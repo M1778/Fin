@@ -1,0 +1,29 @@
+extern fun scanf(format: <&char>, ...) <int>;
+
+fun main() <noret> {
+    const secret_number <int> = 42; 
+    let guess <int> = 0;
+    let num_tries <int> = 0;
+    let game_over <int> = 0; 
+
+    printf("Welcome to Guess the Number!\n");
+    printf("I'm thinking of a number between 1 and 100.\n");
+
+    while (game_over == 0) {
+        printf("Enter your guess: ");
+        
+        scanf("%d", as_ptr(guess)); 
+        
+        num_tries = num_tries + 1;
+
+        if (guess == secret_number) {
+            printf("Congratulations! You guessed it in %d tries!\n", num_tries);
+            game_over = 1; // Set to true
+        } elseif (guess < secret_number) {
+            printf("Too low! Try again.\n");
+        } else { // guess > secret_number
+            printf("Too high! Try again.\n");
+        }
+    }
+    printf("Thanks for playing!\n");
+}
