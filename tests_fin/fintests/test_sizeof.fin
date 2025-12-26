@@ -1,0 +1,6 @@
+fun main() <noret>{
+	let x <int>;
+	let y <int> = sizeof(x);
+	printf("x sizeof = %d\n", y);
+	printf("float sizeof = %d", sizeof(<float>));
+}

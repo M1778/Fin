@@ -1,0 +1,11 @@
+[project]
+name = "popolang"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "llvmlite>=0.43.0",
+    "pytest>=8.4.2",
+    "toml>=0.10.2",
+]

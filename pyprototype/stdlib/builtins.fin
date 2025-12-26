@@ -1,0 +1,36 @@
+// stdlib/builtins.fin
+
+// Core Types
+#[llvm_name="printf"]
+@define printf(fmt: <&int>, ...) <int>;
+
+#[llvm_name="malloc"]
+@define malloc(size: <long>) <&int>;
+
+#[llvm_name="free"]
+@define free(ptr: <&int>) <noret>;
+
+#[llvm_name="exit"]
+@define exit(code: <int>) <noret>;
+
+// The 'any' type wrapper
+#[llvm_name="any"]
+struct Any {
+    data <&int>,   // i8* (void*)
+    type_id <long> // i64
+}
+
+// Dynamic Array (Collection)
+struct Collection<T> {
+    data <&T>,
+    length <int>,
+    capacity <int>
+}
+
+// Panic Handler
+#[llvm_name="__panic"]
+#[linkage="internal"]
+@special panic(msg: <string>) <noret> {
+    printf("\n\033[31mPanic: %s\033[0m\n", msg);
+    compiler.components.exit(1);
+}

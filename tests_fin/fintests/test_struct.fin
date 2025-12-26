@@ -1,0 +1,13 @@
+struct simple{
+	v <int>,
+	e <int>,
+	fun do_something(self:<simple>) <noret> {
+		printf("%d", self.v);
+	}
+}
+
+
+fun main() <noret>{
+	let x <auto> = simple{v:10,e:20};
+	x.do_something();
+}

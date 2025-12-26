@@ -1,0 +1,38 @@
+//@define printf(msg:<string>, ...)<int>;
+
+struct MyStr {
+    f <string>,
+    
+    fun set(self: <MyStr>, new_f: <string>) <MyStr> {
+        self.f = new_f;
+	    return self;
+    }
+
+    fun print(self: <MyStr>) <noret> {
+        printf("%s",self.f);
+    }
+}
+
+struct Counter {
+    value <int>,
+
+    fun inc(self: <Counter>) <Counter> {
+        self.value++;
+        return self;
+    }
+
+    fun print(self: <Counter>) <noret> {
+        printf("%d",self.value);
+    }
+}
+
+fun main() <noret> {
+    let str1 <MyStr> = MyStr{f: "B"};
+    let str2 <MyStr> = MyStr{f: "X"};
+    let counter <Counter> = Counter{value:10};
+
+    str1.set("A").print();   // should print A
+    str2.set("B").print();   // should print B
+    //printf("ADSODOASDOSA");
+    counter.inc().inc().print();  // should print 2
+}

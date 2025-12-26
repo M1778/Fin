@@ -1,0 +1,7 @@
+
+fun main() <noret> {
+	let x <float> = 10.2;
+	let y <int> = 5;
+	let z <auto> = std_conv<float>(y) + x;
+	printf("%f", z);
+}

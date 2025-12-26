@@ -1,0 +1,63 @@
+// std.popo - A hypothetical standard library file for Popo
+
+// We need to declare the C functions we'll use.
+// Your Popo syntax for extern:
+extern fun c_printf(format: <&char>, ...) <int>; // Assuming you handle varargs
+extern fun c_puts(s: <&char>) <int>;
+extern fun c_strlen(s: <&char>) <int(64)>; // strlen returns size_t, often 64-bit
+extern fun c_abs(n: <int>) <int>;
+
+
+// --- I/O ---
+
+fun println(text: <&char>) <noret> {
+    // Option 1: Using puts (simpler, automatically adds newline)
+    // c_puts(text); 
+
+    // Option 2: Using printf (more flexible if you want to adapt print later)
+    c_printf("%s\n", text);
+}
+
+fun print_int(value: <int>) <noret> {
+    c_printf("%d", value);
+}
+
+fun print_float(value: <float>) <noret> { // Assuming <float> is f64 for printf %f
+    c_printf("%f", value);
+}
+
+// You might want a generic print function if you have typeof and if/else
+
+//fun print<T>(value: <T>) <noret> {
+//    if (typeof(value) == typeof(<int>)) {
+//        print_int(std_conv<int>(value)); // Requires std_conv if T isn't directly int
+//    } elseif (typeof(value) == typeof(<float>)) {
+//        print_float(std_conv<float>(value));
+//    } elseif (typeof(value) == typeof(<&char>)) {
+//        // Assuming string is &char. If string has its own distinct type, check that.
+//        c_printf("%s", std_conv<&char>(value));
+//    } else {
+//        c_printf("[unprintable type]\n");
+//    }
+//}
+//
+
+// --- Math ---
+
+fun abs(n: <int>) <int> {
+    // return c_abs(n); // Direct call to C abs
+
+    // Or, implement in Popo:
+    if (n < 0) {
+        return -n;
+    } else {
+        return n;
+    }
+}
+
+// --- String ---
+
+fun strlen(s: <&char>) <int(64)> { // Return type should match C strlen (size_t)
+    return c_strlen(s);
+}
+

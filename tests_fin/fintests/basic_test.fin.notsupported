@@ -1,0 +1,53 @@
+
+enum Status {
+    Ok,
+    NotOk,
+    ProbablyOk
+}
+
+struct MyStr{
+    f <char>,
+    b <int>,
+
+    fun lol() <noret> {
+        printf("Ok");
+    }
+
+    fun set(self: <MyStr>, new_f: <char>) <MyStr> {
+        self.f = new_f;
+    }
+}
+
+macro mymacro(c, a) {
+    printf("%d",c % a);
+}
+
+macro todo() {}
+
+fun main() <noret> {
+    let x <Status> = Status::Ok;
+    let mys <auto> = MyStr{f: 'a', b: 1};
+    const y <auto> = 1;
+
+    mymacro:{10, 20};
+
+    while (x >= 10){
+        output(x);
+    }
+    for (let i <int> = 0; i < 10; i++){
+        output(i);
+    }
+
+    if (x == 1){
+        todo:{};
+    } elseif (x == 2){
+        todo:{};
+    } else {
+        todo:{};
+    }
+
+}
+
+fun add(a: <int>, b: <int>) <int> {
+    return a + b;
+}

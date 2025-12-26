@@ -1,0 +1,16 @@
+#[allow=1]
+#[allow()]
+#[xxx]
+fun lol() <noret> {}
+
+@macro my_macro(){}
+
+#[LetsGo(1)]
+@special lol(x: <int>, y: <int>) {
+    print("Hello");
+}
+
+fun main() <noret> {
+    @lol();
+    $my_macro();
+}

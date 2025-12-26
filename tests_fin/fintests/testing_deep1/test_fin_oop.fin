@@ -1,0 +1,69 @@
+// 1. Define a Generic Struct
+struct Box<T> {
+    value <T>
+}
+
+// 2. Define a Parent Class
+pub struct Animal {
+    age <int>,
+    
+    // Constructor
+    struct(start_age: <int>) {
+        self.age = start_age;
+    }
+
+    fun get_age(self: <Self>) <int> {
+        return self.age;
+    }
+}
+
+// 3. Define a Child Class (Inheritance)
+pub struct Dog : <Animal> {
+    breed <int>, // 1=Labrador, 2=Poodle (using int for simplicity)
+
+    // Child Constructor
+    struct(age: <int>, breed: <int>) {
+        // Manually init parent fields (since super() logic is complex to implement fully)
+        self.age = age; 
+        self.breed = breed;
+    }
+    
+    fun bark(self: <Self>) <noret> {
+        printf("Woof! I am %d years old.\n", self.age);
+    }
+}
+
+fun main() <noret> {
+    printf("--- OOP Test ---\n");
+
+    // TEST 1: Generics
+    printf("1. Testing Generics...\n");
+    let b1 <Box<int>> = Box<int>{ value: 123 };
+    let b2 <Box<float>> = Box<float>{ value: 3.14 };
+    
+    printf("   Box<int>: %d\n", b1.value);
+    printf("   Box<float>: %f\n", b2.value);
+
+    // TEST 2: Constructors & Inheritance
+    printf("2. Testing Constructors & Inheritance...\n");
+    
+    // Uses Dog__init under the hood
+    let my_dog <Dog> = Dog(5, 1); 
+    
+    // Access Child Field
+    printf("   Dog Breed ID: %d\n", my_dog.breed);
+    
+    // Access Inherited Field (age is from Animal)
+    printf("   Dog Age: %d\n", my_dog.age);
+    
+    // Call Child Method
+    my_dog.bark();
+
+    // TEST 3: Blame (Exception)
+    printf("3. Testing Blame (Expect Panic)...\n");
+    if (my_dog.age < 100) {
+        blame "Dog is too young to die!";
+    }
+    
+    printf("This should not print.\n");
+}

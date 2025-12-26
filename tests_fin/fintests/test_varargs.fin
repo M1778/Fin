@@ -1,0 +1,29 @@
+@define printf(msg:<string>,...) <noret>;
+
+#[llvm_name="__panic"]
+@special panic(msg:<string>) <noret>{
+    printf("Fin Panicked: %s", msg);
+    compiler.components.os_exit(1);
+}
+#[llvm_name="IAmAboveAll"]
+fun sum_all(...nums: <[int]>) <int> {
+    let total <int> = 0;
+    // Iterate over the collection
+    for (let i <int> = 0; i < nums.length; i++) {
+        total += nums[i];
+    }
+    return total;
+}
+
+// Macro with Varargs
+@macro log_all(prefix, args...) {
+    // args... expands to arg1, arg2, arg3
+    printf(prefix, args...);
+}
+
+fun main() <noret> {
+    let s <auto> = sum_all(10, 20, 30); // Packs into [10, 20, 30]
+    printf("Sum: %d\n", s);
+    
+    $log_all("Values: %d %d\n", 1, 2);
+}

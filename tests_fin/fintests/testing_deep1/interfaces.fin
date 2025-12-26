@@ -1,0 +1,21 @@
+interface Printable {
+    pub fun to_string() <string>;
+}
+
+struct User : <Printable> {
+    name <string>,
+    fun to_string(self: <Self>) <string> {
+        return self.name;
+    }
+}
+
+fun print_any(p: <Printable>) <noret> {
+    printf("Printing: %s\n", p.to_string());
+}
+
+fun main() <noret> {
+    let u <User> = User{name: "Interface Master"};
+    
+    // Implicit conversion User -> Printable
+    print_any(u);
+}

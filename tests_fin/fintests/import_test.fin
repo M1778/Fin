@@ -1,0 +1,22 @@
+import "game" as m;
+
+struct MyStruct {
+    val <int>
+}
+
+// another function with same name but different namespace
+fun iamalive() <noret> {
+    printf("AND I AM DEAD");
+}
+
+fun main() <noret> {
+    let s <MyStruct> = MyStruct { val: 10 };
+    
+    // Struct Access (DOT)
+    printf("%d", s.val); 
+    
+    // Module Access (DOT) - No more ::
+    // let pi <float> = m.PI;
+    m.iamalive();
+    iamalive();
+}

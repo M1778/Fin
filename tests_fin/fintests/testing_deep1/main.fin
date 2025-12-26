@@ -1,0 +1,30 @@
+// ==========================================
+//               MAIN PROGRAM
+// ==========================================
+import "lib" as l;
+
+fun main() <noret> {
+    printf("--- Visibility Test ---\n");
+
+    // 1. Use public factory (Allowed)
+    // We cannot do `l.Vector { x:1, y:2 }` directly because 'y' is private!
+    let v <l.Vector> = l.create(10, 20);
+
+    // 2. Access Public Field (Allowed)
+    printf("1. Public Field X: %d\n", v.x);
+
+    // 3. Call Public Function (Allowed)
+    l.compute();
+
+    printf("--- Success ---\n");
+
+    // ============================================================
+    //       UNCOMMENT LINES BELOW TO TEST ERRORS
+    // ============================================================
+
+    // ERROR TEST 1: Accessing private field
+    // printf("Private Y: %d\n", v.y);
+
+    // ERROR TEST 2: Calling private function
+    // l.secret_calculation();
+}

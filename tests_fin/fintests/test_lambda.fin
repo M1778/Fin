@@ -1,0 +1,12 @@
+// Named function: No arrow
+fun myfunc(x:<int>, y:<int>) <int> {
+    return x + y;   
+}
+
+fun main() <noret> {
+    // Function Pointer Type using 'fn'
+    let callback <fn(int, int) <int>> = myfunc;
+    
+    // Lambda assignment
+    callback = (x:<int>, y:<int>) <int> => { return x + y; };
+}

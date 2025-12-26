@@ -1,0 +1,18 @@
+let dangerous_ptr <&int>; 
+
+fun main() <noret> {
+    printf("--- Null Pointer Test ---\n");
+    
+    // 1. Prove it is null
+    // We use %p to print the pointer address
+    printf("Pointer address: %p\n", dangerous_ptr);
+    
+    printf("Attempting to read from null pointer...\n");
+
+    // 2. The Crash
+    // This tries to read the value at address 0x0.
+    // Your new compiler logic should catch this before the CPU does.
+    let val <int> = *dangerous_ptr;
+    // or just do division by 0
+    printf("If you see this, the runtime check FAILED.\n");
+}

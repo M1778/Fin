@@ -1,0 +1,37 @@
+fun main() <noret> {
+    let numbers <[int]> = [10, 20, 30, 40, 50]; // Static Arrays
+    let myarr <[int, 32]>;
+    let arr2 <[int, 5]> = [1,2,3,4,5];
+
+    let first <auto> = numbers[0];
+    let third <auto> = numbers[2];
+    numbers[1] = 25; 
+
+    let p_int <&int>;
+    let pp_int <&(&int)>; 
+
+    let ptr_array <[&int]> = [&numbers[0], &numbers[1]];
+    let first_ptr_val <auto> = *ptr_array[0];
+
+    let x <int> = 100;
+    p_int = &x;
+    let val_from_ptr <auto> = *p_int;
+    *p_int = 200; 
+
+
+    let matrix <[[int,2], 2]> = [[1,2], [3,4]];
+    let m_val <auto> = matrix[0][1]; 
+
+    struct Data {
+        items <[int,3]>,
+        config_ptr <&int>,
+    }
+
+    let d_ <auto> = Data{ items: [1,2,3], config_ptr: &x };
+    let d_item <auto> = d_.items[0];
+    let d_config <auto> = *d_.config_ptr;
+
+    let auto_arr <auto> = [7.0, 8.0, 9.0]; 
+    let auto_ptr <auto> = &first;         
+    let auto_idx <auto> = auto_arr[1];   
+}

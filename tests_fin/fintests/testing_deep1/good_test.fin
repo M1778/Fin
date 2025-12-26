@@ -1,0 +1,83 @@
+// --- 1. Structs & Operator Overloading (Type Erasure) ---
+struct MyStruct {
+   val <int>,
+   
+   // Generic Operator with Type Erasure
+   // We use <T> which compiles to i8*
+   operator<T> +(other: <T>) <int> {
+     if (@hasattr(other, "val")) {
+         // Explicit cast required for Type Erasure
+         let other_casted <MyStruct> = std_conv<MyStruct>(other);
+         return self.val + other_casted.val;
+     }
+     blame "other doesn't have val attribute";
+     return 0;
+   }
+}
+
+// --- 2. Inheritance & Super ---
+struct Error {
+    error_msg <string> = "Unknown Error",
+    
+    struct(msg: <string>) {
+        self.error_msg = msg;
+    }
+}
+
+struct MyError : <Error> {
+    code <int>,
+    
+    struct(msg: <string>, code: <int>) {
+        // Call parent constructor
+        super(msg);
+        self.code = code;
+    }
+    
+    fun print_error() <noret> {
+        printf("Error %d: %s\n", self.code, self.error_msg);
+    }
+}
+
+// --- 3. Arrays & Slices ---
+struct Vector {
+    x <int>,
+    y <int> = 10,
+}
+
+fun create_vector(x: <int>, y: <int> = 10) <Vector> {
+    return Vector{x: x, y: y};
+}
+
+// --- 4. Monomorphization (Templates) ---
+// This function is compiled on demand for each type
+fun identity<T>(val: <T>) <T> {
+    return val;
+}
+
+// --- MAIN ---
+fun main() <noret> {
+    printf("--- Test 1: Operator Overloading ---\n");
+    let s1 <auto> = MyStruct{val: 10};
+    let s2 <auto> = MyStruct{val: 20};
+    printf("10 + 20 = %d\n", s1 + s2);
+
+    printf("--- Test 2: Inheritance & Super ---\n");
+    let err <MyError> = MyError("Something went wrong", 404);
+    err.print_error();
+
+    printf("--- Test 3: Default Arguments ---\n");
+    let v1 <Vector> = create_vector(5); // y defaults to 10
+    printf("Vector(5, default) -> x=%d, y=%d\n", v1.x, v1.y);
+    
+    let v2 <Vector> = create_vector(7, 77); // explicit y
+    printf("Vector(7, 77)      -> x=%d, y=%d\n", v2.x, v2.y);
+
+    printf("--- Test 4: Arrays (Slices) ---\n");
+    // We simulate an array using std_conv for now as we don't have array literals fully wired to slices
+    // But we can test the type conversion logic
+    // let arr_slice <[int]>; // Just declaration to check parsing
+    
+    printf("Tests Completed.\n");
+    printf("Let's throw an error");
+    blame "I hate";
+}

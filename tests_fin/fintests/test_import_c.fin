@@ -1,0 +1,8 @@
+import_c "stdio";
+
+extern fun getchar() <int>;
+
+fun main() <noret> {
+	let c <int> = getchar();
+	printf("%c", c);
+}

@@ -1,0 +1,10 @@
+
+@macro test(x, y){
+	return std_conv<int>(x) + std_conv<int>(y);
+}
+
+
+fun main() <noret> {
+	let c <auto> = $test(10, 2.0);
+	printf("%d", c);
+}

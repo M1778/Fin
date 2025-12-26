@@ -1,0 +1,8 @@
+import "test_enum.fin" as mymod;
+
+fun main() <noret> {
+	let x <mymod::Status> = mymod::Status::Ok;
+	let y <mymod::Day> = mymod::Day{day_name: "Hello"};
+	mymod::check_status(x);
+	y.show_day();
+}

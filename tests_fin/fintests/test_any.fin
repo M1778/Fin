@@ -1,0 +1,52 @@
+
+
+struct Point {
+    x <int>,
+    y <int>
+}
+
+fun inspect(val: <Any>) <noret> {
+    if (typeof(val) == typeof(int)) {
+        printf("  [Type: int] Value: %d\n", val);
+    } 
+    elseif (typeof(val) == typeof(float)) { // [FIX] Use 'elseif'
+        printf("  [Type: float] Value: %f\n", val);
+    } 
+    elseif (typeof(val) == typeof(Point)) { // [FIX] Use 'elseif'
+        printf("  [Type: Point] x: %d, y: %d\n", val.x, val.y);
+    } 
+    elseif (typeof(val) == typeof([int])) { // [FIX] Use 'elseif'
+        printf("  [Type: [int]] Length: %d, First: %d\n", val.length, val[0]);
+    }
+    else {
+        printf("  [Unknown Type] ID: %d\n", typeof(val));
+    }
+}
+
+fun main() <noret> {
+    printf("--- Test 1: Primitives ---\n");
+    let i <int> = 42;
+    let f <float> = 3.14159;
+    
+    inspect(i);
+    inspect(f);
+
+    printf("\n--- Test 2: Structs ---\n");
+    let p <Point> = Point{x: 100, y: 200};
+    inspect(p);
+
+    printf("\n--- Test 3: Arrays (Collections) ---\n");
+    let arr <[int]> = [10, 20, 30];
+    inspect(arr);
+
+    printf("\n--- Test 4: Dynamic Re-assignment ---\n");
+    let dynamic <Any> = 1;
+    inspect(dynamic);
+    
+    dynamic = Point{x: 1, y: 1};
+    inspect(dynamic);
+    
+    dynamic = [9, 8, 7];
+    inspect(dynamic);
+
+}

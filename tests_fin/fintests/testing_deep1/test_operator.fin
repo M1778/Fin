@@ -1,0 +1,34 @@
+struct BoolBox {
+    val <bool>,
+    
+    // Overload ! (NOT)
+    operator !() <bool> {
+        return !self.val;
+    }
+    
+    // Overload ==
+    operator ==(other: <&Self>) <bool> {
+        return self.val == other.val;
+    }
+
+    struct(val: <bool>){
+        self.val = val;
+    }
+}
+
+fun main() <noret> {
+    let b1 <&BoolBox> = new <BoolBox>(1); // True
+    let b2 <&BoolBox> = new <BoolBox>{val: 0}; // False
+    
+    if (!b1) {
+        printf("b1 is false (via overload)\n");
+    } else {
+        printf("b1 is true (via overload)\n");
+    }
+    
+    if (b1 == b2) {
+        printf("Equal\n");
+    } else {
+        printf("Not Equal\n");
+    }
+}

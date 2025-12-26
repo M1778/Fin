@@ -1,0 +1,8 @@
+
+fun main() <noret> {
+	let x <int> = 10;
+	let y <&int> = as_ptr(x);
+	let z <&(&int)> = as_ptr(y);
+
+	printf("%d", **z);
+}

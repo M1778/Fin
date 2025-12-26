@@ -1,0 +1,22 @@
+fun main() <noret> {
+    printf("--- Test: Static Array Safety ---\n");
+    let static_arr <[int, 3]> = [10, 20, 30];
+    
+    // This should work
+    printf("Index 1: %d\n", static_arr[1]);
+    
+    // Uncommenting this should cause COMPILE TIME error:
+    // printf("Crash: %d\n", static_arr[5]); 
+
+    printf("--- Test: Dynamic Collection ---\n");
+    // This triggers _create_collection_from_array_literal
+    let dyn_arr <[int]> = [100, 200, 300, 400];
+    
+    printf("Length: %d\n", dyn_arr.length);
+    printf("Item 2: %d\n", dyn_arr[2]);
+    
+    // Runtime Bounds Check
+    printf("Attempting out of bounds...\n");
+    // This should PANIC at runtime
+    let crash <int> = dyn_arr[10]; 
+}

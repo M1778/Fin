@@ -1,0 +1,29 @@
+struct Box<T> {
+    val <T>
+}
+
+struct Pair<K, V> {
+    key <K>,
+    value <V>
+}
+
+fun main() <noret> {
+    printf("--- Test 1: Auto Inference ---\n");
+    // Stack allocation (unchanged)
+    let b1 <Box<int>> = Box<int>{ val: 100 };
+    let x <auto> = b1.val; 
+    printf("Auto inferred int: %d\n", x);
+
+    printf("--- Test 2: Heap Allocation (new) ---\n");
+    // [CHANGED] New Syntax: No outer < >
+    let b2 <Box<float>> = new Box<float>{ val: 3.14 };
+    let y <float> = b2.val;
+    printf("Heap float: %f\n", y);
+
+    printf("--- Test 3: Multiple Generics ---\n");
+    // Stack allocation (unchanged)
+    let p <Pair<int, float>> = Pair<int, float>{ key: 1, value: 99.9 };
+    let k <int> = p.key;
+    let v <float> = p.value;
+    printf("Pair: %d -> %f\n", k, v);
+}

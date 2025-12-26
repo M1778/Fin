@@ -1,0 +1,16 @@
+// #cdef -> c define (C-like macros)
+//#cdef Sum(x, y) ((x) + (y)) 
+
+// @macro -> declares a macro 
+@macro add(x, y){ // macro name is test and it takes two arguments (x, y)
+	let out <int> = std_conv<int>(x) + std_conv<int>(y); // macros can be multilines
+	@return out; // this is how macros return 
+}
+
+
+fun main() <noret> {
+	//let f <function(int,int) <int>> = (x:<int>) <int> => { return x*x; };
+	//f(5);
+	let c <auto> = $add(10, 2.0); // this is how macro calls happen
+	printf("%d", Sum(c, 10)); // stdout should be 22
+}

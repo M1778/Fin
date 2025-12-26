@@ -1,0 +1,36 @@
+@define printf(msg:<string>, ...) <int>;
+
+enum Status {
+    Ok,
+    NotOk,
+    ProbablyOk
+}
+
+struct MyStr{
+    f <string>,
+    b <int>,
+
+    fun lol(self: <MyStr>) <noret> {
+        printf("Ok");
+    }
+
+    fun set(self: <MyStr>, new_f: <string>) <MyStr> {
+        self.f = new_f;
+        return self;
+    }
+}
+    
+
+fun main() <noret> {
+    let x <Status> = Status.NotOk;
+    let mys <MyStr> = MyStr{f: "a", b: 1};
+    const y <int> = 1;
+    const l <int> = 10;
+
+    mys.lol();
+    if (x != Status.Ok){
+    printf("%s",mys.f);
+    mys.set("V");
+    printf("%s",mys.f);
+    }
+}

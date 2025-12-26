@@ -1,0 +1,33 @@
+@define printf(msg: <string>, ...) <int>;
+
+fun print<T: Castable>(...){
+
+}
+
+struct Box<T> {
+    val <T>
+}
+
+fun identity<T>(x: <T>) <T> {
+    return x;
+}
+
+fun main() <noret> {
+    // 1. Turbofish Struct Instantiation
+    let b <Box<int>> = Box::<int>{ val: 100 };
+    printf("Box: %d\n", b.val);
+
+    // 2. Turbofish Function Call
+    // Explicitly telling compiler T is float, even if we pass int (will cast/box if needed)
+    // Actually identity returns T, so if we pass int but say float, it might error on return type mismatch
+    // Let's use matching types.
+    let i <int> = identity::<int>(50);
+    printf("Identity: %d\n", i);
+    
+    // 3. Inference still works
+    let f <float> = identity(3.14);
+    printf("Inferred: %f\n", f);
+
+    // 4. But will it?
+    printf("Let's see: %d", identity(b.val));
+}
