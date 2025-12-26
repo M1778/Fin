@@ -1,7 +1,0 @@
-fun add<T, U>(x: <T>, y: <U>) <T> {
-	return x + std_conv<int>(y);
-}
-
-fun main() <noret> {
-	printf("%d", add(10,20.0));
-}

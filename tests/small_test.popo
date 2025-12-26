@@ -1,6 +1,0 @@
-
-
-fun main() <noret> {
-	let a <[int]> = [1,2,3,4];
-	printf("%d", a[3]);
-}

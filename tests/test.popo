@@ -1,6 +1,0 @@
-import "stdlib/std.popo" as std;
-
-
-fun main() <noret> {
-	printf("Compile me :)");
-}

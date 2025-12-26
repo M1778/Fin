@@ -1,6 +1,0 @@
-
-fun main() <noret> {
-	let x <int(128)> = 10000000;
-
-	printf("%d", x);
-}
