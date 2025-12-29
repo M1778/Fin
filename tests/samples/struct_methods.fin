@@ -1,0 +1,20 @@
+#[llvm_name="general_point"] // this is a rust like attribute for compile time codegen manipulation (it's allowed for structs)
+struct Point<T> { // T is a generic and it will be a Monomorphization Generic type because its the default generic type we use
+   x <T>,
+   y <T> = 0, // struct members can have default values
+   
+   fun print_point(self: <Self>) <noret> { // print_point will be a struct method (OOP) and the first parameter will be injected by compiler and it will be the struct itself (it has to be from its own type which can be specified with <Self> type or just <{ClassName}>) [NOTE: if the declared function doesn't have the static keyword and it doesn't specify the first argument as self compiler still automatically injects the self to the block of that function] 
+      printf("x: %d, y:%d", cast<int>(self.x), cast<int>(self.y)); // here we use a normal conversion to convert from type <T> to <int>
+   }
+   
+   fun set_x<U>(new_x: <U>) <noret> { // this is a method with no self as first argument but as i said compiler will still inject self. here we have a function generic (its separated from the struct generic itself so it cant have the same name as <T>)
+      self.x = cast<T>(new_x); // we use cast to convert the function generic <U> to <T> our struct generic type and assign it to self.x
+   }
+
+   pub static fun default_point() <Self> { // Self will point to the current struct type (Point)
+         return new Self{x: 0}; // y is not forced to be set since it has a default value
+      }
+   pub static fun default_point2() <Point> { // this is another version you can write default_point static function
+        return new Point{x:0}; // using Point instead of Self is correct too
+   }
+}

@@ -1,0 +1,14 @@
+import "std.io";
+
+struct Box<T> {
+    val <T>
+}
+
+fun main() <noret> {
+    let b <Box<int>> = Box::<int>{ val: 100 };
+    if (b.val > 50) {
+        printf("Big");
+    } else {
+        printf("Small");
+    }
+}

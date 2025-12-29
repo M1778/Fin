@@ -1,0 +1,9 @@
+struct Vector3 {
+    x <float>,
+    y <float>,
+    z <float>
+}
+
+fun test() <noret> {
+    let v <Vector3> = Vector3 { x: 1.0, y: 2.0, z: 3.0 };
+}
