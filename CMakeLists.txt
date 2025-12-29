@@ -38,6 +38,11 @@ add_library(fin_core STATIC
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
     src/ast/ASTPrinter.cpp
+    src/diagnostics/DiagnosticEngine.cpp
+    src/semantics/impl/Analyzer_Core.cpp
+    src/semantics/impl/Analyzer_Decl.cpp
+    src/semantics/impl/Analyzer_Stmt.cpp
+    src/semantics/impl/Analyzer_Expr.cpp
     # Add other .cpp files here later (e.g., src/ast/AST.cpp)
 )
 
