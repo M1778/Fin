@@ -1,31 +1,43 @@
 %{
 #include <string>
 #include <iostream>
-#include "../parser/parser.hpp" // Include Bison's generated header
+#include "parser.hpp" 
 
-// Define the return type to match Bison's expectation
+// Define the return type
 #define YY_DECL fin::parser::symbol_type yylex()
 
-// Track location
-int current_line = 1;
-int current_col = 1;
+// Location tracking
+fin::parser::location_type loc;
 
-// Helper to update location
+// Helper to update location for every token
 void update_loc() {
-    // Bison's location tracking is handled via the return value constructors usually,
-    // but we maintain local state for error reporting.
+    loc.step();
+    loc.columns(yyleng);
 }
+
+// Helper to handle newlines
+void handle_newline() {
+    loc.lines(yyleng); 
+    loc.step();
+}
+
+// Macro to simplify returning tokens with location
+#define MAKE(kind) \
+    update_loc(); \
+    return fin::parser::make_##kind(loc);
+
+#define MAKE_VAL(kind, val) \
+    update_loc(); \
+    return fin::parser::make_##kind(val, loc);
 
 %}
 
-/* Flex Options */
 %option noyywrap
 %option nounput
 %option noinput
 %option nounistd
 %option never-interactive
 
-/* Regex Definitions */
 DIGIT       [0-9]
 ALPHA       [a-zA-Z_]
 ID          {ALPHA}({ALPHA}|{DIGIT})*
@@ -33,171 +45,146 @@ WS          [ \t\r]+
 
 %%
 
-    /* ====================================================================== */
-    /*                               WHITESPACE                               */
-    /* ====================================================================== */
-
-{WS}        { current_col += yyleng; }
-\n          { current_line++; current_col = 1; }
-
-    /* ====================================================================== */
-    /*                                COMMENTS                                */
-    /* ====================================================================== */
-
-"//".*      { /* Ignore single line */ }
-"/*"([^*]|(\*+[^*/]))*\*+"/" { 
-    // Handle newlines inside block comments
-    for(int i=0; i<yyleng; i++) {
-        if(yytext[i] == '\n') { current_line++; current_col=1; }
-        else current_col++;
+    /* Initialize location on first run */
+%{
+    static bool init = false;
+    if (!init) {
+        loc.initialize(nullptr, 1, 1);
+        init = true;
     }
-}
+%}
 
-    /* ====================================================================== */
-    /*                                KEYWORDS                                */
-    /* ====================================================================== */
+    /* Whitespace */
+{WS}        { loc.step(); loc.columns(yyleng); }
+\n          { loc.lines(1); loc.step(); }
+"//".*      { /* Ignore */ }
 
-"let"       { current_col += yyleng; return fin::parser::make_KW_LET(); }
-"bez"       { current_col += yyleng; return fin::parser::make_KW_BEZ(); }
-"const"     { current_col += yyleng; return fin::parser::make_KW_CONST(); }
-"beton"     { current_col += yyleng; return fin::parser::make_KW_BETON(); }
-"auto"      { current_col += yyleng; return fin::parser::make_KW_AUTO(); }
+    /* Keywords */
+"let"       { MAKE(KW_LET); }
+"bez"       { MAKE(KW_BEZ); }
+"const"     { MAKE(KW_CONST); }
+"beton"     { MAKE(KW_BETON); }
+"auto"      { MAKE(KW_AUTO); }
 
-"fun"       { current_col += yyleng; return fin::parser::make_KW_FUN(); }
-"<noret>"   { current_col += yyleng; return fin::parser::make_KW_NORET(); }
-"return"    { current_col += yyleng; return fin::parser::make_KW_RETURN(); }
+"fun"       { MAKE(KW_FUN); }
+"<noret>"   { MAKE(KW_NORET); }
+"return"    { MAKE(KW_RETURN); }
 
-"struct"    { current_col += yyleng; return fin::parser::make_KW_STRUCT(); }
-"enum"      { current_col += yyleng; return fin::parser::make_KW_ENUM(); }
-"interface" { current_col += yyleng; return fin::parser::make_KW_INTERFACE(); }
+"struct"    { MAKE(KW_STRUCT); }
+"enum"      { MAKE(KW_ENUM); }
+"interface" { MAKE(KW_INTERFACE); }
 
-"macro"     { current_col += yyleng; return fin::parser::make_KW_MACRO(); }
-"static"    { current_col += yyleng; return fin::parser::make_KW_STATIC(); }
-"null"      { current_col += yyleng; return fin::parser::make_KW_NULL(); }
+"macro"     { MAKE(KW_MACRO); }
+"static"    { MAKE(KW_STATIC); }
+"null"      { MAKE(KW_NULL); }
 
-"while"     { current_col += yyleng; return fin::parser::make_KW_WHILE(); }
-"for"       { current_col += yyleng; return fin::parser::make_KW_FOR(); }
-"foreach"   { current_col += yyleng; return fin::parser::make_KW_FOREACH(); }
-"break"     { current_col += yyleng; return fin::parser::make_KW_BREAK(); }
-"continue"  { current_col += yyleng; return fin::parser::make_KW_CONTINUE(); }
+"while"     { MAKE(KW_WHILE); }
+"for"       { MAKE(KW_FOR); }
+"foreach"   { MAKE(KW_FOREACH); }
+"break"     { MAKE(KW_BREAK); }
+"continue"  { MAKE(KW_CONTINUE); }
 
-"if"        { current_col += yyleng; return fin::parser::make_KW_IF(); }
-"else"      { current_col += yyleng; return fin::parser::make_KW_ELSE(); }
-"elseif"    { current_col += yyleng; return fin::parser::make_KW_ELSEIF(); }
-"in"        { current_col += yyleng; return fin::parser::make_KW_IN(); }
+"if"        { MAKE(KW_IF); }
+"else"      { MAKE(KW_ELSE); }
+"elseif"    { MAKE(KW_ELSEIF); }
+"in"        { MAKE(KW_IN); }
 
-"import"    { current_col += yyleng; return fin::parser::make_KW_IMPORT(); }
-"as"        { current_col += yyleng; return fin::parser::make_KW_AS(); }
-"from"      { current_col += yyleng; return fin::parser::make_KW_FROM(); }
+"import"    { MAKE(KW_IMPORT); }
+"as"        { MAKE(KW_AS); }
+"from"      { MAKE(KW_FROM); }
 
-"new"       { current_col += yyleng; return fin::parser::make_KW_NEW(); }
-"delete"    { current_col += yyleng; return fin::parser::make_KW_DELETE(); }
-"sizeof"    { current_col += yyleng; return fin::parser::make_KW_SIZEOF(); }
-"typeof"    { current_col += yyleng; return fin::parser::make_KW_TYPEOF(); }
-"as_ptr"    { current_col += yyleng; return fin::parser::make_KW_AS_PTR(); }
-"std_conv"  { current_col += yyleng; return fin::parser::make_KW_STD_CONV(); }
+"new"       { MAKE(KW_NEW); }
+"delete"    { MAKE(KW_DELETE); }
+"sizeof"    { MAKE(KW_SIZEOF); }
+"typeof"    { MAKE(KW_TYPEOF); }
+"as_ptr"    { MAKE(KW_AS_PTR); }
+"cast"      { MAKE(KW_CAST); }
 
-"pub"       { current_col += yyleng; return fin::parser::make_KW_PUB(); }
-"priv"      { current_col += yyleng; return fin::parser::make_KW_PRIV(); }
+"pub"       { MAKE(KW_PUB); }
+"priv"      { MAKE(KW_PRIV); }
 
-"operator"  { current_col += yyleng; return fin::parser::make_KW_OPERATOR(); }
+"operator"  { MAKE(KW_OPERATOR); }
 
-"try"       { current_col += yyleng; return fin::parser::make_KW_TRY(); }
-"catch"     { current_col += yyleng; return fin::parser::make_KW_CATCH(); }
-"blame"     { current_col += yyleng; return fin::parser::make_KW_BLAME(); }
-"super"     { current_col += yyleng; return fin::parser::make_KW_SUPER(); }
-"Self"      { current_col += yyleng; return fin::parser::make_KW_SELF_TYPE(); }
+"try"       { MAKE(KW_TRY); }
+"catch"     { MAKE(KW_CATCH); }
+"blame"     { MAKE(KW_BLAME); }
+"super"     { MAKE(KW_SUPER); }
+"Self"      { MAKE(KW_SELF_TYPE); }
 
-"special"   { current_col += yyleng; return fin::parser::make_KW_SPECIAL(); }
-"@return"   { current_col += yyleng; return fin::parser::make_KW_AT_RETURN(); }
-"fn"        { current_col += yyleng; return fin::parser::make_KW_FN_TYPE(); }
-"define"    { current_col += yyleng; return fin::parser::make_KW_DEFINE(); }
+"special"   { MAKE(KW_SPECIAL); }
+"@return"   { MAKE(KW_AT_RETURN); }
+"fn"        { MAKE(KW_FN_TYPE); }
+"define"    { MAKE(KW_DEFINE); }
 
-"m1778"     { current_col += yyleng; return fin::parser::make_KW_M1778(); }
+"m1778"     { MAKE(KW_M1778); }
 
-    /* ====================================================================== */
-    /*                                  TYPES                                 */
-    /* ====================================================================== */
+    /* Types */
+"int"       { MAKE(TYPE_INT); }
+"long"      { MAKE(TYPE_LONG); }
+"float"     { MAKE(TYPE_FLOAT); }
+"double"    { MAKE(TYPE_DOUBLE); }
+"bool"      { MAKE(TYPE_BOOL); }
+"string"    { MAKE(TYPE_STRING); }
+"char"      { MAKE(TYPE_CHAR); }
+"void"      { MAKE(TYPE_VOID); }
+"noret"     { MAKE(TYPE_VOID); }
 
-"int"       { current_col += yyleng; return fin::parser::make_TYPE_INT(); }
-"long"      { current_col += yyleng; return fin::parser::make_TYPE_LONG(); }
-"float"     { current_col += yyleng; return fin::parser::make_TYPE_FLOAT(); }
-"double"    { current_col += yyleng; return fin::parser::make_TYPE_DOUBLE(); }
-"bool"      { current_col += yyleng; return fin::parser::make_TYPE_BOOL(); }
-"string"    { current_col += yyleng; return fin::parser::make_TYPE_STRING(); }
-"char"      { current_col += yyleng; return fin::parser::make_TYPE_CHAR(); }
-"void"      { current_col += yyleng; return fin::parser::make_TYPE_VOID(); }
-"noret"     { current_col += yyleng; return fin::parser::make_TYPE_VOID(); } /* Map noret to void */
+    /* Operators & Punctuation */
+"=>"        { MAKE(ARROW); }
+"::"        { MAKE(DOUBLE_COLON); }
+"..."       { MAKE(ELLIPSIS); }
 
-    /* ====================================================================== */
-    /*                        OPERATORS & PUNCTUATION                         */
-    /* ====================================================================== */
+"++"        { MAKE(INCREMENT); }
+"--"        { MAKE(DECREMENT); }
 
-"=>"        { current_col += yyleng; return fin::parser::make_ARROW(); }
-"::"        { current_col += yyleng; return fin::parser::make_DOUBLE_COLON(); }
-"..."       { current_col += yyleng; return fin::parser::make_ELLIPSIS(); }
+"+="        { MAKE(PLUSEQUAL); }
+"-="        { MAKE(MINUSEQUAL); }
+"*="        { MAKE(MULTEQUAL); }
+"/="        { MAKE(DIVEQUAL); }
 
-"++"        { current_col += yyleng; return fin::parser::make_INCREMENT(); }
-"--"        { current_col += yyleng; return fin::parser::make_DECREMENT(); }
+"=="        { MAKE(EQEQ); }
+"!="        { MAKE(NOTEQ); }
+"<="        { MAKE(LTEQ); }
+">="        { MAKE(GTEQ); }
+"&&"        { MAKE(AND); }
+"||"        { MAKE(OR); }
 
-"+="        { current_col += yyleng; return fin::parser::make_PLUSEQUAL(); }
-"-="        { current_col += yyleng; return fin::parser::make_MINUSEQUAL(); }
-"*="        { current_col += yyleng; return fin::parser::make_MULTEQUAL(); }
-"/="        { current_col += yyleng; return fin::parser::make_DIVEQUAL(); }
+"("         { MAKE(LPAREN); }
+")"         { MAKE(RPAREN); }
+"{"         { MAKE(LBRACE); }
+"}"         { MAKE(RBRACE); }
+"["         { MAKE(LBRACKET); }
+"]"         { MAKE(RBRACKET); }
 
-"=="        { current_col += yyleng; return fin::parser::make_EQEQ(); }
-"!="        { current_col += yyleng; return fin::parser::make_NOTEQ(); }
-"<="        { current_col += yyleng; return fin::parser::make_LTEQ(); }
-">="        { current_col += yyleng; return fin::parser::make_GTEQ(); }
-"&&"        { current_col += yyleng; return fin::parser::make_AND(); }
-"||"        { current_col += yyleng; return fin::parser::make_OR(); }
+";"         { MAKE(SEMICOLON); }
+":"         { MAKE(COLON); }
+","         { MAKE(COMMA); }
+"."         { MAKE(DOT); }
+"@"         { MAKE(AT); }
+"$"         { MAKE(DOLLAR); }
+"#"         { MAKE(HASH); }
 
-"("         { current_col += yyleng; return fin::parser::make_LPAREN(); }
-")"         { current_col += yyleng; return fin::parser::make_RPAREN(); }
-"{"         { current_col += yyleng; return fin::parser::make_LBRACE(); }
-"}"         { current_col += yyleng; return fin::parser::make_RBRACE(); }
-"["         { current_col += yyleng; return fin::parser::make_LBRACKET(); }
-"]"         { current_col += yyleng; return fin::parser::make_RBRACKET(); }
+"="         { MAKE(EQUAL); }
+"+"         { MAKE(PLUS); }
+"-"         { MAKE(MINUS); }
+"*"         { MAKE(MULT); }
+"/"         { MAKE(DIV); }
+"%"         { MAKE(MOD); }
+"<"         { MAKE(LT); }
+">"         { MAKE(GT); }
+"!"         { MAKE(NOT); }
+"&"         { MAKE(AMPERSAND); }
 
-";"         { current_col += yyleng; return fin::parser::make_SEMICOLON(); }
-":"         { current_col += yyleng; return fin::parser::make_COLON(); }
-","         { current_col += yyleng; return fin::parser::make_COMMA(); }
-"."         { current_col += yyleng; return fin::parser::make_DOT(); }
-"@"         { current_col += yyleng; return fin::parser::make_AT(); }
-"$"         { current_col += yyleng; return fin::parser::make_DOLLAR(); }
-"#"         { current_col += yyleng; return fin::parser::make_HASH(); }
+    /* Literals */
+{DIGIT}+"."{DIGIT}+ { MAKE_VAL(FLOAT, yytext); }
+{DIGIT}+            { MAKE_VAL(INTEGER, yytext); }
+\"([^\\\"]|\\.)*\"  { MAKE_VAL(STRING_LITERAL, yytext); }
+\'([^\\\']|\\.)\'   { MAKE_VAL(CHAR_LITERAL, yytext); }
 
-"="         { current_col += yyleng; return fin::parser::make_EQUAL(); }
-"+"         { current_col += yyleng; return fin::parser::make_PLUS(); }
-"-"         { current_col += yyleng; return fin::parser::make_MINUS(); }
-"*"         { current_col += yyleng; return fin::parser::make_MULT(); }
-"/"         { current_col += yyleng; return fin::parser::make_DIV(); }
-"%"         { current_col += yyleng; return fin::parser::make_MOD(); }
-"<"         { current_col += yyleng; return fin::parser::make_LT(); }
-">"         { current_col += yyleng; return fin::parser::make_GT(); }
-"!"         { current_col += yyleng; return fin::parser::make_NOT(); }
-"&"         { current_col += yyleng; return fin::parser::make_AMPERSAND(); }
+    /* Identifiers */
+{ID}                { MAKE_VAL(IDENTIFIER, yytext); }
 
-    /* ====================================================================== */
-    /*                                LITERALS                                */
-    /* ====================================================================== */
-
-{DIGIT}+"."{DIGIT}+ { current_col += yyleng; return fin::parser::make_FLOAT(yytext); }
-{DIGIT}+            { current_col += yyleng; return fin::parser::make_INTEGER(yytext); }
-\"([^\\\"]|\\.)*\"  { current_col += yyleng; return fin::parser::make_STRING_LITERAL(yytext); }
-\'([^\\\']|\\.)\'   { current_col += yyleng; return fin::parser::make_CHAR_LITERAL(yytext); }
-
-    /* ====================================================================== */
-    /*                               IDENTIFIERS                              */
-    /* ====================================================================== */
-
-{ID}                { current_col += yyleng; return fin::parser::make_IDENTIFIER(yytext); }
-
-    /* ====================================================================== */
-    /*                                 ERROR                                  */
-    /* ====================================================================== */
-
-.           { std::cerr << "Lexer Error: Unexpected character '" << yytext << "' at line " << current_line << std::endl; }
-<<EOF>>     { return fin::parser::make_END(); }
+.           { std::cerr << "Lexer Error: " << yytext << std::endl; }
+<<EOF>>     { return fin::parser::make_END(loc); }
 
 %%
