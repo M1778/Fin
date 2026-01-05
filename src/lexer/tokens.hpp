@@ -21,7 +21,7 @@ enum class TokenKind {
     KW_NEW, KW_DELETE, KW_SIZEOF, KW_TYPEOF, KW_AS_PTR,
     KW_STD_CONV, KW_OPERATOR,
     KW_SPECIAL, KW_AT_RETURN, KW_FN_TYPE, KW_DEFINE,
-    KW_M1778, // The signature token!
+    KW_M1778, // Signature token
 
     // --- Primitive Types ---
     TYPE_INT, TYPE_FLOAT, TYPE_DOUBLE, TYPE_BOOL, 
@@ -61,7 +61,7 @@ enum class TokenKind {
 // A structure to pass data from Flex to C++
 struct Token {
     TokenKind kind;
-    std::string text;     // The raw text (lexeme)
+    std::string text;     // Raw lexeme text
     int line;
     int column;
 };

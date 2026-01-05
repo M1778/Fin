@@ -3,10 +3,11 @@
 #include <iostream>
 #include "parser.hpp" 
 
-// Define the return type
 #define YY_DECL fin::parser::symbol_type yylex()
 
-// Location tracking
+// Global location tracking
+int current_line = 1;
+int current_col = 1;
 fin::parser::location_type loc;
 
 // Helper to update location for every token
@@ -21,7 +22,16 @@ void handle_newline() {
     loc.step();
 }
 
-// Macro to simplify returning tokens with location
+// Implementation of the reset function
+namespace fin {
+    void reset_lexer_location() {
+        current_line = 1;
+        current_col = 1;
+        // Reset Bison's location tracker
+        loc.initialize(nullptr, 1, 1);
+    }
+}
+
 #define MAKE(kind) \
     update_loc(); \
     return fin::parser::make_##kind(loc);
@@ -45,7 +55,7 @@ WS          [ \t\r]+
 
 %%
 
-    /* Initialize location on first run */
+    /* Initialize location on first run (Safety check) */
 %{
     static bool init = false;
     if (!init) {
@@ -115,6 +125,9 @@ WS          [ \t\r]+
 "@return"   { MAKE(KW_AT_RETURN); }
 "fn"        { MAKE(KW_FN_TYPE); }
 "define"    { MAKE(KW_DEFINE); }
+"quote"     { MAKE(KW_QUOTE); }
+"#for"      { MAKE(HASH_FOR); }
+"#index"    { MAKE(HASH_INDEX); }
 
 "m1778"     { MAKE(KW_M1778); }
 
@@ -131,6 +144,7 @@ WS          [ \t\r]+
 
     /* Operators & Punctuation */
 "=>"        { MAKE(ARROW); }
+"->"        { MAKE(RARROW); }
 "::"        { MAKE(DOUBLE_COLON); }
 "..."       { MAKE(ELLIPSIS); }
 
@@ -163,6 +177,7 @@ WS          [ \t\r]+
 "@"         { MAKE(AT); }
 "$"         { MAKE(DOLLAR); }
 "#"         { MAKE(HASH); }
+"?"         { MAKE(QUESTION); }
 
 "="         { MAKE(EQUAL); }
 "+"         { MAKE(PLUS); }
@@ -173,7 +188,10 @@ WS          [ \t\r]+
 "<"         { MAKE(LT); }
 ">"         { MAKE(GT); }
 "!"         { MAKE(NOT); }
-"&"         { MAKE(AMPERSAND); }
+"&"         { MAKE(AMPERSAND); }  
+"~"         { MAKE(TILDE); }
+
+  
 
     /* Literals */
 {DIGIT}+"."{DIGIT}+ { MAKE_VAL(FLOAT, yytext); }
