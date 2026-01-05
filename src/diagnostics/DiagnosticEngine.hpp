@@ -22,14 +22,12 @@ private:
     std::string getLine(int lineNum);
     
     std::string extractTokenText(const fin::location& loc);
-    // New: Extract the word immediately preceding the error location
     std::string getPreviousWord(const fin::location& loc);
     fin::location getPreviousWordLoc(const fin::location& loc);
     
     std::string checkTypo(const std::string& word);
     
     void printContext(const fin::location& loc);
-    // New: Print line with syntax highlighting
     void printHighlightedLine(const std::string& line);
 };
 

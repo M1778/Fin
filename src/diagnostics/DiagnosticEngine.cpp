@@ -15,40 +15,15 @@ DiagnosticEngine::DiagnosticEngine(std::string source, std::string fname)
         "fun", "struct", "enum", "let", "const", "bez", "beton", 
         "if", "else", "elseif", "while", "for", "foreach", "return", "break", 
         "continue", "import", "sizeof", "typeof", "new", "delete",
-        "cast", "interface", "pub", "priv", "static", "macro", "operator"
+        "cast", "interface", "pub", "priv", "static", "macro", "operator",
+        "from", "as", "true", "false", "null", "self", "super"
     };
     
     types = {
-        "int", "float", "char", "void", "bool", "string", "noret", "auto", "Self"
+        "int", "float", "char", "void", "bool", "string", "noret", "auto", "Self",
+        "long", "double", "short", "uint", "ulong", "ushort"
     };
 }
-
-fin::location DiagnosticEngine::getPreviousWordLoc(const fin::location& loc) {
-    std::string line = getLine(loc.begin.line);
-    if (line.empty()) return loc;
-    
-    int cursor = loc.begin.column - 2; // Start before current token (0-indexed)
-    
-    // 1. Skip whitespace backwards
-    while (cursor >= 0 && std::isspace(line[cursor])) cursor--;
-    
-    if (cursor < 0) return loc; // Start of line, can't go back
-    
-    // 2. Mark end of previous word
-    int endCol = cursor + 1; // 0-indexed
-    
-    // 3. Scan word backwards
-    while (cursor >= 0 && (std::isalnum(line[cursor]) || line[cursor] == '_')) cursor--;
-    
-    int startCol = cursor + 1; // 0-indexed
-    
-    // Construct new location
-    fin::location newLoc = loc;
-    newLoc.begin.column = startCol + 1; // Convert to 1-based
-    newLoc.end.column = endCol + 1;
-    return newLoc;
-}
-
 
 void DiagnosticEngine::splitLines() {
     std::stringstream ss(sourceCode);
@@ -76,23 +51,36 @@ std::string DiagnosticEngine::extractTokenText(const fin::location& loc) {
     return "";
 }
 
-// Scan backwards from the error location to find the previous word
 std::string DiagnosticEngine::getPreviousWord(const fin::location& loc) {
     std::string line = getLine(loc.begin.line);
     if (line.empty()) return "";
     
-    int cursor = loc.begin.column - 2; // Start before current token
-    
-    // Skip whitespace backwards
+    int cursor = loc.begin.column - 2; 
     while (cursor >= 0 && std::isspace(line[cursor])) cursor--;
+    if (cursor < 0) return ""; 
     
-    if (cursor < 0) return ""; // Start of line
-    
-    // Read word backwards
     int end = cursor + 1;
     while (cursor >= 0 && (std::isalnum(line[cursor]) || line[cursor] == '_')) cursor--;
     
     return line.substr(cursor + 1, end - (cursor + 1));
+}
+
+fin::location DiagnosticEngine::getPreviousWordLoc(const fin::location& loc) {
+    std::string line = getLine(loc.begin.line);
+    if (line.empty()) return loc;
+    
+    int cursor = loc.begin.column - 2;
+    while (cursor >= 0 && std::isspace(line[cursor])) cursor--;
+    if (cursor < 0) return loc;
+    
+    int endCol = cursor + 1;
+    while (cursor >= 0 && (std::isalnum(line[cursor]) || line[cursor] == '_')) cursor--;
+    int startCol = cursor + 1;
+    
+    fin::location newLoc = loc;
+    newLoc.begin.column = startCol + 1;
+    newLoc.end.column = endCol + 1;
+    return newLoc;
 }
 
 std::string DiagnosticEngine::checkTypo(const std::string& word) {
@@ -108,9 +96,7 @@ std::string DiagnosticEngine::checkTypo(const std::string& word) {
         }
     }
     
-    // Stricter threshold for short words
     int threshold = (word.length() < 4) ? 1 : 2;
-    
     if (bestDist <= threshold && bestDist < (int)word.length()) {
         return bestMatch;
     }
@@ -124,11 +110,9 @@ void DiagnosticEngine::printHighlightedLine(const std::string& line) {
         if (std::isalnum(c) || c == '_') {
             word += c;
         } else {
-            // Process accumulated word
             if (!word.empty()) {
                 bool isKw = false;
                 for(const auto& k : keywords) if(k == word) isKw = true;
-                
                 bool isType = false;
                 for(const auto& t : types) if(t == word) isType = true;
 
@@ -137,11 +121,9 @@ void DiagnosticEngine::printHighlightedLine(const std::string& line) {
                 else fmt::print("{}", word);
                 word = "";
             }
-            // Print delimiter
             fmt::print("{}", c);
         }
     }
-    // Print remaining word
     if (!word.empty()) {
         fmt::print("{}", word);
     }
@@ -152,21 +134,24 @@ void DiagnosticEngine::reportError(const fin::location& loc, const std::string& 
     fmt::print(fg(fmt::color::red) | fmt::emphasis::bold, "error: ");
     fmt::print(fmt::emphasis::bold, "{}\n", msg);
     
-    // 1. Check current token for typo
+    fmt::print(fg(fmt::color::cornflower_blue), "   --> {}:{}:{}\n", filename, loc.begin.line, loc.begin.column);
+    
+    printContext(loc);
+
     std::string badToken = extractTokenText(loc);
     std::string suggestion = checkTypo(badToken);
     
-    // 2. If no suggestion, check PREVIOUS token
+    if (suggestion == badToken) suggestion = "";
+
     if (suggestion.empty()) {
         fin::location prevLoc = getPreviousWordLoc(loc);
-        // Only check if we actually moved back
         if (prevLoc.begin.column != loc.begin.column) {
             std::string prevWord = extractTokenText(prevLoc);
             std::string prevSuggestion = checkTypo(prevWord);
             
+            if (prevSuggestion == prevWord) prevSuggestion = "";
+
             if (!prevSuggestion.empty()) {
-                // FOUND IT! The previous word is the culprit.
-                // Print location of the PREVIOUS word
                 fmt::print(fg(fmt::color::cornflower_blue), "   --> {}:{}:{}\n", filename, prevLoc.begin.line, prevLoc.begin.column);
                 printContext(prevLoc); 
                 fmt::print(fg(fmt::color::cyan), "   = help: The word '{}' looks suspicious. Did you mean '{}'?\n", prevWord, prevSuggestion);
@@ -174,10 +159,6 @@ void DiagnosticEngine::reportError(const fin::location& loc, const std::string& 
             }
         }
     }
-
-    // Default behavior (current token)
-    fmt::print(fg(fmt::color::cornflower_blue), "   --> {}:{}:{}\n", filename, loc.begin.line, loc.begin.column);
-    printContext(loc);
 
     if (!suggestion.empty()) {
         fmt::print(fg(fmt::color::cyan), "   = help: Did you mean '{}'?\n", suggestion);
@@ -187,17 +168,12 @@ void DiagnosticEngine::reportError(const fin::location& loc, const std::string& 
 void DiagnosticEngine::printContext(const fin::location& loc) {
     int lineNum = loc.begin.line;
     std::string lineContent = getLine(lineNum);
-    
     std::string lineNumStr = std::to_string(lineNum);
     std::string padding(lineNumStr.length(), ' ');
     
     fmt::print(fg(fmt::color::cornflower_blue), " {} |\n", padding);
-    
     fmt::print(fg(fmt::color::cornflower_blue), " {} | ", lineNumStr);
-    
-    // Use the new highlighter!
     printHighlightedLine(lineContent);
-    
     fmt::print(fg(fmt::color::cornflower_blue), " {} | ", padding);
     
     int col = loc.begin.column;
