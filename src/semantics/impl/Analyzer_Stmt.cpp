@@ -1,5 +1,5 @@
 #include "../SemanticAnalyzer.hpp"
-
+#include "../../types/TypeImpl.hpp" 
 namespace fin {
 
 void SemanticAnalyzer::visit(Block& node) {
@@ -91,6 +91,13 @@ void SemanticAnalyzer::visit(ContinueStatement& node) {
 
 void SemanticAnalyzer::visit(DeleteStatement& node) {
     node.expr->accept(*this);
+    auto type = lastExprType;
+    
+    if (!type) return;
+    
+    if (!dynamic_cast<PointerType*>(type.get())) {
+        error(node, fmt::format("Cannot delete non-pointer type '{}'", type->toString()));
+    }
 }
 
 void SemanticAnalyzer::visit(TryCatch& node) {
@@ -105,6 +112,30 @@ void SemanticAnalyzer::visit(TryCatch& node) {
 
 void SemanticAnalyzer::visit(BlameStatement& node) {
     node.error_expr->accept(*this);
+}
+
+bool SemanticAnalyzer::checkReturnPaths(Statement* node) {
+    if (!node) return false;
+
+    if (dynamic_cast<ReturnStatement*>(node)) return true;
+    if (dynamic_cast<BlameStatement*>(node)) return true;
+
+    if (auto* block = dynamic_cast<Block*>(node)) {
+        for (auto& stmt : block->statements) {
+            if (checkReturnPaths(stmt.get())) return true;
+        }
+        return false;
+    }
+
+    if (auto* ifStmt = dynamic_cast<IfStatement*>(node)) {
+        if (ifStmt->else_stmt) {
+            return checkReturnPaths(ifStmt->then_block.get()) && 
+                   checkReturnPaths(ifStmt->else_stmt.get());
+        }
+        return false;
+    }
+
+    return false;
 }
 
 }

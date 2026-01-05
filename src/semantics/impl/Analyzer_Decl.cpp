@@ -1,6 +1,9 @@
 #include "../SemanticAnalyzer.hpp"
+#include "../../utils/ModuleLoader.hpp"
+#include "../../types/TypeImpl.hpp"
 #include <fmt/core.h>
 #include <fmt/color.h>
+#include <filesystem>
 
 namespace fin {
 
@@ -14,188 +17,478 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
 
     if (node.initializer) {
         node.initializer->accept(*this);
-        // Check assignment compatibility
         if (lastExprType) {
-            checkType(*node.initializer, lastExprType, type);
+            // Type inference for auto keyword
+            if (type->toString() == "auto") {
+                type = lastExprType;
+                debugLog(fg(fmt::color::green), "      [Inference] Inferred type '{}' for variable '{}'\n", type->toString(), node.name);
+            } else {
+                checkType(*node.initializer, lastExprType, type);
+            }
         }
     }
 
     Symbol sym{node.name, type, node.is_mutable, node.initializer != nullptr};
     currentScope->define(sym);
     
-    fmt::print(fg(fmt::color::gray), "[DEBUG] Defined variable '{}' of type '{}'\n", node.name, type->toString());
+    debugLog(fg(fmt::color::gray), "[DEBUG] Defined variable '{}' of type '{}'\n", node.name, type->toString());
 }
 
 void SemanticAnalyzer::visit(FunctionDeclaration& node) {
-    fmt::print(fg(fmt::color::cyan), "[INFO] Analyzing function '{}'\n", node.name);
+    debugLog(fg(fmt::color::cyan), "[INFO] Analyzing function '{}'\n", node.name);
     
     auto prevRet = context.currentFuncReturnType;
+    
+    // 1. Enter Scope for the function body (to hold generics and params)
     enterScope();
 
-    // 1. Register Generics
+    // 2. Register Generics (e.g. <T>)
     for (auto& gen : node.generic_params) {
         currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
     }
 
-    // 2. Register Explicit Params
+    // 3. Resolve Parameters & Build Signature
+    std::vector<std::shared_ptr<Type>> paramTypes;
     bool hasSelf = false;
+    
     for (auto& param : node.params) {
         if (param->name == "self") hasSelf = true;
+        
         auto type = resolveTypeFromAST(param->type.get());
         if (type) {
+            // Define in body scope so the code can use the param
             currentScope->define({param->name, type, false, true});
+            // Register in signature
+            paramTypes.push_back(type);
         }
     }
 
-    // 3. Inject Implicit 'self'
+    // 4. Implicit Self Injection
     if (currentStructContext && !node.is_static && !hasSelf) {
-        // We are in a struct, method is not static, and no explicit self.
-        // Inject 'self' of type 'Self' (which is defined in the struct scope)
         auto selfType = currentScope->resolveType("Self");
         if (selfType) {
-            // We mark it as mutable (true) so setters like set_x work
             currentScope->define({"self", selfType, true, true});
-            fmt::print(fg(fmt::color::gray), "      [Magic] Injected implicit 'self' into '{}'\n", node.name);
+            debugLog(fg(fmt::color::gray), "      [Magic] Injected implicit 'self' into '{}'\n", node.name);
         }
     }
     
-    // 4. Resolve Return Type
+    // 5. Resolve Return Type
+    std::shared_ptr<Type> retType;
     if (node.return_type) {
-        context.currentFuncReturnType = resolveTypeFromAST(node.return_type.get());
+        retType = resolveTypeFromAST(node.return_type.get());
     } else {
-        context.currentFuncReturnType = currentScope->resolveType("void");
+        retType = currentScope->resolveType("void");
+    }
+    context.currentFuncReturnType = retType;
+
+    // 6. REGISTER FUNCTION IN PARENT SCOPE (CRITICAL FIX)
+    // Register 'add' and 'compute' in the Global Scope (currentScope->parent)
+    // so that 'main' can find them later.
+    if (currentScope->parent) {
+        auto funcType = std::make_shared<FunctionType>(paramTypes, retType);
+        // Mark as immutable and initialized
+        currentScope->parent->define({node.name, funcType, false, true});
+        debugLog(fg(fmt::color::gray), "      [Register] Registered function '{}' in parent scope\n", node.name);
     }
 
+    // 7. Analyze Body
     if (node.body) node.body->accept(*this);
     
+    if (node.body && !node.return_type->name.empty() && node.return_type->name != "void" && node.return_type->name != "noret") {
+        // Check if void/noret was resolved to actual void type
+        if (context.currentFuncReturnType->toString() != "void") {
+            if (!checkReturnPaths(node.body.get())) {
+                error(node, fmt::format("Function '{}' is missing a return statement on some paths", node.name));
+            }
+        }
+    }
+
     exitScope();
     context.currentFuncReturnType = prevRet;
 }
 
 void SemanticAnalyzer::visit(StructDeclaration& node) {
-    fmt::print(fg(fmt::color::orange), "[INFO] Analyzing struct '{}'\n", node.name);
+    debugLog(fg(fmt::color::orange), "[INFO] Analyzing struct '{}'\n", node.name);
+
     auto structType = std::make_shared<StructType>(node.name);
     currentScope->defineType(node.name, structType);
 
     enterScope();
+
+    // --- SETUP GENERICS ---
     for (auto& gen : node.generic_params) {
-        currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
+        auto genType = std::make_shared<GenericType>(gen->name);
+        if (gen->constraint) {
+            auto constraintType = resolveTypeFromAST(gen->constraint.get());
+            if (constraintType) {
+                debugLog(fg(fmt::color::gray), "      [Constraint] Generic '{}' : '{}'\n", gen->name, constraintType->toString());
+            }
+        }
+        currentScope->defineType(gen->name, genType);
+        structType->generic_args.push_back(genType);
     }
+
     currentScope->defineType("Self", structType);
 
-    // --- SAVE CONTEXT ---
-    auto prevContext = currentStructContext;
-    currentStructContext = structType; 
-    // --------------------
-
-    for (auto& member : node.members) {
-        resolveTypeFromAST(member->type.get());
+    // --- INHERITANCE ---
+    for (auto& parentNode : node.parents) {
+        auto parentType = resolveTypeFromAST(parentNode.get());
+        if (parentType) {
+            if (auto p = std::dynamic_pointer_cast<StructType>(parentType)) {
+                structType->parents.push_back(p);
+                debugLog(fg(fmt::color::gray), "      [Inheritance] Inherits/Implements '{}'\n", p->toString());
+            } else {
+                error(*parentNode, "Parent type '" + parentType->toString() + "' is not a struct/interface");
+            }
+        }
     }
 
+    // =========================================================
+    // PASS 1: REGISTRATION (Signatures Only)
+    // =========================================================
+    
+    // 1. Members
+    for (auto& member : node.members) {
+        auto memberType = resolveTypeFromAST(member->type.get());
+        if (memberType) {
+            // Check pointer_depth == 0
+            if (memberType->equals(*structType) && member->type->pointer_depth == 0) {
+                error(*member, "Recursive struct member '" + member->name + "' must be a pointer");
+            }
+            structType->defineField(member->name, memberType, member->is_public);
+        }
+        if (member->default_value) {
+            member->default_value->accept(*this);
+            if (lastExprType && memberType) {
+                checkType(*member->default_value, lastExprType, memberType);
+            }
+        }
+    }
+
+    // 2. Methods (Signatures)
+    for (auto& method : node.methods) {
+        std::shared_ptr<Type> retType = nullptr;
+        if (method->return_type) retType = resolveTypeFromAST(method->return_type.get());
+        else retType = currentScope->resolveType("void");
+        
+        if (retType) structType->defineMethod(method->name, retType);
+        
+        // Do not call accept here 
+        // That triggers body analysis too early.
+    }
+
+    // 3. Operators (Signatures)
+    for (auto& op : node.operators) {
+        std::shared_ptr<Type> retType = nullptr;
+        if (op->return_type) retType = resolveTypeFromAST(op->return_type.get());
+        else retType = currentScope->resolveType("void");
+        
+        if (retType) structType->defineOperator((int)op->op, retType);
+    }
+
+    // 4. Constructors (Signatures)
+    for (auto& ctor : node.constructors) {
+        // Resolve params in a temp scope to get signature
+        enterScope();
+        std::vector<std::shared_ptr<Type>> paramTypes;
+        for (auto& param : ctor->params) {
+            auto t = resolveTypeFromAST(param->type.get());
+            if (t) paramTypes.push_back(t);
+        }
+        exitScope();
+
+        auto ctorType = std::make_shared<FunctionType>(paramTypes, structType);
+        structType->addConstructor(ctorType);
+        debugLog(fg(fmt::color::green), "      [Ctor] Registered constructor for '{}' with {} params\n", node.name, paramTypes.size());
+    }
+
+    // =========================================================
+    // PASS 2: ANALYSIS (Bodies)
+    // =========================================================
+
+    auto prevContext = currentStructContext;
+    currentStructContext = structType; 
+
+    // 1. Member Defaults
+    for (auto& member : node.members) {
+        if (member->default_value) {
+            member->default_value->accept(*this);
+            auto memberType = structType->getFieldType(member->name);
+            if (lastExprType && memberType) {
+                checkType(*member->default_value, lastExprType, memberType);
+            }
+        }
+    }
+
+    // 2. Method Bodies (FIXED: Analyze bodies now)
     for (auto& method : node.methods) {
         method->accept(*this);
     }
-    
-    // --- RESTORE CONTEXT ---
-    currentStructContext = prevContext;
-    // -----------------------
 
+    // 3. Operator Bodies
+    for (auto& op : node.operators) {
+        enterScope();
+        for (auto& gen : op->generic_params) currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
+        for (auto& param : op->params) {
+            auto t = resolveTypeFromAST(param->type.get());
+            if (t) currentScope->define({param->name, t, false, true});
+        }
+        currentScope->define({"self", structType, true, true});
+        
+        std::shared_ptr<Type> retType = nullptr;
+        if (op->return_type) retType = resolveTypeFromAST(op->return_type.get());
+        else retType = currentScope->resolveType("void");
+
+        if (op->body) {
+            auto prevRet = context.currentFuncReturnType;
+            context.currentFuncReturnType = retType;
+            op->body->accept(*this);
+            context.currentFuncReturnType = prevRet;
+        }
+        exitScope();
+    }
+
+    // 4. Constructor Bodies
+    for (auto& ctor : node.constructors) {
+        enterScope();
+        for (auto& param : ctor->params) {
+            auto t = resolveTypeFromAST(param->type.get());
+            if (t) currentScope->define({param->name, t, false, true});
+        }
+        // Inject Self
+        currentScope->define({"self", structType, true, true});
+        
+        if (ctor->body) ctor->body->accept(*this);
+        exitScope();
+    }
+
+    // 5. Destructor Body
+    if (node.destructor) {
+        structType->has_destructor = true;
+        enterScope();
+        currentScope->define({"self", structType, true, true});
+        if (node.destructor->body) node.destructor->body->accept(*this);
+        exitScope();
+    }
+
+    // --- CONFORMANCE CHECK ---
+    for (auto& parent : structType->parents) {
+        if (auto p = std::dynamic_pointer_cast<StructType>(parent)) {
+            if (p->is_interface) {
+                debugLog(fg(fmt::color::gray), "[DEBUG] Checking if '{}' implements '{}'\n", node.name, p->name);
+                if (!structType->implements(p.get())) {
+                    error(node, fmt::format("Struct '{}' does not implement interface '{}'", node.name, p->name));
+                }
+            }
+        }
+    }
+
+    currentStructContext = prevContext;
     exitScope();
+}
+
+
+void SemanticAnalyzer::visit(OperatorDeclaration& node) {
+    // Operators are always inside structs (for now)
+    if (!currentStructContext) {
+        error(node, "Operator declaration outside of struct");
+        return;
+    }
+    
+    auto structType = std::dynamic_pointer_cast<StructType>(currentStructContext);
+    if (!structType) return;
+
+    debugLog(fg(fmt::color::cyan), "[INFO] Analyzing operator '{}' for {}\n", (int)node.op, structType->name);
+
+    enterScope();
+    
+    // 1. Generics
+    for (auto& gen : node.generic_params) {
+        currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
+    }
+    
+    // 2. Params
+    for (auto& param : node.params) {
+        auto t = resolveTypeFromAST(param->type.get());
+        if (t) currentScope->define({param->name, t, false, true});
+    }
+    
+    // 3. Inject Self
+    currentScope->define({"self", structType, true, true});
+
+    // 4. Return Type
+    std::shared_ptr<Type> retType = nullptr;
+    if (node.return_type) {
+        retType = resolveTypeFromAST(node.return_type.get());
+    } else {
+        retType = currentScope->resolveType("void");
+    }
+    
+    // 5. Register in Struct
+    if (retType) {
+        structType->defineOperator((int)node.op, retType);
+    }
+
+    // 6. Body
+    if (node.body) {
+        auto prevRet = context.currentFuncReturnType;
+        context.currentFuncReturnType = retType;
+        node.body->accept(*this);
+        context.currentFuncReturnType = prevRet;
+    }
+    
+    exitScope();
+}
+
+void SemanticAnalyzer::visit(MacroDeclaration& node) {
+    debugLog(fg(fmt::color::magenta), "[INFO] Registering macro '{}'\n", node.name);
+    // Macros are handled in a separate expansion pass.
+    // Validate no symbol clashes that it doesn't clash with existing symbols if we wanted to.
+}
+
+void SemanticAnalyzer::visit(ConstructorDeclaration& node) {
+    // Logic is primarily handled inside StructDeclaration to manage 'self' and type registration.
+    // Validate body
+    if (node.body) node.body->accept(*this);
+}
+
+void SemanticAnalyzer::visit(DestructorDeclaration& node) {
+    if (node.body) node.body->accept(*this);
 }
 
 void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
-    fmt::print(fg(fmt::color::magenta), "[INFO] Analyzing interface '{}'\n", node.name);
-    
-    // Create the type
+    debugLog(fg(fmt::color::magenta), "[INFO] Analyzing interface '{}'\n", node.name);
     auto ifaceType = std::make_shared<StructType>(node.name);
+    ifaceType->is_interface = true;
     currentScope->defineType(node.name, ifaceType);
     
     enterScope();
-    
-    // 1. Analyze Members
-    for (auto& member : node.members) {
-        resolveTypeFromAST(member->type.get());
+    for (auto& gen : node.generic_params) {
+        currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
     }
+    currentScope->defineType("Self", ifaceType);
+
+    for (auto& member : node.members) resolveTypeFromAST(member->type.get());
     
-    // 2. Analyze Methods & Register them
     for (auto& method : node.methods) {
         enterScope();
-        // Resolve params...
         for (auto& param : method->params) resolveTypeFromAST(param->type.get());
-        
-        // Resolve Return Type
         std::shared_ptr<Type> retType = nullptr;
-        if(method->return_type) {
-            retType = resolveTypeFromAST(method->return_type.get());
-        } else {
-            retType = currentScope->resolveType("void");
-        }
+        if(method->return_type) retType = resolveTypeFromAST(method->return_type.get());
+        else retType = currentScope->resolveType("void");
         
-        // REGISTER METHOD IN TYPE
         ifaceType->defineMethod(method->name, retType);
-        
         exitScope();
     }
+    
+    for (auto& op : node.operators) {
+        enterScope();
+        for (auto& gen : op->generic_params) currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
+        for (auto& param : op->params) resolveTypeFromAST(param->type.get());
+        std::shared_ptr<Type> retType = nullptr;
+        if(op->return_type) retType = resolveTypeFromAST(op->return_type.get());
+        else retType = currentScope->resolveType("void");
+        
+        ifaceType->defineOperator((int)op->op, retType);
+        exitScope();
+    }
+
+    for (auto& ctor : node.constructors) {
+        enterScope();
+        std::vector<std::shared_ptr<Type>> paramTypes;
+        for (auto& param : ctor->params) {
+            auto t = resolveTypeFromAST(param->type.get());
+            if (t) paramTypes.push_back(t);
+        }
+        auto ctorType = std::make_shared<FunctionType>(paramTypes, ifaceType);
+        ifaceType->addConstructor(ctorType);
+        debugLog(fg(fmt::color::gray), "      [Interface] Added constructor requirement\n");
+        exitScope();
+    }
+
+    if (node.destructor) {
+        ifaceType->has_destructor = true;
+        debugLog(fg(fmt::color::gray), "      [Interface] Added destructor requirement\n");
+    }
+    
     exitScope();
 }
 
-void SemanticAnalyzer::visit(MethodCall& node) {
-    // 1. Analyze the object (e.g., 'item')
-    node.object->accept(*this);
-    auto objType = lastExprType;
+void SemanticAnalyzer::visit(EnumDeclaration& node) {
+    debugLog(fg(fmt::color::yellow), "[INFO] Analyzing enum '{}'\n", node.name);
+    auto enumType = std::make_shared<PrimitiveType>(node.name); 
+    currentScope->defineType(node.name, enumType);
     
-    if (!objType) return; // Error already reported
-
-    // 2. Check if object is a Struct/Interface
-    // We need to handle GenericType (T) which might have constraints
-    std::shared_ptr<StructType> structType = nullptr;
-
-    if (auto* st = dynamic_cast<StructType*>(objType.get())) {
-        structType = std::static_pointer_cast<StructType>(objType);
-    } 
-    else if (auto* gt = dynamic_cast<GenericType*>(objType.get())) {
-        // If it's a generic T, check its constraint (e.g. T : Printable)
-        // For this prototype, we assume the constraint IS the type we look up in.
-        // In a real compiler, we'd store the constraint in GenericType.
-        // Let's hack it: We need to find the constraint type from the scope.
-        // But GenericType doesn't store it yet.
-        
-        // WORKAROUND: For this test case, we know 'T' is 'Printable'.
-        // In a real impl, GenericType needs a `std::shared_ptr<Type> constraint` field.
-        // Let's assume for now that if we call a method on a Generic, we look it up
-        // in the interface it implements.
-        
-        // Since we didn't implement constraint storage in GenericType yet, 
-        // let's try to resolve "Printable" directly to make the test pass.
-        structType = std::dynamic_pointer_cast<StructType>(currentScope->resolveType("Printable"));
+    for (auto& val : node.values) {
+        if (val.second) {
+            val.second->accept(*this);
+            auto intType = currentScope->resolveType("int");
+            checkType(*val.second, lastExprType, intType);
+        }
+        currentScope->define({val.first, enumType, false, true});
+        debugLog(fg(fmt::color::gray), "      [Enum] Member '{}'\n", val.first);
     }
+}
 
-    if (!structType) {
-        // If we couldn't find the type definition
-        error(node, fmt::format("Type '{}' does not have methods (or constraint missing)", objType->toString()));
-        lastExprType = nullptr;
+void SemanticAnalyzer::visit(ImportModule& node) {
+    if (!loader) return;
+
+    auto moduleScope = loader->loadModule(node.source, node.is_package);
+    
+    if (!moduleScope) {
+        error(node, "Failed to load module '" + node.source + "'");
         return;
     }
 
-    // 3. Look up method
-    auto retType = structType->getMethodReturnType(node.method_name);
-    if (!retType) {
-        error(node, fmt::format("Method '{}' not found in type '{}'", node.method_name, structType->name));
-        lastExprType = nullptr;
-    } else {
-        lastExprType = retType;
-        // fmt::print(fg(fmt::color::green), "[DEBUG] Resolved method {}.{} -> {}\n", structType->name, node.method_name, retType->toString());
+    // Case 1: Specific Imports: import { A, B } from "lib"
+    if (!node.targets.empty()) {
+        for (const auto& target : node.targets) {
+            bool found = false;
+            if (auto* sym = moduleScope->resolve(target)) {
+                currentScope->define(*sym); // Copy symbol
+                found = true;
+            }
+            if (auto type = moduleScope->resolveType(target)) {
+                currentScope->defineType(target, type); // Copy type
+                found = true;
+            }
+            if (!found) error(node, "Module '" + node.source + "' does not export '" + target + "'");
+        }
+        return;
     }
 
-    // 4. Check Args
-    for(auto& arg : node.args) arg->accept(*this);
+    // Case 2: Aliased Import: import "lib" as L
+    // OR Default Alias: import "lib/foo.fin" (becomes 'foo')
+    std::string alias = node.alias;
+    if (alias.empty()) {
+        // Derive alias from filename: "tests/samples/macros.fin" -> "macros"
+        std::filesystem::path p(node.source);
+        alias = p.stem().string();
+    }
+
+    // Create a Namespace Symbol
+    auto nsType = std::make_shared<NamespaceType>(alias, moduleScope);
+    
+    // Define the namespace as a variable in the current scope
+    // This allows 'alias.member' to work via MemberAccess
+    currentScope->define({alias, nsType, false, true});
+    
+    debugLog(fg(fmt::color::blue), "      [Import] Module '{}' bound to namespace '{}'\n", node.source, alias);
 }
 
-// Stubs for others
-void SemanticAnalyzer::visit(EnumDeclaration&) {}
-void SemanticAnalyzer::visit(ImportModule&) {}
-void SemanticAnalyzer::visit(DefineDeclaration&) {}
-void SemanticAnalyzer::visit(MacroDeclaration&) {}
-void SemanticAnalyzer::visit(OperatorDeclaration&) {}
+void SemanticAnalyzer::visit(DefineDeclaration& node) {
+    debugLog(fg(fmt::color::magenta), "[INFO] Registering extern '{}'\n", node.name);
+    auto retType = resolveTypeFromAST(node.return_type.get());
+    if (!retType) return;
+
+    std::vector<std::shared_ptr<Type>> paramTypes;
+    for (auto& param : node.params) {
+        auto t = resolveTypeFromAST(param->type.get());
+        if (t) paramTypes.push_back(t);
+    }
+
+    auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg);
+    currentScope->define({node.name, funcType, false, true});
+}
 
 }
