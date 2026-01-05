@@ -9,7 +9,6 @@ find_package(BISON REQUIRED)
 find_package(FLEX REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(LLVM REQUIRED CONFIG)
-find_package(GTest REQUIRED) # Added for testing
 
 message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "LLVM targets: ${LLVM_AVAILABLE_LIBS}")
@@ -25,7 +24,7 @@ include_directories(${LLVM_INCLUDE_DIRS})
 
 # --- Generate Sources ---
 BISON_TARGET(Parser src/parser/parser.y ${CMAKE_CURRENT_BINARY_DIR}/parser.cpp
-    COMPILE_FLAGS "-d"
+    COMPILE_FLAGS "-d -Wcounterexamples"
 )
 FLEX_TARGET(Lexer src/lexer/lexer.l ${CMAKE_CURRENT_BINARY_DIR}/lexer.cpp)
 
@@ -39,11 +38,18 @@ add_library(fin_core STATIC
     ${FLEX_Lexer_OUTPUTS}
     src/ast/ASTPrinter.cpp
     src/diagnostics/DiagnosticEngine.cpp
+    src/ast/ASTNode.cpp
+    src/preprocessor/Preprocessor.cpp
     src/semantics/impl/Analyzer_Core.cpp
     src/semantics/impl/Analyzer_Decl.cpp
     src/semantics/impl/Analyzer_Stmt.cpp
     src/semantics/impl/Analyzer_Expr.cpp
-    # Add other .cpp files here later (e.g., src/ast/AST.cpp)
+    src/driver/Driver.cpp 
+    src/macros/MacroExpander.cpp
+    src/ast/CloneVisitor.cpp
+    src/macros/SubstitutionVisitor.cpp
+    src/types/Type.cpp
+    src/utils/ModuleLoader.cpp 
 )
 
 
@@ -61,6 +67,7 @@ target_include_directories(fin_core PUBLIC
 
 # --- CLI Executable ---
 add_executable(finc src/main.cpp)
+
 target_link_libraries(finc PRIVATE fin_core)
 
 # --- Testing ---
