@@ -4,11 +4,11 @@
 
 namespace fin {
 
-
 // Helper to recursively print AST TypeNodes
 std::string astTypeToString(const TypeNode* type) {
     if (!type) return "unknown";
     std::string s = type->name;
+    
     if (!type->generics.empty()) {
         s += "<";
         for (size_t i = 0; i < type->generics.size(); ++i) {
@@ -17,6 +17,14 @@ std::string astTypeToString(const TypeNode* type) {
         }
         s += ">";
     }
+    
+    // Handle pointers and arrays
+    for(int i=0; i<type->pointer_depth; ++i) {
+        s = "&" + s;
+    }
+    
+    if (type->is_array) s = "[" + s + "]";
+    
     return s;
 }
 
@@ -46,24 +54,36 @@ void ASTPrinter::dispatch(const ASTNode* node, std::string currentPrefix, std::s
     else if (auto* n = dynamic_cast<const StructDeclaration*>(node)) {
         printStruct(n, currentPrefix, false);
     }
-    else if (auto* n = dynamic_cast<const StructInstantiation*>(node)) {
-        fmt::print("{}StructInit '{}'", currentPrefix, n->struct_name);
-        
-        // Print Generics
-        if (!n->generic_args.empty()) {
-            fmt::print("::<");
-            for (size_t i = 0; i < n->generic_args.size(); ++i) {
-                fmt::print("{}", n->generic_args[i]->name);
-                if (i < n->generic_args.size() - 1) fmt::print(", ");
-            }
-            fmt::print(">");
-        }
-        fmt::print("\n");
-
-        for (auto& field : n->fields) {
-            fmt::print("{}    Field: {}\n", currentPrefix, field.first);
-            printNode(field.second.get(), childPrefix + "    ", true);
-        }
+    else if (auto* n = dynamic_cast<const InterfaceDeclaration*>(node)) {
+        printInterface(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const EnumDeclaration*>(node)) {
+        printEnum(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const DefineDeclaration*>(node)) {
+        printDefine(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const MacroDeclaration*>(node)) {
+        printMacro(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const OperatorDeclaration*>(node)) {
+        printOperator(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const ImportModule*>(node)) {
+        printImport(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const ConstructorDeclaration*>(node)) {
+        printConstructor(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const DestructorDeclaration*>(node)) {
+        printDestructor(n, currentPrefix, false);
+    }
+    // --- Helpers ---
+    else if (auto* n = dynamic_cast<const Parameter*>(node)) {
+        printParameter(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const StructMember*>(node)) {
+        printStructMember(n, currentPrefix, false);
     }
     // --- Statements ---
     else if (auto* n = dynamic_cast<const VariableDeclaration*>(node)) {
@@ -81,9 +101,30 @@ void ASTPrinter::dispatch(const ASTNode* node, std::string currentPrefix, std::s
     else if (auto* n = dynamic_cast<const ExpressionStatement*>(node)) {
         printExprStmt(n, currentPrefix, false);
     }
+    else if (auto* n = dynamic_cast<const ForeachLoop*>(node)) {
+        printForeach(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const BreakStatement*>(node)) {
+        printBreak(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const ContinueStatement*>(node)) {
+        printContinue(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const DeleteStatement*>(node)) {
+        printDelete(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const TryCatch*>(node)) {
+        printTryCatch(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const BlameStatement*>(node)) {
+        printBlame(n, currentPrefix, false);
+    }
     // --- Expressions ---
     else if (auto* n = dynamic_cast<const BinaryOp*>(node)) {
         printBinary(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const UnaryOp*>(node)) {
+        printUnary(n, currentPrefix, false);
     }
     else if (auto* n = dynamic_cast<const Literal*>(node)) {
         printLiteral(n, currentPrefix, false);
@@ -94,47 +135,59 @@ void ASTPrinter::dispatch(const ASTNode* node, std::string currentPrefix, std::s
     else if (auto* n = dynamic_cast<const FunctionCall*>(node)) {
         printCall(n, currentPrefix, false);
     }
-    else if (auto* n = dynamic_cast<const CastExpression*>(node)) {
-    fmt::print("{}Cast\n", currentPrefix);
-    printNode(n->expr.get(), childPrefix, true);
-    }
-    else if (auto* n = dynamic_cast<const NewExpression*>(node)) {
-        fmt::print("{}New\n", currentPrefix);
-        // Print type and args...
-    }
-    else if (auto* n = dynamic_cast<const InterfaceDeclaration*>(node)) {
-        printInterface(n, currentPrefix, false);
-    }
-    else if (auto* n = dynamic_cast<const MemberAccess*>(node)) {
-        fmt::print("{}MemberAccess '{}'\n", currentPrefix, n->member);
-        printNode(n->object.get(), childPrefix, true);
-    }
-    else if (auto* n = dynamic_cast<const DefineDeclaration*>(node)) {
-        fmt::print("{}Define '{}'\n", currentPrefix, n->name);
-    }
-    else if (auto* n = dynamic_cast<const MacroDeclaration*>(node)) {
-        fmt::print("{}Macro '{}'\n", currentPrefix, n->name);
-    }
-    else if (auto* n = dynamic_cast<const ForeachLoop*>(node)) {
-        fmt::print("{}Foreach\n", currentPrefix);
-        printNode(n->body.get(), childPrefix, true);
-    }
-    else if (auto* n = dynamic_cast<const BreakStatement*>(node)) {
-        fmt::print("{}Break\n", currentPrefix);
-    }
-    else if (auto* n = dynamic_cast<const ContinueStatement*>(node)) {
-        fmt::print("{}Continue\n", currentPrefix);
-    }
-    else if (auto* n = dynamic_cast<const DeleteStatement*>(node)) {
-        fmt::print("{}Delete\n", currentPrefix);
-        printNode(n->expr.get(), childPrefix, true);
-    }
-    else if (auto* n = dynamic_cast<const OperatorDeclaration*>(node)) {
-        fmt::print("{}Operator\n", currentPrefix);
-        printNode(n->body.get(), childPrefix, true);
-    }
     else if (auto* n = dynamic_cast<const MethodCall*>(node)) {
         printMethodCall(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const MacroCall*>(node)) {
+        printMacroCall(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const MacroInvocation*>(node)) {
+        printMacroInvocation(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const CastExpression*>(node)) {
+        printCast(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const NewExpression*>(node)) {
+        printNew(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const MemberAccess*>(node)) {
+        printMemberAccess(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const StructInstantiation*>(node)) {
+        printStructInit(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const ArrayLiteral*>(node)) {
+        printArrayLiteral(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const ArrayAccess*>(node)) {
+        printArrayAccess(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const SizeofExpression*>(node)) {
+        printSizeof(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const TernaryOp*>(node)) {
+        printTernary(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const FunctionTypeNode*>(node)) {
+        printFunctionType(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const LambdaExpression*>(node)) {
+        printLambda(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const QuoteExpression*>(node)) {
+        printQuote(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const TypeNode*>(node)) {
+        printTypeNode(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const SuperExpression*>(node)) {
+        printSuper(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const PointerTypeNode*>(node)) {
+        printPointerType(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const ArrayTypeNode*>(node)) {
+        printArrayType(n, currentPrefix, false);
     }
     else {
         fmt::print("{}Unknown Node\n", currentPrefix);
@@ -177,49 +230,130 @@ void ASTPrinter::printFunction(const FunctionDeclaration* node, std::string pref
 
 void ASTPrinter::printVarDecl(const VariableDeclaration* node, std::string prefix, bool) {
     fmt::print(fg(fmt::color::light_green), "{}VarDecl ", prefix);
-    // Use the helper here:
     fmt::print("{} <{}>\n", node->name, astTypeToString(node->type.get()));
     if (node->initializer) {
         printNode(node->initializer.get(), "    ", true);
     }
 }
 
-// Update printStruct to show methods and attributes:
 void ASTPrinter::printStruct(const StructDeclaration* node, std::string prefix, bool) {
     fmt::print(fg(fmt::color::orange), "{}Struct ", prefix);
-    fmt::print("{}\n", node->name);
+    fmt::print("{}", node->name);
+    if (!node->parents.empty()) {
+        fmt::print(" : ");
+        for (size_t i = 0; i < node->parents.size(); ++i) {
+            fmt::print("{}", astTypeToString(node->parents[i].get()));
+            if (i < node->parents.size() - 1) fmt::print(", ");
+        }
+    }
+    fmt::print("\n");
     
-    // 1. Print Attributes
-    for (auto& member : node->members) {
-        fmt::print("{}  Member: {} <{}>\n", prefix, member->name, astTypeToString(member->type.get()));
+    for (auto& attr : node->attributes) {
+        fmt::print("{}  #[{}]\n", prefix, attr->name);
     }
 
-    // 2. Print Members
     for (auto& member : node->members) {
         fmt::print("{}  Member: {} <{}>\n", prefix, member->name, astTypeToString(member->type.get()));
     }
     
-    // 3. Print Methods (Recursively!)
     for (size_t i = 0; i < node->methods.size(); ++i) {
-        // We treat methods as children of the struct
-        // We use a simple indent here to keep the tree visual
-        // In a perfect implementation, we'd pass the tree lines down, 
-        // but adding "    " works well enough for visualization.
-        printNode(node->methods[i].get(), prefix + "    ", i == node->methods.size() - 1);
+        printNode(node->methods[i].get(), prefix + "    ", false);
+    }
+    
+    for (auto& ctor : node->constructors) {
+        printNode(ctor.get(), prefix + "    ", false);
+    }
+    if (node->destructor) {
+        printNode(node->destructor.get(), prefix + "    ", false);
     }
 }
 
-void ASTPrinter::printInterface(const InterfaceDeclaration* node, std::string prefix, bool) {
+void ASTPrinter::printInterface(const InterfaceDeclaration* node, std::string prefix, bool isLast) {
     fmt::print(fg(fmt::color::magenta), "{}Interface ", prefix);
-    fmt::print("{}\n", node->name);
+    fmt::print("{}", node->name);
+    if (!node->generic_params.empty()) {
+        fmt::print("<");
+        for (size_t i = 0; i < node->generic_params.size(); ++i) {
+            fmt::print("{}", node->generic_params[i]->name);
+            if (node->generic_params[i]->constraint) {
+                fmt::print(": {}", node->generic_params[i]->constraint->name);
+            }
+            if (i < node->generic_params.size() - 1) fmt::print(", ");
+        }
+        fmt::print(">");
+    }
+    fmt::print("\n");
 
     for (auto& member : node->members) {
-        fmt::print("{}  Member: {} <{}>\n", prefix, member->name, member->type->name);
+        fmt::print("{}  Member: {} <{}>\n", prefix, member->name, astTypeToString(member->type.get()));
     }
-    
+    for (auto& ctor : node->constructors) {
+        fmt::print(fg(fmt::color::cyan), "{}  Abstract Constructor: Self(...)\n", prefix);
+    }
+    if (node->destructor) {
+        fmt::print(fg(fmt::color::cyan), "{}  Abstract Destructor: ~Self()\n", prefix);
+    }
     for (auto& method : node->methods) {
-        fmt::print(fg(fmt::color::cornflower_blue), "{}  Abstract Method: ", prefix);
-        fmt::print("{}\n", method->name);
+        fmt::print(fg(fmt::color::cornflower_blue), "{}  Abstract Method: {}\n", prefix, method->name);
+    }
+    for (auto& op : node->operators) {
+        fmt::print(fg(fmt::color::cyan), "{}  Abstract Operator: {}\n", prefix, (int)op->op);
+    }
+}
+
+void ASTPrinter::printEnum(const EnumDeclaration* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::yellow), "{}Enum '{}'\n", prefix, node->name);
+    for(auto& v : node->values) {
+        fmt::print("{}    Value: {}\n", prefix, v.first);
+    }
+}
+
+void ASTPrinter::printDefine(const DefineDeclaration* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::magenta), "{}Define ", prefix);
+    fmt::print("'{}'", node->name);
+    if (node->is_vararg) fmt::print(" (vararg)");
+    fmt::print("\n");
+}
+
+void ASTPrinter::printMacro(const MacroDeclaration* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::magenta), "{}Macro ", prefix);
+    fmt::print("'{}'\n", node->name);
+    for (const auto& param : node->params) {
+        fmt::print("{}    Param: {}: {}{}\n", prefix, param.name, param.type, param.is_vararg ? "..." : "");
+    }
+    printNode(node->body.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printOperator(const OperatorDeclaration* node, std::string prefix, bool isLast) {
+    fmt::print("{}Operator\n", prefix);
+    printNode(node->body.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printImport(const ImportModule* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::blue), "{}Import '{}'\n", prefix, node->source);
+}
+
+void ASTPrinter::printConstructor(const ConstructorDeclaration* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::cyan), "{}Constructor '{}'\n", prefix, node->name);
+    printNode(node->body.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printDestructor(const DestructorDeclaration* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::cyan), "{}Destructor '~{}'\n", prefix, node->name);
+    printNode(node->body.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printParameter(const Parameter* node, std::string prefix, bool isLast) {
+    fmt::print("{}Param: {} <{}>\n", prefix, node->name, astTypeToString(node->type.get()));
+    if (node->default_value) {
+        printNode(node->default_value.get(), prefix + "    ", true);
+    }
+}
+
+void ASTPrinter::printStructMember(const StructMember* node, std::string prefix, bool isLast) {
+    fmt::print("{}Member: {} <{}>\n", prefix, node->name, astTypeToString(node->type.get()));
+    if (node->default_value) {
+        printNode(node->default_value.get(), prefix + "    ", true);
     }
 }
 
@@ -240,7 +374,6 @@ void ASTPrinter::printIf(const IfStatement* node, std::string prefix, bool) {
 }
 
 void ASTPrinter::printReturn(const ReturnStatement* node, std::string prefix, bool) {
-    // FIXED: Use comma syntax for color
     fmt::print(fg(fmt::color::red), "{}Return\n", prefix);
     if (node->value) printNode(node->value.get(), "    ", true);
 }
@@ -250,26 +383,59 @@ void ASTPrinter::printExprStmt(const ExpressionStatement* node, std::string pref
     printNode(node->expr.get(), "    ", true);
 }
 
+void ASTPrinter::printForeach(const ForeachLoop* node, std::string prefix, bool isLast) {
+    fmt::print("{}Foreach\n", prefix);
+    printNode(node->body.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printBreak(const BreakStatement* node, std::string prefix, bool isLast) {
+    fmt::print("{}Break\n", prefix);
+}
+
+void ASTPrinter::printContinue(const ContinueStatement* node, std::string prefix, bool isLast) {
+    fmt::print("{}Continue\n", prefix);
+}
+
+void ASTPrinter::printDelete(const DeleteStatement* node, std::string prefix, bool isLast) {
+    fmt::print("{}Delete\n", prefix);
+    printNode(node->expr.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printTryCatch(const TryCatch* node, std::string prefix, bool isLast) {
+    fmt::print("{}TryCatch\n", prefix);
+    printNode(node->try_block.get(), prefix + "    ", false);
+    printNode(node->catch_block.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printBlame(const BlameStatement* node, std::string prefix, bool isLast) {
+    fmt::print("{}Blame\n", prefix);
+    printNode(node->error_expr.get(), prefix + "    ", true);
+}
+
 void ASTPrinter::printBinary(const BinaryOp* node, std::string prefix, bool) {
     fmt::print("{}BinaryOp\n", prefix);
     printNode(node->left.get(), "    ", false);
     printNode(node->right.get(), "    ", true);
 }
 
-void ASTPrinter::printLiteral(const Literal* node, std::string prefix, bool) {
-    // FIXED: Use comma syntax for color
-    fmt::print(fg(fmt::color::yellow), "{}Literal ", prefix);
-    fmt::print("{}\n", node->value);
+void ASTPrinter::printUnary(const UnaryOp* node, std::string prefix, bool isLast) {
+    std::string opStr;
+    switch(node->op) {
+        case ASTTokenKind::MINUS: opStr = "-"; break;
+        case ASTTokenKind::NOT: opStr = "!"; break;
+        case ASTTokenKind::AMPERSAND: opStr = "&"; break;
+        case ASTTokenKind::MULT: opStr = "*"; break;
+        case ASTTokenKind::INCREMENT: opStr = "++"; break;
+        case ASTTokenKind::DECREMENT: opStr = "--"; break;
+        default: opStr = "?"; break;
+    }
+    fmt::print("{}UnaryOp '{}'\n", prefix, opStr);
+    printNode(node->operand.get(), prefix + "    ", true);
 }
 
-void ASTPrinter::printMethodCall(const MethodCall* node, std::string prefix, bool) {
-    fmt::print("{}MethodCall '{}'\n", prefix, node->method_name);
-    fmt::print("{}  Object:\n", prefix);
-    printNode(node->object.get(), prefix + "    ", false);
-    fmt::print("{}  Args:\n", prefix);
-    for (auto& arg : node->args) {
-        printNode(arg.get(), prefix + "    ", false);
-    }
+void ASTPrinter::printLiteral(const Literal* node, std::string prefix, bool) {
+    fmt::print(fg(fmt::color::yellow), "{}Literal ", prefix);
+    fmt::print("{}\n", node->value);
 }
 
 void ASTPrinter::printIdentifier(const Identifier* node, std::string prefix, bool) {
@@ -278,8 +444,6 @@ void ASTPrinter::printIdentifier(const Identifier* node, std::string prefix, boo
 
 void ASTPrinter::printCall(const FunctionCall* node, std::string prefix, bool) {
     fmt::print("{}Call '{}'", prefix, node->name);
-    
-    // Print Generic Args ::<T>
     if (!node->generic_args.empty()) {
         fmt::print("::<");
         for (size_t i = 0; i < node->generic_args.size(); ++i) {
@@ -289,10 +453,144 @@ void ASTPrinter::printCall(const FunctionCall* node, std::string prefix, bool) {
         fmt::print(">");
     }
     fmt::print("\n");
-
     for (auto& arg : node->args) {
         printNode(arg.get(), "    ", false);
     }
+}
+
+void ASTPrinter::printMethodCall(const MethodCall* node, std::string prefix, bool isLast) {
+    fmt::print("{}MethodCall '{}'\n", prefix, node->method_name);
+    fmt::print("{}  Object:\n", prefix);
+    printNode(node->object.get(), prefix + "    ", false);
+    fmt::print("{}  Args:\n", prefix);
+    for (auto& arg : node->args) {
+        printNode(arg.get(), prefix + "    ", false);
+    }
+}
+
+void ASTPrinter::printMacroCall(const MacroCall* node, std::string prefix, bool isLast) {
+    fmt::print("{}MacroCall '{}'\n", prefix, node->name);
+}
+
+void ASTPrinter::printMacroInvocation(const MacroInvocation* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::magenta), "{}MacroInvocation ", prefix);
+    fmt::print("'{}!'\n", node->name);
+    for (auto& arg : node->args) {
+        printNode(arg.get(), prefix + "    ", false);
+    }
+}
+
+void ASTPrinter::printCast(const CastExpression* node, std::string prefix, bool isLast) {
+    fmt::print("{}Cast\n", prefix);
+    printNode(node->expr.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printNew(const NewExpression* node, std::string prefix, bool isLast) {
+    fmt::print("{}New\n", prefix);
+}
+
+void ASTPrinter::printMemberAccess(const MemberAccess* node, std::string prefix, bool isLast) {
+    fmt::print("{}MemberAccess '{}'\n", prefix, node->member);
+    printNode(node->object.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printStructInit(const StructInstantiation* node, std::string prefix, bool isLast) {
+    fmt::print("{}StructInit '{}'", prefix, node->struct_name);
+    if (!node->generic_args.empty()) {
+        fmt::print("::<");
+        for (size_t i = 0; i < node->generic_args.size(); ++i) {
+            fmt::print("{}", node->generic_args[i]->name);
+            if (i < node->generic_args.size() - 1) fmt::print(", ");
+        }
+        fmt::print(">");
+    }
+    fmt::print("\n");
+    for (auto& field : node->fields) {
+        fmt::print("{}    Field: {}\n", prefix, field.first);
+        printNode(field.second.get(), prefix + "        ", true);
+    }
+}
+
+void ASTPrinter::printArrayLiteral(const ArrayLiteral* node, std::string prefix, bool isLast) {
+    fmt::print("{}ArrayLiteral\n", prefix);
+    for (size_t i = 0; i < node->elements.size(); ++i) {
+        printNode(node->elements[i].get(), prefix + "    ", i == node->elements.size() - 1);
+    }
+}
+
+void ASTPrinter::printArrayAccess(const ArrayAccess* node, std::string prefix, bool isLast) {
+    fmt::print("{}ArrayAccess\n", prefix);
+    fmt::print("{}  Array:\n", prefix);
+    printNode(node->array.get(), prefix + "    ", false);
+    fmt::print("{}  Index:\n", prefix);
+    printNode(node->index.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printSizeof(const SizeofExpression* node, std::string prefix, bool isLast) {
+    fmt::print("{}Sizeof\n", prefix);
+}
+
+void ASTPrinter::printTernary(const TernaryOp* node, std::string prefix, bool isLast) {
+    fmt::print("{}Ternary\n", prefix);
+    printNode(node->condition.get(), prefix + "    ", false);
+    printNode(node->true_expr.get(), prefix + "    ", false);
+    printNode(node->false_expr.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printFunctionType(const FunctionTypeNode* node, std::string prefix, bool isLast) {
+    fmt::print("{}FunctionType\n", prefix);
+    fmt::print("{}  Params:\n", prefix);
+    for(auto& p : node->param_types) {
+        fmt::print("{}    {}\n", prefix, astTypeToString(p.get()));
+    }
+    fmt::print("{}  Return: {}\n", prefix, astTypeToString(node->return_type.get()));
+}
+
+void ASTPrinter::printLambda(const LambdaExpression* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::cyan), "{}Lambda\n", prefix);
+    for(auto& p : node->params) {
+        fmt::print("{}  Param: {} <{}>\n", prefix, p->name, astTypeToString(p->type.get()));
+    }
+    if(node->body) {
+        printNode(node->body.get(), prefix + "  ", true);
+    } else {
+        printNode(node->expression_body.get(), prefix + "  ", true);
+    }
+}
+
+void ASTPrinter::printQuote(const QuoteExpression* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::magenta), "{}Quote\n", prefix);
+    printNode(node->block.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printTypeNode(const TypeNode* node, std::string prefix, bool isLast) {
+    fmt::print("{}TypeNode '{}'\n", prefix, astTypeToString(node));
+}
+
+void ASTPrinter::printSuper(const SuperExpression* node, std::string prefix, bool isLast) {
+    if (!node->init_fields.empty()) {
+        fmt::print("{}SuperInit\n", prefix);
+        for (auto& f : node->init_fields) {
+            fmt::print("{}    Field: {}\n", prefix, f.first);
+            printNode(f.second.get(), prefix + "        ", true);
+        }
+    } else {
+        fmt::print("{}SuperCall '{}'\n", prefix, node->parent_name.empty() ? "implicit" : node->parent_name);
+        for (auto& arg : node->args) {
+            printNode(arg.get(), prefix + "    ", false);
+        }
+    }
+}
+
+void ASTPrinter::printPointerType(const PointerTypeNode* node, std::string prefix, bool isLast) {
+    fmt::print("{}PointerType\n", prefix);
+    printNode(node->pointee.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printArrayType(const ArrayTypeNode* node, std::string prefix, bool isLast) {
+    fmt::print("{}ArrayType\n", prefix);
+    printNode(node->element_type.get(), prefix + "    ", node->size == nullptr);
+    if(node->size) printNode(node->size.get(), prefix + "    ", true);
 }
 
 } // namespace fin
