@@ -1,0 +1,24 @@
+@define printf(fmt: <string>, ...) <noret>;
+#cdef CONST_NUM 100
+#cdef MAX(a, b) ((a) > (b) ? (a) : (b))
+
+#cdef DEBUG
+#c_ifdef DEBUG
+    #cdef LOG_MSG "Debug Mode"
+#c_else
+    #cdef LOG_MSG "Release Mode"
+#c_endif
+
+fun main() <noret> {
+    let x <int> = CONST_NUM;
+    let y <int> = 50;
+    
+    // This should expand to: ((x) > (y) ? (x) : (y))
+    // Note: Our parser doesn't support ternary operator '?' yet!
+    // So this test will fail parsing unless we add ternary support or change the macro.
+    // Let's change the macro to something our parser supports for now, like addition.
+    
+    let m <int> = MAX(x, y); 
+    
+    printf(LOG_MSG);
+}

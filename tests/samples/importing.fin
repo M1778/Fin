@@ -1,0 +1,17 @@
+import { Vector3 } from "tests/samples/structs.fin"; // This is allowed and ONLY imports the symbol (Vector3) [supports special functions, macros, ...]
+import { printf } from stdio; // this looks in builtins directory which we haven't implemented yet but it looks for either a file named "stdio.fin" or "stdio.finlib" OR looks for a directory named "stdio" and looks for a file named "printf.fin" in it (THERE ARE SO MANY POSSIBILIES THAT CAN HAPPEN WITH DOTS TOO like "stdio.buffers" and more)
+import networking; // looks for this in builtins and imports the whole module which allows to be used like "networking.invoke()"
+import networking as net; // this is using the "as" keyword for name changing which is super useful
+import "tests/samples/macros.fin"; // this is a normal file import which imports macros as "macros" by default so it can be used like "macros.magic_add!(...)"
+
+import "somelib"; // IMPORTANT: THIS IS SO IMPORTANT BECAUSE WE DO NOT GIVE ANY PATH TO IT SO HOW DOES THE COMPILER KNOW WHERE TO IMPORT THIS LIBRARY, as we assume somelib is a directory containing modules. The compiler also checks an environment variable named "FIN_LIBS" which has multiple paths of imports (specially builtins) and uses those to search for libraries (this is how our package manager "finn" can easily tell our compiler which environment to use using "--fin-libs" flag)
+
+
+
+fun main() <noret> {
+    let x <auto> = Vector3{x: 10, y: 10, z: 10};
+
+    printf("Hello i am imported from stdio");
+
+    let y <auto> = macros.magic_add!(10, 20);
+  }

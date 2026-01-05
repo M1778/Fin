@@ -1,0 +1,23 @@
+@define printf(fmt: <string>, ...) <noret>;
+
+fun swap<T>(a:<&T>, b: <&T>) <noret> {
+    let temp <T> = *b;
+    *b = *a;
+    *a = temp;
+    
+    delete &temp;
+  }
+
+
+fun main() <noret> {
+    let a <int> = 10;
+    let b <int> = 20;
+
+    swap(&a, &b);
+
+    printf("a = %d, b = %d\n", a, b);
+    
+    let x <&&int>;
+    *x = new int(10);
+    **x = 10;
+  }

@@ -1,0 +1,136 @@
+@define printf(fmt: <string>, ...) <noret>;
+
+fun swap(a: <&int>, b: <&int>) <noret> {
+    // 1. Read values from addresses
+    let temp <int> = *a; 
+    
+    // 2. Write value of b into address of a
+    *a = *b;
+    
+    // 3. Write temp into address of b
+    *b = temp;
+}
+
+fun test_swap_main() <noret> {
+    let x <int> = 10;
+    let y <int> = 20;
+
+    printf("Before: %d, %d\n", x, y);
+    
+    // Pass addresses using '&'
+    swap(&x, &y);
+    
+    printf("After:  %d, %d\n", x, y);
+}
+
+
+struct Player {
+    pub hp <int>,
+    pub score <int>
+}
+
+fun test_Player_main() <noret> {
+    // 1. Allocate on Heap. 'p' is a pointer <&Player>
+    // We use the constructor syntax with 'new'
+    let p <&Player> = new Player{hp: 100, score: 0}; // we can also use <Player> as type reference but compiler auto corrects us with no problem
+
+    // 2. Access members via pointer (Fin automatically handles -> logic with .)
+    p.score = 50;
+    
+    printf("Player HP: %d, Score: %d\n", p.hp, p.score);
+
+    // 3. Clean up (Calls destructor if defined, then frees memory) (if exits out of scope with no deletion it automatically calls destructor but using delete is manual freeing)
+    delete p;
+}
+
+fun test_array_main() <noret> {
+    let numbers <[int, 3]> = [10, 20, 30];
+
+    // Point to the second element (index 1)
+    let ptr <&int> = &numbers[1];
+
+    printf("Value at index 1: %d\n", *ptr); // Prints 20
+
+    // Modify via pointer
+    *ptr = 99;
+
+    printf("New value in array: %d\n", numbers[1]); // Prints 99
+}
+
+fun print_if_exists(val_ptr: <&int>) <noret> {
+    // Check against null
+    if (val_ptr == null) {
+        printf("No value provided.\n");
+    } else {
+        printf("Value is: %d\n", *val_ptr);
+    }
+}
+
+fun test_null_main() <noret> {
+    let a <int> = 500;
+    
+    print_if_exists(&a);   // Prints 500
+    print_if_exists(null); // Prints "No value provided"
+}
+
+struct Node {
+    pub value <int>,
+    pub next <&Node> = null // Default to null
+}
+
+fun test_linkedlist_main() <noret> {
+    // Create Head
+    let head <&Node> = new Node{value: 1};
+    
+    // Create Second Node
+    let second <&Node> = new Node{value: 2};
+    
+    // Link them
+    head.next = second;
+
+    // Traverse
+    printf("Head: %d\n", head.value);
+    
+    // Access next node via pointer
+    // Note: In C this would be head->next->value. In Fin, dot (.) handles it.
+    printf("Next: %d\n", head.next.value);
+
+    // Cleanup
+    delete second;
+    delete head;
+}
+
+fun test_ptr2arr_main() <noret> {
+    let my_array <[int, 3]> = [10, 20, 30];
+    
+    // A pointer to the WHOLE array
+    let ptr_to_arr <&[int, 3]> = &my_array;
+    
+    // In Fin, indexing a pointer to an array works just like indexing the array
+    // The compiler knows to dereference the base first
+    printf("First element: %d\n", ptr_to_arr[0]);
+    
+    // We can also dereference explicitly to get the array back
+    let copy_of_arr <[int, 3]> = *ptr_to_arr;
+}
+
+fun test_ptr2ptr_main() <noret> {
+    let x <int> = 10;
+    
+    // Level 1: Pointer to int
+    let p <&int> = &x;
+    
+    // Level 2: Pointer to Pointer to int
+    let pp <&&int> = &p;
+    // we can also use <&&int> and let the compiler try to parse this and guess the type
+    let pp_2 <&&int> = &p;
+    // we also allow <&(&int)> if it makes people more comfortable with this kind of syntax but we have to becareful of parser conflicts with other things like lambdas
+    let pp_3 <&(&int)> = &p; // this works too
+    printf("Original: %d\n", x);
+    
+    // Dereference twice to get to 'x'
+    **pp = 500;
+    
+    printf("Modified via double pointer: %d\n", x);
+}
+

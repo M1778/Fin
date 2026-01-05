@@ -1,5 +1,7 @@
 import "std.io";
 
+@define printf(fmt:<string>, ...) <int>;
+
 struct Box<T> {
     val <T>
 }

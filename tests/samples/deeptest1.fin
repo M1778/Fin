@@ -1,0 +1,49 @@
+import "std/io";
+
+@define printf(fmt: <string>, ...) <noret>;
+
+// 1. Struct with Operator Overloading
+struct Vector2 {
+    x <int>,
+    y <int> = 10,
+    
+    operator + (other: <Vector2>) <Vector2> {
+        return new Vector2 { 
+            x: self.x + other.x, 
+            y: self.y + other.y 
+        };
+    }
+}
+
+// 2. Generic Interface Constraint
+interface Printable {
+    pub fun to_string() <string>;
+}
+
+struct User {
+    id <int>
+}
+
+// 3. Macro
+@macro log(msg: expr) {
+    return quote {
+        printf("LOG: %s\n", $msg);
+    };
+}
+
+fun main() <noret> {
+    // Test Operator
+    let v1 <Vector2> = Vector2 { x: 1, y: 2 };
+    let v2 <Vector2> = Vector2 { x: 3, y: 4 };
+    let v3 <Vector2> = v1 + v2; // Should resolve to Vector2
+    
+    // Test Sizeof
+    let size <int> = sizeof(Vector2);
+    
+    // Test Array
+    let arr <[int]> = [1, 2, 3];
+    let val <int> = arr[0];
+    
+    // Test Macro
+    log!("System Ready");
+}

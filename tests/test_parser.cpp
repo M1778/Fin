@@ -2,11 +2,19 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
+#include <iomanip>
+#include <filesystem>
+#include <algorithm>
 #include "parser.hpp"
 #include "lexer/lexer.hpp"
 #include "diagnostics/DiagnosticEngine.hpp"
+#include "preprocessor/Preprocessor.hpp" // <--- ADDED
 
-// Helper to read file content
+namespace fs = std::filesystem;
+
+// --- Helper Functions ---
+
 std::string readFile(const std::string& path) {
     std::ifstream t(path);
     if (!t.is_open()) return "";
@@ -15,31 +23,40 @@ std::string readFile(const std::string& path) {
     return buffer.str();
 }
 
+// --- Base Test Fixture ---
+
 class ParserTest : public ::testing::Test {
 protected:
-    // Helper to parse a string
-    bool parseString(const std::string& code) {
-        // 1. Create Diagnostic Engine
-        // We pass the code so it can print context on error
-        fin::DiagnosticEngine diag(code, "<test-input>");
+    // Helper to parse a string and print errors if it fails
+    bool parseString(std::string code, const std::string& filename = "<test>") {
+        // 0. Reset Lexer State (Crucial for batch testing)
+        fin::reset_lexer_location();
+
+        // 1. Run Preprocessor
+        // The parser expects clean code (no #cdef), so we must preprocess first.
+        fin::Preprocessor pp;
+        code = pp.process(code);
+
+        // 2. Setup Diagnostic Engine
+        fin::DiagnosticEngine diag(code, filename);
         
-        // 2. Setup Lexer
+        // 3. Setup Lexer
         YY_BUFFER_STATE buffer = yy_scan_string(code.c_str());
         
-        // 3. Run Parser with Engine
+        // 4. Setup Parser
         fin::parser parser(diag);
+        
+        // 5. Run
         int res = parser.parse();
         
-        // 4. Cleanup
+        // 6. Cleanup
         yy_delete_buffer(buffer);
         
-        // If parsing failed, DiagnosticEngine has already printed the error to stdout.
-        // GTest captures stdout, so you will see it in the logs if the test fails.
         return res == 0;
     }
 };
 
-// --- Unit Tests ---
+// --- Existing Unit Tests ---
 
 TEST_F(ParserTest, BasicVariableDecl) {
     const char* code = "fun main() <void> { let x <int> = 10; }";
@@ -84,28 +101,46 @@ TEST_F(ParserTest, StructMethods) {
     EXPECT_TRUE(parseString(code));
 }
 
-// --- File Integration Tests ---
+// --- New: Dynamic File Tests ---
 
-TEST_F(ParserTest, File_Basic) {
-    std::string code = readFile("samples/basic.fin");
-    if(code.empty()) SUCCEED();
-    else EXPECT_TRUE(parseString(code));
+class FileParserTest : public ParserTest, public ::testing::WithParamInterface<std::string> {};
+
+TEST_P(FileParserTest, ParsesSuccessfully) {
+    std::string filePath = GetParam();
+    std::string code = readFile(filePath);
+    
+    ASSERT_FALSE(code.empty()) << "Could not read file: " << filePath;
+    
+    bool success = parseString(code, filePath);
+    
+    EXPECT_TRUE(success) << "Failed to parse file: " << filePath;
 }
 
-TEST_F(ParserTest, File_Structs) {
-    std::string code = readFile("samples/structs.fin");
-    if(code.empty()) SUCCEED();
-    else EXPECT_TRUE(parseString(code));
+std::vector<std::string> GetFinFiles() {
+    std::vector<std::string> files;
+    std::string path = "samples"; 
+    
+    if (!fs::exists(path)) {
+        path = "tests/samples"; 
+    }
+    
+    if (fs::exists(path)) {
+        for (const auto& entry : fs::recursive_directory_iterator(path)) {
+            if (entry.path().extension() == ".fin") {
+                files.push_back(entry.path().string());
+            }
+        }
+    }
+    return files;
 }
 
-TEST_F(ParserTest, File_Interfaces) {
-    std::string code = readFile("samples/interfaces.fin");
-    if(code.empty()) SUCCEED();
-    else EXPECT_TRUE(parseString(code));
-}
-
-TEST_F(ParserTest, File_GenericsInterfaces) {
-    std::string code = readFile("samples/generics_interfaces.fin");
-    if(code.empty()) SUCCEED();
-    else EXPECT_TRUE(parseString(code));
-}
+INSTANTIATE_TEST_SUITE_P(
+    AutoDiscovered,
+    FileParserTest,
+    ::testing::ValuesIn(GetFinFiles()),
+    [](const testing::TestParamInfo<std::string>& info) {
+        std::string name = fs::path(info.param).stem().string();
+        std::replace_if(name.begin(), name.end(), [](char c){ return !isalnum(c); }, '_');
+        return name;
+    }
+);

@@ -1,0 +1,9 @@
+fun add() <int> {
+    if (0){
+        return 1;
+        }
+  }
+
+fun main() <noret> {
+    let a <int> = add();
+  }

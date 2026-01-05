@@ -1,3 +1,5 @@
+@define printf(fmt: <string>, ...) <noret>;
+
 #[llvm_name="general_point"] // this is a rust like attribute for compile time codegen manipulation (it's allowed for structs)
 struct Point<T> { // T is a generic and it will be a Monomorphization Generic type because its the default generic type we use
    x <T>,

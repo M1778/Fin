@@ -1,4 +1,4 @@
+let print <fn() int>
 fun main() <noret> {
     print();
-    x
   }

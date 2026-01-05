@@ -1,0 +1,19 @@
+@macro GET_SIZE() {
+    return quote {
+        0;
+      };
+  }
+
+@macro CONFIG_MAX() {
+    return quote {
+        "";
+      };
+  }
+
+enum Config {
+    BufferSize = GET_SIZE!() // Macro expansion in Enum
+}
+
+struct Buffer {
+    data <[int, CONFIG_MAX!()]> // Macro expansion in Type
+}

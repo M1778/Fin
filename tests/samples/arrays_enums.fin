@@ -1,0 +1,22 @@
+enum Status {
+    OK = 0,
+    ERROR
+}
+
+fun main() <noret> {
+    // Array Literal & Access
+    let arr <[int]> = [1, 2, 3];
+    let x <int> = arr[0];
+    
+    // Invalid Array Access
+    // let y = arr["hello"]; // Should fail
+
+    // Enums
+    let s <Status> = OK;
+    
+    // Casting
+    let f <float> = cast<float>(x);
+    
+    // Invalid Cast
+    // let bad = cast<Status>(arr); // Should fail
+}

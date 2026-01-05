@@ -1,0 +1,26 @@
+import { malloc, free } from "stdlib/memory";
+
+@define printf(fmt: <string>, ...) <int>;
+
+enum State {
+    Alive = 1,
+    Dead
+}
+
+struct MyInt {
+    val <int>,
+    
+    // Operator with Generic
+    operator + : <T>(other: <T>) <int> {
+        return self.val + cast<int>(other);
+    }
+    // Normal Operator
+    operator -(other: <int>) <int> {
+        return self.val + other;
+      }
+}
+
+fun main() <noret> {
+    let s <State> = Alive;
+    printf("State: %d", cast<int>(s));
+}

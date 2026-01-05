@@ -1,0 +1,62 @@
+@define printf(fmt: <string>, ...) <noret>;
+
+// A function that accepts a callback
+fun compute(val: <int>, callback: <fn(int) -> int>) <int> {
+    return callback(val);
+}
+
+// A function that returns a function (Higher Order Function)
+// Note: In a real compiler this requires closures (capturing env), 
+// but for syntax/semantics checking, returning a lambda is valid.
+fun get_adder() <fn(int, int) -> int> {
+    return (a: <int>, b: <int>) <int> => a + b;
+}
+
+fun main() <noret> {
+    // ---------------------------------------------------------
+    // Case 1: Standard Anonymous Function (Block Body)
+    // ---------------------------------------------------------
+    let f1 <fn(int) -> int> = fun (x: <int>) <int> {
+        return x * 2;
+    };
+    printf("F1 (Standard): %d\n", f1(10));
+
+    // ---------------------------------------------------------
+    // Case 2: Arrow Syntax (Block Body)
+    // ---------------------------------------------------------
+    let f2 <fn(int) -> int> = (x: <int>) <int> => {
+        return x + 5;
+    };
+    printf("F2 (Arrow Block): %d\n", f2(10));
+
+    // ---------------------------------------------------------
+    // Case 3: Arrow Syntax (Expression Body / One-liner)
+    // ---------------------------------------------------------
+    let f3 <fn(int) -> int> = (x: <int>) <int> => x - 3;
+    printf("F3 (Arrow Expr): %d\n", f3(10));
+
+    // ---------------------------------------------------------
+    // Case 4: Passing Lambda as Argument
+    // ---------------------------------------------------------
+    let res <int> = compute(100, (v: <int>) <int> => v / 2);
+    printf("Result (Arg): %d\n", res);
+
+    // ---------------------------------------------------------
+    // Case 5: Type Inference (Auto)
+    // ---------------------------------------------------------
+    // The Semantic Analyzer should infer 'fn(int) -> int'
+    let f_inferred <auto> = (x: <int>) <int> => x * x;
+    printf("Inferred: %d\n", f_inferred(5));
+
+    // ---------------------------------------------------------
+    // Case 6: Void Lambda
+    // ---------------------------------------------------------
+    let logger <auto> = (msg: <string>) <void> => printf("Log: %s\n", msg);
+    logger("Hello Lambda");
+    
+    // ---------------------------------------------------------
+    // Case 7: Calling returned function
+    // ---------------------------------------------------------
+    let adder <auto> = get_adder();
+    printf("Adder: %d\n", adder(10, 20));
+}

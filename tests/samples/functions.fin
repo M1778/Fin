@@ -1,0 +1,66 @@
+@define printf(fmt: <string>, ...) <noret>;
+
+struct Result<T> {
+    value <T>,
+    is_error <bool>
+}
+
+// Example:
+// A function that takes a callback.
+// The callback takes a Result<int> and returns a Result<Result<int>>
+fun process(
+    input: <Result<int>>, 
+    callback: <fn(Result<int>) -> Result<Result<int>>>
+) <noret> {
+    let res <Result<Result<int>>> = callback(input);
+}
+
+
+
+// Get function as parameter
+fun compute(a: <int>, b: <int>, operation: <fn(int, int) => int>) <int> { // operation gets a function that takes two integer in arguments and returns an integer
+    printf("Running operation...\n");
+    return operation(a, b);
+}
+
+// A standard function to pass later
+fun add(x: <int>, y: <int>) <int> {
+    return x + y;
+}
+
+fun main() <noret> {
+    // ---------------------------------------------------------
+    // Case A: Passing an existing function
+    // ---------------------------------------------------------
+    let res1 <int> = compute(10, 20, add); // using normal function
+    printf("Result 1 (Named): %d\n", res1);
+
+    // ---------------------------------------------------------
+    // Case B: Storing a function pointer in a variable
+    // ---------------------------------------------------------
+    // Note: The type signature must match exactly
+    let my_op <fn(int, int) => int> = add; // 1. Define
+    let res2 <int> = my_op(5, 5);
+    printf("Result 2 (Variable): %d\n", res2);
+
+    // Case C: Using Closures
+    let my_op2 <auto> = (a: <int>, b: <int>) <int> => { return a + b; };
+    let res3 <auto> = my_op2(1, 2);
+    printf("Result 3 (Closure): %d\n", res3);
+
+    // ---------------------------------------------------------
+    // Case D: Inline Anonymous Function (Lambda)
+    // ---------------------------------------------------------
+    // We define the function right inside the call arguments
+    let res4 <int> = compute(100, 50, fun (a: <int>, b: <int>) <int> {
+        return a - b;
+    });
+
+    printf("Result 4 (Anonymous): %d\n", res4);
+    // -------------------------------------------------
+    // Special Case: one liner (expression)
+    // -----------------------------------------------
+    compute(20, 10, (a: <int>, b: <int>) <int> => a + b); // or can also do `(a: <int>, b: <int>) <int> => add(a,b)` as long as it's expression
+
+    
+}

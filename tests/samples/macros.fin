@@ -1,0 +1,21 @@
+@define printf(fmt: <string>, ...) <noret>;
+
+@macro add_magic(a: expr, b: expr) {
+    return quote {
+        $a + $b + 100;
+    };
+}
+
+@macro magic_add(a: expr, b: expr) {
+    return quote { $a + $b; };
+}
+
+fun main() <noret> {
+    let x <int> = 10;
+    let y <int> = 20;
+    
+    // Should expand to: 10 + 20 + 100
+    let res <int> = add_magic!(x, y);
+    
+    printf("Result: %d\n", res);
+}
