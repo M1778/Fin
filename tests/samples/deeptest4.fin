@@ -1,0 +1,16 @@
+import { HashMap } from hashmap;
+
+struct Data {
+    integer <int> = null,
+    str <string> = null,
+  }
+
+fun main() <noret> {
+    let a <auto> = HashMap::<string, Data>();
+
+    a["Hi"] = Data{integer: 10};
+    a["1"] = Data{str: "Hello"};
+
+    blame a["Hi"].integer == 10; // blame works like assert too if condition is provided
+    blame a["1"].str == "Hello";
+  }
