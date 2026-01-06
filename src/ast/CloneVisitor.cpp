@@ -458,6 +458,17 @@ void CloneVisitor::visit(Parameter& node) {
     result = std::move(res);
 }
 
+void CloneVisitor::visit(StaticMethodCall& node) {
+    auto res = std::make_unique<StaticMethodCall>(
+        clone(node.target_type.get()),
+        node.method_name,
+        cloneVector(node.args, *this),
+        cloneVector(node.generic_args, *this)
+    );
+    res->setLoc(node.loc);
+    result = std::move(res);
+}
+
 void CloneVisitor::visit(StructMember& node) {
     auto res = std::make_unique<StructMember>(
         node.name, 

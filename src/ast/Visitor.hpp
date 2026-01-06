@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ASTNode.hpp"
 namespace fin {
 
 // Forward declarations
@@ -52,6 +53,7 @@ class TypeNode;
 class SuperExpression;
 class PointerTypeNode;
 class ArrayTypeNode;
+class StaticMethodCall;
 
 // Missing nodes
 class Parameter;
@@ -78,8 +80,8 @@ public:
     virtual void visit(DestructorDeclaration& node) = 0;
     
     // Helpers
-    virtual void visit(Parameter& node) = 0;      // <--- ADDED
-    virtual void visit(StructMember& node) = 0;   // <--- ADDED
+    virtual void visit(Parameter& node) = 0;     
+    virtual void visit(StructMember& node) = 0;   
 
     // Statements
     virtual void visit(Block& node) = 0;
@@ -119,6 +121,7 @@ public:
     virtual void visit(SuperExpression& node) = 0;
     virtual void visit(PointerTypeNode& node) = 0;
     virtual void visit(ArrayTypeNode& node) = 0;
+    virtual void visit(StaticMethodCall& node) = 0;
 };
 
 } // namespace fin

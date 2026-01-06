@@ -492,6 +492,22 @@ public:
     void accept(Visitor& v) override;
 };
 
+class StaticMethodCall : public Expression {
+public:
+    std::unique_ptr<TypeNode> target_type; // e.g. Vec2<float>
+    std::string method_name;               // e.g. from_angle
+    std::vector<std::unique_ptr<Expression>> args;
+    std::vector<std::unique_ptr<TypeNode>> generic_args; // For method generics
+
+    StaticMethodCall(std::unique_ptr<TypeNode> target, std::string name, 
+                     std::vector<std::unique_ptr<Expression>> a,
+                     std::vector<std::unique_ptr<TypeNode>> g = {})
+        : target_type(std::move(target)), method_name(std::move(name)), 
+          args(std::move(a)), generic_args(std::move(g)) {}
+          
+    void accept(Visitor& v) override;
+};
+
 class DefineDeclaration : public Statement {
 public:
     std::string name;
@@ -503,7 +519,7 @@ public:
     void accept(Visitor& v) override;
 };
 
-// --- NEW: MacroParam Struct ---
+// --- MacroParam Struct ---
 struct MacroParam {
     std::string name;
     std::string type; // "expr", "block", "ident"
@@ -542,5 +558,7 @@ public:
     Program(std::vector<std::unique_ptr<Statement>> s);
     void accept(Visitor& v) override;
 };
+
+
 
 } // namespace fin

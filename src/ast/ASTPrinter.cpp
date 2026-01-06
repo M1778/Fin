@@ -189,6 +189,9 @@ void ASTPrinter::dispatch(const ASTNode* node, std::string currentPrefix, std::s
     else if (auto* n = dynamic_cast<const ArrayTypeNode*>(node)) {
         printArrayType(n, currentPrefix, false);
     }
+    else if (auto* n = dynamic_cast<const StaticMethodCall*>(node)) {
+        printStaticMethodCall(n, currentPrefix, false);
+    }
     else {
         fmt::print("{}Unknown Node\n", currentPrefix);
     }
@@ -219,6 +222,10 @@ void ASTPrinter::printFunction(const FunctionDeclaration* node, std::string pref
         }
         fmt::print(">");
     }
+    if (node->return_type) {
+        fmt::print(" -> {}", astTypeToString(node->return_type.get()));
+    }
+    
     fmt::print("\n");
     
     if (node->body) {
@@ -592,5 +599,15 @@ void ASTPrinter::printArrayType(const ArrayTypeNode* node, std::string prefix, b
     printNode(node->element_type.get(), prefix + "    ", node->size == nullptr);
     if(node->size) printNode(node->size.get(), prefix + "    ", true);
 }
+
+void ASTPrinter::printStaticMethodCall(const StaticMethodCall* node, std::string prefix, bool) {
+    fmt::print("{}StaticCall\n", prefix);
+    fmt::print("{}  Type: {}\n", prefix, astTypeToString(node.target_type.get()));
+    fmt::print("{}  Method: {}\n", prefix, node.method_name);
+    for (auto& arg : node.args) {
+        printNode(arg.get(), prefix + "    ", false);
+    }
+}
+
 
 } // namespace fin

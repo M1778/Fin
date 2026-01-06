@@ -67,6 +67,7 @@ private:
     void printSuper(const SuperExpression* node, std::string prefix, bool isLast);
     void printPointerType(const PointerTypeNode* node, std::string prefix, bool isLast);
     void printArrayType(const ArrayTypeNode* node, std::string prefix, bool isLast);
+    void printStaticMethodCall(const StaticMethodCall* node, std::string prefix, bool isLast);
 };
 
 } // namespace fin
