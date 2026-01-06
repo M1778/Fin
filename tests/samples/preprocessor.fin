@@ -14,10 +14,6 @@ fun main() <noret> {
     let y <int> = 50;
     
     // This should expand to: ((x) > (y) ? (x) : (y))
-    // Note: Our parser doesn't support ternary operator '?' yet!
-    // So this test will fail parsing unless we add ternary support or change the macro.
-    // Let's change the macro to something our parser supports for now, like addition.
-    
     let m <int> = MAX(x, y); 
     
     printf(LOG_MSG);

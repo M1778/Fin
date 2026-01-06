@@ -6,7 +6,7 @@ fun compute(val: <int>, callback: <fn(int) -> int>) <int> {
 }
 
 // A function that returns a function (Higher Order Function)
-// Note: In a real compiler this requires closures (capturing env), 
+// TODO: In a real compiler this requires closures (capturing env), 
 // but for syntax/semantics checking, returning a lambda is valid.
 fun get_adder() <fn(int, int) -> int> {
     return (a: <int>, b: <int>) <int> => a + b;
