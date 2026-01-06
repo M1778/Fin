@@ -128,7 +128,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         structType->generic_args.push_back(genType);
     }
 
-    currentScope->defineType("Self", structType);
+    currentScope->defineType("Self", std::make_shared<SelfType>(structType));
 
     // --- INHERITANCE ---
     for (auto& parentNode : node.parents) {
