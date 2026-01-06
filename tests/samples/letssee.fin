@@ -1,0 +1,83 @@
+@define printf(fmt: <string>, ...) <noret>;
+@define sin(f: <float>) <float>;
+@define cos(f: <float>) <float>;
+@define sqrt(f: <float>) <float>;
+
+#[llvm_name="vec2_f32"]
+struct Vec2<T> {
+    x <T> = 0,
+    y <T> = 0,
+
+    fun length(self: <Self>) <float> {
+        return sqrt(cast<float>(self.x * self.x + self.y * self.y));
+    }
+
+    fun add(self: <Self>, other: <Self>) <&Self> {
+        return new Self{
+            x: self.x + other.x,
+            y: self.y + other.y
+        };
+    }
+
+    fun scale(self: <Self>, factor: <float>) <&Self> {
+        return new Self{
+            x: cast<T>(cast<float>(self.x) * factor),
+            y: cast<T>(cast<float>(self.y) * factor)
+        };
+    }
+
+    fun print(self: <Self>) <noret> {
+        printf("Vec2(x: %f, y: %f)\n", cast<float>(self.x), cast<float>(self.y));
+    }
+
+    fun normalize(ptr: <&Self>) <noret> {
+        let len <float> = (*ptr).length();
+        if (len > cast<float>(0)) {
+            ptr.x = cast<T>(cast<float>(ptr.x) / len);
+            ptr.y = cast<T>(cast<float>(ptr.y) / len);
+        }
+    }
+
+    pub static fun zero() <&Self> {
+        return new Self{};
+    }
+
+    pub static fun from_angle(angle: <float>) <&Self> {
+        return new Self{
+            x: cast<T>(cos(angle)),
+            y: cast<T>(sin(angle))
+        };
+    }
+}
+
+fun main() <noret> {
+    let a <&Vec2<float>> = new Vec2<float>{x: 3.0, y: 4.0};
+    let b <&Vec2<float>> = Vec2::from_angle(0.7854);  // inference on static call
+
+    printf("Vector a: ");
+    a.print();  // auto-deref on pointer
+    printf("Length of a: %f\n", a.length());
+
+    let c <&Vec2<float>> = a.add(*b);  // deref b, add returns heap-allocated pointer
+    printf("a + b: ");
+    c.print();
+
+    let scaled <&Vec2<float>> = c.scale(2.0);
+    printf("c scaled by 2: ");
+    scaled.print();
+
+    Vec2::normalize(scaled);  // mutate in place
+    printf("Scaled normalized: ");
+    scaled.print();
+
+    let zero <&Vec2<float>> = Vec2::zero();
+    printf("Zero vector: ");
+    zero.print();
+
+    // Cleanup memory
+    delete zero;
+    delete scaled;
+    delete c;
+    delete b;
+    delete a;
+}
