@@ -4,57 +4,65 @@
 #include <unordered_map>
 
 namespace fin {
-class Scope;
 
-// --- Namespace Type (for Modules) ---
+class Scope; // Forward decl
+
+// --- Namespace Type ---
 class NamespaceType : public Type {
 public:
     std::string name;
-    std::shared_ptr<Scope> scope; // Imported module scope
-
+    std::shared_ptr<Scope> scope;
     NamespaceType(std::string n, std::shared_ptr<Scope> s) 
         : name(std::move(n)), scope(std::move(s)) {}
-
     std::string toString() const override { return "module<" + name + ">"; }
-    
     bool equals(const Type& other) const override {
-        // Namespaces are singletons effectively, compare pointers or names
         if (auto* o = other.as<NamespaceType>()) return name == o->name;
         return false;
     }
-    
-    TypePtr substitute(const TypeMap&) override { return std::make_shared<NamespaceType>(name, scope); }
+    TypePtr substitute(const TypeMap&, TypePtr = nullptr) override { 
+        return std::make_shared<NamespaceType>(name, scope); 
+    }
     TypePtr clone() const override { return std::make_shared<NamespaceType>(name, scope); }
 };
 
-// --- Primitive Types ---
+// --- SelfType ---
+class SelfType : public Type {
+public:
+    TypePtr originalStruct;
+    SelfType(TypePtr s) : originalStruct(s) {}
+    std::string toString() const override { return "Self"; }
+    bool equals(const Type& other) const override { return other.as<SelfType>(); }
+    TypePtr substitute(const TypeMap& mapping, TypePtr selfReplacement = nullptr) override;
+    TypePtr clone() const override { return std::make_shared<SelfType>(originalStruct); }
+    bool isAssignableTo(const Type& other) const override { return originalStruct->isAssignableTo(other); }
+};
+
+// --- PrimitiveType ---
 class PrimitiveType : public Type {
 public:
     std::string name;
     PrimitiveType(std::string n) : name(std::move(n)) {}
     std::string toString() const override { return name; }
     bool equals(const Type& other) const override;
-    TypePtr substitute(const TypeMap&) override { return std::make_shared<PrimitiveType>(name); }
+    TypePtr substitute(const TypeMap&, TypePtr = nullptr) override { return std::make_shared<PrimitiveType>(name); }
     TypePtr clone() const override { return std::make_shared<PrimitiveType>(name); }
     bool isAssignableTo(const Type& other) const override;
 };
 
-// --- Pointer Type ---
+// --- PointerType ---
 class PointerType : public Type {
 public:
     TypePtr pointee;
     PointerType(TypePtr p) : pointee(std::move(p)) {}
     std::string toString() const override;
     bool equals(const Type& other) const override;
-    TypePtr substitute(const TypeMap& mapping) override;
+    TypePtr substitute(const TypeMap& mapping, TypePtr selfReplacement = nullptr) override;
     TypePtr clone() const override;
     bool isCastableTo(const Type& other) const override;
-    
-    // Added override
     bool isAssignableTo(const Type& other) const override;
 };
 
-// --- Array Type ---
+// --- ArrayType ---
 class ArrayType : public Type {
 public:
     TypePtr element_type;
@@ -63,14 +71,12 @@ public:
         : element_type(std::move(elem)), is_fixed_size(fixed) {}
     std::string toString() const override;
     bool equals(const Type& other) const override;
-    TypePtr substitute(const TypeMap& mapping) override;
+    TypePtr substitute(const TypeMap& mapping, TypePtr selfReplacement = nullptr) override;
     TypePtr clone() const override;
-    
-    // Added override
     bool isAssignableTo(const Type& other) const override;
 };
 
-// --- Generic Type ---
+// --- GenericType ---
 class GenericType : public Type {
 public:
     std::string name;
@@ -78,11 +84,11 @@ public:
     GenericType(std::string n, TypePtr c = nullptr) : name(std::move(n)), constraint(std::move(c)) {}
     std::string toString() const override { return name; }
     bool equals(const Type& other) const override;
-    TypePtr substitute(const TypeMap& mapping) override;
+    TypePtr substitute(const TypeMap& mapping, TypePtr selfReplacement = nullptr) override;
     TypePtr clone() const override;
 };
 
-// --- Function Type ---
+// --- FunctionType ---
 class FunctionType : public Type {
 public:
     std::vector<TypePtr> param_types;
@@ -92,29 +98,26 @@ public:
         : param_types(std::move(params)), return_type(std::move(ret)), is_vararg(vararg) {}
     std::string toString() const override;
     bool equals(const Type& other) const override;
-    TypePtr substitute(const TypeMap& mapping) override;
+    TypePtr substitute(const TypeMap& mapping, TypePtr selfReplacement = nullptr) override;
     TypePtr clone() const override;
 };
 
-// --- Struct / Interface Type ---
 struct FieldInfo {
     TypePtr type;
     bool is_public;
 };
 
+// --- StructType ---
 class StructType : public Type {
 public:
     std::string name;
     std::vector<TypePtr> generic_args;
-    
     std::vector<TypePtr> parents;
     bool is_interface = false;
     
-    // Registry using FieldInfo
     std::unordered_map<std::string, FieldInfo> fields;
     std::unordered_map<std::string, TypePtr> methods;
     std::unordered_map<int, TypePtr> operators;
-    
     std::vector<TypePtr> constructors; 
     bool has_destructor = false;
 
@@ -132,12 +135,11 @@ public:
 
     std::string toString() const override;
     bool equals(const Type& other) const override;
-    TypePtr substitute(const TypeMap& mapping) override;
+    TypePtr substitute(const TypeMap& mapping, TypePtr selfReplacement = nullptr) override;
     TypePtr clone() const override;
 
     TypePtr instantiate(const std::vector<TypePtr>& concreteArgs);
     bool implements(const StructType* interface) const;
 };
-
 
 } // namespace fin

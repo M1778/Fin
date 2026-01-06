@@ -14,8 +14,14 @@ bool typesEqual(const TypePtr& a, const TypePtr& b) {
 bool Type::isAssignableTo(const Type& other) const {
     if (this->equals(other)) return true;
     if (other.toString() == "auto") return true;
+
+    if (auto* self = this->as<SelfType>()) {
+      return self->originalStruct->isAssignableTo(other);
+    }
+    if (auto* otherSelf = this->as<SelfType>()){
+      return this->isAssignableTo(*otherSelf->originalStruct);
+    }
     
-    // Array type simplification
     if (auto* thisArr = this->as<ArrayType>()) {
         if (auto* otherArr = other.as<ArrayType>()) {
             if (thisArr->element_type->equals(*otherArr->element_type)) {
@@ -24,10 +30,20 @@ bool Type::isAssignableTo(const Type& other) const {
         }
     }
     
-    // Allow T* -> void* (Base check handles simple cases, PointerType overrides for details)
+    if (auto* thisPtr = this->as<PointerType>()) {
+        if (auto* otherPtr = other.as<PointerType>()) {
+            if (otherPtr->pointee->toString() == "void") return true;
+        }
+    }
     
     if (dynamic_cast<const GenericType*>(&other)) return true;
     return false;
+}
+
+// --- SelfType ---
+TypePtr SelfType::substitute(const TypeMap& mapping, TypePtr selfReplacement) {
+    if (selfReplacement) return selfReplacement;
+    return std::make_shared<SelfType>(originalStruct);
 }
 
 // --- PrimitiveType ---
@@ -37,7 +53,7 @@ bool PrimitiveType::equals(const Type& other) const {
 }
 bool PrimitiveType::isAssignableTo(const Type& other) const {
     if (Type::isAssignableTo(other)) return true;
-    if (name == "int" && other.toString() == "float") return true; // Implicit int->float
+    if (name == "int" && other.toString() == "float") return true;
     return false;
 }
 
@@ -48,7 +64,9 @@ bool PointerType::equals(const Type& other) const {
     return false;
 }
 TypePtr PointerType::clone() const { return std::make_shared<PointerType>(pointee->clone()); }
-TypePtr PointerType::substitute(const TypeMap& mapping) { return std::make_shared<PointerType>(pointee->substitute(mapping)); }
+TypePtr PointerType::substitute(const TypeMap& mapping, TypePtr selfReplacement) { 
+    return std::make_shared<PointerType>(pointee->substitute(mapping, selfReplacement)); 
+}
 bool PointerType::isCastableTo(const Type& other) const {
     if (other.as<PointerType>()) return true;
     if (auto* prim = other.as<PrimitiveType>()) {
@@ -56,19 +74,11 @@ bool PointerType::isCastableTo(const Type& other) const {
     }
     return false;
 }
-
-// Recursive check for pointers and null compatibility
 bool PointerType::isAssignableTo(const Type& other) const {
     if (Type::isAssignableTo(other)) return true;
-
     if (auto* otherPtr = other.as<PointerType>()) {
-        // 1. Allow &void (null) -> &T
         if (pointee->toString() == "void") return true;
-        
-        // 2. Allow T* -> void*
         if (otherPtr->pointee->toString() == "void") return true;
-        
-        // 3. Recursive check: &int -> &T
         return pointee->isAssignableTo(*otherPtr->pointee);
     }
     return false;
@@ -84,8 +94,9 @@ bool ArrayType::equals(const Type& other) const {
     return false;
 }
 TypePtr ArrayType::clone() const { return std::make_shared<ArrayType>(element_type->clone(), is_fixed_size); }
-TypePtr ArrayType::substitute(const TypeMap& mapping) { return std::make_shared<ArrayType>(element_type->substitute(mapping), is_fixed_size); }
-
+TypePtr ArrayType::substitute(const TypeMap& mapping, TypePtr selfReplacement) { 
+    return std::make_shared<ArrayType>(element_type->substitute(mapping, selfReplacement), is_fixed_size); 
+}
 bool ArrayType::isAssignableTo(const Type& other) const {
     if (Type::isAssignableTo(other)) return true;
     if (auto* otherArr = other.as<ArrayType>()) {
@@ -101,10 +112,12 @@ bool GenericType::equals(const Type& other) const {
     if (auto* o = other.as<GenericType>()) return name == o->name;
     return false;
 }
-TypePtr GenericType::clone() const { return std::make_shared<GenericType>(name, constraint ? constraint->clone() : nullptr); }
-TypePtr GenericType::substitute(const TypeMap& mapping) {
+TypePtr GenericType::clone() const { 
+    return std::make_shared<GenericType>(name, constraint ? constraint->clone() : nullptr); 
+}
+TypePtr GenericType::substitute(const TypeMap& mapping, TypePtr selfReplacement) {
     if (mapping.count(name)) return mapping.at(name);
-    return std::make_shared<GenericType>(name, constraint ? constraint->substitute(mapping) : nullptr);
+    return std::make_shared<GenericType>(name, constraint ? constraint->substitute(mapping, selfReplacement) : nullptr);
 }
 
 // --- FunctionType ---
@@ -134,10 +147,10 @@ TypePtr FunctionType::clone() const {
     for (auto& p : param_types) newParams.push_back(p->clone());
     return std::make_shared<FunctionType>(newParams, return_type->clone(), is_vararg);
 }
-TypePtr FunctionType::substitute(const TypeMap& mapping) {
+TypePtr FunctionType::substitute(const TypeMap& mapping, TypePtr selfReplacement) {
     std::vector<TypePtr> newParams;
-    for (auto& p : param_types) newParams.push_back(p->substitute(mapping));
-    return std::make_shared<FunctionType>(newParams, return_type->substitute(mapping), is_vararg);
+    for (auto& p : param_types) newParams.push_back(p->substitute(mapping, selfReplacement));
+    return std::make_shared<FunctionType>(newParams, return_type->substitute(mapping, selfReplacement), is_vararg);
 }
 
 // --- StructType ---
@@ -210,20 +223,32 @@ TypePtr StructType::clone() const {
     return s;
 }
 
-TypePtr StructType::substitute(const TypeMap& mapping) {
+TypePtr StructType::substitute(const TypeMap& mapping, TypePtr selfReplacement) {
     std::vector<TypePtr> newArgs;
-    for(auto& arg : generic_args) newArgs.push_back(arg->substitute(mapping));
+    for(auto& arg : generic_args) newArgs.push_back(arg->substitute(mapping, selfReplacement));
     
     auto newStruct = std::make_shared<StructType>(name, newArgs);
     
-    for(auto& kv : fields) newStruct->defineField(kv.first, kv.second.type->substitute(mapping), kv.second.is_public);
-    for(auto& kv : methods) newStruct->defineMethod(kv.first, kv.second->substitute(mapping));
-    for(auto& kv : operators) newStruct->defineOperator(kv.first, kv.second->substitute(mapping));
-    for(const auto& p : parents) newStruct->parents.push_back(p->substitute(mapping));
+    // Pass selfReplacement (or newStruct if we are the struct being instantiated)
+    TypePtr nextSelf = selfReplacement ? selfReplacement : newStruct;
+
+    for(auto& kv : fields) newStruct->defineField(kv.first, kv.second.type->substitute(mapping, nextSelf), kv.second.is_public);
+    for(auto& kv : methods) newStruct->defineMethod(kv.first, kv.second->substitute(mapping, nextSelf));
+    for(auto& kv : operators) newStruct->defineOperator(kv.first, kv.second->substitute(mapping, nextSelf));
+    for(const auto& p : parents) newStruct->parents.push_back(p->substitute(mapping, nextSelf));
 
     newStruct->is_interface = is_interface;
     newStruct->has_destructor = has_destructor;
-    for(auto& c : constructors) newStruct->addConstructor(c->substitute(mapping));
+    
+    for(auto& c : constructors) {
+        if (auto* func = c->as<FunctionType>()) {
+            std::vector<TypePtr> newParams;
+            for(auto& p : func->param_types) newParams.push_back(p->substitute(mapping, nextSelf));
+            
+            auto newCtor = std::make_shared<FunctionType>(newParams, nextSelf, func->is_vararg);
+            newStruct->addConstructor(newCtor);
+        }
+    }
 
     return newStruct;
 }

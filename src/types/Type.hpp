@@ -28,7 +28,7 @@ public:
     }
 
     // Generics Substitution
-    virtual TypePtr substitute(const TypeMap& mapping) = 0;
+    virtual TypePtr substitute(const TypeMap& mapping, TypePtr selfReplacement = nullptr) = 0;
 
     // Cloning
     virtual TypePtr clone() const = 0;
