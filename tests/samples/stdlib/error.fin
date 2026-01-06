@@ -1,0 +1,15 @@
+
+struct Error {
+    pub message <string>,
+    pub error_id <int>,
+    Error(msg: <string>, err_code: <int> = null) {
+        if (err_code == null) {
+            err_code = -1;
+          }
+        return new Error{message: msg, error_id: err_code};
+      }
+
+    pub fun format() <string> {
+        return format!("Error: {}", self.message);
+      }
+  }

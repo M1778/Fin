@@ -1,0 +1,48 @@
+import { Collection } from collection;
+import { Error } from error;
+import { Gettable, Settable } from base_array;
+
+@define printf(fmt: <string>, ...) <noret>;
+
+struct HashMapError: <Error> {} // Error Class
+
+
+struct HashMap<T, U> : <Gettable, Settable> {
+    priv keys <Collection<T>>,
+    priv values <Collection<U>>,
+    
+    pub fun __get(self: <Self>, other: <T>) <U> {
+        for (let i <int> = 0; i <= self.values.len();i++) {
+            if (self.keys.get(i) == other) {
+                return self.values.get(i);
+              }
+          }
+        blame HashMapError("Element doesn't exist.");
+      }
+    pub fun get_index(self: <Self>, other: <T>) <int> {
+        for (let i <int> = 0; i <= self.values.len();i++) {
+          if (self.keys.get(i) == other){
+              return i;
+            }
+          }
+        blame HashMapError("Element doesn't exist.");
+      }
+    pub fun exists(self: <Self>, other: <T>) <bool> {
+        for (let i <int> = 0; i <= self.values.len();i++) {
+          if (self.keys.get(i) == other){
+              return true;
+            }
+          }
+          return false;
+      }
+    pub fun __set(self: <Self>, key: <T>, value: <U>) <noret> {
+        if (!self.exists(key)){
+            self.keys.push(key);
+          }
+        self.values[self.get_index(key)] = value;
+      }
+
+    HashMap(){
+        return new HashMap{keys: new Collection::<T>(), values: new Collection::<U>()};
+      }
+  }

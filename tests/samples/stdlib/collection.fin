@@ -1,0 +1,76 @@
+import { Gettable, Settable } from base_array;
+import { Error } from error;
+
+struct CollectionError : <Error> {}
+
+struct Collection<T> : <Gettable, Settable> {
+    priv length <int>,
+    priv filled <int>,
+    priv _arr <[T]>,
+
+    pub fun push(self: <Self>, item: <T>) <noret> {
+        if (self.filled >= self.length) {
+            self.length++;
+            self.allocate(self.length);
+          }
+        self._arr[self.filled + 1] = item;
+        self.filled++;
+      }
+
+    pub fun pop_last(self: <Self>, index: <int>) <T> {
+        let _ <auto> = self._arr[self.filled];
+        self._arr[self.filled] = null;
+        self.filled--;
+        self.length--;
+        return _;
+      }
+
+    pub fun get(self: <Self>, index: <int>) <T> {
+        return self._arr[index];
+      }
+
+    pub fun len(self: <Self>) <int> {
+        return self.length;
+      }
+    
+    priv fun deallocate(self: <Self>) <noret> {
+        delete self._arr;
+        self.length = 0;
+        self.filled = 0;
+      }
+
+    priv fun allocate(amount: <int>) <noret> {
+        let temp_arr <auto> = cast<auto>(self._arr); // Copies
+
+        self._arr = new [T, amount];
+        for (let i <int> = i; i <= self.filled; i++) {
+            self._arr[i] = temp_arr[i];
+          }
+        delete temp_arr;
+      }
+
+    pub fun __get(self: <Self>, index: <int>) <T> {
+        if (index > self.length){
+            blame CollectionError("Index out of bounds");
+          }
+        return self._arr[index];
+      }
+
+    pub fun __set(self: <Self>, index: <int>, value: <T>) <noret> {
+        if (index > self.length){
+            blame CollectionError("Index out of bounds");
+          }
+        self._arr[index] = value;
+      }
+
+    Collection(length: <int>) {
+        return new Collection{length: length, filled: 0, _arr: new [T, length]};
+      }
+    Collection(length: <int>) {
+        return new Collection{length: 5, filled: 0, _arr: new [T, 5]};
+      }
+
+    ~Collection(){
+        self.deallocate();
+      }
+  }

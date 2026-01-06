@@ -1,0 +1,8 @@
+
+interface Gettable<T, U> {
+    fun __get(self: <Self>, other: <T>) <U>;
+  }
+
+interface Settable<T, U> {
+    fun __set(self: <Self>, key: <T>, value: <U>) <noret>;
+  }
