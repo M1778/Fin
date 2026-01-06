@@ -81,6 +81,7 @@ public:
     // Type definitions
     void visit(PointerTypeNode& node) override;
     void visit(ArrayTypeNode& node) override;
+    void visit(StaticMethodCall& node) override;
 
 private:
     DiagnosticEngine& diag;

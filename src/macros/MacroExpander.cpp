@@ -205,6 +205,18 @@ void MacroExpander::visit(OperatorDeclaration& node) {
     if (node.body) node.body->accept(*this);
 }
 
+void MacroExpander::visit(StaticMethodCall& node) {
+    // We might need to expand the type (e.g. Vec2<CONST!>)
+    node.target_type->accept(*this);
+    for (auto& arg : node.args) {
+        arg->accept(*this);
+        if (expandedExpression) {
+            arg = std::move(expandedExpression);
+            expandedExpression = nullptr;
+        }
+    }
+}
+
 void MacroExpander::visit(ConstructorDeclaration& node) { if (node.body) node.body->accept(*this); }
 void MacroExpander::visit(DestructorDeclaration& node) { if (node.body) node.body->accept(*this); }
 

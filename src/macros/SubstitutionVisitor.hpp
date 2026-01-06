@@ -70,6 +70,7 @@ public:
     void visit(StructMember& node) override;
     void visit(PointerTypeNode& node) override;
     void visit(ArrayTypeNode& node) override;
+    void visit(StaticMethodCall& node) override;
 
 private:
     const std::unordered_map<std::string, std::unique_ptr<Expression>>& args;

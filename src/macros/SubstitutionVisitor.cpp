@@ -189,6 +189,14 @@ void SubstitutionVisitor::visit(LambdaExpression& node) {
     }
 }
 
+void SubstitutionVisitor::visit(StaticMethodCall& node) {
+    // Type substitution? Maybe.
+    for (auto& arg : node.args) {
+        arg->accept(*this);
+        if (replacementExpr) { arg = std::move(replacementExpr); replacementExpr = nullptr; }
+    }
+}
+
 void SubstitutionVisitor::visit(Parameter& node) {
     if (node.type) node.type->accept(*this);
     if (node.default_value) {
