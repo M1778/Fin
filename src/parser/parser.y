@@ -175,6 +175,7 @@
 %type <fin::ASTTokenKind> operator_symbol
 %type <std::vector<fin::MacroParam>> macro_param_list
 %type <fin::MacroParam> macro_param
+%type <std::unique_ptr<fin::StaticMethodCall>> static_method_call
 
 %%
 
@@ -1079,6 +1080,28 @@ no_struct_expression:
     }
     ;
 
+static_method_call:
+    /* Case 1: Vec2::zero() */
+    IDENTIFIER DOUBLE_COLON IDENTIFIER LPAREN arguments RPAREN {
+        auto type = std::make_unique<fin::TypeNode>($1);
+        $$ = std::make_unique<fin::StaticMethodCall>(std::move(type), $3, std::move($5));
+        $$->setLoc(@$);
+    }
+    /* Case 2: Vec2::<float>::zero() */
+    | IDENTIFIER DOUBLE_COLON LT type_list GT DOUBLE_COLON IDENTIFIER LPAREN arguments RPAREN {
+        auto type = std::make_unique<fin::TypeNode>($1);
+        type->generics = std::move($4);
+        $$ = std::make_unique<fin::StaticMethodCall>(std::move(type), $7, std::move($9));
+        $$->setLoc(@$);
+    }
+    /* Case 3: Self::zero() */
+    | KW_SELF_TYPE DOUBLE_COLON IDENTIFIER LPAREN arguments RPAREN {
+        auto type = std::make_unique<fin::TypeNode>("Self");
+        $$ = std::make_unique<fin::StaticMethodCall>(std::move(type), $3, std::move($5));
+        $$->setLoc(@$);
+    }
+    ;
+
 primary_no_struct:
     IDENTIFIER { $$ = std::make_unique<fin::Identifier>($1); $$->setLoc(@$); }
     | literal { $$ = std::move($1); }
@@ -1098,12 +1121,6 @@ primary_no_struct:
         $$ = std::move(call);
         $$->setLoc(@$);
     }
-    
-    /* Static Method Call */
-    | IDENTIFIER DOUBLE_COLON IDENTIFIER LPAREN arguments RPAREN {
-        $$ = std::make_unique<fin::FunctionCall>($1 + "::" + $3, std::move($5));
-        $$->setLoc(@$);
-    }
 
     /* Self Constructor Call */
     | KW_SELF_TYPE LPAREN arguments RPAREN {
@@ -1117,6 +1134,7 @@ primary_no_struct:
         $$->setLoc(@$);
     }
     
+    | static_method_call { $$ = std::move($1); }
     
     /* Quote Expression */
     | KW_QUOTE block {
