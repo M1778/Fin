@@ -1,9 +1,39 @@
 #include "../SemanticAnalyzer.hpp"
-#include "../../types/TypeImpl.hpp" // Ensure full type definitions are visible
+#include "../../types/TypeImpl.hpp"
 #include <fmt/core.h>
 #include <fmt/color.h>
 
 namespace fin {
+
+// Signature now accepts std::shared_ptr<Scope>
+std::shared_ptr<StructType> getStructType(std::shared_ptr<Type> type, std::shared_ptr<Scope> scope) {
+    if (!type) return nullptr;
+
+    // 1. Unwrap Pointers (recursive)
+    if (auto* ptr = dynamic_cast<const PointerType*>(type.get())) {
+        return getStructType(ptr->pointee, scope);
+    }
+
+    // 2. Unwrap SelfType
+    if (auto* self = dynamic_cast<const SelfType*>(type.get())) {
+        return getStructType(self->originalStruct, scope);
+    }
+
+    // 3. Check if it's a StructType
+    if (auto* st = dynamic_cast<StructType*>(type.get())) {
+        return std::static_pointer_cast<StructType>(type);
+    }
+
+    // 4. Check GenericType (Constraint)
+    if (auto* gt = dynamic_cast<GenericType*>(type.get())) {
+        // If T : Interface, treat T as Interface
+        if (gt->constraint) {
+            return getStructType(gt->constraint, scope);
+        }
+    }
+
+    return nullptr;
+}
 
 void SemanticAnalyzer::visit(Literal& node) {
     switch(node.kind) {
@@ -26,7 +56,11 @@ void SemanticAnalyzer::visit(Identifier& node) {
     
     // 2. Try Implicit Field Access (self.name)
     if (currentStructContext) {
-        if (auto st = std::dynamic_pointer_cast<StructType>(currentStructContext)) {
+        // Use the helper to handle Self/Pointers
+        auto st = std::dynamic_pointer_cast<StructType>(currentStructContext);
+        if (!st) st = getStructType(currentStructContext, currentScope);
+
+        if (st) {
             auto fieldType = st->getFieldType(node.name);
             if (fieldType) {
                 lastExprType = fieldType;
@@ -61,7 +95,6 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
     );
 
     if (isAssignment) {
-        // Check L-Value
         bool isLValue = false;
         if (dynamic_cast<Identifier*>(node.left.get())) isLValue = true;
         else if (dynamic_cast<MemberAccess*>(node.left.get())) isLValue = true;
@@ -85,7 +118,7 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
     }
 
     // Operator Overloading
-    if (auto structType = std::dynamic_pointer_cast<StructType>(leftType)) {
+    if (auto structType = getStructType(leftType, currentScope)) {
         int opKey = static_cast<int>(node.op);
         if (structType->operators.count(opKey)) {
             lastExprType = structType->operators[opKey];
@@ -131,7 +164,6 @@ void SemanticAnalyzer::visit(UnaryOp& node) {
         } 
         else if (auto* ptrToArray = dynamic_cast<const PointerType*>(type.get())) {
             if (auto* arr = dynamic_cast<const ArrayType*>(ptrToArray->pointee.get())) {
-                // Clone the array type
                 lastExprType = arr->clone(); 
                 return;
             }
@@ -152,7 +184,7 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
 
     // Case 1: Self(...)
     if (funcName == "Self") {
-        if (!currentStructContext) {
+      if (!currentStructContext) {
             error(node, "'Self' used outside of struct");
             lastExprType = nullptr;
             return;
@@ -166,33 +198,11 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
             return;
         }
     }
-    // Case 2: Static Method
-    else if (funcName.find("::") != std::string::npos) {
-        auto delimiterPos = funcName.find("::");
-        std::string typeName = funcName.substr(0, delimiterPos);
-        std::string methodName = funcName.substr(delimiterPos + 2);
-        
-        std::shared_ptr<Type> type = nullptr;
-        if (typeName == "Self") type = currentStructContext;
-        else type = currentScope->resolveType(typeName);
-
-        if (auto st = std::dynamic_pointer_cast<StructType>(type)) {
-            auto methodType = st->getMethodReturnType(methodName);
-            if (methodType) {
-                std::vector<std::shared_ptr<Type>> dummyParams;
-                funcType = std::make_shared<FunctionType>(dummyParams, methodType, true);
-            } else {
-                error(node, fmt::format("Static method '{}' not found in '{}'", methodName, typeName));
-            }
-        } else {
-             error(node, "Undefined type '" + typeName + "'");
-        }
-    }
-    // Case 3: Standard Function
+    // Case 2: Standard Function
     else {
         auto type = currentScope->resolveType(funcName);
         if (type) {
-            if (auto st = std::dynamic_pointer_cast<StructType>(type)) {
+            if (auto st = getStructType(type, currentScope)) {
                 if (!st->constructors.empty()) {
                     funcType = std::dynamic_pointer_cast<FunctionType>(st->constructors[0]);
                 } else {
@@ -238,19 +248,7 @@ void SemanticAnalyzer::visit(MethodCall& node) {
     
     if (!objType) return; 
 
-    std::shared_ptr<StructType> structType = nullptr;
-
-    if (auto* st = dynamic_cast<StructType*>(objType.get())) {
-        structType = std::static_pointer_cast<StructType>(objType);
-    } 
-    else if (auto* ptr = dynamic_cast<PointerType*>(objType.get())) {
-        if (auto* st = dynamic_cast<StructType*>(ptr->pointee.get())) {
-            structType = std::static_pointer_cast<StructType>(ptr->pointee);
-        }
-    }
-    else if (auto* gt = dynamic_cast<GenericType*>(objType.get())) {
-        structType = std::dynamic_pointer_cast<StructType>(currentScope->resolveType("Castable"));
-    }
+    auto structType = getStructType(objType, currentScope);
 
     if (!structType) {
         error(node, fmt::format("Type '{}' does not have methods", objType->toString()));
@@ -262,9 +260,10 @@ void SemanticAnalyzer::visit(MethodCall& node) {
     if (!retType) {
         error(node, fmt::format("Method '{}' not found in type '{}'", node.method_name, structType->name));
         lastExprType = nullptr;
-    } else {
-        lastExprType = retType;
+        return;
     }
+
+    lastExprType = retType;
 
     for(auto& arg : node.args) arg->accept(*this);
 }
@@ -341,7 +340,6 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
     auto objType = lastExprType;
     if (!objType) return;
 
-    // Namespace Access
     if (auto* ns = dynamic_cast<const NamespaceType*>(objType.get())) {
         Symbol* sym = ns->scope->resolve(node.member);
         if (sym) {
@@ -353,15 +351,7 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
         return;
     }
 
-    std::shared_ptr<StructType> structType = nullptr;
-    
-    if (auto* ptr = dynamic_cast<const PointerType*>(objType.get())) {
-        if (auto* st = dynamic_cast<StructType*>(ptr->pointee.get())) {
-            structType = std::static_pointer_cast<StructType>(ptr->pointee);
-        }
-    } else if (auto* st = dynamic_cast<StructType*>(objType.get())) {
-        structType = std::static_pointer_cast<StructType>(objType);
-    }
+    auto structType = getStructType(objType, currentScope);
 
     if (!structType) {
         error(node, fmt::format("Type '{}' is not a struct", objType->toString()));
@@ -374,7 +364,6 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
         error(node, fmt::format("Struct '{}' has no member '{}'", structType->name, node.member));
         lastExprType = nullptr;
     } else {
-        // Visibility Check
         bool isPublic = structType->isFieldPublic(node.member);
         bool isInternal = false;
         if (currentStructContext && currentStructContext->equals(*structType)) isInternal = true;
@@ -525,6 +514,39 @@ void SemanticAnalyzer::visit(TernaryOp& node) {
     }
 }
 
+void SemanticAnalyzer::visit(StaticMethodCall& node) {
+    // 1. Resolve Target Type (e.g. Vec2<float>)
+    auto type = resolveTypeFromAST(node.target_type.get());
+    if (!type) {
+        lastExprType = nullptr;
+        return;
+    }
+
+    // 2. Unwrap Self/Pointers to get StructType
+    auto structType = getStructType(type, currentScope);
+    if (!structType) {
+        error(node, fmt::format("Type '{}' is not a struct", type->toString()));
+        lastExprType = nullptr;
+        return;
+    }
+
+    // 3. Look up Method
+    
+    auto retType = structType->getMethodReturnType(node.method_name);
+    if (!retType) {
+        error(node, fmt::format("Static method '{}' not found in '{}'", node.method_name, structType->toString()));
+        lastExprType = nullptr;
+        return;
+    }
+
+    // 4. Analyze Args
+    for (auto& arg : node.args) {
+        arg->accept(*this);
+    }
+
+    lastExprType = retType;
+}
+
 void SemanticAnalyzer::visit(SuperExpression& node) {
     std::shared_ptr<Type> parentType = nullptr;
     
@@ -559,6 +581,31 @@ void SemanticAnalyzer::visit(SuperExpression& node) {
     lastExprType = parentType;
 }
 
-void SemanticAnalyzer::visit(MacroCall&) {}
+void SemanticAnalyzer::visit(MethodCall& node) {
+    node.object->accept(*this);
+    auto objType = lastExprType;
+    
+    if (!objType) return; 
+
+    auto structType = getStructType(objType, currentScope);
+
+    if (!structType) {
+        error(node, fmt::format("Type '{}' does not have methods", objType->toString()));
+        lastExprType = nullptr;
+        return;
+    }
+
+    auto retType = structType->getMethodReturnType(node.method_name);
+    if (!retType) {
+        error(node, fmt::format("Method '{}' not found in type '{}'", node.method_name, structType->name));
+        lastExprType = nullptr;
+        return;
+    }
+
+    // Analyze Args
+    for(auto& arg : node.args) arg->accept(*this);
+
+    lastExprType = retType;
+}
 
 } // namespace fin
