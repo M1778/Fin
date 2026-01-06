@@ -219,6 +219,10 @@ ConstructorDeclaration::ConstructorDeclaration(std::string n, std::vector<std::u
     : name(std::move(n)), params(std::move(p)), body(std::move(b)), return_type(std::move(rt)) {}
 void ConstructorDeclaration::accept(Visitor& v) { v.visit(*this); }
 
+    
+void StaticMethodCall::accept(Visitor& v) { v.visit(*this); }
+
+
 DestructorDeclaration::DestructorDeclaration(std::string n, std::unique_ptr<Block> b)
     : name(std::move(n)), body(std::move(b)) {}
 void DestructorDeclaration::accept(Visitor& v) { v.visit(*this); }
