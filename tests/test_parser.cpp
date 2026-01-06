@@ -101,7 +101,7 @@ TEST_F(ParserTest, StructMethods) {
     EXPECT_TRUE(parseString(code));
 }
 
-// --- New: Dynamic File Tests ---
+// Dynamic File Tests ---
 
 class FileParserTest : public ParserTest, public ::testing::WithParamInterface<std::string> {};
 
