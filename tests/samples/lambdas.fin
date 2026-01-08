@@ -32,13 +32,13 @@ fun main() <noret> {
     // ---------------------------------------------------------
     // Case 3: Arrow Syntax (Expression Body / One-liner)
     // ---------------------------------------------------------
-    let f3 <fn(int) -> int> = (x: int) <int> => x - 3;
+    let f3 <fn(int) -> int> = (x: int) => x - 3;
     printf("F3 (Arrow Expr): %d\n", f3(10));
 
     // ---------------------------------------------------------
     // Case 4: Passing Lambda as Argument
     // ---------------------------------------------------------
-    let res <int> = compute(100, (v: int) <int> => v / 2);
+    let res <int> = compute(100, (v: int) => v / 2);
     printf("Result (Arg): %d\n", res);
 
     // ---------------------------------------------------------

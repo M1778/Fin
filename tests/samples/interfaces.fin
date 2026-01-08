@@ -11,7 +11,7 @@ struct User {
 
 // 3. Function with Generic Constraint
 // T must implement Printable (checked in Semantics)
-fun print_any<T: Printable>(item: <T>) <noret> {
+fun print_any<T: Printable>(item: T) <noret> {
     let s <string> = item.to_string();
     printf("%s", s);
 }

@@ -4,11 +4,11 @@ import { HashMap } from hashmap;
 // Rust-like macro definition
 macro my_vec {
     () => {
-        new Collection<int>()
+        new Collection::<int>{}
     };
     ($($x:expr),*) => {
         {
-            let temp = new Collection<int>();
+            let temp = new Collection::<int>{};
             $(temp.add($x);)*
             temp
         }
@@ -18,7 +18,7 @@ macro my_vec {
 macro map {
     ($($key:expr => $val:expr),*) => {
         {
-            let temp = new HashMap<string, int>();
+            let temp = new HashMap::<string, int>{};
             $(temp.put($key, $val);)*
             temp
         }
