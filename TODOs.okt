@@ -1,0 +1,35 @@
+
+In stdlib/types.fin:
+- We are using #[llvm_name="..."] which is a crucial compiler attributes which bypasses name mangling and sets IR name directly for that node
+- We are using the #[uncastable] attribute which tells that compiler that this node is not castable (compiler injects that in compile time to Attributes hashmap of that node)
+- we have #[typeinfo_class] attribute which ONLY is used for TypeInfo for one purpose and that's to tell the compiler THIS is the typeinfo implemented in the program so whenever `$type` is used it expects TypeInfo
+- we are using the type keyword to implement some types like (i32, ...)
+- using #[implements] tell the compiler this type implementation is special and respect its implementations (specially the `<...>` implementation which tells that it can accept multiple types/interfaces/CompilerDefinedTactics) NOTE: CompilerDefinedTactics are things like "Castable" and other classes like that (which are defined either in stdlib or precompiled in compiler)
+
+In stdlib/stdio.fin:
+- We are using Any from types and we are saying the generic "X" can by anything (anytype) that implements `Printable` interface
+
+In stdlib/error.fin:
+- we are using the #[std] attribute which tells the compiler use a std llvm name for that object/node (like std_Error)
+- we are using #[class] which just tells the compiler this struct can be casted OR treated like a class which is a little bit higher level
+- we are using the not implemented yet `format` macro which we'll have to implement later somehow
+- we are using #[use(compiler)] which tells the compiler to inject the compiler api module to this special function and allow it to use it
+- using #[use(compiler.components.types)] tells the compiler to include the types component from compiler api which integrates with types and stuff
+- we are telling that t is of type `$type` meaning it can accept types as value, like `@is_error_type(MyWhatever<int>)` or `@is_error_type(bool)`
+
+In stdlib/base_array.fin (Deleted) -> Check stdlib/operators.fin instead:
+- we are defining some interfaces for getter and setter
+
+In stdlib/collection.fin:
+- We are importing the getter and setter from base_array.fin and using it for the Collection class. these "__set" and "__get" are special functions that stand for `cls[n]` and `cls[n] = v`. they might be confused with ArrayAccess which is why we should change the whole mechanism to handle these correctly
+
+
+
+
+##NOTES
+- blaming m1778 is like saying "unimplemented" or "not implemented yet" (Blame keyword supports that)
+- we should implement the `class` keyword since it's a higher level priority
+- we should implement the `implements` keyword, for both implement checking in runtime and type definitions
+- we should implement the `type` keyword for type aliases AND high level type definitions
+- we should improve the attribute and intrinsics engine (which we haven't implemented yee)
+- Semantic Analyzer would need a massive upgrade supporting all of these changes

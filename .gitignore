@@ -178,4 +178,5 @@ cython_debug/
 
 # ------ C/C++
 build/
-CMakeUserPresets.json
+
+legacy/

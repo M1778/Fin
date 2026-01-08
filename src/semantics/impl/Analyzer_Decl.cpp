@@ -227,25 +227,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
 
     // 3. Operator Bodies
     for (auto& op : node.operators) {
-        enterScope();
-        for (auto& gen : op->generic_params) currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
-        for (auto& param : op->params) {
-            auto t = resolveTypeFromAST(param->type.get());
-            if (t) currentScope->define({param->name, t, false, true});
-        }
-        currentScope->define({"self", structType, true, true});
-        
-        std::shared_ptr<Type> retType = nullptr;
-        if (op->return_type) retType = resolveTypeFromAST(op->return_type.get());
-        else retType = currentScope->resolveType("void");
-
-        if (op->body) {
-            auto prevRet = context.currentFuncReturnType;
-            context.currentFuncReturnType = retType;
-            op->body->accept(*this);
-            context.currentFuncReturnType = prevRet;
-        }
-        exitScope();
+        op->accept(*this);
     }
 
     // 4. Constructor Bodies
@@ -327,6 +309,10 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
     // 5. Register in Struct
     if (retType) {
         structType->defineOperator((int)node.op, retType);
+    }
+    
+    if (node.implements_expr) {
+        node.implements_expr->accept(*this);
     }
 
     // 6. Body
@@ -489,6 +475,219 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
 
     auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg);
     currentScope->define({node.name, funcType, false, true});
+}
+
+void SemanticAnalyzer::visit(TypeDefinition& node) {
+    debugLog(fg(fmt::color::cyan), "[INFO] Analyzing type definition '{}'\n", node.name);
+    
+    // 1. If it has generics, we need a way to store a "Generic Type Alias"
+    // For now, we support simple aliases or concrete types.
+    // Enhanced support requires a TypeAlias type in the type system.
+    
+    if (!node.generic_params.empty()) {
+        debugLog(fg(fmt::color::yellow), "      [Warning] Generic type aliases are partially supported.\n");
+        // We can't fully resolve it yet without instantiation.
+        // We should define a placeholder or template.
+        // For this immediate task, we'll verify the aliased type structure.
+        
+        enterScope();
+        for(auto& gen : node.generic_params) {
+            currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
+        }
+        if (node.aliased_type) resolveTypeFromAST(node.aliased_type.get());
+        exitScope();
+        return;
+    }
+
+    // 2. Resolve Aliased Type
+    std::shared_ptr<Type> type = nullptr;
+    if (node.has_implements) {
+         // Handle "type Any<...> = any implements <...>"
+         // This creates a special "Any" type with constraints.
+         // For now, treat as 'any' (if we had it) or 'void*' equivalent, or just 'AnyType'.
+         // We'll define a struct type "any" or similar.
+         auto anyType = std::make_shared<StructType>("any"); // Placeholder
+         type = anyType;
+    } else {
+        type = resolveTypeFromAST(node.aliased_type.get());
+    }
+
+    if (type) {
+        currentScope->defineType(node.name, type);
+        debugLog(fg(fmt::color::gray), "      [Type] Defined alias '{}' -> '{}'\n", node.name, type->toString());
+    }
+}
+
+void SemanticAnalyzer::visit(SpecialDeclaration& node) {
+    debugLog(fg(fmt::color::magenta), "[INFO] Analyzing special decl '{}'\n", node.name);
+    // Similar to function but used for compile-time/macros
+    
+    enterScope();
+    for (auto& param : node.params) {
+         auto t = resolveTypeFromAST(param->type.get());
+         if (t) currentScope->define({param->name, t, false, true});
+    }
+    
+    if (node.return_type) resolveTypeFromAST(node.return_type.get());
+    
+    if (node.body) node.body->accept(*this);
+    
+    exitScope();
+}
+
+void SemanticAnalyzer::visit(ClassDeclaration& node) {
+    debugLog(fg(fmt::color::orange), "[INFO] Analyzing class '{}'\n", node.name);
+
+    auto structType = std::make_shared<StructType>(node.name);
+    // structType->is_class = true; // Placeholder for future
+    currentScope->defineType(node.name, structType);
+
+    enterScope();
+
+    // --- SETUP GENERICS ---
+    for (auto& gen : node.generic_params) {
+        auto genType = std::make_shared<GenericType>(gen->name);
+        if (gen->constraint) {
+            auto constraintType = resolveTypeFromAST(gen->constraint.get());
+            if (constraintType) {
+                debugLog(fg(fmt::color::gray), "      [Constraint] Generic '{}' : '{}'\n", gen->name, constraintType->toString());
+            }
+        }
+        currentScope->defineType(gen->name, genType);
+        structType->generic_args.push_back(genType);
+    }
+
+    currentScope->defineType("Self", std::make_shared<SelfType>(structType));
+
+    // --- INHERITANCE ---
+    for (auto& parentNode : node.parents) {
+        auto parentType = resolveTypeFromAST(parentNode.get());
+        if (parentType) {
+            if (auto p = std::dynamic_pointer_cast<StructType>(parentType)) {
+                structType->parents.push_back(p);
+                debugLog(fg(fmt::color::gray), "      [Inheritance] Inherits/Implements '{}'\n", p->toString());
+            } else {
+                error(*parentNode, "Parent type '" + parentType->toString() + "' is not a struct/interface");
+            }
+        }
+    }
+
+    // =========================================================
+    // PASS 1: REGISTRATION (Signatures Only)
+    // =========================================================
+    
+    // 1. Members
+    for (auto& member : node.members) {
+        auto memberType = resolveTypeFromAST(member->type.get());
+        if (memberType) {
+            if (memberType->equals(*structType) && member->type->pointer_depth == 0) {
+                error(*member, "Recursive class member '" + member->name + "' must be a pointer");
+            }
+            structType->defineField(member->name, memberType, member->is_public);
+        }
+        if (member->default_value) {
+            member->default_value->accept(*this);
+            if (lastExprType && memberType) {
+                checkType(*member->default_value, lastExprType, memberType);
+            }
+        }
+    }
+
+    // 2. Methods
+    for (auto& method : node.methods) {
+        std::shared_ptr<Type> retType = nullptr;
+        if (method->return_type) retType = resolveTypeFromAST(method->return_type.get());
+        else retType = currentScope->resolveType("void");
+        
+        if (retType) structType->defineMethod(method->name, retType);
+    }
+
+    // 3. Operators
+    for (auto& op : node.operators) {
+        std::shared_ptr<Type> retType = nullptr;
+        if (op->return_type) retType = resolveTypeFromAST(op->return_type.get());
+        else retType = currentScope->resolveType("void");
+        
+        if (retType) structType->defineOperator((int)op->op, retType);
+    }
+
+    // 4. Constructors
+    for (auto& ctor : node.constructors) {
+        enterScope();
+        std::vector<std::shared_ptr<Type>> paramTypes;
+        for (auto& param : ctor->params) {
+            auto t = resolveTypeFromAST(param->type.get());
+            if (t) paramTypes.push_back(t);
+        }
+        exitScope();
+
+        auto ctorType = std::make_shared<FunctionType>(paramTypes, structType);
+        structType->addConstructor(ctorType);
+        debugLog(fg(fmt::color::green), "      [Ctor] Registered constructor for '{}' with {} params\n", node.name, paramTypes.size());
+    }
+
+    // =========================================================
+    // PASS 2: ANALYSIS (Bodies)
+    // =========================================================
+
+    auto prevContext = currentStructContext;
+    currentStructContext = structType; 
+
+    // 1. Member Defaults
+    for (auto& member : node.members) {
+        if (member->default_value) {
+            member->default_value->accept(*this);
+            auto memberType = structType->getFieldType(member->name);
+            if (lastExprType && memberType) {
+                checkType(*member->default_value, lastExprType, memberType);
+            }
+        }
+    }
+
+    // 2. Method Bodies
+    for (auto& method : node.methods) {
+        method->accept(*this);
+    }
+
+    // 3. Operator Bodies
+    for (auto& op : node.operators) {
+        op->accept(*this);
+    }
+
+    // 4. Constructor Bodies
+    for (auto& ctor : node.constructors) {
+        enterScope();
+        for (auto& param : ctor->params) {
+            auto t = resolveTypeFromAST(param->type.get());
+            if (t) currentScope->define({param->name, t, false, true});
+        }
+        currentScope->define({"self", structType, true, true});
+        if (ctor->body) ctor->body->accept(*this);
+        exitScope();
+    }
+
+    // 5. Destructor Body
+    if (node.destructor) {
+        structType->has_destructor = true;
+        enterScope();
+        currentScope->define({"self", structType, true, true});
+        if (node.destructor->body) node.destructor->body->accept(*this);
+        exitScope();
+    }
+
+    // --- CONFORMANCE CHECK ---
+    for (auto& parent : structType->parents) {
+        if (auto p = std::dynamic_pointer_cast<StructType>(parent)) {
+            if (p->is_interface) {
+                if (!structType->implements(p.get())) {
+                    error(node, fmt::format("Class '{}' does not implement interface '{}'", node.name, p->name));
+                }
+            }
+        }
+    }
+
+    currentStructContext = prevContext;
+    exitScope();
 }
 
 }

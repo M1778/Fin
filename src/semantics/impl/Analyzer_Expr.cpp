@@ -581,31 +581,6 @@ void SemanticAnalyzer::visit(SuperExpression& node) {
     lastExprType = parentType;
 }
 
-void SemanticAnalyzer::visit(MethodCall& node) {
-    node.object->accept(*this);
-    auto objType = lastExprType;
-    
-    if (!objType) return; 
 
-    auto structType = getStructType(objType, currentScope);
-
-    if (!structType) {
-        error(node, fmt::format("Type '{}' does not have methods", objType->toString()));
-        lastExprType = nullptr;
-        return;
-    }
-
-    auto retType = structType->getMethodReturnType(node.method_name);
-    if (!retType) {
-        error(node, fmt::format("Method '{}' not found in type '{}'", node.method_name, structType->name));
-        lastExprType = nullptr;
-        return;
-    }
-
-    // Analyze Args
-    for(auto& arg : node.args) arg->accept(*this);
-
-    lastExprType = retType;
-}
 
 } // namespace fin

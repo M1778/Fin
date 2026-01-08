@@ -1,24 +1,16 @@
 import { Collection } from collection;
 import { Error } from error;
-import { Gettable, Settable } from base_array;
+import { Index, IndexAssign } from operators;
 
 @define printf(fmt: <string>, ...) <noret>;
 
 struct HashMapError: <Error> {} // Error Class
 
 
-struct HashMap<T, U> : <Gettable, Settable> {
+struct HashMap<T, U> : <Index, IndexAssign> {
     priv keys <Collection<T>>,
     priv values <Collection<U>>,
     
-    pub fun __get(self: <Self>, other: <T>) <U> {
-        for (let i <int> = 0; i <= self.values.len();i++) {
-            if (self.keys.get(i) == other) {
-                return self.values.get(i);
-              }
-          }
-        blame HashMapError("Element doesn't exist.");
-      }
     pub fun get_index(self: <Self>, other: <T>) <int> {
         for (let i <int> = 0; i <= self.values.len();i++) {
           if (self.keys.get(i) == other){
@@ -41,6 +33,17 @@ struct HashMap<T, U> : <Gettable, Settable> {
           }
         self.values[self.get_index(key)] = value;
       }
+
+    pub fun __get(self: <Self>, other: <T>) <U> {
+        for (let i <int> = 0; i <= self.values.len();i++) {
+            if (self.keys.get(i) == other) {
+                return self.values.get(i);
+              }
+          }
+        blame HashMapError("Element doesn't exist.");
+      }
+    pub operator[] implements cast<fn(Self, T)>(__get); // See stdlib/collection.fin for more information about this implementation
+    pub operator= implements cast<fn(Self, T, U)>(__set);
 
     HashMap(){
         return new HashMap{keys: new Collection::<T>(), values: new Collection::<U>()};

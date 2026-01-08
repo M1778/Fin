@@ -16,6 +16,8 @@ class OperatorDeclaration;
 class ImportModule;
 class ConstructorDeclaration;
 class DestructorDeclaration;
+class TypeDefinition;
+class SpecialDeclaration;
 
 class Block;
 class ReturnStatement;
@@ -78,6 +80,9 @@ public:
     virtual void visit(ImportModule& node) = 0;
     virtual void visit(ConstructorDeclaration& node) = 0;
     virtual void visit(DestructorDeclaration& node) = 0;
+    virtual void visit(TypeDefinition& node) = 0;
+    virtual void visit(SpecialDeclaration& node) = 0;
+    virtual void visit(ClassDeclaration& node) = 0;
     
     // Helpers
     virtual void visit(Parameter& node) = 0;     

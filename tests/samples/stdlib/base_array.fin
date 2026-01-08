@@ -1,8 +1,10 @@
 
 interface Gettable<T, U> {
     fun __get(self: <Self>, other: <T>) <U>;
+    pub operator [](self: <Self>, other: <T>) <U>;
   }
 
 interface Settable<T, U> {
     fun __set(self: <Self>, key: <T>, value: <U>) <noret>;
+    pub operator=(self: <Self>, key: <T>, value: <U>) <noret>;
   }

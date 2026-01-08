@@ -1,6 +1,7 @@
 #include "ASTPrinter.hpp"
-#include <fmt/core.h>
-#include <fmt/color.h>
+#include "fmt/core.h"
+#include "fmt/color.h"
+#include "decls/TypeDef.hpp"
 
 namespace fin {
 
@@ -54,6 +55,9 @@ void ASTPrinter::dispatch(const ASTNode* node, std::string currentPrefix, std::s
     else if (auto* n = dynamic_cast<const StructDeclaration*>(node)) {
         printStruct(n, currentPrefix, false);
     }
+    else if (auto* n = dynamic_cast<const ClassDeclaration*>(node)) {
+        printClass(n, currentPrefix, false);
+    }
     else if (auto* n = dynamic_cast<const InterfaceDeclaration*>(node)) {
         printInterface(n, currentPrefix, false);
     }
@@ -77,6 +81,12 @@ void ASTPrinter::dispatch(const ASTNode* node, std::string currentPrefix, std::s
     }
     else if (auto* n = dynamic_cast<const DestructorDeclaration*>(node)) {
         printDestructor(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const TypeDefinition*>(node)) {
+        printTypeDefinition(n, currentPrefix, false);
+    }
+    else if (auto* n = dynamic_cast<const SpecialDeclaration*>(node)) {
+        printSpecialDeclaration(n, currentPrefix, false);
     }
     // --- Helpers ---
     else if (auto* n = dynamic_cast<const Parameter*>(node)) {
@@ -602,12 +612,71 @@ void ASTPrinter::printArrayType(const ArrayTypeNode* node, std::string prefix, b
 
 void ASTPrinter::printStaticMethodCall(const StaticMethodCall* node, std::string prefix, bool) {
     fmt::print("{}StaticCall\n", prefix);
-    fmt::print("{}  Type: {}\n", prefix, astTypeToString(node.target_type.get()));
-    fmt::print("{}  Method: {}\n", prefix, node.method_name);
-    for (auto& arg : node.args) {
+    fmt::print("{}  Type: {}\n", prefix, astTypeToString(node->target_type.get()));
+    fmt::print("{}  Method: {}\n", prefix, node->method_name);
+    for (auto& arg : node->args) {
         printNode(arg.get(), prefix + "    ", false);
     }
 }
 
+void ASTPrinter::printTypeDefinition(const TypeDefinition* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::aqua), "{}TypeDefinition ", prefix);
+    fmt::print("'{}'", node->name);
+    
+    if (node->has_implements) {
+        fmt::print(" implements <");
+        for (size_t i = 0; i < node->implements_list.size(); ++i) {
+            fmt::print("{}", astTypeToString(node->implements_list[i].get()));
+            if (i < node->implements_list.size() - 1) fmt::print(", ");
+        }
+        fmt::print(">");
+    } else {
+        fmt::print(" = <{}>", astTypeToString(node->aliased_type.get()));
+    }
+    fmt::print("\n");
+}
+
+void ASTPrinter::printSpecialDeclaration(const SpecialDeclaration* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::magenta), "{}SpecialDecl ", prefix);
+    fmt::print("@special '{}'\n", node->name);
+    for (const auto& param : node->params) {
+        printParameter(param.get(), prefix + "    ", false);
+    }
+    if (node->body) {
+        printNode(node->body.get(), prefix + "    ", true);
+    }
+}
+
+void ASTPrinter::printClass(const ClassDeclaration* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::orange), "{}Class ", prefix);
+    fmt::print("{}", node->name);
+    if (!node->parents.empty()) {
+        fmt::print(" : ");
+        for (size_t i = 0; i < node->parents.size(); ++i) {
+            fmt::print("{}", astTypeToString(node->parents[i].get()));
+            if (i < node->parents.size() - 1) fmt::print(", ");
+        }
+    }
+    fmt::print("\n");
+    
+    for (auto& attr : node->attributes) {
+        fmt::print("{}  #[{}]\n", prefix, attr->name);
+    }
+
+    for (auto& member : node->members) {
+        fmt::print("{}  Member: {} <{}>\n", prefix, member->name, astTypeToString(member->type.get()));
+    }
+    
+    for (size_t i = 0; i < node->methods.size(); ++i) {
+        printNode(node->methods[i].get(), prefix + "    ", false);
+    }
+    
+    for (auto& ctor : node->constructors) {
+        printNode(ctor.get(), prefix + "    ", false);
+    }
+    if (node->destructor) {
+        printNode(node->destructor.get(), prefix + "    ", false);
+    }
+}
 
 } // namespace fin

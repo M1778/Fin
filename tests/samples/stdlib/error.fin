@@ -1,5 +1,7 @@
-
-struct Error {
+#[uncastable]
+#[std]
+#[class]
+pub struct Error {
     pub message <string>,
     pub error_id <int>,
     Error(msg: <string>, err_code: <int> = null) {
@@ -13,3 +15,10 @@ struct Error {
         return format!("Error: {}", self.message);
       }
   }
+
+#[use(compiler)]
+#[use(compiler.components.types)]
+@special is_error_type( t: $type ) <bool> {
+   const result <int> = compiler.types.cmp_types(t, Error);
+   return result == -1 : false ? true;
+}

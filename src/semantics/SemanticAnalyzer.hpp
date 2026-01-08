@@ -43,6 +43,9 @@ public:
     void visit(OperatorDeclaration& node) override;
     void visit(ConstructorDeclaration& node) override;
     void visit(DestructorDeclaration& node) override;
+    void visit(TypeDefinition& node) override;
+    void visit(SpecialDeclaration& node) override;
+    void visit(ClassDeclaration& node) override;
 
     void visit(Block& node) override;
     void visit(ReturnStatement& node) override;
@@ -80,6 +83,7 @@ public:
     void visit(SuperExpression& node) override;
     void visit(PointerTypeNode& node) override;
     void visit(ArrayTypeNode& node) override;
+    void visit(StaticMethodCall& node) override;
     void visit(Parameter& node) override;
     void visit(StructMember& node) override;
 

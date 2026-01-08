@@ -28,6 +28,7 @@ public:
     void visit(FunctionDeclaration& node) override;
     void visit(VariableDeclaration& node) override;
     void visit(StructDeclaration& node) override;
+    void visit(ClassDeclaration& node) override;
     void visit(InterfaceDeclaration& node) override;
     void visit(EnumDeclaration& node) override;
     void visit(DefineDeclaration& node) override;
@@ -82,6 +83,8 @@ public:
     void visit(PointerTypeNode& node) override;
     void visit(ArrayTypeNode& node) override;
     void visit(StaticMethodCall& node) override;
+    void visit(TypeDefinition& node) override;
+    void visit(SpecialDeclaration& node) override;
 
 private:
     DiagnosticEngine& diag;

@@ -14,6 +14,9 @@ class FinConan(ConanFile):
 
     generators = ("CMakeDeps", "CMakeToolchain")
     build_requires = ["ninja/1.11.1"]
+    def requirements(self):
+        if self.settings.os == "Windows":
+            self.requires("llvm-core/19.1.7")
 
     def layout(self):
         cmake_layout(self)

@@ -1,0 +1,132 @@
+#include "StructType.hpp"
+#include "TypeImpl.hpp"
+
+namespace fin {
+
+std::string StructType::toString() const {
+    if (generic_args.empty()) return name;
+    std::string s = name + "<";
+    for (size_t i = 0; i < generic_args.size(); ++i) {
+        s += generic_args[i]->toString();
+        if (i < generic_args.size() - 1) s += ", ";
+    }
+    s += ">";
+    return s;
+}
+
+TypePtr StructType::getFieldType(const std::string& n) {
+    if (fields.count(n)) return fields.at(n).type;
+    for (const auto& parent : parents) {
+        if (auto p = std::dynamic_pointer_cast<StructType>(parent)) {
+            if (auto t = p->getFieldType(n)) return t;
+        }
+    }
+    return nullptr;
+}
+
+bool StructType::isFieldPublic(const std::string& n) {
+    if (fields.count(n)) return fields.at(n).is_public;
+    for (const auto& parent : parents) {
+        if (auto p = std::dynamic_pointer_cast<StructType>(parent)) {
+            if (p->getFieldType(n)) return p->isFieldPublic(n);
+        }
+    }
+    return false;
+}
+
+TypePtr StructType::getMethodReturnType(const std::string& n) {
+    if (methods.count(n)) return methods.at(n);
+    for (const auto& parent : parents) {
+        if (auto p = std::dynamic_pointer_cast<StructType>(parent)) {
+            if (auto t = p->getMethodReturnType(n)) return t;
+        }
+    }
+    return nullptr;
+}
+
+bool StructType::equals(const Type& other) const {
+    auto* o = other.as<StructType>();
+    if (!o) return false;
+    if (name != o->name) return false;
+    if (generic_args.size() != o->generic_args.size()) return false;
+    for (size_t i = 0; i < generic_args.size(); ++i) {
+        if (!typesEqual(generic_args[i], o->generic_args[i])) return false;
+    }
+    return true;
+}
+
+TypePtr StructType::clone() const {
+    std::vector<TypePtr> newArgs;
+    for (auto& arg : generic_args) newArgs.push_back(arg->clone());
+    
+    auto s = std::make_shared<StructType>(name, newArgs);
+    for(auto& kv : fields) s->defineField(kv.first, kv.second.type->clone(), kv.second.is_public);
+    for(auto& kv : methods) s->defineMethod(kv.first, kv.second->clone());
+    for(auto& kv : operators) s->defineOperator(kv.first, kv.second->clone());
+    for(const auto& p : parents) s->parents.push_back(p->clone());
+    
+    s->constructors = constructors;
+    s->has_destructor = has_destructor;
+    s->is_interface = is_interface;
+    
+    return s;
+}
+
+TypePtr StructType::substitute(const TypeMap& mapping, TypePtr selfReplacement) {
+    std::vector<TypePtr> newArgs;
+    for(auto& arg : generic_args) newArgs.push_back(arg->substitute(mapping, selfReplacement));
+    
+    auto newStruct = std::make_shared<StructType>(name, newArgs);
+    
+    // Pass selfReplacement (or newStruct if we are the struct being instantiated)
+    TypePtr nextSelf = selfReplacement ? selfReplacement : newStruct;
+
+    for(auto& kv : fields) newStruct->defineField(kv.first, kv.second.type->substitute(mapping, nextSelf), kv.second.is_public);
+    for(auto& kv : methods) newStruct->defineMethod(kv.first, kv.second->substitute(mapping, nextSelf));
+    for(auto& kv : operators) newStruct->defineOperator(kv.first, kv.second->substitute(mapping, nextSelf));
+    for(const auto& p : parents) newStruct->parents.push_back(p->substitute(mapping, nextSelf));
+
+    newStruct->is_interface = is_interface;
+    newStruct->has_destructor = has_destructor;
+    
+    for(auto& c : constructors) {
+        if (auto* func = c->as<FunctionType>()) {
+            std::vector<TypePtr> newParams;
+            for(auto& p : func->param_types) newParams.push_back(p->substitute(mapping, nextSelf));
+            
+            auto newCtor = std::make_shared<FunctionType>(newParams, nextSelf, func->is_vararg);
+            newStruct->addConstructor(newCtor);
+        }
+    }
+
+    return newStruct;
+}
+
+TypePtr StructType::instantiate(const std::vector<TypePtr>& concreteArgs) {
+    if (concreteArgs.size() != generic_args.size()) return nullptr;
+    TypeMap mapping;
+    for(size_t i=0; i<generic_args.size(); ++i) {
+        mapping[generic_args[i]->toString()] = concreteArgs[i];
+    }
+    return substitute(mapping);
+}
+
+bool StructType::implements(const StructType* interface) const {
+    for (const auto& [methodName, retType] : interface->methods) {
+        if (methods.find(methodName) == methods.end()) return false;
+    }
+    for (const auto& [op, retType] : interface->operators) {
+        if (operators.find(op) == operators.end()) return false;
+    }
+    if (interface->has_destructor && !this->has_destructor) return false;
+    for (const auto& ifaceCtor : interface->constructors) {
+        bool found = false;
+        for (const auto& myCtor : this->constructors) {
+            if (myCtor->equals(*ifaceCtor)) { found = true; break; }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+}

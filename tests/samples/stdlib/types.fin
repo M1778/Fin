@@ -1,0 +1,32 @@
+import { Error } from error;
+
+#[llvm_name="typeinfo"]
+#[uncastable]
+#[typeinfo_class]
+#[class]
+class TypeInfo {
+    priv _name <_static_string>, // uses _static_string for better compatibility with compiler API
+    priv _typeid <int>, // TypeId that compiler uses to identify types
+
+    pub:
+    	fun prototype() <noret> { blame m1778;} // using blame and m1778 keyword is like using `unimplemented!()` anyways gets optimized and eliminated by optimizer (DeadCode eliminator)
+}
+
+// numbers
+type i32 = <int>;
+type i64 = <int{64}>;
+type i128= <int{128}>;
+type f32 = <float>;
+type f64 = <double>;
+
+// ...
+
+type string = <[char]>; // Special typing (overwrite default type)
+
+type Array<T> = <[T]>;
+
+#[implements]
+type Any<...> = any implements <...>; // checks in compile time ON usage, for example : `fun someFunction<A: Any<SomeInterface, Castable, ...>>() <noret>{};` A is a generic that forces implementation of SomeInterface and has to be castable (which most types are)
+
+#[implements]
+type nullptr = any implements <&void>;

@@ -27,6 +27,9 @@ private:
     void printImport(const ImportModule* node, std::string prefix, bool isLast);
     void printConstructor(const ConstructorDeclaration* node, std::string prefix, bool isLast);
     void printDestructor(const DestructorDeclaration* node, std::string prefix, bool isLast);
+    void printTypeDefinition(const TypeDefinition* node, std::string prefix, bool isLast);
+    void printSpecialDeclaration(const SpecialDeclaration* node, std::string prefix, bool isLast);
+    void printClass(const ClassDeclaration* node, std::string prefix, bool isLast);
     
     void printParameter(const Parameter* node, std::string prefix, bool isLast);
     void printStructMember(const StructMember* node, std::string prefix, bool isLast);

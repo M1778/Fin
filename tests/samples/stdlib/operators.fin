@@ -1,0 +1,129 @@
+interface Equal {
+   pub operator ==() <Any<...>>;
+}
+
+interface NotEqual {
+   pub operator !=() <Any<...>>;
+}
+
+
+interface GreaterThan {
+   pub operator >() <Any<...>>;
+}
+
+
+interface LessThan {
+   pub operator <() <Any<...>>;
+}
+
+
+interface GreaterThanEqual {
+   pub operator >=() <Any<...>>;
+}
+
+
+interface LessThanEqual {
+   pub operator <=() <Any<...>>;
+}
+
+interface Add {
+   pub operator +(rhs: any) <Any<...>>;
+}
+
+interface AddAssign {
+   pub operator +=(rhs: any) <Any<...>>;
+}
+
+interface Sub {
+   pub operator -(rhs: any) <Any<...>>;
+}
+interface SubAssign {
+   pub operator -=(rhs: any) <Any<...>>;
+}
+interface Mul {
+   pub operator *(rhs: any) <Any<...>>;
+}
+
+interface MulAssign {
+   pub operator *=(rhs: any) <Any<...>>;
+}
+
+interface Div {
+   pub operator /(rhs: any) <Any<...>>;
+}
+
+interface DivAssign {
+   pub operator /=(rhs: any) <Any<...>>;
+}
+
+interface Mod {
+   pub operator %(rhs: any) <Any<...>>;
+}
+
+interface ModAssign {
+   pub operator %=(rhs: any) <Any<...>>;
+}
+
+
+interface BitAnd {
+   pub operator &(rhs: any) <Any<...>>;
+}
+
+
+interface BitAndAssign {
+   pub operator &=(rhs: any) <Any<...>>;
+}
+
+
+interface BitOr {
+   pub operator |(rhs: any) <Any<...>>;
+}
+
+
+interface BitOrAssign {
+   pub operator |=(rhs: any) <Any<...>>;
+}
+
+
+interface ShiftLeft {
+   pub operator <<(rhs: any) <Any<...>>;
+}
+
+interface ShiftLeftAssign {
+   pub operator <<=(rhs: any) <Any<...>>;
+}
+
+interface ShiftRight {
+   pub operator >>(rhs: any) <Any<...>>;
+}
+
+interface ShiftRightAssign {
+   pub operator >>=(rhs: any) <Any<...>>;
+}
+
+
+interface Unary {
+   pub operator `-() <Any<...>>;
+}
+
+
+interface Not {
+   pub operator !() <Any<...>>;
+}
+
+
+interface Index {
+   pub operator [](idx: <any>) <Any<...>>;
+}
+
+interface IndexAssign {
+   pub operator []=(idx: <any>) <Any<...>>;
+}
+
+interface Deref {
+   pub operator `*() <Any<...>>;
+}
+
+interface FnCall {
+   pub operator (...args: <[any]>) <Any<...>>; // instead of taking an static array of items with unknown type "<[any]>" we could use a collection like: "<Collection<...>>"
+}

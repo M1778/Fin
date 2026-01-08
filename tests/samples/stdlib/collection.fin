@@ -1,9 +1,9 @@
-import { Gettable, Settable } from base_array;
+import { Index, IndexAssign } from operators;
 import { Error } from error;
 
 struct CollectionError : <Error> {}
 
-struct Collection<T> : <Gettable, Settable> {
+struct Collection<T> : <Index, IndexAssign> {
     priv length <int>,
     priv filled <int>,
     priv _arr <[T]>,
@@ -62,6 +62,14 @@ struct Collection<T> : <Gettable, Settable> {
           }
         self._arr[index] = value;
       }
+    
+    // Other names for same functionality
+    pub getitem <fn(Self, int)> = __get, // points to __get instead of copying it
+    pub setitem <fn(Self, int, T)> = __set,
+
+    pub operator[] implements cast<auto>(__get); // uses implements to set the operator for gettable to a casted function which copies the function instead of just pointing to it (required for implements)
+    pub operator= implements cast<auto>(__set); // same happens here, uses implements and casting to copy the `__set` method to the operator (copying function signature and function body)
+    // Note: Implements also works with methods too (not just operators)
 
     Collection(length: <int>) {
         return new Collection{length: length, filled: 0, _arr: new [T, length]};

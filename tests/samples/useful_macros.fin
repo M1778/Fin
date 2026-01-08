@@ -1,0 +1,11 @@
+
+fun main() <noret> {
+   let a <HashMap<string, int>> = map!{
+	"alex": 10,
+	"robot": 20,
+   }; // Macros can handle syntax/node. dict like macro
+
+   let b <Collection<int>> = coll![1,2,3,4,5]; // List like macro
+
+   let r <string> = format!("{}", b[2]); // funccall like macro
+}

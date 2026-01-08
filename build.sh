@@ -74,9 +74,10 @@ print_banner
 # 1. Check Environment
 log_info "Checking dependencies..."
 check_dependency cmake
-check_dependency uvx conan
 check_dependency make
+check_dependency uvx conan
 check_dependency g++
+check_dependency llvm-config
 
 # 2. Clean if requested
 if [ "$CLEAN_BUILD" = true ]; then

@@ -64,6 +64,7 @@
 %token KW_OPERATOR
 %token KW_SPECIAL KW_AT_RETURN KW_FN_TYPE KW_DEFINE
 %token KW_M1778
+%token KW_TYPE KW_CLASS KW_IMPLEMENTS KW_ANY
 
 /* Types */
 %token TYPE_INT TYPE_FLOAT TYPE_DOUBLE TYPE_BOOL 
@@ -86,6 +87,8 @@
 /* Special Operators */
 %token ARROW RARROW /* => and -> */
 %token KW_QUOTE HASH_FOR HASH_INDEX
+%token SHIFTLEFT SHIFTRIGHT SHIFTLEFTEQUAL SHIFTRIGHTEQUAL
+%token PIPE CARET BACKTICK
 
 /* ========================================================================== */
 /*                                PRECEDENCE                                  */
@@ -123,6 +126,7 @@
 %type <std::unique_ptr<fin::Statement>> import_statement define_declaration macro_declaration
 %type <std::unique_ptr<fin::Statement>> declaration_body
 %type <std::unique_ptr<fin::Statement>> annotated_declaration declaration_with_vis bare_declaration
+%type <std::unique_ptr<fin::Statement>> type_definition special_declaration
 
 %type <std::unique_ptr<fin::TypeNode>> type base_type pointer_type array_type
 %type <std::vector<std::unique_ptr<fin::TypeNode>>> type_list
@@ -154,6 +158,8 @@
 %type <std::vector<std::unique_ptr<fin::GenericParam>>> operator_generics_opt
 
 /* Control Flow */
+%type <std::unique_ptr<fin::Expression>> implements_opt
+%type <std::vector<std::unique_ptr<fin::Expression>>> macro_arg_item macro_arg_list_body macro_arguments
 %type <std::unique_ptr<fin::Statement>> if_statement while_loop for_loop foreach_loop try_catch_statement blame_statement return_statement expression_statement
 %type <std::unique_ptr<fin::Statement>> control_statement delete_statement
 
@@ -226,6 +232,8 @@ statement:
     | blame_statement        { $$ = std::move($1); }
     | return_statement       { $$ = std::move($1); }
     | expression_statement   { $$ = std::move($1); }
+    | type_definition        { $$ = std::move($1); }
+    | special_declaration    { $$ = std::move($1); }
     | SEMICOLON              { $$ = nullptr; }
     ;
 
@@ -314,6 +322,18 @@ declaration_body:
     | KW_ENUM IDENTIFIER LBRACE enum_values RBRACE {
         $$ = std::make_unique<fin::EnumDeclaration>($2, std::move($4), false);
     }
+    | KW_CLASS IDENTIFIER generic_params_opt inheritance_opt LBRACE struct_body_content RBRACE {
+        auto cls = std::make_unique<fin::ClassDeclaration>($2, std::move($6->members), false);
+        cls->methods = std::move($6->methods);
+        cls->operators = std::move($6->operators);
+        cls->constructors = std::move($6->constructors);
+        cls->destructor = std::move($6->destructor);
+        cls->attributes = std::move($6->attributes);
+        cls->generic_params = std::move($3);
+        cls->parents = std::move($4);
+        $$ = std::move(cls);
+    }
+
     ;
 
 /* --- ATTRIBUTES --- */
@@ -497,9 +517,10 @@ struct_item_rest:
         $$->setLoc(@$);
     }
     /* Operator */
-    | KW_OPERATOR operator_symbol operator_generics_opt LPAREN params RPAREN LT type GT block {
-        auto op = std::make_unique<fin::OperatorDeclaration>($2, std::move($5), std::move($8), std::move($10), false);
+    | KW_OPERATOR operator_symbol operator_generics_opt LPAREN params RPAREN implements_opt LT type GT block {
+        auto op = std::make_unique<fin::OperatorDeclaration>($2, std::move($5), std::move($9), std::move($11), false);
         op->generic_params = std::move($3);
+        op->implements_expr = std::move($7);
         $$ = std::move(op);
         $$->setLoc(@$);
     }
@@ -524,12 +545,33 @@ operator_symbol:
     | MINUS { $$ = fin::ASTTokenKind::MINUS; }
     | MULT { $$ = fin::ASTTokenKind::MULT; }
     | DIV { $$ = fin::ASTTokenKind::DIV; }
+    | MOD { $$ = fin::ASTTokenKind::MOD; }
     | EQEQ { $$ = fin::ASTTokenKind::EQEQ; }
+    | NOTEQ { $$ = fin::ASTTokenKind::NOTEQ; }
+    | LT { $$ = fin::ASTTokenKind::LT; }
+    | GT { $$ = fin::ASTTokenKind::GT; }
+    | LTEQ { $$ = fin::ASTTokenKind::LTEQ; }
+    | GTEQ { $$ = fin::ASTTokenKind::GTEQ; }
+    | AMPERSAND { $$ = fin::ASTTokenKind::AMPERSAND; }
+    | PIPE { $$ = fin::ASTTokenKind::PIPE; }
+    | CARET { $$ = fin::ASTTokenKind::CARET; }
+    | SHIFTLEFT { $$ = fin::ASTTokenKind::SHIFTLEFT; }
+    | SHIFTRIGHT { $$ = fin::ASTTokenKind::SHIFTRIGHT; }
+    | NOT { $$ = fin::ASTTokenKind::NOT; }
+    | LBRACKET RBRACKET { $$ = fin::ASTTokenKind::INDEX; }
+    | LBRACKET RBRACKET EQUAL { $$ = fin::ASTTokenKind::INDEX_ASSIGN; }
+    | BACKTICK MULT { $$ = fin::ASTTokenKind::DEREF; }
+    | BACKTICK MINUS { $$ = fin::ASTTokenKind::UNARY_MINUS; }
     ;
 
 operator_generics_opt:
     COLON LT generic_param_list GT { $$ = std::move($3); }
     | %empty { $$ = std::vector<std::unique_ptr<fin::GenericParam>>(); }
+    ;
+
+implements_opt:
+    KW_IMPLEMENTS expression { $$ = std::move($2); }
+    | %empty { $$ = nullptr; }
     ;
 
 /* --- INTERFACES --- */
@@ -701,6 +743,45 @@ macro_param:
     }
     ;
 
+/* --- TYPE DEFINITIONS --- */
+
+type_definition:
+    /* Generic alias: type Array<T> = <[T]>;  (Also covers simple alias since generic_params_opt can be empty) */
+    KW_TYPE IDENTIFIER generic_params_opt EQUAL LT type GT SEMICOLON {
+        auto td = std::make_unique<fin::TypeDefinition>($2, std::move($6));
+        td->generic_params = std::move($3);
+        $$ = std::move(td);
+        $$->setLoc(@$);
+    }
+    /* With implements: type Any<...> = any implements <X, Y>; */
+    | KW_TYPE IDENTIFIER generic_params_opt EQUAL KW_ANY KW_IMPLEMENTS LT type_list GT SEMICOLON {
+        auto voidType = std::make_unique<fin::TypeNode>("any");
+        auto td = std::make_unique<fin::TypeDefinition>($2, std::move(voidType));
+        td->generic_params = std::move($3);
+        td->has_implements = true;
+        td->implements_list = std::move($8);
+        $$ = std::move(td);
+        $$->setLoc(@$);
+    }
+    ;
+
+/* --- SPECIAL (COMPILE-TIME) FUNCTIONS --- */
+
+special_declaration:
+    /* @special name(...) <type> { ... } */
+    AT KW_SPECIAL IDENTIFIER LPAREN params RPAREN LT type GT block {
+        $$ = std::make_unique<fin::SpecialDeclaration>($3, std::move($5), std::move($8), std::move($10));
+        $$->setLoc(@$);
+    }
+    /* With dollar-type param: @special name(t: $type) <bool> { ... } */
+    | attribute_list AT KW_SPECIAL IDENTIFIER LPAREN params RPAREN LT type GT block {
+        auto sd = std::make_unique<fin::SpecialDeclaration>($4, std::move($6), std::move($9), std::move($11));
+        sd->attributes = std::move($1);
+        $$ = std::move(sd);
+        $$->setLoc(@$);
+    }
+    ;
+
 /* --- VARIABLES --- */
 
 variable_declaration:
@@ -735,8 +816,10 @@ base_type:
     }
     | KW_AUTO { $$ = std::make_unique<fin::TypeNode>("auto"); }
     | KW_SELF_TYPE { $$ = std::make_unique<fin::TypeNode>("Self"); }
+    | KW_ANY { $$ = std::make_unique<fin::TypeNode>("any"); }
     | fn_type { $$ = std::move($1); }
     | LPAREN type RPAREN { $$ = std::move($2); }
+    | DOLLAR KW_TYPE { $$ = std::make_unique<fin::TypeNode>("$type"); $$->setLoc(@$); }
     ;
 
 fn_type:
@@ -1041,7 +1124,27 @@ no_struct_expression:
         $$->setLoc(@$);
     }
 
-    | no_struct_expression NOT LPAREN arguments RPAREN {
+    | no_struct_expression NOT LPAREN macro_arguments RPAREN {
+        std::string name = flatten_macro_name($1.get());
+        if (name.empty()) {
+            error(@1, "Invalid macro name");
+            $$ = nullptr;
+        } else {
+            $$ = std::make_unique<fin::MacroInvocation>(name, std::move($4));
+            $$->setLoc(@$);
+        }
+    }
+    | no_struct_expression NOT LBRACE macro_arguments RBRACE {
+        std::string name = flatten_macro_name($1.get());
+        if (name.empty()) {
+            error(@1, "Invalid macro name");
+            $$ = nullptr;
+        } else {
+            $$ = std::make_unique<fin::MacroInvocation>(name, std::move($4));
+            $$->setLoc(@$);
+        }
+    }
+    | no_struct_expression NOT LBRACKET macro_arguments RBRACKET {
         std::string name = flatten_macro_name($1.get());
         if (name.empty()) {
             error(@1, "Invalid macro name");
@@ -1129,10 +1232,7 @@ primary_no_struct:
     }
 
     /* Self Static Method */
-    | KW_SELF_TYPE DOUBLE_COLON IDENTIFIER LPAREN arguments RPAREN {
-        $$ = std::make_unique<fin::FunctionCall>("Self::" + $3, std::move($5));
-        $$->setLoc(@$);
-    }
+    /* Self Static Method - REMOVED (Covered by static_method_call) */
     
     | static_method_call { $$ = std::move($1); }
     
@@ -1162,6 +1262,34 @@ arguments:
 expression_list:
     expression_list COMMA expression { $1.push_back(std::move($3)); $$ = std::move($1); }
     | expression { std::vector<std::unique_ptr<fin::Expression>> v; v.push_back(std::move($1)); $$ = std::move(v); }
+    ;
+
+macro_arg_item:
+    expression {
+        std::vector<std::unique_ptr<fin::Expression>> v;
+        v.push_back(std::move($1));
+        $$ = std::move(v);
+    }
+    | expression COLON expression {
+        std::vector<std::unique_ptr<fin::Expression>> v;
+        v.push_back(std::move($1));
+        v.push_back(std::move($3));
+        $$ = std::move(v);
+    }
+    ;
+
+macro_arg_list_body:
+    macro_arg_list_body COMMA macro_arg_item {
+        for(auto& e : $3) $1.push_back(std::move(e));
+        $$ = std::move($1);
+    }
+    | macro_arg_item { $$ = std::move($1); }
+    ;
+
+macro_arguments:
+    macro_arg_list_body { $$ = std::move($1); }
+    | macro_arg_list_body COMMA { $$ = std::move($1); }
+    | %empty { $$ = std::vector<std::unique_ptr<fin::Expression>>(); }
     ;
 
 field_assignments:

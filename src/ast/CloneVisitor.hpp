@@ -1,8 +1,9 @@
 #pragma once
 
 #include "Visitor.hpp"
-#include "ASTNode.hpp"
+#include "../ASTNode.hpp"
 #include <memory>
+#include <vector>
 
 namespace fin {
 
@@ -15,6 +16,15 @@ public:
         if (!node) return nullptr;
         const_cast<T*>(node)->accept(*this);
         return std::unique_ptr<T>(static_cast<T*>(result.release()));
+    }
+
+    template <typename T>
+    std::vector<std::unique_ptr<T>> cloneVector(const std::vector<std::unique_ptr<T>>& src) {
+        std::vector<std::unique_ptr<T>> dest;
+        for (const auto& item : src) {
+            dest.push_back(clone(item.get()));
+        }
+        return dest;
     }
 
     // --- Visitor Implementation ---
@@ -30,6 +40,9 @@ public:
     void visit(ImportModule& node) override;
     void visit(ConstructorDeclaration& node) override;
     void visit(DestructorDeclaration& node) override;
+    void visit(TypeDefinition& node) override;
+    void visit(SpecialDeclaration& node) override;
+    void visit(ClassDeclaration& node) override;
 
     void visit(Block& node) override;
     void visit(ReturnStatement& node) override;

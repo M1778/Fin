@@ -121,6 +121,11 @@ WS          [ \t\r]+
 "super"     { MAKE(KW_SUPER); }
 "Self"      { MAKE(KW_SELF_TYPE); }
 
+"type"      { MAKE(KW_TYPE); }
+"class"     { MAKE(KW_CLASS); }
+"implements" { MAKE(KW_IMPLEMENTS); }
+"any"       { MAKE(KW_ANY); }
+
 "special"   { MAKE(KW_SPECIAL); }
 "@return"   { MAKE(KW_AT_RETURN); }
 "fn"        { MAKE(KW_FN_TYPE); }
@@ -162,6 +167,14 @@ WS          [ \t\r]+
 ">="        { MAKE(GTEQ); }
 "&&"        { MAKE(AND); }
 "||"        { MAKE(OR); }
+
+"<<"        { MAKE(SHIFTLEFT); }
+">>"        { MAKE(SHIFTRIGHT); }
+"<<="       { MAKE(SHIFTLEFTEQUAL); }
+">>="       { MAKE(SHIFTRIGHTEQUAL); }
+"|"         { MAKE(PIPE); }
+"^"         { MAKE(CARET); }
+"`"         { MAKE(BACKTICK); }
 
 "("         { MAKE(LPAREN); }
 ")"         { MAKE(RPAREN); }
