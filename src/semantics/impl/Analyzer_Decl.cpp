@@ -7,10 +7,6 @@
 
 namespace fin {
 
-void SemanticAnalyzer::visit(Program& node) {
-    for (auto& stmt : node.statements) stmt->accept(*this);
-}
-
 void SemanticAnalyzer::visit(VariableDeclaration& node) {
     auto type = resolveTypeFromAST(node.type.get());
     if (!type) return; 

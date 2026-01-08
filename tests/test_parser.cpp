@@ -9,7 +9,7 @@
 #include "parser.hpp"
 #include "lexer/lexer.hpp"
 #include "diagnostics/DiagnosticEngine.hpp"
-#include "preprocessor/Preprocessor.hpp" // <--- ADDED
+#include "preprocessor/Preprocessor.hpp"
 
 namespace fs = std::filesystem;
 
