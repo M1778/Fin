@@ -313,6 +313,22 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
     
     if (node.implements_expr) {
         node.implements_expr->accept(*this);
+        if (lastExprType) {
+            auto targetStruct = getStructType(lastExprType, currentScope);
+            if (targetStruct) {
+                // Find matching operator in target
+                int opKey = static_cast<int>(node.op);
+                if (targetStruct->operators.count(opKey)) {
+                    auto sourceOpType = targetStruct->operators[opKey];
+                    // "Copy" or validate compatibility
+                    if (retType && !sourceOpType->equals(*retType)) {
+                        error(node, "Implemented operator return type mismatch");
+                    }
+                } else {
+                    error(node, fmt::format("Type '{}' does not implement operator '{}'", targetStruct->name, (int)node.op));
+                }
+            }
+        }
     }
 
     // 6. Body

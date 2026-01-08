@@ -9,3 +9,4 @@
 #include "StructType.hpp"
 #include "NamespaceType.hpp"
 #include "SelfType.hpp"
+#include "PrototypeType.hpp"

@@ -90,6 +90,23 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeFromAST(TypeNode* node) {
     }
 
     // 4. Base Type (Identifier)
+    if (node->is_prototype) {
+        std::shared_ptr<Type> keyType = currentScope->resolveType("any");
+        std::shared_ptr<Type> valueType = currentScope->resolveType("any");
+        
+        if (!keyType) keyType = std::make_shared<PrimitiveType>("any");
+        if (!valueType) valueType = std::make_shared<PrimitiveType>("any");
+
+        if (node->generics.size() >= 1) {
+            keyType = resolveTypeFromAST(node->generics[0].get());
+        }
+        if (node->generics.size() >= 2) {
+            valueType = resolveTypeFromAST(node->generics[1].get());
+        }
+        
+        return std::make_shared<PrototypeType>(keyType, valueType);
+    }
+
     auto type = currentScope->resolveType(node->name);
     if (!type) {
         error(*node, "Undefined type '" + node->name + "'");
@@ -122,6 +139,12 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeFromAST(TypeNode* node) {
         }
     }
     
+    if (type && !node->annotations.empty()) {
+        for (auto& ann : node->annotations) {
+            ann->accept(*this);
+        }
+    }
+
     return type;
 }
 

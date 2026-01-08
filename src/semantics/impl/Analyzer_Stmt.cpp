@@ -111,7 +111,21 @@ void SemanticAnalyzer::visit(TryCatch& node) {
 }
 
 void SemanticAnalyzer::visit(BlameStatement& node) {
-    node.error_expr->accept(*this);
+    if (node.condition) {
+        node.condition->accept(*this);
+        auto boolType = currentScope->resolveType("bool");
+        if (lastExprType) {
+            checkType(*node.condition, lastExprType, boolType);
+        }
+    }
+    
+    if (node.message) {
+        node.message->accept(*this);
+        auto stringType = currentScope->resolveType("string");
+        if (lastExprType) {
+            checkType(*node.message, lastExprType, stringType);
+        }
+    }
 }
 
 bool SemanticAnalyzer::checkReturnPaths(Statement* node) {

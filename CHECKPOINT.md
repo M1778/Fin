@@ -14,11 +14,17 @@
 - [x] `prototype` type syntax added: `<{type, type}>`
 
 ## Active Plan
-### 1. Semantic Analysis (IN PROGRESS)
-- [ ] Implement `self` injection for methods
-- [ ] Implement `implements` logic for operators and types
-- [ ] Implement `prototype` compatibility checks for literals and types
-- [ ] Implement `blame` semantic checking (assert vs throw)
+### 1. Semantic Analysis (COMPLETED)
+- [x] Implement `self` injection for methods (Verified)
+- [x] Implement `implements` logic for operators and types
+- [x] Implement `prototype` compatibility checks for literals and types
+- [x] Implement `blame` semantic checking (assert vs throw)
+
+### 2. Testing and Validation (NEXT)
+- [ ] Create test cases for `blame` assert
+- [ ] Create test cases for `prototype` literals and types
+- [ ] Create test cases for macro definitions
+- [ ] Create test cases for type annotations
 
 ## Task List
 1. [x] **Implement 'blame' as assert**

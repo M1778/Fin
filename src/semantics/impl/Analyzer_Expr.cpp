@@ -35,6 +35,35 @@ std::shared_ptr<StructType> getStructType(std::shared_ptr<Type> type, std::share
     return nullptr;
 }
 
+void SemanticAnalyzer::visit(PrototypeLiteral& node) {
+    std::shared_ptr<Type> keyType = nullptr;
+    std::shared_ptr<Type> valueType = nullptr;
+
+    for (auto& pair : node.elements) {
+        pair.first->accept(*this);
+        auto kType = lastExprType;
+        if (!keyType) keyType = kType;
+        else if (kType && !kType->equals(*keyType)) {
+            keyType = currentScope->resolveType("any");
+        }
+
+        pair.second->accept(*this);
+        auto vType = lastExprType;
+        if (!valueType) valueType = vType;
+        else if (vType && !vType->equals(*valueType)) {
+            valueType = currentScope->resolveType("any");
+        }
+    }
+
+    if (!keyType) keyType = currentScope->resolveType("any");
+    if (!valueType) valueType = currentScope->resolveType("any");
+    
+    if (!keyType) keyType = std::make_shared<PrimitiveType>("any");
+    if (!valueType) valueType = std::make_shared<PrimitiveType>("any");
+
+    lastExprType = std::make_shared<PrototypeType>(keyType, valueType);
+}
+
 void SemanticAnalyzer::visit(Literal& node) {
     switch(node.kind) {
         case ASTTokenKind::INTEGER: lastExprType = currentScope->resolveType("int"); break;
