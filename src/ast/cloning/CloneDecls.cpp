@@ -142,7 +142,7 @@ void CloneVisitor::visit(OperatorDeclaration& node) {
         node.is_public
     );
     res->generic_params = cloneVector(node.generic_params);
-    if(node.implements_expr) res->implements_expr = clone(node.implements_expr.get());
+    if(node.implements_type) res->implements_type = clone(node.implements_type.get());
     res->setLoc(node.loc);
     result = std::move(res);
 }
@@ -217,6 +217,16 @@ void CloneVisitor::visit(SpecialDeclaration& node) {
         clone(node.body.get())
     );
     res->attributes = cloneVector(node.attributes);
+    res->setLoc(node.loc);
+    result = std::move(res);
+}
+
+void CloneVisitor::visit(ImplementsBlock& node) {
+    auto res = std::make_unique<ImplementsBlock>(
+        clone(node.target_type.get()),
+        cloneVector(node.methods),
+        cloneVector(node.operators)
+    );
     res->setLoc(node.loc);
     result = std::move(res);
 }

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Visitor.hpp"
-#include "../ASTNode.hpp"
+#include "ASTNode.hpp"
 #include <memory>
 #include <vector>
 
@@ -43,6 +43,7 @@ public:
     void visit(TypeDefinition& node) override;
     void visit(SpecialDeclaration& node) override;
     void visit(ClassDeclaration& node) override;
+    void visit(ImplementsBlock& node) override;
 
     void visit(Block& node) override;
     void visit(ReturnStatement& node) override;
@@ -57,6 +58,7 @@ public:
     void visit(TryCatch& node) override;
     void visit(BlameStatement& node) override;
 
+    void visit(PrototypeLiteral& node) override;
     void visit(BinaryOp& node) override;
     void visit(UnaryOp& node) override;
     void visit(Literal& node) override;

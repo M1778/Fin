@@ -38,7 +38,7 @@ public:
     void visit(ConstructorDeclaration& node) override;
     void visit(DestructorDeclaration& node) override;
     
-    // Helpers (ADDED THESE)
+    // Helpers
     void visit(Parameter& node) override;
     void visit(StructMember& node) override;
 
@@ -57,6 +57,7 @@ public:
     void visit(BlameStatement& node) override;
 
     // Expressions
+    void visit(PrototypeLiteral& node) override;
     void visit(BinaryOp& node) override;
     void visit(UnaryOp& node) override;
     void visit(Literal& node) override;
@@ -85,6 +86,7 @@ public:
     void visit(StaticMethodCall& node) override;
     void visit(TypeDefinition& node) override;
     void visit(SpecialDeclaration& node) override;
+    void visit(ImplementsBlock& node) override;
 
 private:
     DiagnosticEngine& diag;

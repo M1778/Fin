@@ -224,6 +224,17 @@ void MacroExpander::visit(MacroCall& node) {
     }
 }
 
+void MacroExpander::visit(PrototypeLiteral& node) {
+    if (node.base_type) node.base_type->accept(*this);
+    for (auto& field : node.fields) {
+        field.second->accept(*this);
+        if (expandedExpression) {
+            field.second = std::move(expandedExpression);
+            expandedExpression = nullptr;
+        }
+    }
+}
+
 void MacroExpander::visit(Literal&) {}
 void MacroExpander::visit(Identifier&) {}
 void MacroExpander::visit(QuoteExpression&) {}
