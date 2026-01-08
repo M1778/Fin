@@ -126,8 +126,12 @@ void SubstitutionVisitor::visit(DeleteStatement& node) {
     if(replacementExpr) { node.expr = std::move(replacementExpr); replacementExpr = nullptr; }
 }
 void SubstitutionVisitor::visit(BlameStatement& node) {
-    node.error_expr->accept(*this);
-    if(replacementExpr) { node.error_expr = std::move(replacementExpr); replacementExpr = nullptr; }
+    node.condition->accept(*this);
+    if(replacementExpr) { node.condition = std::move(replacementExpr); replacementExpr = nullptr; }
+    if(node.message) {
+        node.message->accept(*this);
+        if(replacementExpr) { node.message = std::move(replacementExpr); replacementExpr = nullptr; }
+    }
 }
 void SubstitutionVisitor::visit(MethodCall& node) {
     node.object->accept(*this);
