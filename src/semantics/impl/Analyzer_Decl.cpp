@@ -311,16 +311,14 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
         structType->defineOperator((int)node.op, retType);
     }
     
-    if (node.implements_expr) {
-        node.implements_expr->accept(*this);
-        if (lastExprType) {
-            auto targetStruct = getStructType(lastExprType, currentScope);
+    if (node.implements_type) {
+        auto implType = resolveTypeFromAST(node.implements_type.get());
+        if (implType) {
+            auto targetStruct = std::dynamic_pointer_cast<StructType>(implType);
             if (targetStruct) {
-                // Find matching operator in target
                 int opKey = static_cast<int>(node.op);
                 if (targetStruct->operators.count(opKey)) {
                     auto sourceOpType = targetStruct->operators[opKey];
-                    // "Copy" or validate compatibility
                     if (retType && !sourceOpType->equals(*retType)) {
                         error(node, "Implemented operator return type mismatch");
                     }

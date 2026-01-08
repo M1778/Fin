@@ -469,7 +469,13 @@ inheritance_opt:
     ;
 
 struct_body_content:
-    struct_body_content attributes_opt visibility_opt struct_item_rest {
+      struct_body_content KW_PUB COLON {
+        $$ = std::move($1);
+    }
+    | struct_body_content KW_PRIV COLON {
+        $$ = std::move($1);
+    }
+    | struct_body_content attributes_opt visibility_opt struct_item_rest {
         if (auto* member = dynamic_cast<fin::StructMember*>($4.get())) {
             member->attributes = std::move($2);
             member->is_public = $3;
@@ -490,14 +496,6 @@ struct_body_content:
         else if (auto* dtor = dynamic_cast<fin::DestructorDeclaration*>($4.get())) {
             $1->destructor = std::unique_ptr<fin::DestructorDeclaration>(static_cast<fin::DestructorDeclaration*>($4.release()));
         }
-        $$ = std::move($1);
-    }
-    | struct_body_content KW_PUB COLON {
-        // We'll need a way to track "current visibility" if we want to support this properly.
-        // For now, let's just allow the syntax. 
-        $$ = std::move($1);
-    }
-    | struct_body_content KW_PRIV COLON {
         $$ = std::move($1);
     }
     | %empty { 
@@ -546,14 +544,14 @@ struct_item_rest:
     | KW_OPERATOR operator_symbol operator_generics_opt operator_params_opt implements_opt LT type GT block {
         auto op = std::make_unique<fin::OperatorDeclaration>($2, std::move($4), std::move($7), std::move($9), false);
         op->generic_params = std::move($3);
-        op->implements_expr = std::move($5);
+        op->implements_type = std::move($5);
         $$ = std::move(op);
         $$->setLoc(@$);
     }
     | KW_OPERATOR operator_symbol operator_generics_opt operator_params_opt implements_opt LT type GT SEMICOLON {
         auto op = std::make_unique<fin::OperatorDeclaration>($2, std::move($4), std::move($7), nullptr, false);
         op->generic_params = std::move($3);
-        op->implements_expr = std::move($5);
+        op->implements_type = std::move($5);
         $$ = std::move(op);
         $$->setLoc(@$);
     }
@@ -959,14 +957,7 @@ pointer_type:
         $$->setLoc(@$);
     }
     | AND type {
-        // &&T -> Pointer(Pointer(T))
         auto inner = std::make_unique<fin::PointerTypeNode>(std::move($2));
-        $$ = std::make_unique<fin::PointerTypeNode>(std::move(inner));
-        $$->setLoc(@$);
-    }
-    | AMPERSAND AMPERSAND type {
-        // & & T -> Pointer(Pointer(T))
-        auto inner = std::make_unique<fin::PointerTypeNode>(std::move($3));
         $$ = std::make_unique<fin::PointerTypeNode>(std::move(inner));
         $$->setLoc(@$);
     }
@@ -1454,9 +1445,8 @@ prototype_literal:
     ;
 
 prototype_elements:
-    prototype_elements COMMA expression COLON expression { $1.push_back({std::move($3), std::move($5)}); $$ = std::move($1); }
+      prototype_elements COMMA expression COLON expression { $1.push_back({std::move($3), std::move($5)}); $$ = std::move($1); }
     | expression COLON expression { std::vector<std::pair<std::unique_ptr<fin::Expression>, std::unique_ptr<fin::Expression>>> v; v.push_back({std::move($1), std::move($3)}); $$ = std::move(v); }
-    | %empty { $$ = std::vector<std::pair<std::unique_ptr<fin::Expression>, std::unique_ptr<fin::Expression>>>(); }
     ;
 
 %%
