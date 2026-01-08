@@ -99,6 +99,8 @@
 %right ARROW
 %right EQUAL PLUSEQUAL MINUSEQUAL MULTEQUAL DIVEQUAL
 %right QUESTION COLON
+%left PIPE /* For logic OR */
+%left AMPERSAND /* For logic AND */
 %left OR
 %left AND
 %nonassoc EQEQ NOTEQ LT GT LTEQ GTEQ
@@ -142,6 +144,7 @@
 %type <std::unique_ptr<fin::GenericParam>> generic_param
 %type <std::vector<std::unique_ptr<fin::Attribute>>> attributes_opt attribute_list
 %type <std::unique_ptr<fin::Attribute>> attribute
+%type <std::string> attr_id
 
 /* Extern Params */
 %type <std::pair<std::vector<std::unique_ptr<fin::Parameter>>, bool>> extern_params
@@ -157,7 +160,7 @@
 %type <std::unique_ptr<fin::ASTNode>> struct_item_rest implements_item_rest
 
 /* Enums & Imports */
-%type <std::vector<std::pair<std::string, std::unique_ptr<fin::Expression>>>> enum_values
+%type <std::vector<pair<std::string, std::unique_ptr<fin::Expression>>>> enum_values
 %type <std::pair<std::string, std::unique_ptr<fin::Expression>>> enum_value
 %type <std::vector<std::string>> import_list
 %type <std::vector<std::unique_ptr<fin::GenericParam>>> operator_generics_opt
@@ -364,19 +367,21 @@ attribute_list:
     ;
 
 attribute:
-    HASH LBRACKET IDENTIFIER EQUAL STRING_LITERAL RBRACKET {
+    HASH LBRACKET attr_id EQUAL STRING_LITERAL RBRACKET {
         $$ = std::make_unique<fin::Attribute>($3, $5);
         $$->setLoc(@$);
     }
-    | HASH LBRACKET IDENTIFIER RBRACKET {
+    | HASH LBRACKET attr_id RBRACKET {
         $$ = std::make_unique<fin::Attribute>($3, true);
         $$->setLoc(@$);
     }
-    | HASH LBRACKET IDENTIFIER LPAREN dotted_path RPAREN RBRACKET {
+    | HASH LBRACKET attr_id LPAREN dotted_path RPAREN RBRACKET {
         $$ = std::make_unique<fin::Attribute>($3, $5);
         $$->setLoc(@$);
     }
     ;
+
+attr_id: IDENTIFIER | KW_CLASS { $$ = "class"; };
 
 /* --- GENERICS --- */
 
@@ -580,6 +585,7 @@ operator_symbol:
     | SHIFTLEFT { $$ = fin::ASTTokenKind::SHIFTLEFT; }
     | SHIFTRIGHT { $$ = fin::ASTTokenKind::SHIFTRIGHT; }
     | NOT { $$ = fin::ASTTokenKind::NOT; }
+    | EQUAL { $$ = fin::ASTTokenKind::EQUAL; }
     | LBRACKET RBRACKET { $$ = fin::ASTTokenKind::INDEX; }
     | LBRACKET RBRACKET EQUAL { $$ = fin::ASTTokenKind::INDEX_ASSIGN; }
     | BACKTICK MULT { $$ = fin::ASTTokenKind::DEREF; }
@@ -675,8 +681,16 @@ param_list:
     ;
 
 param:
-    IDENTIFIER COLON LT type GT {
+    IDENTIFIER LT type GT {
+        $$ = std::make_unique<fin::Parameter>($1, std::move($3), nullptr, false);
+        $$->setLoc(@$);
+    }
+    | IDENTIFIER COLON LT type GT {
         $$ = std::make_unique<fin::Parameter>($1, std::move($4), nullptr, false);
+        $$->setLoc(@$);
+    }
+    | ELLIPSIS IDENTIFIER LT type GT {
+        $$ = std::make_unique<fin::Parameter>($2, std::move($4), nullptr, true);
         $$->setLoc(@$);
     }
     | ELLIPSIS IDENTIFIER COLON LT type GT {
@@ -750,6 +764,9 @@ macro_rule:
     }
     | LPAREN STRING_LITERAL RPAREN ARROW block { 
         $$ = fin::MacroRule{$2, std::move($5)}; 
+    }
+    | LPAREN RPAREN ARROW block {
+        $$ = fin::MacroRule{"", std::move($4)};
     }
     ;
 
@@ -896,6 +913,7 @@ type:
         $$ = std::move($1);
         $$->annotations = std::move($3);
     }
+    | ELLIPSIS { $$ = std::make_unique<fin::TypeNode>("..."); }
     ;
 
 type_no_annot:
@@ -948,6 +966,10 @@ type_list:
 
 pointer_type:
     AMPERSAND type_no_annot {
+        $$ = std::make_unique<fin::PointerTypeNode>(std::move($2));
+        $$->setLoc(@$);
+    }
+    | MULT type_no_annot {
         $$ = std::make_unique<fin::PointerTypeNode>(std::move($2));
         $$->setLoc(@$);
     }
@@ -1078,8 +1100,8 @@ expression:
     | expression MINUSEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MINUSEQUAL, std::move($3)); $$->setLoc(@$); }
     | expression MULTEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MULTEQUAL, std::move($3)); $$->setLoc(@$); }
     | expression DIVEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::DIVEQUAL, std::move($3)); $$->setLoc(@$); }
-    | expression OR expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($3)); $$->setLoc(@$); }
-    | expression AND expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($3)); $$->setLoc(@$); }
+    | expression PIPE PIPE expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($4)); $$->setLoc(@$); }
+    | expression AMPERSAND AMPERSAND expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($4)); $$->setLoc(@$); }
     | expression EQEQ expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::EQEQ, std::move($3)); $$->setLoc(@$); }
     | expression NOTEQ expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::NOTEQ, std::move($3)); $$->setLoc(@$); }
     | expression LT expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::LT, std::move($3)); $$->setLoc(@$); }
@@ -1091,6 +1113,8 @@ expression:
     | expression MULT expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MULT, std::move($3)); $$->setLoc(@$); }
     | expression DIV expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::DIV, std::move($3)); $$->setLoc(@$); }
     | expression MOD expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MOD, std::move($3)); $$->setLoc(@$); }
+    | expression LT LT expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTLEFT, std::move($4)); $$->setLoc(@$); }
+    | expression GT GT expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTRIGHT, std::move($4)); $$->setLoc(@$); }
     
     /* Unary Ops */
     | MINUS expression %prec UMINUS { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::MINUS, std::move($2)); $$->setLoc(@$); }
@@ -1118,8 +1142,8 @@ expression:
     | expression INCREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::INCREMENT, std::move($1)); $$->setLoc(@$); }
     | expression DECREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::DECREMENT, std::move($1)); $$->setLoc(@$); }
     | expression LBRACKET expression RBRACKET {
-         $$ = std::make_unique<fin::ArrayAccess>(std::move($1), std::move($3));
-         $$->setLoc(@$);
+           $$ = std::make_unique<fin::ArrayAccess>(std::move($1), std::move($3));
+           $$->setLoc(@$);
     }
     | expression QUESTION expression COLON expression {
         $$ = std::make_unique<fin::TernaryOp>(std::move($1), std::move($3), std::move($5));
@@ -1159,6 +1183,10 @@ expression:
         $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
         $$->setLoc(@$);
     }
+    | KW_NEW type_no_annot {
+        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::vector<std::unique_ptr<fin::Expression>>());
+        $$->setLoc(@$);
+    }
     | KW_SELF_TYPE LBRACE field_assignments RBRACE {
         $$ = std::make_unique<fin::StructInstantiation>("Self", std::move($3));
         $$->setLoc(@$);
@@ -1176,8 +1204,8 @@ no_struct_expression:
     | no_struct_expression MINUSEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MINUSEQUAL, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression MULTEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MULTEQUAL, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression DIVEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::DIVEQUAL, std::move($3)); $$->setLoc(@$); }
-    | no_struct_expression OR no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($3)); $$->setLoc(@$); }
-    | no_struct_expression AND no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($3)); $$->setLoc(@$); }
+    | no_struct_expression PIPE PIPE no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($4)); $$->setLoc(@$); }
+    | no_struct_expression AMPERSAND AMPERSAND no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($4)); $$->setLoc(@$); }
     | no_struct_expression EQEQ no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::EQEQ, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression NOTEQ no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::NOTEQ, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression LT no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::LT, std::move($3)); $$->setLoc(@$); }
@@ -1189,6 +1217,8 @@ no_struct_expression:
     | no_struct_expression MULT no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MULT, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression DIV no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::DIV, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression MOD no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MOD, std::move($3)); $$->setLoc(@$); }
+    | no_struct_expression LT LT no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTLEFT, std::move($4)); $$->setLoc(@$); }
+    | no_struct_expression GT GT no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTRIGHT, std::move($4)); $$->setLoc(@$); }
     
     /* Unary Ops */
     | MINUS no_struct_expression %prec UMINUS { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::MINUS, std::move($2)); $$->setLoc(@$); }
@@ -1216,8 +1246,8 @@ no_struct_expression:
     | no_struct_expression INCREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::INCREMENT, std::move($1)); $$->setLoc(@$); }
     | no_struct_expression DECREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::DECREMENT, std::move($1)); $$->setLoc(@$); }
     | no_struct_expression LBRACKET expression RBRACKET {
-         $$ = std::make_unique<fin::ArrayAccess>(std::move($1), std::move($3));
-         $$->setLoc(@$);
+           $$ = std::make_unique<fin::ArrayAccess>(std::move($1), std::move($3));
+           $$->setLoc(@$);
     }
     | no_struct_expression QUESTION no_struct_expression COLON no_struct_expression {
         $$ = std::make_unique<fin::TernaryOp>(std::move($1), std::move($3), std::move($5));
@@ -1279,6 +1309,10 @@ no_struct_expression:
     }
     | KW_NEW type_no_annot LPAREN arguments RPAREN {
         $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
+        $$->setLoc(@$);
+    }
+    | KW_NEW type_no_annot {
+        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::vector<std::unique_ptr<fin::Expression>>());
         $$->setLoc(@$);
     }
     ;
