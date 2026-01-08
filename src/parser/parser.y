@@ -51,8 +51,8 @@
 %token <std::string> IDENTIFIER INTEGER FLOAT STRING_LITERAL CHAR_LITERAL
 
 /* Keywords */
-%token KW_LET KW_BEZ KW_CONST KW_BETON KW_AUTO
-%token KW_FUN KW_NORET KW_RETURN
+%token KW_LET KW_CONST KW_AUTO
+%token KW_FUN KW_RETURN
 %token KW_PUB KW_PRIV
 %token KW_STRUCT KW_ENUM KW_INTERFACE
 %token KW_MACRO KW_STATIC KW_NULL
@@ -62,7 +62,7 @@
 %token KW_IMPORT KW_AS KW_FROM
 %token KW_NEW KW_DELETE KW_SIZEOF KW_TYPEOF KW_AS_PTR KW_CAST
 %token KW_OPERATOR
-%token KW_SPECIAL KW_AT_RETURN KW_FN_TYPE KW_DEFINE
+%token KW_SPECIAL KW_FN_TYPE KW_DEFINE
 %token KW_M1778
 %token KW_TYPE KW_CLASS KW_IMPLEMENTS KW_ANY
 
@@ -156,6 +156,7 @@
 %type <std::pair<std::string, std::unique_ptr<fin::Expression>>> enum_value
 %type <std::vector<std::string>> import_list
 %type <std::vector<std::unique_ptr<fin::GenericParam>>> operator_generics_opt
+%type <std::vector<std::unique_ptr<fin::Parameter>>> operator_params_opt
 
 /* Control Flow */
 %type <std::unique_ptr<fin::Expression>> implements_opt
@@ -266,6 +267,12 @@ annotated_declaration:
         } else if (auto* in = dynamic_cast<fin::InterfaceDeclaration*>($$.get())) {
             in->attributes = std::move($1);
             in->is_public = $2;
+        } else if (auto* var = dynamic_cast<fin::VariableDeclaration*>($$.get())) {
+            var->attributes = std::move($1);
+            var->is_public = $2;
+        } else if (auto* td = dynamic_cast<fin::TypeDefinition*>($$.get())) {
+            td->attributes = std::move($1);
+            td->is_public = $2;
         }
         $$->setLoc(@$);
     }
@@ -278,6 +285,8 @@ declaration_with_vis:
         else if (auto* st = dynamic_cast<fin::StructDeclaration*>($$.get())) st->is_public = true;
         else if (auto* en = dynamic_cast<fin::EnumDeclaration*>($$.get())) en->is_public = true;
         else if (auto* in = dynamic_cast<fin::InterfaceDeclaration*>($$.get())) in->is_public = true;
+        else if (auto* var = dynamic_cast<fin::VariableDeclaration*>($$.get())) var->is_public = true;
+        else if (auto* td = dynamic_cast<fin::TypeDefinition*>($$.get())) td->is_public = true;
         $$->setLoc(@$);
     }
     | KW_PRIV declaration_body {
@@ -286,6 +295,8 @@ declaration_with_vis:
         else if (auto* st = dynamic_cast<fin::StructDeclaration*>($$.get())) st->is_public = false;
         else if (auto* en = dynamic_cast<fin::EnumDeclaration*>($$.get())) en->is_public = false;
         else if (auto* in = dynamic_cast<fin::InterfaceDeclaration*>($$.get())) in->is_public = false;
+        else if (auto* var = dynamic_cast<fin::VariableDeclaration*>($$.get())) var->is_public = false;
+        else if (auto* td = dynamic_cast<fin::TypeDefinition*>($$.get())) td->is_public = false;
         $$->setLoc(@$);
     }
     ;
@@ -297,11 +308,6 @@ bare_declaration:
 declaration_body:
     KW_FUN IDENTIFIER generic_params_opt LPAREN params RPAREN LT type GT block {
         $$ = std::make_unique<fin::FunctionDeclaration>($2, std::move($5), std::move($8), std::move($10));
-        static_cast<fin::FunctionDeclaration*>($$.get())->generic_params = std::move($3);
-    }
-    | KW_FUN IDENTIFIER generic_params_opt LPAREN params RPAREN KW_NORET block {
-        auto voidType = std::make_unique<fin::TypeNode>("void");
-        $$ = std::make_unique<fin::FunctionDeclaration>($2, std::move($5), std::move(voidType), std::move($8));
         static_cast<fin::FunctionDeclaration*>($$.get())->generic_params = std::move($3);
     }
     | KW_FUN IDENTIFIER generic_params_opt LPAREN params RPAREN LT type GT SEMICOLON {
@@ -333,7 +339,16 @@ declaration_body:
         cls->parents = std::move($4);
         $$ = std::move(cls);
     }
-
+    | KW_LET IDENTIFIER LT type GT EQUAL expression SEMICOLON {
+        $$ = std::make_unique<fin::VariableDeclaration>(true, $2, std::move($4), std::move($7));
+    }
+    | KW_CONST IDENTIFIER LT type GT EQUAL expression SEMICOLON {
+        $$ = std::make_unique<fin::VariableDeclaration>(false, $2, std::move($4), std::move($7));
+    }
+    | KW_LET IDENTIFIER LT type GT SEMICOLON {
+        $$ = std::make_unique<fin::VariableDeclaration>(true, $2, std::move($4), nullptr);
+    }
+    | type_definition { $$ = std::move($1); }
     ;
 
 /* --- ATTRIBUTES --- */
@@ -437,6 +452,11 @@ dotted_path:
     | dotted_path DOT IDENTIFIER { $$ = $1 + "." + $3; }
     ;
 
+operator_params_opt:
+    LPAREN params RPAREN { $$ = std::move($2); }
+    | %empty { $$ = std::vector<std::unique_ptr<fin::Parameter>>(); }
+    ;
+
 /* --- STRUCTS --- */
 
 inheritance_opt:
@@ -466,6 +486,14 @@ struct_body_content:
         else if (auto* dtor = dynamic_cast<fin::DestructorDeclaration*>($4.get())) {
             $1->destructor = std::unique_ptr<fin::DestructorDeclaration>(static_cast<fin::DestructorDeclaration*>($4.release()));
         }
+        $$ = std::move($1);
+    }
+    | struct_body_content KW_PUB COLON {
+        // We'll need a way to track "current visibility" if we want to support this properly.
+        // For now, let's just allow the syntax. 
+        $$ = std::move($1);
+    }
+    | struct_body_content KW_PRIV COLON {
         $$ = std::move($1);
     }
     | %empty { 
@@ -502,12 +530,6 @@ struct_item_rest:
         static_cast<fin::FunctionDeclaration*>($$.get())->generic_params = std::move($3);
         $$->setLoc(@$);
     }
-    | KW_FUN IDENTIFIER generic_params_opt LPAREN params RPAREN KW_NORET block {
-        auto voidType = std::make_unique<fin::TypeNode>("void");
-        $$ = std::make_unique<fin::FunctionDeclaration>($2, std::move($5), std::move(voidType), std::move($8));
-        static_cast<fin::FunctionDeclaration*>($$.get())->generic_params = std::move($3);
-        $$->setLoc(@$);
-    }
     /* Static Method */
     | KW_STATIC KW_FUN IDENTIFIER generic_params_opt LPAREN params RPAREN LT type GT block {
         $$ = std::make_unique<fin::FunctionDeclaration>($3, std::move($6), std::move($9), std::move($11));
@@ -517,10 +539,17 @@ struct_item_rest:
         $$->setLoc(@$);
     }
     /* Operator */
-    | KW_OPERATOR operator_symbol operator_generics_opt LPAREN params RPAREN implements_opt LT type GT block {
-        auto op = std::make_unique<fin::OperatorDeclaration>($2, std::move($5), std::move($9), std::move($11), false);
+    | KW_OPERATOR operator_symbol operator_generics_opt operator_params_opt implements_opt LT type GT block {
+        auto op = std::make_unique<fin::OperatorDeclaration>($2, std::move($4), std::move($7), std::move($9), false);
         op->generic_params = std::move($3);
-        op->implements_expr = std::move($7);
+        op->implements_expr = std::move($5);
+        $$ = std::move(op);
+        $$->setLoc(@$);
+    }
+    | KW_OPERATOR operator_symbol operator_generics_opt operator_params_opt implements_opt LT type GT SEMICOLON {
+        auto op = std::make_unique<fin::OperatorDeclaration>($2, std::move($4), std::move($7), nullptr, false);
+        op->generic_params = std::move($3);
+        op->implements_expr = std::move($5);
         $$ = std::move(op);
         $$->setLoc(@$);
     }
@@ -620,8 +649,8 @@ interface_item_rest:
     | declaration_body { $$ = std::move($1); }
     
     /* Abstract Operator */
-    | KW_OPERATOR operator_symbol operator_generics_opt LPAREN params RPAREN LT type GT SEMICOLON {
-        auto op = std::make_unique<fin::OperatorDeclaration>($2, std::move($5), std::move($8), nullptr, false);
+    | KW_OPERATOR operator_symbol operator_generics_opt operator_params_opt LT type GT SEMICOLON {
+        auto op = std::make_unique<fin::OperatorDeclaration>($2, std::move($4), std::move($6), nullptr, false);
         op->generic_params = std::move($3);
         $$ = std::move(op);
         $$->setLoc(@$);
@@ -693,11 +722,6 @@ super_expression:
 define_declaration:
     AT KW_DEFINE IDENTIFIER LPAREN extern_params RPAREN LT type GT SEMICOLON {
         $$ = std::make_unique<fin::DefineDeclaration>($3, std::move($5.first), std::move($8), $5.second);
-        $$->setLoc(@$);
-    }
-    | AT KW_DEFINE IDENTIFIER LPAREN extern_params RPAREN KW_NORET SEMICOLON {
-        auto voidType = std::make_unique<fin::TypeNode>("void");
-        $$ = std::make_unique<fin::DefineDeclaration>($3, std::move($5.first), std::move(voidType), $5.second);
         $$->setLoc(@$);
     }
     ;
@@ -852,6 +876,12 @@ pointer_type:
     | AND type {
         // &&T -> Pointer(Pointer(T))
         auto inner = std::make_unique<fin::PointerTypeNode>(std::move($2));
+        $$ = std::make_unique<fin::PointerTypeNode>(std::move(inner));
+        $$->setLoc(@$);
+    }
+    | AMPERSAND AMPERSAND type {
+        // & & T -> Pointer(Pointer(T))
+        auto inner = std::make_unique<fin::PointerTypeNode>(std::move($3));
         $$ = std::make_unique<fin::PointerTypeNode>(std::move(inner));
         $$->setLoc(@$);
     }

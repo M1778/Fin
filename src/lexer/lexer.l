@@ -71,13 +71,10 @@ WS          [ \t\r]+
 
     /* Keywords */
 "let"       { MAKE(KW_LET); }
-"bez"       { MAKE(KW_BEZ); }
 "const"     { MAKE(KW_CONST); }
-"beton"     { MAKE(KW_BETON); }
 "auto"      { MAKE(KW_AUTO); }
 
 "fun"       { MAKE(KW_FUN); }
-"<noret>"   { MAKE(KW_NORET); }
 "return"    { MAKE(KW_RETURN); }
 
 "struct"    { MAKE(KW_STRUCT); }
@@ -127,7 +124,6 @@ WS          [ \t\r]+
 "any"       { MAKE(KW_ANY); }
 
 "special"   { MAKE(KW_SPECIAL); }
-"@return"   { MAKE(KW_AT_RETURN); }
 "fn"        { MAKE(KW_FN_TYPE); }
 "define"    { MAKE(KW_DEFINE); }
 "quote"     { MAKE(KW_QUOTE); }

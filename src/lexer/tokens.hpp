@@ -9,8 +9,8 @@ enum class TokenKind {
     END_OF_FILE = 0,
 
     // --- Keywords ---
-    KW_LET, KW_BEZ, KW_CONST, KW_BETON, KW_AUTO,
-    KW_FUN, KW_NORET, KW_RETURN,
+    KW_LET, KW_CONST, KW_AUTO,
+    KW_FUN, KW_RETURN,
     KW_PUB, KW_PRIV,
     KW_STRUCT, KW_ENUM, KW_INTERFACE,
     KW_MACRO, KW_STATIC, KW_NULL,
@@ -20,7 +20,7 @@ enum class TokenKind {
     KW_IMPORT, KW_AS, KW_FROM,
     KW_NEW, KW_DELETE, KW_SIZEOF, KW_TYPEOF, KW_AS_PTR,
     KW_STD_CONV, KW_OPERATOR,
-    KW_SPECIAL, KW_AT_RETURN, KW_FN_TYPE, KW_DEFINE,
+    KW_SPECIAL, KW_FN_TYPE, KW_DEFINE,
     KW_M1778, // Signature token
 
     // --- Primitive Types ---

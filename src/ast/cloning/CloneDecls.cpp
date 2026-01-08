@@ -30,6 +30,8 @@ void CloneVisitor::visit(VariableDeclaration& node) {
         clone(node.type.get()), 
         clone(node.initializer.get())
     );
+    res->is_public = node.is_public;
+    res->attributes = cloneVector(node.attributes);
     res->setLoc(node.loc);
     result = std::move(res);
 }

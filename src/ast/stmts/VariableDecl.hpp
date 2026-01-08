@@ -9,9 +9,12 @@ namespace fin {
 class VariableDeclaration : public Statement {
 public:
     bool is_mutable;
+    bool is_public = false;
     std::string name;
     std::unique_ptr<TypeNode> type;
     std::unique_ptr<Expression> initializer;
+    std::vector<std::unique_ptr<Attribute>> attributes;
+
     VariableDeclaration(bool mut, std::string n, std::unique_ptr<TypeNode> t, std::unique_ptr<Expression> init);
     void accept(Visitor& v) override;
 };
