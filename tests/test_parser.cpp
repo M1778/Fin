@@ -139,7 +139,17 @@ INSTANTIATE_TEST_SUITE_P(
     FileParserTest,
     ::testing::ValuesIn(GetFinFiles()),
     [](const testing::TestParamInfo<std::string>& info) {
-        std::string name = fs::path(info.param).stem().string();
+        std::string name = info.param;
+        // Strip the common prefix "tests/samples/" or "samples/"
+        size_t pos = name.find("samples/");
+        if (pos != std::string::npos) {
+            name = name.substr(pos + 8);
+        }
+        // Remove .fin extension
+        if (name.size() > 4 && name.substr(name.size() - 4) == ".fin") {
+            name = name.substr(0, name.size() - 4);
+        }
+        // Replace non-alphanumeric with underscores
         std::replace_if(name.begin(), name.end(), [](char c){ return !isalnum(c); }, '_');
         return name;
     }

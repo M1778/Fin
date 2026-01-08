@@ -192,6 +192,12 @@ void SemanticAnalyzer::visit(PointerTypeNode& node) { resolveTypeFromAST(&node);
 void SemanticAnalyzer::visit(ArrayTypeNode& node) { resolveTypeFromAST(&node); }
 
 
+void SemanticAnalyzer::visit(Program& node) {
+    for (auto& stmt : node.statements) {
+        stmt->accept(*this);
+    }
+}
+
 void SemanticAnalyzer::visit(TypeNode& node) { resolveTypeFromAST(&node); }
 void SemanticAnalyzer::visit(FunctionTypeNode& node) { resolveTypeFromAST(&node); }
 

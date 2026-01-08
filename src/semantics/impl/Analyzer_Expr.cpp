@@ -329,6 +329,23 @@ void SemanticAnalyzer::visit(ArrayAccess& node) {
     }
 }
 
+void SemanticAnalyzer::visit(MacroCall& node) {
+    // Macro calls should be expanded before semantic analysis.
+    // If we reach here, it's either unexpanded or inside a quote.
+    for (auto& arg : node.args) {
+        arg->accept(*this);
+    }
+    lastExprType = nullptr; // Or a placeholder type if we want to support unexpanded macros
+}
+
+void SemanticAnalyzer::visit(MacroInvocation& node) {
+    // Similar to MacroCall
+    for (auto& arg : node.args) {
+        arg->accept(*this);
+    }
+    lastExprType = nullptr;
+}
+
 void SemanticAnalyzer::visit(CastExpression& node) {
     node.expr->accept(*this);
     auto sourceType = lastExprType;
