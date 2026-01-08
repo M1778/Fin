@@ -49,6 +49,7 @@
 
 /* Literals */
 %token <std::string> IDENTIFIER INTEGER FLOAT STRING_LITERAL CHAR_LITERAL
+%token <std::string> TYPE_ID /* For type-specific identifiers to help resolve LT conflict */
 
 /* Keywords */
 %token KW_LET KW_CONST KW_AUTO
@@ -110,6 +111,7 @@
 %left LPAREN LBRACKET DOT LBRACE
 %left INCREMENT DECREMENT
 %left HIGH_PREC
+%left TYPE_PREC /* Specific precedence for resolving < in types */
 
 /* Control Flow Precedence */
 %precedence KW_IFX
@@ -581,16 +583,12 @@ operator_symbol:
     | LTEQ { $$ = fin::ASTTokenKind::LTEQ; }
     | GTEQ { $$ = fin::ASTTokenKind::GTEQ; }
     | AMPERSAND { $$ = fin::ASTTokenKind::AMPERSAND; }
-    | AMPERSAND AMPERSAND { $$ = fin::ASTTokenKind::AND; }
+    | AND { $$ = fin::ASTTokenKind::AND; }
     | PIPE { $$ = fin::ASTTokenKind::PIPE; }
-    | PIPE PIPE { $$ = fin::ASTTokenKind::OR; }
+    | OR { $$ = fin::ASTTokenKind::OR; }
     | CARET { $$ = fin::ASTTokenKind::CARET; }
     | SHIFTLEFT { $$ = fin::ASTTokenKind::SHIFTLEFT; }
     | SHIFTRIGHT { $$ = fin::ASTTokenKind::SHIFTRIGHT; }
-    | LT LT { $$ = fin::ASTTokenKind::SHIFTLEFT; }
-    | GT GT { $$ = fin::ASTTokenKind::SHIFTRIGHT; }
-    | LT LT EQUAL { $$ = fin::ASTTokenKind::SHIFTLEFTEQUAL; }
-    | GT GT EQUAL { $$ = fin::ASTTokenKind::SHIFTRIGHTEQUAL; }
     | SHIFTLEFTEQUAL { $$ = fin::ASTTokenKind::SHIFTLEFTEQUAL; }
     | SHIFTRIGHTEQUAL { $$ = fin::ASTTokenKind::SHIFTRIGHTEQUAL; }
     | NOT { $$ = fin::ASTTokenKind::NOT; }
@@ -691,19 +689,19 @@ param_list:
     ;
 
 param:
-    IDENTIFIER LT type GT %prec HIGH_PREC {
+    IDENTIFIER LT type GT %prec TYPE_PREC {
         $$ = std::make_unique<fin::Parameter>($1, std::move($3), nullptr, false);
         $$->setLoc(@$);
     }
-    | IDENTIFIER COLON LT type GT %prec HIGH_PREC {
+    | IDENTIFIER COLON LT type GT %prec TYPE_PREC {
         $$ = std::make_unique<fin::Parameter>($1, std::move($4), nullptr, false);
         $$->setLoc(@$);
     }
-    | ELLIPSIS IDENTIFIER LT type GT %prec HIGH_PREC {
+    | ELLIPSIS IDENTIFIER LT type GT %prec TYPE_PREC {
         $$ = std::make_unique<fin::Parameter>($2, std::move($4), nullptr, true);
         $$->setLoc(@$);
     }
-    | ELLIPSIS IDENTIFIER COLON LT type GT %prec HIGH_PREC {
+    | ELLIPSIS IDENTIFIER COLON LT type GT %prec TYPE_PREC {
         $$ = std::make_unique<fin::Parameter>($2, std::move($5), nullptr, true);
         $$->setLoc(@$);
     }
@@ -935,8 +933,13 @@ type_no_annot:
 base_type:
     primitive_type { $$ = std::make_unique<fin::TypeNode>($1); }
     | IDENTIFIER { $$ = std::make_unique<fin::TypeNode>($1); }
-    | IDENTIFIER LT type_list GT %prec HIGH_PREC { 
+    | IDENTIFIER LT type_list GT %prec TYPE_PREC { 
         $$ = std::make_unique<fin::TypeNode>($1); 
+        $$->generics = std::move($3);
+    }
+    | IDENTIFIER LT type_list SHIFTRIGHT %prec TYPE_PREC {
+        /* Handle >> as two GTs for nested generics */
+        $$ = std::make_unique<fin::TypeNode>($1);
         $$->generics = std::move($3);
     }
     | LBRACE type_list RBRACE { 
@@ -947,7 +950,11 @@ base_type:
     | KW_AUTO { $$ = std::make_unique<fin::TypeNode>("auto"); }
     | KW_SELF_TYPE { $$ = std::make_unique<fin::TypeNode>("Self"); }
     | KW_ANY { $$ = std::make_unique<fin::TypeNode>("any"); }
-    | KW_ANY LT type_list GT {
+    | KW_ANY LT type_list GT %prec TYPE_PREC {
+        $$ = std::make_unique<fin::TypeNode>("any");
+        $$->generics = std::move($3);
+    }
+    | KW_ANY LT type_list SHIFTRIGHT %prec TYPE_PREC {
         $$ = std::make_unique<fin::TypeNode>("any");
         $$->generics = std::move($3);
     }
@@ -985,6 +992,13 @@ pointer_type:
     }
     | MULT type {
         $$ = std::make_unique<fin::PointerTypeNode>(std::move($2));
+        $$->setLoc(@$);
+    }
+    | AND type {
+        /* Handle && as a double pointer/reference */
+        auto inner = std::make_unique<fin::PointerTypeNode>(std::move($2));
+        inner->setLoc(@$);
+        $$ = std::make_unique<fin::PointerTypeNode>(std::move(inner));
         $$->setLoc(@$);
     }
     ;
@@ -1114,8 +1128,8 @@ expression:
     | expression MINUSEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MINUSEQUAL, std::move($3)); $$->setLoc(@$); }
     | expression MULTEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MULTEQUAL, std::move($3)); $$->setLoc(@$); }
     | expression DIVEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::DIVEQUAL, std::move($3)); $$->setLoc(@$); }
-    | expression PIPE PIPE expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($4)); $$->setLoc(@$); }
-    | expression AMPERSAND AMPERSAND expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($4)); $$->setLoc(@$); }
+    | expression OR expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($3)); $$->setLoc(@$); }
+    | expression AND expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($3)); $$->setLoc(@$); }
     | expression EQEQ expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::EQEQ, std::move($3)); $$->setLoc(@$); }
     | expression NOTEQ expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::NOTEQ, std::move($3)); $$->setLoc(@$); }
     | expression LT expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::LT, std::move($3)); $$->setLoc(@$); }
@@ -1127,8 +1141,8 @@ expression:
     | expression MULT expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MULT, std::move($3)); $$->setLoc(@$); }
     | expression DIV expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::DIV, std::move($3)); $$->setLoc(@$); }
     | expression MOD expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MOD, std::move($3)); $$->setLoc(@$); }
-    | expression LT LT expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTLEFT, std::move($4)); $$->setLoc(@$); }
-    | expression GT GT expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTRIGHT, std::move($4)); $$->setLoc(@$); }
+    | expression SHIFTLEFT expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTLEFT, std::move($3)); $$->setLoc(@$); }
+    | expression SHIFTRIGHT expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTRIGHT, std::move($3)); $$->setLoc(@$); }
     
     /* Unary Ops */
     | MINUS expression %prec UMINUS { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::MINUS, std::move($2)); $$->setLoc(@$); }

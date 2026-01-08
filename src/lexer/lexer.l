@@ -161,13 +161,13 @@ WS          [ \t\r]+
 "!="        { MAKE(NOTEQ); }
 "<="        { MAKE(LTEQ); }
 ">="        { MAKE(GTEQ); }
-"&&"        { yyless(1); MAKE(AMPERSAND); }
-"||"        { yyless(1); MAKE(PIPE); }
+"&&"        { MAKE(AND); }
+"||"        { MAKE(OR); }
 
-"<<"        { yyless(1); MAKE(LT); }
-">>"        { yyless(1); MAKE(GT); }
-"<<="       { yyless(1); MAKE(SHIFTLEFTEQUAL); } /* Keep these for now */
-">>="       { yyless(1); MAKE(SHIFTRIGHTEQUAL); }
+"<<"        { MAKE(SHIFTLEFT); }
+">>"        { MAKE(SHIFTRIGHT); }
+"<<="       { MAKE(SHIFTLEFTEQUAL); }
+">>="       { MAKE(SHIFTRIGHTEQUAL); }
 "|"         { MAKE(PIPE); }
 "^"         { MAKE(CARET); }
 "`"         { MAKE(BACKTICK); }
