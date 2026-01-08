@@ -95,6 +95,7 @@
 /* ========================================================================== */
 
 /* Lowest precedence */
+%precedence TYPE_ANNOT_PREC
 %right ARROW
 %right EQUAL PLUSEQUAL MINUSEQUAL MULTEQUAL DIVEQUAL
 %right QUESTION COLON
@@ -891,14 +892,14 @@ variable_declaration:
 
 type:
     type_no_annot { $$ = std::move($1); }
-    | type LBRACE expression_list RBRACE {
+    | base_type LBRACE expression_list RBRACE %prec LBRACE {
         $$ = std::move($1);
         $$->annotations = std::move($3);
     }
     ;
 
 type_no_annot:
-    base_type { $$ = std::move($1); }
+    base_type %prec TYPE_ANNOT_PREC { $$ = std::move($1); }
     | pointer_type { $$ = std::move($1); }
     | array_type { $$ = std::move($1); }
     ;
@@ -946,7 +947,7 @@ type_list:
     ;
 
 pointer_type:
-    AMPERSAND type {
+    AMPERSAND type_no_annot {
         $$ = std::make_unique<fin::PointerTypeNode>(std::move($2));
         $$->setLoc(@$);
     }
@@ -1273,12 +1274,12 @@ no_struct_expression:
     
     /* Allowed Struct-like things */
     | KW_NEW type_no_annot LBRACE field_assignments RBRACE {
-        $ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
-        $->setLoc(@$);
+        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
+        $$->setLoc(@$);
     }
     | KW_NEW type_no_annot LPAREN arguments RPAREN {
-        $ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
-        $->setLoc(@$);
+        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
+        $$->setLoc(@$);
     }
     ;
 
