@@ -155,7 +155,7 @@ void MacroExpander::visit(SpecialDeclaration& node) {
 }
 
 void MacroExpander::visit(ImplementsBlock& node) {
-    if (node.target_type) node.target_type->accept(*this);
+    if (node.interface_type) node.interface_type->accept(*this);
     for (auto& method : node.methods) method->accept(*this);
     for (auto& op : node.operators) op->accept(*this);
 }

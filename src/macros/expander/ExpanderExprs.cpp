@@ -225,12 +225,20 @@ void MacroExpander::visit(MacroCall& node) {
 }
 
 void MacroExpander::visit(PrototypeLiteral& node) {
-    if (node.base_type) node.base_type->accept(*this);
-    for (auto& field : node.fields) {
-        field.second->accept(*this);
-        if (expandedExpression) {
-            field.second = std::move(expandedExpression);
-            expandedExpression = nullptr;
+    for (auto& element : node.elements) {
+        if (element.first) {
+            element.first->accept(*this);
+            if (expandedExpression) {
+                element.first = std::move(expandedExpression);
+                expandedExpression = nullptr;
+            }
+        }
+        if (element.second) {
+            element.second->accept(*this);
+            if (expandedExpression) {
+                element.second = std::move(expandedExpression);
+                expandedExpression = nullptr;
+            }
         }
     }
 }

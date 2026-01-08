@@ -239,4 +239,17 @@ void SubstitutionVisitor::visit(ArrayTypeNode& node) {
     }
 }
 
+void SubstitutionVisitor::visit(PrototypeLiteral& node) {
+    for (auto& element : node.elements) {
+        if (element.first) {
+            element.first->accept(*this);
+            if (replacementExpr) { element.first = std::move(replacementExpr); replacementExpr = nullptr; }
+        }
+        if (element.second) {
+            element.second->accept(*this);
+            if (replacementExpr) { element.second = std::move(replacementExpr); replacementExpr = nullptr; }
+        }
+    }
+}
+
 }

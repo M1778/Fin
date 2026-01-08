@@ -28,6 +28,12 @@ public:
     void visit(DeleteStatement& node) override;
     void visit(BlameStatement& node) override;
     
+    void visit(TypeDefinition&) override {}
+    void visit(SpecialDeclaration&) override {}
+    void visit(ClassDeclaration&) override {}
+    void visit(ImplementsBlock&) override {}
+    void visit(PrototypeLiteral& node) override;
+    
     // Expressions
     void visit(BinaryOp& node) override;
     void visit(UnaryOp& node) override;

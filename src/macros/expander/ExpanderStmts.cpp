@@ -70,8 +70,14 @@ void MacroExpander::visit(TryCatch& node) {
     node.catch_block->accept(*this);
 }
 void MacroExpander::visit(BlameStatement& node) {
-    node.error_expr->accept(*this);
-    if (expandedExpression) { node.error_expr = std::move(expandedExpression); expandedExpression = nullptr; }
+    if (node.condition) {
+        node.condition->accept(*this);
+        if (expandedExpression) { node.condition = std::move(expandedExpression); expandedExpression = nullptr; }
+    }
+    if (node.message) {
+        node.message->accept(*this);
+        if (expandedExpression) { node.message = std::move(expandedExpression); expandedExpression = nullptr; }
+    }
 }
 
 void MacroExpander::visit(BreakStatement&) {}
