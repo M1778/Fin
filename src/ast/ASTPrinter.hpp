@@ -47,6 +47,7 @@ private:
     void printBlame(const BlameStatement* node, std::string prefix, bool isLast);
 
     // Expressions
+    void printPrototype(const PrototypeLiteral* node, std::string prefix, bool isLast);
     void printBinary(const BinaryOp* node, std::string prefix, bool isLast);
     void printUnary(const UnaryOp* node, std::string prefix, bool isLast);
     void printLiteral(const Literal* node, std::string prefix, bool isLast);

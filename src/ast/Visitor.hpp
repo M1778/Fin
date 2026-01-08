@@ -103,6 +103,7 @@ public:
     virtual void visit(BlameStatement& node) = 0;
 
     // Expressions
+    virtual void visit(PrototypeLiteral& node) = 0;
     virtual void visit(BinaryOp& node) = 0;
     virtual void visit(UnaryOp& node) = 0;
     virtual void visit(Literal& node) = 0;

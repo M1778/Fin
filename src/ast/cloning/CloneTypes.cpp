@@ -5,6 +5,8 @@ namespace fin {
 void CloneVisitor::visit(TypeNode& node) {
     auto res = std::make_unique<TypeNode>(node.name);
     res->generics = cloneVector(node.generics);
+    res->annotations = cloneVector(node.annotations);
+    res->is_prototype = node.is_prototype;
     res->pointer_depth = node.pointer_depth; // Copy depth
     res->is_array = node.is_array;
     if (node.array_size) {

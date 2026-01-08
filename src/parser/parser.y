@@ -115,6 +115,9 @@
 /*                                    TYPES                                   */
 /* ========================================================================== */
 
+%type <std::vector<fin::MacroRule>> macro_rules
+%type <fin::MacroRule> macro_rule
+
 /* Core */
 %type <std::unique_ptr<fin::Program>> program
 %type <std::vector<std::unique_ptr<fin::Statement>>> statements block_stmts
@@ -174,7 +177,8 @@
 /* Types */
 %type <std::unique_ptr<fin::FunctionTypeNode>> fn_type
 %type <std::unique_ptr<fin::LambdaExpression>> lambda_expression
-%type <std::unique_ptr<fin::Expression>> primary_no_struct
+%type <std::unique_ptr<fin::Expression>> primary_no_struct prototype_literal
+%type <std::vector<std::pair<std::unique_ptr<fin::Expression>, std::unique_ptr<fin::Expression>>>> prototype_elements
 
 /* Helpers */
 %type <bool> visibility_opt
@@ -740,6 +744,24 @@ macro_declaration:
         $$ = std::make_unique<fin::MacroDeclaration>($3, std::move($5), std::move($7));
         $$->setLoc(@$);
     }
+    | KW_MACRO IDENTIFIER LBRACE macro_rules RBRACE {
+        $$ = std::make_unique<fin::MacroDeclaration>($2, std::move($4));
+        $$->setLoc(@$);
+    }
+    ;
+
+macro_rules:
+    macro_rules macro_rule { $1.push_back(std::move($2)); $$ = std::move($1); }
+    | macro_rule { std::vector<fin::MacroRule> v; v.push_back(std::move($1)); $$ = std::move(v); }
+    ;
+
+macro_rule:
+    LPAREN IDENTIFIER RPAREN ARROW block { 
+        $$ = fin::MacroRule{$2, std::move($5)}; 
+    }
+    | LPAREN STRING_LITERAL RPAREN ARROW block { 
+        $$ = fin::MacroRule{$2, std::move($5)}; 
+    }
     ;
 
 macro_param_list:
@@ -837,6 +859,15 @@ base_type:
     | IDENTIFIER LT type_list GT { 
         $$ = std::make_unique<fin::TypeNode>($1); 
         $$->generics = std::move($3);
+    }
+    | LBRACE type_list RBRACE { 
+        $$ = std::make_unique<fin::TypeNode>("prototype"); 
+        $$->is_prototype = true;
+        $$->generics = std::move($2);
+    }
+    | base_type LBRACE expression_list RBRACE {
+        $$ = std::move($1);
+        $$->annotations = std::move($3);
     }
     | KW_AUTO { $$ = std::make_unique<fin::TypeNode>("auto"); }
     | KW_SELF_TYPE { $$ = std::make_unique<fin::TypeNode>("Self"); }
@@ -966,6 +997,10 @@ try_catch_statement:
 blame_statement:
     KW_BLAME expression SEMICOLON {
         $$ = std::make_unique<fin::BlameStatement>(std::move($2));
+        $$->setLoc(@$);
+    }
+    | KW_BLAME expression COMMA expression SEMICOLON {
+        $$ = std::make_unique<fin::BlameStatement>(std::move($2), std::move($4));
         $$->setLoc(@$);
     }
     ;
@@ -1239,6 +1274,7 @@ primary_no_struct:
     IDENTIFIER { $$ = std::make_unique<fin::Identifier>($1); $$->setLoc(@$); }
     | literal { $$ = std::move($1); }
     | LPAREN expression RPAREN { $$ = std::move($2); }
+    | prototype_literal { $$ = std::move($1); }
     
     /* Unquote Variable */
     | DOLLAR IDENTIFIER { $$ = std::make_unique<fin::Identifier>("$" + $2); $$->setLoc(@$); }
@@ -1354,6 +1390,19 @@ enum_value:
     | IDENTIFIER EQUAL expression { 
         $$ = std::make_pair($1, std::move($3)); 
     }
+    ;
+
+prototype_literal:
+    LBRACE prototype_elements RBRACE { 
+        $$ = std::make_unique<fin::PrototypeLiteral>(std::move($2)); 
+        $$->setLoc(@$); 
+    }
+    ;
+
+prototype_elements:
+    prototype_elements COMMA expression COLON expression { $1.push_back({std::move($3), std::move($5)}); $$ = std::move($1); }
+    | expression COLON expression { std::vector<std::pair<std::unique_ptr<fin::Expression>, std::unique_ptr<fin::Expression>>> v; v.push_back({std::move($1), std::move($3)}); $$ = std::move(v); }
+    | %empty { $$ = std::vector<std::pair<std::unique_ptr<fin::Expression>, std::unique_ptr<fin::Expression>>>(); }
     ;
 
 %%

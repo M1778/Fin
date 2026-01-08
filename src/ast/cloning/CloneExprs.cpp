@@ -1,6 +1,17 @@
 #include "../CloneVisitor.hpp"
+#include "../exprs/PrototypeExpr.hpp"
 
 namespace fin {
+
+void CloneVisitor::visit(PrototypeLiteral& node) {
+    std::vector<std::pair<std::unique_ptr<Expression>, std::unique_ptr<Expression>>> elements;
+    for (auto& e : node.elements) {
+        elements.push_back({clone(e.first.get()), clone(e.second.get())});
+    }
+    auto res = std::make_unique<PrototypeLiteral>(std::move(elements));
+    res->setLoc(node.loc);
+    result = std::move(res);
+}
 
 void CloneVisitor::visit(BinaryOp& node) {
     auto res = std::make_unique<BinaryOp>(

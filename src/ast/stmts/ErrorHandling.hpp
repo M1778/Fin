@@ -19,8 +19,9 @@ public:
 
 class BlameStatement : public Statement {
 public:
-    std::unique_ptr<Expression> error_expr;
-    BlameStatement(std::unique_ptr<Expression> e);
+    std::unique_ptr<Expression> condition;
+    std::unique_ptr<Expression> message;
+    BlameStatement(std::unique_ptr<Expression> c, std::unique_ptr<Expression> m = nullptr);
     void accept(Visitor& v) override;
 };
 

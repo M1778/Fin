@@ -87,7 +87,10 @@ void CloneVisitor::visit(TryCatch& node) {
 }
 
 void CloneVisitor::visit(BlameStatement& node) {
-    auto res = std::make_unique<BlameStatement>(clone(node.error_expr.get()));
+    auto res = std::make_unique<BlameStatement>(
+        clone(node.condition.get()),
+        clone(node.message.get())
+    );
     res->setLoc(node.loc); result = std::move(res);
 }
 

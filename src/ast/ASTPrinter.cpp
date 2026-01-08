@@ -26,6 +26,18 @@ std::string astTypeToString(const TypeNode* type) {
     
     if (type->is_array) s = "[" + s + "]";
     
+    if (type->is_prototype) s = "{" + s + "}";
+    
+    if (!type->annotations.empty()) {
+        s += "{";
+        for (size_t i = 0; i < type->annotations.size(); ++i) {
+            // This is a bit hacky since we don't have a good way to stringify expressions here
+            s += "..."; 
+            if (i < type->annotations.size() - 1) s += ", ";
+        }
+        s += "}";
+    }
+    
     return s;
 }
 
@@ -130,6 +142,9 @@ void ASTPrinter::dispatch(const ASTNode* node, std::string currentPrefix, std::s
         printBlame(n, currentPrefix, false);
     }
     // --- Expressions ---
+    else if (auto* n = dynamic_cast<const PrototypeLiteral*>(node)) {
+        printPrototype(n, currentPrefix, false);
+    }
     else if (auto* n = dynamic_cast<const BinaryOp*>(node)) {
         printBinary(n, currentPrefix, false);
     }
@@ -335,10 +350,17 @@ void ASTPrinter::printDefine(const DefineDeclaration* node, std::string prefix, 
 void ASTPrinter::printMacro(const MacroDeclaration* node, std::string prefix, bool isLast) {
     fmt::print(fg(fmt::color::magenta), "{}Macro ", prefix);
     fmt::print("'{}'\n", node->name);
-    for (const auto& param : node->params) {
-        fmt::print("{}    Param: {}: {}{}\n", prefix, param.name, param.type, param.is_vararg ? "..." : "");
+    if (node->is_rust_style) {
+        for (const auto& rule : node->rules) {
+            fmt::print("{}    Rule: {} =>\n", prefix, rule.pattern);
+            printNode(rule.expansion.get(), prefix + "        ", true);
+        }
+    } else {
+        for (const auto& param : node->params) {
+            fmt::print("{}    Param: {}: {}{}\n", prefix, param.name, param.type, param.is_vararg ? "..." : "");
+        }
+        printNode(node->body.get(), prefix + "    ", true);
     }
-    printNode(node->body.get(), prefix + "    ", true);
 }
 
 void ASTPrinter::printOperator(const OperatorDeclaration* node, std::string prefix, bool isLast) {
@@ -426,7 +448,17 @@ void ASTPrinter::printTryCatch(const TryCatch* node, std::string prefix, bool is
 
 void ASTPrinter::printBlame(const BlameStatement* node, std::string prefix, bool isLast) {
     fmt::print("{}Blame\n", prefix);
-    printNode(node->error_expr.get(), prefix + "    ", true);
+    printNode(node->condition.get(), prefix + "    ", node->message == nullptr);
+    if (node->message) printNode(node->message.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printPrototype(const PrototypeLiteral* node, std::string prefix, bool isLast) {
+    fmt::print(fg(fmt::color::yellow), "{}PrototypeLiteral\n", prefix);
+    for (size_t i = 0; i < node->elements.size(); ++i) {
+        fmt::print("{}    Entry {}\n", prefix, i);
+        printNode(node->elements[i].first.get(), prefix + "        ", false);
+        printNode(node->elements[i].second.get(), prefix + "        ", true);
+    }
 }
 
 void ASTPrinter::printBinary(const BinaryOp* node, std::string prefix, bool) {

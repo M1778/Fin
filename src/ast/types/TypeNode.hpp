@@ -11,6 +11,8 @@ class TypeNode : public ASTNode {
 public:
     std::string name; 
     std::vector<std::unique_ptr<TypeNode>> generics;
+    std::vector<std::unique_ptr<Expression>> annotations; // New field
+    bool is_prototype = false; // New field
     int pointer_depth = 0; 
     bool is_array = false;
     std::unique_ptr<Expression> array_size = nullptr;
