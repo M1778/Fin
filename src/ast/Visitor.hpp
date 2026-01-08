@@ -19,6 +19,9 @@ class DestructorDeclaration;
 class TypeDefinition;
 class SpecialDeclaration;
 class ImplementsBlock;
+class ClassDeclaration;
+class Parameter;
+class StructMember;
 
 class Block;
 class ReturnStatement;

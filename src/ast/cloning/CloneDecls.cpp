@@ -223,10 +223,11 @@ void CloneVisitor::visit(SpecialDeclaration& node) {
 
 void CloneVisitor::visit(ImplementsBlock& node) {
     auto res = std::make_unique<ImplementsBlock>(
-        clone(node.target_type.get()),
-        cloneVector(node.methods),
-        cloneVector(node.operators)
+        node.target_type,
+        clone(node.interface_type.get())
     );
+    res->methods = cloneVector(node.methods);
+    res->operators = cloneVector(node.operators);
     res->setLoc(node.loc);
     result = std::move(res);
 }
