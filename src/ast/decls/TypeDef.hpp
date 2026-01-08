@@ -1,5 +1,7 @@
 #pragma once
 #include "../nodes/ASTNode.hpp"
+#include "../nodes/Parameter.hpp"
+#include "../stmts/Statement.hpp"
 #include "../types/TypeNode.hpp"
 #include "../types/GenericParam.hpp"
 #include "../types/Attribute.hpp"
