@@ -36,20 +36,82 @@ ADD_FLEX_BISON_DEPENDENCY(Lexer Parser)
 add_library(fin_core STATIC
     ${BISON_Parser_OUTPUTS}
     ${FLEX_Lexer_OUTPUTS}
-    src/ast/ASTPrinter.cpp
+    
+    # Diagnostics & Driver
     src/diagnostics/DiagnosticEngine.cpp
+    src/driver/Driver.cpp 
+    src/utils/ModuleLoader.cpp 
+    
+    # AST Base & Utilities
     src/ast/ASTNode.cpp
-    src/preprocessor/Preprocessor.cpp
+    src/ast/ASTPrinter.cpp
+    src/ast/CloneVisitor.cpp
+    
+    # AST Nodes: Expressions
+    src/ast/exprs/ArrayExpr.cpp
+    src/ast/exprs/BinaryOp.cpp
+    src/ast/exprs/FunctionCall.cpp
+    src/ast/exprs/Identifier.cpp
+    src/ast/exprs/Lambda.cpp
+    src/ast/exprs/Literal.cpp
+    src/ast/exprs/MiscExpr.cpp
+    src/ast/exprs/PrototypeExpr.cpp
+    src/ast/exprs/StructureExpr.cpp
+    src/ast/exprs/UnaryOp.cpp
+    
+    # AST Nodes: Declarations
+    src/ast/decls/ClassDecl.cpp
+    src/ast/decls/DefineDecl.cpp
+    src/ast/decls/FunctionDecl.cpp
+    src/ast/decls/ImplementsBlock.cpp
+    src/ast/decls/MacroDecl.cpp
+    src/ast/decls/Program.cpp
+    src/ast/decls/StructDecl.cpp
+    src/ast/decls/TypeDef.cpp
+    
+    # AST Nodes: Statements
+    src/ast/stmts/ControlFlow.cpp
+    src/ast/stmts/ErrorHandling.cpp
+    src/ast/stmts/Import.cpp
+    src/ast/stmts/Statement.cpp
+    src/ast/stmts/VariableDecl.cpp
+    
+    # AST Nodes: Types & Other
+    src/ast/types/Attribute.cpp
+    src/ast/types/GenericParam.cpp
+    src/ast/types/TypeNode.cpp
+    src/ast/nodes/Parameter.cpp
+    
+    # AST Cloning Implementations
+    src/ast/cloning/CloneDecls.cpp
+    src/ast/cloning/CloneExprs.cpp
+    src/ast/cloning/CloneStmts.cpp
+    src/ast/cloning/CloneTypes.cpp
+    
+    # Semantic Analysis
     src/semantics/impl/Analyzer_Core.cpp
     src/semantics/impl/Analyzer_Decl.cpp
     src/semantics/impl/Analyzer_Stmt.cpp
     src/semantics/impl/Analyzer_Expr.cpp
-    src/driver/Driver.cpp 
-    src/macros/MacroExpander.cpp
-    src/ast/CloneVisitor.cpp
-    src/macros/SubstitutionVisitor.cpp
+    
+    # Types System
     src/types/Type.cpp
-    src/utils/ModuleLoader.cpp 
+    src/types/ArrayType.cpp
+    src/types/FunctionType.cpp
+    src/types/GenericType.cpp
+    src/types/PointerType.cpp
+    src/types/PrimitiveType.cpp
+    src/types/SelfType.cpp
+    src/types/StructType.cpp
+    
+    # Macros & Preprocessor
+    src/preprocessor/Preprocessor.cpp
+    src/macros/MacroExpander.cpp
+    src/macros/SubstitutionVisitor.cpp
+    src/macros/expander/ExpanderDecls.cpp
+    src/macros/expander/ExpanderExprs.cpp
+    src/macros/expander/ExpanderStmts.cpp
+    src/macros/expander/ExpanderTypes.cpp
 )
 
 
