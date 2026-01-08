@@ -109,6 +109,7 @@
 %right NOT UMINUS ADDRESSOF_PREC DEREFERENCE_PREC KW_SIZEOF KW_NEW KW_CAST
 %left LPAREN LBRACKET DOT LBRACE
 %left INCREMENT DECREMENT
+%left HIGH_PREC
 
 /* Control Flow Precedence */
 %precedence KW_IFX
@@ -160,7 +161,7 @@
 %type <std::unique_ptr<fin::ASTNode>> struct_item_rest implements_item_rest
 
 /* Enums & Imports */
-%type <std::vector<pair<std::string, std::unique_ptr<fin::Expression>>>> enum_values
+%type <std::vector<std::pair<std::string, std::unique_ptr<fin::Expression>>>> enum_values
 %type <std::pair<std::string, std::unique_ptr<fin::Expression>>> enum_value
 %type <std::vector<std::string>> import_list
 %type <std::vector<std::unique_ptr<fin::GenericParam>>> operator_generics_opt
@@ -580,16 +581,25 @@ operator_symbol:
     | LTEQ { $$ = fin::ASTTokenKind::LTEQ; }
     | GTEQ { $$ = fin::ASTTokenKind::GTEQ; }
     | AMPERSAND { $$ = fin::ASTTokenKind::AMPERSAND; }
+    | AMPERSAND AMPERSAND { $$ = fin::ASTTokenKind::AND; }
     | PIPE { $$ = fin::ASTTokenKind::PIPE; }
+    | PIPE PIPE { $$ = fin::ASTTokenKind::OR; }
     | CARET { $$ = fin::ASTTokenKind::CARET; }
     | SHIFTLEFT { $$ = fin::ASTTokenKind::SHIFTLEFT; }
     | SHIFTRIGHT { $$ = fin::ASTTokenKind::SHIFTRIGHT; }
+    | LT LT { $$ = fin::ASTTokenKind::SHIFTLEFT; }
+    | GT GT { $$ = fin::ASTTokenKind::SHIFTRIGHT; }
+    | LT LT EQUAL { $$ = fin::ASTTokenKind::SHIFTLEFTEQUAL; }
+    | GT GT EQUAL { $$ = fin::ASTTokenKind::SHIFTRIGHTEQUAL; }
+    | SHIFTLEFTEQUAL { $$ = fin::ASTTokenKind::SHIFTLEFTEQUAL; }
+    | SHIFTRIGHTEQUAL { $$ = fin::ASTTokenKind::SHIFTRIGHTEQUAL; }
     | NOT { $$ = fin::ASTTokenKind::NOT; }
     | EQUAL { $$ = fin::ASTTokenKind::EQUAL; }
     | LBRACKET RBRACKET { $$ = fin::ASTTokenKind::INDEX; }
     | LBRACKET RBRACKET EQUAL { $$ = fin::ASTTokenKind::INDEX_ASSIGN; }
     | BACKTICK MULT { $$ = fin::ASTTokenKind::DEREF; }
     | BACKTICK MINUS { $$ = fin::ASTTokenKind::UNARY_MINUS; }
+    | LPAREN ELLIPSIS IDENTIFIER RPAREN { $$ = fin::ASTTokenKind::VARIADIC_CALL; }
     ;
 
 operator_generics_opt:
@@ -681,19 +691,19 @@ param_list:
     ;
 
 param:
-    IDENTIFIER LT type GT {
+    IDENTIFIER LT type GT %prec HIGH_PREC {
         $$ = std::make_unique<fin::Parameter>($1, std::move($3), nullptr, false);
         $$->setLoc(@$);
     }
-    | IDENTIFIER COLON LT type GT {
+    | IDENTIFIER COLON LT type GT %prec HIGH_PREC {
         $$ = std::make_unique<fin::Parameter>($1, std::move($4), nullptr, false);
         $$->setLoc(@$);
     }
-    | ELLIPSIS IDENTIFIER LT type GT {
+    | ELLIPSIS IDENTIFIER LT type GT %prec HIGH_PREC {
         $$ = std::make_unique<fin::Parameter>($2, std::move($4), nullptr, true);
         $$->setLoc(@$);
     }
-    | ELLIPSIS IDENTIFIER COLON LT type GT {
+    | ELLIPSIS IDENTIFIER COLON LT type GT %prec HIGH_PREC {
         $$ = std::make_unique<fin::Parameter>($2, std::move($5), nullptr, true);
         $$->setLoc(@$);
     }
@@ -925,7 +935,7 @@ type_no_annot:
 base_type:
     primitive_type { $$ = std::make_unique<fin::TypeNode>($1); }
     | IDENTIFIER { $$ = std::make_unique<fin::TypeNode>($1); }
-    | IDENTIFIER LT type_list GT { 
+    | IDENTIFIER LT type_list GT %prec HIGH_PREC { 
         $$ = std::make_unique<fin::TypeNode>($1); 
         $$->generics = std::move($3);
     }
@@ -937,6 +947,10 @@ base_type:
     | KW_AUTO { $$ = std::make_unique<fin::TypeNode>("auto"); }
     | KW_SELF_TYPE { $$ = std::make_unique<fin::TypeNode>("Self"); }
     | KW_ANY { $$ = std::make_unique<fin::TypeNode>("any"); }
+    | KW_ANY LT type_list GT {
+        $$ = std::make_unique<fin::TypeNode>("any");
+        $$->generics = std::move($3);
+    }
     | fn_type { $$ = std::move($1); }
     | LPAREN type RPAREN { $$ = std::move($2); }
     | DOLLAR KW_TYPE { $$ = std::make_unique<fin::TypeNode>("$type"); $$->setLoc(@$); }
@@ -965,11 +979,11 @@ type_list:
     ;
 
 pointer_type:
-    AMPERSAND type_no_annot {
+    AMPERSAND type {
         $$ = std::make_unique<fin::PointerTypeNode>(std::move($2));
         $$->setLoc(@$);
     }
-    | MULT type_no_annot {
+    | MULT type {
         $$ = std::make_unique<fin::PointerTypeNode>(std::move($2));
         $$->setLoc(@$);
     }
