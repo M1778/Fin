@@ -1146,12 +1146,12 @@ expression:
         $$ = std::make_unique<fin::StructInstantiation>($1, std::move($7), std::move($4));
         $$->setLoc(@$);
     }
-    | KW_NEW type LBRACE field_assignments RBRACE {
-        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
+    | KW_NEW LT type GT LBRACE field_assignments RBRACE {
+        $$ = std::make_unique<fin::NewExpression>(std::move($3), std::move($6));
         $$->setLoc(@$);
     }
-    | KW_NEW type LPAREN arguments RPAREN {
-        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
+    | KW_NEW LT type GT LPAREN arguments RPAREN {
+        $$ = std::make_unique<fin::NewExpression>(std::move($3), std::move($6));
         $$->setLoc(@$);
     }
     | KW_SELF_TYPE LBRACE field_assignments RBRACE {
@@ -1268,12 +1268,12 @@ no_struct_expression:
     }
     
     /* Allowed Struct-like things */
-    | KW_NEW type LBRACE field_assignments RBRACE {
-        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
+    | KW_NEW LT type GT LBRACE field_assignments RBRACE {
+        $$ = std::make_unique<fin::NewExpression>(std::move($3), std::move($6));
         $$->setLoc(@$);
     }
-    | KW_NEW type LPAREN arguments RPAREN {
-        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
+    | KW_NEW LT type GT LPAREN arguments RPAREN {
+        $$ = std::make_unique<fin::NewExpression>(std::move($3), std::move($6));
         $$->setLoc(@$);
     }
     ;

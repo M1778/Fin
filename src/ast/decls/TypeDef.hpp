@@ -11,6 +11,9 @@
 
 namespace fin {
 
+class Parameter;
+class Block;
+
 // Represents: type Name<T> = <SomeType>;
 // Also handles: type Any<...> = any implements <...>;
 class TypeDefinition : public Statement {
