@@ -538,11 +538,6 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
     lastExprType = std::make_shared<FunctionType>(paramTypes, retType);
 }
 
-void SemanticAnalyzer::visit(MacroInvocation& node) {
-    for(auto& arg : node.args) arg->accept(*this);
-    lastExprType = currentScope->resolveType("void");
-}
-
 void SemanticAnalyzer::visit(QuoteExpression& node) {
     if (node.block) node.block->accept(*this);
     lastExprType = currentScope->resolveType("auto");
