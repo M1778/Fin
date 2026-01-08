@@ -169,10 +169,16 @@
 %type <std::unique_ptr<fin::Statement>> control_statement delete_statement
 
 /* Expressions */
-%left ARROW
-%nonassoc KW_IFX
-%nonassoc KW_ELSE
-%nonassoc KW_NEW_PREC
+%type <std::unique_ptr<fin::Expression>> expression primary primary_no_struct
+%type <std::unique_ptr<fin::Expression>> literal identifier
+%type <std::unique_ptr<fin::Expression>> new_expression cast_expression sizeof_expression lambda_expression struct_instantiation
+%type <std::unique_ptr<fin::Expression>> quote_expression super_expression prototype_literal
+%type <std::unique_ptr<fin::TypeNode>> function_type
+%type <std::vector<std::unique_ptr<fin::Expression>>> expression_list arguments
+%type <std::vector<std::pair<std::string, std::unique_ptr<fin::Expression>>>> field_assignments
+%type <std::pair<std::string, std::unique_ptr<fin::Expression>>> field_assignment
+%type <std::vector<std::pair<std::unique_ptr<fin::Expression>, std::unique_ptr<fin::Expression>>>> prototype_elements
+%type <bool> visibility_opt
 
 %%
 
