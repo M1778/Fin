@@ -1,0 +1,37 @@
+interface GetVal<T> {
+    pub fun get_val() <T>;
+}
+
+struct MyStruct {
+    val <int>
+}
+
+MyStruct implements <GetVal<int>> {
+    pub fun get_val() <int> {
+        return self.val;
+    }
+}
+
+interface Addable<T> {
+    operator + (other: <T>) <T>;
+}
+
+struct Point {
+    x <int>,
+    y <int>
+}
+
+Point implements <Addable<Point>> {
+    operator + (other: <Point>) <Point> {
+        return Point { x: self.x + other.x, y: self.y + other.y };
+    }
+}
+
+fun main() <void> {
+    let s <MyStruct> = MyStruct { val: 42 };
+    let v <int> = s.get_val();
+    
+    let p1 <Point> = Point { x: 1, y: 2 };
+    let p2 <Point> = Point { x: 3, y: 4 };
+    let p3 <Point> = p1 + p2;
+}

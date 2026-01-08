@@ -1,18 +1,19 @@
-import { HashMap, Collection } from stdlib;
+import { HashMap } from hashmap;
+import { Collection } from collection;
 
 fun main() <void> {
     // Basic prototype literal (type is prototype)
     let a <auto> = { 10 : 10, "a": true };
     
-    // Prototype literal coerced to HashMap
-    let x <HashMap<string, int>> = { "a" : 10, "b" : 20 };
+    // Prototype literal coerced to HashMap (HashMap must implement from_prototype)
+    let x <HashMap<string, int>> = HashMap::from_prototype({ "a" : 10, "b" : 20 });
     
-    // Prototype literal coerced to Collection (if implemented)
-    let my <Collection<int>> = { 0: 10, 1: 20 };
+    // Prototype literal coerced to Collection (Collection must implement from_prototype)
+    let my <Collection<int>> = Collection::from_prototype({ 0: 10, 1: 20 });
     
     // Prototype type syntax in generic
-    let p <prototype> = { "key": "value" };
-    let complex <HashMap<string, <{int, string}>>> = {
+    let p <{string, string}> = { "key": "value" };
+    let complex <{string, {int, string}}> = {
         "item1": { 1: "one", 2: "two" }
     };
 }

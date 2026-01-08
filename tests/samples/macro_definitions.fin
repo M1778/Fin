@@ -1,3 +1,6 @@
+import { Collection } from collection;
+import { HashMap } from hashmap;
+
 // Rust-like macro definition
 macro my_vec {
     () => {

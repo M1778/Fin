@@ -129,7 +129,7 @@
 %type <std::unique_ptr<fin::Statement>> import_statement define_declaration macro_declaration
 %type <std::unique_ptr<fin::Statement>> declaration_body
 %type <std::unique_ptr<fin::Statement>> annotated_declaration declaration_with_vis bare_declaration
-%type <std::unique_ptr<fin::Statement>> type_definition special_declaration
+%type <std::unique_ptr<fin::Statement>> type_definition special_declaration implements_block
 
 %type <std::unique_ptr<fin::TypeNode>> type base_type pointer_type array_type
 %type <std::vector<std::unique_ptr<fin::TypeNode>>> type_list
@@ -152,7 +152,8 @@
 %type <std::unique_ptr<fin::ASTNode>> interface_item_rest
 
 /* Struct Items */
-%type <std::unique_ptr<fin::ASTNode>> struct_item_rest
+%type <std::unique_ptr<fin::ImplementsBlock>> implements_body_content
+%type <std::unique_ptr<fin::ASTNode>> struct_item_rest implements_item_rest
 
 /* Enums & Imports */
 %type <std::vector<std::pair<std::string, std::unique_ptr<fin::Expression>>>> enum_values
@@ -239,6 +240,7 @@ statement:
     | expression_statement   { $$ = std::move($1); }
     | type_definition        { $$ = std::move($1); }
     | special_declaration    { $$ = std::move($1); }
+    | implements_block       { $$ = std::move($1); }
     | SEMICOLON              { $$ = nullptr; }
     ;
 
@@ -807,6 +809,60 @@ type_definition:
         td->has_implements = true;
         td->implements_list = std::move($8);
         $$ = std::move(td);
+        $$->setLoc(@$);
+    }
+    ;
+
+/* --- IMPLEMENTS BLOCK (Trait Implementation) --- */
+
+implements_block:
+    /* MyStruct implements <MyInterface> { ... } */
+    IDENTIFIER KW_IMPLEMENTS LT type GT LBRACE implements_body_content RBRACE {
+        $7->target_type = $1;
+        $7->interface_type = std::move($4);
+        $$ = std::move($7);
+        $$->setLoc(@$);
+    }
+    ;
+
+implements_body_content:
+    implements_body_content attributes_opt visibility_opt implements_item_rest {
+        if (auto* func = dynamic_cast<fin::FunctionDeclaration*>($4.get())) {
+            func->attributes = std::move($2);
+            func->is_public = $3;
+            $1->methods.push_back(std::unique_ptr<fin::FunctionDeclaration>(static_cast<fin::FunctionDeclaration*>($4.release())));
+        }
+        else if (auto* op = dynamic_cast<fin::OperatorDeclaration*>($4.get())) {
+            op->is_public = $3;
+            $1->operators.push_back(std::unique_ptr<fin::OperatorDeclaration>(static_cast<fin::OperatorDeclaration*>($4.release())));
+        }
+        $$ = std::move($1);
+    }
+    | %empty { 
+        $$ = std::make_unique<fin::ImplementsBlock>("", nullptr);
+    }
+    ;
+
+implements_item_rest:
+    /* Method */
+    KW_FUN IDENTIFIER generic_params_opt LPAREN params RPAREN LT type GT block {
+        $$ = std::make_unique<fin::FunctionDeclaration>($2, std::move($5), std::move($8), std::move($10));
+        static_cast<fin::FunctionDeclaration*>($$.get())->generic_params = std::move($3);
+        $$->setLoc(@$);
+    }
+    /* Static Method */
+    | KW_STATIC KW_FUN IDENTIFIER generic_params_opt LPAREN params RPAREN LT type GT block {
+        $$ = std::make_unique<fin::FunctionDeclaration>($3, std::move($6), std::move($9), std::move($11));
+        auto* func = static_cast<fin::FunctionDeclaration*>($$.get());
+        func->generic_params = std::move($4);
+        func->is_static = true;
+        $$->setLoc(@$);
+    }
+    /* Operator */
+    | KW_OPERATOR operator_symbol operator_generics_opt operator_params_opt LT type GT block {
+        auto op = std::make_unique<fin::OperatorDeclaration>($2, std::move($4), std::move($6), std::move($8), false);
+        op->generic_params = std::move($3);
+        $$ = std::move(op);
         $$->setLoc(@$);
     }
     ;

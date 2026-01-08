@@ -706,4 +706,81 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
     exitScope();
 }
 
+void SemanticAnalyzer::visit(ImplementsBlock& node) {
+    debugLog(fg(fmt::color::cyan), "[INFO] Analyzing implements block: {} implements <{}>\n", 
+             node.target_type, node.interface_type ? node.interface_type->name : "?");
+    
+    auto targetType = currentScope->resolveType(node.target_type);
+    if (!targetType) {
+        error(node, fmt::format("Unknown type '{}' in implements block", node.target_type));
+        return;
+    }
+    
+    auto structType = std::dynamic_pointer_cast<StructType>(targetType);
+    if (!structType) {
+        error(node, fmt::format("Type '{}' is not a struct/class and cannot implement interfaces", node.target_type));
+        return;
+    }
+    
+    std::shared_ptr<Type> interfaceType = nullptr;
+    if (node.interface_type) {
+        interfaceType = resolveTypeFromAST(node.interface_type.get());
+        if (!interfaceType) {
+            error(node, fmt::format("Unknown interface '{}'", node.interface_type->name));
+            return;
+        }
+    }
+    
+    enterScope();
+    
+    currentScope->defineType("Self", structType);
+    auto prevContext = currentStructContext;
+    currentStructContext = structType;
+    
+    for (auto& method : node.methods) {
+        std::vector<std::shared_ptr<Type>> paramTypes;
+        for (auto& param : method->params) {
+            auto t = resolveTypeFromAST(param->type.get());
+            if (t) paramTypes.push_back(t);
+        }
+        
+        std::shared_ptr<Type> retType = nullptr;
+        if (method->return_type) retType = resolveTypeFromAST(method->return_type.get());
+        else retType = currentScope->resolveType("void");
+        
+        if (retType) {
+            structType->defineMethod(method->name, retType);
+        }
+        
+        method->accept(*this);
+    }
+    
+    for (auto& op : node.operators) {
+        std::shared_ptr<Type> retType = nullptr;
+        if (op->return_type) retType = resolveTypeFromAST(op->return_type.get());
+        else retType = currentScope->resolveType("void");
+        
+        if (retType) structType->defineOperator((int)op->op, retType);
+        
+        op->accept(*this);
+    }
+    
+    if (interfaceType) {
+        auto ifaceStruct = std::dynamic_pointer_cast<StructType>(interfaceType);
+        if (ifaceStruct && ifaceStruct->is_interface) {
+            structType->parents.push_back(ifaceStruct);
+            
+            if (!structType->implements(ifaceStruct.get())) {
+                error(node, fmt::format("'{}' does not fully implement interface '{}'", 
+                                       node.target_type, ifaceStruct->name));
+            }
+        }
+    }
+    
+    currentStructContext = prevContext;
+    exitScope();
+    
+    debugLog(fg(fmt::color::green), "      [OK] Implements block for '{}' analyzed successfully\n", node.target_type);
+}
+
 }

@@ -46,6 +46,7 @@ public:
     void visit(TypeDefinition& node) override;
     void visit(SpecialDeclaration& node) override;
     void visit(ClassDeclaration& node) override;
+    void visit(ImplementsBlock& node) override;
 
     void visit(Block& node) override;
     void visit(ReturnStatement& node) override;
@@ -63,6 +64,7 @@ public:
     void visit(BinaryOp& node) override;
     void visit(UnaryOp& node) override;
     void visit(Literal& node) override;
+    void visit(PrototypeLiteral& node) override;
     void visit(Identifier& node) override;
     void visit(FunctionCall& node) override;
     void visit(MethodCall& node) override;

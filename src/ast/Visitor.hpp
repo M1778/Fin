@@ -18,6 +18,7 @@ class ConstructorDeclaration;
 class DestructorDeclaration;
 class TypeDefinition;
 class SpecialDeclaration;
+class ImplementsBlock;
 
 class Block;
 class ReturnStatement;
@@ -83,6 +84,7 @@ public:
     virtual void visit(TypeDefinition& node) = 0;
     virtual void visit(SpecialDeclaration& node) = 0;
     virtual void visit(ClassDeclaration& node) = 0;
+    virtual void visit(ImplementsBlock& node) = 0;
     
     // Helpers
     virtual void visit(Parameter& node) = 0;     

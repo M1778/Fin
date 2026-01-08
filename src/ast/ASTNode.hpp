@@ -31,3 +31,4 @@
 #include "decls/Program.hpp"
 #include "decls/TypeDef.hpp"
 #include "decls/ClassDecl.hpp"
+#include "decls/ImplementsBlock.hpp"
