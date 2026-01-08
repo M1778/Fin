@@ -52,7 +52,7 @@ protected:
         // 6. Cleanup
         yy_delete_buffer(buffer);
         
-        return res == 0;
+        return res == 0 && !diag.hasErrors();
     }
 };
 

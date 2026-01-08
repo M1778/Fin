@@ -131,6 +131,7 @@ void DiagnosticEngine::printHighlightedLine(const std::string& line) {
 }
 
 void DiagnosticEngine::reportError(const fin::location& loc, const std::string& msg) {
+    errorCount++;
     fmt::print(fg(fmt::color::red) | fmt::emphasis::bold, "error: ");
     fmt::print(fmt::emphasis::bold, "{}\n", msg);
     

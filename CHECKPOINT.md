@@ -20,15 +20,19 @@
 - [x] Implement `prototype` compatibility checks for literals and types
 - [x] Implement `blame` semantic checking (assert vs throw)
 
-### 2. Testing and Validation (NEXT)
-- [ ] Create test cases for `blame` assert
-- [ ] Create test cases for `prototype` literals and types
-- [ ] Create test cases for macro definitions
-- [ ] Create test cases for type annotations
+### 2. Testing and Validation (COMPLETED)
+- [x] Update `DiagnosticEngine` to track error counts
+- [x] Update `test_parser.cpp` to detect hidden parsing errors
+- [x] Create test cases for `blame` assert syntax (`blame_assert.fin`)
+- [x] Create test cases for Rust-like macros (`macro_definitions.fin`)
+- [x] Create test cases for `prototype` literals and types (`prototype_test.fin`)
+- [x] Create test cases for Type Annotations (`type_annotations.fin`)
 
 ## Task List
 1. [x] **Implement 'blame' as assert**
 2. [x] **Implement Rust-like macros**
 3. [x] **Implement 'prototype' data type**
 4. [x] **Implement type annotations**
-5. [ ] **Semantic Analyzer: self injection & implements logic**
+5. [x] **Semantic Analyzer: self injection & implements logic**
+6. [x] **Parser Test Validation Improvements**
+7. [x] **Test Case Generation**

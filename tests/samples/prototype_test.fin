@@ -1,0 +1,18 @@
+import { HashMap, Collection } from stdlib;
+
+fun main() <void> {
+    // Basic prototype literal (type is prototype)
+    let a <auto> = { 10 : 10, "a": true };
+    
+    // Prototype literal coerced to HashMap
+    let x <HashMap<string, int>> = { "a" : 10, "b" : 20 };
+    
+    // Prototype literal coerced to Collection (if implemented)
+    let my <Collection<int>> = { 0: 10, 1: 20 };
+    
+    // Prototype type syntax in generic
+    let p <prototype> = { "key": "value" };
+    let complex <HashMap<string, <{int, string}>>> = {
+        "item1": { 1: "one", 2: "two" }
+    };
+}

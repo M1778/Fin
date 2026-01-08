@@ -1,0 +1,28 @@
+// Rust-like macro definition
+macro my_vec {
+    () => {
+        new Collection<int>()
+    };
+    ($($x:expr),*) => {
+        {
+            let temp = new Collection<int>();
+            $(temp.add($x);)*
+            temp
+        }
+    }
+}
+
+macro map {
+    ($($key:expr => $val:expr),*) => {
+        {
+            let temp = new HashMap<string, int>();
+            $(temp.put($key, $val);)*
+            temp
+        }
+    }
+}
+
+fun main() <void> {
+    let v = my_vec![1, 2, 3];
+    let m = map!{ "a" => 1, "b" => 2 };
+}

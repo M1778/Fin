@@ -10,10 +10,13 @@ class DiagnosticEngine {
 public:
     DiagnosticEngine(std::string sourceCode, std::string filename = "<input>");
     void reportError(const fin::location& loc, const std::string& msg);
+    bool hasErrors() const { return errorCount > 0; }
+    int getErrorCount() const { return errorCount; }
 
 private:
     std::string sourceCode;
     std::string filename;
+    int errorCount = 0;
     std::vector<std::string> lines;
     std::vector<std::string> keywords;
     std::vector<std::string> types;
