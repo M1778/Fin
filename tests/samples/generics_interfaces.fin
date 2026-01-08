@@ -3,11 +3,11 @@ interface Person {
    pub fun get_name() <string>;
 }
 
-fun using_erasure_generics<T: Castable, U: Castable>(a: <T>, b: <U>) <int> {
+fun using_erasure_generics<T: Castable, U: Castable>(a: T, b: U) <int> {
    return cast<int>(a) + cast<int>(b);
 }
 
-fun normal_generics<T>(a: <T>) <T>{
+fun normal_generics<T>(a: T) <T>{
     return a;
   }
 

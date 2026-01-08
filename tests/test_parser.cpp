@@ -85,13 +85,14 @@ TEST_F(ParserTest, StructMethods) {
            x <T>,
            y <T> = 0,
            
-           fun print_point(self: <Self>) <noret> { 
-              printf("x: %d", cast<int>(self.x)); 
-           }
-           
-           fun set_x<U>(new_x: <U>) <noret> { 
-              self.x = cast<T>(new_x); 
-           }
+             fun print_point(self: Self) <noret> { 
+                printf("x: %d", cast<int>(self.x)); 
+             }
+             
+             fun set_x<U>(new_x: U) <noret> { 
+                self.x = cast<T>(new_x); 
+             }
+
         
            pub static fun default_point() <Self> { 
                  return new Self{x: 0}; 

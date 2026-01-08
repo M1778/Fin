@@ -1,11 +1,11 @@
 import { Any } from types;
 
-@define printf(fmt: <string>, ...) <noret>;
+@define printf(fmt: string, ...) <noret>;
 
 interface Printable {
    pub fun format_str() <string>;
 }
 
-pub fun print<X: Any<Printable>>(object: <X>) <noret> {
+pub fun print<X: Any<Printable>>(object: X) <noret> {
    blame m1778;
 }

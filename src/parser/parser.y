@@ -141,7 +141,7 @@
 %type <std::unique_ptr<fin::Statement>> annotated_declaration declaration_with_vis bare_declaration
 %type <std::unique_ptr<fin::Statement>> type_definition special_declaration implements_block
 
-%type <std::unique_ptr<fin::TypeNode>> type base_type pointer_type array_type fn_type type_no_annot
+%type <std::unique_ptr<fin::TypeNode>> type base_type pointer_type array_type fn_type type_no_annot type_expr base_type_expr pointer_type_expr array_type_expr
 %type <std::vector<std::unique_ptr<fin::TypeNode>>> type_list
 %type <std::vector<std::unique_ptr<fin::Parameter>>> params param_list
 %type <std::unique_ptr<fin::Parameter>> param
@@ -693,20 +693,12 @@ param_list:
     ;
 
 param:
-    IDENTIFIER LT type GT %prec TYPE_PREC {
+    IDENTIFIER COLON type {
         $$ = std::make_unique<fin::Parameter>($1, std::move($3), nullptr, false);
         $$->setLoc(@$);
     }
-    | IDENTIFIER COLON LT type GT %prec TYPE_PREC {
-        $$ = std::make_unique<fin::Parameter>($1, std::move($4), nullptr, false);
-        $$->setLoc(@$);
-    }
-    | ELLIPSIS IDENTIFIER LT type GT %prec TYPE_PREC {
+    | ELLIPSIS IDENTIFIER COLON type {
         $$ = std::make_unique<fin::Parameter>($2, std::move($4), nullptr, true);
-        $$->setLoc(@$);
-    }
-    | ELLIPSIS IDENTIFIER COLON LT type GT %prec TYPE_PREC {
-        $$ = std::make_unique<fin::Parameter>($2, std::move($5), nullptr, true);
         $$->setLoc(@$);
     }
     ;
@@ -918,6 +910,71 @@ variable_declaration:
     ;
 
 /* --- TYPES --- */
+
+type_expr:
+    base_type_expr { $$ = std::move($1); }
+    | pointer_type_expr { $$ = std::move($1); }
+    | array_type_expr { $$ = std::move($1); }
+    ;
+
+base_type_expr:
+    primitive_type { $$ = std::make_unique<fin::TypeNode>($1); }
+    | IDENTIFIER { $$ = std::make_unique<fin::TypeNode>($1); }
+    | IDENTIFIER DOUBLE_COLON LT type_list GT { 
+        $$ = std::make_unique<fin::TypeNode>($1); 
+        $$->generics = std::move($4);
+    }
+    | IDENTIFIER DOUBLE_COLON LT type_list SHIFTRIGHT {
+        $$ = std::make_unique<fin::TypeNode>($1);
+        $$->generics = std::move($4);
+    }
+    | LBRACE type_list RBRACE { 
+        $$ = std::make_unique<fin::TypeNode>("prototype"); 
+        $$->is_prototype = true;
+        $$->generics = std::move($2);
+    }
+    | KW_AUTO { $$ = std::make_unique<fin::TypeNode>("auto"); }
+    | KW_SELF_TYPE { $$ = std::make_unique<fin::TypeNode>("Self"); }
+    | KW_ANY { $$ = std::make_unique<fin::TypeNode>("any"); }
+    | KW_ANY DOUBLE_COLON LT type_list GT {
+        $$ = std::make_unique<fin::TypeNode>("any");
+        $$->generics = std::move($4);
+    }
+    | KW_ANY DOUBLE_COLON LT type_list SHIFTRIGHT {
+        $$ = std::make_unique<fin::TypeNode>("any");
+        $$->generics = std::move($4);
+    }
+    | fn_type { $$ = std::move($1); }
+    | LPAREN type RPAREN { $$ = std::move($2); }
+    ;
+
+pointer_type_expr:
+    AMPERSAND type_expr {
+        $$ = std::make_unique<fin::PointerTypeNode>(std::move($2));
+        $$->setLoc(@$);
+    }
+    | MULT type_expr {
+        $$ = std::make_unique<fin::PointerTypeNode>(std::move($2));
+        $$->setLoc(@$);
+    }
+    | AND type_expr {
+        auto inner = std::make_unique<fin::PointerTypeNode>(std::move($2));
+        inner->setLoc(@$);
+        $$ = std::make_unique<fin::PointerTypeNode>(std::move(inner));
+        $$->setLoc(@$);
+    }
+    ;
+
+array_type_expr:
+    LBRACKET type_expr RBRACKET {
+        $$ = std::make_unique<fin::ArrayTypeNode>(std::move($2), nullptr);
+        $$->setLoc(@$);
+    }
+    | LBRACKET type_expr COMMA expression RBRACKET {
+        $$ = std::make_unique<fin::ArrayTypeNode>(std::move($2), std::move($4));
+        $$->setLoc(@$);
+    }
+    ;
 
 type:
     type_no_annot { $$ = std::move($1); }
@@ -1199,28 +1256,12 @@ expression:
     | lambda_expression { $$ = std::move($1); }
 
     /* Struct Instantiations */
-    | IDENTIFIER LBRACE field_assignments RBRACE {
-        $$ = std::make_unique<fin::StructInstantiation>($1, std::move($3));
+    | base_type_expr LBRACE field_assignments RBRACE {
+        $$ = std::make_unique<fin::StructInstantiation>($1->name, std::move($3), std::move($1->generics));
         $$->setLoc(@$);
     }
-    | IDENTIFIER DOUBLE_COLON LT type_list GT LBRACE field_assignments RBRACE {
-        $$ = std::make_unique<fin::StructInstantiation>($1, std::move($7), std::move($4));
-        $$->setLoc(@$);
-    }
-    | KW_NEW type_no_annot LBRACE field_assignments RBRACE {
+    | KW_NEW type_expr LBRACE field_assignments RBRACE {
         $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
-        $$->setLoc(@$);
-    }
-    | KW_NEW type_no_annot LPAREN arguments RPAREN {
-        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
-        $$->setLoc(@$);
-    }
-    | KW_NEW type_no_annot {
-        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::vector<std::unique_ptr<fin::Expression>>());
-        $$->setLoc(@$);
-    }
-    | KW_SELF_TYPE LBRACE field_assignments RBRACE {
-        $$ = std::make_unique<fin::StructInstantiation>("Self", std::move($3));
         $$->setLoc(@$);
     }
     ;
@@ -1335,16 +1376,8 @@ no_struct_expression:
     }
     
     /* Allowed Struct-like things */
-    | KW_NEW type_no_annot LBRACE field_assignments RBRACE {
+    | KW_NEW type_expr LBRACE field_assignments RBRACE {
         $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
-        $$->setLoc(@$);
-    }
-    | KW_NEW type_no_annot LPAREN arguments RPAREN {
-        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
-        $$->setLoc(@$);
-    }
-    | KW_NEW type_no_annot {
-        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::vector<std::unique_ptr<fin::Expression>>());
         $$->setLoc(@$);
     }
     ;

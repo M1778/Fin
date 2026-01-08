@@ -8,7 +8,7 @@ struct Collection<T> : <Index, IndexAssign> {
     priv filled <int>,
     priv _arr <[T]>,
 
-    pub fun push(self: <Self>, item: <T>) <noret> {
+    pub fun push(self: Self, item: T) <noret> {
         if (self.filled >= self.length) {
             self.length++;
             self.allocate(self.length);
@@ -17,7 +17,7 @@ struct Collection<T> : <Index, IndexAssign> {
         self.filled++;
       }
 
-    pub fun pop_last(self: <Self>, index: <int>) <T> {
+    pub fun pop_last(self: Self, index: int) <T> {
         let _ <auto> = self._arr[self.filled];
         self._arr[self.filled] = null;
         self.filled--;
@@ -25,38 +25,38 @@ struct Collection<T> : <Index, IndexAssign> {
         return _;
       }
 
-    pub fun get(self: <Self>, index: <int>) <T> {
+    pub fun get(self: Self, index: int) <T> {
         return self._arr[index];
       }
 
-    pub fun len(self: <Self>) <int> {
+    pub fun len(self: Self) <int> {
         return self.length;
       }
     
-    priv fun deallocate(self: <Self>) <noret> {
+    priv fun deallocate(self: Self) <noret> {
         delete self._arr;
         self.length = 0;
         self.filled = 0;
       }
 
-    priv fun allocate(amount: <int>) <noret> {
+    priv fun allocate(amount: int) <noret> {
         let temp_arr <auto> = cast<auto>(self._arr); // Copies
 
-        self._arr = new [T, amount];
+        self._arr = new [T, amount]{};
         for (let i <int> = i; i <= self.filled; i++) {
             self._arr[i] = temp_arr[i];
           }
         delete temp_arr;
       }
 
-    pub fun __get(self: <Self>, index: <int>) <T> {
+    pub fun __get(self: Self, index: int) <T> {
         if (index > self.length){
             blame CollectionError("Index out of bounds");
           }
         return self._arr[index];
       }
 
-    pub fun __set(self: <Self>, index: <int>, value: <T>) <noret> {
+    pub fun __set(self: Self, index: int, value: T) <noret> {
         if (index > self.length){
             blame CollectionError("Index out of bounds");
           }
@@ -71,11 +71,11 @@ struct Collection<T> : <Index, IndexAssign> {
     pub operator= implements cast<auto>(__set); // same happens here, uses implements and casting to copy the `__set` method to the operator (copying function signature and function body)
     // Note: Implements also works with methods too (not just operators)
 
-    Collection(length: <int>) {
-        return new Collection{length: length, filled: 0, _arr: new [T, length]};
+    Collection(length: int) {
+        return new Collection{length: length, filled: 0, _arr: new [T, length]{}};
       }
-    Collection(length: <int>) {
-        return new Collection{length: 5, filled: 0, _arr: new [T, 5]};
+    Collection(length: int) {
+        return new Collection{length: 5, filled: 0, _arr: new [T, 5]{}};
       }
 
     ~Collection(){

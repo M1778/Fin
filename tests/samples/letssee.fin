@@ -1,36 +1,36 @@
-@define printf(fmt: <string>, ...) <noret>;
-@define sin(f: <float>) <float>;
-@define cos(f: <float>) <float>;
-@define sqrt(f: <float>) <float>;
+@define printf(fmt: string, ...) <noret>;
+@define sin(f: float) <float>;
+@define cos(f: float) <float>;
+@define sqrt(f: float) <float>;
 
 #[llvm_name="vec2_f32"]
 struct Vec2<T> {
     x <T> = 0,
     y <T> = 0,
 
-    fun length(self: <Self>) <float> {
+    fun length(self: Self) <float> {
         return sqrt(cast<float>(self.x * self.x + self.y * self.y));
     }
 
-    fun add(self: <Self>, other: <Self>) <&Self> {
+    fun add(self: Self, other: Self) <&Self> {
         return new Self{
             x: self.x + other.x,
             y: self.y + other.y
         };
     }
 
-    fun scale(self: <Self>, factor: <float>) <&Self> {
+    fun scale(self: Self, factor: float) <&Self> {
         return new Self{
             x: cast<T>(cast<float>(self.x) * factor),
             y: cast<T>(cast<float>(self.y) * factor)
         };
     }
 
-    fun print(self: <Self>) <noret> {
+    fun print(self: Self) <noret> {
         printf("Vec2(x: %f, y: %f)\n", cast<float>(self.x), cast<float>(self.y));
     }
 
-    fun normalize(ptr: <&Self>) <noret> {
+    fun normalize(ptr: &Self) <noret> {
         let len <float> = (*ptr).length();
         if (len > cast<float>(0)) {
             ptr.x = cast<T>(cast<float>(ptr.x) / len);
@@ -42,7 +42,7 @@ struct Vec2<T> {
         return new Self{};
     }
 
-    pub static fun from_angle(angle: <float>) <&Self> {
+    pub static fun from_angle(angle: float) <&Self> {
         return new Self{
             x: cast<T>(cos(angle)),
             y: cast<T>(sin(angle))
@@ -51,7 +51,7 @@ struct Vec2<T> {
 }
 
 fun main() <noret> {
-    let a <&Vec2<float>> = new Vec2<float>{x: 3.0, y: 4.0};
+    let a <&Vec2<float>> = new Vec2::<float>{x: 3.0, y: 4.0};
     let b <&Vec2<float>> = Vec2::from_angle(0.7854);  // inference on static call
 
     printf("Vector a: ");
