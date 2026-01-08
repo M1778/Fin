@@ -35,6 +35,13 @@ public:
     std::shared_ptr<Type> clone() const override {
         return std::make_shared<PrototypeType>(keyType->clone(), valueType->clone());
     }
+
+    TypePtr substitute(const TypeMap& mapping, TypePtr selfReplacement = nullptr) override {
+        return std::make_shared<PrototypeType>(
+            keyType->substitute(mapping, selfReplacement),
+            valueType->substitute(mapping, selfReplacement)
+        );
+    }
 };
 
 }

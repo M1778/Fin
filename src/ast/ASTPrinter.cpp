@@ -364,8 +364,15 @@ void ASTPrinter::printMacro(const MacroDeclaration* node, std::string prefix, bo
 }
 
 void ASTPrinter::printOperator(const OperatorDeclaration* node, std::string prefix, bool isLast) {
-    fmt::print("{}Operator\n", prefix);
-    printNode(node->body.get(), prefix + "    ", true);
+    fmt::print(fg(fmt::color::cyan), "{}Operator\n", prefix);
+    if (node->implements_type) {
+        fmt::print("{}  Implements: <{}>\n", prefix, astTypeToString(node->implements_type.get()));
+    }
+    if (node->body) {
+        printNode(node->body.get(), prefix + "    ", true);
+    } else {
+        fmt::print("{}    (Abstract)\n", prefix);
+    }
 }
 
 void ASTPrinter::printImport(const ImportModule* node, std::string prefix, bool isLast) {

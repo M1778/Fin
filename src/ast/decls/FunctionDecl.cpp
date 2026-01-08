@@ -9,7 +9,7 @@ void FunctionDeclaration::accept(Visitor& v) { v.visit(*this); }
 
 OperatorDeclaration::OperatorDeclaration(ASTTokenKind o, std::vector<std::unique_ptr<Parameter>> p, 
                     std::unique_ptr<TypeNode> rt, std::unique_ptr<Block> b, bool pub)
-    : op(o), params(std::move(p)), return_type(std::move(rt)), body(std::move(b)), is_public(pub) {}
+    : op(o), params(std::move(p)), return_type(std::move(rt)), body(std::move(b)), is_public(pub), implements_type(nullptr) {}
 void OperatorDeclaration::accept(Visitor& v) { v.visit(*this); }
 
 ConstructorDeclaration::ConstructorDeclaration(std::string n, std::vector<std::unique_ptr<Parameter>> p, std::unique_ptr<Block> b, std::unique_ptr<TypeNode> rt)

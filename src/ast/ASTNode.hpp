@@ -17,6 +17,7 @@
 #include "exprs/ArrayExpr.hpp"
 #include "exprs/Lambda.hpp"
 #include "exprs/MiscExpr.hpp"
+#include "exprs/PrototypeExpr.hpp"
 
 #include "stmts/Statement.hpp"
 #include "stmts/ControlFlow.hpp"

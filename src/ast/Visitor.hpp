@@ -57,10 +57,7 @@ class SuperExpression;
 class PointerTypeNode;
 class ArrayTypeNode;
 class StaticMethodCall;
-
-// Missing nodes
-class Parameter;
-class StructMember;
+class PrototypeLiteral;
 
 class Visitor {
 public:

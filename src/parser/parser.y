@@ -163,7 +163,7 @@
 %type <std::vector<std::unique_ptr<fin::Parameter>>> operator_params_opt
 
 /* Control Flow */
-%type <std::unique_ptr<fin::Expression>> implements_opt
+%type <std::unique_ptr<fin::TypeNode>> implements_opt
 %type <std::vector<std::unique_ptr<fin::Expression>>> macro_arg_item macro_arg_list_body macro_arguments
 %type <std::unique_ptr<fin::Statement>> if_statement while_loop for_loop foreach_loop try_catch_statement blame_statement return_statement expression_statement
 %type <std::unique_ptr<fin::Statement>> control_statement delete_statement
@@ -224,7 +224,6 @@ statement:
       annotated_declaration { $$ = std::move($1); }
     | declaration_with_vis   { $$ = std::move($1); }
     | bare_declaration       { $$ = std::move($1); }
-    | variable_declaration   { $$ = std::move($1); }
     | define_declaration     { $$ = std::move($1); }
     | macro_declaration      { $$ = std::move($1); }
     | import_statement       { $$ = std::move($1); }
@@ -238,7 +237,6 @@ statement:
     | blame_statement        { $$ = std::move($1); }
     | return_statement       { $$ = std::move($1); }
     | expression_statement   { $$ = std::move($1); }
-    | type_definition        { $$ = std::move($1); }
     | special_declaration    { $$ = std::move($1); }
     | implements_block       { $$ = std::move($1); }
     | SEMICOLON              { $$ = nullptr; }
@@ -605,7 +603,7 @@ operator_generics_opt:
     ;
 
 implements_opt:
-    KW_IMPLEMENTS expression { $$ = std::move($2); }
+      KW_IMPLEMENTS LT type GT { $$ = std::move($3); }
     | %empty { $$ = nullptr; }
     ;
 
@@ -1073,22 +1071,22 @@ expression_statement:
     ;
 
 lambda_expression:
-    /* Case 1: Anonymous Fun: fun(a: <int>) <int> { ... } */
-    KW_FUN LPAREN params RPAREN LT type GT block {
-        $$ = std::make_unique<fin::LambdaExpression>(std::move($3), std::move($6), std::move($8));
-        $$->setLoc(@$);
-    }
-    /* Case 2: Arrow Block: (a: <int>) <int> => { ... } */
-    | LPAREN params RPAREN LT type GT ARROW block {
-        $$ = std::make_unique<fin::LambdaExpression>(std::move($2), std::move($5), std::move($8));
-        $$->setLoc(@$);
-    }
-    /* Case 3: Arrow Expression (Full): (a: <int>) <int> => expr */
-    | LPAREN params RPAREN LT type GT ARROW expression {
-        $$ = std::make_unique<fin::LambdaExpression>(std::move($2), std::move($5), std::move($8));
-        $$->setLoc(@$);
-    }
-    ;
+      /* Case 1: Anonymous Fun: fun(a: <int>) <int> { ... } */
+      KW_FUN LPAREN params RPAREN LT type GT block {
+          $$ = std::make_unique<fin::LambdaExpression>(std::move($3), std::move($6), std::move($8));
+          $$->setLoc(@$);
+      }
+      /* Case 2: Arrow Block: (a: <int>) <int> => { ... } */
+      | LPAREN params RPAREN LT type GT ARROW block {
+          $$ = std::make_unique<fin::LambdaExpression>(std::move($2), std::move($5), std::move($8));
+          $$->setLoc(@$);
+      }
+      /* Case 3: Arrow Expression (Full): (a: <int>) <int> => expr */
+      | LPAREN params RPAREN LT type GT ARROW expression %prec ARROW {
+          $$ = std::make_unique<fin::LambdaExpression>(std::move($2), std::move($5), std::move($8));
+          $$->setLoc(@$);
+      }
+      ;
 
 
 /* The main expression rule includes everything */

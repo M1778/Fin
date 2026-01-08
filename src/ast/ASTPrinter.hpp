@@ -6,6 +6,8 @@
 
 namespace fin {
 
+class PrototypeLiteral;
+
 class ASTPrinter {
 public:
     void print(const ASTNode& node);

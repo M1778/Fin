@@ -36,7 +36,7 @@ public:
     bool is_public;
     std::vector<std::unique_ptr<GenericParam>> generic_params;
 
-    std::unique_ptr<Expression> implements_expr;
+    std::unique_ptr<TypeNode> implements_type;
 
     OperatorDeclaration(ASTTokenKind o, std::vector<std::unique_ptr<Parameter>> p, 
                         std::unique_ptr<TypeNode> rt, std::unique_ptr<Block> b, bool pub);
