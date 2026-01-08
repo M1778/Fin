@@ -131,7 +131,7 @@
 %type <std::unique_ptr<fin::Statement>> annotated_declaration declaration_with_vis bare_declaration
 %type <std::unique_ptr<fin::Statement>> type_definition special_declaration implements_block
 
-%type <std::unique_ptr<fin::TypeNode>> type base_type pointer_type array_type fn_type
+%type <std::unique_ptr<fin::TypeNode>> type base_type pointer_type array_type fn_type type_no_annot
 %type <std::vector<std::unique_ptr<fin::TypeNode>>> type_list
 %type <std::vector<std::unique_ptr<fin::Parameter>>> params param_list
 %type <std::unique_ptr<fin::Parameter>> param
@@ -890,6 +890,14 @@ variable_declaration:
 /* --- TYPES --- */
 
 type:
+    type_no_annot { $$ = std::move($1); }
+    | type LBRACE expression_list RBRACE {
+        $$ = std::move($1);
+        $$->annotations = std::move($3);
+    }
+    ;
+
+type_no_annot:
     base_type { $$ = std::move($1); }
     | pointer_type { $$ = std::move($1); }
     | array_type { $$ = std::move($1); }
@@ -906,10 +914,6 @@ base_type:
         $$ = std::make_unique<fin::TypeNode>("prototype"); 
         $$->is_prototype = true;
         $$->generics = std::move($2);
-    }
-    | base_type LBRACE expression_list RBRACE {
-        $$ = std::move($1);
-        $$->annotations = std::move($3);
     }
     | KW_AUTO { $$ = std::make_unique<fin::TypeNode>("auto"); }
     | KW_SELF_TYPE { $$ = std::make_unique<fin::TypeNode>("Self"); }
@@ -1146,12 +1150,12 @@ expression:
         $$ = std::make_unique<fin::StructInstantiation>($1, std::move($7), std::move($4));
         $$->setLoc(@$);
     }
-    | KW_NEW LT type GT LBRACE field_assignments RBRACE {
-        $$ = std::make_unique<fin::NewExpression>(std::move($3), std::move($6));
+    | KW_NEW type_no_annot LBRACE field_assignments RBRACE {
+        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
         $$->setLoc(@$);
     }
-    | KW_NEW LT type GT LPAREN arguments RPAREN {
-        $$ = std::make_unique<fin::NewExpression>(std::move($3), std::move($6));
+    | KW_NEW type_no_annot LPAREN arguments RPAREN {
+        $$ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
         $$->setLoc(@$);
     }
     | KW_SELF_TYPE LBRACE field_assignments RBRACE {
@@ -1268,13 +1272,13 @@ no_struct_expression:
     }
     
     /* Allowed Struct-like things */
-    | KW_NEW LT type GT LBRACE field_assignments RBRACE {
-        $$ = std::make_unique<fin::NewExpression>(std::move($3), std::move($6));
-        $$->setLoc(@$);
+    | KW_NEW type_no_annot LBRACE field_assignments RBRACE {
+        $ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
+        $->setLoc(@$);
     }
-    | KW_NEW LT type GT LPAREN arguments RPAREN {
-        $$ = std::make_unique<fin::NewExpression>(std::move($3), std::move($6));
-        $$->setLoc(@$);
+    | KW_NEW type_no_annot LPAREN arguments RPAREN {
+        $ = std::make_unique<fin::NewExpression>(std::move($2), std::move($4));
+        $->setLoc(@$);
     }
     ;
 

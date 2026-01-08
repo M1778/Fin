@@ -1,4 +1,5 @@
 #include "TypeDef.hpp"
+#include "../Visitor.hpp"
 
 namespace fin {
 

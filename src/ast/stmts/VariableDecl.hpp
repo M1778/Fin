@@ -6,6 +6,9 @@
 
 namespace fin {
 
+class Expression;
+class Attribute;
+
 class VariableDeclaration : public Statement {
 public:
     bool is_mutable;
