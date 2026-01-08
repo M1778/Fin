@@ -131,7 +131,7 @@
 %type <std::unique_ptr<fin::Statement>> annotated_declaration declaration_with_vis bare_declaration
 %type <std::unique_ptr<fin::Statement>> type_definition special_declaration implements_block
 
-%type <std::unique_ptr<fin::TypeNode>> type base_type pointer_type array_type
+%type <std::unique_ptr<fin::TypeNode>> type base_type pointer_type array_type fn_type
 %type <std::vector<std::unique_ptr<fin::TypeNode>>> type_list
 %type <std::vector<std::unique_ptr<fin::Parameter>>> params param_list
 %type <std::unique_ptr<fin::Parameter>> param
@@ -169,16 +169,19 @@
 %type <std::unique_ptr<fin::Statement>> control_statement delete_statement
 
 /* Expressions */
-%type <std::unique_ptr<fin::Expression>> expression primary primary_no_struct
-%type <std::unique_ptr<fin::Expression>> literal identifier
-%type <std::unique_ptr<fin::Expression>> new_expression cast_expression sizeof_expression lambda_expression struct_instantiation
-%type <std::unique_ptr<fin::Expression>> quote_expression super_expression prototype_literal
-%type <std::unique_ptr<fin::TypeNode>> function_type
+%type <std::unique_ptr<fin::Expression>> expression primary_no_struct
+%type <std::unique_ptr<fin::Expression>> literal lambda_expression
+%type <std::unique_ptr<fin::Expression>> super_expression prototype_literal no_struct_expression static_method_call
 %type <std::vector<std::unique_ptr<fin::Expression>>> expression_list arguments
 %type <std::vector<std::pair<std::string, std::unique_ptr<fin::Expression>>>> field_assignments
-%type <std::pair<std::string, std::unique_ptr<fin::Expression>>> field_assignment
 %type <std::vector<std::pair<std::unique_ptr<fin::Expression>, std::unique_ptr<fin::Expression>>>> prototype_elements
 %type <bool> visibility_opt
+
+/* Added missing types */
+%type <std::string> dotted_path primitive_type
+%type <fin::ASTTokenKind> operator_symbol
+%type <std::vector<fin::MacroParam>> macro_param_list
+%type <fin::MacroParam> macro_param
 
 %%
 
@@ -202,7 +205,7 @@ program:
 
 statements:
     statements statement {
-        $1.push_back(std::move($2));
+        if ($2) $1.push_back(std::move($2));
         $$ = std::move($1);
     }
     | statement {
@@ -461,24 +464,34 @@ inheritance_opt:
     ;
 
 struct_body_content:
-      struct_body_content struct_body_element
+      struct_body_content attributes_opt visibility_opt struct_item_rest {
+        if (auto* member = dynamic_cast<fin::StructMember*>($4.get())) {
+            member->attributes = std::move($2);
+            member->is_public = $3;
+            $1->members.push_back(std::unique_ptr<fin::StructMember>(static_cast<fin::StructMember*>($4.release())));
+        }
+        else if (auto* func = dynamic_cast<fin::FunctionDeclaration*>($4.get())) {
+            func->attributes = std::move($2);
+            func->is_public = $3;
+            $1->methods.push_back(std::unique_ptr<fin::FunctionDeclaration>(static_cast<fin::FunctionDeclaration*>($4.release())));
+        }
+        else if (auto* op = dynamic_cast<fin::OperatorDeclaration*>($4.get())) {
+            op->is_public = $3;
+            $1->operators.push_back(std::unique_ptr<fin::OperatorDeclaration>(static_cast<fin::OperatorDeclaration*>($4.release())));
+        }
+        else if (auto* ctor = dynamic_cast<fin::ConstructorDeclaration*>($4.get())) {
+            $1->constructors.push_back(std::unique_ptr<fin::ConstructorDeclaration>(static_cast<fin::ConstructorDeclaration*>($4.release())));
+        }
+        else if (auto* dtor = dynamic_cast<fin::DestructorDeclaration*>($4.get())) {
+            $1->destructor = std::unique_ptr<fin::DestructorDeclaration>(static_cast<fin::DestructorDeclaration*>($4.release()));
+        }
+        $$ = std::move($1);
+    }
     | %empty { 
         std::vector<std::unique_ptr<fin::StructMember>> m;
         $$ = std::make_unique<fin::StructDeclaration>("", std::move(m), false); 
     }
     ;
-
-struct_body_element:
-      attributes_opt visibility_opt struct_item_rest {
-        if (auto* member = dynamic_cast<fin::StructMember*>($3.get())) {
-            member->attributes = std::move($1);
-            member->is_public = $2;
-            // Note: We'll need to handle the parent struct access differently if we restructure like this, 
-            // but for now let's just resolve the conflict.
-            // Actually, the previous structure used $1 as the struct. 
-            // Let's stick to a flatter structure if possible.
-        }
-    }
 
 
 struct_item_rest:
@@ -1397,7 +1410,7 @@ visibility_opt:
 enum_values:
     enum_values COMMA enum_value { $1.push_back(std::move($3)); $$ = std::move($1); }
     | enum_value { std::vector<std::pair<std::string, std::unique_ptr<fin::Expression>>> v; v.push_back(std::move($1)); $$ = std::move(v); }
-    | %empty { $$ = std::vector<std::pair<std::string, std::unique_ptr<fin::Expression>>>(); }
+    | %empty { std::vector<std::pair<std::string, std::unique_ptr<fin::Expression>>> v; $$ = std::move(v); }
     ;
 
 enum_value:
