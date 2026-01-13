@@ -1,4 +1,4 @@
-fun check(val <int>) <void> {
+fun check(val: int) <void> {
     // Assert-like blame with message
     blame val > 0, "Value must be positive";
     
@@ -10,10 +10,15 @@ fun check(val <int>) <void> {
     // Example in deeptest4.fin: `blame a["Hi"].integer == 10;`
     
     if (val == 42) {
-        blame "The answer is forbidden";
+        // blame Error("The answer is forbidden");
     }
 }
 
+struct M <T> {}
+
+pub fun pp(m: M<M<int>>) <noret>{} // TODO: This should be allowed 
+
 fun main() <void> {
+    let x <int> = 10;
     check(10);
 }

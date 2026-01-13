@@ -1,5 +1,5 @@
-@define printf(fmt: <string>, ...) <noret>;
-@define free(ptr: <&void> ) <noret>;
+@define printf(fmt: string, ...) <noret>;
+@define free(ptr: &void ) <noret>;
 
 @macro format(fmt: expr, args...) { // i dont know how to implement this right now but just imagine this works
   return quote {
@@ -15,7 +15,7 @@ interface Printable { // A simple printable interface which only needs to declar
 
 interface Addable<T: Castable> { // A more complicated interface uses Generics (Specially Castable FatPointer type)
                                  // It only requires you to have an operator overload
-    operator +(self: <Self>, other : <T>) <T>;
+    operator +(self: Self, other : T) <T>;
 }
 
 struct MyStruct <T> : <Printable, Addable> {// The first section which is stick to the name of the
@@ -29,8 +29,8 @@ struct MyStruct <T> : <Printable, Addable> {// The first section which is stick 
         return format!("base_val = {}, base_size = {}", cast<&auto>(base_val), base_size);
     }
     
-    operator +(self: <Self>, other : <Self>) <Self> {
-        return new Self{base_val: self.base_val + other.base_val, base_size: self.base_size + other.base_size};
+    operator +(self: Self, other : Self) <Self> {
+        return *new Self{base_val: self.base_val + other.base_val, base_size: self.base_size + other.base_size};
     }
 }
 
@@ -58,6 +58,14 @@ struct Person { // a normal popular example
         free(&age);
     }
 
+    pub fun get_name() <string> {
+        return self.name;
+    }
+    
+    pub fun get_age() <int> {
+        return self.age;
+    }
+
     fun to_string() <string> {
         return format!("Name: {}, Age: {}", self.name, self.age);
     }
@@ -65,14 +73,14 @@ struct Person { // a normal popular example
 
 struct Student : <Person> { // inherits from its parent (Person) [NOTE: Also can inherit from multiple parents]
     grade <int>,
-    Student(name: <string>, age: <int>, grade: <int>) { // Constructor (even if not specified compiler
+    Student(name: string, age: int, grade: int) { // Constructor (even if not specified compiler
                                           // automatically injects self and super)
         // Initialize parent using the super
         let person <Person> = super{name:name, age:age}; // we can also use the constructor of the
                                                          // parent class like super(...)
-        self.name = person.name; // if we do not Initialize a field from parent we have inherited
+        self.name = person.get_name(); // if we do not Initialize a field from parent we have inherited
                                  // it will automatically set it to null value but it gives a warning
-        self.age = person.age;
+        self.age = person.get_age();
         self.grade = grade;
 
         // compiler automatically returns self for the constructor
@@ -122,9 +130,14 @@ interface HasConstructor { // A simple interface to force having a constructor a
 struct MyStr {
     string_arr <[char]>,
     length <long>,
+    MyStr() {}
 }
 
-struct IncludeBoth: <HasConstructor, MyStr> {// This should throw an error since it doesn't
+//struct IncludeBoth: <HasConstructor, MyStr> {// This should throw an error since it doesn't
                                              // actually respect the rules defined for it from
                                              // interface
+//}
+
+fun main() <noret> {
+    let a <auto> = MyStr();
 }

@@ -1,0 +1,25 @@
+
+
+fun compatible(iface: $interface, struct_: $struct) <bool> {
+    if (@implements(struct_, iface) == true) { // another feature of implements is that it can tell if a struct satisfies an interface or type shape like instance
+        return true;
+      } else {
+          return false;
+        }
+  }
+
+enum IFaceOptions {
+    First = 1,
+    Second = 2,
+  }
+
+fun pick_interface(option: IFaceOptions) <$interface> {
+    if (option == IFaceOptions::First) {
+        return interface {
+            pub picked_first <bool> = true;
+            pub fun say_hello() <noret>;
+          }
+      } else {
+          return interface { pub picked_second <bool> = true; };
+        }
+  }

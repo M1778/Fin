@@ -1,0 +1,42 @@
+
+fun make_default<T: any implements Struct>(st: $struct) <T> {
+    let instance <auto> = st{}; // Make default of struct type
+
+    return cast<T>(instance);
+  }
+
+interface _PlayerStructLike {
+    pub health <uint>,
+    pub damage <uint>,
+  }
+
+type PlayerStructLike = Struct implements <_PlayerStructLike>;
+
+fun sub_health<T: PlayerStructLike>(plr: T) <noret> { // another way of defining this function is like this: `fun sub_health(plr: PlayerStructLike) <noret>{}` which is easier
+    plr.health -= 10;
+  }
+
+
+fun main() <noret> {
+    // example of struct literal (temporary struct)
+    let unique_player <auto> = make_default(struct {
+        pub health <uint> = 100,
+        pub damage <uint> = 1,
+
+        pub print_player(self: Self) <noret> {
+            if (!@defined("printf")){
+              @define printf() <noret>;
+            }
+            printf("health: %d, damage: %d\n");
+          }
+      });
+
+    unique_player.print_player(); // health = 100, damage = 1
+
+    unique_player.damage = 10; // this works
+
+    sub_health(unique_player);
+
+   blame unique_player.health == 90 && unique_player.damage == 10; // <- assertion here
+
+  }

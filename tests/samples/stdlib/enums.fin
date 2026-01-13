@@ -1,0 +1,18 @@
+type EnumType = any implements Enum;
+
+#[llvm_name="_getenumkeyid"]
+#[private]
+#[use(compiler)]
+#[use(compiler.components.enums)]
+@special getenumkeyid(value: EnumType) <int> {
+    return compiler.enums.resolve_id(value);
+  }
+
+#[use(call)]
+pub fun getkeyid(value: EnumType) <int> {
+    return @getenumkeyid(value);
+  }
+
+pub fun keyidof(enum_member: $enum_member) <int> { // example: `keyidof(Ok)`
+    return enum_member._keyid;
+  }

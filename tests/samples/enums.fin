@@ -1,0 +1,44 @@
+import { Error } from error;
+
+@define printf(fmt: string, ...) <noret>;
+
+enum Color {
+	RGB(uint{8}, uint{8}, uint{8}),
+	RGBA(uint{8}, uint{8}, uint{8}, uint{8})
+}
+
+// Enums with generics
+enum Result <T: Any<...>, E: Offer<string, Error>> { // `Offer` is a special erasure type that allows use of multiple types for an instance giving high level control
+	Ok(T),
+	Error(E) // E can be either of type `string` or `Error` and that can be identified by comparing typeids or casting
+}
+
+// Super powerful usage of `implements`
+// Creating unwrap function for Result enum
+// for more information refer to stdlib/types.fin
+@implements Result<T, E>::unwrap = fun(enum_: Result<T, E>) <T> {
+	if (enum_ == Ok(T)) {
+		return enum_.0;
+	} else {
+		blame enum_.1; // Error = ErrorType OR string
+	}
+}
+
+fun main() <noret> {
+
+	let color1 <Color> = RGB(100, 200, 50);
+	let color2 <Color> = RGBA(0, 0, 0, 100);
+
+	if (color1.0 == 100) {
+		printf("True");
+	} else {
+		blame m1778;
+	}
+
+	let r <Result<int, string>> = Ok(10);
+	r.unwrap(); // No error will happen
+
+	r = Error("Blame ME!");
+	r.unwrap(); // This raises an error
+
+}

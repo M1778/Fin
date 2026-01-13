@@ -1,6 +1,6 @@
-@define printf(fmt: <string>, ...) <noret>;
+@define printf(fmt: string, ...) <noret>;
 
-fun swap(a: <&int>, b: <&int>) <noret> {
+fun swap(a: &int, b: &int) <noret> {
     // 1. Read values from addresses
     let temp <int> = *a; 
     
@@ -57,7 +57,7 @@ fun test_array_main() <noret> {
     printf("New value in array: %d\n", numbers[1]); // Prints 99
 }
 
-fun print_if_exists(val_ptr: <&int>) <noret> {
+fun print_if_exists(val_ptr: &int) <noret> {
     // Check against null
     if (val_ptr == null) {
         printf("No value provided.\n");

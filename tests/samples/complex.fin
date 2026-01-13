@@ -1,6 +1,6 @@
-import "std.io";
+import stdio;
 
-@define printf(fmt:<string>, ...) <int>;
+@define printf(fmt: string, ...) <int>;
 
 struct Box<T> {
     val <T>
@@ -9,8 +9,8 @@ struct Box<T> {
 fun main() <noret> {
     let b <Box<int>> = Box::<int>{ val: 100 };
     if (b.val > 50) {
-        printf("Big");
+        stdio.printf("Big"); // uses stdio printf
     } else {
-        printf("Small");
+        printf("Small"); // uses defined (c interlop) printf
     }
 }

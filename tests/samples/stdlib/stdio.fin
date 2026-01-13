@@ -1,11 +1,47 @@
 import { Any } from types;
+import { Result, Ok, Error } from typing;
 
 @define printf(fmt: string, ...) <noret>;
+
+implements c_printf = printf; // Symbol Resolution
 
 interface Printable {
    pub fun format_str() <string>;
 }
 
 pub fun print<X: Any<Printable>>(object: X) <noret> {
-   blame m1778;
+   c_printf(object.format_str());
 }
+
+pub fun println<X: Any<Printable>>(object: X) <noret> {
+    c_printf("%s\n",object.format_str());
+  }
+
+#[llvm_name="printf"]
+#[overwrite(printf)] // this tells the compiler we are overwriting printf and it will ignore the current definition of it and doesn't raise an error
+pub fun printf<X: Any<Printable>>(fmt: string, ...objects: [X]) <noret> {
+    let formatted_str <string> = format!(fmt, ...objects); // Using format macro
+    c_printf(formatted_str);
+  }
+
+
+struct IOResult<T, E>: <IResult> {
+    pub error <E>,
+    pub result <T>,
+
+    IOResult()
+  }
+
+interface FileIO {
+    pub fun get_file_info(path: PathLike) <IOResult>;
+  }
+
+struct File: <FileIO> {
+    pub static fun open(path: string) <IOResult<File>> {
+        if (!File::exists(path)){
+            return ERROR("File don't exists");
+          } else {
+              return OK(File(path));
+            }
+      }
+  }

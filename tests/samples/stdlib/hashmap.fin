@@ -10,22 +10,22 @@ struct HashMapError: <Error> {} // Error Class
 struct HashMap<T, U> : <Index, IndexAssign> {
     priv keys <Collection<T>>,
     priv values <Collection<U>>,
-    
+
     pub fun get_index(self: Self, other: T) <int> {
         for (let i <int> = 0; i <= self.values.len();i++) {
           if (self.keys.get(i) == other){
               return i;
             }
           }
-        blame HashMapError("Element doesn't exist.");
+        return -1;
       }
     pub fun exists(self: Self, other: T) <bool> {
         for (let i <int> = 0; i <= self.values.len();i++) {
-          if (self.keys.get(i) == other){
+            if (self.keys.get(i) == other){
               return true;
             }
           }
-          return false;
+        return false;
       }
     pub fun __set(self: Self, key: T, value: U) <noret> {
         if (!self.exists(key)){
@@ -40,7 +40,7 @@ struct HashMap<T, U> : <Index, IndexAssign> {
                 return self.values.get(i);
               }
           }
-        blame HashMapError("Element doesn't exist.");
+        return -1;
       }
     pub operator[] implements cast<fn(Self, T)>(__get); // See stdlib/collection.fin for more information about this implementation
     pub operator= implements cast<fn(Self, T, U)>(__set);

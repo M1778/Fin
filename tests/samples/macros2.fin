@@ -1,14 +1,4 @@
-@macro GET_SIZE() {
-    return quote {
-        0;
-      };
-  }
-
-@macro CONFIG_MAX() {
-    return quote {
-        "";
-      };
-  }
+// Truncated
 
 enum Config {
     BufferSize = GET_SIZE!() // Macro expansion in Enum

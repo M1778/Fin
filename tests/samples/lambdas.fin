@@ -1,3 +1,5 @@
+import { Addable } from operators;
+
 @define printf(fmt: string, ...) <noret>;
 
 // A function that accepts a callback
@@ -6,7 +8,7 @@ fun compute(val: int, callback: fn(int) -> int) <int> {
 }
 
 // A function that returns a function (Higher Order Function)
-// TODO: In a real compiler this requires closures (capturing env), 
+// TODO: In a real compiler this requires closures (capturing env),
 // but for syntax/semantics checking, returning a lambda is valid.
 fun get_adder() <fn(int, int) -> int> {
     return (a: int, b: int) <int> => a + b;
@@ -53,10 +55,16 @@ fun main() <noret> {
     // ---------------------------------------------------------
     let logger <auto> = (msg: string) <void> => printf("Log: %s\n", msg);
     logger("Hello Lambda");
-    
+
     // ---------------------------------------------------------
     // Case 7: Calling returned function
     // ---------------------------------------------------------
     let adder <auto> = get_adder();
     printf("Adder: %d\n", adder(10, 20));
+
+
+    // Case 8: Lambda with generics
+    let case_8 <fn<T: Castable>(m: T) -> T> = <T: Castable>(m: T) <T> => m;
+
+    let case_8_ <auto> = fun <Generic: Addable>(a: Generic, b: Generic) <Generic> { return a + b; };
 }

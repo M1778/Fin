@@ -1,6 +1,6 @@
-@define printf(fmt: <string>, ...) <noret>;
+@define printf(fmt: string, ...) <noret>;
 
-fun swap<T>(a:<&T>, b: <&T>) <noret> {
+fun swap<T>(a: &T, b:  &T) <noret> {
     let temp <T> = *b;
     *b = *a;
     *a = temp;

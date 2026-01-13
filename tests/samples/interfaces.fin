@@ -11,7 +11,7 @@ struct User {
 
 // 3. Function with Generic Constraint
 // T must implement Printable (checked in Semantics)
-fun print_any<T: Printable>(item: <T>) <noret> {
+fun print_any<T: Printable>(item: T) <noret> { // an easier way to write this is : `fun print_any(item: Printable) <noret> {}`
     let s <string> = item.to_string();
     printf("%s", s);
 }
@@ -20,5 +20,5 @@ fun main() <noret> {
     let u <User> = User { name: "Fin", age: 1 };
     // This would technically fail in a real compiler if User doesn't impl Printable
     // But for now, we just want to see if Semantics accepts the syntax.
-    print_any::<User>(u); 
+    print_any::<User>(u);
 }

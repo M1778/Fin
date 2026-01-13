@@ -7,6 +7,7 @@ struct Collection<T> : <Index, IndexAssign> {
     priv length <int>,
     priv filled <int>,
     priv _arr <[T]>,
+    pub push_back <fn(Self, T)=>noret> = null,
 
     pub fun push(self: Self, item: T) <noret> {
         if (self.filled >= self.length) {
@@ -64,21 +65,35 @@ struct Collection<T> : <Index, IndexAssign> {
       }
     
     // Other names for same functionality
-    pub getitem <fn(Self, int)> = __get, // points to __get instead of copying it
-    pub setitem <fn(Self, int, T)> = __set,
+    pub getitem <fn(Self, int) => T> = __get, // points to __get instead of copying it
+    pub setitem <fn(Self, int, T) => void> = __set,
 
-    pub operator[] implements cast<auto>(__get); // uses implements to set the operator for gettable to a casted function which copies the function instead of just pointing to it (required for implements)
-    pub operator= implements cast<auto>(__set); // same happens here, uses implements and casting to copy the `__set` method to the operator (copying function signature and function body)
+    //pub operator[] implements cast<auto>(__get); // uses implements to set the operator for gettable to a casted function which copies the function instead of just pointing to it (required for implements)
+    //pub operator= implements cast<auto>(__set); // same happens here, uses implements and casting to copy the `__set` method to the operator (copying function signature and function body)
     // Note: Implements also works with methods too (not just operators)
-
+    
     Collection(length: int) {
-        return new Collection{length: length, filled: 0, _arr: new [T, length]{}};
-      }
-    Collection(length: int) {
-        return new Collection{length: 5, filled: 0, _arr: new [T, 5]{}};
+        return Collection{length: length, filled: 0, _arr: new [T, length]{}};
       }
 
     ~Collection(){
         self.deallocate();
       }
   }
+
+
+@implements Collection<T> { // Overwriter. overwrites or adds methods/operators 
+  pub fun test() <noret> {} // adds or overwrites test to Collection
+}
+
+@implements Collection<T>::push_back = (self: Self, other: T) <noret> => {} // Safe Single overwrite
+
+interface NoLengthCollection {
+  Self();
+}
+
+Collection<T> implements <NoLengthCollection> {
+  Collection() {
+    return Collection{length: 5, filled: 0, _arr: new [T, 5]{}};
+  }
+}

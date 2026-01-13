@@ -5,25 +5,49 @@ import { Error } from error;
 #[typeinfo_class]
 #[class]
 class TypeInfo {
-    priv _name <_static_string>, // uses _static_string for better compatibility with compiler API
+    priv _name <_static_string>, // uses _static_string for better compatibility with compiler API (castable to normal string)
     priv _typeid <int>, // TypeId that compiler uses to identify types
 
     pub:
     	fun prototype() <noret> { blame m1778;} // using blame and m1778 keyword is like using `unimplemented!()` anyways gets optimized and eliminated by optimizer (DeadCode eliminator)
 }
 
+#[llvm_name="typeid"]
+#[use(compiler)]
+#[use(compiler.components.types)]
+@special typeid(T: $type) <int> {
+    return compiler.structs.select_field::<int>(compiler.types.gettype::<T>(), "TypeID")?; // A compiler API function that returns type information AS value. uses select_field to select a field from struct returned by gettype and we use denullifier `?`
+  }
+
+// cast function overlook:
+/*
+#[llvm_name="cast"]
+#[public] // Public to all
+#[uncastable]
+pub fun cast<_Type: $type>(value: Any<...>) <_Type> // $type == literal type (not needed to specify by default compiler uses monomorphism), value is type of ANY<ANY> (we take care of it in runtime but hint the compiler in compile time for catching expected errors before they break the program)
+{
+  // ... (Some checks for type conversion compatibility like type shape reformation status, check inheritance, parents, compatibility conversion)
+
+  // return casted:
+  return _casted;
+}
+*/
+
 // numbers
-type i32 = <int>;
-type i64 = <int{64}>;
-type i128= <int{128}>;
-type f32 = <float>;
-type f64 = <double>;
+type i32 = int;
+type i64 = int{64};
+type i128= int{128};
+type u32 = uint;
+type u64 = uint{64};
+type u128 = uint{128};
+type f32 = float;
+type f64 = double;
 
 // ...
 
-type string = <[char]>; // Special typing (overwrite default type)
+type string = [char]; // Special typing (overwrite default type)
 
-type Array<T> = <[T]>;
+type Array<T> = [T];
 
 #[implements]
 type Any<...> = any implements <...>; // checks in compile time ON usage, for example : `fun someFunction<A: Any<SomeInterface, Castable, ...>>() <noret>{};` A is a generic that forces implementation of SomeInterface and has to be castable (which most types are)
