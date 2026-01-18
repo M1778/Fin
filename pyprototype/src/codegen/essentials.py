@@ -54,8 +54,6 @@ from llvmlite import ir
 from llvmlite.binding import ffi, targets
 
 # --- Internal Imports ---
-from src.codegen.lib.intrinsics import IntrinsicLibrary
-from src.codegen.lib.attributes import AttributeLibrary
 from src.semantics.types import *
 from src.semantics.scope import Scope
 from src.ast2.nodes import *
@@ -218,8 +216,8 @@ class Compiler:
     
     # Macros
     macros: Dict[str, Tuple[List[str], List[AstNode]]]
-    attributes_lib = AttributeLibrary(...)
-    intrinsics_lib = IntrinsicLibrary(...)
+    attributes_lib = NotImplemented#AttributeLibrary(...)
+    intrinsics_lib = NotImplemented#IntrinsicLibrary(...)
 
     # =========================================================================
     # CORE METHODS (Signatures)
