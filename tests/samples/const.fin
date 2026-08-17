@@ -1,0 +1,101 @@
+import { rptr } from stdptr::std;
+
+// ALL const usages
+
+// global constants
+const myGlobalVar <int> = 100; // cannot be reassigned later
+
+// constant parameters (cannot be reassigned or changed inside function body)
+fun test(const a: int) <noret> {
+    // a = 10; // raises an error if we try to reassign it
+
+    // a is only readable and can be copied too
+    let scope_a <int> = a;
+    scope_a = 5; // this is allowed since the value is copied
+  }
+
+// a more complex usage (what about pointers?)
+fun test_2(const a: &int) <noret> { // now `a` is a pointer to an integer
+    // a = new int(1); // again we cannot reassign `a` since its a constant parameter
+
+    // however we can change the content of the value `a` is pointing to
+    *a = 20; // this will work
+  }
+
+// a more safe pointer example (restricting the function from changing the value of integer pointer is pointing to)
+fun test_3(const a: rptr<int>) <noret> { // we can use smart pointers just like in c++
+    if (a.owned == false) {// this means we don't own the value so we can't change it
+      // a.set(10) // this will cause an error because we do not have ownership of the value
+    } else {
+      a.set(10); // this works fine (if we have ownership)
+    }
+  }
+
+// a way to borrow ownership to change the value and give ownership back:
+fun test_4(const a: &rptr<int>) <noret> {
+    if (a.borrowed == false ){ // this means they didn't borrow us the ownership so we can't do fun things
+
+    } else {
+      // We got ownership let's use it
+      a.set(2026); // this works
+
+      // at the end we shouldn't forget to give ownership back (by default this will be called when compiler goes out of scope of the function)
+      a.giveback(); // we manually give back what we borrowed (this is automatically handled with scope measures)
+    }
+  }
+
+// complete ownership
+fun test_5(const a: &rptr<int>) <noret> {
+    if (a.owned == true){ // we completely own the smart pointer and there is no giving back
+        a.set(1010); // we can do anything we want to the smart pointer (even freeing it before it is read again which is dangerous)
+
+        // let's free the smart pointer and dispose of it (this will automatically happen when compiler goes out of scope because we have full ownership and we are going out of scope)
+        // we'll manually dispose of it so it cannot be read even by the other pointers pointing to the value (we'll ignore the counter)
+        a.release();
+      }
+  }
+
+// const arrays: we cannot reassign the array but we can change the value of its elements
+fun test_6(const a: [int]) <noret> {
+    a[0] = 10; // this is allowed (but this won't do anything since we are not using a pointer like `&[int]`) everything will happen in function scope
+  }
+
+// readonly arrays:
+fun test_7(const a: rptr<[int]>) <noret> {
+    for (i: int = 0; i >= a.value.length; i++){
+        printf("%d: %d, ", i, a.value[i]);
+      }
+  }
+
+fun main() <noret> {
+  let ta1 <int> = 10;
+
+  test_2(&ta1); // this will change the value of `ta1` to 20
+
+  blame ta1 == 20; // assertion
+
+  // using smart pointers
+  let ta2 <rptr<int>> = rptr(5);
+
+  test_3(ta2.restrict); // this property of rptr is a a copy of itself but in readonly mode (restrict)
+
+  blame ta2.value == 5; // this ensures the value of our pointer didn't change
+
+  // however if we want to we can borrow the ownership
+  test_4(ta2.borrow());
+
+  blame ta2.value == 2026; // assert value has changed
+
+  // we can also give full ownership and dispose of the ownership we currently have
+
+  test_5(ta2.own()); // this will give up ownership and we'll only have a readonly pointer `ta2`
+
+  // since `test_5` manually releases all other pointers to the value without considering counters we can assert like this:
+  blame ta2.value == null; // this will not cause an error since the value is now null
+
+  let arr <rptr<[int]>> = rptr([1,2,3,4]);
+
+  test_7(arr);
+
+  blame arr.value == [1,2,3,4];
+}

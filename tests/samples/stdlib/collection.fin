@@ -1,15 +1,21 @@
-import { Index, IndexAssign } from operators;
-import { Error } from error;
+#[stdimport] %{ // multi set attribute for statements
+import { Index, IndexAssign } from operators::std;
+import { Error } from error::std;
+}%
 
+namespace std {
 struct CollectionError : <Error> {}
 
-struct Collection<T> : <Index, IndexAssign> {
-    priv length <int>,
-    priv filled <int>,
-    priv _arr <[T]>,
-    pub push_back <fn(Self, T)=>noret> = null,
+#[export]
+pub struct Collection<T> : <Index, IndexAssign> {
+    priv:
+      length <int>,
+      filled <int>,
+      _arr <[T]>,
+    pub:
+      push_back <fn(&Self, T)=>noret> = null,
 
-    pub fun push(self: Self, item: T) <noret> {
+      fun push(self: &Self, item: T) <noret> {
         if (self.filled >= self.length) {
             self.length++;
             self.allocate(self.length);
@@ -18,7 +24,7 @@ struct Collection<T> : <Index, IndexAssign> {
         self.filled++;
       }
 
-    pub fun pop_last(self: Self, index: int) <T> {
+      fun pop_last(self: &Self, index: int) <T> {
         let _ <auto> = self._arr[self.filled];
         self._arr[self.filled] = null;
         self.filled--;
@@ -26,15 +32,15 @@ struct Collection<T> : <Index, IndexAssign> {
         return _;
       }
 
-    pub fun get(self: Self, index: int) <T> {
+      fun get(self: &Self, index: int) <T> {
         return self._arr[index];
       }
 
-    pub fun len(self: Self) <int> {
+      fun len(self: &Self) <int> {
         return self.length;
       }
-    
-    priv fun deallocate(self: Self) <noret> {
+
+    priv fun deallocate(self: &Self) <noret> {
         delete self._arr;
         self.length = 0;
         self.filled = 0;
@@ -50,20 +56,20 @@ struct Collection<T> : <Index, IndexAssign> {
         delete temp_arr;
       }
 
-    pub fun __get(self: Self, index: int) <T> {
+    pub fun __get(self: &Self, index: int) <T> {
         if (index > self.length){
             blame CollectionError("Index out of bounds");
           }
         return self._arr[index];
       }
 
-    pub fun __set(self: Self, index: int, value: T) <noret> {
+    pub fun __set(self: &Self, index: int, value: T) <noret> {
         if (index > self.length){
             blame CollectionError("Index out of bounds");
           }
         self._arr[index] = value;
       }
-    
+
     // Other names for same functionality
     pub getitem <fn(Self, int) => T> = __get, // points to __get instead of copying it
     pub setitem <fn(Self, int, T) => void> = __set,
@@ -71,7 +77,7 @@ struct Collection<T> : <Index, IndexAssign> {
     //pub operator[] implements cast<auto>(__get); // uses implements to set the operator for gettable to a casted function which copies the function instead of just pointing to it (required for implements)
     //pub operator= implements cast<auto>(__set); // same happens here, uses implements and casting to copy the `__set` method to the operator (copying function signature and function body)
     // Note: Implements also works with methods too (not just operators)
-    
+
     Collection(length: int) {
         return Collection{length: length, filled: 0, _arr: new [T, length]{}};
       }
@@ -82,11 +88,11 @@ struct Collection<T> : <Index, IndexAssign> {
   }
 
 
-@implements Collection<T> { // Overwriter. overwrites or adds methods/operators 
+@implements Collection<T> { // Overwriter. overwrites or adds methods/operators
   pub fun test() <noret> {} // adds or overwrites test to Collection
 }
 
-@implements Collection<T>::push_back = (self: Self, other: T) <noret> => {} // Safe Single overwrite
+@implements(pub) Collection<T>::push_back = (self: &Self, other: T) <noret> => {} // Safe Single overwrite (public)
 
 interface NoLengthCollection {
   Self();
@@ -96,4 +102,6 @@ Collection<T> implements <NoLengthCollection> {
   Collection() {
     return Collection{length: 5, filled: 0, _arr: new [T, 5]{}};
   }
+}
+
 }

@@ -1,20 +1,25 @@
-import { getkeyid, keyidof } from enums;
-import { Error } from error;
+#[stdimport] %{
+import { getkeyid, keyidof } from enums::std;
+import { Error } from error::std;
+}%
+
+namespace std {
 
 type ErrorLike = string | any implements <Error>; // This is a way of saying ErrorLike is a type that can be either a string OR anything else that implements the `Error` class from stdlib/error (like inheritance implementation)
 
 
-
-enum Result <T: Any<...>, U: ErrorLike> { // Using `ErrorLike` here as a reference helps the compiler to know what is most likely the type of that generic (U)
+#[llvm_name="Result"]
+pub enum Result <T: Any<...>, U: ErrorLike> { // Using `ErrorLike` here as a reference helps the compiler to know what is most likely the type of that generic (U)
     Ok(T),
     Err(U),
   }
 
-
-interface IResult<T, U> {
-    pub fun unwrap(enum_ : Result<T, U>) <T>; // Unwraps the underlying value and returns it
-    pub fun expect(enum_ : Result<T, U>) <noret>; // expects the enum to be anything other than error (Err) so it blames the error if it is one
-    pub fun select(enum_ : Result<T, U>, callback : fn(T) -> void) <noret>; // if the result is Ok it runs the callback function and passes the result to it (T)
+#[export]
+pub interface IResult<T, U> {
+    pub:
+      fun unwrap(enum_ : Result<T, U>) <T>; // Unwraps the underlying value and returns it
+      fun expect(enum_ : Result<T, U>) <noret>; // expects the enum to be anything other than error (Err) so it blames the error if it is one
+      fun select(enum_ : Result<T, U>, callback : fn(T) -> void) <noret>; // if the result is Ok it runs the callback function and passes the result to it (T)
   }
 
 Result<T, U> implements <IResult> { // Enums can also be implemented (meaning methods can be implemented for it BUT ONLY ON CONDITIONS like having their first parameter the enum value itself)
@@ -38,3 +43,4 @@ Result<T, U> implements <IResult> { // Enums can also be implemented (meaning me
           }
       }
   }
+}

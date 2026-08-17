@@ -50,6 +50,9 @@ from ...semantics.types import *
 import enum
 import uuid
 
+class Compiler:... # Forward Declaration
+
+
 class Compiler:
     """
     The Central Compiler State.
@@ -191,7 +194,7 @@ class Compiler:
     panic_str_const: ir.Value
     
     # Macros
-    macros: Dict[str, Tuple[List[str], List[AstNode]]]
+    macros: Dict[str, Tuple[List[str], List[Node]]]
     attributes_lib = Any#(Compiler)
     intrinsics_lib = Any#(Compiler)
 
@@ -435,7 +438,7 @@ class Compiler:
         ...
     
     # --- Module Helpers (src/codegen/modules.py) ---
-    def compile_and_import_file(self, abs_path: str, node: AstNode = None, targets: List[str] = None, alias: str = None) -> None:
+    def compile_and_import_file(self, abs_path: str, node: Node = None, targets: List[str] = None, alias: str = None) -> None:
         """Compiles and imports a module from a file path."""
         ...
 
@@ -472,7 +475,7 @@ class Compiler:
         ...
 
  
-class AstNode(Node):...
+class Node(Node):...
 
 
 

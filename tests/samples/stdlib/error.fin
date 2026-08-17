@@ -1,6 +1,8 @@
+namespace std {
+#[llvm_name="Error"]
 #[uncastable]
-#[std]
-#[class]
+#[stderror] // Standard error class
+#[class] // turns structs into classes (for stronger inheritance support)
 pub struct Error {
     pub message <string>,
     pub error_id <int>,
@@ -16,9 +18,11 @@ pub struct Error {
       }
   }
 
+#[export]
 #[use(compiler)]
 #[use(compiler.components.types)]
-@special is_error_type( t: $type ) <bool> {
+@special(pub) is_error_type( t: $type ) <bool> {
    const result <int> = compiler.types.cmp_types(t, Error);
    return result == -1 : false ? true;
+}
 }

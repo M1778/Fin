@@ -1,4 +1,4 @@
-import { Addable } from operators;
+import { Addable } from operators::std;
 
 @define printf(fmt: string, ...) <noret>;
 

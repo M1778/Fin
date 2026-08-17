@@ -1,3 +1,5 @@
+// Better examples exists in stdlib
+
 interface GetVal<T> {
     pub fun get_val() <T>;
 }
@@ -13,7 +15,7 @@ MyStruct implements <GetVal<int>> {
 }
 
 interface Addable<T> {
-    operator + (other: <T>) <T>;
+    pub operator + (other: <T>) <T>;
 }
 
 struct Point {
@@ -22,7 +24,7 @@ struct Point {
 }
 
 Point implements <Addable<Point>> {
-    operator + (other: <Point>) <Point> {
+    pub operator + (other: <Point>) <Point> {
         return Point { x: self.x + other.x, y: self.y + other.y };
     }
 }

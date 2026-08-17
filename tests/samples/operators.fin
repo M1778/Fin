@@ -1,4 +1,3 @@
-import { malloc, free } from "stdlib/memory";
 
 @define printf(fmt: <string>, ...) <int>;
 

@@ -1,8 +1,10 @@
-import { Collection } from collection;
-import { HashMap } from hashmap;
+/* [WIP]
+import { Collection } from collection::std;
+import { HashMap } from hashmap::std;
 
-// Rust-like macro definition
-macro my_vec {
+
+// Hygienic Rust-like macro definition (NOT DECIDED YET)
+@macro my_vec {
     () => {
         new Collection::<int>{}
     };
@@ -15,7 +17,7 @@ macro my_vec {
     }
 }
 
-macro map {
+@macro map {
     ($($key:expr => $val:expr),*) => {
         {
             let temp <auto> = new HashMap::<string, int>{};
@@ -29,3 +31,5 @@ fun main() <void> {
     let v <auto> = my_vec![1, 2, 3];
     let m <auto> = map!{ "a" => 1, "b" => 2 };
 }
+
+*/

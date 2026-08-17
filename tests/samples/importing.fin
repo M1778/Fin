@@ -6,6 +6,11 @@ import "tests/samples/macros.fin"; // this is a normal file import which imports
 
 import "somelib"; // IMPORTANT: THIS IS SO IMPORTANT BECAUSE WE DO NOT GIVE ANY PATH TO IT SO HOW DOES THE COMPILER KNOW WHERE TO IMPORT THIS LIBRARY, as we assume somelib is a directory containing modules. The compiler also checks an environment variable named "FIN_LIBS" which has multiple paths of imports (specially builtins) and uses those to search for libraries (this is how our package manager "finn" can easily tell our compiler which environment to use using "--fin-libs" flag)
 
+import * from somelib; // this will import ALL symbols from the somelib library
+
+//since namespaces exists we also allow a way to import stuff from namespaces explicitly:
+import { HashMap } from hashmap::std; // this means there is a namespace in hashmap library and we explicitly import the `HashMap` symbol from that namespace using COLONCOLON
+
 
 
 fun main() <noret> {

@@ -70,6 +70,58 @@ import { Collection } from collection;
 // NOT: import { X } from stdlib;
 ```
 
+### @implements (The overwriter or implementor?)
+```fin
+@implements Collection<T> { // Overwriter. overwrites or adds methods/operators 
+  pub fun test() <noret> {} // adds or overwrites test to Collection
+}
+
+@implements Collection<T>::push_back = (self: Self, other: T) <noret> => {} // Safe Single overwrite
+
+interface NoLengthCollection {
+  Self();
+}
+
+Collection<T> implements <NoLengthCollection> {
+  Collection() {
+    return Collection{length: 5, filled: 0, _arr: new [T, 5]{}};
+  }
+}
+```
+
+### easy nullifier (default is null)
+```fin
+struct A {
+    b? <int>, // using '?' makes its default value null and it might not exists (equavelant to `b <int> = null,`)
+}
+struct maybe<T: Castable> {
+    value? <T>,
+    pub static fun unpack(v: any) <T> {
+        return cast<T>(v); // raises a panic if cast fails
+    }
+}
+fun make_A(n: int) <A?> { // using '?' in types tells us that it might return that type OR null (equavelant to <Maybe<A>>)
+    if (n > 0){
+        return A{};
+    } else {
+        return null;
+    }
+}
+
+fun main() <noret> {
+    let myvar <A?> = make_A(1); // Handling unknowns
+    maybe::unpack::<A>(myvar); // raises an error if myvar is null
+
+    // Or an easier way to handle it (let compiler handle it):
+    let myvar2 <A> = make_A(-1)?; // Using '?' at the end of an expression makes any null value to raise an panic error OR just returns the normal value "unpacked"
+
+    // another example:
+    let mibombo <any?> = null;
+    // what happens if we try to unnullify an any type:
+    let _ <any> = mibombo?; // This is a crucial thing we have to handle (this should be an error since type any cannot be null)
+}
+```
+
 ## Task List
 1. [x] **Implement 'blame' as assert**
 2. [x] **Implement Rust-like macros**

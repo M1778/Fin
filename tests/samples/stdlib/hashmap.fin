@@ -1,7 +1,10 @@
-import { Collection } from collection;
-import { Error } from error;
-import { Index, IndexAssign } from operators;
+#[stdimport] %{
+import { Collection } from collection::std;
+import { Error } from error::std;
+import { Index, IndexAssign } from operators::std;
+}%
 
+namespace std {
 @define printf(fmt: string, ...) <noret>;
 
 struct HashMapError: <Error> {} // Error Class
@@ -11,7 +14,7 @@ struct HashMap<T, U> : <Index, IndexAssign> {
     priv keys <Collection<T>>,
     priv values <Collection<U>>,
 
-    pub fun get_index(self: Self, other: T) <int> {
+    pub fun get_index(self: &Self, other: T) <int> {
         for (let i <int> = 0; i <= self.values.len();i++) {
           if (self.keys.get(i) == other){
               return i;
@@ -19,7 +22,7 @@ struct HashMap<T, U> : <Index, IndexAssign> {
           }
         return -1;
       }
-    pub fun exists(self: Self, other: T) <bool> {
+    pub fun exists(self: &Self, other: T) <bool> {
         for (let i <int> = 0; i <= self.values.len();i++) {
             if (self.keys.get(i) == other){
               return true;
@@ -27,14 +30,14 @@ struct HashMap<T, U> : <Index, IndexAssign> {
           }
         return false;
       }
-    pub fun __set(self: Self, key: T, value: U) <noret> {
+    pub fun __set(self: &Self, key: T, value: U) <noret> {
         if (!self.exists(key)){
             self.keys.push(key);
           }
         self.values[self.get_index(key)] = value;
       }
 
-    pub fun __get(self: Self, other: T) <U> {
+    pub fun __get(self: &Self, other: T) <U> {
         for (let i <int> = 0; i <= self.values.len();i++) {
             if (self.keys.get(i) == other) {
                 return self.values.get(i);
@@ -49,3 +52,4 @@ struct HashMap<T, U> : <Index, IndexAssign> {
         return new HashMap{keys: new Collection::<T>{}, values: new Collection::<U>{}};
       }
   }
+}

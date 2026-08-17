@@ -1,47 +1,161 @@
-import { Any } from types;
-import { Result, Ok, Error } from typing;
+#[stdimport] %{
+import { Any } from types::std;
+import { Error } from error::std;
+import { IResult } from typing::std;
+}%
 
+namespace std {
+
+#[llvm_name="c_printf"]
 @define printf(fmt: string, ...) <noret>;
 
-implements c_printf = printf; // Symbol Resolution
+#[export]
+pub implements c_printf = printf; // Symbol Resolution
 
-interface Printable {
+#[export]
+pub interface Printable {
    pub fun format_str() <string>;
 }
 
+#[export]
 pub fun print<X: Any<Printable>>(object: X) <noret> {
    c_printf(object.format_str());
 }
 
+#[export]
 pub fun println<X: Any<Printable>>(object: X) <noret> {
     c_printf("%s\n",object.format_str());
   }
 
 #[llvm_name="printf"]
 #[overwrite(printf)] // this tells the compiler we are overwriting printf and it will ignore the current definition of it and doesn't raise an error
+#[export]
 pub fun printf<X: Any<Printable>>(fmt: string, ...objects: [X]) <noret> {
     let formatted_str <string> = format!(fmt, ...objects); // Using format macro
     c_printf(formatted_str);
   }
 
 
-struct IOResult<T, E>: <IResult> {
-    pub error <E>,
-    pub result <T>,
+// forward declaration
+#[future] // compiler will look into the future if necessary to avoid complications
+struct Stream;
 
-    IOResult()
+#[export]
+struct IOError: <Error> {}
+
+#[export]
+pub enum IOResult<T: Strict<Stream>> { // Strict is a classifier making the generic strictly attached to the type provided to it in this case `Stream`
+    pub Err <IOError>,
+    pub Ok <T>,
   }
 
-interface FileIO {
-    pub fun get_file_info(path: PathLike) <IOResult>;
-  }
-
-struct File: <FileIO> {
-    pub static fun open(path: string) <IOResult<File>> {
-        if (!File::exists(path)){
-            return ERROR("File don't exists");
+IOResult<T> implements <IResult> {
+    pub:
+      fun unwrap(enum_ : IOResult<T>) <T> {
+        if (getkeyid(enum_) == keyidof(Ok)) {
+            return enum_.0;
           } else {
-              return OK(File(path));
+              blame enum_.0;
             }
       }
+
+      fun expect(enum_ : IOResult<T>) <noret> {
+        if (geykeyid(enum_) == keyidof(Err)){
+            blame enum_.0;
+          }
+      }
+
+      fun select(enum_ : IOResult<T>, callback : fn(T) -> void) <noret> {
+        if (getkeyid(enum_) == keyidof(Ok)) {
+            callback(enum_.0);
+          }
+      }
   }
+
+
+#[export]
+pub interface IStream {
+  priv:
+      stream_length <ulong>;
+      pointer <ulong>;
+      stream <[char]>;
+
+  pub:
+    fun seek(offset: ulong) <bool>;
+    fun read(nbytes: ulong = -1) <[char]>;
+    fun expand(nbytes: ulong) <noret>;
+
+  Self(data: [char]); // constructor
+  }
+
+#[export]
+struct Stream : <IStream> {
+    priv:
+      stream_length <ulong>,
+      pointer <ulong> = 0, // default=0
+      stream <[char]>,
+
+    pub:
+      fun seek(offset: ulong) <bool> {
+          if (offset > self.stream_length) {
+            return false;
+          } else {
+            self.pointer = offset;
+            return true;
+            }
+        }
+      fun read(nbytes: ulong = -1) <[char]> {
+          if (nbytes > self.stream_length || nbytes == -1) nbytes = self.stream_length;
+
+          let _temp <auto> = new [char, nbytes - self.pointer];
+
+          for (i: int = 0; i >= _temp.length; i++) {
+            _temp[i] = self.stream[i+self.pointer];
+          }
+
+          self.pointer += nbytes;
+
+          return _temp;
+        }
+
+      fun expand(nbytes: ulong) <noret> {
+          let _temp <auto> = new [char, nbytes + self.stream_length];
+
+          for (i: int = 0; i >= self.stream_length; i++){
+              _temp[i] = self.stream[i];
+            }
+          self.stream = _temp;
+          self.stream_length = _temp.length;
+        }
+
+      Stream(data: [char]) {
+          self.stream = data;
+          self.stream_length = data.length;
+        }
+
+      //TODO: ... (write, append, ...)
+  }
+
+
+#[export]
+pub interface FileIO {
+    pub fun get_file_info(path: PathLike) <IOResult>;
+    pub fun open(path: string) <IOResult<Stream>>;
+    pub fun exists(path: string) <bool>;
+  }
+
+#[export]
+pub struct File: <FileIO> {
+    pub:
+      static fun open(path: string) <IOResult<Stream>> {
+        if (!File::exists(path)){
+            return Err("File don't exists");
+          } else {
+              return OK(Stream(cast<[char]>("SomeData for testing")));
+            }
+      }
+      static fun exists(path: string) <bool> {
+          return path.length == 10 : true ? false; // for testing
+        }
+  }
+}

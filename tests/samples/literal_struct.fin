@@ -23,7 +23,7 @@ fun main() <noret> {
         pub health <uint> = 100,
         pub damage <uint> = 1,
 
-        pub print_player(self: Self) <noret> {
+        pub print_player(self: &Self) <noret> {
             if (!@defined("printf")){
               @define printf() <noret>;
             }

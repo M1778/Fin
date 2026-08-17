@@ -1,0 +1,42 @@
+#[stdimport]
+import { number2str } from types;
+
+namespace std {
+#[export]
+type size_t = uint{64};
+
+
+// Fin dynamic memory alloc function
+#[llvm_name="falloc"]
+fun? falloc(size: size_t) <&void> {
+  if (size > @GET_MEMORY_LIMIT()) {
+
+  }
+  return @Alloc(size); // BUILTIN COMPILER SPECIAL MEMORY METHOD
+}
+
+#[llvm_name="dealloc"]
+fun dealloc(memory: &void) <noret> {
+  @Free(memory); // BUILTIN COMPILER SPECIAL MEMORY METHOD
+}
+
+// mem_info: Returns a prototype containing information about system RAM
+#[export]
+#[use(compiler)]
+#[use(compiler.components.system)]
+@special mem_info() <{string, string}> {
+  let info <{string, string}>;
+  info["MemoryCardModel"] = compiler.system.get_memorycard_model();
+  info["TotalMemoryInBytes"] = number2str(compiler.system.get_total_memory(compiler.enums.InBytes));
+  info["AvailableMemory"] = number2str(compiler.system.get_available_memory(compiler.enums.InBytes));
+  return info;
+}
+
+#[export]
+#[use(compiler)]
+#[use(compiler.components.system)]
+@special GET_MEMORY_LIMIT() <uint> {
+  return compiler.system.get_available_memory(compiler.enums.InBytes);
+}
+
+}

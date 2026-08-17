@@ -10,7 +10,6 @@
 
 #include <fstream>
 #include <sstream>
-#include <iostream>
 #include <filesystem>
 #include <fmt/core.h>
 #include <fmt/color.h>
@@ -46,10 +45,10 @@ void configureLoader(ModuleLoader& loader, const CompilerOptions& options) {
             loader.addSearchPath(path);
         }
     }
-    
+
     // 3. Add Default Test Paths
-    loader.addSearchPath("tests/samples/stdlib"); 
-    loader.addSearchPath("."); 
+    loader.addSearchPath("tests/samples/stdlib");
+    loader.addSearchPath(".");
 }
 
 int Driver::compile() {
@@ -62,7 +61,7 @@ int Driver::compile() {
 
     // 2. Preprocessor
     std::string processedCode = runPreprocessor(source);
-    
+
     DiagnosticEngine diag(processedCode, options.inputFile);
 
     // 3. Parser
@@ -75,14 +74,14 @@ int Driver::compile() {
     std::filesystem::path p(options.inputFile);
     std::string basePath = p.parent_path().string();
     if(basePath.empty()) basePath = ".";
-    
+
     ModuleLoader loader(basePath);
     configureLoader(loader, options);
     // ----------------------------
 
     // 3.5 Macro Expansion
     if (options.debugParser) fmt::print("[INFO] Running Macro Expansion...\n");
-    
+
     auto macroScope = std::make_shared<Scope>(nullptr);
     MacroExpander expander(diag, macroScope.get());
     expander.setModuleLoader(&loader); // Use configured loader
@@ -98,15 +97,15 @@ int Driver::compile() {
     // 4. Semantic Analysis
     if (!options.skipSemantics) {
         if (options.debugSema) fmt::print("[INFO] Running Semantic Analysis...\n");
-        
+
         SemanticAnalyzer analyzer(diag, options.debugSema);
         analyzer.setModuleLoader(&loader); // Use same loader
         analyzer.visit(*ast);
-        
+
         if (analyzer.hasError) {
             return 1;
         }
-        
+
         if (options.debugSema) fmt::print(fg(fmt::color::green), "[SUCCESS] Semantics Verified.\n");
     }
 

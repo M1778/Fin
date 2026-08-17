@@ -1,4 +1,4 @@
-import stdio;
+import stdio::std as stdio; // its like saying `using stdio = std;`
 
 @define printf(fmt: string, ...) <int>;
 

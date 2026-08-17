@@ -1,9 +1,15 @@
-fun add() <int> {
+fun add() <int> { // this function won't compile and compiler will return an error
     if (0){
         return 1;
         }
   }
 
+fun? add2() <int> { // this function compiles but compiler will be strict about its return type which can be either int or null
+    if (0) { return 1; }
+}
+
 fun main() <noret> {
     let a <int> = add();
+
+    let b <int> = add2()?; // this will emit runtime checker code and it will panic an error
   }

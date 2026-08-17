@@ -13,11 +13,17 @@ fun main() <noret> {
     let a <int> = 10;
     let b <int> = 20;
 
-    swap(&a, &b);
+    swap(&a, &b); // we can also use `swap(a, b);` and compiler will automatically pass them by reference and give a warning asking you to pass them by reference manually however there's a way to change that in compiler options
 
     printf("a = %d, b = %d\n", a, b);
     
     let x <&&int>;
-    *x = new int(10);
-    **x = 10;
+    *x = new int*;
+    **x = new int(10); // heap allocated
+
+    let yy <&&&&int>; // complex pointer
+    *yy = new int***;
+    **yy = new int**;
+    ***yy = new int*;
+    ****yy = 10;
   }

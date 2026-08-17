@@ -1,4 +1,3 @@
-// import stdio;
 
 @define printf(fmt: string, ...) <noret>;
 

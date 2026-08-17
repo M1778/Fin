@@ -1,128 +1,136 @@
+namespace std { // std namespace
+namespace ops { // std::ops namespace
+#[export] %{
+type Output = Any<...>;
+
 interface Equal {
-   pub operator ==(other: any) <Any<...>>;
+   pub operator ==(other: any) <Output>;
 }
 
 interface NotEqual {
-   pub operator !=(other: any) <Any<...>>;
+   pub operator !=(other: any) <Output>;
 }
 
 
 interface GreaterThan {
-   pub operator >(other: any) <Any<...>>;
+   pub operator >(other: any) <Output>;
 }
 
 
 interface LessThan {
-   pub operator <(other: any) <Any<...>>;
+   pub operator <(other: any) <Output>;
 }
 
 
 interface GreaterThanEqual {
-   pub operator >=(other: any) <Any<...>>;
+   pub operator >=(other: any) <Output>;
 }
 
 
 interface LessThanEqual {
-   pub operator <=(other: any) <Any<...>>;
+   pub operator <=(other: any) <Output>;
 }
 
 interface Add {
-   pub operator +(rhs: any) <Any<...>>;
+   pub operator +(rhs: any) <Output>;
 }
 
 interface AddAssign {
-   pub operator +=(rhs: any) <Any<...>>;
+   pub operator +=(rhs: any) <Output>;
 }
 
 interface Sub {
-   pub operator -(rhs: any) <Any<...>>;
+   pub operator -(rhs: any) <Output>;
 }
 interface SubAssign {
-   pub operator -=(rhs: any) <Any<...>>;
+   pub operator -=(rhs: any) <Output>;
 }
 interface Mul {
-   pub operator *(rhs: any) <Any<...>>;
+   pub operator *(rhs: any) <Output>;
 }
 
 interface MulAssign {
-   pub operator *=(rhs: any) <Any<...>>;
+   pub operator *=(rhs: any) <Output>;
 }
 
 interface Div {
-   pub operator /(rhs: any) <Any<...>>;
+   pub operator /(rhs: any) <Output>;
 }
 
 interface DivAssign {
-   pub operator /=(rhs: any) <Any<...>>;
+   pub operator /=(rhs: any) <Output>;
 }
 
 interface Mod {
-   pub operator %(rhs: any) <Any<...>>;
+   pub operator %(rhs: any) <Output>;
 }
 
 interface ModAssign {
-   pub operator %=(rhs: any) <Any<...>>;
+   pub operator %=(rhs: any) <Output>;
 }
 
 
 interface BitAnd {
-   pub operator &(rhs: any) <Any<...>>;
+   pub operator &(rhs: any) <Output>;
 }
 
 
 interface BitAndAssign {
-   pub operator &=(rhs: any) <Any<...>>;
+   pub operator &=(rhs: any) <Output>;
 }
 
 
 interface BitOr {
-   pub operator |(rhs: any) <Any<...>>;
+   pub operator |(rhs: any) <Output>;
 }
 
 
 interface BitOrAssign {
-   pub operator |=(rhs: any) <Any<...>>;
+   pub operator |=(rhs: any) <Output>;
 }
 
 interface ShiftLeft {
-   pub operator <<(rhs: any) <Any<...>>;
+   pub operator <<(rhs: any) <Output>;
 }
 
 interface ShiftLeftAssign {
-   pub operator <<=(rhs: any) <Any<...>>;
+   pub operator <<=(rhs: any) <Output>;
 }
 
 interface ShiftRight {
-   pub operator >>(rhs: any) <Any<...>>;
+   pub operator >>(rhs: any) <Output>;
 }
 
 interface ShiftRightAssign {
-   pub operator >>=(rhs: any) <Any<...>>;
+   pub operator >>=(rhs: any) <Output>;
 }
 
 
 interface Unary {
-   pub operator `-() <Any<...>>;
+   pub operator `-() <Output>;
 }
 
 
 interface Not {
-   pub operator !() <Any<...>>;
+   pub operator !() <Output>;
 }
 
 
 interface Index {
-   pub operator [](idx: any) <Any<...>>;
+   pub operator [](idx: any) <Output>;
 }
 
 interface IndexAssign {
-   pub operator []=(idx: any) <Any<...>>;
+   pub operator []=(idx: any) <Output>;
 }
 
 interface Deref {
-   pub operator `*() <Any<...>>;
+   pub operator `*() <Output>;
 }
 
 interface FnCall {
-   pub operator (...args: <[any]>) <Any<...>>; // instead of taking an static array of items with unknown type "<[any]>" we could use a collection like: "<Collection<...>>"
+   pub operator (...args: <[any]>) <Output>; // instead of taking an static array of items with unknown type "<[any]>" we could use a collection like: "<Collection<...>>"
+}
+}%
+}
 }

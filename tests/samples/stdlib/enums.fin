@@ -1,18 +1,23 @@
-type EnumType = any implements Enum;
+namespace std {
+#[export]
+#[type(enum)]
+pub type EnumType = any implements Enum;
 
 #[llvm_name="_getenumkeyid"]
 #[private]
 #[use(compiler)]
 #[use(compiler.components.enums)]
-@special getenumkeyid(value: EnumType) <int> {
-    return compiler.enums.resolve_id(value);
-  }
+@special(priv) getenumkeyid(value: EnumType) <int> {
+   return compiler.enums.resolve_id(value);
+ }
 
-#[use(call)]
+#[llvm_name="enums_getkeyid"]
 pub fun getkeyid(value: EnumType) <int> {
-    return @getenumkeyid(value);
-  }
+   return @getenumkeyid(value);
+ }
 
+#[llvm_name="enums_keyidof"]
 pub fun keyidof(enum_member: $enum_member) <int> { // example: `keyidof(Ok)`
     return enum_member._keyid;
-  }
+}
+}

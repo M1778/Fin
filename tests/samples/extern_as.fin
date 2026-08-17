@@ -1,0 +1,49 @@
+// `Extern as` syntax is a really helpful statement, it can separate symbols from namespaces and can be used for type definitions but not recommended for that since we have `type` keyword + helpful when using enums (example at "tests/samples/enums.fin)
+
+// A Global Variable
+const int myglobv <int> = 10;
+
+// we can define another symbol which is exactly like using the same variable but with a different name only
+extern myglobv as myglobv_diffname; // myglobv_diffname is a new name for `myglobv` but they are the same variable just different names (identifier)
+
+// but this is more useful with namespaces
+// lets say we have a namespace and in it we have a function
+namespace myns {
+pub fun myfunc() <void> {}
+}
+
+// to access `myfunc` inside the namespace `myns` we'll have to write `myns::myfunc()` which is a little bit of overhead
+// we can use `extern as` to just give it a shortcut
+extern myns::myfunc as myfunc; // now we can just access `myns::myfunc` by using `myfunc()` only and this also is included when this file is imported they can just say `import { myfunc } from extern_as;` instead of saying `import { myfunc } from extern_as::myns`
+
+// `extern as` can be used for type definitions but its not recommended because `type` handles such task better and `extern as` is only for tweaking symbols and namespaces
+// here is an example of using `extern as` for typedefs
+extern int as Integer; // this works but its just better to use `type Integer = int;` since it guides the compiler that we are not working with symbols and we are working with types
+
+// another very useful features of `extern as` is moving all symbols out of a namespace just like how `using namespace` works in c++
+// we do it a little bit differently here with this syntax:
+namespace a_namespace {
+pub fun a() <void> {}
+pub fun b() <void> {}
+}
+// we will now make it so we don't have to use `a_namespace::SYMBOL_NAME` every time we want to access something in that namespace:
+extern * from a_namespace; // using `*` and `from` keyword we extract all names and symbols from that namespace (same can be done with enums)
+
+// let's see an enum example:
+enum MyEnum {
+   A, B, C
+}
+
+extern * from MyEnum;
+
+// now we can use A, B, C without writing `MyEnum::`
+fun test() <void> {
+   let a <MyEnum> = A; // this now works
+   let b <MyEnum> = MyEnum::B; // this also works but why do this when we have externed it at the first place?
+}
+
+
+
+// IMPORTANT NOTE: while `extern as` and `extern from` is designed for this task we usually don't use them because mostly we are using this kind of method for libraries we externally import, which we can just use a simple import statement to import specific symbols or even extract from namespaces using the import statements since they are so powerful
+// here is an example: `import * from a_random_library::a_namespace_in_that_library` this will import and extract all symbols in that specific namespace in that random library which completely removes the need to use `extern as` or `exterm from` however they will still be useful and supported
+// another USEFUL specific example for import statements is : `import { HashMap } from hashmap::std;` // this will import the HashMap class from hashmap library FROM the `std` namespace it is defined in so we don't have to write `std::HashMap` everytime

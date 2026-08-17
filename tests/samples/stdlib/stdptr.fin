@@ -1,0 +1,60 @@
+#[stdimport]
+import { Error } from error::std;
+
+namespace std {
+
+struct OwnershipError: <Error> {}
+
+interface rptr_iface<T> {
+  priv:
+    ref_counter <&uint>;
+
+  pub:
+    owned <bool>;
+    readonly restrict <&Self<T>>; // a copy version of rptr but with READONLY access
+    readonly value <&T>;
+
+    fun is_givenback() <bool>;
+    fun is_owned() <bool>;
+
+    fun own() <Self<T>>;
+    fun borrow() <Self<T>>;
+
+    fun release() <noret>;
+
+    fun set(new_value: &T) <noret>;
+    fun get() <&T>;
+
+  // Constructors
+  Self(initial_value: T);
+  Self(value: &T, counter: &T, borrowed: &bool, restrict: &Self<T>, owned: bool);
+
+  ~Self(); // Destructor
+}
+
+pub class rptr<T>: <rptr_iface> {
+  priv:
+    counter <&uint>,
+    ptrt <pointer_type>,
+
+  pub:
+    owned <bool> = false,
+    borrowed <bool> = false,
+    readonly restrict <&Self<T>>,
+    readonly value <&T>,
+
+    fun is_borrowed() <bool> { return self.borrowed; }
+    fun is_givenback() <bool> { return self.borrowed == false; }
+    fun is_owned() <bool> { return self.owned; }
+
+    fun own() <&Self<T>> {
+      if (!self.owned) {
+        blame OwnershipError("This instance is not the owner so it cannot pass ownership of value");
+      }
+      if (self.borrowed) {
+          blame OwnershipError("Cannot pass ownership while the value is borrowed");
+      }
+    }
+
+}
+}

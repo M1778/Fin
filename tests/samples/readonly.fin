@@ -1,0 +1,55 @@
+import { Error } from error::std;
+
+@define printf(fmt: string, ...) <noret>;
+
+// Readonly in struct:
+struct MyStruct {
+    pub readonly v1 <int>, // v1 is public but its value cannot be changed outside of struct declaration scope
+
+    pub fun change_v1(new_val: int) <noret> {
+        self.v1 = new_val; // this works, v1 is only readonly to outsiders
+      }
+}
+
+// Readonly in classes (same with struct):
+class MyClass {
+    pub:
+      #[debug] // debug attribute allows tracking
+      readonly v1 <int>,
+
+      fun change_v1(new_val: int) <noret> {
+          self.v1 = new_val;
+        }
+}
+
+// Readonly definitions in interfaces
+interface UnchanableString {
+    pub readonly value <string>;
+    pub fun force_change_string(self: &Self, new_str: string) <noret>;
+  }
+
+// A struct using `UnchanableString` interface:
+struct ChangableSomehow: <UnchanableString> {
+    pub:
+      readonly value <string>
+
+      fun force_change_string(new_str: string) <noret> {
+          self.value = new_str;
+        }
+  }
+
+fun main() <noret> {
+    let a <MyStruct> = MyStruct{v1: 10}; // first initializations of readonly members are allowed
+
+    let copy_v1 <int> = a.v1; // readonly members can be copied and we can tweak the copied version but not the members themselves since they are readonly
+
+    try {
+        a.v1 = 5; // this will blame an error
+    } catch (Error as err) {
+        printf("ERROR: cannot change value of readonly members");
+      }
+
+    // we can change the value of v1 using public methods
+    a.change_v1(1024);
+    blame a.v1 == 1024; // assertion
+}

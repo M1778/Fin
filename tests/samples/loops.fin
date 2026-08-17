@@ -1,0 +1,50 @@
+@define printf(fmt: string, ...) <noret>;
+
+
+fun main() <noret> {
+    // for loop
+    for (i : int = 0; i <= 10; i++) {
+        printf("%d\n", i);
+    }
+
+    let a <[int, 5]> = [1,2,3,4,5]; // array
+
+    for (i: int = 0; i < a.length - 1; i++){
+        printf("%d\n", a[i]);
+      }
+
+    // foreach loop
+    foreach(idx <int>, element <int> in a) {
+      blame element == a[idx]; // No assertion happens since the element matches
+    }
+
+    // foreach loop (just element)
+    foreach (element <int> in a) {
+      printf("%d\n", element);
+    }
+
+    // while loop
+    while (true) {
+      printf("Atleast i ran once\n");
+      break;
+    }
+
+    // do while loop
+    do {
+        printf("I was ran once too\n");
+      } while (false);
+
+    // recursion like
+    fun recursive(a: int) <int> {
+        if (a == 0) {
+            return 0;
+          }
+        return recursive(a - 1);
+    }
+    let b <auto> = recursive(5);
+
+    // Special loop (infinite loop => while true):
+    m1778 { // using the m1778 keyword and LBRACE AND RBRACE means this is a infinite loop and you'll have to exit out of it using `break`
+        break;
+    }
+  }

@@ -54,6 +54,10 @@ from .compiletime.errors import ErrorHandler
 ## --- NOTES ---
 # NOTE: Removed ImportC -> No longer supported
 
+# Attributes
+from .lib.attributes import *
+from .lib.intrinsics import *
+
 # --- Production
 # Access
 from .prod.access import compile_qualified_access

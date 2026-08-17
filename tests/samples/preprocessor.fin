@@ -2,6 +2,10 @@
 #cdef CONST_NUM 100
 #cdef MAX(a, b) ((a) > (b) ? (a) : (b))
 
+#c_ifndef PREPROCESSORS
+	#cdef PREPROCESSORS
+#c_endif
+
 #cdef DEBUG
 #c_ifdef DEBUG
     #cdef LOG_MSG "Debug Mode"

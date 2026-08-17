@@ -42,9 +42,45 @@
 # -----------------------------------------------------------------------------
 # “Code fades. Love leaves a signature.”
 # =============================================================================
-def main():
-    print("Hello from fin!")
+from src.codegen.fin import FinCompiler
+from src.utils.module_loader import ModuleLoader
+from src.parser import parser
+from src.lexer import lexer
+import platform
+from pathlib import Path
+import sys
+import argparse
 
+arg = argparse.ArgumentParser()
+arg.add_argument('file')
+arg.add_argument('-r','--run', action="store_true")
+arg.add_argument('-O', '--optimization-level', action="store_true")
+arg.add_argument('-o', '--output', type=str, default="out.exe" if platform.system()=="Windows" else "out")
+arg.add_argument('-i', '--ircode', action="store_true")
 
 if __name__ == "__main__":
-    main()
+    lexer.parser_instance = parser
+    args = arg.parse_args()
+    if not args.file or not Path(args.file).exists():
+        sys.exit(0)
+
+    file = args.file
+
+    OPT = 0
+
+    if args.run:
+        source =open(args.file,'r').read()
+        program = parser.parse(source,lexer=lexer)
+        if args.optimization_level:
+            OPT = int(args.optimization_level)
+        ML = ModuleLoader(args.file)
+        compiler = FinCompiler(source,args.file, module_loader=ML, opt=OPT)
+
+        compiler.compile(program)
+
+        compiler.runwithjit()
+    
+        if args.ircode:
+            f=open(f'{str(Path(args.file).stem)}.fin.ir','w')
+            f.write(str(compiler.module))
+            f.close()

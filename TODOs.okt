@@ -27,7 +27,7 @@ In stdlib/collection.fin:
 
 
 ##NOTES
-- blaming m1778 is like saying "unimplemented" or "not implemented yet" (Blame keyword supports that)
+- blaming m1778 (`blame m1778;`) is like saying "unimplemented" or "not implemented yet" (Blame keyword supports that)
 - we should implement the `class` keyword since it's a higher level priority
 - we should implement the `implements` keyword, for both implement checking in runtime and type definitions
 - we should implement the `type` keyword for type aliases AND high level type definitions

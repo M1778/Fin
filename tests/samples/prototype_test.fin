@@ -1,19 +1,47 @@
-import { HashMap } from hashmap;
-import { Collection } from collection;
+import { HashMap } from hashmap::std;
+import { Collection } from collection::std;
+
+struct CustomDT {}
+
+struct CustomDT2 {
+  CustomDT2() {} // constructor
+}
 
 fun main() <void> {
     // Basic prototype literal (type is prototype)
-    let a <auto> = { 10 : 10, "a": true };
-    
+    let a <auto> = { 10 : 10, "a": true }; // auto would resolve to `<{object, object}>`
+
+    // basic access
+    let a_member <int> = a[10]; // a_member will be 10 because of the key, value (10, 10)
+
+    // new member assignment (only for non-constant variables)
+    a["b"] = false; // a would be {10:10, "a":true,"b":false} after this statement
+
+    // remove/delete prototype member
+    delete &a[10]; // this is the manual way
+    a.rm("b"); // this is the functional way
+
     // Prototype literal coerced to HashMap (HashMap must implement from_prototype)
     let x <HashMap<string, int>> = HashMap::from_prototype({ "a" : 10, "b" : 20 });
-    
+
     // Prototype literal coerced to Collection (Collection must implement from_prototype)
     let my <Collection<int>> = Collection::from_prototype({ 0: 10, 1: 20 });
-    
+
     // Prototype type syntax in generic
     let p <{string, string}> = { "key": "value" };
     let complex <{string, {int, string}}> = {
         "item1": { 1: "one", 2: "two" }
-    };
+    }; // parsing this gonna be hella fun
+
+    let cus <{CustomDT, CustomDT2}> = { CustomDT{} : CustomDT2() }; // this works
+
+    let obj <{object, object}> = { 1: 1.0, "a":CustomDT{} }; // object type is an expensive type but can fit any datatype in it at the cost of memory and speed
+
+     // arrays in prototypes (weird example):
+     let sss <{[int], [{int, string}]}> = {
+        [1,2,3] : [{1 : "Hello"}, {100: "Some"}],
+        [5,5,5] : [] // empty array
+     }; // this example is weird, having the key as a array `[int]` and values as arrays containing another prototype type `[{int, string}]`
+
+
 }

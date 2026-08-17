@@ -1,0 +1,20 @@
+#[stdimport]
+import { resolve_type } from types::std;
+
+namespace std {
+#[export]
+type listarray = {any, any};
+
+pub fun keys<T>(prtp: {T, any}) <[T]> {
+    return prtp.0; // accessing `{prototype}.0` returns an array of the keys
+  }
+
+pub fun values<T>(prtp: {any, T}) <[T]> {
+    return prtp.1; // accessing `{prototype}.1` returns an array of the values
+  }
+
+// if a prototype's type is <{int, string}> it returns the type `int`
+pub fun typeof_keys(prtp: {any, any}) <$type> {
+    return resolve_type(prtp.0);
+  }
+}

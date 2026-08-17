@@ -58,7 +58,6 @@ from src.semantics.types import *
 from src.semantics.scope import Scope
 from src.ast2.nodes import *
 from .compiletime.errors import ErrorHandler
-from .helpers import *
 
 DEBUG = False
 

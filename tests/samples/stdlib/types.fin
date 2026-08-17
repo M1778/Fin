@@ -1,12 +1,16 @@
-import { Error } from error;
+#[stdimport]
+import { Error } from error::std; // import `Error` from error -> std namespace
+
+namespace std {
 
 #[llvm_name="typeinfo"]
 #[uncastable]
 #[typeinfo_class]
 #[class]
 class TypeInfo {
-    priv _name <_static_string>, // uses _static_string for better compatibility with compiler API (castable to normal string)
-    priv _typeid <int>, // TypeId that compiler uses to identify types
+    priv:
+      _name <_static_string>, // uses _static_string for better compatibility with compiler API (castable to normal string)
+      _typeid <uint>, // TypeId that compiler uses to identify types
 
     pub:
     	fun prototype() <noret> { blame m1778;} // using blame and m1778 keyword is like using `unimplemented!()` anyways gets optimized and eliminated by optimizer (DeadCode eliminator)
@@ -15,7 +19,7 @@ class TypeInfo {
 #[llvm_name="typeid"]
 #[use(compiler)]
 #[use(compiler.components.types)]
-@special typeid(T: $type) <int> {
+@special(pub) typeid(T: $type) <int> {
     return compiler.structs.select_field::<int>(compiler.types.gettype::<T>(), "TypeID")?; // A compiler API function that returns type information AS value. uses select_field to select a field from struct returned by gettype and we use denullifier `?`
   }
 
@@ -34,23 +38,74 @@ pub fun cast<_Type: $type>(value: Any<...>) <_Type> // $type == literal type (no
 */
 
 // numbers
-type i32 = int;
-type i64 = int{64};
-type i128= int{128};
-type u32 = uint;
-type u64 = uint{64};
-type u128 = uint{128};
-type f32 = float;
-type f64 = double;
+#[export] %{ // multi set attribute for statements using `#[attribute]%{...statements}%`
+pub type i32 = int;
+pub type i64 = int{64};
+pub type i128= int{128};
+pub type u32 = uint;
+pub type u64 = uint{64};
+pub type u128 = uint{128};
+pub type f32 = float;
+pub type f64 = double;
 
+pub type Number = int | uint | float | short | long | ushort | ulong | double | u64 | i64 | i128 | u128;
+}%
 // ...
 
-type string = [char]; // Special typing (overwrite default type)
+#[export] // Using export makes a unique llvm name for all modules (for example: `t_string`)
+#[type(string)] // String type definition
+pub type string = [char]; // Special typing (overwrite default type)
 
-type Array<T> = [T];
+#[export]
+pub type array<T> = [T];
+
+#[anytype]
+#[export]
+#[implements]
+#[type(any)]
+#[RT] // RuntimeType
+pub type Any = any;
 
 #[implements]
-type Any<...> = any implements <...>; // checks in compile time ON usage, for example : `fun someFunction<A: Any<SomeInterface, Castable, ...>>() <noret>{};` A is a generic that forces implementation of SomeInterface and has to be castable (which most types are)
+#[export]
+#[RT]
+type Any<...> = any implements <...>; // Any allows generics to bypass compile time type checking and instead runtime type handling happens, in other words ANY type is allowed to be passed but it has to be casted or handled by the user itself : `fun someFunction<A: Any<...>>() <noret>{};`
 
 #[implements]
+#[export]
 type nullptr = any implements <&void>;
+
+#[export]
+#[use(compiler)]
+#[use(compiler.components.types)]
+@special(pub) tftid(tid: uint) <$type> { // returns a type from typeid
+    let _type <$type> = compiler.types.typefrom_typeid(tid);
+    return _type;
+  }
+
+#[use(compiler)]
+#[use(compiler.components.types)]
+@special _resolve_type(v: any) <$type> { // if v is of type `Any` or `Any<...>` or any other types that are defined to be RunetimeType, compiler raises an error
+    let _type <$type> = compiler.types.ct_any(v); // resolves the type of v using a compiler api function (only in compile time)
+    return _type;
+  }
+
+// Type Resolver (Compile time)
+#[export]
+pub fun resolve_type(v: any) <$type> { // any = any type that is visible in compile time (can be identified in compile time)
+  return @_resolve_type(v);
+}
+
+#[export]
+pub fun resolve_arr_type(const &arr: [any]) <$type> { // Usually we can resolve the type of the array but resolving the type of its first element like `resolve_type(array[0]);` however this might cause an error if the array is empty
+    return resolve_type(arr[0]); // for now we'll just assume it has atleast one element and return the type of that
+}
+
+
+#[export]
+pub fun number2str<T: Number>(number: T) <string> {
+
+  return "10"; // placeholder
+}
+
+}

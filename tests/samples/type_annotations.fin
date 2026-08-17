@@ -2,9 +2,6 @@ fun main() <void> {
     // Type with expression-based annotation
     let x <int{64}> = 10;
     
-    // Type with multiple annotations
-    let y <float{32, aligned(16)}> = 3.14;
-    
     // Type with complex expressions in annotations
     let z <int{8 * 8}> = 42;
     
@@ -12,5 +9,5 @@ fun main() <void> {
     let p <*int{32}> = &x;
     
     // Prototype type with annotations (if applicable, though usually not needed)
-    let prot <{int{64}, string{256}}> = { 10: "test" };
+    let prot <{int{64}, float{128}}> = { 10: 123244.2 };
 }
