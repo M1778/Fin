@@ -1221,7 +1221,57 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
 
         op->accept(*this);
     }
-    
+
+    // `Collection<T> implements <NoLengthCollection> { Collection() { ... } }`
+    // (stdlib/collection.fin:103). ImplementsBlock::constructors is built by the grammar
+    // -- with a comment saying so -- and this function read `methods` and `operators`
+    // and stopped, so the constructor was parsed and then dropped: the conformance check
+    // below reported `Collection does not fully implement NoLengthCollection` about a
+    // constructor written four lines under the requirement it satisfies.
+    //
+    // Registered against structType, not against the interface the block names, or
+    // `Collection()` would construct a NoLengthCollection. Same hazard as the parent
+    // walk in StructType::constructorFor, same answer.
+    //
+    // Two passes over the parameters for the reason the struct body has two: the
+    // signature is built quietly, so an unresolvable parameter type is reported once --
+    // by the body scope below -- rather than twice
+    // (Soundness_ErrorRecovery.AConstructorParameterWithAnUnresolvedTypeKeepsItsArity is
+    // the struct-side test for the same arrangement).
+    //
+    // The written name is not checked against the target's, matching the struct body,
+    // where the grammar takes any `IDENTIFIER(params) block` for a constructor and
+    // nothing looks at which identifier it was.
+    for (auto& ctor : node.constructors) {
+        std::vector<std::shared_ptr<Type>> paramTypes;
+        {
+            QuietPass quiet(*this);
+            enterScope();
+            for (auto& param : ctor->params) {
+                // Sentinel, not dropped: the constructor keeps its written arity.
+                paramTypes.push_back(resolveTypeOrError(param->type.get()));
+            }
+            exitScope();
+        }
+        structType->addConstructor(std::make_shared<FunctionType>(paramTypes, structType));
+        debugLog(fg(fmt::color::green), "      [Implements] Registered constructor for '{}' with {} params\n",
+                 node.target_type, paramTypes.size());
+
+        // The body, in a scope of its own holding the parameters and `self`.
+        // visit(ConstructorDeclaration&) walks the body and nothing else -- it says so,
+        // and the reason is that a struct manages that scope itself -- so an implements
+        // block has to build the same one. `self._arr = new [T, 0]{};` is what the
+        // corpus block's body writes, and it is not analysable without either half.
+        enterScope();
+        for (auto& param : ctor->params) {
+            currentScope->define({param->name, resolveTypeOrError(param->type.get()), false, true});
+        }
+        visitParameterDefaults(ctor->params);
+        currentScope->define({"self", structType, true, true});
+        ctor->accept(*this);
+        exitScope();
+    }
+
     if (interfaceType) {
         auto ifaceStruct = std::dynamic_pointer_cast<StructType>(interfaceType);
         if (ifaceStruct && ifaceStruct->is_interface) {

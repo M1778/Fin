@@ -7055,3 +7055,194 @@ TEST(Soundness_ImplementsGenerics, AGenericParameterInABlockIsStillTheTargetsOwn
                               "fun main() <noret> { }\n");
     EXPECT_EQ(r.exitCode, 0) << "the bound travels with the parameter\n" << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// An implements block's constructors.
+//
+// `interface NoLengthCollection { Self(); }` and
+// `Collection<T> implements <NoLengthCollection> { Collection() { ... } }`
+// (stdlib/collection.fin:99 and :103) is the corpus shape: an interface whose whole
+// content is a constructor requirement, satisfied by a block that writes one. The
+// grammar builds ImplementsBlock::constructors -- its own comment says so -- and
+// visit(ImplementsBlock&) iterated `methods` and `operators` and nothing else, so
+// the constructor was parsed, held, and then dropped on the floor. The conformance
+// check at the bottom of the same function then reported `Collection does not fully
+// implement NoLengthCollection` about a constructor written two lines below the
+// requirement.
+//
+// Registering it is also what makes it callable, since the call site reads
+// StructType::constructors -- so this closes the same gap from both ends.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_ImplementsConstructors, AConstructorInABlockSatisfiesTheRequirement) {
+    // collection.fin:99-107 reduced to its shape.
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, }\n"
+        "interface INoArgs { Self(); }\n"
+        "Thing implements <INoArgs> { Thing() { self.d = 0; } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("does not fully implement"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsConstructors, AConstructorInABlockIsCallable) {
+    // The other half. Registration is what the call site reads, so a fix that only
+    // taught the conformance check about the block's constructors would leave
+    // `Thing(1)` reporting `expects 0 arguments, got 1`.
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, }\n"
+        "interface IOne { Self(d: int); }\n"
+        "Thing implements <IOne> { Thing(d: int) { self.d = d; } }\n"
+        "fun f() <void> { let t <Thing> = Thing(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsConstructors, AConstructorInABlockConstructsItsTarget) {
+    // Registered against the target, not against the interface the block names --
+    // the same hazard Soundness_ConstructorInheritance.AnInheritedConstructorConstructs-
+    // TheDerivedType pins for a parent's.
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, }\n"
+        "interface IOne { Self(d: int); }\n"
+        "Thing implements <IOne> { Thing(d: int) { self.d = d; } }\n"
+        "fun f() <void> { let t <Thing> = Thing(1); }\n");
+    EXPECT_EQ(stripAnsi(r.err).find("expected 'Thing'"), std::string::npos)
+        << "a block's constructor constructs the block's target:\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsConstructors, AConstructorInABlockIsStillArityChecked) {
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, }\n"
+        "interface IOne { Self(d: int); }\n"
+        "Thing implements <IOne> { Thing(d: int) { self.d = d; } }\n"
+        "fun f() <void> { let t <Thing> = Thing(1, 2); }\n");
+    EXPECT_NE(r.exitCode, 0) << "registering a constructor is not excusing its call";
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsConstructors, AConstructorInABlockIsStillArgumentChecked) {
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, }\n"
+        "interface IOne { Self(d: int); }\n"
+        "Thing implements <IOne> { Thing(d: int) { self.d = d; } }\n"
+        "fun f() <void> { let t <Thing> = Thing(\"x\"); }\n");
+    EXPECT_NE(r.exitCode, 0) << "a string does not fit an int parameter";
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsConstructors, AConstructorsBodyIsAnalysed) {
+    // Registering the signature and never walking the body would be the easy half.
+    // collection.fin's block body assigns to a field, and a body nobody visits is a
+    // body nobody checks.
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, }\n"
+        "interface INoArgs { Self(); }\n"
+        "Thing implements <INoArgs> { Thing() { let bad <int> = nosuchvariable; } }\n");
+    EXPECT_NE(r.exitCode, 0) << "the body is analysed";
+    // On the message, not on the name: a diagnostic prints the offending source line
+    // under its caret, so `find("nosuchvariable")` matched the conformance error's own
+    // excerpt and passed before the body was walked at all. `Undefined variable` is in
+    // the message and nowhere in the program.
+    EXPECT_NE(stripAnsi(r.err).find("Undefined variable"), std::string::npos) << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u)
+        << "the requirement is satisfied, so the body's is the only error:\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsConstructors, SelfIsVisibleInTheBody) {
+    // `self._arr = new [T, 0]{};` is what collection.fin:104-106 writes, so a body
+    // analysed in a scope without `self` would report on the corpus line itself.
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, }\n"
+        "interface INoArgs { Self(); }\n"
+        "Thing implements <INoArgs> { Thing() { self.d = 7; } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsConstructors, AParameterIsVisibleInTheBody) {
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, }\n"
+        "interface IOne { Self(d: int); }\n"
+        "Thing implements <IOne> { Thing(d: int) { self.d = d; } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsConstructors, AConstructorOfTheWrongArityDoesNotSatisfyTheRequirement) {
+    // The guard. Registering the block's constructors must not amount to satisfying
+    // the requirement by the mere fact that one was written -- the same three-guard
+    // shape Unit 13 put around StructType::implements.
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, }\n"
+        "interface IOne { Self(d: int); }\n"
+        "Thing implements <IOne> { Thing() { self.d = 0; } }\n");
+    EXPECT_NE(r.exitCode, 0) << "a nullary constructor does not satisfy a requirement for one parameter";
+    EXPECT_NE(stripAnsi(r.err).find("does not fully implement"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsConstructors, AConstructorOfTheWrongParameterTypeDoesNotSatisfyTheRequirement) {
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, }\n"
+        "interface IOne { Self(d: int); }\n"
+        "Thing implements <IOne> { Thing(d: string) { self.d = 0; } }\n");
+    EXPECT_NE(r.exitCode, 0) << "a string parameter does not satisfy a requirement for an int";
+    EXPECT_NE(stripAnsi(r.err).find("does not fully implement"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsConstructors, AGenericTargetsConstructorIsRegisteredToo) {
+    // collection.fin's target is `Collection<T>`, so the whole of it has to work on a
+    // generic target. `<auto>` and not `<Box<int>>` because `Box<int>()` does not parse
+    // -- turbofish in a call is one of the gaps still open -- and the annotation is not
+    // what this test is about.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, }\n"
+        "interface INoArgs { Self(); }\n"
+        "Box<T> implements <INoArgs> { Box() { } }\n"
+        "fun f() <void> { let b <auto> = Box(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsConstructors, TheTargetsGenericParameterIsUsableInAConstructorsParameterList) {
+    // Units 12 and 16 together: the block's header declares `T`, and the constructor
+    // this commit started registering is the second place that reads it. Without the
+    // binding, `Box(v: T)` reported `Undefined type 'T'` about a parameter named in the
+    // same line's header.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, }\n"
+        "interface IBoxed { pub fun get() <int>; }\n"
+        "Box<T> implements <IBoxed> {\n"
+        "  Box(v: T) { self.v = v; }\n"
+        "  pub fun get() <int> { return 1; }\n"
+        "}\n"
+        "fun f() <void> { let b <auto> = Box(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, AnImplementsBlockConstructorParameterIsReportedOnce) {
+    // The sibling of AnImplementsBlockMethodParameterIsReportedOnce, and the reason the
+    // signature pass is quiet: the parameter types are resolved twice, once to register
+    // the arity and once to populate the body's scope, and only the second one reports.
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, }\n"
+        "interface INoArgs { Self(); }\n"
+        "Thing implements <INoArgs> { Thing(x: NoSuchType) { } }\n");
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(e.find("Undefined type 'NoSuchType'"), std::string::npos) << e;
+    // Once, and the second error is the conformance one -- correct here, since a
+    // one-parameter constructor does not satisfy `Self()`.
+    size_t n = 0, at = 0;
+    while ((at = e.find("Undefined type 'NoSuchType'", at)) != std::string::npos) { ++n; at += 4; }
+    EXPECT_EQ(n, 1u) << e;
+}
+
+TEST(KnownDefect_ImplementsConstructors, ABlocksConstructorIsNotAnOverloadOfTheTargetsOwn) {
+    // Booked, not fixed: constructor lookup reads constructors[0] and nothing else,
+    // which is the same limit the struct body has had all along -- two constructors
+    // written on one struct are not resolved between either. The block's is second in
+    // the vector because the struct declaration is analysed first, so it is the one
+    // that cannot be called. Fixing this is overload resolution, not registration.
+    const FincRun r = compile(
+        "struct Thing { pub d <int>, Thing(d: int) { self.d = d; } }\n"
+        "interface INoArgs { Self(); }\n"
+        "Thing implements <INoArgs> { Thing() { self.d = 0; } }\n"
+        "fun f() <void> { let t <Thing> = Thing(); }\n");
+    EXPECT_NE(r.exitCode, 0) << "if this passes, constructor overloads resolve -- invert this test";
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
