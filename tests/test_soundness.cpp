@@ -818,6 +818,38 @@ TEST(Soundness_DynamicTypes, TwoArraysWithAssignableElementsAreAssignable) {
         << "[int] does not fit [string]\n" << stripAnsi(bad.err);
 }
 
+TEST(Soundness_Pointers, AVoidPointerIsAssignableInBothDirections) {
+    // Written to make a *deletion* safe rather than to catch a new defect: both of
+    // these compile today, and the rule that allows them is written twice --
+    // Type::isAssignableTo has a `&T -> &void` arm, and PointerType::isAssignableTo
+    // has the same arm plus the reverse and an element-wise recursion.
+    //
+    // The base copy is reachable only from inside the override (`this->as<PointerType>()`
+    // needs a pointer receiver, and the override's first line is the only qualified
+    // call), and it accepts a strict subset of what the override accepts. So it is
+    // dominated, and dominated code is not free: a mutation of the *override's* rule
+    // kills nothing while the base arm answers first, which is how the array copy of
+    // this same duplication was found (see the note on Soundness_Arrays
+    // .AFixedListInitialisesADynamicArrayOfTheSameElementType).
+    for (const char* code : {
+            "fun t(p: &void) <int> { return 0; }\n"
+            "fun main() <int> { let x <int> = 1; return t(&x); }\n",
+            "fun t(p: &int) <int> { return 0; }\n"
+            "fun main() <int> { let x <int> = 1; let v <&void> = &x; return t(v); }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << code << stripAnsi(r.err);
+    }
+
+    // The control, because "a void pointer converts freely" must not become "a
+    // pointer converts freely". stdlib depends on the first and nothing wants the
+    // second.
+    const FincRun bad = compile(
+        "fun t(p: &string) <int> { return 0; }\n"
+        "fun main() <int> { let x <int> = 1; return t(&x); }\n");
+    EXPECT_NE(stripAnsi(bad.err).find("Type mismatch"), std::string::npos)
+        << "&int does not fit &string\n" << stripAnsi(bad.err);
+}
+
 TEST(Soundness_DynamicTypes, AnyDoesNotInferFromItsInitialiser) {
     // The distinction from `auto`, and the reason `any` cannot be implemented by
     // aliasing it. `let x <auto> = 5;` makes `x` an `int`, so the next line reports
@@ -1113,36 +1145,131 @@ TEST(KnownDefect_DynamicTypes, GenericArgumentsOnADynamicTypeAreNotConstraints) 
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Prototypes, AHeterogeneousPrototypeLiteralInfersAnyNotObject) {
-    // `prototype_test.fin:14` writes `let a <auto> = { 10 : 10, "a": true };` and
-    // says in the sample: "auto would resolve to `<{object, object}>`". Inference
-    // reaches for `any` instead -- and it did so before `any` was a type anyone
-    // could write, so the inferred type printed a name that did not resolve.
+TEST(KnownDefect_DynamicTypes, ObjectAndAnyAreMutuallyAssignable) {
+    // Both directions compile, and one of them probably should not.
+    //
+    // The corpus draws a distinction between the two names. stdlib/types.fin:97 says
+    // of `any`: "any type that is visible in compile time (can be identified in
+    // compile time)". prototype_test.fin:40 says of `object`: "object type is an
+    // expensive type but can fit any datatype in it at the cost of memory and speed".
+    // Read together those are erasure and boxing: an `any` is a type the compiler
+    // knows and has stopped checking, an `object` is a value carrying its type at
+    // runtime. Every static type fits either. But an `object` fits an `any` only if
+    // its content was compile-time known, which is exactly what the box exists to
+    // stop promising -- so `object -> any` looks like it should be rejected while
+    // `any -> object` stays.
+    //
+    // Booked rather than implemented because no corpus program exercises the
+    // direction, and a directional rule between the two would change what
+    // `<{object, object}>` accepts across prototype_test.fin. The ruling is owed
+    // (docs/plan.md, "Rulings owed").
+    //
+    // This test also records where DynamicType::equals's name comparison stands. That
+    // comparison is what keeps `any` and `object` two types rather than one, and
+    // today nothing can observe it: the "every type fits a dynamic target" rule in
+    // Type::isAssignableTo answers before equality in both directions, and the one
+    // remaining channel -- the cast -- rejects both names alike
+    // (Soundness_Casts.ACastToOrFromADynamicTypeIsAllowed). A mutant that drops the
+    // name comparison kills no test, which is a statement about the consumer not
+    // existing yet and not about the comparison being wrong. Deleting it would make
+    // `any` and `object` one type, a stronger claim than the corpus supports.
+    for (const char* code : {"fun main() <noret> { let a <any> = 1; let b <object> = a; }\n",
+                             "fun main() <noret> { let a <object> = 1; let b <any> = a; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u)
+            << "GOOD NEWS IF THIS FAILED on the second program: the boxing/erasure "
+               "distinction has been ruled on. Split this test, keep `any -> object` "
+               "as Soundness, and assert the mismatch for the other direction.\n"
+            << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_Prototypes, AHeterogeneousPrototypeLiteralInfersObject) {
+    // Inverted from KnownDefect_Prototypes.AHeterogeneousPrototypeLiteralInfersAnyNotObject.
+    // `prototype_test.fin:14` writes `let a <auto> = { 10 : 10, "a": true };` and says
+    // in the sample: "auto would resolve to `<{object, object}>`".
     //
     // The distinction is the corpus's own (types.fin:97 vs prototype_test.fin:40):
-    // `any` is compile-time erasure of a type that *is* known, `object` is a box
-    // for one that is not. A literal mixing an `int` key with a `string` key has no
-    // single compile-time key type, so `object` is the truthful answer and `any` is
-    // a claim the compiler cannot make good on.
+    // `any` is compile-time erasure of a type that *is* known, `object` is a box for
+    // one that is not. A literal mixing an `int` key with a `string` key has no single
+    // compile-time key type, so `object` is the truthful answer and `any` was a claim
+    // the compiler could not make good on.
     //
-    // TO FIX: infer `object` for the mixed case in the prototype-literal rule, and
-    // invert this into
-    // Soundness_Prototypes.AHeterogeneousPrototypeLiteralInfersObject. Keep the
-    // homogeneous control below -- `{int, int}` must not become `{object, object}`,
-    // or every prototype in the corpus starts boxing.
+    // The widening reached for `any` by name (Analyzer_Expr.cpp, the PrototypeLiteral
+    // visit) since before `any` was a type anyone could write -- so for as long as
+    // that code has existed, a mixed prototype literal has had a type whose name did
+    // not resolve. It is the oldest evidence in the tree that `any` was always meant
+    // to be registered.
     const FincRun r = compile(
         "fun main() <int> { let a <auto> = { 1: 2, \"a\": true }; "
         "let y <string> = a; return 0; }\n");
-    EXPECT_NE(stripAnsi(r.err).find("got '<{any, any}>'"), std::string::npos)
-        << "GOOD NEWS IF THIS FAILED: if it now says `<{object, object}>`, invert "
-           "this test into Soundness_Prototypes and strike the defect\n"
+    EXPECT_NE(stripAnsi(r.err).find("got '<{object, object}>'"), std::string::npos)
         << stripAnsi(r.err);
 
-    // The control: a literal whose keys and values *are* of one type keeps it.
+    // The control: a literal whose keys and values *are* of one type keeps it. Without
+    // this, "infer object" is one edit away from "box everything", and every prototype
+    // in the corpus starts paying for a runtime tag it does not need.
     const FincRun homo = compile(
         "fun main() <int> { let a <auto> = { 1: 2 }; let y <string> = a; return 0; }\n");
     EXPECT_NE(stripAnsi(homo.err).find("got '<{int, int}>'"), std::string::npos)
         << stripAnsi(homo.err);
+}
+
+TEST(Soundness_Prototypes, APrototypeOfConcreteTypesFitsAPrototypeOfADynamicType) {
+    // `prototype_test.fin:40` writes
+    //   let obj <{object, object}> = { 1: 1.0, "a":CustomDT{} };
+    // and comments that `object` "can fit any datatype in it". It reported
+    // `expected '<{object, object}>', got '<{any, any}>'` -- and the plain
+    // `let a <{object, object}> = { 1: 2 };` failed too, so the mixed literal's `any`
+    // was not the cause. PrototypeType::isAssignableTo compared its key and value
+    // types with `equals`, which is exact, so no prototype ever fitted a prototype of
+    // a different key or value type at all.
+    //
+    // This is the same defect ArrayType had and the same fix: ask the contained types
+    // whether they are *assignable*, not whether they are equal. The comment on
+    // ArrayType::isAssignableTo states the general form -- reaching the element check
+    // and then discarding its answer means every permissive element type stops at the
+    // container boundary. Two containers had it; PrototypeType is the second.
+    for (const char* code : {"fun main() <noret> { let a <{object, object}> = { 1: 2 }; }\n",
+                             "fun main() <noret> { let a <{object, object}> = { 1: true }; }\n",
+                             "fun main() <noret> { let a <{any, any}> = { 1: 2 }; }\n",
+                             "fun main() <noret> { let a <{any, int}> = { 1: 2 }; }\n",
+                             "fun main() <noret> { let a <{object, object}> = { 1: 2, \"a\": true }; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_Prototypes, APrototypeFitsABareDynamicTarget) {
+    // `let a <any> = { 1: 2 };` reported `expected 'any', got '<{int, int}>'` while
+    // `let a <any> = [1, 2];` compiled clean, and the difference was not about
+    // prototypes: PrototypeType::isAssignableTo was the one override in src/types that
+    // never called Type::isAssignableTo. ArrayType, PointerType, NullableType and
+    // PrimitiveType all open with it, which is how each of them inherits `-> auto`,
+    // `-> any` and `-> object` without restating them.
+    //
+    // Its local `if (other.toString() == "auto") return true;` was the visible half of
+    // that: one of the base's three target rules, copied in, and the other two lost.
+    for (const char* code : {"fun main() <noret> { let a <any> = { 1: 2 }; }\n",
+                             "fun main() <noret> { let a <object> = { 1: 2 }; }\n",
+                             "fun main() <noret> { let a <auto> = { 1: 2 }; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_Prototypes, APrototypeWithAnUnassignableKeyOrValueIsStillRejected) {
+    // The control for the test above, and it is the load-bearing half: "compare by
+    // assignability" is one edit away from "return true", and a prototype that fits
+    // every prototype would take the whole container out of the type system silently
+    // -- nothing in the corpus writes a mismatched prototype, so the sample suite
+    // could not notice.
+    for (const char* code : {"fun main() <noret> { let a <{string, int}> = { 1: 2 }; }\n",
+                             "fun main() <noret> { let a <{int, string}> = { 1: 2 }; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos)
+            << code << stripAnsi(r.err);
+    }
 }
 
 TEST(KnownDefect_TypeAliases, AGenericTypeAliasIsNeverDeclared) {
@@ -1193,6 +1320,92 @@ TEST(Soundness_ErrorRecovery, AMemberDefaultIsReportedOncePerProgramNotOncePerPa
         compile("struct S { pub v <int> = \"str\" }\nfun main() <int> { return 0; }\n");
     EXPECT_NE(stripAnsi(mismatch.err).find("Type mismatch"), std::string::npos)
         << "a member default of the wrong type is still checked\n" << stripAnsi(mismatch.err);
+}
+
+// ---------------------------------------------------------------------------
+// A container literal whose element did not type.
+//
+// The sentinel unit fixed this at five sites -- member access, method call, index,
+// cast and checkType -- and every one of them was about a *named entity* whose
+// annotation failed. A container literal reaches the same cascade from the other
+// direction: nothing was annotated, so nothing failed to resolve; an element simply
+// has no type because the expression inside it was already reported.
+//
+// The two literals answered differently, and neither answer was right. The prototype
+// substituted `any` for the missing type, so `let a <{int, int}> = { nosuchvar : 1 };`
+// said "Undefined variable" and then "expected '<{int, int}>', got '<{any, int}>'" --
+// a claim about a type the program never wrote, which is the exact shape the sentinel
+// exists to prevent. The array bailed out with `if (!firstType) return;`, which is
+// quiet but stops the walk, so a second undefined name in the same literal went
+// unreported.
+
+TEST(Soundness_ErrorRecovery, APrototypeLiteralWithAnUntypedElementDoesNotCascade) {
+    // `any` was the wrong substitute for two separate reasons. It is a real type, so
+    // it compares -- and it does not fit `int`, so the mismatch fires. And it is a
+    // *claim*: `<{any, int}>` says the program asked for a boxed key, when what
+    // happened is that the analyser could not tell what the key was.
+    for (const char* code : {"fun main() <noret> { let a <{int, int}> = { nosuchvar : 1 }; }\n",
+                             "fun main() <noret> { let a <{int, int}> = { 1 : nosuchvar }; }\n",
+                             "fun main() <noret> { let a <auto> = { nosuchvar : 1 }; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u)
+            << "one undefined name, one diagnostic\n" << code << stripAnsi(r.err);
+        EXPECT_NE(stripAnsi(r.err).find("Undefined variable"), std::string::npos)
+            << "and it is the undefined name, not a type mismatch\n" << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_ErrorRecovery, AnArrayLiteralWithAnUntypedElementDoesNotCascade) {
+    // The array half already passed when this was written, and it is here because the
+    // fix changes how: it used to leave the literal with no type at all, and now the
+    // literal is typed `[<error>]` and isErrorType unwraps it. Both are quiet, but
+    // only the second one keeps walking -- see the next test.
+    for (const char* code : {"fun main() <noret> { let a <[int]> = [nosuchvar]; }\n",
+                             "fun main() <noret> { let a <auto> = [nosuchvar]; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_ErrorRecovery, EveryElementOfAContainerLiteralIsWalked) {
+    // `[n1, n2]` reported only n1. visit(ArrayLiteral) returned as soon as the first
+    // element had no type, and the return skipped the loop that visits the rest.
+    //
+    // Suppressing a cascade and skipping the walk look alike from one diagnostic away
+    // and are opposites: the first drops a message that says nothing new, the second
+    // drops a message about a different mistake. The parameter-defaults unit learned
+    // the same thing about a default that is never visited. The prototype loop already
+    // visited every pair, which is why only one of these two was red.
+    struct Case { const char* code; unsigned n; };
+    for (const Case& c : {Case{"fun main() <noret> { let a <[int]> = [n1, n2]; }\n", 2u},
+                          Case{"fun main() <noret> { let a <[int]> = [n1, n2, n3]; }\n", 3u},
+                          Case{"fun main() <noret> { let a <{int, int}> = { n1 : 1, n2 : 2 }; }\n", 2u},
+                          Case{"fun main() <noret> { let a <{int, int}> = { 1 : n1, 2 : n2 }; }\n", 2u}}) {
+        const FincRun r = compile(c.code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), c.n)
+            << "one diagnostic per undefined name and nothing else\n" << c.code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_ErrorRecovery, AnUntypedElementDoesNotSuppressTheRestOfItsOwnLiteral) {
+    // The control for the test above, and for the sentinel generally: an element that
+    // *did* type is still checked against its siblings. `[1, "s"]` must still report,
+    // and it must still report when an untyped element sits in front of it -- the
+    // sentinel is meant to absorb comparisons that involve it, not every comparison
+    // in the construct that contains it.
+    const FincRun plain = compile("fun main() <noret> { let a <auto> = [1, \"s\"]; }\n");
+    EXPECT_NE(stripAnsi(plain.err).find("Type mismatch"), std::string::npos)
+        << "a heterogeneous array literal is still an error\n" << stripAnsi(plain.err);
+
+    // With the sentinel in front, the mismatch between elements 1 and 2 is a
+    // comparison against the sentinel and is correctly absorbed -- so what this
+    // asserts is that the *names* are all still reported and nothing else is.
+    const FincRun mixed = compile("fun main() <noret> { let a <auto> = [n1, 1, \"s\"]; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(mixed.err)), 1u)
+        << "the undefined name only: every later element is compared against <error>\n"
+        << stripAnsi(mixed.err);
+    EXPECT_EQ(stripAnsi(mixed.err).find("<error>"), std::string::npos)
+        << "and the sentinel is never rendered\n" << stripAnsi(mixed.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -2060,6 +2273,33 @@ TEST(Soundness_Casts, AStructToAnIntIsStillRejected) {
     EXPECT_NE(r.exitCode, 0);
     EXPECT_NE(stripAnsi(r.err).find("Invalid cast"), std::string::npos)
         << stripAnsi(r.err);
+}
+
+TEST(Soundness_Casts, ACastToOrFromADynamicTypeIsAllowed) {
+    // Casting out of a dynamic type is what a dynamic type is for, and the corpus
+    // writes it twice. nullifier.fin:12 declares `pub static fun unpack(v: any) <T>`
+    // whose body is `return cast<T>(v);` with the comment "raises a panic if cast
+    // fails" -- a cast out of `any`, checked at runtime, by design. stdlib/types.fin:33
+    // declares the library's own `cast`: `pub fun cast<_Type: $type>(value: Any<...>)
+    // <_Type>`, whose parameter is dynamic for every call in the language.
+    //
+    // Both of these said `Invalid cast from 'any' to 'int'`. The corpus site survived
+    // only because its target `T` is a generic parameter, and the cast rule lets any
+    // generic through -- so the corpus never showed the defect and the standard
+    // library's own signature was the thing that would have.
+    //
+    // The rule is stated for either side. A cast *into* `any` is the boxing operation
+    // and has to be writable for the reverse to mean anything, and stdlib/types.fin:90
+    // takes `v: any` from callers who had a concrete value.
+    for (const char* code : {"fun main() <noret> { let a <any> = 1; let b <int> = cast<int>(a); }\n",
+                             "fun main() <noret> { let a <object> = 1; let b <int> = cast<int>(a); }\n",
+                             "fun main() <noret> { let a <any> = cast<any>(1); }\n",
+                             "fun main() <noret> { let a <any> = 1; let b <object> = cast<object>(a); }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << code << stripAnsi(r.err);
+    }
+    // Soundness_Casts.AStructToAnIntIsStillRejected is this rule's control: widening
+    // the cast for dynamic types must not widen it for everything.
 }
 
 TEST(KnownDefect_Casts, AStringToAnIntegerIsAccepted) {

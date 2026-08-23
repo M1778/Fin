@@ -63,20 +63,23 @@ bool Type::isAssignableTo(const Type& other) const {
       return this->isAssignableTo(*otherSelf->originalStruct);
     }
     
-    if (auto* thisArr = this->as<ArrayType>()) {
-        if (auto* otherArr = other.as<ArrayType>()) {
-            if (thisArr->element_type->equals(*otherArr->element_type)) {
-                if (thisArr->is_fixed_size && !otherArr->is_fixed_size) return true;
-            }
-        }
-    }
-    
-    if (auto* thisPtr = this->as<PointerType>()) {
-        if (auto* otherPtr = other.as<PointerType>()) {
-            if (otherPtr->pointee->toString() == "void") return true;
-        }
-    }
-    
+    // The array-decay and void-pointer rules used to be repeated here, and both copies
+    // were unreachable in practice. Each subclass override opens with
+    // `if (Type::isAssignableTo(other)) return true;`, so the base copy only ever runs
+    // from *inside* the override that also states the rule -- and the base copies were
+    // the stricter of the two pairs (`element_type->equals` vs `isAssignableTo`;
+    // decay-only vs both directions). A strictly narrower rule that answers first can
+    // never change an answer.
+    //
+    // Dominated code is not free. A mutation matrix on the array rule killed nothing:
+    // breaking ArrayType's copy left the base's copy answering, and breaking the base's
+    // copy left ArrayType's. Two arms, one rule, no test able to see either. Deleting
+    // the duplicates makes the surviving rule load-bearing, which is the only state in
+    // which a test can hold it.
+    //
+    // Soundness_Arrays.AFixedListInitialisesADynamicArrayOfTheSameElementType and
+    // Soundness_Pointers.AVoidPointerIsAssignableInBothDirections cover what is left.
+
     if (dynamic_cast<const GenericType*>(&other)) return true;
     return false;
 }

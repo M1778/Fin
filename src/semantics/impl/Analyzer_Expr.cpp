@@ -39,27 +39,49 @@ void SemanticAnalyzer::visit(PrototypeLiteral& node) {
     std::shared_ptr<Type> keyType = nullptr;
     std::shared_ptr<Type> valueType = nullptr;
 
+    // A heterogeneous literal widens to `object`, not to `any`. The two are not
+    // interchangeable and prototype_test.fin says which is which: :14 writes
+    // `<{object, string}>` over a literal whose keys are an int and a string, and :40
+    // explains the choice -- "object type is an expensive type but can fit any datatype
+    // in it at the cost of memory and speed". A cost paid at run time is a boxed value.
+    // `any` is the other half of the pair: stdlib/types.fin:97 calls it "any type that
+    // is visible in compile time", i.e. erasure of a type the compiler still knows.
+    //
+    // Here the compiler does *not* still know it. Two keys of different types have to
+    // coexist in one container at run time, and only the boxed representation can hold
+    // them. Inferring `any` claimed the opposite and had a second consequence: the
+    // inferred type printed as `<{any, any}>` in every mismatch about a mixed literal,
+    // which is a claim about representation the diagnostic had no business making.
+    // An element that did not type becomes the sentinel, not `any`. Substituting `any`
+    // was a claim -- `let a <{int, int}> = { nosuchvar : 1 };` reported the undefined
+    // name and then `expected '<{int, int}>', got '<{any, int}>'`, naming a boxed key
+    // the program never asked for. The sentinel is the one type that absorbs the second
+    // comparison instead of losing it (isErrorType unwraps a prototype for this).
+    //
+    // And once a side is the sentinel it stays the sentinel: the widening below must not
+    // overwrite it, or `{ nosuchvar : 1, 5 : 2 }` would see `<error>` and `int` disagree,
+    // widen to `object`, and put the cascade back with a different type in it.
     for (auto& pair : node.elements) {
         pair.first->accept(*this);
-        auto kType = lastExprType;
+        auto kType = lastExprType ? lastExprType : errorType();
         if (!keyType) keyType = kType;
-        else if (kType && !kType->equals(*keyType)) {
-            keyType = currentScope->resolveType("any");
-        }
+        else if (isErrorType(kType) || isErrorType(keyType)) keyType = errorType();
+        else if (!kType->equals(*keyType)) keyType = currentScope->resolveType("object");
 
         pair.second->accept(*this);
-        auto vType = lastExprType;
+        auto vType = lastExprType ? lastExprType : errorType();
         if (!valueType) valueType = vType;
-        else if (vType && !vType->equals(*valueType)) {
-            valueType = currentScope->resolveType("any");
-        }
+        else if (isErrorType(vType) || isErrorType(valueType)) valueType = errorType();
+        else if (!vType->equals(*valueType)) valueType = currentScope->resolveType("object");
     }
 
-    if (!keyType) keyType = currentScope->resolveType("any");
-    if (!valueType) valueType = currentScope->resolveType("any");
-    
-    if (!keyType) keyType = std::make_shared<PrimitiveType>("any");
-    if (!valueType) valueType = std::make_shared<PrimitiveType>("any");
+    // Unreachable while `{}` is a syntax error (`unexpected RBRACE`), and a total guard
+    // rather than an assertion because the parser is the only thing keeping it that way.
+    // It is the sentinel and not a fabricated `PrimitiveType("any")`, which is what
+    // stood here: `any` is a registered DynamicType now, so a hand-built primitive of
+    // the same spelling would print as `any` and behave as none of it.
+    if (!keyType) keyType = errorType();
+    if (!valueType) valueType = errorType();
 
     lastExprType = std::make_shared<PrototypeType>(keyType, valueType);
 }
@@ -459,6 +481,21 @@ void SemanticAnalyzer::visit(CastExpression& node) {
              dynamic_cast<const PointerType*>(targetType.get())) valid = true;
     else if (dynamic_cast<const GenericType*>(sourceType.get()) || 
              dynamic_cast<const GenericType*>(targetType.get())) valid = true;
+    // A dynamic type on either side. Casting *out* of one is the whole point of having
+    // one -- nullifier.fin:12 writes `let b <int> = cast<int>(a);` where `a` is `any`,
+    // and stdlib/types.fin:33 declares `fun cast_to<T>(value: any) -> T` whose body can
+    // only be that cast. Casting *into* one is how a value enters, and the corpus site
+    // survived by accident: `cast_to`'s target is the generic parameter `T`, which the
+    // arm above already admits, so the corpus never exercised the dynamic target and
+    // the standard library's own signature was what would have shown the defect.
+    //
+    // Unchecked in both directions, deliberately. A cast is the program overriding the
+    // checker; `cast<int>(x)` where x is `any` is the programmer asserting what the box
+    // holds, and there is nothing at compile time to verify that against -- that is
+    // what makes it a cast and not an assignment. The run-time check belongs to
+    // codegen, which will need a tag to compare and does not have one yet.
+    else if (dynamic_cast<const DynamicType*>(sourceType.get()) ||
+             dynamic_cast<const DynamicType*>(targetType.get())) valid = true;
     
     if (!valid) {
         error(node, fmt::format("Invalid cast from '{}' to '{}'", sourceType->toString(), targetType->toString()));
@@ -580,10 +617,16 @@ void SemanticAnalyzer::visit(ArrayLiteral& node) {
         return;
     }
 
+    // `if (!firstType) return;` stood here and it suppressed too much: the return
+    // skipped the loop below, so `[n1, n2]` reported n1 and never looked at n2. A
+    // cascade and a skipped walk are one diagnostic apart and are opposites -- the
+    // first drops a message that says nothing new, the second drops a message about a
+    // different mistake.
+    //
+    // The sentinel does both jobs. Every element is still visited, and each one is
+    // compared against `<error>`, which checkType absorbs.
     node.elements[0]->accept(*this);
-    auto firstType = lastExprType;
-
-    if (!firstType) return;
+    auto firstType = lastExprType ? lastExprType : errorType();
 
     for (size_t i = 1; i < node.elements.size(); ++i) {
         node.elements[i]->accept(*this);
