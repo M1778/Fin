@@ -9,7 +9,16 @@ namespace fin {
 
 void SemanticAnalyzer::visit(VariableDeclaration& node) {
     auto type = resolveTypeFromAST(node.type.get());
-    if (!type) return; 
+
+    // Not an early return. It was one, and that made a single unresolved annotation
+    // silence its whole initialiser: `let x <NoSuchType> = nosuchvar;` reported the type
+    // and never mentioned `nosuchvar`. Two real errors in prototype_test.fin were hidden
+    // by exactly this. Carrying the sentinel instead keeps the initialiser analysed and
+    // defines the variable, so uses of it do not each report again.
+    //
+    // It must not be `auto`: the inference branch below would then adopt the
+    // initialiser's type and the program would compile clean.
+    if (!type) type = errorType();
 
     if (node.initializer) {
         node.initializer->accept(*this);
@@ -47,23 +56,17 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     // 3. Resolve Parameters & Build Signature
     std::vector<std::shared_ptr<Type>> paramTypes;
     bool hasSelf = false;
-    // A parameter whose type did not resolve is left out of paramTypes, which
-    // silently changes the function's arity. Tracked so that a signature which
-    // did not resolve is not registered as though it had; see step 6.
-    bool signatureResolved = true;
     
     for (auto& param : node.params) {
         if (param->name == "self") hasSelf = true;
         
-        auto type = resolveTypeFromAST(param->type.get());
-        if (type) {
-            // Define in body scope so the code can use the param
-            currentScope->define({param->name, type, false, true});
-            // Register in signature
-            paramTypes.push_back(type);
-        } else {
-            signatureResolved = false;
-        }
+        auto type = resolveTypeOrError(param->type.get());
+        // Define in body scope so the code can use the param
+        currentScope->define({param->name, type, false, true});
+        // Register in signature. The sentinel goes in too: dropping an unresolved
+        // parameter is what made `fun f(p: NoSuchType)` called as `f(1)` report
+        // "expects 0 arguments, got 1" -- a claim about a signature nobody wrote.
+        paramTypes.push_back(type);
     }
     visitParameterDefaults(node.params);
 
@@ -85,22 +88,27 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     }
     // nullptr here means "the return type is unknown", which every other reader
     // of this field already treats as "stop asking" (Analyzer_Stmt.cpp:15,21).
+    // Deliberately still null rather than the sentinel: those readers are the
+    // missing-return check, and telling it the return type is `<error>` would
+    // make it demand a return statement the program cannot satisfy. Retiring
+    // that convention is its own step.
     context.currentFuncReturnType = retType;
-    if (!retType) signatureResolved = false;
 
     // 6. REGISTER FUNCTION IN PARENT SCOPE (CRITICAL FIX)
     // Register 'add' and 'compute' in the Global Scope (currentScope->parent)
     // so that 'main' can find them later.
     //
-    // Only when the signature resolved. FunctionType dereferences its return
-    // type and its parameters in toString(), so registering one built over an
-    // unresolved part hands a live null to every later caller -- and registering
-    // one whose unresolved parameters were quietly dropped advertises the wrong
-    // arity, which made `fun f(p: NoSuchType)` called as `f(1)` report a second,
-    // false error about expecting 0 arguments. Calls to such a function still
-    // cascade, as KnownDefect_TypeResolution records.
-    if (currentScope->parent && signatureResolved) {
-        auto funcType = std::make_shared<FunctionType>(paramTypes, retType);
+    // Registered even when part of the signature did not resolve. This used to be
+    // gated on the whole signature resolving, for two reasons that the error
+    // sentinel answers: FunctionType dereferences its return type and parameters
+    // in toString(), which a live null made a crash, and dropping the unresolved
+    // parameters advertised the wrong arity. The sentinel is neither null nor
+    // absent, so the signature keeps the shape the program wrote and the call is
+    // checked against it. Not registering was no kinder than the wrong arity: it
+    // reported "Undefined function or type 'f'" about a function that is defined.
+    if (currentScope->parent) {
+        auto funcType = std::make_shared<FunctionType>(
+            paramTypes, retType ? retType : errorType());
         // Mark as immutable and initialized
         currentScope->parent->define({node.name, funcType, false, true});
         debugLog(fg(fmt::color::gray), "      [Register] Registered function '{}' in parent scope\n", node.name);
@@ -170,28 +178,30 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
     
     // 1. Members
     for (auto& member : node.members) {
-        auto memberType = resolveTypeFromAST(member->type.get());
-        if (memberType) {
-            // Check pointer_depth == 0
-            if (memberType->equals(*structType) && member->type->pointer_depth == 0) {
-                error(*member, "Recursive struct member '" + member->name + "' must be a pointer");
-            }
-            structType->defineField(member->name, memberType, member->is_public);
+        auto memberType = resolveTypeOrError(member->type.get());
+        if (memberType->equals(*structType) && member->type->pointer_depth == 0) {
+            error(*member, "Recursive struct member '" + member->name + "' must be a pointer");
         }
-        if (member->default_value) {
-            member->default_value->accept(*this);
-            if (lastExprType && memberType) {
-                checkInitializer(*member->default_value, lastExprType, memberType);
-            }
-        }
+        // Defined even when the type did not resolve, so `s.field` says nothing
+        // further: the annotation is the diagnostic, not every use of the field.
+        structType->defineField(member->name, memberType, member->is_public);
+        // The default is NOT walked here. PASS 2 below walks it again, with
+        // currentStructContext set and the field type read back from the struct,
+        // and both walks reported -- `pub v <int> = nosuchvar` said
+        // "Undefined variable 'nosuchvar'" twice. PASS 2's is the well-formed
+        // one, so this pass registers the field and nothing more.
     }
 
     // 2. Methods (Signatures)
     for (auto& method : node.methods) {
         std::shared_ptr<Type> retType = nullptr;
-        if (method->return_type) retType = resolveTypeFromAST(method->return_type.get());
+        if (method->return_type) retType = resolveTypeOrError(method->return_type.get());
         else retType = currentScope->resolveType("void");
         
+        // The guard is now only about `void` itself failing to resolve, which
+        // would mean the primitive table is broken. An unresolved *written*
+        // return type arrives as the sentinel and the method is still declared,
+        // so calling it reports nothing beyond the annotation.
         if (retType) structType->defineMethod(method->name, retType);
         
         // Do not call accept here 
@@ -201,10 +211,14 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
     // 3. Operators (Signatures)
     for (auto& op : node.operators) {
         std::shared_ptr<Type> retType = nullptr;
-        if (op->return_type) retType = resolveTypeFromAST(op->return_type.get());
+        if (op->return_type) retType = resolveTypeOrError(op->return_type.get());
         else retType = currentScope->resolveType("void");
         
-        if (retType) structType->defineOperator((int)op->op, retType);
+        // Ungated for the same reason as the methods above, and it mattered more
+        // here: with the operator undeclared, `s + 1` fell through to the built-in
+        // rule and reported `Type mismatch: expected 'S', got 'int'` -- a claim
+        // about an operator the program did declare.
+        structType->defineOperator((int)op->op, retType);
     }
 
     // 4. Constructors (Signatures)
@@ -213,8 +227,8 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         enterScope();
         std::vector<std::shared_ptr<Type>> paramTypes;
         for (auto& param : ctor->params) {
-            auto t = resolveTypeFromAST(param->type.get());
-            if (t) paramTypes.push_back(t);
+            // Sentinel, not dropped: the constructor keeps its written arity.
+            paramTypes.push_back(resolveTypeOrError(param->type.get()));
         }
         exitScope();
 
@@ -255,8 +269,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
     for (auto& ctor : node.constructors) {
         enterScope();
         for (auto& param : ctor->params) {
-            auto t = resolveTypeFromAST(param->type.get());
-            if (t) currentScope->define({param->name, t, false, true});
+            currentScope->define({param->name, resolveTypeOrError(param->type.get()), false, true});
         }
         visitParameterDefaults(ctor->params);
         // Inject Self
@@ -311,8 +324,7 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
     
     // 2. Params
     for (auto& param : node.params) {
-        auto t = resolveTypeFromAST(param->type.get());
-        if (t) currentScope->define({param->name, t, false, true});
+        currentScope->define({param->name, resolveTypeOrError(param->type.get()), false, true});
     }
     visitParameterDefaults(node.params);
     
@@ -322,15 +334,25 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
     // 4. Return Type
     std::shared_ptr<Type> retType = nullptr;
     if (node.return_type) {
-        retType = resolveTypeFromAST(node.return_type.get());
+        retType = resolveTypeOrError(node.return_type.get());
     } else {
         retType = currentScope->resolveType("void");
     }
     
-    // 5. Register in Struct
-    if (retType) {
-        structType->defineOperator((int)node.op, retType);
-    }
+    // 5. Register in Struct -- the second time, and not redundantly. PASS 1 in
+    // visit(StructDeclaration&) registered this operator already, from a scope that has
+    // the *struct's* generic parameters but not the operator's own, so an operator
+    // written `operator + : <T>(other: <T>) <T>` was registered there returning the
+    // sentinel. Here `declareGenericParams` has run and the return type is `T`.
+    //
+    // Both registrations therefore have to be ungated, and a mutation matrix showed
+    // why that is easy to get wrong: dropping either one alone changes nothing
+    // observable, because the other still declares the operator. PASS 1 is what an
+    // earlier sibling's body sees (Soundness_ErrorRecovery
+    // .AnOperatorWithAnUnresolvedReturnTypeIsVisibleToAMethodDeclaredBeforeIt); this one
+    // is what a generic operator needs, and it is only observable once
+    // KnownDefect_Generics.AnOperatorsOwnGenericParameterIsNotInScopeInPassOne is fixed.
+    structType->defineOperator((int)node.op, retType);
     
     if (node.implements_type) {
         auto implType = resolveTypeFromAST(node.implements_type.get());
@@ -394,9 +416,11 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
         for (auto& param : method->params) resolveTypeFromAST(param->type.get());
         visitParameterDefaults(method->params);
         std::shared_ptr<Type> retType = nullptr;
-        if(method->return_type) retType = resolveTypeFromAST(method->return_type.get());
+        if(method->return_type) retType = resolveTypeOrError(method->return_type.get());
         else retType = currentScope->resolveType("void");
         
+        // Unguarded, and it was handing defineMethod a live null whenever the
+        // written return type did not resolve. The sentinel closes that.
         ifaceType->defineMethod(method->name, retType);
         exitScope();
     }
@@ -407,9 +431,11 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
         for (auto& param : op->params) resolveTypeFromAST(param->type.get());
         visitParameterDefaults(op->params);
         std::shared_ptr<Type> retType = nullptr;
-        if(op->return_type) retType = resolveTypeFromAST(op->return_type.get());
+        if(op->return_type) retType = resolveTypeOrError(op->return_type.get());
         else retType = currentScope->resolveType("void");
         
+        // Unguarded, like defineMethod above it, so this stored a live null. Every
+        // reader dereferences it: StructType.cpp:65 clones it, :86 substitutes it.
         ifaceType->defineOperator((int)op->op, retType);
         exitScope();
     }
@@ -418,8 +444,7 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
         enterScope();
         std::vector<std::shared_ptr<Type>> paramTypes;
         for (auto& param : ctor->params) {
-            auto t = resolveTypeFromAST(param->type.get());
-            if (t) paramTypes.push_back(t);
+            paramTypes.push_back(resolveTypeOrError(param->type.get()));
         }
         auto ctorType = std::make_shared<FunctionType>(paramTypes, ifaceType);
         ifaceType->addConstructor(ctorType);
@@ -528,13 +553,15 @@ void SemanticAnalyzer::visit(ImportModule& node) {
 
 void SemanticAnalyzer::visit(DefineDeclaration& node) {
     debugLog(fg(fmt::color::magenta), "[INFO] Registering extern '{}'\n", node.name);
-    auto retType = resolveTypeFromAST(node.return_type.get());
-    if (!retType) return;
+    // Was `if (!retType) return;`, which abandoned the whole declaration: the
+    // extern went unregistered so every call to it reported an undefined name,
+    // and -- because the bare return also skipped the walk below -- its parameter
+    // defaults went unanalysed as well.
+    auto retType = resolveTypeOrError(node.return_type.get());
 
     std::vector<std::shared_ptr<Type>> paramTypes;
     for (auto& param : node.params) {
-        auto t = resolveTypeFromAST(param->type.get());
-        if (t) paramTypes.push_back(t);
+        paramTypes.push_back(resolveTypeOrError(param->type.get()));
     }
     visitParameterDefaults(node.params);
 
@@ -572,13 +599,20 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
          auto anyType = std::make_shared<StructType>("any"); // Placeholder
          type = anyType;
     } else {
-        type = resolveTypeFromAST(node.aliased_type.get());
+        type = resolveTypeOrError(node.aliased_type.get());
     }
 
-    if (type) {
-        currentScope->defineType(node.name, type);
-        debugLog(fg(fmt::color::gray), "      [Type] Defined alias '{}' -> '{}'\n", node.name, type->toString());
-    }
+    // The twenty-first site of the same rule, and the one that cost the corpus most:
+    // an alias whose target did not resolve left its *name* undefined, so
+    // `stdlib/operators.fin`'s `type Output = Any<...>;` on line 6 was charged once for
+    // the annotation and then once more for each of the thirty operator requirements
+    // that name `Output` -- thirty diagnostics about a declaration that is written
+    // right there, none of them about the one that failed.
+    //
+    // An alias is a declaration like any other: the name was written, so the name
+    // exists. What it names is the sentinel, and that is what ends the cascade.
+    currentScope->defineType(node.name, type);
+    debugLog(fg(fmt::color::gray), "      [Type] Defined alias '{}' -> '{}'\n", node.name, type->toString());
 }
 
 void SemanticAnalyzer::visit(SpecialDeclaration& node) {
@@ -587,8 +621,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
     
     enterScope();
     for (auto& param : node.params) {
-         auto t = resolveTypeFromAST(param->type.get());
-         if (t) currentScope->define({param->name, t, false, true});
+         currentScope->define({param->name, resolveTypeOrError(param->type.get()), false, true});
     }
     visitParameterDefaults(node.params);
     
@@ -632,37 +665,44 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
     
     // 1. Members
     for (auto& member : node.members) {
-        auto memberType = resolveTypeFromAST(member->type.get());
-        if (memberType) {
-            if (memberType->equals(*structType) && member->type->pointer_depth == 0) {
-                error(*member, "Recursive class member '" + member->name + "' must be a pointer");
-            }
-            structType->defineField(member->name, memberType, member->is_public);
+        auto memberType = resolveTypeOrError(member->type.get());
+        if (memberType->equals(*structType) && member->type->pointer_depth == 0) {
+            error(*member, "Recursive class member '" + member->name + "' must be a pointer");
         }
-        if (member->default_value) {
-            member->default_value->accept(*this);
-            if (lastExprType && memberType) {
-                checkInitializer(*member->default_value, lastExprType, memberType);
-            }
-        }
+        // Defined even when the type did not resolve, so `s.field` says nothing
+        // further: the annotation is the diagnostic, not every use of the field.
+        structType->defineField(member->name, memberType, member->is_public);
+        // The default is NOT walked here. PASS 2 below walks it again, with
+        // currentStructContext set and the field type read back from the struct,
+        // and both walks reported -- `pub v <int> = nosuchvar` said
+        // "Undefined variable 'nosuchvar'" twice. PASS 2's is the well-formed
+        // one, so this pass registers the field and nothing more.
     }
 
     // 2. Methods
     for (auto& method : node.methods) {
         std::shared_ptr<Type> retType = nullptr;
-        if (method->return_type) retType = resolveTypeFromAST(method->return_type.get());
+        if (method->return_type) retType = resolveTypeOrError(method->return_type.get());
         else retType = currentScope->resolveType("void");
         
+        // The guard is now only about `void` itself failing to resolve, which
+        // would mean the primitive table is broken. An unresolved *written*
+        // return type arrives as the sentinel and the method is still declared,
+        // so calling it reports nothing beyond the annotation.
         if (retType) structType->defineMethod(method->name, retType);
     }
 
     // 3. Operators
     for (auto& op : node.operators) {
         std::shared_ptr<Type> retType = nullptr;
-        if (op->return_type) retType = resolveTypeFromAST(op->return_type.get());
+        if (op->return_type) retType = resolveTypeOrError(op->return_type.get());
         else retType = currentScope->resolveType("void");
         
-        if (retType) structType->defineOperator((int)op->op, retType);
+        // Ungated for the same reason as the methods above, and it mattered more
+        // here: with the operator undeclared, `s + 1` fell through to the built-in
+        // rule and reported `Type mismatch: expected 'S', got 'int'` -- a claim
+        // about an operator the program did declare.
+        structType->defineOperator((int)op->op, retType);
     }
 
     // 4. Constructors
@@ -670,8 +710,8 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
         enterScope();
         std::vector<std::shared_ptr<Type>> paramTypes;
         for (auto& param : ctor->params) {
-            auto t = resolveTypeFromAST(param->type.get());
-            if (t) paramTypes.push_back(t);
+            // Sentinel, not dropped: the constructor keeps its written arity.
+            paramTypes.push_back(resolveTypeOrError(param->type.get()));
         }
         exitScope();
 
@@ -712,8 +752,7 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
     for (auto& ctor : node.constructors) {
         enterScope();
         for (auto& param : ctor->params) {
-            auto t = resolveTypeFromAST(param->type.get());
-            if (t) currentScope->define({param->name, t, false, true});
+            currentScope->define({param->name, resolveTypeOrError(param->type.get()), false, true});
         }
         visitParameterDefaults(ctor->params);
         currentScope->define({"self", structType, true, true});
@@ -787,14 +826,19 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
         enterScope();
         declareGenericParams(method->generic_params);
 
-        std::vector<std::shared_ptr<Type>> paramTypes;
-        for (auto& param : method->params) {
-            auto t = resolveTypeFromAST(param->type.get());
-            if (t) paramTypes.push_back(t);
-        }
-        
+        // The parameters are NOT resolved here. StructType::methods maps a name to a
+        // return type and nothing else (StructType.hpp:29), so the signature this
+        // loop used to build was a local that no one read -- while its resolution
+        // reported every parameter annotation a second time, on top of the walk in
+        // visit(FunctionDeclaration&) two lines below. Deleting it takes one
+        // duplicate off `pub fun m(a: NoSuchType)` and loses nothing.
+        //
+        // When methods do record their parameters -- see
+        // KnownDefect_MethodCalls.AMethodCallIsNotCheckedAgainstItsSignature, which
+        // is the reason they must -- the signature belongs on StructType, built once,
+        // not rebuilt here.
         std::shared_ptr<Type> retType = nullptr;
-        if (method->return_type) retType = resolveTypeFromAST(method->return_type.get());
+        if (method->return_type) retType = resolveTypeOrError(method->return_type.get());
         else retType = currentScope->resolveType("void");
         
         exitScope();
@@ -815,12 +859,12 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
         declareGenericParams(op->generic_params);
 
         std::shared_ptr<Type> retType = nullptr;
-        if (op->return_type) retType = resolveTypeFromAST(op->return_type.get());
+        if (op->return_type) retType = resolveTypeOrError(op->return_type.get());
         else retType = currentScope->resolveType("void");
 
         exitScope();
         
-        if (retType) structType->defineOperator((int)op->op, retType);
+        structType->defineOperator((int)op->op, retType);
         
         op->accept(*this);
     }

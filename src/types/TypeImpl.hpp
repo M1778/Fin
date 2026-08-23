@@ -11,3 +11,4 @@
 #include "NamespaceType.hpp"
 #include "SelfType.hpp"
 #include "PrototypeType.hpp"
+#include "ErrorType.hpp"

@@ -112,6 +112,21 @@ private:
     // grammar sites that set it.
     std::shared_ptr<Type> resolveTypeFromAST(TypeNode* node);
 
+    // The same, but returning the error sentinel instead of nullptr when the
+    // written type does not resolve. Use this at every site that *declares*
+    // something: a field, a parameter, a return type, a signature.
+    //
+    // Fifteen such sites each used to gate on the null and drop the declaration
+    // -- `if (t) define(...)`, `if (memberType) defineField(...)`,
+    // `if (t) paramTypes.push_back(t)` -- which is how one unresolved annotation
+    // became one diagnostic per use of the thing it declared. The rule is
+    // identical at all of them, so it lives here once.
+    //
+    // Only for declarations. Expression positions (a cast target, a generic
+    // argument) want the null: there is no entity there to keep alive, and the
+    // sentinel would only hide the next question.
+    std::shared_ptr<Type> resolveTypeOrError(TypeNode* node);
+
     // The body of the above, without the nullable wrap. Split out rather than
     // handled at each `return` because there are eight of them and a new arm
     // silently forgetting the wrap is exactly the bug this feature was.

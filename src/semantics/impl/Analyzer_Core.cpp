@@ -154,6 +154,21 @@ void SemanticAnalyzer::exitScope() {
 // `fun?` -- and until this wave nothing in src/semantics/ or src/types/ ever read
 // it. Reading it here, once, is what gives all twenty a meaning, and it is why
 // `fun?` needed no change of its own: the grammar already marks the return type.
+std::shared_ptr<Type> SemanticAnalyzer::resolveTypeOrError(TypeNode* node) {
+    auto t = resolveTypeFromAST(node);
+    if (t) return t;
+    // resolveTypeUnwrapped has already reported the cause. The sentinel's whole
+    // job is to stop it being reported again, once per use of the declaration.
+    //
+    // Safe to substitute unconditionally because the grammar admits no untyped
+    // declaration: `fun f(self)` is a syntax error ("expecting COLON"), and a
+    // member without `<T>` likewise. A null here therefore always means a type
+    // was written and failed to resolve, never that none was written. If the
+    // grammar ever gains an inferred parameter, this must not paper over it --
+    // `auto` is the spelling for that and it resolves to a real type.
+    return errorType();
+}
+
 std::shared_ptr<Type> SemanticAnalyzer::resolveTypeFromAST(TypeNode* node) {
     auto resolved = resolveTypeUnwrapped(node);
     // `!resolved` first: a null node resolves to null and has no flag to read.
@@ -338,6 +353,12 @@ void SemanticAnalyzer::error(ASTNode& node, const std::string& msg) {
 
 bool SemanticAnalyzer::checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected) {
     if (!actual || !expected) return false;
+
+    // Nothing to compare once the analyser has already failed to type one side. The
+    // annotation that failed is the real diagnostic; a mismatch here would be a second
+    // one, naming a type the program never wrote. isErrorType rather than a plain
+    // as<ErrorType>() because `&NoSuchType` and `[NoSuchType]` reach here wrapped.
+    if (isErrorType(actual) || isErrorType(expected)) return true;
     
     if (!actual->isAssignableTo(*expected)) {
         if (constantFitsType(node, *expected)) return true;

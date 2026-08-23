@@ -2021,6 +2021,295 @@ are `-1` and `null` and both walk clean.
 Suite: **375 tests, all passing**, corpus 50/50. Lane note: `src/semantics/**` and `tests/test_soundness.cpp`;
 no parser change, no type-system change, no sample change.
 
+### One unresolved type, twenty-seven diagnostics
+
+`const.fin` reported 26 errors. One of them was true. The other 25 followed from a single unresolvable
+annotation, `rptr`, in a single parameter: the parameter's type failed to resolve, so the analyser never
+defined the parameter, so every one of the nine mentions of it in the body reported `Undefined variable 'a'`,
+and every member access on those undefined values reported again.
+
+The rule the analyser was following is the one the codebase writes twenty-one times over: *if a declaration's
+type does not resolve, drop the declaration.* Written out, it is the wrong trade in every instance --
+suppressing one diagnostic about a type in exchange for one diagnostic per use of the thing it typed. But it
+is not obviously wrong at any single site, which is why it is at twenty-one of them:
+
+```cpp
+auto t = resolveTypeFromAST(param->type.get());
+if (t) currentScope->define({param->name, t, false, true});   // four sites
+if (t) paramTypes.push_back(t);                               // six sites
+if (memberType) structType->defineField(...);                  // two sites
+if (retType) structType->defineMethod(...);                    // two sites
+if (retType) structType->defineOperator(...);                  // five sites
+if (type) currentScope->defineType(node.name, type);           // one site -- a type alias
+if (!retType) return;                                          // one site
+```
+
+The last two are the ones that cost the most and read the worst, and neither was found by reading: the
+alias site was found by ranking the corpus after the other nineteen were fixed, and the operator sites by
+mutation. Both are below.
+
+The first measurement was the useful one, and it was misleading. Defining the unresolved parameter as `auto`
+removed all nine `Undefined variable 'a'` from `const.fin` -- and left the sample's total at 26. The cascade
+had not gone away; it had changed shape, into five `does not have methods` and four `is not a struct`. That is
+what settled the design: suppressing the *name* lookup is not enough, because the cascade continues through
+every operation performed on the value. What is needed is a type that absorbs.
+
+`src/types/ErrorType.hpp` is that type. It substitutes and clones to itself, and -- the properties that do the
+work -- member access on it yields itself, a method call on it yields itself, indexing it yields itself, and a
+cast of it yields the cast's target type. `checkType` returns true the moment either side is one, at any depth
+of pointer, array, nullable or function wrapping. It prints as `<error>`, and a test asserts that string never
+reaches a user.
+
+It cannot be `auto`, and this is worth recording because `auto` is the obvious candidate and it is available:
+`auto` is a *target-side wildcard* (`Type.cpp:16`) that means "infer from the initialiser" in a declaration.
+Give a variable with an unresolvable annotation the type `auto` and the inference branch adopts the
+initialiser's type and the program compiles clean. The sentinel has to be a type the language cannot spell.
+
+The rule is now written once, in `resolveTypeOrError`, and called from all twenty sites. Its comment carries
+the precondition that makes the substitution safe: the grammar admits no untyped declaration -- `fun f(self)`
+is a syntax error, "expecting COLON" -- so a null return always means a type was written and failed, never
+that none was written. Without that, the sentinel would silently type an inferred parameter as `<error>` and
+absorb every check on it.
+
+**Ten defects found while fixing it, six fixed, four booked.**
+
+*An abandoned extern.* `visit(DefineDeclaration)` opened with `if (!retType) return;`, which left the extern
+unregistered -- so every call to it reported an undefined name -- and, because the bare `return` sat above the
+parameter walk, also skipped the analysis the previous unit had just built. One line, two features. It is the
+site that matters most of the twenty: the standard library is a wall of `@define`, and one unresolved type in
+one of them silenced every use of it.
+
+*Two live nulls in an interface.* `ifaceType->defineMethod(name, retType)` and
+`ifaceType->defineOperator((int)op->op, retType)` were both unguarded while their struct and class
+counterparts were guarded, so an unresolved return type on an interface requirement handed a `nullptr` to a
+map whose every reader dereferences it -- `StructType.cpp:65` clones what is stored, `:86` substitutes it.
+Nothing in the corpus instantiated an interface with a broken requirement, which is the only reason this had
+never crashed.
+
+*A dropped operator.* The operator return type is the same rule at five more sites, and it produced the
+worst-reading cascade of any of them: with the operator undeclared, `s + 1` fell through to the built-in rule
+for `+` and reported `Type mismatch: expected 'S', got 'int'` -- which reads as though the program had not
+declared the operator it plainly did declare.
+
+*An alias that named nothing.* `type Output = Any<...>;` on line 6 of `stdlib/operators.fin` was charged once
+for the annotation and then thirty more times, because `visit(TypeDefinition&)` gated `defineType` on the
+target resolving -- so the alias's *name* was undefined, and each of the thirty operator requirements that
+returns `Output` reported `Undefined type 'Output'`. Thirty diagnostics about a declaration written six lines
+above them, none of them about the one that failed. An alias is a declaration like any other: the name was
+written, so the name exists, and what it names is the sentinel. This one site was worth more than the other
+twenty put together on a per-sample basis -- `stdlib/operators.fin` went from 57 diagnostics to 27, the largest
+single reduction in the corpus so far -- and it was worth nothing at all until the sentinel existed to be what
+the name resolves to.
+
+*The sentinel leaking into a message.* Two holes, each for a different reason. `visit(CastExpression&)`
+hand-rolls its own validity table and consults neither `isErrorType` nor the `isCastableTo` family, so
+`cast<float>(x)` on an untypeable `x` reported `Invalid cast from '<error>' to 'float'`. And `isErrorType` did
+not look inside a `FunctionType`, so a function whose return type failed -- registered as
+`fn(int) -> <error>`, deliberately, so that its arity survives -- printed that spelling the moment the
+function was named as a value. Both are now in the leak test, which is the test that had to grow: it is easy
+to write a sentinel that suppresses cascades and still shows the user a type they cannot write.
+
+*A generic operator's own parameter, undefined in its own signature.* Booked, not fixed.
+`visit(StructDeclaration&)`'s signature pass resolves each operator's and method's return type from a scope
+holding the *struct's* generic parameters and not the member's own, so `operator + : <T>(other: <T>) <T>`
+reports `Undefined type 'T'` about a parameter it declares one token earlier. The parameter list escapes only
+because those annotations are resolved a second time, later, in a scope that has `T`. Two hundred lines below,
+`visit(ImplementsBlock&)` already does the right thing -- a scope per method, `declareGenericParams` before the
+signature, with a comment saying why -- so the fix is those three lines in two more places. It is booked
+because the honest version is the single copy that the eight existing `declareGenericParams` calls should
+collapse into, and that is a refactor with its own tests.
+
+*A generic type alias that is never declared at all.* Also booked, and not the drop-the-entity rule but worse:
+`visit(TypeDefinition&)` returns early for any alias carrying generic parameters, resolving the target for its
+diagnostics and never calling `defineType` -- so `type ArrayType<T> = [T];` leaves `ArrayType` undefined
+whether or not `[T]` resolved. The debug log calls it "partially supported"; nothing is supported. It costs the
+corpus nothing today because `arrays.fin:4` writes one and never names it, and it will cost a diagnostic per
+use the first time anyone does. The fix is a `TypeAlias` in the type system that can be instantiated.
+
+*A diagnostic reported once per pass.* `visit(StructDeclaration)` walked every member default twice -- once
+registering, once analysing -- and both walks reported, so `pub v <int> = nosuchvar` said
+`Undefined variable 'nosuchvar'` twice. The registration pass's walk is deleted: the analysis pass has
+`currentStructContext` set and reads the field type back from the struct, so it is the well-formed one. The
+implements block had the same duplication for a worse reason and it is also deleted -- see the matrix below.
+What remains is constructor parameters and method return types, where the fix is structural rather than a
+deletion, and it is booked as `KnownDefect_ErrorRecovery` with the measurement that ranks it last: its corpus
+footprint is *zero*. Exactly one pair of diagnostics in the 50 samples shares a message and a location, and it
+is a module path.
+
+**A location bug the sentinel exposed.** Unhiding errors moved the corpus census red:
+`Soundness_DiagnosticAttribution` found two diagnostics landing on `//@` expectation comment lines in
+`prototype_test.fin`. Both were newly surfaced -- `HashMap::from_prototype(...)` had never been analysed,
+because the unresolved annotation on the declaration it initialised used to be fatal to the whole statement --
+and both came out at `1:1`, because `static_method_call` builds a `TypeNode` for the qualified name and set a
+location on the call but not on the type inside it. It is the type that fails to resolve. Five productions,
+five one-line fixes, `@1` rather than `@$` so the caret lands on the type name. This is the second time that
+census has found an unlocated node this way and the fifth production family to need it; the pattern is that a
+node built inside an action, rather than reduced from a rule, is the one that gets forgotten.
+
+*Lane note.* Those five fixes are in `src/parser/parser.y`, which is agent C's lane. Crossed deliberately and
+recorded here: the failing test's own message names the file and the production, no agent was alive to hand it
+to, and the change adds no production and alters no grammar -- six `setLoc` calls inside existing actions.
+
+**Measured.** 335 corpus diagnostics before, **310** after the first nineteen sites, **280** after the alias.
+27 cascades removed by the first pass, 2 real errors surfaced --
+`Undefined type 'HashMap'` and `Undefined type 'Collection'` in `prototype_test.fin`, which had been invisible
+for as long as the sample has existed. No sample's exit code changed. The reductions:
+
+| sample | before | after |
+|---|---|---|
+| `const.fin` | 26 | 11 |
+| `stdlib/hashmap.fin` | 24 | 19 |
+| `stdlib/collection.fin` | 24 | 22 |
+| `stdlib/prototypes.fin` | 11 | 9 |
+| `stdlib/types.fin` | 13 | 12 |
+| `nullifier.fin` | 5 | 4 |
+| `useful_macros.fin` | 6 | 5 |
+| `prototype_test.fin` | 15 | **17** |
+
+and then, from the twenty-first site alone:
+
+| sample | before | after |
+|---|---|---|
+| `stdlib/operators.fin` | 57 | **27** |
+
+Every ranking-by-diagnostic-count in the sections above was measured against the 335 and is now inflated by
+whatever share of its count was cascade. The next unit's ranking is re-derived from what is left.
+
+**A correction to every count in this document.** All of them, this section's 335 / 310 / 280 included, came
+from `grep -c 'error:'`, which also matches the source line echoed under the caret -- so `stdlib/error.fin`, a
+sample whose subject is error handling, was inflating the total by six. The exact figure after this unit is
+**274**. The snapshot script now anchors at `^error:` and lives in the repository rather than in `/tmp`, at
+`tests/tools/corpus_snapshot.sh`, with the histogram command that produces the rankings in its header comment
+and a note saying which figures above predate it. Numbers from here on are exact; numbers above read about six
+high, uniformly enough that no ranking changes.
+
+The operator, cast and function-type fixes moved the corpus by exactly **nothing** -- 310 before them and 310
+after, identical per sample. They were found by probe and by mutation, not by the corpus, which is the useful
+thing to record about them: the corpus is a specification, not a test suite, and it exercises what the samples
+happen to say rather than what the analyser happens to do. The alias fix is the other half of that lesson --
+found by ranking the corpus, worth thirty diagnostics, and invisible to every probe and mutant that had been
+written up to that point, because nothing in the unit's thirty tests had thought to write an alias.
+
+**Tests.** 41 in the unit: 37 `Soundness_ErrorRecovery` and four booked defects. Twenty-one for the sites,
+each its own test rather than a loop, because they are twenty-one kinds of entity and a fix to one is not a fix
+to another -- the eight-site matrix in the previous section is the evidence for that, not a guess, and this
+unit's matrix confirmed it site by site. Seven controls, which are the half that matters for a sentinel: a type
+that absorbs too much is a worse compiler than one that cascades, and nothing in a "this no longer reports"
+test can tell the two apart. A member access on a primitive, a method call on a primitive, an index on a
+non-array, a real type mismatch, an undefined name, a missing struct member and a cast whose target is wrong
+all still report, and the sentinel's own spelling is asserted absent from seven programs designed to provoke
+it.
+
+**Mutation: thirty-three mutants, and what the zero-kill ones were actually telling us.**
+Every test in this unit was written after the fix it covers, so not one of them has been seen red. The matrix
+is `/tmp/ermut.py`; it takes two shapes. Half the mutants put the drop-the-entity gate back at one site, which
+the "does not cascade" tests must kill. The other half make the sentinel *more* absorbing -- `isErrorType`
+answering true for every type, for a primitive, `isAssignableTo` accepting everything, `ErrorType::equals`
+matching anything, a cast answering the sentinel instead of its target -- which the controls must kill. A
+one-sided matrix proves nothing about a sentinel: absorbing too much is the failure mode a suppression
+mechanism actually has, and no "this no longer reports" test can see it.
+
+Six anchors were wrong on the first run, and both ways of being wrong were the same mistake: a substring of
+something else. A nine-space-indented anchor is a substring of the twelve-space copies of the same line, and
+the comment `// 2. Methods` is a prefix of `// 2. Methods (Signatures)`. Both matched more places than
+intended and the count check caught it, which is the argument for the count check: an anchor that silently
+matched twice would have produced a mutant nobody could interpret.
+
+Six mutants then killed nothing, and the resolutions fell into three kinds rather than the usual two:
+
+*The test was missing.* `R-cfield` and `R-ctorbody`. Every member test in the unit used a `struct`, so the
+class copy of the member loop was uncovered; no test used a constructor *body* parameter, only a signature. Two
+tests added.
+
+*The test was weak.* `R-iface`. It declared an interface with an unresolved return type and never read the
+stored value back, so a live `nullptr` in the map was invisible to it. Strengthened with a bounded generic that
+calls the requirement -- `fun use<T: I>(v: T) <int> { let s <int> = v.m(); ... }` -- which is the path through
+`StructType::substitute` that dereferences what was stored.
+
+*The code was dead.* `R-impl`. The implements block resolved every method parameter into a local
+`std::vector<TypePtr>` and then dropped it: `StructType::methods` maps a name to a return type and nothing
+else, so the signature that loop built had no reader. It was also reporting every parameter annotation a second
+time. Deleted -- and one `KnownDefect` case went green as a result, which is the convention working: the case
+was split out into `Soundness_ErrorRecovery.AnImplementsBlockMethodParameterIsReportedOnce` rather than the
+expectation relaxed.
+
+*The consumer does not exist yet.* This is the third kind, and it is the one worth writing down, because the
+reflex from "the code is dead" is to delete. `R-impl`'s deletion is only correct because method calls are
+checked against nothing today -- probes confirmed a method call checks neither its arity nor its argument
+types -- so the parameter types genuinely have no reader. The moment they do, that loop's work is needed again,
+in a different place. `KnownDefect_MethodCalls.AMethodCallIsNotCheckedAgainstItsSignature` books exactly that,
+with three cases and a free-function control that proves the arity check exists and simply is not reached; when
+it is inverted, the signature belongs on `StructType`, built once, not rebuilt per implements block. A booked
+defect is what makes a deletion reversible.
+
+*Three mechanisms hiding each other.* `R-checktype`, `R-assign` and `I-castall` all killed nothing, and the
+reason was not any test: `ErrorType` overrode both assignability directions, `Type::isAssignableTo` had a
+branch for the sentinel, and `checkType` short-circuited before either could run. Any two covered for the
+third, so no single mutant was observable. The structural argument settles which to keep -- `isAssignableTo`
+has exactly one caller outside `src/types/`, and it is `checkType`, which short-circuits first; `isCastableTo`
+has none at all, because `visit(CastExpression&)` hand-rolls its own table. Both type-level branches deleted,
+the short-circuit kept as the only mechanism, because it is also the only one of the three that suppresses the
+*message*. `R-checktype` now kills eighteen tests. Their comments say why they are absent, so the next person
+does not reinstate them: a second caller of `isAssignableTo` must short-circuit the same way.
+
+*Two mechanisms that are not redundant.* `R-opret` and `R-opdecl` also killed nothing each, and this pair
+resolved the other way. An operator is registered twice -- once in the struct's signature pass, once when its
+body is walked -- and dropping either alone leaves the other to declare it. Deleting one would have been wrong:
+the signature pass is what an *earlier sibling's* body sees, and the body pass is the only one with the
+operator's own generic parameters in scope. So the resolution was three things rather than a deletion. A test
+whose method is declared *above* the operator, which only the signature pass can satisfy, kills `R-opret`. A
+combined `R-opboth` covers the pair. And the generic case that makes the body pass independently observable is
+the `KnownDefect_Generics` above -- with a note in its failure message telling whoever fixes it to check
+whether the second registration has become redundant, and delete it if so.
+
+Two further findings came from the never-killed list rather than from a zero-kill mutant:
+
+*A control no mutant could reach.* Three tests assert that an unrelated undefined name, a missing struct
+member and a real type mismatch still report when some *other* type failed -- the guard against one bad
+annotation muting a file. Nothing in the sentinel's machinery can kill them, because a name with no declaration
+has no type that could have failed. The mutant has to be the wrong fix itself: `I-undefname` answers the
+sentinel from `visit(Identifier&)`'s undefined-variable path, `I-nomember` from the missing-member path. Both
+are plausible bad fixes for a cascade, both now kill their control, and both are named in the tests' comments.
+
+*A mutant that could not tell two copies apart.* The struct and class member loops are textually identical, so
+one substitution mutated both and the struct's test killed first -- leaving the class test in the never-killed
+list, looking redundant when it is not. The fix was to the matrix: `patch()` takes an occurrence index, and
+`R-methodS`/`R-methodC` and `R-opretS`/`R-opretC` patch one copy each. The class copies are separate code --
+`R-cfield` exists precisely because the class field loop has a line the struct's does not -- and now the matrix
+can say so.
+
+Splitting the mutants was necessary and not sufficient, which is worth separating: with `R-methodC` patching
+only the class occurrence it *still* killed nothing, because the class test asserted a diagnostic count over a
+program whose `main` was `return 0;`. Undeclaring a method changes nothing a program that never calls it can
+notice. So the matrix limitation was hiding a weak test rather than excusing one, and both had to be fixed --
+the test now calls the method, as its struct sibling always did. That is the second time in this unit the same
+sentence applied: a count assertion is only worth writing over a program that would notice. Each of the four
+split mutants is now killed by exactly one test.
+
+Two tests were also changed for failing to be killable. The anti-`auto` test asserted only that the program
+exited 1, which stays true when the sentinel *is* `auto`, since the annotation reports either way; it now
+asserts what `x` becomes. And the operator-parameter count test had a body that never mentioned the parameter,
+so dropping the definition changed nothing to count; it was folded into the sibling whose body uses it twice
+and deleted. A count assertion is only worth writing over a program that would notice.
+
+One `KnownDefect` went red and was inverted per its own note, which had specified this exact fix in
+advance: "a sentinel error type -- one that resolution returns instead of nullptr, that is
+assignable to and from everything ... would let the function be registered with its correct arity and let this
+call go quiet." Both objections that had kept the registration gated turned out to be answered by the sentinel
+rather than argued away, and the inverted test now asserts the thing that distinguishes a sentinel from a
+shrug: `f(1, 2)` against `fun f(p: NoSuchType)` still reports `expects 1 arguments, got 2`.
+
+Final matrix: **33 mutants, 32 lethal, 0 anchor failures**, and the one that was not -- `R-methodC` -- was the
+weak test above, lethal once the test called the method. **51 of the 84 tests** under the matrix's filter are
+killed by some mutant; the 33 that are not are the ones no mutant in this unit's machinery reaches (parameter
+defaults, diagnostic locations, the booked defects), and they belong to other units' matrices. The tree is
+rebuilt from verified-pristine sources at the end of every run, so a matrix that dies half way cannot leave a
+mutant in the tree.
+
+Suite: **417 tests, all passing**, corpus 50/50. Lane note: `src/semantics/**`, `src/types/**`,
+`tests/test_soundness.cpp` and the new `tests/tools/corpus_snapshot.sh`; plus the six `setLoc` calls in
+`src/parser/parser.y` disclosed above. No sample changed.
+
 ## Rulings owed
 
 Every entry below is a question only the language owner can answer, discovered by measurement and blocking
@@ -2042,8 +2331,11 @@ cannot be changed later without breaking every compiled artifact.)
 
 **The type system's three unknowns.** What is `any` — a top type, a tagged union, an alias for `&void`?
 What is `object`? What does `Any<C>` mean, and is `Any<...>` with a literal ellipsis a distinct form?
-Together these are the single largest class of corpus diagnostics (115 `Undefined type`, of which `any`
-accounts for 40 and `Output` 30), so this is the highest-value ruling on the list.
+Together these are still the single largest class of corpus diagnostics: of the 81 `Undefined type` that
+remain, `any` accounts for 40, `Any` for 4 and `object` for 2, so **46 of 274** total diagnostics are behind
+this one answer -- more than twice the next-largest cause. It was 30 higher until the type-alias fix in the
+section above stopped `type Output = Any<...>;` from charging once per use of `Output`; the fix removed the
+cascade, not the cause, and the cause is this ruling.
 
 **Modules.** What does a `namespace` block do to a module's symbol table, and is importing a namespace the
 module does not declare an error or a no-op? (Twelve stdlib samples open with `namespace std`; eleven corpus

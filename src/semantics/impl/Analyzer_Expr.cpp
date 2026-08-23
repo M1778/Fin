@@ -354,6 +354,12 @@ void SemanticAnalyzer::visit(MethodCall& node) {
     auto structType = getStructType(objType, currentScope);
 
     if (!structType) {
+    // The sentinel answers every access with itself, so one unresolved annotation
+    // stays one diagnostic instead of becoming one per use. Without this the
+    // cascade only changes shape -- measured before the sentinel existed:
+    // suppressing `Undefined variable 'a'` alone just turned const.fin's nine
+    // into five `does not have methods` and four `is not a struct`.
+        if (isErrorType(objType)) { lastExprType = errorType(); return; }
         error(node, fmt::format("Type '{}' does not have methods", objType->toString()));
         lastExprType = nullptr;
         return;
@@ -397,6 +403,8 @@ void SemanticAnalyzer::visit(ArrayAccess& node) {
 
     if (auto* arrType = dynamic_cast<const ArrayType*>(arrExprType.get())) {
         lastExprType = arrType->element_type;
+    } else if (isErrorType(arrExprType)) {
+        lastExprType = errorType();  // see the note at the method-call site
     } else {
         error(node, fmt::format("Type '{}' is not an array or pointer", arrExprType->toString()));
         lastExprType = nullptr;
@@ -427,6 +435,19 @@ void SemanticAnalyzer::visit(CastExpression& node) {
     
     if (!sourceType || !targetType) {
         lastExprType = nullptr;
+        return;
+    }
+
+    // The fourth expression site, and the one that leaked: `cast<float>(x)` where x's
+    // annotation did not resolve said `Invalid cast from '<error>' to 'float'` -- a
+    // cascade *and* a diagnostic naming a type no program can write.
+    //
+    // The result is the target type, not the sentinel. A cast is an assertion about
+    // the value's type, and that assertion stands whether or not the operand typed:
+    // `let s <string> = cast<float>(x);` should still say string got float, which is
+    // true of what was written. The sentinel would swallow that too.
+    if (isErrorType(sourceType)) {
+        lastExprType = targetType;
         return;
     }
 
@@ -479,6 +500,7 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
     auto structType = getStructType(objType, currentScope);
 
     if (!structType) {
+        if (isErrorType(objType)) { lastExprType = errorType(); return; }  // see the method-call site
         error(node, fmt::format("Type '{}' is not a struct", objType->toString()));
         lastExprType = nullptr;
         return;

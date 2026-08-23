@@ -15,6 +15,15 @@ bool Type::isAssignableTo(const Type& other) const {
     if (this->equals(other)) return true;
     if (other.toString() == "auto") return true;
 
+    // No rule for the error sentinel here, deliberately. checkType short-circuits on
+    // isErrorType before it ever calls this (Analyzer_Core.cpp:361), and checkType is
+    // the only caller outside this directory -- so a rule here could not fire, and a
+    // mutation matrix proved it: removing this line, removing ErrorType's own
+    // override, and removing the short-circuit each killed nothing, because any two
+    // covered for the third. One mechanism, in the one place that also suppresses the
+    // message. If a second caller of isAssignableTo ever appears it must short-circuit
+    // the same way rather than reinstate this.
+
     // A `T?` slot accepts a plain `T`. nullifier.fin:7 returns an `int?` member
     // from a body whose declared return type is `int` under `fun?`, and :27
     // assigns an `A?` call result into an `A?` binding.

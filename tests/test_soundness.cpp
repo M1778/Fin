@@ -68,7 +68,792 @@ FincRun compile(const std::string& code) {
     return runFinc({s.str()});
 }
 
+// The diagnostic message lines, and nothing else.
+//
+// This exists because searching all of stderr for an identifier is not evidence that
+// the identifier was diagnosed. Every rendered diagnostic echoes the offending source
+// line under a caret, so `stripAnsi(r.err).find("nosuchvar")` finds the *program's own
+// text* whenever the program contains that name -- which, in a test that put the name
+// there on purpose, is always. Two tests in this file were written wrong that way, one
+// of them going red against a correct compiler and one of them passing vacuously, before
+// this helper existed. Assert against this, not against raw stderr.
+std::string messagesOnly(const std::string& stripped) {
+    std::string out;
+    for (size_t i = 0; i < stripped.size();) {
+        size_t eol = stripped.find('\n', i);
+        if (eol == std::string::npos) eol = stripped.size();
+        if (stripped.compare(i, 7, "error: ") == 0 || stripped.compare(i, 9, "warning: ") == 0)
+            out.append(stripped, i, eol - i).append("\n");
+        i = eol + 1;
+    }
+    return out;
+}
+
+// How many diagnostics were reported. Line-anchored for the same reason.
+size_t errorCount(const std::string& stripped) {
+    size_t n = 0;
+    for (size_t i = 0; i < stripped.size();) {
+        size_t eol = stripped.find('\n', i);
+        if (eol == std::string::npos) eol = stripped.size();
+        if (stripped.compare(i, 7, "error: ") == 0) ++n;
+        i = eol + 1;
+    }
+    return n;
+}
+
 } // namespace
+
+// ---------------------------------------------------------------------------
+// An unresolved type must not silence the code around it.
+//
+// When a type annotation fails to resolve, the analyser drops the entity that was
+// being declared -- and everything that referred to it then reports a second time.
+// `fun f(a: NoSuchType) <int> { return a + a; }` produces three diagnostics: the
+// real one, and `Undefined variable 'a'` once per use. Four declaration kinds do
+// this, and they are one rule, not four bugs:
+//
+//   let x <NoSuchType> = ...      the variable is never defined       (Analyzer_Decl, visit(VariableDeclaration))
+//   fun f(a: NoSuchType)          the parameter is never defined      (the parameter loops)
+//   struct S { pub v <NoSuchType> }   the member is never defined     -> `Struct 'S' has no member 'v'`
+//   fun f() <NoSuchType>          the whole function is dropped       -> `Undefined function or type 'f'`
+//
+// The variable case is worse than noise. `if (!type) return;` returns before the
+// initialiser is visited, so `let x <NoSuchType> = nosuchvar;` reports the type and
+// never mentions `nosuchvar`. One bad annotation silently disables analysis of an
+// arbitrarily large expression -- wrong code, no diagnostic, which is the category
+// the plan puts first. Measured on the corpus: two real errors in
+// prototype_test.fin (`Undefined type 'Collection'` and `'HashMap'`) are hidden by
+// exactly this and appear the moment it is fixed.
+//
+// Measured before it was written, by patching the analyser to define the entity
+// anyway and re-running the corpus: 335 diagnostics become 317. Twenty-one cascades
+// go, two hidden errors arrive. That also means every other unit's ranking-by-count
+// is inflated until this lands, which is the second reason to do it early.
+//
+// The fix is an error type: a single sentinel that is assignable in both directions,
+// answers any member, method and index with itself, and is never spellable by a
+// program. `auto` looks like a free ride and is not -- a declaration whose annotation
+// is `auto` infers from its initialiser, so an unresolved annotation would silently
+// become whatever the initialiser was and the program would compile. The sentinel
+// prints as `<error>`, which is not an identifier, so a leak into a diagnostic is
+// both impossible to write by hand and obvious when seen. One test below watches for
+// exactly that leak.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_ErrorRecovery, AnInitialiserIsAnalysedWhenTheAnnotationDoesNotResolve) {
+    // The soundness half, and the reason this unit is not merely about noise:
+    // `if (!type) return;` skipped the initialiser entirely.
+    auto r = compile("fun main() <int> { let x <NoSuchType> = nosuchvar; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("NoSuchType"), std::string::npos) << err;
+    EXPECT_NE(err.find("nosuchvar"), std::string::npos)
+        << "a bad annotation must not silence its own initialiser:\n" << err;
+}
+
+TEST(Soundness_ErrorRecovery, AnInitialiserCallIsAnalysedWhenTheAnnotationDoesNotResolve) {
+    // A call takes a different path from a bare name and reports a different message,
+    // so a fix that reached one and not the other would leave this silent.
+    auto r = compile("fun main() <int> { let x <NoSuchType> = nosuchfn(); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("nosuchfn"), std::string::npos)
+        << "a bad annotation must not silence a call in its initialiser:\n" << err;
+}
+
+TEST(Soundness_ErrorRecovery, AnUnresolvedAnnotationIsStillReportedExactlyOnce) {
+    // The control that stops the fix from going the other way: suppressing cascades
+    // must not suppress the diagnostic that started it, nor duplicate it.
+    auto r = compile("fun main() <int> { let x <NoSuchType> = 0; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(errorCount(err), 1u) << "exactly the real error, nothing else:\n" << err;
+    EXPECT_NE(err.find("Undefined type 'NoSuchType'"), std::string::npos) << err;
+}
+
+TEST(Soundness_ErrorRecovery, AnUnresolvedAnnotationDoesNotInferFromItsInitialiser) {
+    // Why the sentinel cannot be `auto`. visit(VariableDeclaration) infers when the
+    // annotation is `auto`, so reusing it here would make this program compile.
+    auto r = compile("fun main() <int> { let x <NoSuchType> = 5; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1)
+        << "an unresolved annotation is an error, not a request to infer:\n" << r.err;
+
+    // The exit code alone does not say it: the annotation reports either way, so this
+    // test passed just as happily with `auto` as the sentinel. What separates them is
+    // what `x` then *is*. Under the sentinel a later use of x is silent; under `auto` it
+    // has inferred `int` and the mismatch below appears, making the count 2.
+    const std::string err = stripAnsi(compile(
+        "fun main() <int> { let x <NoSuchType> = 5; let y <bool> = x; return 0; }\n").err);
+    EXPECT_EQ(errorCount(err), 1u)
+        << "a second diagnostic here means the annotation inferred a type\n" << err;
+}
+
+TEST(Soundness_ErrorRecovery, AUseOfAVariableWithAnUnresolvedTypeDoesNotCascade) {
+    // Two uses, so the count distinguishes "one cascade" from "one per use".
+    auto r = compile("fun main() <int> { let a <NoSuchType> = 0;\n"
+                     "                   let b <int> = a; let c <int> = a; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Undefined variable 'a'"), std::string::npos)
+        << "`a` was declared; the annotation is what failed:\n" << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(Soundness_ErrorRecovery, AUseOfAParameterWithAnUnresolvedTypeDoesNotCascade) {
+    // const.fin's shape: `fun test_3(const a: rptr<int>)` where rptr is unresolvable,
+    // and nine of the corpus's thirty-two `Undefined variable` diagnostics are this.
+    auto r = compile("fun f(a: NoSuchType) <int> { return a + a; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Undefined variable 'a'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(Soundness_ErrorRecovery, AMemberAccessOnAnUnresolvedTypeDoesNotCascade) {
+    auto r = compile("fun f(a: NoSuchType) <int> { return a.field; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, AMethodCallOnAnUnresolvedTypeDoesNotCascade) {
+    // const.fin:32 `a.set(10)` -- five of that sample's diagnostics are this shape.
+    auto r = compile("fun f(a: NoSuchType) <int> { return a.m(1); }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, AnIndexOnAnUnresolvedTypeDoesNotCascade) {
+    auto r = compile("fun f(a: NoSuchType) <int> { return a[0]; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, AStructMemberWithAnUnresolvedTypeStillExists) {
+    // The member is dropped today, so reading it reports `Struct 'S' has no member 'v'`
+    // -- a claim about the program that is false. The member was written; its type was
+    // the problem.
+    auto r = compile("struct S { pub v <NoSuchType>, }\n"
+                     "fun f(s: &S) <int> { let q <int> = s.v; return 0; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("has no member 'v'"), std::string::npos)
+        << "the member exists; its type did not resolve:\n" << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(Soundness_ErrorRecovery, AClassMemberWithAnUnresolvedTypeStillExists) {
+    // The class copy of the test above. Not redundant with it: the two member loops are
+    // separate code (Analyzer_Decl.cpp ~185 and ~648, the largest of this codebase's
+    // duplicated loops), and a mutation matrix found this exact hole -- restoring the
+    // drop on the class side killed nothing, because every test used a struct.
+    auto r = compile("class C { pub v <NoSuchType>, }\n"
+                     "fun f(c: &C) <int> { let q <int> = c.v; return 0; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("has no member 'v'"), std::string::npos)
+        << "the member exists; its type did not resolve:\n" << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(Soundness_ErrorRecovery, AFunctionWithAnUnresolvedReturnTypeIsStillCallable) {
+    // The widest cascade of the four: the function is not registered at all, so every
+    // call site reports `Undefined function or type 'f'` on top of the real error.
+    auto r = compile("fun f() <NoSuchType> { return 0; }\n"
+                     "fun main() <int> { let z <int> = f(); let y <int> = f(); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Undefined function or type 'f'"), std::string::npos)
+        << "`f` was declared; its return type is what failed:\n" << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(Soundness_ErrorRecovery, TheErrorSentinelNeverAppearsInADiagnostic) {
+    // It exists to be suppressed. If it reaches a message, some site propagated it
+    // without checking, and the user is being shown a type they cannot have written.
+    for (const char* code : {"fun main() <int> { let x <NoSuchType> = 0; let y <int> = x; return 0; }\n",
+                             "fun f(a: NoSuchType) <int> { return a.m(1)[0].k; }\nfun main() <int> { return 0; }\n",
+                             "struct S { pub v <NoSuchType>, }\nfun f(s: &S) <int> { return s.v; }\nfun main() <int> { return 0; }\n",
+                             // Each of these three leaked, and each leaked through a
+                             // different hole. A cast printed the sentinel because the
+                             // cast rule is hand-rolled and consulted neither
+                             // isErrorType nor isCastableTo; naming a function whose
+                             // return type failed printed `fn(int) -> <error>` because
+                             // isErrorType did not look inside a FunctionType; the
+                             // array and nullable spellings are here because the same
+                             // wrapping argument applies to them and only the pointer
+                             // one had a test.
+                             "fun main() <int> { let x <NoSuchType> = 0; let y <float> = cast<float>(x); return 0; }\n",
+                             "fun f(a: int) <NoSuchType> { return 0; }\nfun main() <int> { let g <int> = f; return 0; }\n",
+                             "fun f(a: [NoSuchType]) <int> { let q <int> = a; return 0; }\nfun main() <int> { return 0; }\n",
+                             "fun f(a: NoSuchType?) <int> { let q <int> = a; return 0; }\nfun main() <int> { return 0; }\n"}) {
+        const std::string err = stripAnsi(compile(code).err);
+        EXPECT_EQ(err.find("<error>"), std::string::npos)
+            << "the error sentinel leaked into a diagnostic:\n" << code << err;
+    }
+}
+
+// The sentinel is permissive by design, which makes every one of these a test that it
+// is not permissive about anything else. Each was a real diagnostic before the unit
+// and must still be one after.
+
+TEST(Soundness_ErrorRecovery, AMemberAccessOnAPrimitiveIsStillAnError) {
+    auto r = compile("fun main() <int> { let x <int> = 1; let y <int> = x.field; return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << "an int has no members:\n" << r.err;
+}
+
+TEST(Soundness_ErrorRecovery, AMethodCallOnAPrimitiveIsStillAnError) {
+    auto r = compile("fun main() <int> { let x <int> = 1; let y <int> = x.m(); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << "an int has no methods:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("does not have methods"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, AnIndexOnANonArrayIsStillAnError) {
+    auto r = compile("fun main() <int> { let x <int> = 1; let y <int> = x[0]; return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << "an int is not indexable:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("is not an array or pointer"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, ARealTypeMismatchIsStillReported) {
+    auto r = compile("fun main() <int> { let x <int> = \"s\"; return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, AnUndefinedNameIsStillReportedWhenNoTypeFailed) {
+    // The cascade suppression must key on "this entity's type failed", not on "some
+    // type failed somewhere", or one bad annotation would mute the whole file.
+    //
+    // This is a control against a specific wrong fix, and the matrix spells it out as
+    // I-undefname: answering the sentinel from the undefined-variable path in
+    // visit(Identifier&) instead of reporting. Nothing in the sentinel's own machinery
+    // can reach this test, because a name with no declaration has no type that could
+    // have failed -- so the mutant that kills it has to be the mistake itself.
+    auto r = compile("fun main() <int> { let a <NoSuchType> = 0; let b <int> = alsonothere; return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("alsonothere"), std::string::npos)
+        << "an unrelated undefined name is still an error:\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, AMissingStructMemberIsStillReportedWhenNoTypeFailed) {
+    // The member-access counterpart of the control above; the mutant is I-nomember.
+    auto r = compile("struct S { pub v <int>, }\n"
+                     "fun f(s: &S) <int> { return s.nope; }\nfun main() <int> { return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("has no member"), std::string::npos) << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// The other eleven declaration sites.
+//
+// The four tests above cover a variable, a function parameter, a struct member and
+// a function return type. resolveTypeOrError is called from fifteen places, and
+// the eleven below are the rest: a constructor's parameters (twice over, in the
+// signature pass and the body pass), a method's return type, an interface method's
+// return type, an extern's return type and parameters, an operator's parameters, a
+// @special's parameters, and an implements-block method's parameters.
+//
+// One test each rather than a loop, because they are not one code path: each site
+// registers a different kind of entity, and a fix to one is not a fix to another.
+// That is not a guess -- the eight-site mutation matrix for visitParameterDefaults
+// showed each site killed by exactly its own test and nothing else. The same
+// matrix runs over these.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_ErrorRecovery, AConstructorParameterWithAnUnresolvedTypeKeepsItsArity) {
+    // The signature pass used to drop the unresolved parameter from paramTypes, so
+    // the constructor advertised zero arguments and calling it with the one the
+    // program wrote earned a second, false diagnostic.
+    const FincRun r = compile("struct S { S(p: NoSuchType) {} }\n"
+                              "fun main() <int> { let s <auto> = S(1); return 0; }\n");
+    EXPECT_EQ(stripAnsi(r.err).find("expects 0 arguments"), std::string::npos)
+        << "the unresolved parameter still counts toward the arity\n" << stripAnsi(r.err);
+
+    // And the arity is enforced, not merely silent: this is the half that tells a
+    // sentinel apart from a shrug.
+    const FincRun wrong = compile("struct S { S(p: NoSuchType) {} }\n"
+                                  "fun main() <int> { let s <auto> = S(1, 2); return 0; }\n");
+    EXPECT_NE(stripAnsi(wrong.err).find("expects 1 arguments, got 2"), std::string::npos)
+        << stripAnsi(wrong.err);
+}
+
+TEST(Soundness_ErrorRecovery, AMethodWithAnUnresolvedReturnTypeIsStillCallable) {
+    // defineMethod was gated on the return type resolving, so calling the method
+    // reported "Method 'm' not found" about a method written three lines up.
+    const FincRun r = compile(
+        "struct S { pub v <int>, fun m(self: &Self) <NoSuchType> { return 0; } }\n"
+        "fun main() <int> { let s <&S> = new S{v: 1}; s.m(); return 0; }\n");
+    EXPECT_EQ(stripAnsi(r.err).find("not found in type"), std::string::npos)
+        << "m is declared; only its return type is unknown\n" << stripAnsi(r.err);
+
+    // The control, in the same program shape: a name that really is not a method
+    // must still be reported, or the sentinel has swallowed the check itself.
+    const FincRun bad = compile(
+        "struct S { pub v <int>, fun m(self: &Self) <NoSuchType> { return 0; } }\n"
+        "fun main() <int> { let s <&S> = new S{v: 1}; s.nosuchmethod(); return 0; }\n");
+    EXPECT_NE(stripAnsi(bad.err).find("'nosuchmethod' not found"), std::string::npos)
+        << stripAnsi(bad.err);
+}
+
+TEST(Soundness_ErrorRecovery, AClassMethodWithAnUnresolvedReturnTypeIsStillCallable) {
+    // The class copy of the same loop. Its own test because it is its own code:
+    // Analyzer_Decl.cpp carries the struct and class member passes twice over, and
+    // a mutant that restores the gate in one is not caught by the other's test.
+    //
+    // Proving that took a change to the matrix, not to this test. The two copies are
+    // textually identical, so one substitution mutated both and the struct test killed
+    // first, leaving this one in the never-killed list looking redundant. The mutants are
+    // now R-methodS and R-methodC, each patching one occurrence, and each is killed by
+    // exactly one of the two tests.
+    //
+    // Splitting the mutants was necessary but not sufficient: R-methodC still killed
+    // nothing, because this test used to assert only a diagnostic count over a program
+    // whose `main` was `return 0;`. Undeclaring the method changes nothing a program that
+    // never calls it can notice. The call is the assertion; the count rides along.
+    const FincRun r = compile(
+        "class C { pub v <int>, fun m(self: &Self) <NoSuchType> { return 0; } }\n"
+        "fun main() <int> { let c <&C> = new C{v: 1}; c.m(); return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("not found in type"), std::string::npos)
+        << "m is declared; only its return type is unknown\n" << err;
+    EXPECT_EQ(errorCount(err), 2u)
+        << "the unresolved return type, reported once per resolution pass and no more "
+           "-- see KnownDefect_ErrorRecovery below for why two and not one\n"
+        << err;
+
+    // No `nosuchmethod` control here, deliberately. The lookup that would have to be
+    // swallowed is one site shared by both (Analyzer_Expr.cpp:370), and the struct
+    // sibling above already covers it; a second copy would be the redundancy this
+    // unit spent a matrix removing.
+}
+
+TEST(Soundness_ErrorRecovery, AnInterfaceMethodWithAnUnresolvedReturnTypeDoesNotCrash) {
+    // This site was worse than a cascade: `ifaceType->defineMethod(name, retType)`
+    // was unguarded, so an unresolved return type handed it a live nullptr. Nothing
+    // in the corpus dereferenced it, which is the only reason it had not crashed.
+    const FincRun r = compile("interface I { fun m(a: int) <NoSuchType>; }\n"
+                              "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "a diagnostic, not a crash and not a pass\n" << r.err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+
+    // The declaration alone proves nothing: the null was stored quietly and the program
+    // above never read it back, so this test passed before the fix as well. Calling the
+    // method through a bounded type parameter is what reads it -- with a null in the
+    // map, getMethodReturnType answers "not found" and the call reports a second error
+    // about a method the interface plainly requires.
+    const std::string used = stripAnsi(compile(
+        "interface I { pub fun m() <NoSuchType>; }\n"
+        "fun use<T: I>(v: T) <int> { let s <int> = v.m(); return 0; }\n"
+        "fun main() <int> { return 0; }\n").err);
+    EXPECT_EQ(used.find("not found"), std::string::npos)
+        << "the requirement exists; its return type is what failed\n" << used;
+    EXPECT_EQ(errorCount(used), 1u) << used;
+}
+
+TEST(Soundness_ErrorRecovery, AnExternWithAnUnresolvedReturnTypeIsStillCallable) {
+    // `if (!retType) return;` abandoned the whole declaration, so the extern went
+    // unregistered and every call to it reported an undefined name. This matters
+    // most of all fifteen sites: the standard library is a wall of @define, and
+    // one unresolved type in one of them silenced every use.
+    const FincRun r = compile("@define ext(a: int) <NoSuchType>;\n"
+                              "fun main() <int> { ext(1); return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u)
+        << "the one undefined type, and nothing about `ext` being undefined\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, AnExternWithAnUnresolvedParameterTypeIsStillCallable) {
+    const FincRun r = compile("@define ext(a: NoSuchType) <int>;\n"
+                              "fun main() <int> { ext(1); return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, AnExternWithAnUnresolvedReturnTypeStillWalksItsDefaults) {
+    // The bare `return` skipped visitParameterDefaults too, so this one line
+    // silenced the whole feature the previous unit built. Kept as its own test
+    // because the two are separately reversible: a fix that registers the extern
+    // but keeps an early return above the walk passes every other test here.
+    const FincRun r = compile("@define ext(a: int = nosuchvar) <NoSuchType>;\n"
+                              "fun main() <int> { return 0; }\n");
+    const std::string msgs = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(msgs.find("NoSuchType"), std::string::npos) << msgs;
+    EXPECT_NE(msgs.find("nosuchvar"), std::string::npos)
+        << "the default is still analysed even though the return type failed\n" << msgs;
+}
+
+TEST(Soundness_ErrorRecovery, AnOperatorParameterWithAnUnresolvedTypeIsStillUsable) {
+    // The parameter must be *defined*, or the operator body reports an undefined
+    // variable for every mention of it.
+    //
+    // The body mentions `o` twice on purpose. There used to be a second test here with
+    // the body `return 0;`, asserting the count was 1, and no mutant could kill it: with
+    // the parameter never mentioned, leaving it undefined changes nothing to observe. The
+    // count assertion only means something over a body that uses what was dropped, so it
+    // moved here and the other test went away.
+    const FincRun r = compile(
+        "struct S { pub v <int>, operator +(self: &Self, o: NoSuchType) <int> { return o + o; } }\n"
+        "fun main() <int> { return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(messagesOnly(err).find("'o'"), std::string::npos)
+        << "o is declared; only its type is unknown\n" << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(Soundness_ErrorRecovery, ASpecialDeclarationParameterWithAnUnresolvedTypeIsStillUsable) {
+    const FincRun r = compile("@special sp(a: NoSuchType) <int> { return a; }\n"
+                              "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("'a'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, AnImplementsBlockMethodParameterWithAnUnresolvedTypeIsStillUsable) {
+    const FincRun r = compile(
+        "interface I { pub fun m(a: int) <int>; }\n"
+        "struct S { val <int> }\n"
+        "S implements <I> {\n"
+        "    pub fun m(a: NoSuchType) <int> { return a; }\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("'a'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ErrorRecovery, AConstructorBodyCanUseAParameterWhoseTypeDidNotResolve) {
+    // The constructor's parameters are resolved twice -- once to record the arity, once
+    // to populate the body scope -- and only the second one makes the parameter usable.
+    // The arity test above covers the first; this covers the second, which no test
+    // reached: restoring the drop in the body pass alone broke nothing.
+    //
+    // Asserted as the absence of `'p'` rather than a count, because the two passes
+    // report the annotation twice today (KnownDefect_ErrorRecovery, below) and this
+    // test must not have to change when that is fixed.
+    for (const char* kw : {"struct", "class"}) {
+        const std::string code = std::string(kw) + " S {\n"
+            "    v <int>,\n"
+            "    S(p: NoSuchType) { self.v = p; }\n"
+            "}\n"
+            "fun main() <int> { return 0; }\n";
+        const std::string err = messagesOnly(stripAnsi(compile(code).err));
+        EXPECT_EQ(err.find("'p'"), std::string::npos)
+            << "the parameter is declared; its type is what failed\n" << kw << "\n" << err;
+    }
+}
+
+TEST(Soundness_ErrorRecovery, AnOperatorWithAnUnresolvedReturnTypeIsStillDeclared) {
+    // The fifth shape of the drop-the-entity rule, and the loudest: with the operator
+    // undeclared, `s + 1` fell back to the built-in rule for `+` and reported
+    // `Type mismatch: expected 'S', got 'int'` -- which reads as though the program had
+    // not declared the operator it plainly did declare.
+    const FincRun r = compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    pub operator +(other: <int>) <NoSuchType> { return 0; }\n"
+        "}\n"
+        "fun main() <int> { let s <S> = S{v: 1}; let q <int> = s + 1; return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("expected 'S', got 'int'"), std::string::npos)
+        << "the operator is declared; its return type is what failed\n" << err;
+}
+
+TEST(Soundness_ErrorRecovery, AnOperatorWithAnUnresolvedReturnTypeIsVisibleToAMethodDeclaredBeforeIt) {
+    // The same rule, from the side that pins *which* of the two registrations matters.
+    // An operator is registered twice: once in visit(StructDeclaration&)'s signature
+    // pass, once when visit(OperatorDeclaration&) walks its body. Only the first has run
+    // by the time an earlier sibling's body is analysed, so `self + 1` in a method
+    // declared above the operator sees the signature pass or nothing at all -- and with
+    // nothing, it fell through to the built-in rule for `+` and said
+    // `Type mismatch: expected 'Self', got 'int'`.
+    //
+    // Written this way round on purpose: the ordinary spelling (the operator first) is
+    // covered by whichever registration happens to survive, so it cannot tell the two
+    // apart, and a mutation matrix proved it -- dropping either registration alone left
+    // every other test in this file green.
+    const FincRun r = compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    pub fun m() <int> { let q <int> = self + 1; return 0; }\n"
+        "    pub operator +(other: <int>) <NoSuchType> { return 0; }\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Type mismatch"), std::string::npos)
+        << "the operator is declared above; the method below it should see it\n" << err;
+}
+
+TEST(Soundness_ErrorRecovery, AClassOperatorWithAnUnresolvedReturnTypeIsVisibleToAnEarlierMethod) {
+    // The class copy, for the reason spelled out at
+    // AClassMethodWithAnUnresolvedReturnTypeIsStillCallable: two identical copies of the
+    // loop, one mutant each (R-opretS, R-opretC), one test each.
+    const FincRun r = compile(
+        "class C {\n"
+        "    v <int>,\n"
+        "    pub fun m() <int> { let q <int> = self + 1; return 0; }\n"
+        "    pub operator +(other: <int>) <NoSuchType> { return 0; }\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(stripAnsi(r.err).find("Type mismatch"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Generics, AnOperatorsOwnGenericParameterIsNotInScopeInPassOne) {
+    // visit(StructDeclaration&)'s signature pass resolves each operator's return type
+    // from a scope holding the struct's generic parameters and not the operator's own,
+    // so `operator + : <T>(other: <T>) <T>` reports `Undefined type 'T'` about a
+    // parameter it declares one token earlier. The parameter list escapes it only
+    // because those types are resolved again, later, in a scope that has T.
+    //
+    // The same hole is in the method loop directly above the operator loop -- and
+    // visit(ImplementsBlock&), two hundred lines below, already does the right thing:
+    // it opens a scope per method and calls declareGenericParams before resolving the
+    // signature, with a comment saying why. The signature pass needs that same three
+    // lines. It is booked rather than patched here because the honest version of the fix
+    // is the one copy the eight existing declareGenericParams calls should collapse into,
+    // and that is a refactor with its own tests, not a line in this unit.
+    const FincRun r = compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    operator + : <T>(other: <T>) <T> { return other; }\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("Undefined type 'T'"), std::string::npos)
+        << "GOOD NEWS: a member's generic parameters are in scope when its signature is\n"
+           "registered. Invert this test -- the program should compile clean -- rename it\n"
+           "to Soundness_Generics.AnOperatorsOwnGenericParameterIsInScopeInPassOne, and\n"
+           "check whether visit(OperatorDeclaration&)'s second defineOperator call is now\n"
+           "redundant: if it is, delete it and the R-opboth mutant becomes R-opret.\n"
+        << err;
+
+    // The control: the corpus spelling, where the operator's parameter uses T and its
+    // return type does not (tests/samples/operators.fin:15). That one is clean today,
+    // which is why the defect above survived being written down.
+    const FincRun ok = compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    operator + : <T>(other: <T>) <int> { return 0; }\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(ok.exitCode, 0) << stripAnsi(ok.err);
+}
+
+TEST(Soundness_ErrorRecovery, ACastOfAnOperandThatDidNotTypeKeepsItsTargetType) {
+    // The cast rule is hand-rolled in visit(CastExpression&) and consults neither
+    // isErrorType nor the isCastableTo family, so it was the one expression site the
+    // sentinel did not reach: `cast<float>(x)` reported an invalid cast from a type the
+    // program never wrote. The result stays the *target* type -- a cast asserts a type
+    // and that assertion is still readable when its operand is not.
+    const FincRun r = compile(
+        "fun main() <int> {\n"
+        "    let x <NoSuchType> = 0;\n"
+        "    let y <float> = cast<float>(x);\n"
+        "    return 0;\n"
+        "}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Invalid cast"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+
+    // ...and the assertion is still checked against its use.
+    const std::string bad = stripAnsi(compile(
+        "fun main() <int> {\n"
+        "    let x <NoSuchType> = 0;\n"
+        "    let y <bool> = cast<float>(x);\n"
+        "    return 0;\n"
+        "}\n").err);
+    EXPECT_NE(bad.find("expected 'bool', got 'float'"), std::string::npos)
+        << "the cast still says what the value is\n" << bad;
+}
+
+TEST(Soundness_ErrorRecovery, ATypeAliasWhoseTargetDidNotResolveStillNamesSomething) {
+    // The twenty-first site, and the largest cascade in the corpus by a factor of four:
+    // `stdlib/operators.fin` writes `type Output = Any<...>;` on line 6 and then names
+    // `Output` as the return type of thirty operator requirements. `Any` is undefined,
+    // so the alias was not defined, so all thirty reported -- 30 of that sample's 57
+    // diagnostics, from one annotation.
+    //
+    // An alias is a declaration like any other: the name was written, and it is the
+    // target that failed.
+    const FincRun r = compile("type Alias = NoSuchType;\n"
+                              "fun f(a: Alias) <int> { return 0; }\n"
+                              "fun g(b: Alias) <int> { return 0; }\n"
+                              "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Undefined type 'Alias'"), std::string::npos)
+        << "the alias is declared; its target is what failed\n" << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(KnownDefect_TypeAliases, AGenericTypeAliasIsNeverDeclared) {
+    // Not the drop-the-entity rule -- worse. visit(TypeDefinition&) returns early for any
+    // alias with generic parameters, resolving the target for its diagnostics and never
+    // calling defineType at all, so `type ArrayType<T> = [T];` leaves `ArrayType`
+    // undefined whether or not `[T]` resolved. The debugLog calls it "partially
+    // supported"; nothing is supported. The fix is a TypeAlias in the type system that
+    // can be instantiated, which is why this is booked rather than fixed here.
+    //
+    // Corpus footprint: `arrays.fin:4` writes one and never names it, so this costs
+    // nothing today and will cost a diagnostic per use the first time it is used.
+    const FincRun r = compile("type Alias<T> = [T];\n"
+                              "fun f(a: Alias<int>) <int> { return 0; }\n"
+                              "fun main() <int> { return 0; }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'Alias'"), std::string::npos)
+        << "GOOD NEWS: generic type aliases are declared now. Invert this test -- the\n"
+           "program should compile clean -- and rename it to\n"
+           "Soundness_TypeAliases.AGenericTypeAliasIsDeclaredAndInstantiable.\n"
+        << stripAnsi(r.err);
+
+    // The control: the non-generic spelling of the same alias is declared and usable,
+    // which is what makes the above a gap in one branch rather than the feature missing.
+    const FincRun plain = compile("type Alias = [int];\n"
+                                  "fun f(a: Alias) <int> { return 0; }\n"
+                                  "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(plain.exitCode, 0) << stripAnsi(plain.err);
+}
+
+TEST(Soundness_ErrorRecovery, AMemberDefaultIsReportedOncePerProgramNotOncePerPass) {
+    // Not a cascade -- the opposite failure, and found while fixing the fields
+    // above. visit(StructDeclaration) walked every member default twice: once in
+    // the registration pass and again in the body pass, each reporting. The body
+    // pass is the well-formed one (it has currentStructContext set and reads the
+    // field type back from the struct), so the registration pass now registers the
+    // field and nothing more.
+    for (const char* kw : {"struct", "class"}) {
+        const std::string code =
+            std::string(kw) + " S { pub v <int> = nosuchvar }\nfun main() <int> { return 0; }\n";
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u)
+            << "one undefined name, one diagnostic\n" << code << stripAnsi(r.err);
+    }
+
+    // The control: the check that pass still performs must still perform it. If the
+    // deletion had taken the type check with it, this would go quiet.
+    const FincRun mismatch =
+        compile("struct S { pub v <int> = \"str\" }\nfun main() <int> { return 0; }\n");
+    EXPECT_NE(stripAnsi(mismatch.err).find("Type mismatch"), std::string::npos)
+        << "a member default of the wrong type is still checked\n" << stripAnsi(mismatch.err);
+}
+
+// ---------------------------------------------------------------------------
+// An annotation inside a struct signature is reported once per resolution pass.
+//
+// visit(StructDeclaration) resolves each method's and constructor's parameter and
+// return types twice: once in the registration pass, which needs the signature
+// before any body is analysed, and again when the body is visited. Both passes
+// call resolveTypeFromAST on the same TypeNode, and resolution reports on
+// failure, so `S(p: NoSuchType)` says "Undefined type 'NoSuchType'" twice.
+//
+// Predates the error sentinel and is untouched by it -- the sentinel governs what
+// happens *after* a failed resolution, not how many times resolution runs. It is
+// booked separately because the fix is structural: either the passes share a
+// resolved-type cache keyed on the TypeNode, or resolution stops reporting and
+// every caller reports instead. Both are larger than this unit, and both need a
+// decision about which pass owns the diagnostic.
+//
+// Measured cost in the corpus: nothing. Exactly one pair of diagnostics in the
+// 50 samples shares a message and a location, and it is a module path, not this.
+// The corpus's unresolved types sit in member and `let` annotations, which resolve
+// once; none is in a constructor parameter or a method return type. So this test is
+// the only thing holding the shape, and the ranking follows: fix it when the pass
+// structure is being changed for another reason, not before.
+// ---------------------------------------------------------------------------
+TEST(KnownDefect_MethodCalls, AMethodCallIsNotCheckedAgainstItsSignature) {
+    // Methods record a return type and nothing else: StructType::methods is
+    // `map<string, TypePtr>` (StructType.hpp:29) and visit(MethodCall&) looks up
+    // getMethodReturnType and stops (Analyzer_Expr.cpp:369). So a method call is checked
+    // for neither arity nor argument types, on a struct, on a class, or through an
+    // implements block -- while a free function is checked for both.
+    //
+    // Found by mutation: the implements block built a parameter-type vector that no one
+    // read, and breaking it killed no test because nothing can observe a method
+    // signature. That vector is now deleted; this is the consumer whose absence made it
+    // dead, and when it exists the signature belongs on StructType, built once.
+    //
+    // Correct behaviour: each of these reports a wrong-arity error, exactly as
+    // `fun f(a: int)` called `f(1, 2)` already does.
+    for (const char* code : {
+            "struct S {\n"
+            "    v <int>,\n"
+            "    pub fun m(a: int) <int> { return a; }\n"
+            "}\n"
+            "fun main() <int> { let s <S> = S{v: 1}; return s.m(1, 2); }\n",
+            "class C {\n"
+            "    v <int>,\n"
+            "    pub fun m(a: int) <int> { return a; }\n"
+            "}\n"
+            "fun main() <int> { let c <&C> = new C{v: 1}; return c.m(1, 2); }\n",
+            "struct S { v <int> }\n"
+            "interface I { pub fun m(a: int) <int>; }\n"
+            "S implements <I> {\n"
+            "    pub fun m(a: int) <int> { return a; }\n"
+            "}\n"
+            "fun main() <int> { let s <S> = S{v: 1}; return s.m(1, 2); }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "GOOD NEWS: a method call is now checked against its signature. Invert\n"
+               "this test -- each case should report a wrong-arity error naming the\n"
+               "method -- rename it to Soundness_MethodCalls.AMethodCallIsCheckedAgainst"
+               "ItsSignature,\n"
+               "and check whether argument *types* are checked too.\n"
+            << code << stripAnsi(r.err);
+    }
+
+    // The free-function control: the same mistake is caught here, which is what makes
+    // the silence above a gap rather than a policy.
+    const std::string fn = stripAnsi(compile(
+        "fun m(a: int) <int> { return a; }\n"
+        "fun main() <int> { return m(1, 2); }\n").err);
+    EXPECT_NE(fn.find("expects 1 arguments, got 2"), std::string::npos) << fn;
+}
+
+TEST(KnownDefect_ErrorRecovery, AnAnnotationInAStructSignatureIsReportedOncePerPass) {
+    struct Case { const char* what; const char* code; };
+    for (const Case& c : {
+             Case{"constructor parameter",
+                  "struct S { S(p: NoSuchType) {} }\nfun main() <int> { return 0; }\n"},
+             Case{"method return type",
+                  "struct S { pub v <int>, fun m(self: &Self) <NoSuchType> { return 0; } }\n"
+                  "fun main() <int> { return 0; }\n"},
+             // The implements-block method parameter used to be a third case here and
+             // is now a Soundness test of its own, below: the pass that duplicated it
+             // was building a signature no one read, so deleting the pass fixed the
+             // duplicate outright. What is left are the two passes that both exist for
+             // a reason -- a signature pass that must run before any body, and a body
+             // pass that must populate a scope -- which is why this is still open.
+             }) {
+        const FincRun r = compile(c.code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 2u)
+            << "FIXED? One unresolved type earns one diagnostic, not one per pass over the "
+               "signature. Change this to 1 and move it into Soundness_ErrorRecovery.\n"
+            << c.what << "\n" << stripAnsi(r.err);
+    }
+
+    // The control, and the reason this is a two-pass defect and not a two-sites
+    // defect: a plain function's signature is resolved once, so the same annotation
+    // in the same position outside a struct is reported once.
+    const FincRun once = compile("fun f(p: NoSuchType) <int> { return 0; }\n"
+                                 "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(once.err)), 1u)
+        << "a free function resolves its signature once\n" << stripAnsi(once.err);
+}
+
+TEST(Soundness_ErrorRecovery, AnImplementsBlockMethodParameterIsReportedOnce) {
+    // Split out of the KnownDefect above when it went green. The implements block
+    // resolved every parameter twice: once into a vector that StructType had nowhere to
+    // put (see KnownDefect_MethodCalls.AMethodCallIsNotCheckedAgainstItsSignature) and
+    // once in visit(FunctionDeclaration&), which is the walk that has a use for them.
+    // Deleting the first left the diagnostic and dropped the duplicate.
+    const FincRun r = compile("interface I { pub fun m(a: int) <int>; }\n"
+                              "struct S { val <int> }\n"
+                              "S implements <I> {\n"
+                              "    pub fun m(a: NoSuchType) <int> { return 0; }\n"
+                              "}\nfun main() <int> { return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u)
+        << "one annotation, one diagnostic\n" << stripAnsi(r.err);
+}
 
 // ---------------------------------------------------------------------------
 // Interface fields are not checked at all.
@@ -1301,32 +2086,30 @@ TEST(Soundness_GenericLambdas, AGenericFnTypeAcceptsAGenericLambda) {
 }
 
 // ---------------------------------------------------------------------------
-// A call to a function whose signature did not resolve reports a second, false
-// error.
+// A call to a function whose signature did not resolve is quiet.
 //
-// visit(FunctionDeclaration&) does not register a function whose parameter or
-// return types failed to resolve (Analyzer_Decl.cpp step 6), because a
-// FunctionType cannot hold a null part and a signature with its unresolved
-// parameters silently dropped advertises the wrong arity -- which is what made
-// `fun f(p: NoSuchType)` called as `f(1)` report "expects 0 arguments, got 1",
-// a claim about a function nobody wrote. Not registering it trades that for
-// "Undefined function or type 'f'", which is no truer: f is defined, its type is
-// merely unknown.
+// This was KnownDefect_TypeResolution.ACallToAFunctionWithAnUnresolvedSignatureCascades,
+// and its note said what to build: "a sentinel error type -- one that resolution
+// returns instead of nullptr, that is assignable to and from everything, and that
+// suppresses any further complaint about the expression it reaches. That would let
+// the function be registered with its correct arity and let this call go quiet."
+// src/types/ErrorType.hpp is that type. Inverted rather than relaxed, per its own
+// instruction.
 //
-// The real fix is a sentinel error type -- one that resolution returns instead of
-// nullptr, that is assignable to and from everything, and that suppresses any
-// further complaint about the expression it reaches. That would let the function
-// be registered with its correct arity and let this call go quiet, and it would
-// also retire the "null means unknown, stop asking" convention that
-// Analyzer_Stmt.cpp:15,21 and Analyzer_Decl.cpp step 7 each implement by hand.
-// Booked rather than built because it touches every Type subclass.
+// The two objections that kept step 6 gated are both answered by the sentinel
+// rather than argued away: a FunctionType built over it dereferences safely in
+// toString() because it is not null, and the arity stays the written one because
+// the unresolved parameter is carried into paramTypes instead of dropped.
 //
-// What must never come back is the crash: Soundness_TypeResolution above holds
-// that line, and this test only pins how loud the aftermath is.
+// Still owed, and named here because this test's predecessor named it: the
+// "null means unknown, stop asking" convention that Analyzer_Stmt.cpp:15,21 and
+// Analyzer_Decl.cpp step 7 implement by hand. `context.currentFuncReturnType` is
+// deliberately still null and not the sentinel -- its reader is the missing-return
+// check, which would otherwise demand a return the program cannot write.
 // ---------------------------------------------------------------------------
-TEST(KnownDefect_TypeResolution, ACallToAFunctionWithAnUnresolvedSignatureCascades) {
-    // Guard: with the type defined, the same two files compile clean, so the
-    // cascade below is caused by the unresolved type and not by the shape of the
+TEST(Soundness_TypeResolution, ACallToAFunctionWithAnUnresolvedSignatureIsQuiet) {
+    // Guard: with the type defined, the same two files compile clean, so anything
+    // reported below is caused by the unresolved type and not by the shape of the
     // program.
     const FincRun control = compile(
         "fun f(p: int) <int> { return 0; }\n"
@@ -1341,12 +2124,23 @@ TEST(KnownDefect_TypeResolution, ACallToAFunctionWithAnUnresolvedSignatureCascad
             std::string("fun f() <NoSuchType> { return 0; }\n"
                         "fun main() <int> { let y <auto> = f(); return 0; }")}) {
         const FincRun r = compile(code);
-        EXPECT_NE(r.err.find("Undefined function or type 'f'"), std::string::npos)
-            << "FIXED? The call no longer cascades. Correct behaviour is that the one "
-               "undefined type is the only diagnostic: f is defined, so nothing should say "
-               "otherwise. Invert this into Soundness_TypeResolution.\n"
-            << r.err;
+        const std::string err = stripAnsi(r.err);
+        EXPECT_EQ(err.find("Undefined function or type 'f'"), std::string::npos)
+            << "f is defined; only its type is unknown\n" << code << err;
+        EXPECT_EQ(errorCount(err), 1u)
+            << "the one undefined type is the only diagnostic this program earns:\n"
+            << code << err;
     }
+
+    // And quiet is not the same as blind. The signature keeps the arity the program
+    // wrote, so a call that really is wrong is still caught -- this is what
+    // distinguishes carrying the sentinel from the old behaviour of dropping the
+    // parameter, which reported "expects 0 arguments" for `f(1)`.
+    const FincRun wrong = compile(
+        "fun f(p: NoSuchType) <int> { return 0; }\n"
+        "fun main() <int> { return f(1, 2); }");
+    EXPECT_NE(stripAnsi(wrong.err).find("expects 1 arguments, got 2"), std::string::npos)
+        << "the unresolved parameter still counts toward the arity\nstderr:\n" << wrong.err;
 }
 
 // The half of that defect which is fixed: whatever the call reports, it must not
@@ -1648,7 +2442,7 @@ TEST(Soundness_ParameterDefaults, AParameterDefaultIsAnalysed) {
         const FincRun r = compile(code);
         EXPECT_EQ(r.exitCode, 1) << "a parameter default is analysed:\n" << code << r.err;
         const std::string err = stripAnsi(r.err);
-        EXPECT_NE(err.find("nosuch"), std::string::npos) << code << err;
+        EXPECT_NE(messagesOnly(err).find("nosuch"), std::string::npos) << code << err;
         EXPECT_NE(err.find(":1:16"), std::string::npos)
             << "the caret belongs inside the default, at the expression:\n" << code << err;
     }
@@ -1845,6 +2639,40 @@ TEST(Soundness_DiagnosticLocation, ANewExpressionsTypeReportsWhereItWasWritten) 
     EXPECT_EQ(reportedLine("fun main() <noret> { let x <int> = new Nope{}; }\n"), "3");
     EXPECT_EQ(reportedLine("fun main() <noret> { let x <int> = new Nope::<int>{}; }\n"), "3")
         << "the turbofish form is a second production and must carry one too";
+}
+
+TEST(Soundness_DiagnosticLocation, AStaticCallsTypeReportsWhereItWasWritten) {
+    // A fifth production family, and found the same way the fourth was: by the corpus
+    // census going red, not by reading the grammar. `Nope::zero()` builds its TypeNode
+    // inside the `static_method_call` actions and set a location on the call but not on
+    // the type inside it -- and the type is what fails to resolve, so the diagnostic
+    // came out at 1:1, which in a sample is a `//@` expectation comment.
+    //
+    // It stayed hidden until the error sentinel landed. `let x <HashMap<...>> = ...`
+    // never analysed its initialiser while an unresolved annotation was fatal to the
+    // declaration, so prototype_test.fin:27 reported the annotation and stopped. With
+    // the initialiser analysed the call is reached, and the missing location with it.
+    //
+    // Five shapes because they are five separate actions, each building its own
+    // TypeNode: three spellings of `Type::method(...)`, `Self::method()`, and
+    // `new Self{}`. A fix to one is not a fix to the others -- that is exactly how
+    // ANewExpressionsTypeReportsWhereItWasWritten's production survived the previous
+    // sweep -- so each is asserted, and the loop names which one broke.
+    for (const char* body : {
+             "fun main() <noret> { let x <int> = Nope::zero(); }\n",
+             "fun main() <noret> { let x <int> = Nope::<int>::zero(); }\n",
+             "fun main() <noret> { let x <int> = Nope::zero::<int>(); }\n",
+             "fun main() <noret> { let x <int> = Self::zero(); }\n",
+             "fun main() <noret> { let x <int> = new Self{}; }\n"}) {
+        EXPECT_EQ(reportedLine(body), "3") << body;
+    }
+
+    // The column, not just the line: the type name starts at column 36 in the first
+    // shape. Asserted on one shape rather than all five because the line assertions
+    // above already say the location is the type's own, and this says the fix put it
+    // on the type name rather than on the whole call expression -- `@1`, not `@$`.
+    EXPECT_EQ(reportedLoc("fun main() <noret> { let x <int> = Nope::zero(); }\n"), "3:36")
+        << "the caret belongs on the type name, so the location is @1 and not @$";
 }
 
 TEST(Soundness_DiagnosticLocation, AMissingReturnReportsWhereTheFunctionIsDeclared) {
@@ -2450,21 +3278,21 @@ TEST(Soundness_ParameterDefaults, AFunctionDefaultIsVisited) {
     auto r = compile("fun g(n: int = nosuchvar) <int> { return 0; }\n"
                      "fun main() <int> { return 0; }\n");
     EXPECT_EQ(r.exitCode, 1) << "an undefined name in a default must be reported:\n" << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
 }
 
 TEST(Soundness_ParameterDefaults, AStructMethodDefaultIsVisited) {
     auto r = compile("struct S { pub fun m(self: &Self, n: int = nosuchvar) <int> { return 0; } }\n"
                      "fun main() <int> { return 0; }\n");
     EXPECT_EQ(r.exitCode, 1) << "a struct method's default:\n" << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
 }
 
 TEST(Soundness_ParameterDefaults, AClassMethodDefaultIsVisited) {
     auto r = compile("class C { pub v <int>, pub fun m(self: &Self, n: int = nosuchvar) <int> { return 0; } }\n"
                      "fun main() <int> { return 0; }\n");
     EXPECT_EQ(r.exitCode, 1) << "a class method's default:\n" << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
 }
 
 TEST(Soundness_ParameterDefaults, AStructConstructorDefaultIsVisited) {
@@ -2475,12 +3303,12 @@ TEST(Soundness_ParameterDefaults, AStructConstructorDefaultIsVisited) {
                      "fun main() <int> { return 0; }\n");
     EXPECT_EQ(r.exitCode, 1) << "a struct constructor's default:\n" << r.err;
     const std::string err = stripAnsi(r.err);
-    // Count the *message*, not the identifier: the caret snippet echoes the offending
-    // source line, so `nosuchvar` legitimately appears twice in one report. The first
-    // draft counted the identifier and went red against a correct compiler.
-    const std::string msg = "Undefined variable 'nosuchvar'";
-    EXPECT_NE(err.find(msg), std::string::npos) << err;
-    EXPECT_EQ(err.find(msg, err.find(msg) + 1), std::string::npos)
+    // messagesOnly, because the caret snippet echoes the offending source line and
+    // `nosuchvar` is in it -- the first draft counted raw stderr and went red against a
+    // correct compiler. See messagesOnly's own comment.
+    const std::string msgs = messagesOnly(err);
+    EXPECT_NE(msgs.find("nosuchvar"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(msgs), 1u)
         << "reported once, not once per pass over the parameter list:\n" << err;
 }
 
@@ -2489,12 +3317,12 @@ TEST(Soundness_ParameterDefaults, AClassConstructorDefaultIsVisited) {
                      "fun main() <int> { return 0; }\n");
     EXPECT_EQ(r.exitCode, 1) << "a class constructor's default:\n" << r.err;
     const std::string err = stripAnsi(r.err);
-    // Count the *message*, not the identifier: the caret snippet echoes the offending
-    // source line, so `nosuchvar` legitimately appears twice in one report. The first
-    // draft counted the identifier and went red against a correct compiler.
-    const std::string msg = "Undefined variable 'nosuchvar'";
-    EXPECT_NE(err.find(msg), std::string::npos) << err;
-    EXPECT_EQ(err.find(msg, err.find(msg) + 1), std::string::npos)
+    // messagesOnly, because the caret snippet echoes the offending source line and
+    // `nosuchvar` is in it -- the first draft counted raw stderr and went red against a
+    // correct compiler. See messagesOnly's own comment.
+    const std::string msgs = messagesOnly(err);
+    EXPECT_NE(msgs.find("nosuchvar"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(msgs), 1u)
         << "reported once, not once per pass over the parameter list:\n" << err;
 }
 
@@ -2506,7 +3334,7 @@ TEST(Soundness_ParameterDefaults, AnInterfaceMethodDefaultIsVisited) {
     auto r = compile("interface I { fun m(n: int = nosuchvar) <int>; }\n"
                      "fun main() <int> { return 0; }\n");
     EXPECT_EQ(r.exitCode, 1) << "an interface method requirement's default:\n" << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
 }
 
 TEST(Soundness_ParameterDefaults, AnOperatorDefaultIsVisited) {
@@ -2516,7 +3344,7 @@ TEST(Soundness_ParameterDefaults, AnOperatorDefaultIsVisited) {
     auto r = compile("struct S { pub v <int>, operator +(self: &Self, other: int = nosuchvar) <int> { return 0; } }\n"
                      "fun main() <int> { return 0; }\n");
     EXPECT_EQ(r.exitCode, 1) << "an operator's default:\n" << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
 }
 
 TEST(Soundness_ParameterDefaults, AnInterfaceOperatorDefaultIsVisited) {
@@ -2525,7 +3353,7 @@ TEST(Soundness_ParameterDefaults, AnInterfaceOperatorDefaultIsVisited) {
     auto r = compile("interface I { operator +(self: &Self, other: int = nosuchvar) <int>; }\n"
                      "fun main() <int> { return 0; }\n");
     EXPECT_EQ(r.exitCode, 1) << "an interface operator requirement's default:\n" << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
 }
 
 TEST(Soundness_ParameterDefaults, AnExternDeclarationDefaultIsVisited) {
@@ -2535,7 +3363,7 @@ TEST(Soundness_ParameterDefaults, AnExternDeclarationDefaultIsVisited) {
     auto r = compile("@define ext(fmt: string = nosuchvar, ...) <int>;\n"
                      "fun main() <int> { return 0; }\n");
     EXPECT_EQ(r.exitCode, 1) << "an extern's default:\n" << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
 }
 
 TEST(Soundness_ParameterDefaults, ASpecialDeclarationDefaultIsVisited) {
@@ -2544,7 +3372,7 @@ TEST(Soundness_ParameterDefaults, ASpecialDeclarationDefaultIsVisited) {
     auto r = compile("@special sp(n: int = nosuchvar) <int> { return 0; }\n"
                      "fun main() <int> { return 0; }\n");
     EXPECT_EQ(r.exitCode, 1) << "a compile-time function's default:\n" << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
 }
 
 TEST(Soundness_ParameterDefaults, AValidDefaultIsStillAccepted) {
