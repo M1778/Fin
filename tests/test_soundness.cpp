@@ -1127,6 +1127,62 @@ TEST(Soundness_DynamicTypes, AnyWithGenericArgumentsIsStillDynamic) {
     EXPECT_EQ(errorCount(stripAnsi(obj.err)), 0u) << stripAnsi(obj.err);
 }
 
+TEST(Soundness_DynamicTypes, AnyInsideAGenericSurvivesInstantiation) {
+    // `DynamicType::substitute` had no caller anywhere in this suite or the corpus,
+    // proven rather than argued: replacing its body with `std::abort()` and running
+    // every test in the binary killed nothing. A mutant that kills nothing says some
+    // rule has no test able to see it, and this one was the plainest of the five
+    // reasons -- the test was simply missing.
+    //
+    // Two things have to hold when a generic carrying `any` is instantiated, and they
+    // pull in opposite directions. The parameter must be replaced, or the instantiation
+    // did nothing. The `any` must NOT be, or `any` has silently become whatever type
+    // the neighbouring parameter was bound to -- which is what a substitute() that
+    // returned its bound, or a fabricated struct, would do.
+    const char* decl =
+        "struct Pair<T> {\n"
+        "    pub k <any>\n"
+        "    pub v <T>\n"
+        "}\n";
+
+    const FincRun sub = compile(std::string(decl) +
+        "fun main() <noret> { let p <Pair<int>>; p.v = \"s\"; }\n");
+    EXPECT_NE(stripAnsi(sub.err).find("expected 'int', got 'string'"), std::string::npos)
+        << "T was substituted: the field is an int in Pair<int>\n" << stripAnsi(sub.err);
+
+    const FincRun kept = compile(std::string(decl) +
+        "fun main() <noret> { let p <Pair<int>>; let n <int> = p.k; }\n");
+    EXPECT_NE(stripAnsi(kept.err).find("expected 'int', got 'any'"), std::string::npos)
+        << "and `any` was not: it is still `any` in Pair<int>, still not implicitly an "
+           "int, and still spelled the way the program wrote it\n" << stripAnsi(kept.err);
+
+    const FincRun ok = compile(std::string(decl) +
+        "fun main() <noret> { let p <Pair<int>>; p.k = \"s\"; p.v = 1; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(ok.err)), 0u)
+        << "the instantiated struct accepts a string in the `any` field and an int in "
+           "the substituted one\n" << stripAnsi(ok.err);
+
+    // The bounded spelling, which is the one stdlib/types.fin:74 actually writes:
+    // `type Any<...> = any implements <...>`. substitute() walks the bounds, because a
+    // bound can name a generic parameter, and the temptation in a function that returns
+    // a substituted type is to return the substituted bound. That would erase the
+    // erasure -- `any implements <I>` would arrive as plain `I`, a nominal type with
+    // members, and a value of it would then be rejected for not being one. It is also
+    // the mutant that measured nothing in the first matrix: I-substname returns the
+    // first bound, and until this program existed no test instantiated a generic over
+    // a dynamic type that had one.
+    const FincRun bound = compile(
+        "interface I { fun m(self: &Self) <int>; }\n"
+        "type E = any implements <I>;\n"
+        "struct Pair<T> {\n"
+        "    pub k <E>\n"
+        "    pub v <T>\n"
+        "}\n"
+        "fun main() <noret> { let p <Pair<int>>; let n <int> = p.k; }\n");
+    EXPECT_NE(stripAnsi(bound.err).find("got 'any implements <I>'"), std::string::npos)
+        << "instantiation keeps both the name and the bound\n" << stripAnsi(bound.err);
+}
+
 TEST(KnownDefect_DynamicTypes, GenericArgumentsOnADynamicTypeAreNotConstraints) {
     // Having kept `any<int>` dynamic, the open question is whether the `<int>` means
     // anything. Today it does not: `any<int>` accepts a string.
@@ -1406,6 +1462,34 @@ TEST(Soundness_ErrorRecovery, AnUntypedElementDoesNotSuppressTheRestOfItsOwnLite
         << stripAnsi(mixed.err);
     EXPECT_EQ(stripAnsi(mixed.err).find("<error>"), std::string::npos)
         << "and the sentinel is never rendered\n" << stripAnsi(mixed.err);
+}
+
+TEST(Soundness_ErrorRecovery, ASentinelElementIsNotWidenedAwayByItsSiblings) {
+    // The prototype literal has a rule the array literal does not: two elements of
+    // different real types widen the inferred key or value to `object` instead of
+    // reporting, which is what Soundness_Prototypes.AHeterogeneousPrototypeLiteralInfersObject
+    // asserts. The sentinel must not take part in that widening. If it does, a literal
+    // holding one untyped element and one typed one comes out `<{object, int}>` -- a
+    // real type, so it compares, so it mismatches, and the cascade is back by a
+    // different route than the one three tests above.
+    //
+    // This test exists because a mutation matrix found the rule unguarded: deleting
+    // both `isErrorType(...) -> errorType()` arms from visit(PrototypeLiteral) killed
+    // nothing at all. The cascade tests above use `{ n1 : 1, n2 : 2 }`, where *both*
+    // keys are the sentinel -- and `<error>.equals(<error>)` is true, so the widening
+    // branch is never reached and the deleted arms never ran. The mixture is the point:
+    // one element the analyser could not type, one it could, in the same literal.
+    for (const char* code : {"fun main() <noret> { let a <{int, int}> = { nosuchvar : 1, 5 : 2 }; }\n",
+                             "fun main() <noret> { let a <{int, int}> = { 5 : 2, nosuchvar : 1 }; }\n",
+                             "fun main() <noret> { let a <{int, int}> = { 1 : nosuchvar, 2 : 5 }; }\n",
+                             "fun main() <noret> { let a <{int, int}> = { 1 : 5, 2 : nosuchvar }; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u)
+            << "the undefined name only\n" << code << stripAnsi(r.err);
+        EXPECT_EQ(stripAnsi(r.err).find("object"), std::string::npos)
+            << "and nothing claims the program asked for a boxed key or value\n"
+            << code << stripAnsi(r.err);
+    }
 }
 
 // ---------------------------------------------------------------------------

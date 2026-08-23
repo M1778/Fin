@@ -2310,6 +2310,430 @@ Suite: **417 tests, all passing**, corpus 50/50. Lane note: `src/semantics/**`, 
 `tests/test_soundness.cpp` and the new `tests/tools/corpus_snapshot.sh`; plus the six `setLoc` calls in
 `src/parser/parser.y` disclosed above. No sample changed.
 
+### `any` was not a ruling, it was a reading
+
+The plan asked the owner three questions about the type system -- what `any` is, what `object` is, what
+`Any<C>` means -- and put 46 of the corpus's 274 diagnostics behind the answers. Two of the three were
+already answered, in the corpus, by evidence the plan had not looked for: **which files use the name, and
+what they import.**
+
+`stdlib/operators.fin` writes `any` and imports nothing. Not "imports something that might re-export it" --
+the file has no `import` statement. `nullifier.fin:12` writes `fun unpack(v: any)` in a file whose only
+import is nothing at all. A name that a file uses without importing is either a builtin or a bug in the
+file, and it appears in five files that way. So `any` and `object` are builtins, and registering them is a
+two-line change to the `SemanticAnalyzer` constructor.
+
+The same test says `Any` is *not*: `stdlib/types.fin:69` declares `pub type Any = any;` inside an
+`#[export]` block, which is a library declaration with an export marker on it. Handing `Any` out as a
+builtin would compile files here that a real standard library rejects, which is the worst kind of green, and
+`Soundness_DynamicTypes.AnUnknownTypeNameIsStillUndefined` is the control that keeps it out -- along with
+`anyy`, `objekt`, `Object` and `AnyType`, because the wrong fix here is a rule that shrugs at unknown names
+rather than two registrations.
+
+`any` and `object` are two types and not one, and the corpus is what distinguishes them. `types.fin:97`
+takes an `any` and casts on the way out: erasure, resolved at compile time. `prototype_test.fin:40`
+annotates `<{object, object}>` for a prototype whose members are heterogeneous: a box, present at runtime.
+Nothing in the analyser needs the difference yet -- both accept everything -- but codegen will, and a single
+registration would have to be split later, so both names are registered now.
+
+What remains genuinely owed is narrower than the three questions it replaces: whether a primitive satisfies
+an `implements` bound. That one the corpus does not answer, and it cannot be guessed, because
+`stdlib/types.fin:78` writes `type nullptr = any implements <&void>;` -- a bound that is a pointer type and
+not an interface at all. A check that only understood interfaces would reject a line the standard library
+writes.
+
+**Three fabrications, one mistake.** Registering the names turned up something the missing registration had
+been hiding. Three sites answered a shape they did not understand by constructing a `StructType` whose name
+was the text the program had written:
+
+```cpp
+// visit(TypeDefinition&), for any alias with an `implements` bound:
+auto anyType = std::make_shared<StructType>("any"); // Placeholder
+// resolveTypeUnwrapped, for any resolved non-struct given generic arguments:
+type = std::make_shared<StructType>(node->name, args);
+```
+
+A `StructType("any")` has no fields, no methods, no relation to the interface, and a `toString()` of `any`.
+It is the worst answer available *because it is an authoritative one*: `type E = any implements <I>; let x
+<E> = 5;` reported `Type mismatch: expected 'any', got 'int'`, naming as a concrete type something the
+program never wrote as one, and `v.nosuch` reported `Struct 'any' has no member 'nosuch'` about a struct
+that does not exist. The second site is the one the corpus actually reaches: `Any<...>` is how the standard
+library spells its escape hatch, so every use of it became a struct that accepted nothing.
+
+The third was quieter. An `implements` bound was resolved by nobody, so `type E = any implements
+<NoSuchInterface>;` was accepted in silence. An unenforced bound that also fails to reject a misspelling is
+not a partial implementation, it is a blind spot -- and closing it is the only change in this unit that
+*added* a diagnostic to the corpus: `stdlib/enums.fin:6` bounds on `Enum`, and no file in the corpus
+declares `Enum`. Three diagnostics became four, and the fourth is true.
+
+**Where the assignability rules live, and why it is not obvious.** Every type is assignable to a dynamic
+type. The rule is four tokens; its placement took the reasoning:
+
+* Not as an override on `DynamicType`. An override speaks for the *source*, and this rule is about the
+  *target* -- it is every other type that has to accept this one.
+* Not in `checkType`, which is `isAssignableTo`'s only caller outside `src/types/` and therefore the
+  tempting place. `isAssignableTo` is reached **recursively**: `ArrayType::isAssignableTo` asks its element
+  types, so `[int]` fits `[any]` through this line. A copy in `checkType` would have answered for `any` and
+  not for `[any]`, and `stdlib/types.fin:102` takes `const &arr: [any]`.
+* With `NullType` excluded, because `nullifier.fin:36` says so in the sample: "this should be an error since
+  type any cannot be null". `null` is not a value of a type, it is the absence of one, so a rule stated as
+  "a dynamic target accepts anything" accepts null too, silently.
+
+That last exclusion is only observable in *assignment* position, and finding out why cost a test. A
+declaration initialised to `null` is accepted whatever it is annotated -- `checkInitializer` short-circuits
+on it, because `deeptest4.fin:6` writes `integer <int> = null` and `stdlib/error.fin:11` writes `err_code:
+int = null` and neither is nullable. So `let x <any> = null;` is clean for a reason that has nothing to do
+with `any`, and the first version of the test asserted on exactly that program: it would have tested
+`checkInitializer` while claiming to test this rule. `x = null` on the next line is where the rule is
+decidable, and that is what the test asserts.
+
+**A defect found sideways.** `ArrayType::isAssignableTo` checked its element types, and then threw the
+answer away:
+
+```cpp
+if (!element_type->isAssignableTo(*otherArr->element_type)) return false;
+if (is_fixed_size && !otherArr->is_fixed_size) return true;
+return false;                                    // same shape -> not assignable
+```
+
+Two arrays of the same shape only ever matched through `equals` in the base class, which is exact. So
+`[int]` did not fit `[auto]`, and would not have fitted `[any]` either -- every permissive element rule in
+the type system stopped at the array boundary. The element check above is the whole rule; reaching it and
+discarding its answer is the bug.
+
+**Corpus: 274 diagnostics -> 235.** `stdlib/operators.fin` alone goes from 27 to 1, and the one that is left
+is `Undefined type 'Any'` -- correctly, per the reading above. `stdlib/types.fin` 12 to 7,
+`stdlib/prototypes.fin` 9 to 5, `nullifier.fin` 4 to 1, `prototype_test.fin` 17 to 16, `arrays.fin` 6 to 5,
+`stdlib/enums.fin` 3 to 4. Seven `//@ unimplemented` notes rewritten to say what each file reports now.
+
+**Two Soundness tests lost their vehicle**, which is worth recording because a Soundness test is not
+something this suite removes lightly. Both used `any` to demonstrate that an undefined type reports where it
+was written -- one of them said so explicitly: "40 of the corpus's 99 `Undefined type` diagnostics name it".
+Registering `any` retired that diagnostic. `TheCaretSpansTheTypeNameAndNothingElse` is repointed at a
+different three-character undefined name, since the assertion is about the caret's *width*.
+`TheAnyTypeReportsWhereItWasWritten` is removed: `any` now resolves in every position, `S implements <any>`
+is accepted, and `new any{}` fails in the parser with a token location rather than a node one, so there is
+no diagnostic left that can point at a `KW_ANY` node. Keeping it would have meant giving it a different
+vehicle, which makes it a second copy of the test above it. The removal and its reason are in the file, where
+a reader looking for it will be.
+
+Two `KnownDefect_AnyType` tests were inverted rather than relaxed, as the convention requires; one became
+`Soundness_DynamicTypes.AnyIsRegistered`, keeping its distinctive program (a declaration with *no*
+initialiser, since registration and inference are separate mechanisms) and its assertion that the fix did
+not belong in the lexer. The other is deleted, because its one program -- a parameter of type `any` -- is one
+of the seven positions in `AnyIsSpellableInEveryPositionTheCorpusWritesIt`.
+
+A dead predicate was written and then deleted in the same unit. `isDynamicType` was added by analogy with
+`isErrorType` and had no consumer, and the analogy is false: the sentinel must be *absorbed* wherever it is
+buried, so its predicate looks through Pointer/Array/Nullable, whereas `[any]` is an ordinary array whose
+assignability is answered element by element. The two sites that ask whether a type is dynamic ask with
+`as<DynamicType>()`, about that type and nothing inside it. The reasoning is kept as a comment where the
+function was, because the next person to reach for the analogy deserves it.
+
+### Mutation matrix: the dynamic types
+
+Eighteen mutants over six files, two-sided by construction. The (a) half puts back what the unit removed --
+the three `StructType` fabrications, the two missing assignability rules, the registrations themselves -- and
+a named test has to kill each. The (b) half pushes a rule past what it should accept, and for a type that
+accepts everything that half is the load-bearing one: "every type fits `any`" is one word from "`any` fits
+every type", and only a control can tell the two apart. A one-sided matrix would have reported full lethality
+on a `DynamicType` that also *fitted* every target, which would have type-checked the whole standard library
+wrong and looked like success.
+
+| mutant | kills | |
+|---|---|---|
+| `R-dyntarget` no type is assignable to a dynamic type | 9 | |
+| `R-regany` `any` is not registered | 13 | |
+| `R-regobj` `object` is not registered | 3 | |
+| `R-fabalias` an alias with a bound is a fabricated struct again | 4 | |
+| `R-arr` two arrays of the same shape are not assignable | 2 | |
+| `R-bounds` a bound is discarded unread again | 2 | |
+| `R-boundattach` the bound is resolved and then not recorded | 1 | |
+| `I-dynsource` a dynamic type is assignable *to* every type | 3 | |
+| `I-null` a dynamic type accepts null | 1 | |
+| `I-regAny` `Any` is registered alongside `any` | 1 | |
+| `I-regAnyObj` `object` is registered under the name `any` too | 1 | |
+| `I-arrall` any array is assignable to any array | 1 | |
+| `I-boundrender` the bound is dropped from the rendered name | 1 | |
+| `I-autoisdyn` `auto` is treated as a dynamic type | 1 | |
+| `R-arrdecay` the fixed-size decay runs the wrong way | **0** | finding, 5 on re-run |
+| `I-eqname` two dynamic types are equal whatever their names | **0** | finding, ruling owed |
+| `I-substname` `substitute()` replaces the name with a bound | **0** | no-op, 1 on re-run |
+| `R-fabgeneric` `any<int>` is a fabricated struct again | -- | did not build, 2 on re-run |
+
+**Fourteen lethal, three zero-kill, one that measured nothing** on the first pass. Three of the four are
+resolved below and their re-run numbers are in the table; the fourth, `I-eqname`, is waiting on a ruling. Each of the last four is resolved below,
+because a mutant that kills nothing is a finding and not a failure -- it says that some rule in the tree has
+no test able to see it, and the useful work is finding out which of five things is true: the test is missing,
+the test is weak, the code is dead, the consumer does not exist yet, or two mechanisms are hiding each other.
+
+**`R-fabgeneric` did not build, which means it measured nothing.** This is worth stating plainly because a
+build failure in a matrix reads like a kill and is the opposite: the mutant never ran, so the rule it targets
+is still unmeasured. The mutant deleted the fabrication but left the variable it had initialised, and the fix
+is to append the fabrication rather than replace the line. With the anchor fixed it **kills 2** --
+`Soundness_DynamicTypes.AnyWithGenericArgumentsIsStillDynamic` and
+`KnownDefect_DynamicTypes.GenericArgumentsOnADynamicTypeAreNotConstraints` -- so the second fabrication site
+is measured after all, and by the two tests that were written for it.
+
+**`R-arrdecay` was two copies of one rule.** The fixed-size array decay is written in
+`ArrayType::isAssignableTo`, and it *was also written* in `Type::isAssignableTo`, which the override calls on
+its first line. The base copy is reachable only from inside the override, and it accepts a strict subset of
+what the override accepts -- `element_type->equals` where the override asks `isAssignableTo`, one direction
+where the override handles both. A strictly narrower rule that answers first can never change an answer, so
+the duplicate was invisible; and it was invisible in both directions, which is what made the mutant survive.
+Break the override's copy and the base's answers. Break the base's copy and the override's answers.
+
+The first diagnosis was wrong and is worth recording as such: the reverse direction (`[int]` into a
+`[int; 4]` annotation) is genuinely unwritable, because `[int; 4]` does not parse in type position, and that
+looked like enough of an explanation. It is not -- an array *literal* is constructed fixed-size
+(`Analyzer_Expr.cpp:593`), so `let a <[int]> = [1, 2];` reaches the decay from the writable side, and
+`Soundness_Arrays.AFixedListInitialisesADynamicArrayOfTheSameElementType` already asserted it. A test
+existed, the rule was reached, and the mutation still killed nothing. Only the duplicate explains that.
+
+The same duplication holds for the void-pointer rule, found by looking for the pattern rather than by a
+mutant: `Type::isAssignableTo` carried `otherPtr->pointee == "void"` and `PointerType::isAssignableTo`
+carries it plus the source direction plus the recursive case. Both base arms are deleted in the following
+unit, and `R-arrdecay` re-run against the single remaining copy **kills 5**. Nothing about the tests changed
+between the two runs.
+
+**`I-eqname`: the consumer does not exist yet.** `DynamicType::equals` compares names, and nothing can
+observe whether it does. The "every type fits a dynamic target" rule in `Type::isAssignableTo` answers before
+equality is ever consulted in either direction, so `any` and `object` are mutually assignable whatever
+`equals` says; the one remaining channel was the cast, which rejected both names alike. A test that killed
+this mutant would have to assert that `object` does not fit `any` -- a *ruling*, not a fact about the tree,
+and one the corpus does not settle (see **Rulings owed**). So the resolution is the fourth kind: the
+comparison is right, the consumer is missing, and deleting the comparison to make the matrix green would
+merge `any` and `object` into one type, which is a stronger claim than any evidence supports. The state is
+booked in `KnownDefect_DynamicTypes.ObjectAndAnyAreMutuallyAssignable`, which asserts today's behaviour so
+that the day a ruling arrives, the test fails and says where to go.
+
+**`I-substname` was a no-op mutant, which is a fifth failure mode worth naming.** It replaced the
+substituted type with the first *bound*, and no corpus type carries one -- so on every program the matrix
+ran, `sub` was empty and the mutant was the pristine code. Zero kills measured nothing about
+`DynamicType::substitute`; it measured that the mutation did not apply. The re-run replaced it with an
+unconditional loud sentinel (`StructType("__subst__")`), which killed nothing either -- and then with
+`std::abort()`, which also killed nothing. An abort separates the two remaining explanations, because a crash
+is proof of arrival: `DynamicType::substitute` was **never called** by any test in the binary or any sample in
+the corpus. Not unobserved -- unreached.
+
+That is the first kind of finding, the plainest one: the test was missing. The path is perfectly writable, and
+one program reaches it --
+
+```fin
+struct Pair<T> {
+    pub k <any>
+    pub v <T>
+}
+fun main() <noret> { let p <Pair<int>>; let n <int> = p.k; }
+```
+
+-- because instantiating `Pair<int>` substitutes over the struct's fields and `k`'s type is a `DynamicType`.
+Two things must hold and they pull against each other: `T` must be replaced, or the instantiation did nothing,
+and `any` must **not** be, or the erasure has silently become whatever the neighbouring parameter was bound to.
+`Soundness_DynamicTypes.AnyInsideAGenericSurvivesInstantiation` asserts both, in the plain and the bounded
+spelling (`type E = any implements <I>;`, the shape stdlib/types.fin:74 actually writes). With it in place
+`I-substloud` and `I-substabort` each kill 1, and `I-substname` -- the no-op -- kills 1 as well, because the
+bounded case finally gives it a bound to return.
+
+### Five copies of one rule, and the container that had none of them
+
+`let a <any> = [1, 2];` compiled clean. `let a <any> = { 1: 2 };` said
+`Type mismatch: expected 'any', got '<{int, int}>'`. Same target, same shape of question, opposite answers --
+and the difference was not about prototypes at all. `PrototypeType::isAssignableTo` was the only override in
+`src/types` that did not open with `Type::isAssignableTo(other)`. Every other one does: `ArrayType`,
+`PointerType`, `NullableType`, `NullType`, `PrimitiveType`. That first line is how each of them inherits the
+three rules that are about the *target* rather than the source -- `-> auto`, `-> any`/`-> object`, and
+`-> T?` -- and an override that skips it opts out of all three by omission.
+
+It had not skipped them silently. It carried `if (other.toString() == "auto") return true;`, which is one of
+the three, copied in. That is the tell: somebody hit the `auto` case, fixed the case, and left the other two
+lost. A rule that is about the target cannot be restated per source, because the set of sources is open.
+
+The same class of defect, three more times in the same file:
+
+**Key and value were compared with `equals`.** So a prototype fitted only a prototype of exactly its own key
+and value types, and `<{object, object}>` -- which `prototype_test.fin:40` writes as an annotation over a
+literal of an `int`, a `float` and a struct -- accepted nothing at all. `ArrayType::isAssignableTo` asks its
+element types for *assignability* and has a comment explaining why, ending "reaching the element check and
+then discarding its answer meant every permissive element type stopped at the array boundary". The prototype
+is the second container boundary and had not learned it.
+
+The direction is pinned deliberately and the matrix holds it there. `<{int, int}>` does not fit
+`<{int, any}>`, because a prototype is a mutable container and a covariant value type would let a write
+through the wider alias put a `string` where the narrower one promises `int`. `[int]` into `[any]` has exactly
+the same hole and is what the corpus asks for (`stdlib/types.fin:102` takes `const &arr: [any]`), so this is
+not settled tree-wide -- but nothing asks for it here, and the narrow rule is the one that can be widened
+later without breaking a program that already compiles.
+
+**A heterogeneous prototype literal inferred `any`.** The sample says otherwise in its own voice.
+`prototype_test.fin:14` writes `let a <auto> = { 10 : 10, "a": true };` and comments *"auto would resolve to
+`<{object, object}>`"*. Line 40 annotates `<{object, object}>` over a mixed literal and explains the choice:
+"object type is an expensive type but can fit any datatype in it at the cost of memory and speed". A cost paid
+at run time is a box. `any` is the other half of the pair -- `stdlib/types.fin:97` calls it "any type that is
+visible in compile time" -- and inferring it here claimed the compiler still knew a type it demonstrably did
+not. It had a second, quieter cost: every mismatch about a mixed literal printed `<{any, any}>`, a claim about
+representation that the diagnostic had no business making. This inverted
+`KnownDefect_Prototypes.AHeterogeneousPrototypeLiteralInfersAnyNotObject` into a Soundness test, as the
+convention requires, rather than relaxing it.
+
+**A cast rejected every dynamic type on either side.** `nullifier.fin:12` writes `cast<int>(a)` where `a` is
+`any`, and `stdlib/types.fin:33` declares `fun cast_to<T>(value: any) -> T`, whose body can only be that cast.
+Casting *out* of a dynamic type is the entire reason to have one. The corpus site survived by accident:
+`cast_to`'s target is the generic parameter `T`, and the validity check already admitted a `GenericType` on
+either side -- so the sample never exercised the dynamic target, and the thing that would have shown the
+defect was the standard library's own signature rather than any line of a sample. Both directions are now
+valid and both are unchecked, deliberately: a cast is the program overriding the checker, and `cast<int>(x)`
+on an `any` is an assertion about what the box holds that nothing at compile time can verify. The run-time
+check belongs to codegen, which will need a tag to compare and has none yet.
+
+**Two arms of the base class are deleted.** The array decay and the void-pointer rule were each written twice
+-- once in `Type::isAssignableTo`, once in the override that calls it on its first line -- and the mutation
+matrix for the previous unit could not kill either copy. See that matrix's resolution of `R-arrdecay` for the
+full account; the short version is that the base copy is reachable only from inside the override and accepts a
+strict subset of what the override accepts, so it can never change an answer, and its presence made the
+override's copy unkillable. `R-arrdecay` re-run against the single surviving copy kills 5. The inverse mutant,
+`R-basearr`, which puts the dominated arm back, kills 0 -- which is the proof that the deletion changed no
+behaviour, stated as a measurement rather than as an argument.
+
+`Soundness_Pointers.AVoidPointerIsAssignableInBothDirections` was written *before* the deletion and passed
+immediately. That is unusual enough to say out loud: it exists to make a deletion safe rather than to catch a
+defect, and it is the reason the deletion is a refactor and not a change.
+
+**Corpus 235 -> 233**, both in `prototype_test.fin`, whose `//@ unimplemented` note now describes what is
+left: prototype *access*. `a[10]`, `a["b"] = false` and `delete &a[10]` each report
+`Type '<{object, object}>' is not an array or pointer`, and `a.rm("b")` reports `does not have methods` -- a
+prototype reaches the array path and the struct path in the analyser and has no path of its own. The index at
+`20:7` is checked against `int` before the object's shape is looked at, so that one construct reports twice
+and the extra message is about a key type that is `object`. That is the next prototype unit, and it is a
+larger one: it needs an index rule keyed on the container, a member-assignment rule that creates, `delete` on
+a prototype member, and the two methods the sample calls (`rm`, and `HashMap`'s interface behind it).
+
+### A container literal whose element did not type
+
+Found by probe while checking whether the empty-prototype fallback was reachable, and it is the sentinel
+unit's lesson arriving at a boundary that unit did not reach. Those five sites -- member access, method call,
+index, cast, `checkType` -- were all about a *named entity* whose annotation failed. A container literal gets
+there from the other direction: nothing was annotated, so nothing failed to resolve; an element simply has no
+type because the expression inside it was already reported.
+
+The two literals answered differently and both answers were wrong.
+
+The prototype substituted `any`, so `let a <{int, int}> = { nosuchvar : 1 };` reported the undefined name and
+then `expected '<{int, int}>', got '<{any, int}>'` -- a claim about a boxed key the program never wrote, which
+is the exact shape the sentinel exists to prevent. It now substitutes `errorType()`, and `isErrorType` unwraps
+a prototype the way it already unwrapped `[T]`, `&T`, `T?` and `fn(...) -> T`. One further rule was needed and
+is the sort that only shows up when you write it down: **once a side is the sentinel it stays the sentinel**,
+or `{ nosuchvar : 1, 5 : 2 }` sees `<error>` and `int` disagree, widens to `object`, and puts the cascade back
+with a different type in it.
+
+The array had the opposite bug. `if (!firstType) return;` was quiet, but the `return` skipped the loop that
+visits the remaining elements, so `[n1, n2]` reported `n1` and never looked at `n2`. **Suppressing a cascade
+and skipping a walk are one diagnostic apart and are opposites** -- the first drops a message that says
+nothing new, the second drops a message about a different mistake. The parameter-defaults unit learned the
+same thing about a default that was never visited. Typing the literal `[<error>]` and continuing does both
+jobs at once: every element is walked, and each is compared against a sentinel that `checkType` absorbs.
+
+Two fabricated types went with it. `if (!keyType) keyType = std::make_shared<PrimitiveType>("any");` stood
+after the loop as a belt-and-braces fallback, and it had quietly become a trap: `any` is a registered
+`DynamicType` now, so a hand-built `PrimitiveType` spelled the same way would *print* as `any` and behave as
+none of it. The remaining guard is the sentinel, and it is unreachable while `{}` is a syntax error
+(`unexpected RBRACE`) -- a guard rather than an assertion because the parser is the only thing keeping it that
+way.
+
+**The corpus moved by nothing**, which is the useful thing to record about this half: no sample writes an
+undefined name inside a container literal. It was found by probe, like the operator, cast and function-type
+fixes before it, and for the same reason -- the corpus is a specification, not a test suite, and it exercises
+what the samples happen to say rather than what the analyser happens to do.
+
+One gap is booked rather than fixed: `prototype_test.fin:45` writes `[]` as a prototype value inside
+`<{[int], [{int, string}]}>` and gets `Empty array literal cannot infer type.` from an annotation that says
+exactly what it is. An empty literal in a position with a known expected type is inferable, and nothing in the
+`ArrayLiteral` visit can see that position. That is a *bidirectional* inference question, not a container one,
+and it wants doing once for arrays, prototypes and struct literals together.
+
+### Mutation matrix: prototypes, casts and the container boundary
+
+Twenty-two mutants over seven files. Four of them are not new rules at all -- `R-arrdecay`, `R-arrsame`,
+`R-ptrvoidtgt`, `R-ptrvoidsrc` re-test the array and pointer rules from the previous matrix against a tree
+where the base class no longer carries a second copy of them. That re-test is the whole reason the deletion is
+in this unit rather than filed as a tidy-up: a rule with two implementations is a rule with no measurement, and
+the only way to show the deletion mattered is to run the same mutant twice.
+
+| mutant | kills | |
+|---|---|---|
+| `R-arrdecay` the fixed-size decay runs the wrong way | 5 | 0 before the duplicate went |
+| `R-arrsame` two arrays of the same shape are not assignable | 2 | |
+| `R-ptrvoidtgt` a pointer is not assignable to `&void` | 1 | |
+| `R-ptrvoidsrc` `&void` is not assignable to a pointer | 1 | |
+| `R-protobase` `PrototypeType` does not consult the base target rules | 1 | |
+| `R-protoeq` key and value compared by equality again | 1 | |
+| `R-protoany` a heterogeneous prototype literal infers `any` again | 1 | |
+| `R-protonowiden` a heterogeneous literal keeps its first element type | 1 | |
+| `R-castdyn` a cast with a dynamic type on either side is invalid again | 1 | |
+| `R-errproto` `isErrorType` stops unwrapping a prototype | 2 | |
+| `R-protosent` an untyped prototype element becomes `any` again | 2 | |
+| `R-arrbail` the array literal bails out before walking the rest | 1 | |
+| `I-protoall` any prototype is assignable to any prototype | 1 | |
+| `I-protorev` key and value assignability runs in the reverse direction | 1 | |
+| `I-protokeyonly` only the key is checked | 1 | |
+| `I-protovalonly` only the value is checked | 1 | |
+| `I-ptrall` any pointer is assignable to any pointer | 1 | |
+| `I-errall` `isErrorType` calls every prototype an error | 2 | |
+| `I-castall` every cast is valid | 1 | 3 against the whole binary |
+| `R-basearr` the dominated array arm comes back to the base class | **0** | finding, predicted |
+| `R-protosticky` the sentinel does not stick across the widening | **0** | finding, 1 on re-run |
+| `I-substloud` `substitute()` on a dynamic type returns a loud sentinel | **0** | the previous matrix's, 1 on re-run |
+
+**Nineteen lethal, three zero-kill.** One of the three was predicted before the run, one was a real hole in a
+test written in this unit, and one belongs to the previous section and is resolved there.
+
+**`R-basearr` kills nothing, and that is what it is for.** It puts the deleted array arm back into
+`Type::isAssignableTo`. If the argument for deleting it was right -- the arm was reachable only from inside the
+override that also stated the rule, and accepted a strict subset of what the override accepts -- then restoring
+it cannot change any answer, and a mutant that cannot change an answer cannot be killed. So this is the third
+kind of finding, code that is dead, deliberately introduced to check a claim about the shape of the code rather
+than about its behaviour. Read together with `R-arrdecay`'s 0 before the deletion and 5 after, with no test
+changed between the two runs, the pair is the measurement: the rule was invisible because it was written twice,
+and it is visible now because it is written once.
+
+A mutant whose zero is predicted is worth building anyway. The prediction is the hypothesis; without the run,
+"that code was dominated" is an argument, and arguments about which of two overlapping conditions answers first
+are exactly the kind that turn out wrong -- this one already did once, when the first explanation for
+`R-arrdecay` was an unparseable type annotation.
+
+**`R-protosticky` kills nothing, and that was a hole.** The mutant deletes both arms that keep the error
+sentinel from being widened away:
+
+```cpp
+else if (isErrorType(kType) || isErrorType(keyType)) keyType = errorType();
+```
+
+The prototype literal widens two elements of differing types to `object`, which is right for two real types and
+wrong for the sentinel: widen it and the literal comes out `<{object, int}>`, a real type, which compares, which
+mismatches, which is the cascade back by another route. The rule was written in this unit, from the reasoning,
+and no test could see it -- because every existing test used `{ n1 : 1, n2 : 2 }`, where *both* keys are the
+sentinel, and `<error>.equals(<error>)` is true, so the widening branch was never reached and the deleted arms
+never ran. The programs that reach them mix one untyped element with one typed one, in either order and on
+either side of the colon, and `Soundness_ErrorRecovery.ASentinelElementIsNotWidenedAwayByItsSiblings` now
+writes all four. It kills the mutant.
+
+This is the second kind of finding by the letter -- a test existed and was too weak -- but the useful way to
+say it is that a test whose cases are all the *same* case is one test. Four programs in a loop looked like
+coverage of the untyped-element rule and were four spellings of the branch that does not widen.
+
+**`I-castall`'s single kill was the filter, not the tests.** It makes every cast valid, and it killed exactly
+one test, when the suite plainly contains others that assert a cast is rejected --
+`KnownDefect_Casts.TheCorpusOwnStringToCharArrayCastIsRejected` and `TheCorpusOwnPointerCastIsRejected`, both
+of which assert a non-zero exit and the words `Invalid cast`. The reason is that `KnownDefect_Casts` was not in
+the matrix's `--gtest_filter`. Re-run against the whole binary the mutant kills 3.
+
+So the filter is part of the measurement, and the rule that follows is worth keeping: **an over-permissive
+mutant is measured against every test, not against the suites the unit touched.** A restore mutant can be
+scoped, because it puts back a behaviour whose tests are known. A permissive one cannot, because permissiveness
+can break a test anywhere -- and the tests most likely to notice are the `KnownDefect_*` ones, which assert
+that something is *rejected* today. Those are the assertions a permissive mutant flips, and they are the ones a
+filter drawn around "this unit's suites" leaves out.
+
 ## Rulings owed
 
 Every entry below is a question only the language owner can answer, discovered by measurement and blocking
@@ -2329,13 +2753,36 @@ holds the gap open with a test naming this ruling as the blocker. Does an
 and is `char` signed? (Nothing can range-check a literal until these are fixed, and the answer is ABI, so it
 cannot be changed later without breaking every compiled artifact.)
 
-**The type system's three unknowns.** What is `any` — a top type, a tagged union, an alias for `&void`?
-What is `object`? What does `Any<C>` mean, and is `Any<...>` with a literal ellipsis a distinct form?
-Together these are still the single largest class of corpus diagnostics: of the 81 `Undefined type` that
-remain, `any` accounts for 40, `Any` for 4 and `object` for 2, so **46 of 274** total diagnostics are behind
-this one answer -- more than twice the next-largest cause. It was 30 higher until the type-alias fix in the
-section above stopped `type Output = Any<...>;` from charging once per use of `Output`; the fix removed the
-cascade, not the cause, and the cause is this ruling.
+**~~The type system's three unknowns.~~ Answered by the corpus** -- see "`any` was not a ruling, it was a
+reading" above. `any` and `object` are builtins, because five files use them and import nothing; they are
+distinct, because the corpus writes `any` where it casts on the way out and `object` where a value is boxed
+at runtime; `Any` is a library alias behind `#[export]` and stays undefined without an import. What is left
+of this entry is one question, and it is narrower than any of the three: **does a primitive satisfy an
+`implements` bound?** `type EnumType = any implements <Enum>;` (`stdlib/enums.fin:6`) reads as a constraint,
+and `KnownDefect_DynamicTypes.AnImplementsBoundOnADynamicTypeIsNotEnforced` holds the gap open. It cannot be
+guessed, because `stdlib/types.fin:78` writes `type nullptr = any implements <&void>;`, whose bound is a
+pointer type and not an interface, and `stdlib/typing.fin:10` writes one inside a union -- a check that only
+understood interfaces would reject two lines the standard library writes. A second, smaller question rides
+along: does a written `any<int>` narrow, or are the arguments decoration?
+`KnownDefect_DynamicTypes.GenericArgumentsOnADynamicTypeAreNotConstraints` books it, and the corpus points
+at "decoration", since the only spelling it writes is `Any<...>` with a literal ellipsis, which cannot be a
+type.
+
+**Erasure or a box: is `object` assignable to `any`?** The corpus settles that the two are distinct and says
+what each *is*. `stdlib/types.fin:97` calls `any` "any type that is visible in compile time", which is
+erasure of something the compiler still knows. `prototype_test.fin:40` calls `object` "an expensive type but
+can fit any datatype in it at the cost of memory and speed", and a cost paid at run time is a box with a tag.
+Read that way the two directions are not symmetric: a value the compiler knows the type of can always be
+boxed, so `any -> object` should be legal, while unboxing is exactly what a *cast* is for, so `object -> any`
+should not be. What the tree does today is accept both, because the rule "every type fits a dynamic target"
+in `Type::isAssignableTo` answers before anything looks at which dynamic type it is.
+
+The question blocks a real change and is not academic. `DynamicType::equals` already compares names and
+nothing can observe that it does -- the mutation matrix above shows it, and the only channel that could have
+shown it, the cast diagnostic, is one the corpus contradicts. Until this is answered, `equals` cannot be
+tested and cannot be safely deleted either: deleting it makes `any` and `object` one type, which is a
+stronger claim than the corpus supports. `KnownDefect_DynamicTypes.ObjectAndAnyAreMutuallyAssignable` asserts
+today's behaviour and names this ruling, so an answer turns straight into a failing test.
 
 **Modules.** What does a `namespace` block do to a module's symbol table, and is importing a namespace the
 module does not declare an error or a no-op? (Twelve stdlib samples open with `namespace std`; eleven corpus
