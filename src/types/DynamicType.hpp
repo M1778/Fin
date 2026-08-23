@@ -67,11 +67,12 @@ public:
     TypePtr clone() const override;
 };
 
-// True when a type is `any` or `object`, unwrapped. Deliberately *not* recursive
-// through Pointer/Array/Nullable the way `isErrorType` is: the sentinel has to be
-// absorbed wherever it is buried, because a diagnostic about it would be a
-// propagation bug, whereas `[any]` is an ordinary array type that a program means to
-// write and whose assignability is answered element by element by ArrayType.
-bool isDynamicType(const TypePtr& t);
+// There is no `isDynamicType` free function, and the omission is deliberate.
+// `isErrorType` exists because the sentinel has to be *absorbed* wherever it is
+// buried, so every suppression site needs to look through Pointer/Array/Nullable for
+// it. A dynamic type is the opposite: `[any]` is an ordinary array type that a
+// program means to write, and its assignability is answered element by element by
+// ArrayType. The two places that ask whether a type is dynamic ask with
+// `as<DynamicType>()` about that type and nothing inside it, which is the whole rule.
 
 } // namespace fin

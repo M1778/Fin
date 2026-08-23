@@ -41,6 +41,4 @@ TypePtr DynamicType::clone() const {
     return std::make_shared<DynamicType>(name, std::move(copy));
 }
 
-bool isDynamicType(const TypePtr& t) { return t && t->as<DynamicType>() != nullptr; }
-
 } // namespace fin
