@@ -147,6 +147,8 @@ TypePtr StructType::clone() const {
     s->constructors = constructors;
     s->has_destructor = has_destructor;
     s->is_interface = is_interface;
+    s->is_enum = is_enum;
+    for (auto& kv : enumerators) s->defineEnumerator(kv.first, kv.second->clone());
     
     return s;
 }
@@ -172,7 +174,12 @@ TypePtr StructType::substitute(const TypeMap& mapping, TypePtr selfReplacement) 
     for(const auto& p : parents) newStruct->parents.push_back(p->substitute(mapping, nextSelf));
 
     newStruct->is_interface = is_interface;
+    newStruct->is_enum = is_enum;
     newStruct->has_destructor = has_destructor;
+    // `Result<int, string>::Ok` is `fn(int) -> Result<int, string>`, so an enumerator
+    // is substituted like a method: without this, instantiating a generic enum kept
+    // every payload at the template's type parameter.
+    for (auto& kv : enumerators) newStruct->defineEnumerator(kv.first, kv.second->substitute(mapping, nextSelf));
     
     for(auto& c : constructors) {
         if (auto* func = c->as<FunctionType>()) {

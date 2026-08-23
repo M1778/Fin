@@ -24,6 +24,16 @@ public:
     std::vector<TypePtr> generic_args;
     std::vector<TypePtr> parents;
     bool is_interface = false;
+    // An enum's type is a StructType too. Not because an enum is a struct -- it is
+    // not, and Soundness_Enums.AnEnumIsNotAStructEvenThoughItsTypeIsAStructType is the
+    // guard on that -- but because everything an enum turned out to need is already
+    // here: a method table for `implements`, `generic_args` for `enum Result<T, E>`,
+    // `parents` for the conformance check. The PrimitiveType this replaces had nowhere
+    // to put any of them, which is the whole reason an enum had no methods.
+    //
+    // Every reader that means "a struct" must test this flag, exactly as the ones that
+    // mean "not an interface" test is_interface.
+    bool is_enum = false;
     
     std::unordered_map<std::string, FieldInfo> fields;
     // Name -> the method's FunctionType. It held only a return type until a method
@@ -40,6 +50,13 @@ public:
     std::unordered_map<int, TypePtr> operators;
     std::vector<TypePtr> constructors; 
     bool has_destructor = false;
+    // Enumerator name -> `fn(payload...) -> ThisEnum`. A FunctionType even for a
+    // member with no payload, so that one reader serves both spellings the corpus
+    // has: `Color::RGB(100, 200, 50)` (enums.fin:35) checks the parameters, and
+    // `Result::Ok` (enums.fin:19) reads the return type. Separate from `fields`
+    // because an enumerator is reached through the type and never through a value:
+    // keeping it out of `fields` is what stops `value.A` from resolving.
+    std::unordered_map<std::string, TypePtr> enumerators;
 
     StructType(std::string n, std::vector<TypePtr> args = {}) 
         : name(std::move(n)), generic_args(std::move(args)) {}
@@ -48,6 +65,14 @@ public:
     void defineMethod(std::string n, TypePtr t) { methods[n] = t; }
     void defineOperator(int op, TypePtr t) { operators[op] = t; }
     void addConstructor(TypePtr t) { constructors.push_back(t); }
+    void defineEnumerator(std::string n, TypePtr t) { enumerators[n] = t; }
+    // The enumerator's `fn(payload...) -> ThisEnum`, or null when this type declares
+    // no such member. No parent walk: an enum has no parents but the interfaces it
+    // implements, and an interface declares no enumerators.
+    TypePtr getEnumerator(const std::string& n) const {
+        auto it = enumerators.find(n);
+        return it == enumerators.end() ? nullptr : it->second;
+    }
 
     TypePtr getFieldType(const std::string& n);
     bool isFieldPublic(const std::string& n);

@@ -4462,9 +4462,10 @@ TEST(Soundness_DiagnosticLocation, AMissingReturnReportsWhereTheFunctionIsDeclar
 //     error, because KW_INTERFACE's production has no `inheritance_opt` where the struct
 //     and class ones do -- so conformance never runs on one. No sample writes that form,
 //     which is why it stays a note here rather than a KnownDefect of its own.
-//   * An enum member's payload type is never resolved, so `enum E { pub Ok <Nope>, }`
-//     compiles clean. That one is booked:
-//     KnownDefect_Enums.AnEnumMemberPayloadTypeIsNeverResolved.
+//   * An enum member's payload type was never resolved, so `enum E { pub Ok <Nope>, }`
+//     compiled clean. That one is fixed -- see
+//     Soundness_Enums.AnEnumMemberPayloadTypeIsResolvedWhereItIsWritten -- so of the
+//     four productions only the interface one is still untestable here.
 //
 // A first draft of this test asserted the interface case and *passed*, which is the trap
 // worth recording: the syntax error above happens to be reported on the same line the
@@ -4489,45 +4490,58 @@ TEST(Soundness_DiagnosticLocation, ADeclarationReportsWhereItWasWritten) {
         << "KW_CLASS ... RBRACE builds a ClassDeclaration and needs its own setLoc";
 }
 
-// An enum member's payload type is never resolved.
+// An enum member's payload type is resolved where it is written.
 //
-// `enum E { pub Ok <Nope>, }` compiles clean, and `Nope` is undefined. The payloads are
-// parsed and stored -- EnumDeclaration::member_payloads is built in the KW_ENUM
-// production and CloneVisitor carries it -- but nothing walks them looking for a type to
-// resolve, so a typo in a payload type is silent until something tries to use the value.
+// This was KnownDefect_Enums.AnEnumMemberPayloadTypeIsNeverResolved, inverted and
+// renamed as that test's own note said to: `enum E { pub Ok <Nope>, }` compiled clean
+// with `Nope` undefined. The payloads were parsed and stored --
+// EnumDeclaration::member_payloads is built in the KW_ENUM production and CloneVisitor
+// carries it -- and nothing walked them, so a typo in a payload type was silent until
+// something tried to use the value.
 //
-// This is load-bearing for the library rather than hypothetical:
+// It was load-bearing for the library rather than hypothetical:
 // `tests/samples/stdlib/stdio.fin:49` declares `pub enum IOResult<T: Strict<Stream>> {
-// pub Err <IOError>, pub Ok <T>, }` and `lib/std/stdio.fin` carries its own copy. If
-// `IOError` were misspelled there, eleven importers would inherit the mistake and none
-// of them would say so.
+// pub Err <IOError>, pub Ok <T>, }` and `lib/std/stdio.fin` carries its own copy. Had
+// `IOError` been misspelled there, eleven importers would have inherited the mistake
+// and none of them would have said so.
 //
-// The inversion is Soundness_Enums.AnEnumMemberPayloadTypeIsResolvedWhereItIsWritten,
-// and the diagnostic then wants the payload's own location, not the enum's.
-TEST(KnownDefect_Enums, AnEnumMemberPayloadTypeIsNeverResolved) {
+// visit(EnumDeclaration&) resolves them now, in the enum's own generic scope, which is
+// what lets `Ok(T)` name the enum's type parameter and `Ok <Nope>` report.
+TEST(Soundness_Enums, AnEnumMemberPayloadTypeIsResolvedWhereItIsWritten) {
     const FincRun undefinedPayload = compile(
         "enum E { pub Ok <Nope>, }\n"
         "fun main() <noret> { }\n");
-    EXPECT_EQ(undefinedPayload.exitCode, 0)
-        << "when this starts reporting, invert the test and rename it\n"
+    EXPECT_EQ(undefinedPayload.exitCode, 1) << stripAnsi(undefinedPayload.err);
+    EXPECT_NE(stripAnsi(undefinedPayload.err).find("Undefined type 'Nope'"), std::string::npos)
         << stripAnsi(undefinedPayload.err);
 
-    // Not a quirk of `pub`, and not a quirk of the single-member case.
+    // Not a quirk of `pub`, and not a quirk of the single-member case. The good payload
+    // beside the bad one is what shows the loop does not stop at the first member.
     const FincRun several = compile(
         "struct Real {}\n"
         "enum E { Ok <Real>, Err <AlsoNope>, }\n"
         "fun main() <noret> { }\n");
-    EXPECT_EQ(several.exitCode, 0) << stripAnsi(several.err);
+    EXPECT_EQ(several.exitCode, 1) << stripAnsi(several.err);
+    EXPECT_NE(stripAnsi(several.err).find("Undefined type 'AlsoNope'"), std::string::npos)
+        << stripAnsi(several.err);
 
-    // The control: the very same name in the very same file *is* reported when it is
-    // written in a place that gets resolved, so the name is genuinely undefined and it
-    // is the payload position that is not looked at.
-    const FincRun control = compile(
-        "enum E { pub Ok <Nope>, }\n"
-        "fun main() <noret> { let x <Nope> = 1; }\n");
-    EXPECT_EQ(control.exitCode, 1) << stripAnsi(control.err);
-    EXPECT_NE(stripAnsi(control.err).find("Undefined type 'Nope'"), std::string::npos)
-        << stripAnsi(control.err);
+    // The parenthesised spelling of a payload is the same declaration and is resolved
+    // too -- enums.fin:8 writes `RGB(uint{8}, uint{8}, uint{8})` and stdlib/typing.fin:15
+    // writes `Ok(T)`, so both forms reach this loop.
+    const FincRun parens = compile(
+        "enum E { RGB(int, Nope, int), }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(parens.exitCode, 1) << stripAnsi(parens.err);
+    EXPECT_NE(stripAnsi(parens.err).find("Undefined type 'Nope'"), std::string::npos)
+        << stripAnsi(parens.err);
+
+    // A payload that resolves stays quiet, which is what keeps the three assertions
+    // above about `Nope` and not about payloads in general.
+    const FincRun good = compile(
+        "struct Real {}\n"
+        "enum E { Ok <Real>, Err(int, Real), None, }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(good.exitCode, 0) << stripAnsi(good.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -6175,4 +6189,249 @@ TEST(Soundness_PrototypeAccess, SomethingThatIsNeitherStillSaysSo) {
     EXPECT_EQ(r.exitCode, 1) << r.err;
     EXPECT_NE(stripAnsi(r.err).find("is not an array or pointer"), std::string::npos)
         << stripAnsi(r.err);
+}
+
+// ============================================================================
+// An enum is a real type.
+// ============================================================================
+//
+// tests/samples/enums.fin is the whole specification and it asks for six things an
+// enum has to be: a named type (`let color1 <Color>`), a set of enumerators readable
+// through it (`Color::RGB`), enumerators that carry payloads and are constructed by
+// calling them (`Color::RGB(100, 200, 50)`), a generic type (`enum Result <T, E>`),
+// something an `implements` block can target (`@implements Result<T, E>::unwrap`), and
+// something a method can then be called on (`r.unwrap()`).
+//
+// What was there instead: `visit(EnumDeclaration&)` built a `PrimitiveType` with the
+// enum's name and defined every enumerator as a variable of it. That is why an enum
+// had no methods, no generics, no payload types and no members -- a PrimitiveType has
+// nowhere to put any of them -- and why `Color::RGB` said "Undefined variable 'Color'":
+// the grammar builds `E::A` as a MemberAccess with `is_static` set over an
+// `Identifier`, and nothing read `is_static`, so the enum's *type* name was looked up
+// among the variables.
+//
+// An enum is now a StructType carrying `is_enum`, which is the same shape `is_interface`
+// already had and the reason the implements block, the method table, the generic
+// arguments and the conformance check all work on one without being rewritten. The guard
+// that this does not make an enum a struct is
+// Soundness_Enums.AnEnumIsNotAStructEvenThoughItsTypeIsAStructType below -- it is the
+// test to read first if this design is ever revisited.
+
+TEST(Soundness_Enums, AnEnumeratorIsReadableThroughItsType) {
+    // enums.fin:19 (`Result::Ok`), literal_interface.fin:19 (`IFaceOptions::First`)
+    // and extern_as.fin:44 (`MyEnum::B`). Was "Undefined variable 'E'".
+    const FincRun r = compile("enum E { A, B }\n"
+                              "fun main() <noret> { let x <E> = E::A; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AnEnumeratorIsStillReadableByItsBareName) {
+    // arrays_enums.fin:17 is `let s <Status> = OK;` -- the enumerators leak into the
+    // enclosing scope and the corpus depends on it. Asserted because the change above
+    // is the one that would drop it.
+    const FincRun r = compile("enum Status { OK = 0, ERROR }\n"
+                              "fun main() <noret> { let s <Status> = OK; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AnEnumeratorReadThroughItsTypeIsTypedAsTheEnum) {
+    // Resolving the name is half of it; the other half is that the expression's type
+    // is the enum and not whatever the lookup happened to leave behind.
+    const FincRun wrong = compile("enum E { A, B }\n"
+                                  "fun main() <noret> { let x <int> = E::A; }\n");
+    EXPECT_EQ(wrong.exitCode, 1) << stripAnsi(wrong.err);
+    EXPECT_NE(stripAnsi(wrong.err).find("expected 'int', got 'E'"), std::string::npos)
+        << stripAnsi(wrong.err);
+}
+
+TEST(Soundness_Enums, AnUnknownEnumeratorIsReported) {
+    // The lookup has to be a lookup. Reading a member the enum does not declare is
+    // the mistake this whole path exists to catch.
+    const FincRun r = compile("enum E { A, B }\n"
+                              "fun main() <noret> { let x <E> = E::NoSuch; }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("NoSuch"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AnEnumIsNotAStructEvenThoughItsTypeIsAStructType) {
+    // The guard on the representation. An enum's type is a StructType so that it has
+    // somewhere to keep methods, and every struct-shaped operation must still be
+    // refused on one -- otherwise the representation has quietly changed the language.
+    const FincRun braces = compile("enum E { A, B }\n"
+                                   "fun main() <noret> { let x <E> = E{}; }\n");
+    EXPECT_EQ(braces.exitCode, 1) << "an enum is not instantiable with a struct "
+                                     "literal\n" << stripAnsi(braces.err);
+
+    const FincRun field = compile("enum E { A, B }\n"
+                                  "fun main() <noret> { let x <E> = E::A; "
+                                  "let y <int> = x.nosuch; }\n");
+    EXPECT_EQ(field.exitCode, 1) << "an enum has no fields to read\n"
+                                 << stripAnsi(field.err);
+}
+
+TEST(Soundness_Enums, AnEnumDeclaresItsGenericParameters) {
+    // enums.fin:13 and stdlib/typing.fin:14. `node.generic_params` was populated by
+    // the grammar and read by nobody, so `T` in the payload below was undefined and
+    // said nothing, and `R<int>` was neither checked nor instantiable.
+    const FincRun r = compile("enum R<T> { Ok(T), }\n"
+                              "fun main() <noret> { let a <R<int>>; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AnEnumsGenericParameterDoesNotLeakIntoTheEnclosingScope) {
+    // The generics are declared in a scope of the enum's own, exactly as a struct's
+    // are. Without the scope they would be visible to the rest of the file.
+    const FincRun r = compile("enum R<T> { Ok(T), }\n"
+                              "fun main() <noret> { let bad <T>; }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'T'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AnEnumCanBeTheTargetOfAnImplementsBlock) {
+    // stdlib/typing.fin:27 -- `Result<T, U> implements <IResult> { ... }`, and the
+    // sample says why in its own comment: "Enums can also be implemented". This was
+    // "Type 'Result' is not a struct/class and cannot implement interfaces", and it
+    // was the only diagnostic left in that file.
+    const FincRun r = compile("enum E { A, B }\n"
+                              "interface I { pub fun m(e: E) <int>; }\n"
+                              "E implements <I> { pub fun m(e: E) <int> { return 1; } }\n"
+                              "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AnImplementsBlockOnAnEnumIsStillCheckedForConformance) {
+    // Accepting the target is not the same as accepting anything. An enum that
+    // promises an interface and does not deliver reports, the way a struct does.
+    const FincRun r = compile("enum E { A, B }\n"
+                              "interface I { pub fun m(e: E) <int>; }\n"
+                              "E implements <I> { }\n"
+                              "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("does not fully implement"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AMethodFromAnImplementsBlockIsCallableOnAnEnumValue) {
+    // enums.fin:45 -- `r.unwrap()`. Was "Method 'unwrap' not found in type 'Result'".
+    const FincRun r = compile("enum E { A, B }\n"
+                              "interface I { pub fun m(e: E) <int>; }\n"
+                              "E implements <I> { pub fun m(e: E) <int> { return 1; } }\n"
+                              "fun main() <noret> { let x <E> = E::A; let n <int> = x.m(x); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AnEnumsMethodIsCheckedAgainstItsSignature) {
+    // And it is a real signature, not a name that happens to be found: the return
+    // type is the method's, and the arguments are checked.
+    const FincRun ret = compile("enum E { A, B }\n"
+                                "interface I { pub fun m(e: E) <int>; }\n"
+                                "E implements <I> { pub fun m(e: E) <int> { return 1; } }\n"
+                                "fun main() <noret> { let x <E> = E::A; let s <string> = x.m(x); }\n");
+    EXPECT_EQ(ret.exitCode, 1) << "the call is typed as the method's return type\n"
+                               << stripAnsi(ret.err);
+
+    const FincRun arity = compile("enum E { A, B }\n"
+                                  "interface I { pub fun m(e: E) <int>; }\n"
+                                  "E implements <I> { pub fun m(e: E) <int> { return 1; } }\n"
+                                  "fun main() <noret> { let x <E> = E::A; let n <int> = x.m(); }\n");
+    EXPECT_EQ(arity.exitCode, 1) << "and against its arity\n" << stripAnsi(arity.err);
+}
+
+// The cast. `operators.fin:26` writes `cast<int>(s)` on an enum whose members carry
+// integer values (`enum State { Alive = 1, Dead }`), and that sample is `//@ ok` --
+// so an enum-to-integer cast is the corpus's own requirement, not a convenience.
+//
+// It used to work by accident. An enum's type was a `PrimitiveType`, so the
+// primitive-to-primitive arm of the validity chain admitted it along with every other
+// pair; making the enum a `StructType` took the accident away and `operators.fin`
+// went red the same hour. These two tests are what replaces the accident: the first
+// says the cast is admitted, the second says it is still a check and not a hole.
+TEST(Soundness_Enums, AnEnumCastsToAnInteger) {
+    const FincRun r = compile("enum State { Alive = 1, Dead }\n"
+                              "fun main() <noret> { let s <State> = Alive; let n <int> = cast<int>(s); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, ACastFromAnEnumToAStructIsStillRefused) {
+    // The arm admits an enum against a *primitive*, not against anything at all. A
+    // struct is the case that says so: there is no integer reading of `S`, and the
+    // enum's own members give no way to produce one.
+    const FincRun r = compile("enum State { Alive = 1, Dead }\n"
+                              "struct S { pub v <int>, }\n"
+                              "fun main() <noret> { let s <State> = Alive; let x <S> = cast<S>(s); }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Invalid cast from 'State' to 'S'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, ACastFromAnArrayToAnEnumIsRefused) {
+    // arrays_enums.fin:23 carries this as a commented-out line with the expectation
+    // written next to it: `// let bad = cast<Status>(arr); // Should fail`. The sample
+    // cannot assert it -- the line is commented out, so the corpus never runs it --
+    // which is exactly why it is asserted here instead. An array is not an integer in
+    // any reading, and the symmetric arm below must not make it one.
+    const FincRun r = compile("enum Status { OK, ERR }\n"
+                              "fun main() <noret> { let arr <[int]> = [1, 2]; let s <Status> = cast<Status>(arr); }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Invalid cast"), std::string::npos) << stripAnsi(r.err);
+}
+
+// Construction. `enums.fin:35` writes `let color1 <Color> = Color::RGB(100, 200, 50);`
+// on `enum Color { RGB(uint{8}, uint{8}, uint{8}), ... }`, which is the reason the
+// enumerator is stored as a FunctionType rather than as the enum type: a call needs
+// parameters to check the arguments against and a return type to be typed as, and one
+// FunctionType per enumerator gives both spellings -- `Result::Ok` reads the return
+// type, `Color::RGB(...)` checks the parameters -- out of one entry.
+TEST(Soundness_Enums, AnEnumeratorWithAPayloadIsConstructedThroughItsType) {
+    const FincRun r = compile("enum Color { RGB(int, int, int), Named(string) }\n"
+                              "fun main() <noret> { let c <Color> = Color::RGB(1, 2, 3); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AnEnumeratorConstructionIsTypedAsTheEnum) {
+    // Not as the payload, and not as the last argument. `Color::RGB(1,2,3)` is a
+    // `Color`; the FunctionType's return type is the enum, so this is the same
+    // assertion as AnEnumeratorReadThroughItsTypeIsTypedAsTheEnum made through a call.
+    const FincRun r = compile("enum Color { RGB(int, int, int) }\n"
+                              "fun main() <noret> { let s <string> = Color::RGB(1, 2, 3); }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("got 'Color'"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AnEnumeratorsPayloadIsCheckedAtTheConstruction) {
+    // The point of the parameters. Arity and type both, through the same
+    // checkCallArguments every other call goes through -- so a payload is not a
+    // decoration that parses and then admits anything.
+    const FincRun arity = compile("enum Color { RGB(int, int, int) }\n"
+                                  "fun main() <noret> { let c <Color> = Color::RGB(1, 2); }\n");
+    EXPECT_EQ(arity.exitCode, 1) << "too few arguments\n" << stripAnsi(arity.err);
+
+    const FincRun type = compile("enum Color { Named(string) }\n"
+                                 "fun main() <noret> { let c <Color> = Color::Named(7); }\n");
+    EXPECT_EQ(type.exitCode, 1) << "wrong argument type\n" << stripAnsi(type.err);
+
+    const FincRun payloadless = compile("enum Color { Red, Green }\n"
+                                        "fun main() <noret> { let c <Color> = Color::Red(1); }\n");
+    EXPECT_EQ(payloadless.exitCode, 1) << "an enumerator with no payload takes no arguments\n"
+                                       << stripAnsi(payloadless.err);
+}
+
+TEST(Soundness_Enums, AnUnknownEnumeratorIsReportedAtAConstruction) {
+    const FincRun r = compile("enum Color { RGB(int, int, int) }\n"
+                              "fun main() <noret> { let c <Color> = Color::Nope(1); }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("'Nope'"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AStaticMethodOnAnEnumIsStillCallableThroughItsType) {
+    // The enumerator lookup runs before the method lookup in visit(StaticMethodCall&),
+    // so this is the test that says the ordering did not shadow the methods: an enum's
+    // implements block still contributes to `::` calls, and only a name the enum
+    // actually declares as a member is taken as a construction.
+    const FincRun r = compile("enum E { A, B }\n"
+                              "interface I { pub fun m(e: E) <int>; }\n"
+                              "E implements <I> { pub fun m(e: E) <int> { return 1; } }\n"
+                              "fun main() <noret> { let n <int> = E::m(E::A); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }

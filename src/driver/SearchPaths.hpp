@@ -102,8 +102,9 @@ inline std::string executablePath() {
 // `lib/std`. `<exe dir>/../lib/std` is both of those.
 //
 // Returns nothing when the directory is absent, so a search path is never
-// reported that would not be read. Today that is every build, because `lib/std`
-// does not exist yet.
+// reported that would not be read. `lib/std` exists now -- eleven modules, and
+// every `::std` import in the corpus resolves through this path -- so the empty
+// return is the case of a binary moved out of its layout, not the normal one.
 inline std::vector<std::string> bundledLibraryPathsFor(const std::string& exePath) {
     if (exePath.empty()) return {};
     const std::filesystem::path candidate =

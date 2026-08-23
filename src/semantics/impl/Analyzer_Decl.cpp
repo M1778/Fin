@@ -618,18 +618,64 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
 
 void SemanticAnalyzer::visit(EnumDeclaration& node) {
     debugLog(fg(fmt::color::yellow), "[INFO] Analyzing enum '{}'\n", node.name);
-    auto enumType = std::make_shared<PrimitiveType>(node.name); 
+    // A StructType, not the PrimitiveType this replaces. The reason is in
+    // StructType.hpp on `is_enum`: an enum needs a method table, generic arguments
+    // and parents, and a PrimitiveType has nowhere to put any of them. tests/samples/
+    // enums.fin is the specification and Soundness_Enums the tests, including the
+    // guard that this does not make an enum a struct.
+    auto enumType = std::make_shared<StructType>(node.name);
+    enumType->is_enum = true;
     currentScope->defineType(node.name, enumType);
-    
-    for (auto& val : node.values) {
+
+    // The enumerators are collected here and defined below, after the generic scope
+    // has been left: arrays_enums.fin:17 reads one by its bare name (`let s <Status>
+    // = OK;`), so they belong to the scope the enum was declared in and not to the
+    // enum's own. Soundness_Enums.AnEnumeratorIsStillReadableByItsBareName.
+    std::vector<std::string> enumeratorNames;
+    enumeratorNames.reserve(node.values.size());
+
+    enterScope();
+    // enums.fin:13 (`enum Result <T: Any<...>, E: Offer<string, Error>>`) and
+    // stdlib/typing.fin:14. node.generic_params was built by the grammar and read by
+    // nobody, so a payload naming the enum's own type parameter had nothing to
+    // resolve against.
+    declareGenericParams(node.generic_params, &enumType->generic_args);
+    currentScope->defineType("Self", enumType);
+
+    for (size_t i = 0; i < node.values.size(); ++i) {
+        auto& val = node.values[i];
         if (val.second) {
             val.second->accept(*this);
             auto intType = currentScope->resolveType("int");
             checkType(*val.second, lastExprType, intType);
         }
-        currentScope->define({val.first, enumType, false, true});
-        debugLog(fg(fmt::color::gray), "      [Enum] Member '{}'\n", val.first);
+
+        // The payload. `values` and `member_payloads` are built in one loop in the
+        // KW_ENUM production, so index i is the same member in both -- verified
+        // against the payload's own copy of the name rather than assumed, because
+        // nothing else enforces the parallelism and a mismatch would hand a member
+        // somebody else's payload types without saying so.
+        std::vector<std::shared_ptr<Type>> payload;
+        if (i < node.member_payloads.size() && node.member_payloads[i].name == val.first) {
+            // Resolved, where before they were parsed and dropped: `enum E { pub Ok
+            // <Nope>, }` compiled clean, which
+            // KnownDefect_Enums.AnEnumMemberPayloadTypeIsNeverResolved booked and
+            // Soundness_Enums.AnEnumMemberPayloadTypeIsResolvedWhereItIsWritten now
+            // asserts. resolveTypeOrError, not resolveTypeFromAST, because a payload
+            // is a declaration: the sentinel keeps one typo to one diagnostic.
+            for (auto& t : node.member_payloads[i].types) payload.push_back(resolveTypeOrError(t.get()));
+        }
+        // `fn(payload...) -> ThisEnum` even with no payload, so that `Color::RGB(100,
+        // 200, 50)` (enums.fin:35) has parameters to be checked against and
+        // `Result::Ok` (enums.fin:19) has a return type to be read.
+        enumType->defineEnumerator(val.first, std::make_shared<FunctionType>(payload, enumType));
+        enumeratorNames.push_back(val.first);
+        debugLog(fg(fmt::color::gray), "      [Enum] Member '{}' with {} payload type(s)\n",
+                 val.first, payload.size());
     }
+    exitScope();
+
+    for (const auto& name : enumeratorNames) currentScope->define({name, enumType, false, true});
 }
 
 void SemanticAnalyzer::visit(ImportModule& node) {

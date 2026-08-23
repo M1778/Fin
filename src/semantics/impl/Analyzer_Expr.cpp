@@ -87,6 +87,27 @@ bool typeHasBuiltinMembers(const TypePtr& type) {
     return false;
 }
 
+// Is this type an enum? Not "is it struct-shaped" -- an enum's type is a StructType,
+// which is the whole hazard StructType.hpp's two-flags rule warns about, so a reader
+// that means "an enum" has to say `is_enum` and a reader that means "a struct" has to
+// say `!is_enum`. Written out here because the dynamic_pointer_cast plus the flag test
+// is exactly the pair that is easy to write as just the cast, and just the cast is the
+// bug.
+//
+// One caller today: the cast rule below, which holds a TypePtr and wants a yes or no.
+// The two other sites that ask the same question -- the enumerator lookup in
+// visit(MemberAccess&) and the refusal in visit(StructInstantiation&) -- already hold
+// the StructType and go on to use it, so they test the flag directly rather than throw
+// the pointer away and ask for it again.
+//
+// No unwrapping, deliberately unlike getStructType above: a `&State` is a pointer, and
+// the caller asks about a value. If a reader ever needs the question through a pointer,
+// that reader should say so at its own call site.
+static bool isEnumType(const TypePtr& type) {
+    auto asStruct = std::dynamic_pointer_cast<StructType>(type);
+    return asStruct && asStruct->is_enum;
+}
+
 void SemanticAnalyzer::visit(PrototypeLiteral& node) {
     std::shared_ptr<Type> keyType = nullptr;
     std::shared_ptr<Type> valueType = nullptr;
@@ -692,6 +713,29 @@ void SemanticAnalyzer::visit(CastExpression& node) {
     // codegen, which will need a tag to compare and does not have one yet.
     else if (dynamic_cast<const DynamicType*>(sourceType.get()) ||
              dynamic_cast<const DynamicType*>(targetType.get())) valid = true;
+    // An enum against a primitive, in either direction. `operators.fin:26` writes
+    // `cast<int>(s)` on a `<State>` and that sample is `//@ ok`, so this is the corpus's
+    // requirement and not a convenience: an enum *is* an integer at the representation
+    // level, and `enum State { Alive = 1, Dead }` writes the integer down.
+    //
+    // This arm restores something that used to work by accident. An enum's type was a
+    // PrimitiveType until the enum became a real type, so the primitive-to-primitive arm
+    // above admitted the cast along with every other pair; `operators.fin` went red the
+    // hour the representation changed. What replaces the accident is narrower than the
+    // accident was -- `is_enum` names the one struct-shaped type with an integer
+    // reading, and every other struct is still refused, which is
+    // Soundness_Enums.ACastFromAnEnumToAStructIsStillRefused.
+    //
+    // Symmetric, though only the one direction is in the corpus. `cast<State>(1)` is the
+    // same fact read the other way: the enumerator's value is written in the
+    // declaration, so an integer has a reading as an enum exactly as an enum has a
+    // reading as an integer. What the symmetry does not admit is a source with no
+    // integer reading at all -- arrays_enums.fin:23 carries `cast<Status>(arr)` as a
+    // commented-out line marked "Should fail", and
+    // Soundness_Enums.ACastFromAnArrayToAnEnumIsRefused is the guard that keeps it
+    // failing now that an enum is a cast target.
+    else if (isEnumType(sourceType) && dynamic_cast<const PrimitiveType*>(targetType.get())) valid = true;
+    else if (dynamic_cast<const PrimitiveType*>(sourceType.get()) && isEnumType(targetType)) valid = true;
     
     if (!valid) {
         error(node, fmt::format("Invalid cast from '{}' to '{}'", sourceType->toString(), targetType->toString()));
@@ -715,6 +759,36 @@ void SemanticAnalyzer::visit(NewExpression& node) {
 }
 
 void SemanticAnalyzer::visit(MemberAccess& node) {
+    // `E::A`. The grammar builds this as a MemberAccess carrying `is_static` whose
+    // object is an Identifier naming a *type* (parser.y, `IDENTIFIER DOUBLE_COLON
+    // IDENTIFIER %prec STATIC_VALUE_PREC`), and until now nothing read the flag -- so
+    // the walk below looked that type name up among the variables and reported
+    // "Undefined variable 'Color'". enums.fin:19-20 and :35, literal_interface.fin:19,
+    // extern_as.fin:44.
+    //
+    // Only the enum case is claimed here. The other production that sets `is_static`
+    // puts a SuperExpression in `object`, which the cast excludes; and a name that
+    // resolves to a type that is not an enum falls through to the walk below, whose
+    // diagnostic is still the right one.
+    if (node.is_static) {
+        if (auto* id = dynamic_cast<Identifier*>(node.object.get())) {
+            auto named = currentScope->resolveType(id->name);
+            auto asStruct = std::dynamic_pointer_cast<StructType>(named);
+            if (asStruct && asStruct->is_enum) {
+                if (auto ctor = asStruct->getEnumerator(node.member)) {
+                    // `E::A` read as a value is an E. The parameters of the same
+                    // signature are what a call site checks against, which is why one
+                    // entry serves both and neither reader needs its own map.
+                    auto* sig = ctor->as<FunctionType>();
+                    lastExprType = sig ? sig->return_type : named;
+                    return;
+                }
+                error(node, fmt::format("Enum '{}' has no member '{}'", asStruct->name, node.member));
+                lastExprType = nullptr;
+                return;
+            }
+        }
+    }
     node.object->accept(*this);
     auto objType = lastExprType;
     if (!objType) return;
@@ -788,7 +862,15 @@ void SemanticAnalyzer::visit(StructInstantiation& node) {
     }
     
     auto structDef = std::dynamic_pointer_cast<StructType>(baseType);
-    if (!structDef) {
+    // `is_enum` as well as the cast, and this is the first place the two-flags rule in
+    // StructType.hpp bites: an enum's type became a StructType so that it could carry
+    // methods, and the cast alone would therefore make `E{}` a legal instantiation of
+    // one. It is not -- an enum is constructed by naming a member -- and the guard is
+    // Soundness_Enums.AnEnumIsNotAStructEvenThoughItsTypeIsAStructType, which caught
+    // this the hour the representation changed. An interface is refused for the same
+    // reason and was already: nothing instantiates one either, and `is_interface` was
+    // tested in the paths that mattered.
+    if (!structDef || structDef->is_enum) {
         error(node, "'" + node.struct_name + "' is not a struct");
         lastExprType = nullptr;
         return;
@@ -956,7 +1038,40 @@ void SemanticAnalyzer::visit(StaticMethodCall& node) {
         return;
     }
 
-    // 3. Look up Method
+    // 3. An enumerator, before a method. `enums.fin:35` writes `Color::RGB(100, 200,
+    // 50)`, which the parser gives the same shape as a static call because it is the
+    // same shape -- a type, `::`, a name, arguments -- and the enumerator's stored
+    // FunctionType is a signature like any other, so the argument check below is the
+    // one every other call gets rather than a second one written here.
+    //
+    // Before the method lookup and not after it, so that the enum's own members win a
+    // name they share with a method. Nothing decides that ordering for us -- no sample
+    // writes the collision -- but a member is written in the enum's own declaration and
+    // a method arrives from an implements block somewhere else, and the more local
+    // declaration winning is the rule everywhere else in the language.
+    // Soundness_Enums.AStaticMethodOnAnEnumIsStillCallableThroughItsType is the guard
+    // that this does not shadow the methods it is not about.
+    if (structType->is_enum) {
+        if (auto ctor = structType->getEnumerator(node.method_name)) {
+            if (auto* sig = ctor->as<FunctionType>()) {
+                checkCallArguments(node, "Enum member", node.method_name, *sig, node.args);
+                lastExprType = sig->return_type;
+            } else {
+                for (auto& arg : node.args) arg->accept(*this);
+                lastExprType = ctor;
+            }
+            return;
+        }
+        // Not falling through to the method lookup with an `Enum 'X' has no member 'Y'`
+        // of its own: an enum reached here through `::` may still be calling a method
+        // from its implements block, and `E::m(...)` must not be reported as a missing
+        // member. The name that is neither gets the "Static method not found" below,
+        // which is the truthful message for a `::` call on a type that has no such
+        // callable -- visit(MemberAccess&) is where a *non-call* `E::Nope` is reported
+        // as a missing member, because there the only reading left is an enumerator.
+    }
+
+    // 4. Look up Method
     
     auto methodType = structType->getMethodType(node.method_name);
     if (!methodType) {
@@ -965,7 +1080,7 @@ void SemanticAnalyzer::visit(StaticMethodCall& node) {
         return;
     }
 
-    // 4. Analyze Args
+    // 5. Analyze Args
     //
     // Against the same stored signature as an instance call, which is the signature as
     // *called*: the receiver is not in it. Calling an instance method through `::` and
