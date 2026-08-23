@@ -4688,6 +4688,188 @@ TEST(Soundness_MachineContract, ASelfReferentialInstantiationIsNotFatal) {
 // reaches the analyzer down a different grammar path than the other three.
 // ---------------------------------------------------------------------------
 
+// --- A type body in expression position --------------------------------------
+//
+// `struct { ... }` and `interface { ... }` are expressions, and their value is a
+// meta-type. Two normative samples say so and nothing else in the corpus does:
+//
+//   literal_struct.fin:24     make_default(struct { pub health <uint> = 100, ... })
+//                             where make_default's parameter is `st: $struct` (:5)
+//   literal_interface.fin:20  return interface { ... } from a function declared
+//                             `<$interface>` (:19), and again at :27
+//
+// So the type of the expression is not a guess: the parameter and the return
+// annotation the corpus wrote around each literal name it.
+//
+// The bodies are the bodies of the corresponding declarations, not new grammar --
+// which is why a method with no `fun` (literal_struct.fin:27) already works here:
+// it works in a named struct too, and these tests assert that the literal did not
+// get a second, narrower body grammar.
+//
+// One thing inside those bodies genuinely is new. `pub picked_first <bool> = true;`
+// (literal_interface.fin:21, again at :27) is an interface member carrying a
+// default, which was `unexpected EQUAL, expecting SEMICOLON or COMMA` -- and the
+// only evidence for it in fifty samples is those two lines. It is implemented for
+// interface bodies generally, named and anonymous alike, because they are one
+// nonterminal; what a default on an interface member *means* to an implementor is
+// not settled by anything in the corpus and this unit does not decide it. The
+// default is parsed, and type-checked against the member's declared type.
+
+TEST(Soundness_TypeLiterals, AStructLiteralIsAnExpression) {
+    auto r = compile("fun take(s: $struct) <int> { return 1; }\n"
+                     "fun main() <noret> { take(struct { pub a <int> = 1, }); }\n");
+    EXPECT_EQ(r.exitCode, 0) << "literal_struct.fin:24 passes one to a `$struct` parameter:\n" << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AStructLiteralIsTypedDollarStructAndNotSomethingElse) {
+    // The type is asserted through a *rejection* as well as an acceptance. An
+    // implementation that typed the literal `auto`, or left lastExprType null,
+    // would satisfy the acceptance above and report nothing here.
+    auto r = compile("fun take(n: int) <int> { return 1; }\n"
+                     "fun main() <noret> { take(struct { pub a <int> = 1, }); }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got '$struct'"), std::string::npos)
+        << "a struct literal is a `$struct`:\n" << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AnInterfaceLiteralIsAnExpression) {
+    auto r = compile("fun take(i: $interface) <int> { return 1; }\n"
+                     "fun main() <noret> { take(interface { pub fun f() <noret>; }); }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AnInterfaceLiteralIsNotAStructLiteral) {
+    // The two meta-types are distinct (Soundness_MetaTypes), so the two literals
+    // must not collapse onto one of them.
+    auto r = compile("fun take(s: $struct) <int> { return 1; }\n"
+                     "fun main() <noret> { take(interface { pub fun f() <noret>; }); }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected '$struct', got '$interface'"), std::string::npos) << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AnInterfaceLiteralIsReturnable) {
+    // literal_interface.fin:19-26: the literal is the returned expression of a
+    // function whose return type is the meta-type.
+    auto r = compile("fun pick() <$interface> {\n"
+                     "    return interface {\n"
+                     "        pub picked_first <bool> = true;\n"
+                     "        pub fun say_hello() <noret>;\n"
+                     "      };\n"
+                     "  }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AReturnedTypeLiteralStillNeedsItsSemicolon) {
+    // The test above writes `};`. literal_interface.fin:24 does not -- it closes the
+    // literal with a bare `}` and goes straight to the enclosing `}`. That is a typo
+    // in the sample, not a rule, and the sample itself is the witness: the *other*
+    // branch of that same function, line 26, writes
+    // `return interface { pub picked_second <bool> = true; };`. Every other
+    // brace-terminated return in the corpus agrees -- deeptest1.fin:15,
+    // letssee.fin:22, :29, :52 -- so it is five spellings to one.
+    //
+    // Asserted rather than left alone because the alternative is a
+    // semicolon-optional rule for one expression shape, which nothing in the corpus
+    // asks for. Recorded in literal_interface.fin's own note so the ruling is
+    // visible where the typo is.
+    auto r = compile("fun pick() <$interface> {\n"
+                     "    return interface {\n"
+                     "        pub picked_first <bool> = true;\n"
+                     "      }\n"
+                     "  }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(r.err.find("syntax error"), std::string::npos) << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AnInterfaceMemberCarriesADefault) {
+    // The narrow new thing, in the named form, since the nonterminal is shared:
+    // it was a syntax error, `unexpected EQUAL, expecting SEMICOLON or COMMA`.
+    auto r = compile("interface I { pub flag <bool> = true; }\n"
+                     "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AnInterfaceMembersDefaultIsTypeChecked) {
+    // Parsed and dropped would pass the test above. A struct field's default is
+    // checked (`struct S { pub a <int> = "s", }` reports), so an interface
+    // member's is too -- the alternative is a hole that only anonymous types have.
+    auto r = compile("interface I { pub flag <bool> = 7; }\n"
+                     "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool', got 'int'"), std::string::npos) << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AStructLiteralsFieldDefaultIsTypeChecked) {
+    auto r = compile("fun take(s: $struct) <int> { return 1; }\n"
+                     "fun main() <noret> { take(struct { pub a <int> = \"s\", }); }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << "the body of a literal is analysed, not skipped:\n" << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AStructLiteralsMethodBodyIsAnalysed) {
+    // The whole body, not just the field list. An implementation that produced the
+    // meta-type without walking the members would pass every acceptance above.
+    auto r = compile("fun take(s: $struct) <int> { return 1; }\n"
+                     "fun main() <noret> { take(struct { pub fun f() <noret> { nosuchvar; } }); }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("Undefined variable 'nosuchvar'"), std::string::npos) << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AMethodWithNoFunKeywordWorksInALiteralToo) {
+    // literal_struct.fin:27 writes `pub print_player(self: &Self) <noret> { ... }`
+    // with no `fun`. That already parses in a named struct body; the literal reuses
+    // that nonterminal rather than getting a narrower one of its own.
+    auto r = compile("fun take(s: $struct) <int> { return 1; }\n"
+                     "fun main() <noret> {\n"
+                     "    take(struct {\n"
+                     "        pub health <uint> = 100,\n"
+                     "        pub print_player(self: &Self) <noret> { }\n"
+                     "      });\n"
+                     "  }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_TypeLiterals, ALiteralsMembersDoNotLeakIntoTheEnclosingScope) {
+    // An anonymous type's members are its own. Reusing the declaration path makes
+    // the opposite easy to write by accident -- a StructDeclaration visit that
+    // defines fields in the current scope would leave `health` resolvable here.
+    auto r = compile("fun take(s: $struct) <int> { return 1; }\n"
+                     "fun main() <noret> { take(struct { pub health <uint> = 100, }); health; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("Undefined variable 'health'"), std::string::npos) << r.err;
+}
+
+TEST(Soundness_TypeLiterals, TwoLiteralsInOneScopeDoNotCollide) {
+    // Anonymous types need internal names to be registered at all, and the obvious
+    // first implementation gives them all the same one, which the second literal
+    // then redefines.
+    auto r = compile("fun take(s: $struct) <int> { return 1; }\n"
+                     "fun main() <noret> {\n"
+                     "    take(struct { pub a <int> = 1, });\n"
+                     "    take(struct { pub b <int> = 2, });\n"
+                     "  }\n");
+    EXPECT_EQ(r.exitCode, 0) << "two anonymous structs are two types, not one name twice:\n" << r.err;
+}
+
+TEST(Soundness_TypeLiterals, ANamedStructDeclarationIsStillADeclaration) {
+    // The control on the grammar change: `struct` in statement position must not
+    // start being read as an expression. The two forms differ by one token of
+    // lookahead (IDENTIFIER against LBRACE).
+    auto r = compile("struct S { pub a <int> = 1, }\n"
+                     "fun main() <noret> { let s <S> = S{a: 2}; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AnEmptyStructLiteralIsStillAStructLiteral) {
+    // `struct {}` has no members at all. Worth pinning because a body nonterminal
+    // that requires at least one member is the usual shape, and `struct IOError:
+    // <Error> {}` proves the empty *declaration* is legal (stdio.fin:44).
+    auto r = compile("fun take(s: $struct) <int> { return 1; }\n"
+                     "fun main() <noret> { take(struct { }); }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
 TEST(Soundness_MetaTypes, DollarTypeIsADeclarableType) {
     auto r = compile("fun f(t: $type) <int> { return 1; }\n");
     EXPECT_EQ(r.exitCode, 0) << "`$type` is a builtin meta-type, not an undefined name:\n" << r.err;

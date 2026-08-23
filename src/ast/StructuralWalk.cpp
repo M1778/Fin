@@ -386,6 +386,15 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
             return;
         }
 
+        // The declaration is the whole subtree. Walking it here is what makes the
+        // body of an anonymous type visible to every structural pass without any of
+        // them knowing that a type body can appear inside an expression.
+        case NodeKind::TypeLiteralExpression: {
+            auto& n = static_cast<TypeLiteralExpression&>(node);
+            emit(out, n.decl.get());
+            return;
+        }
+
         case NodeKind::SizeofExpression: {
             auto& n = static_cast<SizeofExpression&>(node);
             emit(out, n.type_target.get());

@@ -16,6 +16,20 @@ public:
     void accept(Visitor& v) override;
 };
 
+// `struct { ... }` and `interface { ... }` in expression position --
+// literal_struct.fin:24 and literal_interface.fin:20. The body is the body the
+// named declaration uses, so this holds that declaration rather than a second
+// representation of a type body: `decl` is a StructDeclaration or an
+// InterfaceDeclaration, always with a generated name (parser.y names it from its
+// location, because two literals in one scope are two types).
+class TypeLiteralExpression : public Expression {
+public:
+    std::unique_ptr<Statement> decl;
+    bool is_interface = false;
+    TypeLiteralExpression(std::unique_ptr<Statement> d, bool iface);
+    void accept(Visitor& v) override;
+};
+
 class SizeofExpression : public Expression {
 public:
     std::unique_ptr<TypeNode> type_target;

@@ -1128,6 +1128,30 @@ interface_item_rest:
         $$ = std::make_unique<fin::StructMember>($1, std::move($4), false);
         $$->setLoc(@$);
     }
+    /* A member carrying a default: `pub picked_first <bool> = true;`
+       (literal_interface.fin:21, again at :27). Both terminators, like the two
+       plain forms above, and both in one place because the interface bodies in the
+       corpus disagree about which one they use -- semicolons everywhere except
+       literal_struct.fin:10-13.
+
+       What a default on an interface member means to an implementor is not
+       something any sample says, and this does not decide it: the expression is
+       parsed onto `default_value`, where the analyzer type-checks it against the
+       declared type exactly as it does a struct field's. Those two lines are the
+       only evidence in fifty samples that the form exists at all. */
+    | IDENTIFIER LT type GT EQUAL expression SEMICOLON {
+        auto member = std::make_unique<fin::StructMember>($1, std::move($3), false);
+        member->default_value = std::move($6);
+        $$ = std::move(member);
+        $$->setLoc(@$);
+    }
+    | IDENTIFIER LT type GT EQUAL expression COMMA {
+        auto member = std::make_unique<fin::StructMember>($1, std::move($3), false);
+        member->default_value = std::move($6);
+        $$ = std::move(member);
+        $$->setLoc(@$);
+    }
+
     /* Method: fun ... */
     | declaration_body { $$ = std::move($1); }
     
@@ -2690,6 +2714,42 @@ primary_no_struct:
     | LBRACKET arguments RBRACKET { $$ = std::make_unique<fin::ArrayLiteral>(std::move($2)); $$->setLoc(@$); }
     | KW_CAST LT type GT LPAREN expression RPAREN { $$ = std::make_unique<fin::CastExpression>(std::move($3), std::move($6)); $$->setLoc(@$); }
     | KW_SIZEOF LPAREN type RPAREN { $$ = std::make_unique<fin::SizeofExpression>(std::move($3)); $$->setLoc(@$); }
+
+    /* A type body in expression position: `make_default(struct { ... })`
+       (literal_struct.fin:24) and `return interface { ... }`
+       (literal_interface.fin:20). The body is `struct_body_content` /
+       `interface_body_content` -- the same nonterminal the named declaration uses --
+       so everything that already works in a named body works here, including a
+       method written without `fun` (literal_struct.fin:27).
+
+       In `primary_no_struct` rather than in the two expression nonterminals that
+       share it, and unambiguous in both: the `{` follows a keyword, so the restricted
+       context that exists to keep `if (x) {` from being read as an instantiation is
+       not affected.
+
+       The name. An anonymous type still needs one to be registered, and the location
+       gives a unique one without a counter -- two literals in one scope are two
+       types, which a shared placeholder name would have collapsed into a
+       duplicate definition. Angle brackets keep it out of the identifier space, so
+       no source can name it and a diagnostic that prints it cannot be mistaken for
+       a real type.
+
+       No `inheritance_opt`. No sample writes `struct : <I> { }` in expression
+       position, and adding a production nothing exercises is inventing grammar. */
+    | KW_STRUCT LBRACE struct_body_content RBRACE {
+        $3->name = "<anonymous struct at " + std::to_string(@$.begin.line)
+                 + ":" + std::to_string(@$.begin.column) + ">";
+        $3->setLoc(@$);
+        $$ = std::make_unique<fin::TypeLiteralExpression>(std::move($3), false);
+        $$->setLoc(@$);
+    }
+    | KW_INTERFACE LBRACE interface_body_content RBRACE {
+        $3->name = "<anonymous interface at " + std::to_string(@$.begin.line)
+                 + ":" + std::to_string(@$.begin.column) + ">";
+        $3->setLoc(@$);
+        $$ = std::make_unique<fin::TypeLiteralExpression>(std::move($3), true);
+        $$->setLoc(@$);
+    }
     
     /* Turbofish Call */
     | IDENTIFIER DOUBLE_COLON LT type_list GT LPAREN arguments RPAREN {

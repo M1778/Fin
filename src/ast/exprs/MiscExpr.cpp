@@ -7,6 +7,10 @@ CastExpression::CastExpression(std::unique_ptr<TypeNode> t, std::unique_ptr<Expr
     : target_type(std::move(t)), expr(std::move(e)) {}
 void CastExpression::accept(Visitor& v) { v.visit(*this); }
 
+TypeLiteralExpression::TypeLiteralExpression(std::unique_ptr<Statement> d, bool iface)
+    : decl(std::move(d)), is_interface(iface) {}
+void TypeLiteralExpression::accept(Visitor& v) { v.visit(*this); }
+
 SizeofExpression::SizeofExpression(std::unique_ptr<TypeNode> t) : type_target(std::move(t)) {}
 SizeofExpression::SizeofExpression(std::unique_ptr<Expression> e) : expr_target(std::move(e)) {}
 void SizeofExpression::accept(Visitor& v) { v.visit(*this); }

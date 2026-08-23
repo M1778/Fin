@@ -100,6 +100,7 @@ class ASTNode;
     V(StructInstantiation)    \
     V(NewExpression)          \
     V(CastExpression)         \
+    V(TypeLiteralExpression)  \
     V(SizeofExpression)       \
     V(SuperExpression)        \
     V(LambdaExpression)       \

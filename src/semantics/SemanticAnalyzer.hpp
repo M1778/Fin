@@ -76,6 +76,7 @@ public:
     void visit(MacroCall& node) override;
     void visit(MacroInvocation& node) override;
     void visit(CastExpression& node) override;
+    void visit(TypeLiteralExpression& node) override;
     void visit(NewExpression& node) override;
     void visit(MemberAccess& node) override;
     void visit(StructInstantiation& node) override;

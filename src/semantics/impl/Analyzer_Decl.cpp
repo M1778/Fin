@@ -552,7 +552,27 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     declareGenericParams(node.generic_params);
     currentScope->defineType("Self", ifaceType);
 
-    for (auto& member : node.members) resolveTypeFromAST(member->type.get());
+    // resolveTypeOrError, not resolveTypeFromAST, because an interface member is a
+    // declaration site: the sentinel is what keeps checkInitializer below quiet about
+    // a type that has already reported.
+    for (auto& member : node.members) {
+        auto memberType = resolveTypeOrError(member->type.get());
+        // literal_interface.fin:21 gives an interface member a default
+        // (`pub picked_first <bool> = true;`), so a default on one is part of the
+        // language and is checked exactly as a struct member's is (pass 2 step 1 of
+        // visit(StructDeclaration&) above). Before this, the default was parsed onto
+        // StructMember::default_value and read by nobody: `interface I { pub flag
+        // <bool> = 7; }` built successfully, and the value was dropped.
+        //
+        // What a default on an interface member *means* to an implementor -- a
+        // required initial value, or merely a suggested one -- is an open question
+        // for the owner, and this check does not decide it. `= 7` on a `<bool>` is
+        // wrong under either answer, which is why the check can land first.
+        if (member->default_value) {
+            member->default_value->accept(*this);
+            if (lastExprType) checkInitializer(*member->default_value, lastExprType, memberType);
+        }
+    }
     
     for (auto& method : node.methods) {
         // The one signature pass that is NOT quiet, and the reason QuietPass is a

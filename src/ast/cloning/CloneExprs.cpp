@@ -65,6 +65,17 @@ void CloneVisitor::visit(MethodCall& node) {
     result = std::move(res);
 }
 
+void CloneVisitor::visit(TypeLiteralExpression& node) {
+    // The declaration is cloned through the same visit the named form uses, so a
+    // literal inside a macro body is copied as completely as a named type is. The
+    // generated name is copied with it: a macro expanded twice therefore yields two
+    // types with one name, which is a duplicate-definition diagnostic rather than
+    // silent aliasing. Nothing in the corpus does it.
+    auto res = std::make_unique<TypeLiteralExpression>(clone(node.decl.get()), node.is_interface);
+    res->setLoc(node.loc);
+    result = std::move(res);
+}
+
 void CloneVisitor::visit(CastExpression& node) {
     auto res = std::make_unique<CastExpression>(
         clone(node.target_type.get()),

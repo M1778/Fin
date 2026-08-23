@@ -626,6 +626,26 @@ void SemanticAnalyzer::visit(MacroInvocation& node) {
     lastExprType = nullptr;
 }
 
+void SemanticAnalyzer::visit(TypeLiteralExpression& node) {
+    // The body is analysed through the same visit a named declaration takes, which
+    // is what makes a field's default and a method's body checked here without a
+    // second copy of that logic. literal_struct.fin:24 and literal_interface.fin:20.
+    //
+    // Inside a scope of its own. `visit(StructDeclaration&)` defines the type by
+    // name in `currentScope`, and the name here is generated -- so without this the
+    // enclosing function would gain a type nobody can spell, and it would gain one
+    // per literal. Discarding the scope also settles what a literal's members are
+    // visible to: the type itself, and nothing outside it.
+    //
+    // The value is the meta-type, and it is set after the body walk rather than
+    // before, because analysing the body overwrites lastExprType.
+    enterScope();
+    node.decl->accept(*this);
+    exitScope();
+
+    lastExprType = currentScope->resolveType(node.is_interface ? "$interface" : "$struct");
+}
+
 void SemanticAnalyzer::visit(CastExpression& node) {
     node.expr->accept(*this);
     auto sourceType = lastExprType;

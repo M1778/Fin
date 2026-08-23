@@ -48,6 +48,7 @@ class MacroCall;
 class MacroInvocation;
 class QuoteExpression;
 class CastExpression;
+class TypeLiteralExpression;
 class NewExpression;
 class MemberAccess;
 class StructInstantiation;
@@ -135,6 +136,7 @@ public:
     virtual void visit(MacroInvocation& node) = 0;
     virtual void visit(QuoteExpression& node) = 0;
     virtual void visit(CastExpression& node) = 0;
+    virtual void visit(TypeLiteralExpression& node) = 0;
     virtual void visit(NewExpression& node) = 0;
     virtual void visit(MemberAccess& node) = 0;
     virtual void visit(StructInstantiation& node) = 0;

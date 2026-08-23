@@ -90,6 +90,7 @@ NodeCategory nodeCategory(NodeKind kind) noexcept {
         case NodeKind::StructInstantiation:
         case NodeKind::NewExpression:
         case NodeKind::CastExpression:
+        case NodeKind::TypeLiteralExpression:
         case NodeKind::SizeofExpression:
         case NodeKind::SuperExpression:
         case NodeKind::LambdaExpression:
