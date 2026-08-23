@@ -7385,3 +7385,161 @@ TEST(KnownDefect_SelfGenerics, SelfWithConcreteArgumentsInAStructIsAFabricatedTy
     EXPECT_NE(r.exitCode, 0) << "if this passes, Self<int> resolves properly -- invert this test";
     EXPECT_NE(stripAnsi(r.err).find("Self<int>"), std::string::npos) << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// A generic struct's arguments, inferred at a constructor call.
+//
+// `let ta2 <rptr<int>> = rptr(5);` (tests/samples/const.fin:80) and
+// `let arr <rptr<[int]>> = rptr([1,2,3,4]);` (:98). The call was typed as the
+// template -- `rptr<T>` -- so both reported a mismatch against the annotation three
+// characters to the left, and the sample could not say what a smart pointer is for
+// without saying it wrong. `Ok(10)` in stdlib/typing.fin is the same shape one layer
+// out, and waits on an enum-side call site rather than on the rule.
+//
+// Inferred from the arguments only. What is deliberately not read is the annotation:
+// `let b <Box<int>> = Box();` has nothing in the call to infer from, and a rule that
+// reached leftward for the answer would be a different feature -- booked below.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_GenericInference, AConstructorCallInfersTheStructsArgument) {
+    // const.fin:80 reduced.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> { let b <Box<int>> = Box(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, TheInferredArgumentIsWhatTheAnnotationIsCheckedAgainst) {
+    // The sharp one. Inference must not become acceptance: `Box(1)` is a `Box<int>`,
+    // and a `Box<string>` annotation is still wrong -- with the inferred argument in
+    // the message rather than the parameter's name.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> { let b <Box<string>> = Box(1); }\n");
+    EXPECT_NE(r.exitCode, 0) << "a Box<int> is not a Box<string>";
+    EXPECT_NE(stripAnsi(r.err).find("got 'Box<int>'"), std::string::npos)
+        << "the diagnostic names what was inferred, not the template:\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, TwoParametersAreInferredIndependently) {
+    const FincRun r = compile(
+        "struct Pair<A, B> { pub a <A>, pub b <B>, Pair(a: A, b: B) { self.a = a; self.b = b; } }\n"
+        "fun main() <noret> { let p <Pair<int, string>> = Pair(1, \"x\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, AnArgumentIsMatchedThroughAnArrayParameter) {
+    // `Box(v: [T])` given `[1,2,3]` says T is int, not `[int]`. Structural, so the
+    // whole of const.fin:98 -- `rptr<[int]>` from `rptr([1,2,3,4])`, where the
+    // parameter is a bare T and the argument is the array -- works for the same reason
+    // in the other direction.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: [T]) { } }\n"
+        "fun main() <noret> { let b <Box<int>> = Box([1,2,3]); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, AWholeArrayIsInferredForABareParameter) {
+    // A bare `T` takes the whole argument type, array and all -- the inference itself
+    // is not what fails in the KnownDefect below. `[int, 3]` is how the corpus spells a
+    // fixed-size array (loops.fin:12), and an array literal is typed fixed, so this is
+    // the pairing that matches exactly.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> { let b <Box<[int, 3]>> = Box([1,2,3]); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_GenericInference, AFixedArrayInferredIntoAGenericArgumentDoesNotDecay) {
+    // `let arr <rptr<[int]>> = rptr([1,2,3,4]);` (tests/samples/const.fin:98). An array
+    // literal is typed fixed-size, so a bare `T` infers `[int; fixed]` and the struct
+    // comparison -- which is exact on generic arguments -- rejects the unsized
+    // annotation one character away.
+    //
+    // ArrayType::isAssignableTo already says a fixed array decays into a dynamic one;
+    // it is never asked, because StructType::equals compares generic arguments with
+    // typesEqual. Making that comparison assignability instead would also make
+    // `Box<Dog>` a `Box<Animal>`, which is variance and unsound for a mutable field --
+    // not a ruling to invent here.
+    //
+    // The fix is the other end: seed the mapping from the annotation before looking at
+    // the arguments, so T is `[int]` because that is what was written, and the literal
+    // is then checked against `[int]` and decays. That is the same missing machinery as
+    // AnArgumentlessConstructorIsNotInferredFromItsAnnotation below -- when it lands,
+    // invert both. Do not relax this by making arrays compare loosely.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> { let b <Box<[int]>> = Box([1,2,3]); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'Box<[int]>', got 'Box<[int; fixed]>'"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, AnArgumentIsMatchedThroughANestedGenericParameter) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "struct Wrap<U> { pub w <U>, Wrap(b: Box<U>) { } }\n"
+        "fun main() <noret> { let x <Box<int>> = Box(1); let y <Wrap<int>> = Wrap(x); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, AnUninferrableParameterIsLeftAsItWas) {
+    // `U` appears nowhere in the constructor's parameter list, so nothing says what it
+    // is. The half that was inferred still has to be applied -- a rule that gave up on
+    // the whole instantiation because one parameter was unknown would leave the common
+    // case unfixed.
+    const FincRun r = compile(
+        "struct Box<T, U> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> { let b <auto> = Box(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, TheArgumentsAreStillCheckedAgainstTheInstantiatedParameters) {
+    // Checked against the *instantiated* signature, which is stricter than checking
+    // against the template: `n: int` given a string is wrong either way, but with T
+    // bound to int the first parameter is too.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T, n: int) { self.v = v; } }\n"
+        "fun main() <noret> { let b <Box<int>> = Box(1, \"x\"); }\n");
+    EXPECT_NE(r.exitCode, 0) << "a string does not fit an int parameter";
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, ArityIsStillChecked) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> { let b <auto> = Box(1, 2); }\n");
+    EXPECT_NE(r.exitCode, 0) << "inference is not a licence to pass anything";
+    EXPECT_NE(stripAnsi(r.err).find("expects 1 arguments, got 2"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, ANonGenericStructIsUnaffected) {
+    // The control.
+    const FincRun r = compile(
+        "struct Box { pub v <int>, Box(v: int) { self.v = v; } }\n"
+        "fun main() <noret> { let b <Box> = Box(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, AnInheritedConstructorIsInferredToo) {
+    // The two rules meet: the constructor comes from the parent and the arguments come
+    // from the call, and the type constructed is the deriving one with its own argument
+    // bound.
+    const FincRun r = compile(
+        "struct Base<T> { pub v <T>, Base(v: T) { self.v = v; } }\n"
+        "struct Derived<T> : <Base<T>> {}\n"
+        "fun main() <noret> { let d <auto> = Derived(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_GenericInference, AnArgumentlessConstructorIsNotInferredFromItsAnnotation) {
+    // Booked: nothing in `Box()` says what T is, and the annotation on the left is not
+    // read. Reaching for it means threading an expected type into expression analysis --
+    // a feature, not a fix -- and no corpus line asks for it: both const.fin sites pass
+    // the value the parameter is inferred from.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box() { } }\n"
+        "fun main() <noret> { let b <Box<int>> = Box(); }\n");
+    EXPECT_NE(r.exitCode, 0) << "if this passes, an annotation informs inference -- invert this test";
+    EXPECT_NE(stripAnsi(r.err).find("got 'Box<T>'"), std::string::npos) << stripAnsi(r.err);
+}

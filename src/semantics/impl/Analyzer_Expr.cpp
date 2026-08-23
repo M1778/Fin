@@ -357,17 +357,101 @@ void SemanticAnalyzer::visit(UnaryOp& node) {
     }
 }
 
-// One check for every call that has a signature. Shared rather than copied because
-// each of the three call sites got a different subset right: the function site had
-// arity and argument types, the method site had neither, and the static-method site had
-// neither but ordered its own two statements correctly. See the header for the ordering
-// contract -- this walks the arguments, so the caller assigns the call's own type after.
-void SemanticAnalyzer::checkCallArguments(ASTNode& node, const char* kind,
-                                         const std::string& name,
-                                         const FunctionType& sig,
-                                         std::vector<std::unique_ptr<Expression>>& args) {
+namespace {
+
+// Does this type still mention a generic parameter that has not been given a value?
+//
+// The gate on generic-argument inference, and deliberately narrow: it looks at a
+// struct's generic_args and not at its fields, so `Box<int>` is concrete even though
+// `Box<T>::v` was written `T` -- the field is already substituted by the time an
+// instantiated struct exists, and reading fields here would call a fully applied type
+// generic and re-infer it.
+bool mentionsGenericParam(const TypePtr& t) {
+    if (!t) return false;
+    if (t->as<GenericType>()) return true;
+    if (auto* p = t->as<PointerType>()) return mentionsGenericParam(p->pointee);
+    if (auto* a = t->as<ArrayType>()) return mentionsGenericParam(a->element_type);
+    if (auto* n = t->as<NullableType>()) return mentionsGenericParam(n->inner);
+    if (auto* s = t->as<StructType>()) {
+        for (const auto& g : s->generic_args) if (mentionsGenericParam(g)) return true;
+        return false;
+    }
+    if (auto* pr = t->as<PrototypeType>())
+        return mentionsGenericParam(pr->keyType) || mentionsGenericParam(pr->valueType);
+    if (auto* f = t->as<FunctionType>()) {
+        if (mentionsGenericParam(f->return_type)) return true;
+        for (const auto& q : f->param_types) if (mentionsGenericParam(q)) return true;
+    }
+    return false;
+}
+
+// Learn what a generic parameter stands for by matching a written argument against the
+// parameter it binds to, structurally. Nothing is diagnosed here -- an argument that
+// does not match the shape teaches nothing and is left to checkType, which runs after
+// against the instantiated parameters and already has the message for it.
+//
+// First binding wins. `Pair(1, "x")` for `Pair(a: A, b: A)` therefore instantiates
+// `Pair<int, int>` and reports the second argument as a type mismatch, rather than
+// needing a second diagnostic about conflicting inferences that no sample asks for.
+void unifyGeneric(const TypePtr& param, const TypePtr& arg, TypeMap& out) {
+    if (!param || !arg) return;
+    if (auto* g = param->as<GenericType>()) {
+        if (!out.count(g->name)) out[g->name] = arg;
+        return;
+    }
+    if (auto* p = param->as<PointerType>()) {
+        if (auto* pa = arg->as<PointerType>()) unifyGeneric(p->pointee, pa->pointee, out);
+        return;
+    }
+    if (auto* a = param->as<ArrayType>()) {
+        // is_fixed_size is not matched. `rptr([1,2,3,4])` (tests/samples/const.fin:98)
+        // hands a fixed-size literal to a parameter written `[T]`, and the size is not
+        // part of what T is.
+        if (auto* aa = arg->as<ArrayType>()) unifyGeneric(a->element_type, aa->element_type, out);
+        return;
+    }
+    if (auto* n = param->as<NullableType>()) {
+        // `n?: T` given 5 learns T = int: a nullable parameter accepts the bare value,
+        // so the same pairing has to teach the same thing (nullifier.fin's optional
+        // parameters are what makes this reachable at all).
+        if (auto* na = arg->as<NullableType>()) unifyGeneric(n->inner, na->inner, out);
+        else unifyGeneric(n->inner, arg, out);
+        return;
+    }
+    if (auto* s = param->as<StructType>()) {
+        if (auto* sa = arg->as<StructType>()) {
+            if (s->name == sa->name && s->generic_args.size() == sa->generic_args.size()) {
+                for (size_t i = 0; i < s->generic_args.size(); ++i)
+                    unifyGeneric(s->generic_args[i], sa->generic_args[i], out);
+            }
+        }
+        return;
+    }
+    if (auto* pr = param->as<PrototypeType>()) {
+        if (auto* pa = arg->as<PrototypeType>()) {
+            unifyGeneric(pr->keyType, pa->keyType, out);
+            unifyGeneric(pr->valueType, pa->valueType, out);
+        }
+        return;
+    }
+    if (auto* f = param->as<FunctionType>()) {
+        if (auto* fa = arg->as<FunctionType>()) {
+            for (size_t i = 0; i < f->param_types.size() && i < fa->param_types.size(); ++i)
+                unifyGeneric(f->param_types[i], fa->param_types[i], out);
+            unifyGeneric(f->return_type, fa->return_type, out);
+        }
+        return;
+    }
+}
+
+} // namespace
+
+// Arity only, so that the generic-inference path can report it before it walks the
+// arguments -- see the header.
+void SemanticAnalyzer::checkCallArity(ASTNode& node, const char* kind,
+                                     const std::string& name,
+                                     const FunctionType& sig, size_t actual) {
     size_t expected = sig.param_types.size();
-    size_t actual = args.size();
 
     // A nullable parameter is optional at the call site. nullifier.fin:39 calls
     // `make_A()` with no arguments and says why: "since make_A says \"n?: int\" we
@@ -395,7 +479,21 @@ void SemanticAnalyzer::checkCallArguments(ASTNode& node, const char* kind,
         }
     }
 
-    for (size_t i = 0; i < actual; ++i) {
+}
+
+// One check for every call that has a signature. Shared rather than copied because
+// each of the three call sites got a different subset right: the function site had
+// arity and argument types, the method site had neither, and the static-method site had
+// neither but ordered its own two statements correctly. See the header for the ordering
+// contract -- this walks the arguments, so the caller assigns the call's own type after.
+void SemanticAnalyzer::checkCallArguments(ASTNode& node, const char* kind,
+                                         const std::string& name,
+                                         const FunctionType& sig,
+                                         std::vector<std::unique_ptr<Expression>>& args) {
+    checkCallArity(node, kind, name, sig, args.size());
+
+    size_t expected = sig.param_types.size();
+    for (size_t i = 0; i < args.size(); ++i) {
         args[i]->accept(*this);
         if (i < expected) {
             checkType(*args[i], lastExprType, sig.param_types[i]);
@@ -406,6 +504,11 @@ void SemanticAnalyzer::checkCallArguments(ASTNode& node, const char* kind,
 void SemanticAnalyzer::visit(FunctionCall& node) {
     std::shared_ptr<FunctionType> funcType = nullptr;
     std::string funcName = node.name;
+    // Set by the two paths that reach a constructor. A constructor is the only callee
+    // whose return type is the thing being named at the call site, which is what makes
+    // its generic arguments inferable from the arguments written -- a free generic
+    // function returns something else and is a separate rule.
+    bool isConstructor = false;
 
     // Case 1: Self(...)
     if (funcName == "Self") {
@@ -418,6 +521,7 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
         auto ctor = st ? StructType::constructorFor(st) : nullptr;
         if (ctor) {
             funcType = std::dynamic_pointer_cast<FunctionType>(ctor);
+            isConstructor = true;
         } else {
             error(node, "Struct '" + st->name + "' has no constructors");
             lastExprType = nullptr;
@@ -436,6 +540,7 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
                 // call and none declare.
                 if (auto ctor = StructType::constructorFor(st)) {
                     funcType = std::dynamic_pointer_cast<FunctionType>(ctor);
+                    isConstructor = true;
                 } else {
                      // Nothing in the ancestry declares one, so the type is
                      // constructible with no arguments and with nothing else --
@@ -444,6 +549,7 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
                      // keeps `P(1)` an arity error rather than an unchecked call.
                      std::vector<std::shared_ptr<Type>> dummyParams;
                      funcType = std::make_shared<FunctionType>(dummyParams, st);
+                     isConstructor = true;
                 }
             }
         } 
@@ -458,6 +564,50 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
     if (!funcType) {
         error(node, "Undefined function or type '" + funcName + "'");
         lastExprType = nullptr;
+        return;
+    }
+
+    // A generic constructor is instantiated from the arguments written to it.
+    //
+    // `let ta2 <rptr<int>> = rptr(5);` (tests/samples/const.fin:80) was typed as the
+    // template -- `rptr<T>` -- and so reported a mismatch against the annotation three
+    // characters to its left. The sample could not say what a smart pointer is for
+    // without saying it wrong. The argument says what T is, so the call is checked
+    // against, and typed as, the instantiation.
+    //
+    // Gated on a constructor whose struct return type still mentions a parameter, so
+    // that nothing else moves: every other call goes through checkCallArguments in the
+    // order it always did. Inference cannot use that helper, because it has to know the
+    // argument types before it can say what the parameters are.
+    if (isConstructor && funcType->return_type && funcType->return_type->as<StructType>() &&
+        mentionsGenericParam(funcType->return_type)) {
+        checkCallArity(node, "Function", funcName, *funcType, node.args.size());
+
+        std::vector<std::shared_ptr<Type>> argTypes;
+        for (auto& arg : node.args) {
+            arg->accept(*this);
+            argTypes.push_back(lastExprType);
+        }
+
+        TypeMap mapping;
+        for (size_t i = 0; i < argTypes.size() && i < funcType->param_types.size(); ++i) {
+            unifyGeneric(funcType->param_types[i], argTypes[i], mapping);
+        }
+
+        // One substitute() does both halves: FunctionType::substitute rebuilds the
+        // parameters *and* the return type, and a constructor's return type is the
+        // struct being constructed. So the parameters the arguments are checked against
+        // and the type the call takes come out of the same instantiation, and cannot
+        // disagree.
+        auto instantiated = std::dynamic_pointer_cast<FunctionType>(funcType->substitute(mapping));
+        if (instantiated) {
+            for (size_t i = 0; i < argTypes.size() && i < instantiated->param_types.size(); ++i) {
+                checkType(*node.args[i], argTypes[i], instantiated->param_types[i]);
+            }
+            lastExprType = instantiated->return_type;
+        } else {
+            lastExprType = funcType->return_type;
+        }
         return;
     }
 

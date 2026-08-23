@@ -209,6 +209,15 @@ private:
     void checkCallArguments(ASTNode& node, const char* kind, const std::string& name,
                             const FunctionType& sig,
                             std::vector<std::unique_ptr<Expression>>& args);
+
+    // The arity half of checkCallArguments on its own.
+    //
+    // Split out for the one caller that cannot use the pair together: inferring a
+    // generic constructor's arguments means walking them first, and checkCallArguments
+    // reports arity *before* it walks. Calling this first keeps that order -- an arity
+    // error on `Box(1, 2)` still prints ahead of anything the arguments say.
+    void checkCallArity(ASTNode& node, const char* kind, const std::string& name,
+                        const FunctionType& sig, size_t actual);
     bool checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected);
 
     // checkType, except that `null` is accepted whatever the declared type is.
