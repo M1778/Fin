@@ -17,6 +17,7 @@ class ModuleLoader; // Forward declaration
 // a shared_ptr, and pulling TypeImpl.hpp into this header would put every concrete
 // type in front of every translation unit that analyses anything.
 class FunctionType;
+class StructType; // buildOperatorSignature takes the owner, to look a method up in it
 
 struct AnalysisContext {
     bool inLoop = false;
@@ -179,6 +180,14 @@ private:
     // the sentinel, and a sentinel parameter silently switches the argument check off
     // rather than failing loudly.
     std::shared_ptr<FunctionType> buildMethodSignature(FunctionDeclaration& method);
+    // The same for an operator, and the reason it is not buildMethodSignature is the
+    // `implements cast<fn(Self, T)>(__get)` form (tests/samples/stdlib/hashmap.fin:50),
+    // which has no parameter list and no written return type: both come out of the
+    // cast, and the return type out of the method the cast names -- which is what
+    // `owner` is for. `owner` may be null where there is no type to look a method up
+    // in yet.
+    std::shared_ptr<FunctionType> buildOperatorSignature(OperatorDeclaration& op,
+                                                         const std::shared_ptr<StructType>& owner);
 
     // The arity-and-argument check shared by every call that has a signature:
     // visit(FunctionCall&), visit(MethodCall&) and visit(StaticMethodCall&).

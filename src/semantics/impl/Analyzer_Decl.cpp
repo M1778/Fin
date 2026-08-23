@@ -84,6 +84,80 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDec
     return std::make_shared<FunctionType>(paramTypes, retType);
 }
 
+std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
+        OperatorDeclaration& op, const std::shared_ptr<StructType>& owner) {
+    enterScope();
+    declareGenericParams(op.generic_params);
+
+    std::vector<std::shared_ptr<Type>> paramTypes;
+    for (auto& param : op.params) {
+        auto type = resolveTypeOrError(param->type.get());
+        currentScope->define({param->name, type, false, true});
+        // The receiver is not an argument, exactly as in buildMethodSignature. No
+        // corpus operator writes `self`, but the two functions should not disagree
+        // about what a signature is.
+        if (param->name == "self") continue;
+        paramTypes.push_back(type);
+    }
+    visitParameterDefaults(op.params);
+
+    std::shared_ptr<Type> retType = nullptr;
+    if (op.return_type) retType = resolveTypeOrError(op.return_type.get());
+
+    // `pub operator[] implements cast<fn(Self, T)>(__get);` --
+    // tests/samples/stdlib/hashmap.fin:50-51, and lib/std/hashmap.fin's header note at
+    // :17-23 says the bundle wrote its operators out longhand precisely because "an
+    // operator declared that way would be registered with no signature".
+    //
+    // The form says: this operator *is* that function, viewed as `fn(Self, T)`. So the
+    // parameters come from the cast and the return type from the function it names --
+    // there is no `<ReturnType>` on the declaration to read, which is what makes this
+    // form need its own path. `implements_expr` held the whole cast and was read by
+    // nobody until here.
+    if (op.implements_expr) {
+        if (auto* cast = dynamic_cast<CastExpression*>(op.implements_expr.get())) {
+            if (auto* fnNode = dynamic_cast<FunctionTypeNode*>(cast->target_type.get())) {
+                size_t first = 0;
+                // The leading `Self` is the receiver. Recognised by name rather than by
+                // resolving it, because `Self` inside its own declaration resolves to
+                // the struct and so would be indistinguishable from a genuine parameter
+                // of that type -- and `fn(Self, Self)` is a thing an operator could
+                // legitimately want.
+                if (!fnNode->param_types.empty() && fnNode->param_types[0]->name == "Self") first = 1;
+                for (size_t i = first; i < fnNode->param_types.size(); ++i) {
+                    paramTypes.push_back(resolveTypeOrError(fnNode->param_types[i].get()));
+                }
+                // `fn(Self, T)` has no return type at all -- parser.y's fn_type leaves
+                // it null rather than inventing one, "so a pass that needs one can tell
+                // it was not written". This is that pass.
+                if (fnNode->return_type) retType = resolveTypeOrError(fnNode->return_type.get());
+            }
+            if (!retType) {
+                if (auto* id = dynamic_cast<Identifier*>(cast->expr.get())) {
+                    if (owner) {
+                        if (auto mt = owner->getMethodType(id->name)) {
+                            if (auto* f = mt->as<FunctionType>()) retType = f->return_type;
+                            else retType = mt;
+                        }
+                    }
+                    // Not an error when the method is missing: the operator still gets
+                    // `void` below and the program still reports whatever it reports
+                    // about the name elsewhere. Diagnosing an unbound `implements cast`
+                    // is its own question, and stdlib/hashmap.fin:50 binds a method
+                    // declared eight lines above it.
+                }
+            }
+        }
+    }
+
+    if (!retType) retType = currentScope->resolveType("void");
+    exitScope();
+
+    // Null only when `void` itself failed to resolve. Callers gate on it as they did.
+    if (!retType) return nullptr;
+    return std::make_shared<FunctionType>(paramTypes, retType);
+}
+
 void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     debugLog(fg(fmt::color::cyan), "[INFO] Analyzing function '{}'\n", node.name);
     
@@ -260,39 +334,31 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         }
 
         for (auto& op : node.operators) {
-            // A scope with the operator's own generics in it, which this loop did not
-            // have: `operator + : <T>(other: <T>) <T>` reported "Undefined type 'T'"
-            // about a parameter it declares one token earlier, and registered the
-            // operator returning the sentinel. Booked as KnownDefect_Generics.AnOperators-
-            // OwnGenericParameterIsNotInScopeInPassOne, whose text asked for exactly
-            // these three lines once something had collapsed the method copy of the same
-            // hole -- buildMethodSignature above is that something.
+            // The whole signature, not just the return type. The note that used to sit
+            // here said an operator's parameters had no consumer and that building a
+            // signature "would be dead. Booked, not done" -- a subscript is that
+            // consumer, since visit(ArrayAccess&) checks the index against the index
+            // operator's parameter (Soundness_IndexOperator).
             //
-            // The QuietPass around this whole block had already removed the *diagnostic*
-            // half of that defect, which is why the fix cannot be verified by compiling
-            // the program and counting: silence and a correct scope produce the same zero.
-            // What is left to verify is the registration, and the only way to see it is to
-            // call the operator and read the type of the call --
-            // Soundness_Generics.AnOperatorsRegisteredReturnTypeIsWhatItsCallIsTyped.
-            // Mutant D-opgen reverts these three lines and that test is what kills it.
-            enterScope();
-            declareGenericParams(op->generic_params);
-
-            std::shared_ptr<Type> retType = nullptr;
-            if (op->return_type) retType = resolveTypeOrError(op->return_type.get());
-            else retType = currentScope->resolveType("void");
-
-            exitScope();
-
+            // buildOperatorSignature opens the scope holding the operator's own
+            // generics, which this loop once lacked: `operator + : <T>(other: <T>) <T>`
+            // reported "Undefined type 'T'" about a parameter it declares one token
+            // earlier, and registered the operator returning the sentinel. That was
+            // KnownDefect_Generics.AnOperatorsOwnGenericParameterIsNotInScopeInPassOne.
+            // The QuietPass around this block had already removed the *diagnostic* half,
+            // which is why the fix cannot be verified by compiling and counting --
+            // silence and a correct scope produce the same zero. What is verifiable is
+            // the registration, and the only way to see it is to call the operator and
+            // read the type of the call: Soundness_Generics.AnOperatorsRegisteredReturn-
+            // TypeIsWhatItsCallIsTyped. Mutant D-opgen drops those generics and that
+            // test is what kills it.
+            //
             // Ungated for the same reason as the methods above, and it mattered more
             // here: with the operator undeclared, `s + 1` fell through to the built-in
             // rule and reported `Type mismatch: expected 'S', got 'int'` -- a claim
             // about an operator the program did declare.
-            //
-            // A return type and nothing else, unlike the methods: an operator call has
-            // no arity check yet, so there is no consumer for its parameters and
-            // building a signature here would be dead. Booked, not done.
-            structType->defineOperator((int)op->op, retType);
+            if (auto sig = buildOperatorSignature(*op, structType))
+                structType->defineOperator((int)op->op, sig);
         }
 
         for (auto& ctor : node.constructors) {
@@ -433,9 +499,13 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
             auto targetStruct = std::dynamic_pointer_cast<StructType>(implType);
             if (targetStruct) {
                 int opKey = static_cast<int>(node.op);
-                if (targetStruct->operators.count(opKey)) {
-                    auto sourceOpType = targetStruct->operators[opKey];
-                    if (retType && !sourceOpType->equals(*retType)) {
+                if (auto sourceRet = targetStruct->getOperatorReturnType(opKey)) {
+                    // Return types, not whole signatures: this check has always been
+                    // about the return type, and `operators` holding a FunctionType
+                    // now would otherwise turn it into an accidental arity check --
+                    // which lib/std/collection.fin:29-33 says nothing does yet, and
+                    // which is not this unit's to introduce.
+                    if (retType && !sourceRet->equals(*retType)) {
                         error(node, "Implemented operator return type mismatch");
                     }
                 } else {
@@ -498,18 +568,12 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     }
     
     for (auto& op : node.operators) {
-        enterScope();
-        declareGenericParams(op->generic_params);
-        for (auto& param : op->params) resolveTypeFromAST(param->type.get());
-        visitParameterDefaults(op->params);
-        std::shared_ptr<Type> retType = nullptr;
-        if(op->return_type) retType = resolveTypeOrError(op->return_type.get());
-        else retType = currentScope->resolveType("void");
-        
-        // Unguarded, like defineMethod above it, so this stored a live null. Every
-        // reader dereferences it: StructType.cpp:65 clones it, :86 substitutes it.
-        ifaceType->defineOperator((int)op->op, retType);
-        exitScope();
+        // Guarded, unlike the version this replaces: that one stored a live null
+        // whenever `void` failed to resolve, and every reader dereferences it --
+        // StructType.cpp clones it and substitutes it. buildOperatorSignature returns
+        // null in exactly that case, and this is the whole of the guard.
+        if (auto sig = buildOperatorSignature(*op, ifaceType))
+            ifaceType->defineOperator((int)op->op, sig);
     }
 
     for (auto& ctor : node.constructors) {
@@ -785,21 +849,11 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
         }
 
         for (auto& op : node.operators) {
-            // The operator's own generics, as in visit(StructDeclaration) above.
-            enterScope();
-            declareGenericParams(op->generic_params);
-
-            std::shared_ptr<Type> retType = nullptr;
-            if (op->return_type) retType = resolveTypeOrError(op->return_type.get());
-            else retType = currentScope->resolveType("void");
-
-            exitScope();
-
-            // Ungated for the same reason as the methods above, and it mattered more
-            // here: with the operator undeclared, `s + 1` fell through to the built-in
-            // rule and reported `Type mismatch: expected 'S', got 'int'` -- a claim
-            // about an operator the program did declare.
-            structType->defineOperator((int)op->op, retType);
+            // The whole signature, as in the struct pass -- see the note there. The
+            // scope holding the operator's own generics is inside
+            // buildOperatorSignature now, so this loop opens none of its own.
+            if (auto sig = buildOperatorSignature(*op, structType))
+                structType->defineOperator((int)op->op, sig);
         }
 
         for (auto& ctor : node.constructors) {
@@ -943,17 +997,9 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
     }
     
     for (auto& op : node.operators) {
-        enterScope();
-        declareGenericParams(op->generic_params);
+        if (auto sig = buildOperatorSignature(*op, structType))
+            structType->defineOperator((int)op->op, sig);
 
-        std::shared_ptr<Type> retType = nullptr;
-        if (op->return_type) retType = resolveTypeOrError(op->return_type.get());
-        else retType = currentScope->resolveType("void");
-
-        exitScope();
-        
-        structType->defineOperator((int)op->op, retType);
-        
         op->accept(*this);
     }
     

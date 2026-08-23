@@ -107,6 +107,20 @@ std::vector<Position> parsePositions(const std::string& stderrText) {
     return out;
 }
 
+// How many diagnostics were printed. Anchored at the start of a line because the
+// source line echoed under a caret can itself contain "error:" -- an unanchored
+// count read `stdlib/error.fin`, whose whole subject is error handling, six high.
+size_t errorCount(const std::string& stripped) {
+    size_t n = 0;
+    for (size_t i = 0; i < stripped.size();) {
+        size_t eol = stripped.find('\n', i);
+        if (eol == std::string::npos) eol = stripped.size();
+        if (stripped.compare(i, 7, "error: ") == 0) ++n;
+        i = eol + 1;
+    }
+    return n;
+}
+
 // The whole comparison, extracted so the tests below can drive it over a file
 // they wrote themselves and prove it fails when it should.
 void checkSampleAgainstFinc(const std::string& path) {
@@ -151,6 +165,37 @@ void checkSampleAgainstFinc(const std::string& path) {
                       + std::to_string(run.exitCode - 128) + ".\n"
                 : "")
         << "stderr:\n" << err;
+
+    // Exit 1 means diagnostics and diagnostics mean exit 1 -- both directions, over
+    // every sample. This is the contract ADR 0009 states, and until now nothing
+    // checked it: `expectsOk` below asserts exit 0 and separately asserts no
+    // diagnostic, but a *failing* sample was only required to be non-zero, so a
+    // sample that printed nothing and exited 1, or printed six diagnostics and
+    // exited 3, satisfied every assertion in the file.
+    //
+    // Stated as a biconditional and not as two independent one-way implications
+    // because the two failures it catches are opposite mistakes: a pass that sets
+    // the failure flag without reporting anything (silent rejection -- the user
+    // sees an empty failure), and a pass that reports without setting it (a
+    // diagnostic the exit code denies, which is what a build script reads).
+    //
+    // Exit 2 is reachable in principle -- `finc /tmp/nosuch.fin` prints
+    // `error: could not read file` and exits 2 -- but never from here: every sample
+    // is a readable file passed as the one positional argument. So 2 is a failure of
+    // this assertion rather than an exemption from it, and the message says so.
+    const size_t diagnostics = errorCount(err);
+    if (diagnostics > 0) {
+        EXPECT_EQ(run.exitCode, 1)
+            << path << " printed " << diagnostics
+            << " diagnostic(s) but exited " << run.exitCode
+            << ". A diagnostic means exit 1 (ADR 0009); 2 is reserved for usage errors, "
+               "which a readable sample file cannot provoke.\nstderr:\n" << err;
+    } else {
+        EXPECT_NE(run.exitCode, 1)
+            << path << " exited 1 without printing a diagnostic. Exit 1 means "
+               "diagnostics were reported (ADR 0009), so this is a silent failure: "
+               "whatever rejected the sample set the failure flag without saying why.";
+    }
 
     const bool expectsOk = ann.expectations.front().kind == ExpectationKind::Ok;
 

@@ -1876,59 +1876,33 @@ TEST(KnownDefect_MethodCalls, AStaticCallOnAGenericStructIsCheckedAgainstTheTemp
         << stripAnsi(method.err);
 }
 
-TEST(KnownDefect_IndexOperator, AnIndexExpressionNeverConsultsOperatorBracket) {
-    // `operator []` parses, resolves, and is registered on the struct -- and nothing
-    // ever looks it up. visit(ArrayAccess) in Analyzer_Expr.cpp knows two shapes,
-    // ArrayType and PointerType, and a struct is neither, so a declared subscript
-    // operator has no reader at all. Two faces, and the pointer one is the dangerous
-    // half because it is silent.
-    //
-    // Found by measurement, not by reading: mutant S-retvoid ("a method with no
-    // written return type gets the sentinel, not void") killed nothing, and the reason
-    // was that no method can *have* no written return type -- every function production
-    // in parser.y requires `LT type GT`. Checking whether the operator loop's identical
-    // `else` branch was equally dead turned up parser.y:939, the
-    // `operator[] implements cast<fn(Self, T)>(__get)` form, where `return_type` really
-    // is null. That form is reachable (tests/samples/stdlib/hashmap.fin:50) -- and
-    // probing what it registered is how this came out.
-    //
-    // A third defect sits behind these two and only becomes visible once they are
-    // fixed: `OperatorDeclaration::implements_expr`, which holds the cast that carries
-    // that form's whole signature, is written by the parser and read by nobody
-    // (`grep -rn implements_expr src/` finds only the declaration and its assignment).
-    // So `operator[] implements cast<fn(Self, T)>(__get)` registers `operator[]`
-    // returning `void` and drops the binding to `__get` on the floor.
+// ---------------------------------------------------------------------------
+// A subscript on a struct is typed by its `operator []`.
+//
+// This block replaces KnownDefect_IndexOperator.AnIndexExpressionNeverConsults-
+// OperatorBracket, whose three faces were: a pointer receiver silently doing
+// pointer arithmetic, a value receiver reported as `is not an array or pointer`
+// even though it declared the operator, and the index forced to `int` before the
+// receiver was classified at all. The third went with the prototype unit above,
+// which moved the index check behind the classification. These are the other two,
+// and the inverted assertions are the ones that KnownDefect's failure message
+// asked for by name.
+//
+// The corpus wanted this in five places: tests/samples/deeptest4.fin:13, :14, :16
+// and :17 subscript a `HashMap`, and stdlib/hashmap.fin:39 subscripts a
+// `Collection`. So did the bundle -- lib/std/hashmap.fin's own header note at
+// :17-23 says the `implements cast` form was avoided because "an operator declared
+// that way would be registered with no signature", and wrote both operators out
+// longhand instead.
+//
+// `StructType::operators` mapped an operator to a *return type* and nothing else,
+// so there was nowhere to check a subscript against. Analyzer_Decl.cpp's own
+// comment on that said building a signature there "would be dead. Booked, not
+// done" -- and this is what made it live. Operators now hold a FunctionType, the
+// same as methods.
 
-    // Face one, silent: `&Box<int>` is a PointerType whose pointee is not an array, so
-    // the subscript is typed as the pointee -- C pointer-arithmetic semantics applied to
-    // a struct that asked for something else. No diagnostic says so; the only reason
-    // this is visible at all is the annotation it then fails against.
-    const std::string ptr = stripAnsi(compile(
-        "struct Box<T> {\n"
-        "    v <T>,\n"
-        "    operator [](i: <int>) <int> { return 1; }\n"
-        "}\n"
-        "fun main() <int> {\n"
-        "    let b <&Box<int>> = new Box::<int>{v: 7};\n"
-        "    let r <string> = b[0];\n"
-        "    return 0;\n"
-        "}\n").err);
-    EXPECT_NE(ptr.find("got 'Box<int>'"), std::string::npos)
-        << "GOOD NEWS: a subscript on a struct consults its operator []. Invert this\n"
-           "test -- the pointer case should report `expected 'string', got 'int'`, the\n"
-           "value case should compile clean, and a struct with no operator [] must still\n"
-           "report `is not an array or pointer` -- then rename it\n"
-           "Soundness_IndexOperator.AnIndexExpressionOnAStructIsTypedByItsOperator.\n"
-           "Registering the operator's *parameter* type is part of that fix: today\n"
-           "StructType::operators maps an operator to a return type and nothing else,\n"
-           "so there is nowhere to check the index against. Then re-run\n"
-           "tests/tools/corpus_snapshot.sh -- hashmap.fin and collection.fin both use\n"
-           "the `implements cast` form and their notes need rereading.\n"
-        << ptr;
-
-    // Face two, loud and wrong: a value receiver is not a pointer either, so the
-    // operator that exists to make this legal is reported as if it did not exist.
-    const std::string val = stripAnsi(compile(
+TEST(Soundness_IndexOperator, AnIndexExpressionOnAStructIsTypedByItsOperator) {
+    const FincRun r = compile(
         "struct Box {\n"
         "    v <int>,\n"
         "    operator [](i: <int>) <int> { return self.v; }\n"
@@ -1937,39 +1911,187 @@ TEST(KnownDefect_IndexOperator, AnIndexExpressionNeverConsultsOperatorBracket) {
         "    let b <Box> = Box{v: 7};\n"
         "    let r <int> = b[0];\n"
         "    return 0;\n"
-        "}\n").err);
-    EXPECT_NE(val.find("Type 'Box' is not an array or pointer"), std::string::npos)
-        << "the value-receiver half: the declared operator [] is not consulted\n" << val;
-    EXPECT_EQ(errorCount(val), 1u) << "and it is the only diagnostic\n" << val;
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "a value receiver that declares operator [] is subscriptable:\n" << r.err;
+}
 
-    // Face three: the index is forced to `int` before the receiver is even classified,
-    // so an operator declared to take a string key -- which is what a hashmap is for --
-    // reports twice for one legal expression.
-    const std::string key = stripAnsi(compile(
+TEST(Soundness_IndexOperator, TheResultIsTheOperatorsReturnTypeAndNotTheReceiver) {
+    // The control. Before this, the same program through a *pointer* was typed as the
+    // pointee -- C pointer arithmetic applied to a struct that asked for something
+    // else -- and nothing said so. Naming the type in the message is what separates
+    // "consulted the operator" from "gave up quietly".
+    const FincRun r = compile(
+        "struct Box {\n"
+        "    v <int>,\n"
+        "    operator [](i: <int>) <string> { return \"x\"; }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let b <Box> = Box{v: 7};\n"
+        "    let r <int> = b[0];\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_IndexOperator, AnIndexThroughAPointerToAStructConsultsTheOperator) {
+    // Face one of the old KnownDefect, and the dangerous half because it was silent:
+    // `&Box<int>` is a PointerType whose pointee is not an array, so the subscript
+    // was typed as `Box<int>`. A struct that declares a subscript means the subscript,
+    // not an offset into an array of itself.
+    const FincRun r = compile(
+        "struct Box<T> {\n"
+        "    v <T>,\n"
+        "    operator [](i: <int>) <int> { return 1; }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let b <&Box<int>> = new Box::<int>{v: 7};\n"
+        "    let r <string> = b[0];\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << "the operator's return type, not the pointee:\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_IndexOperator, TheSubscriptIsCheckedAgainstTheOperatorsParameter) {
+    // What "registering the parameter type" is for. A string-keyed subscript is what
+    // a hashmap is: lib/std/hashmap.fin:84 declares `operator [](key: <T>) <U>`.
+    // Two claims in one program so neither can pass vacuously -- the legal string
+    // subscript must not report, and the int one must.
+    const FincRun r = compile(
         "struct Map {\n"
         "    v <int>,\n"
         "    operator [](k: <string>) <int> { return self.v; }\n"
         "}\n"
         "fun main() <int> {\n"
         "    let m <Map> = Map{v: 7};\n"
-        "    let r <int> = m[\"k\"];\n"
+        "    let ok <int> = m[\"k\"];\n"
+        "    let bad <int> = m[3];\n"
         "    return 0;\n"
-        "}\n").err);
-    EXPECT_NE(key.find("expected 'int', got 'string'"), std::string::npos)
-        << "the index is checked against int, not against the operator's parameter\n" << key;
-    EXPECT_EQ(errorCount(key), 2u) << "two diagnostics for one legal subscript\n" << key;
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("expected 'string', got 'int'"), std::string::npos)
+        << "checked against the operator's parameter, not against int:\n" << err;
+    EXPECT_EQ(errorCount(err), 1u)
+        << "and the legal string subscript reports nothing -- this used to be two "
+           "diagnostics for one legal expression:\n"
+        << err;
+}
 
-    // The control, and the reason this is an operator defect and not a subscript defect:
-    // indexing what visit(ArrayAccess) does know about is right, element type and all.
-    const std::string arr = stripAnsi(compile(
+TEST(Soundness_IndexOperator, AStructWithNoIndexOperatorStillSaysSo) {
+    // The other regression guard the old test asked for. "Look for an operator" must
+    // not become "assume one".
+    const FincRun r = compile(
+        "struct Plain { v <int> }\n"
+        "fun main() <int> { let p <Plain> = Plain{v: 1}; let r <int> = p[0]; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("Type 'Plain' is not an array or pointer"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_IndexOperator, AnInheritedIndexOperatorIsConsulted) {
+    // `operators` had no parent walk, unlike `getFieldType` and `getMethodType`. An
+    // operator inherited from a parent is as declared as one written in the body --
+    // and stdlib/collection.fin:35 gets its `Index` conformance from an interface, so
+    // the walk is not hypothetical.
+    const FincRun r = compile(
+        "struct Base { operator [](i: <int>) <int> { return 1; } }\n"
+        "struct Derived : <Base> { v <int> }\n"
         "fun main() <int> {\n"
-        "    let a <[int]> = [1, 2, 3];\n"
-        "    let e <string> = a[0];\n"
+        "  let d <Derived>;\n"
+        "  let r <string> = d[0];\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << "an inherited operator [] is consulted:\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_IndexOperator, TheImplementsCastFormRegistersASignature) {
+    // `pub operator[] implements cast<fn(Self, T)>(__get);` -- stdlib/hashmap.fin:50,
+    // whose own comment points at stdlib/collection.fin for the explanation. The form
+    // says: this operator *is* that function, viewed as `fn(Self, T)`. So the
+    // parameters come from the cast (minus the leading `Self`, which is the receiver
+    // and not an argument, exactly as buildMethodSignature drops a written `self`) and
+    // the return type comes from the function named inside it -- there is no
+    // `<ReturnType>` on the declaration at all, which is what makes this form need its
+    // own path.
+    //
+    // `OperatorDeclaration::implements_expr` held that cast and was read by nobody.
+    const FincRun r = compile(
+        "struct Box {\n"
+        "    v <int>,\n"
+        "    pub fun __get(self: &Self, k: int) <int> { return self.v; }\n"
+        "    pub operator[] implements cast<fn(Self, int)>(__get);\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let b <Box> = Box{v: 7};\n"
+        "    let r <string> = b[0];\n"
         "    return 0;\n"
-        "}\n").err);
-    EXPECT_NE(arr.find("expected 'string', got 'int'"), std::string::npos)
-        << "an array subscript is typed as its element type\n" << arr;
-    EXPECT_EQ(errorCount(arr), 1u) << arr;
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << "the return type comes from the function the cast names:\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_IndexOperator, TheImplementsCastFormChecksItsSubscript) {
+    // The parameter half of the same form. `fn(Self, string)` means a string key.
+    const FincRun r = compile(
+        "struct Map {\n"
+        "    v <int>,\n"
+        "    pub fun __get(self: &Self, k: string) <int> { return self.v; }\n"
+        "    pub operator[] implements cast<fn(Self, string)>(__get);\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let m <Map> = Map{v: 7};\n"
+        "    let ok <int> = m[\"k\"];\n"
+        "    let bad <int> = m[3];\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("expected 'string', got 'int'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(KnownDefect_IndexOperator, AnAssignmentThroughASubscriptNeverConsultsOperatorBracketEquals) {
+    // `a[k] = v` types its target through `operator []` -- the *read* -- and checks the
+    // value against that operator's return type. `operator []=` is registered and never
+    // looked up. lib/std/hashmap.fin:23's own note says so ("an index expression never
+    // consults `operator []=`").
+    //
+    // This is benign wherever both are declared with matching types, which is every
+    // corpus site: lib/std/collection.fin:92 and :96, lib/std/hashmap.fin:84 and :88.
+    // It is not benign in two cases, and neither is in the corpus yet: a struct that
+    // declares `[]=` and no `[]` cannot be assigned into at all, and a struct whose two
+    // operators disagree about the value type is checked against the wrong one.
+    //
+    // Left booked rather than fixed because the ruling it needs is not in the samples:
+    // whether `a[k] = v` requires `operator []=`, or whether `operator []` alone is
+    // enough to make a subscript assignable. stdlib/operators.fin declares `Index` and
+    // `IndexAssign` as two interfaces, which hints at the first, and lib/std's note at
+    // collection.fin:29-33 says nothing checks an operator's arity against the
+    // interface that requires it either.
+    const FincRun r = compile(
+        "struct Only {\n"
+        "    v <int>,\n"
+        "    operator []=(i: <int>, value: <int>) <noret> { }\n"
+        "}\n"
+        "fun main() <int> { let o <Only> = Only{v: 1}; o[0] = 5; return 0; }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Type 'Only' is not an array or pointer"),
+              std::string::npos)
+        << "GOOD NEWS: a subscript assignment consults operator []=. Invert this test --\n"
+           "the program should compile clean, the subscript should be checked against\n"
+           "[]='s first parameter and the value against its second -- and rename it\n"
+           "Soundness_IndexOperator.AnAssignmentThroughASubscriptIsCheckedAgainstOperator-\n"
+           "BracketEquals. Then decide the other half: whether `operator []` alone still\n"
+           "makes a subscript assignable, and say so here either way.\n"
+        << stripAnsi(r.err);
 }
 
 // `a + f()` is not a call.
@@ -5733,4 +5855,142 @@ TEST(Soundness_FieldVisibility, AnInheritedPrivFieldIsNotReadableFromOutside) {
     EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Cannot access private field 'hidden'"),
               std::string::npos)
         << messagesOnly(stripAnsi(r.err));
+}
+
+// ---------------------------------------------------------------------------
+// Indexing a prototype.
+//
+// `visit(ArrayAccess&)` knew about arrays and pointers only, so every `p[k]` in the
+// corpus reported `Type '<{...}>' is not an array or pointer` -- six sites across
+// stdlib/memory.fin:31-33 and prototype_test.fin:17, :20 and :23. Two claims are
+// enough to fix all six, and both come straight off the samples:
+//
+//   * stdlib/memory.fin:30-33 declares `let info <{string, string}>;` and writes
+//     `info["MemoryCardModel"] = <a string>`. The subscript is the key type and the
+//     result is the value type.
+//   * prototype_test.fin:17's own comment -- "a_member will be 10 because of the
+//     key, value (10, 10)" -- says the same for a read.
+//
+// The index was also checked against `int` before the object's shape was looked at,
+// so a string-keyed prototype reported twice: once for not being an array, once for
+// a key that was never meant to be an integer. prototype_test.fin's note calls that
+// second message out by name.
+//
+// What this unit does *not* settle: `let a_member <int> = a[10];` on a
+// `<{object, object}>` still leaves `expected 'int', got 'object'`, because that is
+// the open question of whether an `object` narrows to the type it holds -- queued
+// for the owner along with `any<int>` and `object -> any`. Fixing the subscript
+// makes that question visible as its own diagnostic instead of hiding it behind a
+// wrong one, which is the point.
+
+TEST(Soundness_PrototypeAccess, AReadIsTypedAsTheValueType) {
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "  let p <{string, int}> = { \"a\": 1 };\n"
+        "  let v <int> = p[\"a\"];\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "prototype_test.fin:17 -- \"a_member will be 10 because of the key, value\":\n"
+        << r.err;
+}
+
+TEST(Soundness_PrototypeAccess, AReadIsNotTypedAsSomethingElse) {
+    // The control. Typing the read as the *key* type would pass the test above
+    // whenever key and value coincide, and `<{string, int}>` above was chosen so they
+    // do not -- but nothing in that test says which of the two it picked. This does.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "  let p <{string, int}> = { \"a\": 1 };\n"
+        "  let v <bool> = p[\"a\"];\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool', got 'int'"), std::string::npos)
+        << "the read is the value type, named as such:\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeAccess, AWriteThroughASubscriptIsAccepted) {
+    // stdlib/memory.fin:30-33 exactly: declared with no initialiser, then three
+    // subscript assignments. A prototype is grown by writing to a key that is not in
+    // it yet -- prototype_test.fin:20's comment says so outright ("a would be
+    // {10:10, "a":true,"b":false} after this statement") -- so there is nothing here
+    // to check beyond the key and the value.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "  let info <{string, string}>;\n"
+        "  info[\"model\"] = \"x\";\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << "stdlib/memory.fin:31 requires this:\n" << r.err;
+}
+
+TEST(Soundness_PrototypeAccess, TheSubscriptIsCheckedAgainstTheKeyTypeAndNotAgainstInt) {
+    // Two claims in one program, and the second is the one the old code got wrong: a
+    // string subscript on a string-keyed prototype is right, and an int subscript on
+    // the same prototype is wrong. Before this, both reported -- the first because the
+    // index was compared against `int` unconditionally.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "  let p <{string, int}> = { \"a\": 1 };\n"
+        "  let ok <int> = p[\"a\"];\n"
+        "  let bad <int> = p[7];\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("expected 'string', got 'int'"), std::string::npos)
+        << "the subscript is checked against the key type:\n"
+        << err;
+    EXPECT_EQ(errorCount(err), 1u)
+        << "and the legal string subscript is not also reported -- the old code compared "
+           "every index against `int` before it looked at what was being indexed, which "
+           "is the second message prototype_test.fin's note names:\n"
+        << err;
+}
+
+TEST(Soundness_PrototypeAccess, AnIntKeyedPrototypeStillTakesAnIntSubscript) {
+    // The other control. "Check against the key type" must not become "accept any
+    // subscript": prototype_test.fin:14 and :30 both key on integers.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "  let p <{int, int}> = { 1: 10 };\n"
+        "  let ok <int> = p[1];\n"
+        "  let bad <int> = p[\"a\"];\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("expected 'int', got 'string'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(Soundness_PrototypeAccess, ANestedPrototypeIsIndexedTwice) {
+    // prototype_test.fin:34 declares `<{string, {int, string}}>`. Indexing it once
+    // yields a prototype, which is indexable in turn -- so the branch has to be
+    // reached through its own result and not just from a variable's annotation.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "  let p <{string, {int, string}}> = { \"a\": { 1: \"one\" } };\n"
+        "  let v <string> = p[\"a\"][1];\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_PrototypeAccess, AnArrayIsStillNotAPrototype) {
+    // The regression guard on the other side: adding a prototype branch must not make
+    // arrays take arbitrary subscripts. `.length` is an int (Soundness_BuiltinMembers)
+    // and so is an array index.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "  let a <[int]> = [1, 2, 3];\n"
+        "  let bad <int> = a[\"x\"];\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeAccess, SomethingThatIsNeitherStillSaysSo) {
+    // And the diagnostic still exists for a type that is genuinely not indexable.
+    const FincRun r = compile("fun main() <noret> { let x <bool> = true; let y <bool> = x[0]; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("is not an array or pointer"), std::string::npos)
+        << stripAnsi(r.err);
 }

@@ -32,6 +32,11 @@ public:
     // with a FunctionType, and `implements` compares names. The receiver is not among
     // the parameters -- see SemanticAnalyzer::buildMethodSignature for why.
     std::unordered_map<std::string, TypePtr> methods;
+    // Operator key (ASTTokenKind) -> the operator's FunctionType, the receiver not
+    // among its parameters. This held a bare return type until a subscript needed a
+    // parameter to be checked against; Analyzer_Decl.cpp's comment on the old
+    // registration said building a signature there "would be dead. Booked, not done",
+    // and Soundness_IndexOperator is what made it live.
     std::unordered_map<int, TypePtr> operators;
     std::vector<TypePtr> constructors; 
     bool has_destructor = false;
@@ -55,6 +60,14 @@ public:
     // the language reaches that today, but a `methods` entry that lost its parameters
     // should degrade to an unchecked call rather than to a null dereference.
     TypePtr getMethodReturnType(const std::string& n);
+    // The operator's whole signature, or null when neither this type nor any parent
+    // declares it. Walks `parents` for the same reason getMethodType does: an
+    // inherited operator is as declared as a written one, and a struct gets its
+    // conformance to Index/IndexAssign (stdlib/operators.fin) through an interface
+    // parent.
+    TypePtr getOperatorType(int op) const;
+    // Its return type, and null-tolerant in the same way getMethodReturnType is.
+    TypePtr getOperatorReturnType(int op) const;
 
     std::string toString() const override;
     bool equals(const Type& other) const override;

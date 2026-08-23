@@ -25,7 +25,11 @@ finc="${2:-./build/finc}"
 : > "$out"
 total=0
 for f in tests/samples/*.fin tests/samples/stdlib/*.fin; do
-  e=$("$finc" "$f" 2>&1 | sed 's/\x1b\[[0-9;]*m//g'); rc=$?
+  # finc's own status, not the pipeline's. `cmd | sed` puts sed's status in $?, so the
+  # rc column read 0 for every sample -- including the ones that print diagnostics and
+  # exit 1 -- and was silently useless. Strip the colour in a second step instead.
+  e=$("$finc" "$f" 2>&1); rc=$?
+  e=$(printf '%s\n' "$e" | sed 's/\x1b\[[0-9;]*m//g')
   n=$(printf '%s\n' "$e" | grep -cE '^error:')
   first=$(printf '%s\n' "$e" | grep -E '^error:' | head -1 | cut -c1-70)
   total=$((total + n))

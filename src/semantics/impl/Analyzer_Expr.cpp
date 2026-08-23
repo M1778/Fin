@@ -225,11 +225,14 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         return;
     }
 
-    // Operator Overloading
+    // Operator Overloading. The *return* type: `operators` holds a whole signature
+    // now, and a binary expression is typed by what its operator returns. Nothing
+    // checks the right-hand operand against the operator's parameter yet -- an
+    // operator call has no argument check at all, which is booked separately -- so
+    // this reads only the half it always read.
     if (auto structType = getStructType(leftType, currentScope)) {
-        int opKey = static_cast<int>(node.op);
-        if (structType->operators.count(opKey)) {
-            lastExprType = structType->operators[opKey];
+        if (auto retType = structType->getOperatorReturnType(static_cast<int>(node.op))) {
+            lastExprType = retType;
             return;
         }
     }
@@ -523,23 +526,84 @@ void SemanticAnalyzer::visit(ArrayAccess& node) {
         return;
     }
 
-    auto intType = currentScope->resolveType("int");
-    checkType(*node.index, idxType, intType);
+    // What the subscript has to be depends on what is being subscripted, so the
+    // check comes after the shape is known and once per branch. It used to be a
+    // single unconditional comparison against `int` up here, which made a
+    // string-keyed prototype report twice -- once for not being an array, once for
+    // a key that was never meant to be an integer. prototype_test.fin's note names
+    // that second message.
+    const auto intType = currentScope->resolveType("int");
 
+    // A struct that declares `operator []` is subscripted through it, and that beats
+    // both of the rules below: before this, a value receiver was reported as
+    // `is not an array or pointer` even though it had declared the operator, and a
+    // *pointer* receiver silently did pointer arithmetic and typed the subscript as
+    // the pointee. getStructType unwraps pointers and Self for us, so both spellings
+    // arrive here. tests/samples/deeptest4.fin:13-17 and stdlib/hashmap.fin:39 are
+    // the five corpus sites; lib/std/collection.fin:92 and lib/std/hashmap.fin:84
+    // declare the operator this consults.
+    //
+    // Checked before the pointer unwrap below so that `&Map` reaches the operator
+    // rather than being read as an offset into an array of Maps -- a struct that
+    // declares a subscript means the subscript.
+    if (auto structType = getStructType(arrExprType, currentScope)) {
+        const int indexOp = static_cast<int>(ASTTokenKind::INDEX);
+        if (auto opType = structType->getOperatorType(indexOp)) {
+            if (auto* sig = opType->as<FunctionType>()) {
+                // One parameter is what `operator [](i: <int>)` declares. A signature
+                // with none is not a subscript at all, so the index goes unchecked
+                // rather than being compared against nothing.
+                if (!sig->param_types.empty()) checkType(*node.index, idxType, sig->param_types[0]);
+                lastExprType = sig->return_type;
+                return;
+            }
+            // A registration that is not a signature: unreachable today, since every
+            // defineOperator call builds a FunctionType. Typed as whatever is there
+            // rather than dropped, and the index left unchecked, for the same reason
+            // the method-call site tolerates the same shape.
+            lastExprType = opType;
+            return;
+        }
+    }
+
+    // A pointer to an array is indexed as the array it points at. A pointer to
+    // anything else is indexed as pointer arithmetic and yields its pointee, so the
+    // subscript is an offset and therefore an int.
     if (auto* ptrToArray = dynamic_cast<const PointerType*>(arrExprType.get())) {
-        if (auto* arr = dynamic_cast<const ArrayType*>(ptrToArray->pointee.get())) {
-            arrExprType = ptrToArray->pointee; 
+        if (dynamic_cast<const ArrayType*>(ptrToArray->pointee.get())) {
+            arrExprType = ptrToArray->pointee;
         } else {
+            checkType(*node.index, idxType, intType);
             lastExprType = ptrToArray->pointee;
             return;
         }
     }
 
+    // A prototype is subscripted by its key and yields its value.
+    // stdlib/memory.fin:30-33 declares `let info <{string, string}>;` and then
+    // writes `info["MemoryCardModel"] = <a string>`; prototype_test.fin:17's comment
+    // says the same for a read -- "a_member will be 10 because of the key, value
+    // (10, 10)". Nothing here refuses a key that is not in the prototype yet:
+    // :20's comment ("a would be {10:10, "a":true,"b":false} after this statement")
+    // makes growing one by writing to a new key the way a prototype is filled, and
+    // this visitor cannot tell a read from a write anyway.
+    if (auto* proto = dynamic_cast<const PrototypeType*>(arrExprType.get())) {
+        checkType(*node.index, idxType, proto->keyType);
+        lastExprType = proto->valueType;
+        return;
+    }
+
     if (auto* arrType = dynamic_cast<const ArrayType*>(arrExprType.get())) {
+        checkType(*node.index, idxType, intType);
         lastExprType = arrType->element_type;
     } else if (isErrorType(arrExprType)) {
         lastExprType = errorType();  // see the note at the method-call site
     } else {
+        // Deliberately without an index check: the subscript of something that
+        // cannot be subscripted has no expected type to be wrong against, and a
+        // second message about it would be noise attached to the same mistake. The
+        // index expression was still walked above, so anything undefined inside it
+        // has already been reported.
         error(node, fmt::format("Type '{}' is not an array or pointer", arrExprType->toString()));
         lastExprType = nullptr;
     }

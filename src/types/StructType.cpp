@@ -98,6 +98,24 @@ TypePtr StructType::getMethodType(const std::string& n) {
     return nullptr;
 }
 
+TypePtr StructType::getOperatorType(int op) const {
+    auto it = operators.find(op);
+    if (it != operators.end()) return it->second;
+    for (const auto& parent : parents) {
+        if (auto p = std::dynamic_pointer_cast<StructType>(parent)) {
+            if (auto t = p->getOperatorType(op)) return t;
+        }
+    }
+    return nullptr;
+}
+
+TypePtr StructType::getOperatorReturnType(int op) const {
+    auto t = getOperatorType(op);
+    if (!t) return nullptr;
+    if (auto* f = t->as<FunctionType>()) return f->return_type;
+    return t;
+}
+
 TypePtr StructType::getMethodReturnType(const std::string& n) {
     auto t = getMethodType(n);
     if (!t) return nullptr;
