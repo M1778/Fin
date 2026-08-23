@@ -2612,6 +2612,136 @@ TEST(Soundness_InterfaceConstructors, AConstructorOfTheWrongParameterTypeDoesNot
     EXPECT_NE(stripAnsi(r.err).find("does not implement"), std::string::npos) << stripAnsi(r.err);
 }
 
+// ---------------------------------------------------------------------------
+// An inherited constructor.
+//
+// `struct CollectionError : <Error> {}` (stdlib/collection.fin:9) is the corpus
+// shape, and four samples write it: an empty subclass whose whole purpose is to be a
+// distinguishable error type, calling the parent's `Error(msg: string)`. The call
+// site read StructType::constructors, which has no parent walk, found it empty, and
+// fabricated a nullary signature -- so `CollectionError("Index out of bounds")`
+// reported `expects 0 arguments, got 1` about a constructor the program inherited.
+//
+// The return type is the hazard. A registered constructor carries the type it
+// constructs, so handing a parent's back unchanged would make `CollectionError(...)`
+// an `Error`, and the next line would report a type mismatch instead of an arity one.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_ConstructorInheritance, AnInheritedConstructorIsCallable) {
+    const FincRun r = compile(
+        "struct Base { pub message <string>, Base(msg: string) { self.message = msg; } }\n"
+        "struct Derived : <Base> {}\n"
+        "fun f() <void> { let d <Derived> = Derived(\"y\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ConstructorInheritance, AnInheritedConstructorConstructsTheDerivedType) {
+    // The sharp one. Passing the parent's FunctionType through untouched makes this
+    // call an `Error`, which is a different diagnostic in the same place and no
+    // improvement. The annotation is what pins it.
+    const FincRun r = compile(
+        "struct Base { pub message <string>, Base(msg: string) { self.message = msg; } }\n"
+        "struct Derived : <Base> {}\n"
+        "fun f() <void> { let d <Derived> = Derived(\"y\"); }\n");
+    EXPECT_EQ(stripAnsi(r.err).find("expected 'Derived'"), std::string::npos)
+        << "an inherited constructor constructs the type that inherited it:\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ConstructorInheritance, AGrandparentsConstructorIsFound) {
+    const FincRun r = compile(
+        "struct A { pub m <string>, A(msg: string) { self.m = msg; } }\n"
+        "struct B : <A> {}\n"
+        "struct C : <B> {}\n"
+        "fun f() <void> { let c <C> = C(\"y\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ConstructorInheritance, AnInheritedConstructorIsStillArityChecked) {
+    // The first of three guards: finding one must not mean waving the call through.
+    const FincRun r = compile(
+        "struct Base { pub message <string>, Base(msg: string) { self.message = msg; } }\n"
+        "struct Derived : <Base> {}\n"
+        "fun f() <void> { let d <Derived> = Derived(); }\n");
+    EXPECT_NE(r.exitCode, 0) << "the inherited constructor takes one argument";
+    EXPECT_NE(stripAnsi(r.err).find("expects 1 arguments, got 0"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ConstructorInheritance, AnInheritedConstructorIsStillArgumentChecked) {
+    const FincRun r = compile(
+        "struct Base { pub message <string>, Base(msg: string) { self.message = msg; } }\n"
+        "struct Derived : <Base> {}\n"
+        "fun f() <void> { let d <Derived> = Derived(5); }\n");
+    EXPECT_NE(r.exitCode, 0) << "an int does not satisfy a string parameter";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ConstructorInheritance, AnOwnConstructorWinsOverAnInheritedOne) {
+    // The second guard, and the reason the walk is depth-first from `this`: a type
+    // that declares a constructor never consults a parent, so the parent's signature
+    // cannot quietly widen what the derived type accepts.
+    const FincRun r = compile(
+        "struct Base { pub m <string>, Base(msg: string) { self.m = msg; } }\n"
+        "struct Derived : <Base> {\n"
+        "  pub n <int>,\n"
+        "  Derived(a: int, b: int) { self.n = a; }\n"
+        "}\n"
+        "fun f() <void> { let d <Derived> = Derived(\"y\"); }\n");
+    EXPECT_NE(r.exitCode, 0) << "Derived's own constructor takes two ints";
+    EXPECT_NE(stripAnsi(r.err).find("expects 2 arguments, got 1"), std::string::npos)
+        << stripAnsi(r.err);
+
+    const FincRun ok = compile(
+        "struct Base { pub m <string>, Base(msg: string) { self.m = msg; } }\n"
+        "struct Derived : <Base> {\n"
+        "  pub n <int>,\n"
+        "  Derived(a: int, b: int) { self.n = a; }\n"
+        "}\n"
+        "fun f() <void> { let d <Derived> = Derived(1, 2); }\n");
+    EXPECT_EQ(ok.exitCode, 0) << stripAnsi(ok.err);
+}
+
+TEST(Soundness_ConstructorInheritance, AStructWithNoConstructorAnywhereStillTakesNoArguments) {
+    // The third guard. With nothing found the call site still fabricates a nullary
+    // signature, which is what makes `P()` legal and `P(1)` an error; a walk that
+    // returned something for a type with no constructor in its ancestry would take
+    // that rule with it.
+    const FincRun r = compile(
+        "struct P { pub v <int>, }\n"
+        "fun f() <void> { let p <P> = P(1); }\n");
+    EXPECT_NE(r.exitCode, 0) << "a struct with no constructor takes no arguments";
+    EXPECT_NE(stripAnsi(r.err).find("expects 0 arguments, got 1"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ConstructorInheritance, AnInterfaceRequirementIsNotAnInheritedConstructor) {
+    // Interfaces are skipped in the walk. A requirement is a promise that the
+    // implementor declares one, and conformance is what enforces it
+    // (Soundness_InterfaceConstructors above); treating the requirement as an
+    // implementation would let a struct that failed to declare its constructor be
+    // called as though it had.
+    const FincRun r = compile(
+        "interface IThing { Self(d: int); }\n"
+        "struct Thing : <IThing> { pub v <int>, }\n"
+        "fun f() <void> { let t <Thing> = Thing(1); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("does not implement interface 'IThing'"), std::string::npos)
+        << "the unmet requirement is still reported:\n" << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expects 0 arguments, got 1"), std::string::npos)
+        << "and the call does not borrow the requirement as a signature:\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_ConstructorInheritance, SelfFindsAnInheritedConstructorToo) {
+    // `Self(...)` resolves through the same accessor, so the rule is one rule.
+    const FincRun r = compile(
+        "struct Base { pub m <string>, Base(msg: string) { self.m = msg; } }\n"
+        "struct Derived : <Base> {\n"
+        "  pub fun make() <Derived> { return Self(\"y\"); }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
 TEST(Soundness_InterfaceConstructors, AnInterfaceThatRequiresNoneIsNotGivenOne) {
     // The last guard, and the one that keeps the rule one-directional: the
     // implementor may have constructors the interface never asked about. Only the
@@ -2712,13 +2842,27 @@ TEST(Soundness_DynamicTypes, AnyIsRegistered) {
 // suite has removed elsewhere.
 
 // ---------------------------------------------------------------------------
-// The raise half of `blame` is rejected.
+// `blame` does two jobs.
 //
-// Analyzer_Stmt.cpp requires the first operand to be bool and the second string,
-// so `blame CollectionError("...")` — which is how collection.fin:63 and
-// stdptr.fin:54 spell it — fails with `expected 'bool', got 'CollectionError'`.
-// CONTEXT.md ratifies one keyword doing two jobs and the analyzer implements one.
-// Per ADR 0008 the normative samples convict the compiler, so the analyzer changes.
+// CONTEXT.md ratifies one keyword for both, and the corpus writes both: `blame val
+// > 0, "msg"` asserts (blame_assert.fin:5), and `blame CollectionError("Index out of
+// bounds")` raises (stdlib/collection.fin:63, :70, stdlib/stdptr.fin:54, :57). The
+// analyzer implemented the assert half only -- it compared the first operand against
+// bool unconditionally -- so every raise in the corpus reported
+// `expected 'bool', got 'CollectionError'` about a statement the language has.
+//
+// The operand's type is what tells them apart, and it has to be, because the two
+// forms are written identically. A StructType -- struct, class, enum, or a value of
+// interface type -- is a raise; anything else is still compared against bool, which
+// is what keeps `blame 1;` an error (Soundness_Conditions.BlameStillRejectsAnInteger
+// owns that case, and is a control for a different argument).
+//
+// Not the widest rule available, deliberately. `blame "boom"` stays an error even
+// though lib/std's `ErrorLike = string | any implements <Error>` reads a string as
+// error-like, because the second operand of the assert form is a string and the two
+// readings of `blame "..."` cannot both be right; and nothing narrower than "a
+// StructType" is checkable without the analyzer hardcoding the library's `Error`,
+// which is the owner's ruling and not this unit's. Both are pinned below.
 // ---------------------------------------------------------------------------
 
 TEST(Soundness_Blame, TheAssertHalfWorks) {
@@ -2732,18 +2876,81 @@ TEST(Soundness_Blame, TheAssertHalfWorks) {
     EXPECT_EQ(r.exitCode, 0) << r.err;
 }
 
-TEST(KnownDefect_Blame, RaisingAValueIsRejected) {
+TEST(Soundness_Blame, RaisingAStructValueIsAccepted) {
     auto r = compile(
         "struct E { pub m <string>, }\n"
         "fun main() <void> {\n"
         "  let e <E>;\n"
         "  blame e;\n"
         "}\n");
-    EXPECT_NE(r.exitCode, 0) << "FIXED: `blame <value>` raises now. Invert this test.";
-    const std::string err = stripAnsi(r.err);
-    EXPECT_NE(err.find("expected 'bool'"), std::string::npos)
-        << "still rejected, but no longer for the documented reason — read this "
-           "before assuming the defect is unchanged: " << err;
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Blame, RaisingTheCorpusSpelling) {
+    // stdlib/collection.fin:63 exactly: an empty error subclass, constructed through
+    // the constructor it inherits (Soundness_ConstructorInheritance), raised. Both
+    // halves have to be in place for this to compile, which is why it is here as one
+    // test rather than as two.
+    auto r = compile(
+        "struct Error { pub message <string>, Error(msg: string) { self.message = msg; } }\n"
+        "struct CollectionError : <Error> {}\n"
+        "fun get(index: int) <int> {\n"
+        "  if (index > 10) { blame CollectionError(\"Index out of bounds\"); }\n"
+        "  return index;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Blame, TheRaisedValueIsStillAnalysed) {
+    // The guard that matters most: not comparing the operand against bool must not
+    // become not looking at it. The walk happens first and reports on its own.
+    auto r = compile(
+        "struct E { pub m <string>, E(msg: string) { self.m = msg; } }\n"
+        "fun main() <void> { blame E(nosuchvar); }\n");
+    EXPECT_NE(r.exitCode, 0) << "the argument is undefined";
+    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Blame, AMessageIsStillCheckedInTheRaiseForm) {
+    // The second operand's rule is unchanged and applies to both forms. Nothing in
+    // the corpus writes a message beside a raise, so this is the shape being fixed in
+    // place rather than a requirement being read off a sample.
+    auto r = compile(
+        "struct E { pub m <string>, }\n"
+        "fun main() <void> { let e <E>; blame e, 5; }\n");
+    EXPECT_NE(r.exitCode, 0) << "5 is not a message";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Blame, RaisingAStringIsRejected) {
+    // Pinned, not fixed. lib/std/typing.fin's `ErrorLike = string | any implements
+    // <Error>` reads a string as error-like, so `blame "boom"` has a defensible
+    // meaning -- but so does reading it as the assert form's message written in the
+    // wrong position, and `blame "msg"` cannot be both. The corpus writes neither, so
+    // there is nothing to settle it with and the narrow rule stands.
+    auto r = compile("fun main() <void> { blame \"boom\"; }\n");
+    EXPECT_NE(r.exitCode, 0)
+        << "FIXED: a string is raisable now. That is an owner ruling on ErrorLike -- "
+           "invert this test, rename it, and say in it which reading won.";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Blame, RaisingAValueIsNotCheckedForBeingAnError) {
+    // The other half of the same ruling, and the looser one: any StructType is
+    // raisable, including one with no relation to `Error` at all. Narrowing it means
+    // the analyzer knowing what `Error` is -- either by hardcoding the library's name
+    // or by growing the union machinery `ErrorLike` needs -- and `blame enum_.0`
+    // (stdlib/typing.fin:32) raises a bare `T`, which no narrowing short of a bound
+    // on the enum's parameter would admit. Recorded so the looseness is a decision
+    // and not an oversight.
+    auto r = compile(
+        "struct NotAnError { pub v <int>, }\n"
+        "fun main() <void> { let n <NotAnError>; blame n; }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: a raised value is checked for being error-like. Invert this test "
+           "and record what the rule turned out to be.";
 }
 
 // ---------------------------------------------------------------------------

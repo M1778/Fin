@@ -134,8 +134,30 @@ void SemanticAnalyzer::visit(TryCatch& node) {
 void SemanticAnalyzer::visit(BlameStatement& node) {
     if (node.condition) {
         node.condition->accept(*this);
+        // One keyword, two statements, told apart by the operand's type -- they are
+        // written identically, so there is nothing else to tell them apart by.
+        // `blame val > 0` asserts (blame_assert.fin:5) and `blame CollectionError("Index
+        // out of bounds")` raises (stdlib/collection.fin:63), and comparing the second
+        // against bool reported `expected 'bool', got 'CollectionError'` about a
+        // statement the language has. Soundness_Blame carries the whole rule.
+        //
+        // A StructType is a raise: a struct, a class, an enum, or a value of interface
+        // type. Everything else keeps the bool comparison, which is what leaves
+        // `blame 1;` an error with the message it always had
+        // (Soundness_Conditions.BlameStillRejectsAnInteger is a control for a separate
+        // argument and reads that message).
+        //
+        // No unwrapping, as in isEnumType: a `&CollectionError` is a pointer and this
+        // asks about a value. Nothing in the corpus raises through one, and a reader
+        // that needs it should say so at its own call site.
+        //
+        // What is *not* checked is whether the raised value is error-like at all --
+        // KnownDefect_Blame.RaisingAValueIsNotCheckedForBeingAnError records why: the
+        // narrowing needs either the library's `Error` hardcoded here or the union
+        // machinery behind `ErrorLike`, and `blame enum_.0` raises a bare `T`.
+        const bool isRaise = lastExprType && lastExprType->as<StructType>();
         auto boolType = currentScope->resolveType("bool");
-        if (lastExprType) {
+        if (lastExprType && !isRaise) {
             checkType(*node.condition, lastExprType, boolType);
         }
     }

@@ -415,8 +415,9 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
             return;
         }
         auto st = std::dynamic_pointer_cast<StructType>(currentStructContext);
-        if (st && !st->constructors.empty()) {
-            funcType = std::dynamic_pointer_cast<FunctionType>(st->constructors[0]);
+        auto ctor = st ? StructType::constructorFor(st) : nullptr;
+        if (ctor) {
+            funcType = std::dynamic_pointer_cast<FunctionType>(ctor);
         } else {
             error(node, "Struct '" + st->name + "' has no constructors");
             lastExprType = nullptr;
@@ -428,9 +429,19 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
         auto type = currentScope->resolveType(funcName);
         if (type) {
             if (auto st = getStructType(type, currentScope)) {
-                if (!st->constructors.empty()) {
-                    funcType = std::dynamic_pointer_cast<FunctionType>(st->constructors[0]);
+                // constructorFor and not `constructors[0]`: a parent's is inherited,
+                // rebound to construct this type rather than the parent
+                // (Soundness_ConstructorInheritance). `struct CollectionError :
+                // <Error> {}` gets `Error(msg: string)` this way, which four samples
+                // call and none declare.
+                if (auto ctor = StructType::constructorFor(st)) {
+                    funcType = std::dynamic_pointer_cast<FunctionType>(ctor);
                 } else {
+                     // Nothing in the ancestry declares one, so the type is
+                     // constructible with no arguments and with nothing else --
+                     // Soundness_ConstructorInheritance
+                     // .AStructWithNoConstructorAnywhereStillTakesNoArguments is what
+                     // keeps `P(1)` an arity error rather than an unchecked call.
                      std::vector<std::shared_ptr<Type>> dummyParams;
                      funcType = std::make_shared<FunctionType>(dummyParams, st);
                 }

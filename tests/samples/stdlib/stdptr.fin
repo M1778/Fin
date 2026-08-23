@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`module not found: error` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107), so `Error` is undefined and a cascade follows. The whole file parses now, `readonly restrict <&Self<T>>;` on line 16 included"
+//@ unimplemented "The import resolves and the whole file parses, `readonly restrict <&Self<T>>;` on 16 included. Seven are left. The four `Generic count mismatch` on 16, 22, 23 and 32 are all `Self<T>` inside `interface rptr_iface<T>`: visit(InterfaceDeclaration&) builds the interface's StructType with no generic_args at all -- it declares the parameters into the signature scope and stores none of them -- so instantiating `Self` with one argument is compared against zero. `pointer_type` on 40 is a type declared in no corpus file (see enums.fin's note: the prelude question). `own` on 52 is reported for missing a return, and correctly as the sample is written: its two raises are both inside an `if`, so the fall-through path reaches the end of a function returning `&Self<T>`. `rptr does not implement rptr_iface` on 37 follows the two constructor requirements on 31 and 32, which the class does not declare -- 32's own parameter list is one of the four mismatches above, so this one is not readable until they are"
 #[stdimport]
 import { Error } from error::std;
 

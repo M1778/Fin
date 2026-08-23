@@ -114,6 +114,32 @@ public:
     TypePtr getOperatorType(int op) const;
     // Its return type, and null-tolerant in the same way getMethodReturnType is.
     TypePtr getOperatorReturnType(int op) const;
+    // The constructor a call on this type is checked against, the parents included,
+    // and null when nothing in the ancestry declares one.
+    //
+    // A constructor carries the type it constructs as its return type, so a parent's
+    // cannot be handed back as it stands: `struct CollectionError : <Error> {}`
+    // (stdlib/collection.fin:9) inherits `Error(msg: string)`, and
+    // `CollectionError("...")` has to be a CollectionError. What comes back from a
+    // parent is a fresh FunctionType with the same parameters and this type as its
+    // return type -- which is also why this is not a plain `constructors[0]` with a
+    // walk bolted on.
+    //
+    // Interfaces are skipped. A constructor in one is a requirement, not an
+    // implementation (Soundness_InterfaceConstructors), and borrowing the requirement
+    // as a signature would let a struct that failed to declare its own be called as
+    // though it had.
+    //
+    // The first found, which is the rule the call site already had: constructor
+    // overloads are not resolved, only `constructors[0]` was ever consulted, and a
+    // parent walk does not change that -- a type with a constructor of its own never
+    // reaches a parent.
+    //
+    // Static and taking the type by shared_ptr because the rebinding needs one to put
+    // in the return type and Type is not enable_shared_from_this. Adding that base to
+    // Type for one accessor's benefit would put a weak reference in every type in the
+    // language; a parameter is the smaller change.
+    static TypePtr constructorFor(const std::shared_ptr<StructType>& type);
 
     std::string toString() const override;
     bool equals(const Type& other) const override;

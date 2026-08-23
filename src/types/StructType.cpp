@@ -203,6 +203,30 @@ TypePtr StructType::instantiate(const std::vector<TypePtr>& concreteArgs) {
     return substitute(mapping);
 }
 
+TypePtr StructType::constructorFor(const std::shared_ptr<StructType>& type) {
+    if (!type) return nullptr;
+    if (!type->constructors.empty()) return type->constructors[0];
+    for (const auto& parent : type->parents) {
+        auto p = std::dynamic_pointer_cast<StructType>(parent);
+        if (!p || p->is_interface) continue;
+        if (auto inherited = constructorFor(p)) {
+            // Rebound to `type`. The parameters are the parent's, the thing
+            // constructed is not -- see the header for why that matters. The recursive
+            // call has already rebound it to `p`; only the outermost binding survives,
+            // which is the one the caller asked about.
+            if (auto* sig = inherited->as<FunctionType>()) {
+                return std::make_shared<FunctionType>(sig->param_types, type, sig->is_vararg);
+            }
+            // Not a signature, so there is nothing to rebind and nothing this can
+            // usefully say about it. Handed back as found rather than dropped: a
+            // caller that checks arguments against it will refuse the call, which is
+            // a better failure than reporting a constructor that does exist as absent.
+            return inherited;
+        }
+    }
+    return nullptr;
+}
+
 // Does this constructor satisfy that requirement? Parameters only, deliberately.
 //
 // A constructor's return type is the type being constructed, so an interface's
