@@ -2382,6 +2382,7 @@ expression:
     /* New expression - Self type */
     | KW_NEW KW_SELF_TYPE LBRACE field_assignments RBRACE {
         auto type = std::make_unique<fin::TypeNode>("Self");
+        type->setLoc(@2);
         $$ = std::make_unique<fin::NewExpression>(std::move(type), std::move($4));
         $$->setLoc(@$);
     }
@@ -2586,6 +2587,7 @@ no_struct_expression:
     /* New expression - Self type */
     | KW_NEW KW_SELF_TYPE LBRACE field_assignments RBRACE {
         auto type = std::make_unique<fin::TypeNode>("Self");
+        type->setLoc(@2);
         $$ = std::make_unique<fin::NewExpression>(std::move(type), std::move($4));
         $$->setLoc(@$);
     }
@@ -2595,6 +2597,11 @@ static_method_call:
     /* Case 1: Vec2::zero() */
     IDENTIFIER DOUBLE_COLON IDENTIFIER LPAREN arguments RPAREN {
         auto type = std::make_unique<fin::TypeNode>($1);
+        // @1, not @$: the type name is what fails to resolve, so the caret belongs
+        // on it and not on the whole call. Without this the diagnostic had no
+        // location at all and came out at 1:1 -- see
+        // Soundness_DiagnosticLocation.AStaticCallsTypeReportsWhereItWasWritten.
+        type->setLoc(@1);
         $$ = std::make_unique<fin::StaticMethodCall>(std::move(type), $3, std::move($5));
         $$->setLoc(@$);
     }
@@ -2602,6 +2609,7 @@ static_method_call:
     | IDENTIFIER DOUBLE_COLON LT type_list GT DOUBLE_COLON IDENTIFIER LPAREN arguments RPAREN {
         auto type = std::make_unique<fin::TypeNode>($1);
         type->generics = std::move($4);
+        type->setLoc(@1);
         $$ = std::make_unique<fin::StaticMethodCall>(std::move(type), $7, std::move($9));
         $$->setLoc(@$);
     }
@@ -2610,6 +2618,7 @@ static_method_call:
        placement and both are in the corpus. */
     | IDENTIFIER DOUBLE_COLON IDENTIFIER DOUBLE_COLON LT type_list GT LPAREN arguments RPAREN {
         auto type = std::make_unique<fin::TypeNode>($1);
+        type->setLoc(@1);
         $$ = std::make_unique<fin::StaticMethodCall>(std::move(type), $3, std::move($9), std::move($6));
         $$->setLoc(@$);
     }
@@ -2633,6 +2642,7 @@ static_method_call:
     /* Case 3: Self::zero() */
     | KW_SELF_TYPE DOUBLE_COLON IDENTIFIER LPAREN arguments RPAREN {
         auto type = std::make_unique<fin::TypeNode>("Self");
+        type->setLoc(@1);
         $$ = std::make_unique<fin::StaticMethodCall>(std::move(type), $3, std::move($5));
         $$->setLoc(@$);
     }
