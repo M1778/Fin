@@ -281,6 +281,52 @@ void SemanticAnalyzer::visit(UnaryOp& node) {
     }
 }
 
+// One check for every call that has a signature. Shared rather than copied because
+// each of the three call sites got a different subset right: the function site had
+// arity and argument types, the method site had neither, and the static-method site had
+// neither but ordered its own two statements correctly. See the header for the ordering
+// contract -- this walks the arguments, so the caller assigns the call's own type after.
+void SemanticAnalyzer::checkCallArguments(ASTNode& node, const char* kind,
+                                         const std::string& name,
+                                         const FunctionType& sig,
+                                         std::vector<std::unique_ptr<Expression>>& args) {
+    size_t expected = sig.param_types.size();
+    size_t actual = args.size();
+
+    // A nullable parameter is optional at the call site. nullifier.fin:39 calls
+    // `make_A()` with no arguments and says why: "since make_A says \"n?: int\" we
+    // know that n can be null and we don't need to pass any arguments".
+    //
+    // The minimum is one past the *last* required parameter rather than the count
+    // of required ones, because arguments bind positionally: `(a?: int, b: int)`
+    // still needs both written, `(a: int, b?: int)` needs one. That falls out of
+    // positional binding and needs no rule about which order the two kinds may
+    // appear in -- which matters, because the corpus only ever writes the trailing
+    // form and a rule invented here would be unratified.
+    size_t required = 0;
+    for (size_t i = 0; i < expected; ++i) {
+        if (!sig.param_types[i]->as<NullableType>()) required = i + 1;
+    }
+
+    if (!sig.is_vararg && (actual < required || actual > expected)) {
+        if (required == expected) {
+            error(node, fmt::format("{} '{}' expects {} arguments, got {}", kind, name, expected, actual));
+        } else {
+            // "expects 2 arguments, got 0" is a lie about a function one of whose
+            // parameters is optional, so the range is spelled out.
+            error(node, fmt::format("{} '{}' expects between {} and {} arguments, got {}",
+                                    kind, name, required, expected, actual));
+        }
+    }
+
+    for (size_t i = 0; i < actual; ++i) {
+        args[i]->accept(*this);
+        if (i < expected) {
+            checkType(*args[i], lastExprType, sig.param_types[i]);
+        }
+    }
+}
+
 void SemanticAnalyzer::visit(FunctionCall& node) {
     std::shared_ptr<FunctionType> funcType = nullptr;
     std::string funcName = node.name;
@@ -328,42 +374,7 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
         return;
     }
 
-    size_t expected = funcType->param_types.size();
-    size_t actual = node.args.size();
-
-    // A nullable parameter is optional at the call site. nullifier.fin:39 calls
-    // `make_A()` with no arguments and says why: "since make_A says \"n?: int\" we
-    // know that n can be null and we don't need to pass any arguments".
-    //
-    // The minimum is one past the *last* required parameter rather than the count
-    // of required ones, because arguments bind positionally: `(a?: int, b: int)`
-    // still needs both written, `(a: int, b?: int)` needs one. That falls out of
-    // positional binding and needs no rule about which order the two kinds may
-    // appear in -- which matters, because the corpus only ever writes the trailing
-    // form and a rule invented here would be unratified.
-    size_t required = 0;
-    for (size_t i = 0; i < expected; ++i) {
-        if (!funcType->param_types[i]->as<NullableType>()) required = i + 1;
-    }
-
-    if (!funcType->is_vararg && (actual < required || actual > expected)) {
-        if (required == expected) {
-            error(node, fmt::format("Function '{}' expects {} arguments, got {}", funcName, expected, actual));
-        } else {
-            // "expects 2 arguments, got 0" is a lie about a function one of whose
-            // parameters is optional, so the range is spelled out.
-            error(node, fmt::format("Function '{}' expects between {} and {} arguments, got {}",
-                                    funcName, required, expected, actual));
-        }
-    }
-
-    for (size_t i = 0; i < actual; ++i) {
-        node.args[i]->accept(*this);
-        if (i < expected) {
-            checkType(*node.args[i], lastExprType, funcType->param_types[i]);
-        }
-    }
-
+    checkCallArguments(node, "Function", funcName, *funcType, node.args);
     lastExprType = funcType->return_type;
 }
 
@@ -387,16 +398,28 @@ void SemanticAnalyzer::visit(MethodCall& node) {
         return;
     }
 
-    auto retType = structType->getMethodReturnType(node.method_name);
-    if (!retType) {
+    auto methodType = structType->getMethodType(node.method_name);
+    if (!methodType) {
         error(node, fmt::format("Method '{}' not found in type '{}'", node.method_name, structType->name));
         lastExprType = nullptr;
         return;
     }
 
-    lastExprType = retType;
-
-    for(auto& arg : node.args) arg->accept(*this);
+    // Assigned *after* the arguments are walked, and that is the whole of a bug this
+    // unit found rather than set out to fix: `lastExprType = retType` used to come
+    // first, so every argument overwrote the call's type and `s.m("x")` on a method
+    // returning int was typed `string`. It reported a mismatch that did not exist and
+    // accepted one that did. Soundness_MethodCalls.ACallsTypeIsItsReturnTypeNotIts-
+    // LastArgument holds both halves.
+    if (auto* sig = methodType->as<FunctionType>()) {
+        checkCallArguments(node, "Method", node.method_name, *sig, node.args);
+        lastExprType = sig->return_type;
+    } else {
+        // A `methods` entry that is not a signature: unreachable from the language
+        // today, and an unchecked call rather than a crash if it ever is.
+        for (auto& arg : node.args) arg->accept(*this);
+        lastExprType = methodType;
+    }
 }
 
 void SemanticAnalyzer::visit(ArrayAccess& node) {
@@ -739,19 +762,28 @@ void SemanticAnalyzer::visit(StaticMethodCall& node) {
 
     // 3. Look up Method
     
-    auto retType = structType->getMethodReturnType(node.method_name);
-    if (!retType) {
+    auto methodType = structType->getMethodType(node.method_name);
+    if (!methodType) {
         error(node, fmt::format("Static method '{}' not found in '{}'", node.method_name, structType->toString()));
         lastExprType = nullptr;
         return;
     }
 
     // 4. Analyze Args
-    for (auto& arg : node.args) {
-        arg->accept(*this);
+    //
+    // Against the same stored signature as an instance call, which is the signature as
+    // *called*: the receiver is not in it. Calling an instance method through `::` and
+    // passing the receiver by hand would therefore be one argument over -- no corpus
+    // sample does it (the four `::` calls are prototype_test.fin:27, :30,
+    // stdlib/stdio.fin:153 and nullifier.fin:26, all static), so which of the two
+    // spellings that is stays an owner question rather than a rule invented here.
+    if (auto* sig = methodType->as<FunctionType>()) {
+        checkCallArguments(node, "Static method", node.method_name, *sig, node.args);
+        lastExprType = sig->return_type;
+    } else {
+        for (auto& arg : node.args) arg->accept(*this);
+        lastExprType = methodType;
     }
-
-    lastExprType = retType;
 }
 
 void SemanticAnalyzer::visit(SuperExpression& node) {

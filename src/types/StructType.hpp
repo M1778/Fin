@@ -26,6 +26,11 @@ public:
     bool is_interface = false;
     
     std::unordered_map<std::string, FieldInfo> fields;
+    // Name -> the method's FunctionType. It held only a return type until a method
+    // call needed a signature to be checked against, which is why the map's value is
+    // still a plain TypePtr: clone() and substitute() below already do the right thing
+    // with a FunctionType, and `implements` compares names. The receiver is not among
+    // the parameters -- see SemanticAnalyzer::buildMethodSignature for why.
     std::unordered_map<std::string, TypePtr> methods;
     std::unordered_map<int, TypePtr> operators;
     std::vector<TypePtr> constructors; 
@@ -41,6 +46,14 @@ public:
 
     TypePtr getFieldType(const std::string& n);
     bool isFieldPublic(const std::string& n);
+    // The method's whole signature, or null when the type has no such method.
+    // Walks `parents` exactly as getMethodReturnType does, so an inherited method is
+    // as checkable as a declared one.
+    TypePtr getMethodType(const std::string& n);
+    // Its return type. Kept as its own accessor because that is what most callers
+    // want, and because it tolerates a value that is not a FunctionType: nothing in
+    // the language reaches that today, but a `methods` entry that lost its parameters
+    // should degrade to an unchecked call rather than to a null dereference.
     TypePtr getMethodReturnType(const std::string& n);
 
     std::string toString() const override;

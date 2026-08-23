@@ -34,14 +34,21 @@ bool StructType::isFieldPublic(const std::string& n) {
     return false;
 }
 
-TypePtr StructType::getMethodReturnType(const std::string& n) {
+TypePtr StructType::getMethodType(const std::string& n) {
     if (methods.count(n)) return methods.at(n);
     for (const auto& parent : parents) {
         if (auto p = std::dynamic_pointer_cast<StructType>(parent)) {
-            if (auto t = p->getMethodReturnType(n)) return t;
+            if (auto t = p->getMethodType(n)) return t;
         }
     }
     return nullptr;
+}
+
+TypePtr StructType::getMethodReturnType(const std::string& n) {
+    auto t = getMethodType(n);
+    if (!t) return nullptr;
+    if (auto* f = t->as<FunctionType>()) return f->return_type;
+    return t;
 }
 
 bool StructType::equals(const Type& other) const {

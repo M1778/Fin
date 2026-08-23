@@ -2863,6 +2863,107 @@ FromItsOperand`, found by the same probe: `s + 1` on `operator + : <T>(other: <T
 inference from arguments to generic parameters anywhere yet, on any of the three call paths, and that is one
 unification pass with its own tests rather than a patch in this unit.
 
+### Mutation matrix: the method call
+
+Twenty-three mutants over five files. The (a) half removes the check the unit added -- the arity comparison, the
+argument-type comparison, the return type that replaced the last argument, the parents walk -- and a named test
+has to kill each. The (b) half pushes a check past what it should accept, and here that half found the corpus:
+`A-vararg` applies the arity check to a vararg function too, and it kills four *samples* and no unit test, which
+is the corpus doing the job unit tests cannot. `@define printf(fmt: string, ...) <noret>` is in almost every
+sample, so "arity is checked" and "arity is checked on varargs" differ by four files and by nothing else.
+
+| mutant | kills | |
+|---|---|---|
+| `T-mcall` a method call is typed as its last argument again | 9 | |
+| `S-notfn` the check is skipped when the stored type is a `FunctionType` | 9 | |
+| `A-none` no arity check at all | 8 | |
+| `A-toomany` the arity check ignores too many arguments | 8 | |
+| `A-alloptional` every parameter is optional | 7 | |
+| `D-opreg` the struct signature pass does not register its operators | 5 | |
+| `T-fncall` a free call is typed as its last argument again | 5 | |
+| `Q-loud` the signature pass reports again | 5 | |
+| `S-self` a written `self` parameter counts as an argument | 4 | |
+| `A-vararg` the arity check applies to varargs too | 4 | kills four samples, no unit test |
+| `A-kind` the diagnostic calls every callee a Function | 3 | |
+| `T-static` a static call is typed as its last argument again | 3 | |
+| `Q-iface` the interface signature pass goes quiet as well | 3 | |
+| `A-toofew` the arity check ignores too few arguments | 2 | |
+| `A-argtype` arguments walked but not checked against the parameters | 2 | |
+| `D-opgen` the signature pass resolves operator return types without its generics | 2 | |
+| `A-nullreq` a nullable parameter is required like any other | 1 | |
+| `S-generics` the signature pass drops the method's own generics | 1 | |
+| `S-inherit` `getMethodType` does not walk the parents | 1 | |
+| `D-opdecl` the deleted pass-2 `defineOperator` is put back | **0** | claim confirmed |
+| `Q-haserror` quiet but still sets `hasError` | **0** | unkillable by construction |
+| `Q-nesting` `QuietPass` sets a flag instead of counting | **0** | consumer does not exist yet |
+| `S-retvoid` a method with no written return type gets the sentinel, not `void` | **0** | dead by grammar |
+
+Nineteen of twenty-three killed something, and all nine `*_MethodCalls` tests are killed by some mutant. The four
+zero-kill mutants are the section, and they resolve four different ways -- which is the argument for running the
+matrix at all, because "0 kills" read as one thing would have produced one wrong action four times.
+
+*A mutant can be a claim.* `D-opdecl` is the only mutant in any matrix so far that *adds* code: it puts back the
+`defineOperator` call this unit deleted from `visit(OperatorDeclaration&)`. Zero kills is the result being
+sought. "Redundant" is what a second registration is when removing it changes no test and putting it back
+changes no test either, and that is a measurement rather than an argument. The path analysis said the same thing
+-- all four containers (struct, class, interface, implements block) pre-register their operators in a signature
+pass, `Self` is defined before PASS 1, and every operator body comes through one of the four -- but the path
+analysis is what I would have written if I were wrong, and it had already been wrong once in this unit.
+
+*The pair collapsed.* The previous matrix booked `R-opret` and `R-opdecl` as a zero-kill pair with the reading
+"either registration alone suffices". That was true and it was not the whole truth: what made the second
+registration load-bearing was the *first one being broken*. With pass 1's operator generics fixed, `D-opreg`
+(drop pass 1's registration) kills five and `D-opgen` (resolve its return types without the generics) kills two.
+A zero-kill pair can be two mutants covering for each other's defect, and the way to find out is to fix one and
+re-run.
+
+*Unkillable by construction.* `Q-haserror` makes the quiet pass suppress the diagnostic and still set
+`hasError`, which is the shape of the worst bug in a compiler: exit 1 with nothing printed. No test kills it,
+and the reason is the legality rule the quiet pass is allowed to exist under -- *a pre-pass may be quiet only
+when a later pass repeats every resolution it performed and reports*. All three quiet sites satisfy it, so
+`hasError` cannot diverge from the printed output: whatever pass 1 swallowed, pass 2 says out loud. The test that
+would kill this mutant therefore cannot be written against method calls at all; it has to assert the rule
+itself, as one global invariant -- **exit 1 if and only if at least one diagnostic was printed** -- over every
+program in the corpus and every rejecting test in the suite. `tests/test_cli.cpp` has
+`MachineContract.ExitOneOnADiagnostic` for the forward half on one program; the biconditional over the whole
+corpus is owed, and it is what makes the legality rule enforced rather than merely stated.
+
+*The consumer does not exist yet.* `Q-nesting` turns the `quietDepth` counter into a flag, so an inner
+`QuietPass` closing would un-quiet the outer one. Nothing kills it because nothing nests: `buildMethodSignature`
+opens no quiet pass, and implements blocks are top-level. The counter stays a counter anyway, and the reason is
+the failure mode it guards -- a flag's failure is a *lost* diagnostic on the outer pass's remaining members,
+which is the one failure a diagnostic-counting test cannot see. The mutant stays in the matrix as the tripwire:
+the day a second quiet site nests inside the first, `Q-nesting` starts killing, and if it does not, the coverage
+hole is real.
+
+*Dead by grammar.* `S-retvoid` gives a method with no written return type the error sentinel instead of `void`.
+Nothing kills it because no program can reach the branch: every function production in `parser.y` requires
+`LT type GT`, so `FunctionDeclaration::return_type` is never null. Measured rather than argued -- replacing the
+branch body with `std::abort()` and running the suite gives 456/456, and that suite contains all fifty samples.
+The branch stays (deleting it would turn an impossible null into a *silent non-registration*, which is worse
+than resolving to void), and what the mutant actually bought was the next finding: checking whether the
+operator loop's identical `else` was equally dead turned up `parser.y:939`, the
+`operator[] implements cast<fn(Self, T)>(__get)` form, where `return_type` genuinely is null and which
+`stdlib/hashmap.fin:50` uses. Probing what that registers found three layers of the same hole --
+`operator []` is registered and never consulted by `visit(ArrayAccess)`, a value receiver is reported as "not an
+array or pointer" despite having one, the index is checked against `int` before the receiver is classified, and
+`OperatorDeclaration::implements_expr` (which carries that form's whole signature) is written by the parser and
+read by nobody. `KnownDefect_IndexOperator.AnIndexExpressionNeverConsultsOperatorBracket` books all of it with
+an array control. A zero-kill mutant on dead code still paid for itself, one file over.
+
+*And one test was unkillable, which is worse than a missing test.* Fixing pass 1's operator generics, I inverted
+the `KnownDefect` that booked it into `Soundness_Generics.AnOperatorsOwnGenericParameterIsInScopeInPassOne` --
+declare the operator, assert no diagnostic -- and it went green. `D-opgen` reverts exactly that fix and the test
+stayed green, because the operator loop is *inside* the `QuietPass` block: the quiet pass removes the
+diagnostic, so `errorCount == 0` holds whether the scope is right or not. The test asserted nothing and its name
+claimed a guarantee. Two general reasons a "this compiles clean" assertion can be blind, and both apply
+here: a quiet pass removes the diagnostic, and the error sentinel is **silent by construction** -- `checkType`
+returns before comparing when either side is `<error>`, so "no diagnostic" is satisfied by registering nothing
+at all. The fix is to assert the *registration* rather than the silence: call the operator and read the type of
+the call. `Soundness_Generics.AnOperatorsRegisteredReturnTypeIsWhatItsCallIsTyped` does that in four cases, and
+it is what kills `D-opgen` and `D-opreg` both. A name that overstates what a test verifies is worse than no
+test, because it retires the suspicion that would have found the gap.
+
 ## Rulings owed
 
 Every entry below is a question only the language owner can answer, discovered by measurement and blocking

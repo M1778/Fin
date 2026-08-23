@@ -13,6 +13,10 @@
 namespace fin {
 
 class ModuleLoader; // Forward declaration
+// Declared, not included: the two members below name it only through a reference and
+// a shared_ptr, and pulling TypeImpl.hpp into this header would put every concrete
+// type in front of every translation unit that analyses anything.
+class FunctionType;
 
 struct AnalysisContext {
     bool inLoop = false;
@@ -133,6 +137,62 @@ private:
     std::shared_ptr<Type> resolveTypeUnwrapped(TypeNode* node);
 
     void error(ASTNode& node, const std::string& msg);
+
+    // Nesting depth of the quiet pre-passes below. `error` returns before it reports
+    // and before it sets hasError while this is non-zero.
+    int quietDepth = 0;
+
+    // Silences diagnostics for the lifetime of the object.
+    //
+    // Only legal around a *pre-pass whose every resolution is repeated by a later
+    // reporting pass*. That is not a style rule, it is the whole argument: silence is
+    // sound here precisely because the diagnostic is not lost, and the two sites that
+    // need it -- a struct's and a class's signature registration -- are followed by a
+    // body pass that resolves the same TypeNodes and reports. Used anywhere else it
+    // deletes diagnostics.
+    //
+    // The alternative shapes were a resolved-type cache keyed on the TypeNode, and
+    // making resolution never report and every caller report instead. Both are bigger
+    // and neither is needed while the guarantee holds; Soundness_ErrorRecovery.
+    // AnAnnotationInAStructSignatureIsReportedOnce and AMethodParameterAnnotationIs-
+    // StillReportedOnce are what hold it. An interface is the counter-example that
+    // fixes the boundary: it has no body pass, so its signature pass must report.
+    struct QuietPass {
+        explicit QuietPass(SemanticAnalyzer& a) : an(a) { ++an.quietDepth; }
+        ~QuietPass() { --an.quietDepth; }
+        QuietPass(const QuietPass&) = delete;
+        QuietPass& operator=(const QuietPass&) = delete;
+        SemanticAnalyzer& an;
+    };
+
+    // Builds the FunctionType that StructType::methods stores for one method.
+    //
+    // The receiver is not in it. `struct_methods.fin:10` says the first parameter
+    // "will be injected by compiler and it will be the struct itself" whether or not
+    // the author wrote `self`, and the same file writes both spellings in one struct
+    // (:10 and :14), so a signature that kept a written `self` would make the two
+    // spellings call differently. It is stored as it is called.
+    //
+    // Opens a scope and declares the method's own generics before resolving, because
+    // `fun set_x<U>(new_x: U)` (struct_methods.fin:14) is resolved here now and `U` is
+    // declared by the method, not by the struct. Without that the parameter resolves to
+    // the sentinel, and a sentinel parameter silently switches the argument check off
+    // rather than failing loudly.
+    std::shared_ptr<FunctionType> buildMethodSignature(FunctionDeclaration& method);
+
+    // The arity-and-argument check shared by every call that has a signature:
+    // visit(FunctionCall&), visit(MethodCall&) and visit(StaticMethodCall&).
+    //
+    // It walks the arguments, so the caller must set `lastExprType` to the call's own
+    // type *after* calling it -- which is the bug that made this a shared helper rather
+    // than three copies: visit(MethodCall&) set lastExprType to the return type and then
+    // walked the arguments, so a call's type was the type of its last argument.
+    //
+    // `kind` is the word the diagnostic uses for the callee ("Function", "Method",
+    // "Static method"), matching what each site's own not-found message already says.
+    void checkCallArguments(ASTNode& node, const char* kind, const std::string& name,
+                            const FunctionType& sig,
+                            std::vector<std::unique_ptr<Expression>>& args);
     bool checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected);
 
     // checkType, except that `null` is accepted whatever the declared type is.

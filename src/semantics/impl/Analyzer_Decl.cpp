@@ -42,6 +42,48 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
     debugLog(fg(fmt::color::gray), "[DEBUG] Defined variable '{}' of type '{}'\n", node.name, type->toString());
 }
 
+std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDeclaration& method) {
+    // A scope of its own, holding the method's generics: `fun set_x<U>(new_x: U)`
+    // (struct_methods.fin:14) declares U itself, and the interface loop below used to
+    // resolve its parameters without one -- which is why `pub fun m<T>(a: T) <T>;`
+    // reported "Undefined type 'T'" twice. The parameters are defined in it too, so a
+    // default may name a sibling, as it may in a free function.
+    enterScope();
+    declareGenericParams(method.generic_params);
+
+    std::vector<std::shared_ptr<Type>> paramTypes;
+    for (auto& param : method.params) {
+        auto type = resolveTypeOrError(param->type.get());
+        currentScope->define({param->name, type, false, true});
+        // The receiver is not a parameter of the call. struct_methods.fin writes both
+        // spellings in one struct -- `fun print_point(self: &Self)` at :10 and
+        // `fun set_x<U>(new_x: U)` at :14 -- and :10 says the compiler injects it
+        // either way, so a signature that kept a written `self` would make the two
+        // spellings disagree about arity.
+        if (param->name == "self") continue;
+        // The sentinel goes in, exactly as in visit(FunctionDeclaration&): dropping an
+        // unresolved parameter would make `pub fun m(a: NoSuchType)` called `s.m(1)`
+        // report "expects 0 arguments, got 1" on top of the one real diagnostic.
+        paramTypes.push_back(type);
+    }
+    // Walked here rather than at the call sites because this is the only scope that has
+    // the method's generics and parameters in it. At the struct and class sites this
+    // pass is quiet and visit(FunctionDeclaration&) walks them again, reporting; at the
+    // interface, where there is no body pass, this walk is the one that reports.
+    visitParameterDefaults(method.params);
+
+    std::shared_ptr<Type> retType;
+    if (method.return_type) retType = resolveTypeOrError(method.return_type.get());
+    else retType = currentScope->resolveType("void");
+
+    exitScope();
+
+    // Null only when `void` itself failed to resolve, which means the primitive table
+    // is broken; the callers gate on it as they always did.
+    if (!retType) return nullptr;
+    return std::make_shared<FunctionType>(paramTypes, retType);
+}
+
 void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     debugLog(fg(fmt::color::cyan), "[INFO] Analyzing function '{}'\n", node.name);
     
@@ -192,49 +234,81 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         // one, so this pass registers the field and nothing more.
     }
 
-    // 2. Methods (Signatures)
-    for (auto& method : node.methods) {
-        std::shared_ptr<Type> retType = nullptr;
-        if (method->return_type) retType = resolveTypeOrError(method->return_type.get());
-        else retType = currentScope->resolveType("void");
-        
-        // The guard is now only about `void` itself failing to resolve, which
-        // would mean the primitive table is broken. An unresolved *written*
-        // return type arrives as the sentinel and the method is still declared,
-        // so calling it reports nothing beyond the annotation.
-        if (retType) structType->defineMethod(method->name, retType);
-        
-        // Do not call accept here 
-        // That triggers body analysis too early.
-    }
+    // 2-4. Signatures: methods, operators, constructors.
+    //
+    // Quiet, and this is the block QuietPass exists for. Every TypeNode resolved below
+    // is resolved again by PASS 2 -- method->accept, op->accept and the constructor
+    // parameter loop are all a few lines down -- and that pass reports. Resolving twice
+    // and reporting twice is what made `S(p: NoSuchType)` say "Undefined type" twice,
+    // booked for a long time as KnownDefect_ErrorRecovery.AnAnnotationInAStructSignature-
+    // IsReportedOncePerPass and fixable only once one pass could be made to own the
+    // diagnostic. PASS 2 owns it, because it is the pass with a scope to populate.
+    {
+        QuietPass quiet(*this);
 
-    // 3. Operators (Signatures)
-    for (auto& op : node.operators) {
-        std::shared_ptr<Type> retType = nullptr;
-        if (op->return_type) retType = resolveTypeOrError(op->return_type.get());
-        else retType = currentScope->resolveType("void");
-        
-        // Ungated for the same reason as the methods above, and it mattered more
-        // here: with the operator undeclared, `s + 1` fell through to the built-in
-        // rule and reported `Type mismatch: expected 'S', got 'int'` -- a claim
-        // about an operator the program did declare.
-        structType->defineOperator((int)op->op, retType);
-    }
-
-    // 4. Constructors (Signatures)
-    for (auto& ctor : node.constructors) {
-        // Resolve params in a temp scope to get signature
-        enterScope();
-        std::vector<std::shared_ptr<Type>> paramTypes;
-        for (auto& param : ctor->params) {
-            // Sentinel, not dropped: the constructor keeps its written arity.
-            paramTypes.push_back(resolveTypeOrError(param->type.get()));
+        for (auto& method : node.methods) {
+            // The whole signature, not just the return type: a method call is checked
+            // for arity and argument types (Soundness_MethodCalls), and it can only be
+            // checked against something the type records. The guard is still only about
+            // `void` failing to resolve. An unresolved *written* return type arrives as
+            // the sentinel and the method is still declared, so calling it reports
+            // nothing beyond the annotation.
+            //
+            // Do not call accept here -- that triggers body analysis too early.
+            if (auto sig = buildMethodSignature(*method))
+                structType->defineMethod(method->name, sig);
         }
-        exitScope();
 
-        auto ctorType = std::make_shared<FunctionType>(paramTypes, structType);
-        structType->addConstructor(ctorType);
-        debugLog(fg(fmt::color::green), "      [Ctor] Registered constructor for '{}' with {} params\n", node.name, paramTypes.size());
+        for (auto& op : node.operators) {
+            // A scope with the operator's own generics in it, which this loop did not
+            // have: `operator + : <T>(other: <T>) <T>` reported "Undefined type 'T'"
+            // about a parameter it declares one token earlier, and registered the
+            // operator returning the sentinel. Booked as KnownDefect_Generics.AnOperators-
+            // OwnGenericParameterIsNotInScopeInPassOne, whose text asked for exactly
+            // these three lines once something had collapsed the method copy of the same
+            // hole -- buildMethodSignature above is that something.
+            //
+            // The QuietPass around this whole block had already removed the *diagnostic*
+            // half of that defect, which is why the fix cannot be verified by compiling
+            // the program and counting: silence and a correct scope produce the same zero.
+            // What is left to verify is the registration, and the only way to see it is to
+            // call the operator and read the type of the call --
+            // Soundness_Generics.AnOperatorsRegisteredReturnTypeIsWhatItsCallIsTyped.
+            // Mutant D-opgen reverts these three lines and that test is what kills it.
+            enterScope();
+            declareGenericParams(op->generic_params);
+
+            std::shared_ptr<Type> retType = nullptr;
+            if (op->return_type) retType = resolveTypeOrError(op->return_type.get());
+            else retType = currentScope->resolveType("void");
+
+            exitScope();
+
+            // Ungated for the same reason as the methods above, and it mattered more
+            // here: with the operator undeclared, `s + 1` fell through to the built-in
+            // rule and reported `Type mismatch: expected 'S', got 'int'` -- a claim
+            // about an operator the program did declare.
+            //
+            // A return type and nothing else, unlike the methods: an operator call has
+            // no arity check yet, so there is no consumer for its parameters and
+            // building a signature here would be dead. Booked, not done.
+            structType->defineOperator((int)op->op, retType);
+        }
+
+        for (auto& ctor : node.constructors) {
+            // Resolve params in a temp scope to get signature
+            enterScope();
+            std::vector<std::shared_ptr<Type>> paramTypes;
+            for (auto& param : ctor->params) {
+                // Sentinel, not dropped: the constructor keeps its written arity.
+                paramTypes.push_back(resolveTypeOrError(param->type.get()));
+            }
+            exitScope();
+
+            auto ctorType = std::make_shared<FunctionType>(paramTypes, structType);
+            structType->addConstructor(ctorType);
+            debugLog(fg(fmt::color::green), "      [Ctor] Registered constructor for '{}' with {} params\n", node.name, paramTypes.size());
+        }
     }
 
     // =========================================================
@@ -339,20 +413,19 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
         retType = currentScope->resolveType("void");
     }
     
-    // 5. Register in Struct -- the second time, and not redundantly. PASS 1 in
-    // visit(StructDeclaration&) registered this operator already, from a scope that has
-    // the *struct's* generic parameters but not the operator's own, so an operator
-    // written `operator + : <T>(other: <T>) <T>` was registered there returning the
-    // sentinel. Here `declareGenericParams` has run and the return type is `T`.
+    // 5. NOT registered here. This used to be a second defineOperator, needed because
+    // the signature pass resolved the return type without the operator's own generic
+    // parameters in scope and so registered the sentinel for `operator + : <T>(...) <T>`.
+    // All four containers now declare those generics before they resolve
+    // (visit(StructDeclaration&), visit(ClassDeclaration&), visit(InterfaceDeclaration&)
+    // and visit(ImplementsBlock&)), and every path that reaches this function comes
+    // through one of them, so the write here could only ever repeat what is already
+    // stored. Deleting it is what makes dropping the signature pass's registration
+    // observable at all -- with two writers, the mutation matrix measured zero kills for
+    // dropping either one alone.
     //
-    // Both registrations therefore have to be ungated, and a mutation matrix showed
-    // why that is easy to get wrong: dropping either one alone changes nothing
-    // observable, because the other still declares the operator. PASS 1 is what an
-    // earlier sibling's body sees (Soundness_ErrorRecovery
-    // .AnOperatorWithAnUnresolvedReturnTypeIsVisibleToAMethodDeclaredBeforeIt); this one
-    // is what a generic operator needs, and it is only observable once
-    // KnownDefect_Generics.AnOperatorsOwnGenericParameterIsNotInScopeInPassOne is fixed.
-    structType->defineOperator((int)node.op, retType);
+    // retType is still resolved above: the implements-check below compares against it,
+    // and the body walk needs the scope this function opened.
     
     if (node.implements_type) {
         auto implType = resolveTypeFromAST(node.implements_type.get());
@@ -412,17 +485,16 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     for (auto& member : node.members) resolveTypeFromAST(member->type.get());
     
     for (auto& method : node.methods) {
-        enterScope();
-        for (auto& param : method->params) resolveTypeFromAST(param->type.get());
-        visitParameterDefaults(method->params);
-        std::shared_ptr<Type> retType = nullptr;
-        if(method->return_type) retType = resolveTypeOrError(method->return_type.get());
-        else retType = currentScope->resolveType("void");
-        
-        // Unguarded, and it was handing defineMethod a live null whenever the
-        // written return type did not resolve. The sentinel closes that.
-        ifaceType->defineMethod(method->name, retType);
-        exitScope();
+        // The one signature pass that is NOT quiet, and the reason QuietPass is a
+        // guard and not a policy: an interface method has no body, so nothing resolves
+        // these TypeNodes a second time and this is the only chance to report. The
+        // asymmetry is stated in Soundness_ErrorRecovery.AMethodParameterAnnotationIs-
+        // StillReportedOnce, which counts both shapes.
+        //
+        // The parameters used to be resolved here and thrown away -- and resolved
+        // without the method's own generic scope, so `pub fun m<T>(a: T) <T>;` reported
+        // "Undefined type 'T'" twice. buildMethodSignature keeps them, and declares T.
+        if (auto sig = buildMethodSignature(*method)) ifaceType->defineMethod(method->name, sig);
     }
     
     for (auto& op : node.operators) {
@@ -701,45 +773,48 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
         // one, so this pass registers the field and nothing more.
     }
 
-    // 2. Methods
-    for (auto& method : node.methods) {
-        std::shared_ptr<Type> retType = nullptr;
-        if (method->return_type) retType = resolveTypeOrError(method->return_type.get());
-        else retType = currentScope->resolveType("void");
-        
-        // The guard is now only about `void` itself failing to resolve, which
-        // would mean the primitive table is broken. An unresolved *written*
-        // return type arrives as the sentinel and the method is still declared,
-        // so calling it reports nothing beyond the annotation.
-        if (retType) structType->defineMethod(method->name, retType);
-    }
+    // 2-4. Signatures: methods, operators, constructors. Quiet, for the reason spelled
+    // out at the same block in visit(StructDeclaration) -- PASS 2 below resolves every
+    // one of these TypeNodes again and reports.
+    {
+        QuietPass quiet(*this);
 
-    // 3. Operators
-    for (auto& op : node.operators) {
-        std::shared_ptr<Type> retType = nullptr;
-        if (op->return_type) retType = resolveTypeOrError(op->return_type.get());
-        else retType = currentScope->resolveType("void");
-        
-        // Ungated for the same reason as the methods above, and it mattered more
-        // here: with the operator undeclared, `s + 1` fell through to the built-in
-        // rule and reported `Type mismatch: expected 'S', got 'int'` -- a claim
-        // about an operator the program did declare.
-        structType->defineOperator((int)op->op, retType);
-    }
-
-    // 4. Constructors
-    for (auto& ctor : node.constructors) {
-        enterScope();
-        std::vector<std::shared_ptr<Type>> paramTypes;
-        for (auto& param : ctor->params) {
-            // Sentinel, not dropped: the constructor keeps its written arity.
-            paramTypes.push_back(resolveTypeOrError(param->type.get()));
+        for (auto& method : node.methods) {
+            if (auto sig = buildMethodSignature(*method))
+                structType->defineMethod(method->name, sig);
         }
-        exitScope();
 
-        auto ctorType = std::make_shared<FunctionType>(paramTypes, structType);
-        structType->addConstructor(ctorType);
-        debugLog(fg(fmt::color::green), "      [Ctor] Registered constructor for '{}' with {} params\n", node.name, paramTypes.size());
+        for (auto& op : node.operators) {
+            // The operator's own generics, as in visit(StructDeclaration) above.
+            enterScope();
+            declareGenericParams(op->generic_params);
+
+            std::shared_ptr<Type> retType = nullptr;
+            if (op->return_type) retType = resolveTypeOrError(op->return_type.get());
+            else retType = currentScope->resolveType("void");
+
+            exitScope();
+
+            // Ungated for the same reason as the methods above, and it mattered more
+            // here: with the operator undeclared, `s + 1` fell through to the built-in
+            // rule and reported `Type mismatch: expected 'S', got 'int'` -- a claim
+            // about an operator the program did declare.
+            structType->defineOperator((int)op->op, retType);
+        }
+
+        for (auto& ctor : node.constructors) {
+            enterScope();
+            std::vector<std::shared_ptr<Type>> paramTypes;
+            for (auto& param : ctor->params) {
+                // Sentinel, not dropped: the constructor keeps its written arity.
+                paramTypes.push_back(resolveTypeOrError(param->type.get()));
+            }
+            exitScope();
+
+            auto ctorType = std::make_shared<FunctionType>(paramTypes, structType);
+            structType->addConstructor(ctorType);
+            debugLog(fg(fmt::color::green), "      [Ctor] Registered constructor for '{}' with {} params\n", node.name, paramTypes.size());
+        }
     }
 
     // =========================================================
@@ -845,30 +920,21 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
         // parameter, undefined in its own signature. The scope is also what keeps
         // one method's generics from leaking into the next.
         // Soundness_GenericConstraints.AMethodInAnImplementsBlockDeclaresItsOwnGenerics.
-        enterScope();
-        declareGenericParams(method->generic_params);
-
-        // The parameters are NOT resolved here. StructType::methods maps a name to a
-        // return type and nothing else (StructType.hpp:29), so the signature this
-        // loop used to build was a local that no one read -- while its resolution
-        // reported every parameter annotation a second time, on top of the walk in
-        // visit(FunctionDeclaration&) two lines below. Deleting it takes one
-        // duplicate off `pub fun m(a: NoSuchType)` and loses nothing.
+        // The parameters ARE resolved here now: StructType::methods holds a whole
+        // FunctionType and a method call is checked against it (Soundness_MethodCalls),
+        // so the signature this loop builds has a reader. It is quiet, which is what
+        // keeps Soundness_ErrorRecovery.AnImplementsBlockMethodParameterIsReportedOnce
+        // at one -- method->accept below resolves the same TypeNodes and reports.
         //
-        // When methods do record their parameters -- see
-        // KnownDefect_MethodCalls.AMethodCallIsNotCheckedAgainstItsSignature, which
-        // is the reason they must -- the signature belongs on StructType, built once,
-        // not rebuilt here.
-        std::shared_ptr<Type> retType = nullptr;
-        if (method->return_type) retType = resolveTypeOrError(method->return_type.get());
-        else retType = currentScope->resolveType("void");
-        
-        exitScope();
-
-        if (retType) {
-            structType->defineMethod(method->name, retType);
+        // buildMethodSignature opens the signature scope and declares the method's own
+        // generics, which is what this loop did by hand.
+        std::shared_ptr<FunctionType> sig;
+        {
+            QuietPass quiet(*this);
+            sig = buildMethodSignature(*method);
         }
-        
+        if (sig) structType->defineMethod(method->name, sig);
+
         // Outside the signature scope: visit(FunctionDeclaration&) opens its own
         // and declares the same parameters there, so declaring them twice in
         // nested scopes would be harmless but says something untrue about which

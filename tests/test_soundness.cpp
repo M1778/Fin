@@ -421,9 +421,9 @@ TEST(Soundness_ErrorRecovery, AClassMethodWithAnUnresolvedReturnTypeIsStillCalla
     const std::string err = stripAnsi(r.err);
     EXPECT_EQ(err.find("not found in type"), std::string::npos)
         << "m is declared; only its return type is unknown\n" << err;
-    EXPECT_EQ(errorCount(err), 2u)
-        << "the unresolved return type, reported once per resolution pass and no more "
-           "-- see KnownDefect_ErrorRecovery below for why two and not one\n"
+    EXPECT_EQ(errorCount(err), 1u)
+        << "the unresolved return type, once -- the signature pass is quiet and the body\n"
+           "pass reports (Soundness_ErrorRecovery.AnAnnotationInAStructSignatureIsReportedOnce)\n"
         << err;
 
     // No `nosuchmethod` control here, deliberately. The lookup that would have to be
@@ -599,45 +599,118 @@ TEST(Soundness_ErrorRecovery, AClassOperatorWithAnUnresolvedReturnTypeIsVisibleT
     EXPECT_EQ(stripAnsi(r.err).find("Type mismatch"), std::string::npos) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Generics, AnOperatorsOwnGenericParameterIsNotInScopeInPassOne) {
-    // visit(StructDeclaration&)'s signature pass resolves each operator's return type
-    // from a scope holding the struct's generic parameters and not the operator's own,
-    // so `operator + : <T>(other: <T>) <T>` reports `Undefined type 'T'` about a
-    // parameter it declares one token earlier. The parameter list escapes it only
-    // because those types are resolved again, later, in a scope that has T.
+// Was two tests. KnownDefect_Generics.AnOperatorsOwnGenericParameterIsNotInScopeInPassOne
+// booked a signature pass that resolved an operator's return type without the operator's
+// own generic parameters in scope: `operator + : <T>(other: <T>) <T>` reported
+// "Undefined type 'T'" about a parameter it declares one token earlier, and registered the
+// operator returning the error sentinel. When the pass was fixed the KnownDefect was
+// inverted into Soundness_Generics.AnOperatorsOwnGenericParameterIsInScopeInPassOne,
+// asserting that the program compiles clean.
+//
+// That test was unkillable, and this is where it went. Two reasons, both general:
+//
+//   * The signature pass is quiet (SemanticAnalyzer::QuietPass), so the diagnostic is gone
+//     whether or not the scope is right. Mutant D-opgen reverts the fix and the inverted
+//     test stayed green.
+//   * A sentinel registration is silent *by construction* -- checkType stops before it
+//     compares against the sentinel -- so "this program compiles clean" is satisfied by
+//     registering nothing at all. Any assertion of the form "no diagnostic" is blind to
+//     the failure it was written for.
+//
+// So the claim has to be read off the registration instead: call the operator and check
+// the type of the call. `errorCount == 0` survives below as one case among several, and it
+// is deliberately not the assertion the test rests on.
+TEST(Soundness_Generics, AnOperatorsRegisteredReturnTypeIsWhatItsCallIsTyped) {
+    // The declaration on its own, which must not report -- kept from the inverted test.
+    // See above for why this assertion cannot detect the defect it came from.
+    EXPECT_EQ(errorCount(stripAnsi(compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    operator + : <T>(other: <T>) <T> { return other; }\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n").err)), 0u)
+        << "the operator declares T one token before it uses it";
+
+    // The corpus spelling, where the parameter uses T and the return type does not
+    // (tests/samples/operators.fin:15). That one was clean even before the fix, which is
+    // why the defect survived being written down.
+    EXPECT_EQ(errorCount(stripAnsi(compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    operator + : <T>(other: <T>) <int> { return 0; }\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n").err)), 0u)
+        << "the corpus's own generic operator spelling";
+
+    // The non-generic case first, to fix what "typed as its return type" means: the
+    // operator returns int, the annotation says string, one mismatch.
+    const FincRun r = compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    operator -(other: <int>) <int> { return 0; }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let s <S> = S{v: 1};\n"
+        "    let r <string> = s - 1;\n"
+        "    return 0;\n"
+        "}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("expected 'string', got 'int'"), std::string::npos)
+        << "the operator's own return type, not the operand's and not the struct's\n" << err;
+
+    // The generic case, which is the one that needs the signature pass to have declared
+    // T. This asserts only that *some* real type was registered and reported -- what T
+    // should have been narrowed to is a separate question, booked in
+    // KnownDefect_Generics.AnOperatorsGenericParameterIsNotInferredFromItsOperand.
+    // Silence is the failure mode being watched for here: an operator registered
+    // returning the sentinel makes this program compile clean.
+    const FincRun g = compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    operator + : <T>(other: <T>) <T> { return other; }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let s <S> = S{v: 1};\n"
+        "    let r <string> = s + 1;\n"
+        "    return 0;\n"
+        "}\n");
+    const std::string gerr = stripAnsi(g.err);
+    EXPECT_EQ(errorCount(gerr), 1u)
+        << "an operator registered returning the sentinel would compile this clean\n" << gerr;
+    EXPECT_EQ(gerr.find("<error>"), std::string::npos)
+        << "the signature pass registered the sentinel: it resolved <T> without T in scope\n"
+        << gerr;
+}
+
+TEST(KnownDefect_Generics, AnOperatorsGenericParameterIsNotInferredFromItsOperand) {
+    // `s + 1` calls `operator + : <T>(other: <T>) <T>` with an int, so T is int and the
+    // call is an int. The analyser reports the mismatch against the *unsubstituted*
+    // parameter instead, printing a type name that exists only inside the operator's own
+    // declaration: `expected 'string', got 'T'`.
     //
-    // The same hole is in the method loop directly above the operator loop -- and
-    // visit(ImplementsBlock&), two hundred lines below, already does the right thing:
-    // it opens a scope per method and calls declareGenericParams before resolving the
-    // signature, with a comment saying why. The signature pass needs that same three
-    // lines. It is booked rather than patched here because the honest version of the fix
-    // is the one copy the eight existing declareGenericParams calls should collapse into,
-    // and that is a refactor with its own tests, not a line in this unit.
+    // A function call has the same shape and the same gap -- there is no inference from
+    // arguments to generic parameters anywhere yet, which is why this is booked here
+    // rather than fixed: the fix is a unification pass shared by calls, method calls and
+    // operators, and it wants its own tests.
     const FincRun r = compile(
         "struct S {\n"
         "    v <int>,\n"
         "    operator + : <T>(other: <T>) <T> { return other; }\n"
         "}\n"
-        "fun main() <int> { return 0; }\n");
+        "fun main() <int> {\n"
+        "    let s <S> = S{v: 1};\n"
+        "    let r <string> = s + 1;\n"
+        "    return 0;\n"
+        "}\n");
     const std::string err = stripAnsi(r.err);
-    EXPECT_NE(err.find("Undefined type 'T'"), std::string::npos)
-        << "GOOD NEWS: a member's generic parameters are in scope when its signature is\n"
-           "registered. Invert this test -- the program should compile clean -- rename it\n"
-           "to Soundness_Generics.AnOperatorsOwnGenericParameterIsInScopeInPassOne, and\n"
-           "check whether visit(OperatorDeclaration&)'s second defineOperator call is now\n"
-           "redundant: if it is, delete it and the R-opboth mutant becomes R-opret.\n"
+    EXPECT_NE(err.find("got 'T'"), std::string::npos)
+        << "GOOD NEWS: an operator's generic parameter is inferred from its operand.\n"
+           "The diagnostic should now read \"expected 'string', got 'int'\" -- move that\n"
+           "assertion into Soundness_Generics.AnOperatorsRegisteredReturnTypeIsWhatItsCall-\n"
+           "IsTyped, which currently asserts only that the type is not the sentinel, and\n"
+           "delete this test.\n"
         << err;
-
-    // The control: the corpus spelling, where the operator's parameter uses T and its
-    // return type does not (tests/samples/operators.fin:15). That one is clean today,
-    // which is why the defect above survived being written down.
-    const FincRun ok = compile(
-        "struct S {\n"
-        "    v <int>,\n"
-        "    operator + : <T>(other: <T>) <int> { return 0; }\n"
-        "}\n"
-        "fun main() <int> { return 0; }\n");
-    EXPECT_EQ(ok.exitCode, 0) << stripAnsi(ok.err);
 }
 
 TEST(Soundness_ErrorRecovery, ACastOfAnOperandThatDidNotTypeKeepsItsTargetType) {
@@ -1493,96 +1566,532 @@ TEST(Soundness_ErrorRecovery, ASentinelElementIsNotWidenedAwayByItsSiblings) {
 }
 
 // ---------------------------------------------------------------------------
-// An annotation inside a struct signature is reported once per resolution pass.
+// A method call has a signature.
 //
-// visit(StructDeclaration) resolves each method's and constructor's parameter and
-// return types twice: once in the registration pass, which needs the signature
-// before any body is analysed, and again when the body is visited. Both passes
-// call resolveTypeFromAST on the same TypeNode, and resolution reports on
-// failure, so `S(p: NoSuchType)` says "Undefined type 'NoSuchType'" twice.
+// Until this unit StructType::methods was `map<string, TypePtr>` holding only a
+// return type, so a method call was checked for neither arity nor argument types on
+// a struct, a class, an implements block or an inherited parent -- while a free
+// function was checked for both. The map now holds a FunctionType and the three
+// call sites share one check with visit(FunctionCall&).
 //
-// Predates the error sentinel and is untouched by it -- the sentinel governs what
-// happens *after* a failed resolution, not how many times resolution runs. It is
-// booked separately because the fix is structural: either the passes share a
-// resolved-type cache keyed on the TypeNode, or resolution stops reporting and
-// every caller reports instead. Both are larger than this unit, and both need a
-// decision about which pass owns the diagnostic.
+// Two things about the stored signature are decisions, not accidents:
 //
-// Measured cost in the corpus: nothing. Exactly one pair of diagnostics in the
-// 50 samples shares a message and a location, and it is a module path, not this.
-// The corpus's unresolved types sit in member and `let` annotations, which resolve
-// once; none is in a constructor parameter or a method return type. So this test is
-// the only thing holding the shape, and the ranking follows: fix it when the pass
-// structure is being changed for another reason, not before.
+//   * The receiver is not in it. `struct_methods.fin:10` says the first parameter
+//     "will be injected by compiler and it will be the struct itself", whether or
+//     not the author wrote `self`, so both spellings must call the same way. The
+//     signature is stored as it is *called*, which makes AWrittenSelfParameter-
+//     IsNotAnArgument a test of the store rather than of every call site.
+//   * It is resolved in the signature pass, quietly, because the body pass resolves
+//     the same annotations again and reports. Resolving twice reporting is exactly
+//     the duplicate that Soundness_ErrorRecovery.AnImplementsBlockMethodParameter-
+//     IsReportedOnce was split out to hold, and AMethodParameterAnnotationIsStill-
+//     ReportedOnce below is the guard for the other three sites.
 // ---------------------------------------------------------------------------
-TEST(KnownDefect_MethodCalls, AMethodCallIsNotCheckedAgainstItsSignature) {
-    // Methods record a return type and nothing else: StructType::methods is
-    // `map<string, TypePtr>` (StructType.hpp:29) and visit(MethodCall&) looks up
-    // getMethodReturnType and stops (Analyzer_Expr.cpp:369). So a method call is checked
-    // for neither arity nor argument types, on a struct, on a class, or through an
-    // implements block -- while a free function is checked for both.
+
+TEST(Soundness_MethodCalls, AMethodCallIsCheckedAgainstItsSignature) {
+    // Was KnownDefect_MethodCalls.AMethodCallIsNotCheckedAgainstItsSignature, whose
+    // own text set the target: "each of these reports a wrong-arity error, exactly as
+    // `fun f(a: int)` called `f(1, 2)` already does".
     //
     // Found by mutation: the implements block built a parameter-type vector that no one
-    // read, and breaking it killed no test because nothing can observe a method
-    // signature. That vector is now deleted; this is the consumer whose absence made it
-    // dead, and when it exists the signature belongs on StructType, built once.
-    //
-    // Correct behaviour: each of these reports a wrong-arity error, exactly as
-    // `fun f(a: int)` called `f(1, 2)` already does.
-    for (const char* code : {
-            "struct S {\n"
-            "    v <int>,\n"
-            "    pub fun m(a: int) <int> { return a; }\n"
-            "}\n"
-            "fun main() <int> { let s <S> = S{v: 1}; return s.m(1, 2); }\n",
-            "class C {\n"
-            "    v <int>,\n"
-            "    pub fun m(a: int) <int> { return a; }\n"
-            "}\n"
-            "fun main() <int> { let c <&C> = new C{v: 1}; return c.m(1, 2); }\n",
-            "struct S { v <int> }\n"
-            "interface I { pub fun m(a: int) <int>; }\n"
-            "S implements <I> {\n"
-            "    pub fun m(a: int) <int> { return a; }\n"
-            "}\n"
-            "fun main() <int> { let s <S> = S{v: 1}; return s.m(1, 2); }\n"}) {
-        const FincRun r = compile(code);
-        EXPECT_EQ(r.exitCode, 0)
-            << "GOOD NEWS: a method call is now checked against its signature. Invert\n"
-               "this test -- each case should report a wrong-arity error naming the\n"
-               "method -- rename it to Soundness_MethodCalls.AMethodCallIsCheckedAgainst"
-               "ItsSignature,\n"
-               "and check whether argument *types* are checked too.\n"
-            << code << stripAnsi(r.err);
+    // read, and breaking it killed no test because nothing could observe a method
+    // signature. This is the consumer whose absence made it dead.
+    struct Case { const char* what; const char* code; };
+    for (const Case& c : {
+             Case{"struct",
+                  "struct S {\n"
+                  "    v <int>,\n"
+                  "    pub fun m(a: int) <int> { return a; }\n"
+                  "}\n"
+                  "fun main() <int> { let s <S> = S{v: 1}; return s.m(1, 2); }\n"},
+             Case{"class",
+                  "class C {\n"
+                  "    v <int>,\n"
+                  "    pub fun m(a: int) <int> { return a; }\n"
+                  "}\n"
+                  "fun main() <int> { let c <&C> = new C{v: 1}; return c.m(1, 2); }\n"},
+             Case{"implements block",
+                  "struct S { v <int> }\n"
+                  "interface I { pub fun m(a: int) <int>; }\n"
+                  "S implements <I> {\n"
+                  "    pub fun m(a: int) <int> { return a; }\n"
+                  "}\n"
+                  "fun main() <int> { let s <S> = S{v: 1}; return s.m(1, 2); }\n"}}) {
+        const std::string err = stripAnsi(compile(c.code).err);
+        EXPECT_NE(err.find("Method 'm' expects 1 arguments, got 2"), std::string::npos)
+            << c.what << "\n" << err;
+        EXPECT_EQ(errorCount(err), 1u) << "one call, one diagnostic\n" << c.what << "\n" << err;
     }
 
-    // The free-function control: the same mistake is caught here, which is what makes
-    // the silence above a gap rather than a policy.
+    // Too few, on the same declaration: the check is a range, not an upper bound.
+    const std::string few = stripAnsi(compile(
+        "struct S { v <int>, pub fun m(a: int, b: int) <int> { return a; } }\n"
+        "fun main() <int> { let s <S> = S{v: 1}; return s.m(1); }\n").err);
+    EXPECT_NE(few.find("Method 'm' expects 2 arguments, got 1"), std::string::npos) << few;
+
+    // The free-function control: the same mistake in the same shape, which is what
+    // makes the two messages worth keeping in one wording.
     const std::string fn = stripAnsi(compile(
         "fun m(a: int) <int> { return a; }\n"
         "fun main() <int> { return m(1, 2); }\n").err);
-    EXPECT_NE(fn.find("expects 1 arguments, got 2"), std::string::npos) << fn;
+    EXPECT_NE(fn.find("Function 'm' expects 1 arguments, got 2"), std::string::npos) << fn;
 }
 
-TEST(KnownDefect_ErrorRecovery, AnAnnotationInAStructSignatureIsReportedOncePerPass) {
+TEST(Soundness_MethodCalls, ACallsTypeIsItsReturnTypeNotItsLastArgument) {
+    // visit(MethodCall&) assigned lastExprType = retType and *then* walked the
+    // arguments, so every argument overwrote the call's own type and a call with
+    // arguments was typed as its last argument. Both directions were wrong at once:
+    // a true type was rejected and a false one accepted. visit(StaticMethodCall&)
+    // already ordered the two operations the other way round, which is what showed
+    // this was an ordering slip and not a missing rule.
+    const char* decl = "struct S {\n"
+                       "    v <int>,\n"
+                       "    pub fun m(self: &Self, a: string) <int> { return 1; }\n"
+                       "    pub fun n(self: &Self) <int> { return 2; }\n"
+                       "    pub static fun s(a: string) <int> { return 3; }\n"
+                       "}\n";
+
+    // The false positive: `m` returns int, the annotation is int, and the argument's
+    // type was reported as if it were the call's.
+    const std::string ok = stripAnsi(compile(
+        std::string(decl) + "fun main() <int> { let s <S> = S{v: 1}; let r <int> = s.m(\"x\"); return 0; }\n").err);
+    EXPECT_EQ(errorCount(ok), 0u) << "a call's type is its return type\n" << ok;
+
+    // The missed error, which is the half a caret-placement fix would have hidden:
+    // the call was accepted where a string was wanted because a string was passed.
+    const std::string bad = stripAnsi(compile(
+        std::string(decl) + "fun main() <int> { let s <S> = S{v: 1}; let r <string> = s.m(\"x\"); return 0; }\n").err);
+    EXPECT_NE(bad.find("expected 'string', got 'int'"), std::string::npos)
+        << "the call's type is int, whatever it was passed\n" << bad;
+
+    // The control that localised it: with no arguments there was nothing to overwrite
+    // with, so a no-argument method typed correctly throughout.
+    const std::string none = stripAnsi(compile(
+        std::string(decl) + "fun main() <int> { let s <S> = S{v: 1}; let r <string> = s.n(); return 0; }\n").err);
+    EXPECT_NE(none.find("expected 'string', got 'int'"), std::string::npos) << none;
+
+    // And the static site, which was already right and must stay right.
+    const std::string stat = stripAnsi(compile(
+        std::string(decl) + "fun main() <int> { let r <string> = S::s(\"x\"); return 0; }\n").err);
+    EXPECT_NE(stat.find("expected 'string', got 'int'"), std::string::npos) << stat;
+}
+
+TEST(Soundness_MethodCalls, AMethodArgumentIsCheckedAgainstItsParameter) {
+    // Deliberately a *discarded* call: `let r <int> = s.m("x")` would have reported
+    // "expected 'int', got 'string'" even before this unit, through the ordering bug
+    // above, so testing arguments in an annotated position proves nothing about
+    // whether arguments are checked.
+    struct Case { const char* what; const char* code; };
+    for (const Case& c : {
+             Case{"struct",
+                  "struct S { v <int>, pub fun m(a: int) <int> { return a; } }\n"
+                  "fun main() <int> { let s <S> = S{v: 1}; s.m(\"x\"); return 0; }\n"},
+             Case{"class",
+                  "class C { v <int>, pub fun m(a: int) <int> { return a; } }\n"
+                  "fun main() <int> { let c <&C> = new C{v: 1}; c.m(\"x\"); return 0; }\n"},
+             Case{"static",
+                  "struct S { v <int>, pub static fun m(a: int) <int> { return a; } }\n"
+                  "fun main() <int> { S::m(\"x\"); return 0; }\n"}}) {
+        const std::string err = stripAnsi(compile(c.code).err);
+        EXPECT_NE(err.find("expected 'int', got 'string'"), std::string::npos)
+            << c.what << "\n" << err;
+    }
+
+    // The argument that is right is still right -- an arity-only check would pass the
+    // three above by accident if it reported on every call.
+    const std::string clean = stripAnsi(compile(
+        "struct S { v <int>, pub fun m(a: int) <int> { return a; } }\n"
+        "fun main() <int> { let s <S> = S{v: 1}; s.m(1); return 0; }\n").err);
+    EXPECT_EQ(errorCount(clean), 0u) << clean;
+}
+
+TEST(Soundness_MethodCalls, AWrittenSelfParameterIsNotAnArgument) {
+    // struct_methods.fin writes both spellings in one struct -- `fun print_point(self:
+    // &Self)` at :10 and `fun set_x<U>(new_x: U)` at :14 -- and its comment says the
+    // receiver is injected either way. So the two must be called identically, which
+    // means the stored signature cannot simply be the declared parameter list.
+    struct Case { const char* what; const char* decl; };
+    for (const Case& c : {Case{"written self", "pub fun m(self: &Self, a: int) <int> { return a; }"},
+                          Case{"injected self", "pub fun m(a: int) <int> { return a; }"}}) {
+        const std::string head = std::string("struct S { v <int>, ") + c.decl + " }\n"
+                                 "fun main() <int> { let s <S> = S{v: 1}; return ";
+        EXPECT_EQ(errorCount(stripAnsi(compile(head + "s.m(1); }\n").err)), 0u)
+            << c.what << ": one written argument is the one argument\n";
+        EXPECT_NE(stripAnsi(compile(head + "s.m(); }\n").err).find("expects 1 arguments, got 0"),
+                  std::string::npos) << c.what;
+        EXPECT_NE(stripAnsi(compile(head + "s.m(1, 2); }\n").err).find("expects 1 arguments, got 2"),
+                  std::string::npos) << c.what;
+    }
+
+    // A written `self` is not silently dropped either: it still names the receiver in
+    // the body, which is the reason the spelling exists.
+    EXPECT_EQ(errorCount(stripAnsi(compile(
+        "struct S { pub v <int>, pub fun m(self: &Self) <int> { return self.v; } }\n"
+        "fun main() <int> { let s <S> = S{v: 1}; return s.m(); }\n").err)), 0u);
+}
+
+TEST(Soundness_MethodCalls, AnInheritedMethodIsCheckedAgainstItsSignature) {
+    // getMethodReturnType walked `parents` (StructType.cpp:37) and getMethodType must
+    // walk it the same way, or inheriting a method would lose its signature and every
+    // call through a child would be unchecked again -- the defect this unit closes,
+    // reintroduced for exactly the programs deeptest2.fin:67 writes.
+    const char* decl = "struct P { pub x <int>, pub fun base(a: int) <int> { return a; } }\n"
+                       "struct C : <P> { pub y <int> }\n";
+    const std::string wrong = stripAnsi(compile(
+        std::string(decl) + "fun main() <int> { let c <C> = C{x: 1, y: 2}; return c.base(1, 2); }\n").err);
+    EXPECT_NE(wrong.find("Method 'base' expects 1 arguments, got 2"), std::string::npos) << wrong;
+
+    const std::string right = stripAnsi(compile(
+        std::string(decl) + "fun main() <int> { let c <C> = C{x: 1, y: 2}; return c.base(1); }\n").err);
+    EXPECT_EQ(errorCount(right), 0u) << right;
+}
+
+TEST(Soundness_MethodCalls, ANullableMethodParameterIsOptional) {
+    // nullifier.fin:2 records that "a nullable parameter is optional at the call site"
+    // is implemented -- for functions. The optionality lives in the `required` count
+    // that visit(FunctionCall&) computes, so sharing the check is what carries the
+    // rule to methods; writing the arity check separately would have lost it.
+    const char* decl = "struct S { v <int>, pub fun m(a?: int) <int> { return 1; } }\n";
+    EXPECT_EQ(errorCount(stripAnsi(compile(
+        std::string(decl) + "fun main() <int> { let s <S> = S{v: 1}; return s.m(); }\n").err)), 0u)
+        << "a nullable parameter may be omitted";
+    EXPECT_EQ(errorCount(stripAnsi(compile(
+        std::string(decl) + "fun main() <int> { let s <S> = S{v: 1}; return s.m(1); }\n").err)), 0u)
+        << "and may be supplied";
+    const std::string over = stripAnsi(compile(
+        std::string(decl) + "fun main() <int> { let s <S> = S{v: 1}; return s.m(1, 2); }\n").err);
+    EXPECT_NE(over.find("expects between 0 and 1 arguments, got 2"), std::string::npos)
+        << "optional is not unlimited\n" << over;
+}
+
+TEST(Soundness_MethodCalls, AMethodCallThroughAnInterfaceIsChecked) {
+    // interfaces.fin:16 writes the bounded form and its comment offers the
+    // interface-in-parameter-position form as "an easier way to write this", so both
+    // spellings are corpus syntax and both find the method on the interface rather
+    // than on a struct. The interface's own signature pass is the one that must record
+    // parameters, and it is the one site that cannot resolve them quietly: an
+    // interface has no body, so its signature pass is the only pass there is.
+    struct Case { const char* what; const char* code; };
+    for (const Case& c : {
+             Case{"generic bound",
+                  "interface I { pub fun m(a: int) <int>; }\n"
+                  "fun f<T: I>(item: T) <noret> { let x <int> = item.m(1, 2); }\n"
+                  "fun main() <int> { return 0; }\n"},
+             Case{"parameter position",
+                  "interface I { pub fun m(a: int) <int>; }\n"
+                  "fun f(item: I) <noret> { let x <int> = item.m(1, 2); }\n"
+                  "fun main() <int> { return 0; }\n"}}) {
+        const std::string err = stripAnsi(compile(c.code).err);
+        EXPECT_NE(err.find("Method 'm' expects 1 arguments, got 2"), std::string::npos)
+            << c.what << "\n" << err;
+    }
+}
+
+TEST(Soundness_MethodCalls, AMethodWithAnUnresolvedParameterKeepsItsWrittenArity) {
+    // The sentinel rule at a new site. Soundness_TypeResolution.AnUnresolvedParameter-
+    // DoesNotChangeTheReportedArity holds this for functions; dropping an unresolved
+    // parameter out of a method signature would make `pub fun m(a: NoSuchType)` called
+    // `s.m(1)` say "expects 0 arguments, got 1" -- a claim about a signature nobody
+    // wrote, on top of the one real diagnostic.
+    const std::string err = stripAnsi(compile(
+        "struct S { v <int>, pub fun m(a: NoSuchType) <int> { return 1; } }\n"
+        "fun main() <int> { let s <S> = S{v: 1}; return s.m(1); }\n").err);
+    EXPECT_EQ(errorCount(err), 1u) << "the annotation is the whole diagnostic\n" << err;
+    EXPECT_NE(err.find("Undefined type 'NoSuchType'"), std::string::npos) << err;
+    EXPECT_EQ(err.find("arguments"), std::string::npos) << "arity is what was written\n" << err;
+}
+
+TEST(KnownDefect_MethodCalls, AStaticCallOnAGenericStructIsCheckedAgainstTheTemplate) {
+    // Now that a call is checked against its signature, a signature holding `Self` has to
+    // say which Self. For a method it does: the receiver is the *instance* type
+    // `G<int>`, StructType::substitute rewrote Self when the instance was made, and both
+    // the parameter and the return type compare clean. A static call has no receiver --
+    // it resolves `G` by name and gets the uninstantiated template, whose Self is still
+    // Self -- so the same signature reports against every argument and every use of the
+    // result.
+    //
+    // Found in the corpus, not here: tests/samples/letssee.fin went from four
+    // diagnostics to three when method calls started being checked, and the one it
+    // gained was `Vec2::normalize(scaled)` at line 73 -- an argument position, where
+    // before only the two static return types (59, 77) misreported. The sample's own
+    // //@ unimplemented note already books the root cause.
+    //
+    // The fix is generic argument inference on a static call path (`G::f(g)` has to
+    // learn T from somewhere -- the argument, or the `G::<int>::f` spelling the parser
+    // accepts), which is the same missing unification as
+    // KnownDefect_Generics.AnOperatorsGenericParameterIsNotInferredFromItsOperand.
+    const FincRun r = compile(
+        "struct G<T> {\n"
+        "    v <T>,\n"
+        "    static fun f(p: <&Self>) <noret> { }\n"
+        "    static fun g() <&Self> { return null; }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let g <&G<int>> = new G::<int>{v: 1};\n"
+        "    G::f(g);\n"
+        "    let a <&G<int>> = G::g();\n"
+        "    return 0;\n"
+        "}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("expected '&Self', got '&G<int>'"), std::string::npos)
+        << "GOOD NEWS: a static call substitutes the generic arguments into its\n"
+           "signature. Invert this test -- both statements should compile clean -- and\n"
+           "rename it Soundness_MethodCalls.AStaticCallOnAGenericStructIsCheckedAgainst-\n"
+           "TheInstance. Then re-run tests/tools/corpus_snapshot.sh: letssee.fin should\n"
+           "drop from three diagnostics to zero, and its //@ unimplemented note goes.\n"
+        << err;
+    EXPECT_NE(err.find("expected '&G<int>', got '&Self'"), std::string::npos)
+        << "the return-type half of the same defect\n" << err;
+
+    // The control, and the reason this is a static-call defect and not a Self defect: a
+    // non-generic struct has nothing to substitute, so its static signature is right.
+    const FincRun plain = compile(
+        "struct P {\n"
+        "    v <int>,\n"
+        "    static fun f(p: <&P>) <noret> { }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let p <&P> = new P{v: 1};\n"
+        "    P::f(p);\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(errorCount(stripAnsi(plain.err)), 0u) << stripAnsi(plain.err);
+
+    // The other control: the same generic struct reached through a receiver, where both
+    // positions are clean. This is what the static path should look like.
+    const FincRun method = compile(
+        "struct G<T> {\n"
+        "    v <T>,\n"
+        "    fun m(self: <&Self>, p: <&Self>) <noret> { }\n"
+        "    fun r(self: <&Self>) <&Self> { return self; }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let g <&G<int>> = new G::<int>{v: 1};\n"
+        "    g.m(g);\n"
+        "    let a <&G<int>> = g.r();\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(errorCount(stripAnsi(method.err)), 0u)
+        << "a method call substitutes Self through the instance receiver\n"
+        << stripAnsi(method.err);
+}
+
+TEST(KnownDefect_IndexOperator, AnIndexExpressionNeverConsultsOperatorBracket) {
+    // `operator []` parses, resolves, and is registered on the struct -- and nothing
+    // ever looks it up. visit(ArrayAccess) in Analyzer_Expr.cpp knows two shapes,
+    // ArrayType and PointerType, and a struct is neither, so a declared subscript
+    // operator has no reader at all. Two faces, and the pointer one is the dangerous
+    // half because it is silent.
+    //
+    // Found by measurement, not by reading: mutant S-retvoid ("a method with no
+    // written return type gets the sentinel, not void") killed nothing, and the reason
+    // was that no method can *have* no written return type -- every function production
+    // in parser.y requires `LT type GT`. Checking whether the operator loop's identical
+    // `else` branch was equally dead turned up parser.y:939, the
+    // `operator[] implements cast<fn(Self, T)>(__get)` form, where `return_type` really
+    // is null. That form is reachable (tests/samples/stdlib/hashmap.fin:50) -- and
+    // probing what it registered is how this came out.
+    //
+    // A third defect sits behind these two and only becomes visible once they are
+    // fixed: `OperatorDeclaration::implements_expr`, which holds the cast that carries
+    // that form's whole signature, is written by the parser and read by nobody
+    // (`grep -rn implements_expr src/` finds only the declaration and its assignment).
+    // So `operator[] implements cast<fn(Self, T)>(__get)` registers `operator[]`
+    // returning `void` and drops the binding to `__get` on the floor.
+
+    // Face one, silent: `&Box<int>` is a PointerType whose pointee is not an array, so
+    // the subscript is typed as the pointee -- C pointer-arithmetic semantics applied to
+    // a struct that asked for something else. No diagnostic says so; the only reason
+    // this is visible at all is the annotation it then fails against.
+    const std::string ptr = stripAnsi(compile(
+        "struct Box<T> {\n"
+        "    v <T>,\n"
+        "    operator [](i: <int>) <int> { return 1; }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let b <&Box<int>> = new Box::<int>{v: 7};\n"
+        "    let r <string> = b[0];\n"
+        "    return 0;\n"
+        "}\n").err);
+    EXPECT_NE(ptr.find("got 'Box<int>'"), std::string::npos)
+        << "GOOD NEWS: a subscript on a struct consults its operator []. Invert this\n"
+           "test -- the pointer case should report `expected 'string', got 'int'`, the\n"
+           "value case should compile clean, and a struct with no operator [] must still\n"
+           "report `is not an array or pointer` -- then rename it\n"
+           "Soundness_IndexOperator.AnIndexExpressionOnAStructIsTypedByItsOperator.\n"
+           "Registering the operator's *parameter* type is part of that fix: today\n"
+           "StructType::operators maps an operator to a return type and nothing else,\n"
+           "so there is nowhere to check the index against. Then re-run\n"
+           "tests/tools/corpus_snapshot.sh -- hashmap.fin and collection.fin both use\n"
+           "the `implements cast` form and their notes need rereading.\n"
+        << ptr;
+
+    // Face two, loud and wrong: a value receiver is not a pointer either, so the
+    // operator that exists to make this legal is reported as if it did not exist.
+    const std::string val = stripAnsi(compile(
+        "struct Box {\n"
+        "    v <int>,\n"
+        "    operator [](i: <int>) <int> { return self.v; }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let b <Box> = Box{v: 7};\n"
+        "    let r <int> = b[0];\n"
+        "    return 0;\n"
+        "}\n").err);
+    EXPECT_NE(val.find("Type 'Box' is not an array or pointer"), std::string::npos)
+        << "the value-receiver half: the declared operator [] is not consulted\n" << val;
+    EXPECT_EQ(errorCount(val), 1u) << "and it is the only diagnostic\n" << val;
+
+    // Face three: the index is forced to `int` before the receiver is even classified,
+    // so an operator declared to take a string key -- which is what a hashmap is for --
+    // reports twice for one legal expression.
+    const std::string key = stripAnsi(compile(
+        "struct Map {\n"
+        "    v <int>,\n"
+        "    operator [](k: <string>) <int> { return self.v; }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let m <Map> = Map{v: 7};\n"
+        "    let r <int> = m[\"k\"];\n"
+        "    return 0;\n"
+        "}\n").err);
+    EXPECT_NE(key.find("expected 'int', got 'string'"), std::string::npos)
+        << "the index is checked against int, not against the operator's parameter\n" << key;
+    EXPECT_EQ(errorCount(key), 2u) << "two diagnostics for one legal subscript\n" << key;
+
+    // The control, and the reason this is an operator defect and not a subscript defect:
+    // indexing what visit(ArrayAccess) does know about is right, element type and all.
+    const std::string arr = stripAnsi(compile(
+        "fun main() <int> {\n"
+        "    let a <[int]> = [1, 2, 3];\n"
+        "    let e <string> = a[0];\n"
+        "    return 0;\n"
+        "}\n").err);
+    EXPECT_NE(arr.find("expected 'string', got 'int'"), std::string::npos)
+        << "an array subscript is typed as its element type\n" << arr;
+    EXPECT_EQ(errorCount(arr), 1u) << arr;
+}
+
+TEST(Soundness_GenericConstraints, AMethodInAnInterfaceDeclaresItsOwnGenerics) {
+    // The sibling of Soundness_GenericConstraints.AMethodInAnImplementsBlockDeclares-
+    // ItsOwnGenerics, and it was broken: visit(InterfaceDeclaration) opened a scope per
+    // method but never called declareGenericParams for it -- the operator loop three
+    // lines below did -- so `pub fun m<T>(a: T) <T>;` reported "Undefined type 'T'"
+    // twice, once for the parameter and once for the return type.
+    //
+    // Found by counting diagnostics for the quiet signature pass rather than by a test:
+    // the interface is the one site that must keep reporting, so its output was the
+    // output being counted.
+    EXPECT_EQ(errorCount(stripAnsi(compile(
+        "interface I { pub fun m<T>(a: T) <T>; }\nfun main() <int> { return 0; }\n").err)), 0u)
+        << "a generic interface method declares its own T";
+
+    // And the generics do not leak: the next method's signature is resolved in its own
+    // scope, so T is undefined there -- once, for the one annotation that names it.
+    const std::string leak = stripAnsi(compile(
+        "interface I { pub fun m<T>(a: T) <int>; pub fun n(b: T) <int>; }\n"
+        "fun main() <int> { return 0; }\n").err);
+    EXPECT_EQ(errorCount(leak), 1u) << "one method's generics stay in one method\n" << leak;
+}
+
+TEST(Soundness_ErrorRecovery, AMethodParameterAnnotationIsStillReportedOnce) {
+    // The guard on the quiet signature pass. Before this unit no site resolved a
+    // method's parameter types in pass 1, so each was reported once, by the body pass.
+    // Pass 1 now resolves them to build the signature -- and must not report, or every
+    // one of these becomes two diagnostics. That is the same duplicate that
+    // AnImplementsBlockMethodParameterIsReportedOnce was split out of a KnownDefect to
+    // hold, so this test states it for the sites that pass 1 covers.
+    //
+    // Interfaces are absent on purpose: an interface method has no body, so nothing
+    // resolves its parameters a second time and its signature pass reports. That
+    // asymmetry is the whole reason the flag is a flag and not a policy.
+    struct Case { const char* what; const char* code; };
+    for (const Case& c : {
+             Case{"struct method",
+                  "struct S { v <int>, pub fun m(a: NoSuchType) <int> { return 1; } }\n"
+                  "fun main() <int> { return 0; }\n"},
+             Case{"class method",
+                  "class C { v <int>, pub fun m(a: NoSuchType) <int> { return 1; } }\n"
+                  "fun main() <int> { return 0; }\n"},
+             Case{"static method",
+                  "struct S { v <int>, pub static fun m(a: NoSuchType) <int> { return 1; } }\n"
+                  "fun main() <int> { return 0; }\n"},
+             Case{"implements block",
+                  "interface I { pub fun m(a: int) <int>; }\n"
+                  "struct S { val <int> }\n"
+                  "S implements <I> { pub fun m(a: NoSuchType) <int> { return 0; } }\n"
+                  "fun main() <int> { return 0; }\n"}}) {
+        const std::string err = stripAnsi(compile(c.code).err);
+        EXPECT_EQ(errorCount(err), 1u) << c.what << ": one annotation, one diagnostic\n" << err;
+    }
+
+    // The interface, stated rather than left to inference: exactly one, from the only
+    // pass that sees it.
+    const std::string iface = stripAnsi(compile(
+        "interface I { pub fun m(a: NoSuchType) <int>; }\nfun main() <int> { return 0; }\n").err);
+    EXPECT_EQ(errorCount(iface), 1u) << "an interface method reports from its signature pass\n" << iface;
+}
+
+// ---------------------------------------------------------------------------
+// An annotation inside a struct signature is reported once.
+//
+// It used to be reported once per resolution pass. visit(StructDeclaration) resolves
+// each method's and constructor's parameter and return types twice: once in the
+// registration pass, which needs the signature before any body is analysed, and again
+// when the body is visited. Both called a reporting resolver on the same TypeNode, so
+// `S(p: NoSuchType)` said "Undefined type 'NoSuchType'" twice.
+//
+// The ranking on the KnownDefect this replaces read "fix it when the pass structure is
+// being changed for another reason, not before", and the method-signature unit was that
+// reason: pass 1 had to start resolving parameter types to build a FunctionType, which
+// would have turned one duplicate into three. The fix is the second of the two shapes
+// that KnownDefect named -- resolution in the registration pass does not report,
+// because the body pass resolves the same nodes and does. It is a pre-pass whose every
+// diagnostic is re-raised, which is what makes silence there sound rather than lossy.
+//
+// The one site that keeps reporting is the interface, and it is the reason this is a
+// scoped guard and not a policy: an interface method has no body, so its registration
+// pass is the only pass over its signature. Soundness_MethodCalls.AMethodCallThrough-
+// AnInterfaceIsChecked calls those signatures and AMethodParameterAnnotationIsStill-
+// ReportedOnce counts their diagnostics.
+// ---------------------------------------------------------------------------
+TEST(Soundness_ErrorRecovery, AnAnnotationInAStructSignatureIsReportedOnce) {
     struct Case { const char* what; const char* code; };
     for (const Case& c : {
              Case{"constructor parameter",
                   "struct S { S(p: NoSuchType) {} }\nfun main() <int> { return 0; }\n"},
+             Case{"class constructor parameter",
+                  "class C { pub v <int>, C(p: NoSuchType) {} }\n"
+                  "fun main() <int> { return 0; }\n"},
              Case{"method return type",
                   "struct S { pub v <int>, fun m(self: &Self) <NoSuchType> { return 0; } }\n"
+                  "fun main() <int> { return 0; }\n"},
+             Case{"class method return type",
+                  "class C { pub v <int>, fun m(self: &Self) <NoSuchType> { return 0; } }\n"
+                  "fun main() <int> { return 0; }\n"},
+             // The operator return type was never booked -- it is the same two passes
+             // over the same node, found while counting what the quiet pass covers,
+             // and it would have stayed unmeasured because no test called an operator
+             // whose return type failed. An operator *parameter* is still resolved by
+             // one pass only: defineOperator stores a return type and nothing else,
+             // so operators have no signature yet and `s + 1` is unchecked for arity
+             // and argument type the way a method call was.
+             Case{"operator return type",
+                  "struct S { pub v <int>, pub operator + (other: <S>) <NoSuchType> { return 0; } }\n"
                   "fun main() <int> { return 0; }\n"},
              // The implements-block method parameter used to be a third case here and
              // is now a Soundness test of its own, below: the pass that duplicated it
              // was building a signature no one read, so deleting the pass fixed the
-             // duplicate outright. What is left are the two passes that both exist for
-             // a reason -- a signature pass that must run before any body, and a body
-             // pass that must populate a scope -- which is why this is still open.
+             // duplicate outright. The two that remain are the two passes that both
+             // exist for a reason -- a signature pass that must run before any body,
+             // and a body pass that must populate a scope -- so neither could be
+             // deleted and one had to fall silent instead. Parameters are counted at
+             // all four signature sites by AMethodParameterAnnotationIsStillReportedOnce
+             // above; the two cases here are the two the KnownDefect carried.
              }) {
         const FincRun r = compile(c.code);
-        EXPECT_EQ(errorCount(stripAnsi(r.err)), 2u)
-            << "FIXED? One unresolved type earns one diagnostic, not one per pass over the "
-               "signature. Change this to 1 and move it into Soundness_ErrorRecovery.\n"
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u)
+            << "one unresolved type, one diagnostic -- not one per pass over the signature\n"
             << c.what << "\n" << stripAnsi(r.err);
     }
 
@@ -1598,9 +2107,12 @@ TEST(KnownDefect_ErrorRecovery, AnAnnotationInAStructSignatureIsReportedOncePerP
 TEST(Soundness_ErrorRecovery, AnImplementsBlockMethodParameterIsReportedOnce) {
     // Split out of the KnownDefect above when it went green. The implements block
     // resolved every parameter twice: once into a vector that StructType had nowhere to
-    // put (see KnownDefect_MethodCalls.AMethodCallIsNotCheckedAgainstItsSignature) and
-    // once in visit(FunctionDeclaration&), which is the walk that has a use for them.
-    // Deleting the first left the diagnostic and dropped the duplicate.
+    // put -- StructType::methods held a return type and nothing else -- and once in
+    // visit(FunctionDeclaration&), which is the walk that has a use for them. Deleting
+    // the first left the diagnostic and dropped the duplicate.
+    //
+    // The map holds a full FunctionType now (Soundness_MethodCalls), so the block
+    // resolves its parameters again -- quietly, which is what keeps this at one.
     const FincRun r = compile("interface I { pub fun m(a: int) <int>; }\n"
                               "struct S { val <int> }\n"
                               "S implements <I> {\n"

@@ -377,6 +377,11 @@ bool SemanticAnalyzer::checkConstraint(TypeNode* typeNode, std::shared_ptr<Type>
 }
 
 void SemanticAnalyzer::error(ASTNode& node, const std::string& msg) {
+    // A quiet pre-pass reports nothing and, just as importantly, does not set
+    // hasError: an exit code that says the program failed with no diagnostic printed
+    // is the one outcome worse than a duplicate. See SemanticAnalyzer::QuietPass for
+    // why silence is sound at the two sites that use it.
+    if (quietDepth) return;
     diag.reportError(node.loc, msg);
     hasError = true;
 }
