@@ -6435,3 +6435,189 @@ TEST(Soundness_Enums, AStaticMethodOnAnEnumIsStillCallableThroughItsType) {
                               "fun main() <noret> { let n <int> = E::m(E::A); }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
+
+// A member with a payload is not a value until its payload is supplied. The two
+// spellings that force the rule are both in the corpus and both `//@ ok` or on the
+// path to it: `let s <Status> = OK;` (arrays_enums.fin:17) reads a payloadless member
+// as a value of its enum, and `Ok(10)` (enums.fin:44) calls a payloaded one. So the
+// bare name -- and `E::X` read without a call -- is the enum itself when there is no
+// payload and the constructor `fn(payload...) -> E` when there is.
+//
+// The constructor is what is *stored* either way, `fn() -> E` for a payloadless
+// member included, because visit(StaticMethodCall&) needs a signature to check
+// arguments against: `Color::Red(1)` on a payloadless member is an arity error, and it
+// can only be one if there is an arity to compare against.
+TEST(Soundness_Enums, AnEnumeratorWithAPayloadIsNotAValueOnItsOwn) {
+    const FincRun r = compile("enum E { Ok(int), Err(string) }\n"
+                              "fun main() <noret> { let e <E> = Ok; }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, AnEnumeratorWithAPayloadIsCallableByItsBareName) {
+    // enums.fin:44 -- `let r <Result<int, string>> = Ok(10);`, reached through the
+    // extern on line 19. Without the extern it is the same call by the bare name.
+    const FincRun r = compile("enum E { Ok(int), Err(string) }\n"
+                              "fun main() <noret> { let e <E> = Ok(10); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, ABareEnumeratorCallIsCheckedAgainstItsPayload) {
+    const FincRun r = compile("enum E { Ok(int), Err(string) }\n"
+                              "fun main() <noret> { let e <E> = Ok(\"no\"); }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Enums, APayloadlessEnumeratorIsStillAValue) {
+    // The other half, and the one two `//@ ok` samples depend on: arrays_enums.fin:17
+    // and operators.fin:25 both write a bare payloadless enumerator as a value.
+    const FincRun r = compile("enum E { A, B }\n"
+                              "fun main() <noret> { let e <E> = A; let f <E> = E::B; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// `extern X as Y;` -- a second name for an existing symbol.
+//
+// tests/samples/extern_as.fin is the whole specification and its first line says what
+// the statement is for: "it can separate symbols from namespaces and can be used for
+// type definitions but not recommended for that since we have `type` keyword". So the
+// primary reading is a *symbol* alias and the type alias is the secondary one, which is
+// the opposite of what the analyzer did: TypeDefinition carries `is_extern_alias`,
+// nothing read it, and `extern myglobv as myglobv_diffname;` resolved `myglobv` as a
+// type name and reported it undefined.
+TEST(Soundness_ExternAlias, AnExternAliasBindsASymbol) {
+    // extern_as.fin:9 -- "myglobv_diffname is a new name for `myglobv` but they are
+    // the same variable just different names (identifier)".
+    const FincRun r = compile("const g <int> = 10;\n"
+                              "extern g as g2;\n"
+                              "fun main() <noret> { let x <int> = g2; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ExternAlias, AnExternAliasCarriesTheSymbolsType) {
+    // "the same variable" -- so the alias is not a fresh name of unknown type. A
+    // diagnostic through the alias names the aliased symbol's type.
+    const FincRun r = compile("const g <int> = 10;\n"
+                              "extern g as g2;\n"
+                              "fun main() <noret> { let s <string> = g2; }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("got 'int'"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ExternAlias, AnExternAliasOfAFunctionIsCallable) {
+    const FincRun r = compile("fun f(n: int) <int> { return n; }\n"
+                              "extern f as g;\n"
+                              "fun main() <noret> { let x <int> = g(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ExternAlias, AnExternAliasOfAFunctionKeepsItsSignature) {
+    const FincRun r = compile("fun f(n: int) <int> { return n; }\n"
+                              "extern f as g;\n"
+                              "fun main() <noret> { let x <int> = g(\"no\"); }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ExternAlias, AnExternAliasOfATypeIsStillAType) {
+    // extern_as.fin:23 -- `extern int as Integer;`, which the file's own comment calls
+    // legal but discouraged. A name that resolves as a type and not as a symbol is
+    // bound as a type, which is what makes both readings of the statement work.
+    const FincRun r = compile("extern int as Integer;\n"
+                              "fun main() <noret> { let x <Integer> = 1; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ExternAlias, AnExternAliasOfAStructIsStillAType) {
+    const FincRun r = compile("struct S { pub v <int>, }\n"
+                              "extern S as T;\n"
+                              "fun main() <noret> { let x <T> = T{v: 1}; let n <int> = x.v; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ExternAlias, AnExternAliasOfAnUnknownNameIsReported) {
+    // The whole point of resolving it at all. An alias to nothing is a typo, and it
+    // has to report at the extern rather than at each use of the new name.
+    const FincRun r = compile("extern nosuchthing as x;\n"
+                              "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("nosuchthing"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ExternAlias, AnExternAliasOfAnUnknownNameStillDeclaresTheNewName) {
+    // The error-recovery rule every declaration site follows: the name was written, so
+    // the name exists, and it names the sentinel. Otherwise one typo'd extern is one
+    // diagnostic plus one for every use of the alias.
+    const FincRun r = compile("extern nosuchthing as x;\n"
+                              "fun main() <noret> { let n <int> = x; }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Undefined variable 'x'"), std::string::npos)
+        << "the alias is declared even though its target is not\n" << err;
+}
+
+TEST(Soundness_ExternAlias, AnExternAliasReachesAnEnumerator) {
+    // enums.fin:19 -- `extern Result::Ok as Ok;`, "this makes it so we can use `Ok`
+    // instead of typing `Result::Ok`". The qualifier here is a type, not a namespace,
+    // and it resolves: an enum's members are reachable through it.
+    const FincRun r = compile("enum E { A, B }\n"
+                              "extern E::A as Ok;\n"
+                              "fun main() <noret> { let e <E> = Ok; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ExternAlias, AnExternAliasOfAPayloadedEnumeratorIsCallable) {
+    // enums.fin:19 and :44 together, which is the pair the sample is built out of.
+    const FincRun r = compile("enum E { Ok(int), Err(string) }\n"
+                              "extern E::Ok as Ok;\n"
+                              "extern E::Err as Err;\n"
+                              "fun main() <noret> { let e <E> = Ok(10); let f <E> = Err(\"x\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ExternAlias, AnExternAliasOfAnUnknownEnumeratorIsReported) {
+    const FincRun r = compile("enum E { A, B }\n"
+                              "extern E::Nope as X;\n"
+                              "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Nope"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ExternAlias, AWildcardExternDoesNotReport) {
+    // extern_as.fin:32 and :39 -- `extern * from a_namespace;` and `extern * from
+    // MyEnum;`. Both are no-ops today and both must be quiet: a namespace's contents
+    // are spliced into the enclosing statement list (parser.y, namespace_block), so
+    // its names are already in scope, and an enum's members are already bound by their
+    // bare names. What the statement grants is what the file already has.
+    const FincRun r = compile("namespace ns { pub fun a() <void> {} }\n"
+                              "enum E { A, B }\n"
+                              "extern * from ns;\n"
+                              "extern * from E;\n"
+                              "fun main() <noret> { a(); let e <E> = A; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ExternAlias, ASymbolResolutionBindsASymbol) {
+    // `pub implements c_printf = printf;` -- stdlib/stdio.fin:15, commented there as
+    // "Symbol Resolution". The same shape as an extern alias with the sides swapped,
+    // and the same defect: `is_symbol_resolution` was set by the parser and read by
+    // nobody, so `printf` was resolved as a type name.
+    const FincRun r = compile("@define pf(fmt: string, ...) <noret>;\n"
+                              "pub implements c_pf = pf;\n"
+                              "fun main() <noret> { c_pf(\"hi\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_ExternAlias, ANamespaceQualifierOnAnExternPathIsNotChecked) {
+    // `extern myns::myfunc as myfunc;` (extern_as.fin:19) resolves, and it resolves by
+    // ignoring `myns`: a namespace block's contents are spliced into the enclosing
+    // statement list and its name is discarded (parser.y, namespace_block), so there is
+    // no `myns` to look `myfunc` up in and the last segment is all there is to go on.
+    //
+    // Which means a wrong qualifier is accepted. `extern nosuchns::myfunc as f;` binds
+    // f to myfunc, and nothing says the namespace does not exist. This is not a rule --
+    // it is the splice showing through, and the fix is a namespace with a scope, not a
+    // check bolted onto the extern path. Invert this test when namespaces get one.
+    const FincRun r = compile("namespace ns { pub fun myfunc() <void> {} }\n"
+                              "extern nosuchns::myfunc as f;\n"
+                              "fun main() <noret> { f(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a qualifier that names nothing is accepted\n" << stripAnsi(r.err);
+}

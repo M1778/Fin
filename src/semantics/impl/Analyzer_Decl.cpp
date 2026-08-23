@@ -675,7 +675,11 @@ void SemanticAnalyzer::visit(EnumDeclaration& node) {
     }
     exitScope();
 
-    for (const auto& name : enumeratorNames) currentScope->define({name, enumType, false, true});
+    // getEnumeratorValueType and not the enum type flat: a member with a payload is
+    // bound to its constructor, so `Ok(10)` (enums.fin:44) is a call and `let e <E> =
+    // Ok;` is the error it should be. StructType.hpp carries the rule.
+    for (const auto& name : enumeratorNames)
+        currentScope->define({name, enumType->getEnumeratorValueType(name), false, true});
 }
 
 void SemanticAnalyzer::visit(ImportModule& node) {
@@ -771,8 +775,122 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
     currentScope->define({node.name, funcType, false, true});
 }
 
+// One `::`-separated path from an `extern` or a symbol resolution, resolved as a
+// *symbol*. Returns the symbol's type, or null when the path names no symbol -- in
+// which case the caller falls back to reading it as a type, which is the other half of
+// what `extern X as Y;` can mean.
+//
+// Three shapes reach here and each is resolved on its own terms:
+//
+//   `g`                a bare name: whatever the scope has under it.
+//   `Result::Ok`       a *type* qualifier. enums.fin:19. An enum's members are
+//                      reachable through it, and the member's value type is what the
+//                      alias binds -- so a payloaded member's alias is callable
+//                      (`Ok(10)`, enums.fin:44) and a payloadless one's is a value.
+//   `myns::myfunc`     a *namespace* qualifier, either an import alias bound to a
+//                      NamespaceType (whose scope can be searched) or a namespace
+//                      block in this file (whose name was discarded when its contents
+//                      were spliced -- parser.y, namespace_block). For the second the
+//                      last segment is all there is to go on, which is why the
+//                      qualifier goes unchecked: KnownDefect_ExternAlias.\
+//                      ANamespaceQualifierOnAnExternPathIsNotChecked books it, and the
+//                      fix is a namespace with a scope rather than a check here.
+std::shared_ptr<Type> SemanticAnalyzer::resolveExternPathAsSymbol(const std::string& path) {
+    std::vector<std::string> segs;
+    for (size_t start = 0; start <= path.size();) {
+        const size_t sep = path.find("::", start);
+        if (sep == std::string::npos) { segs.push_back(path.substr(start)); break; }
+        segs.push_back(path.substr(start, sep - start));
+        start = sep + 2;
+    }
+    if (segs.empty()) return nullptr;
+
+    if (segs.size() == 1) {
+        auto* sym = currentScope->resolve(segs[0]);
+        return sym ? sym->type : nullptr;
+    }
+
+    // A type qualifier, tried first: it is the only one that can be checked. An enum
+    // that has no such member reports here rather than falling through to the last
+    // segment, because `E::Nope` with an `E` in scope is a typo and not a namespace.
+    if (auto named = currentScope->resolveType(segs[0])) {
+        if (auto asStruct = std::dynamic_pointer_cast<StructType>(named)) {
+            if (asStruct->is_enum && segs.size() == 2) {
+                if (auto value = asStruct->getEnumeratorValueType(segs[1])) return value;
+                return nullptr;
+            }
+        }
+    }
+
+    // A namespace bound by an import (`import ... as alias`, visit(ImportDeclaration&)
+    // below) is a real scope and can be searched properly.
+    if (auto* sym = currentScope->resolve(segs[0])) {
+        if (auto* ns = sym->type ? sym->type->as<NamespaceType>() : nullptr) {
+            if (ns->scope) {
+                if (auto* inner = ns->scope->resolve(segs.back())) return inner->type;
+            }
+        }
+    }
+
+    // The spliced case. See the KnownDefect above.
+    if (auto* sym = currentScope->resolve(segs.back())) return sym->type;
+    return nullptr;
+}
+
 void SemanticAnalyzer::visit(TypeDefinition& node) {
     debugLog(fg(fmt::color::cyan), "[INFO] Analyzing type definition '{}'\n", node.name);
+
+    // `extern * from a_namespace;` and `extern * from MyEnum;` -- extern_as.fin:32
+    // and :39. A no-op, and quiet, which is the whole of what it takes to be right
+    // today: a namespace block's contents are spliced into the enclosing statement list
+    // so its names are already in scope, and an enum's members are already bound by
+    // their bare names (visit(EnumDeclaration&) above). What the statement grants is
+    // what the file already has.
+    //
+    // Quiet, specifically, rather than resolving the right-hand side to check it. The
+    // name may be a spliced namespace, which no longer exists to be resolved -- and
+    // reporting the compiler's own splice as a user error is worse than accepting a
+    // statement that asks for nothing. Soundness_ExternAlias.AWildcardExternDoesNotReport.
+    if (node.is_extern_wildcard) {
+        debugLog(fg(fmt::color::gray), "      [Extern] Wildcard from '{}' -- already in scope\n",
+                 node.aliased_type ? node.aliased_type->name : "?");
+        return;
+    }
+
+    // `extern g as g2;` (extern_as.fin:9) and `pub implements c_printf = printf;`
+    // (stdlib/stdio.fin:15). Both bind a name to an existing *symbol*; the parser set
+    // is_extern_alias and is_symbol_resolution to say so, and both flags were read by
+    // nobody, so the right-hand side was resolved as a type name and reported undefined.
+    //
+    // The symbol reading is tried first and the type reading is the fallback, which is
+    // the order extern_as.fin:3 states: the statement "can separate symbols from
+    // namespaces and can be used for type definitions but not recommended for that".
+    // `extern int as Integer;` on line 23 is the fallback in the corpus, and the file's
+    // own comment on it says to prefer `type`.
+    if ((node.is_extern_alias || node.is_symbol_resolution) && node.aliased_type) {
+        const std::string& path = node.aliased_type->name;
+        if (auto symType = resolveExternPathAsSymbol(path)) {
+            currentScope->define({node.name, symType, false, true});
+            debugLog(fg(fmt::color::gray), "      [Extern] Symbol '{}' -> '{}'\n",
+                     node.name, symType->toString());
+            return;
+        }
+        // Not a symbol. A type, then -- resolveTypeOrError reports the path itself if it
+        // is neither and substitutes the sentinel, so the new name is declared either
+        // way. The rule every declaration site follows: the name was written, so the
+        // name exists, and one typo'd extern stays one diagnostic instead of one plus
+        // one per use of the alias.
+        // Soundness_ExternAlias.AnExternAliasOfAnUnknownNameStillDeclaresTheNewName.
+        auto asType = resolveTypeOrError(node.aliased_type.get());
+        currentScope->defineType(node.name, asType);
+        // And as a symbol too, holding the sentinel, when the path resolved to nothing
+        // at all: `x` in `extern nosuchthing as x;` may be used in either position and
+        // the sentinel is quiet in both.
+        if (isErrorType(asType)) currentScope->define({node.name, asType, false, true});
+        debugLog(fg(fmt::color::gray), "      [Extern] Type '{}' -> '{}'\n",
+                 node.name, asType->toString());
+        return;
+    }
     
     // 1. If it has generics, we need a way to store a "Generic Type Alias"
     // For now, we support simple aliases or concrete types.

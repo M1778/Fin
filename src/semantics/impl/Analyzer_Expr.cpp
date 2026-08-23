@@ -775,12 +775,13 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
             auto named = currentScope->resolveType(id->name);
             auto asStruct = std::dynamic_pointer_cast<StructType>(named);
             if (asStruct && asStruct->is_enum) {
-                if (auto ctor = asStruct->getEnumerator(node.member)) {
-                    // `E::A` read as a value is an E. The parameters of the same
-                    // signature are what a call site checks against, which is why one
-                    // entry serves both and neither reader needs its own map.
-                    auto* sig = ctor->as<FunctionType>();
-                    lastExprType = sig ? sig->return_type : named;
+                if (auto value = asStruct->getEnumeratorValueType(node.member)) {
+                    // `E::A` read and not called: an E when the member has no payload,
+                    // and the constructor when it has one -- the same rule the bare
+                    // name follows, because `E::Ok` and `Ok` name the same member and
+                    // differ only in how much of the path is written.
+                    // StructType::getEnumeratorValueType carries it.
+                    lastExprType = value;
                     return;
                 }
                 error(node, fmt::format("Enum '{}' has no member '{}'", asStruct->name, node.member));

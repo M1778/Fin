@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`extern myglobv as myglobv_diffname;` on line 9 parses now, and the analyzer then resolves the alias target as a type: \"Undefined type 'myglobv'\" at 9:8. TypeDefinition carries is_extern_alias and is_symbol_resolution, and the semantic pass consults neither"
+//@ ok
 // `Extern as` syntax is a really helpful statement, it can separate symbols from namespaces and can be used for type definitions but not recommended for that since we have `type` keyword + helpful when using enums (example at "tests/samples/enums.fin)
 
 // A Global Variable

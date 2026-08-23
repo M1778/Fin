@@ -133,6 +133,12 @@ private:
     // sentinel would only hide the next question.
     std::shared_ptr<Type> resolveTypeOrError(TypeNode* node);
 
+    // A `::`-separated path from an `extern X as Y;` or a `pub implements Y = X;`,
+    // resolved as a symbol rather than as a type. Null when the path names no symbol,
+    // which is the caller's cue to read it as a type instead. Analyzer_Decl.cpp carries
+    // the three path shapes and why the namespace qualifier goes unchecked.
+    std::shared_ptr<Type> resolveExternPathAsSymbol(const std::string& path);
+
     // The body of the above, without the nullable wrap. Split out rather than
     // handled at each `return` because there are eight of them and a new arm
     // silently forgetting the wrap is exactly the bug this feature was.

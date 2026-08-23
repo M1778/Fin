@@ -74,6 +74,27 @@ public:
         return it == enumerators.end() ? nullptr : it->second;
     }
 
+    // The type the member has when it is *named* rather than called: the enum itself
+    // when there is no payload, and the constructor when there is. Two spellings the
+    // corpus needs out of one entry -- `let s <Status> = OK;` (arrays_enums.fin:17)
+    // reads a payloadless member as a value of its enum, and `Ok(10)` (enums.fin:44)
+    // calls a payloaded one -- and one rule behind them: a member with a payload is not
+    // a value until its payload is supplied.
+    //
+    // The constructor is what is stored either way, `fn() -> E` for a payloadless
+    // member included, because a caller needs a signature to check arguments against:
+    // `Color::Red(1)` on a payloadless member is an arity error, and it can only be one
+    // if there is an arity to compare it with.
+    //
+    // Null when there is no such member, exactly as getEnumerator.
+    TypePtr getEnumeratorValueType(const std::string& n) const {
+        auto ctor = getEnumerator(n);
+        if (!ctor) return nullptr;
+        auto* sig = ctor->as<FunctionType>();
+        if (sig && sig->param_types.empty()) return sig->return_type;
+        return ctor;
+    }
+
     TypePtr getFieldType(const std::string& n);
     bool isFieldPublic(const std::string& n);
     // The method's whole signature, or null when the type has no such method.
