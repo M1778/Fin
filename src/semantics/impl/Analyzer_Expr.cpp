@@ -35,6 +35,58 @@ std::shared_ptr<StructType> getStructType(std::shared_ptr<Type> type, std::share
     return nullptr;
 }
 
+// Does this type have members even though it is not a struct?
+//
+// Two do, both because the corpus reads a member off them and neither because anything
+// declares one: an array has `.length` (arrays.fin:12,17,18 on a `&[T]`, loops.fin:14
+// on a `[int, 5]`, const.fin:67 through an rptr) and so does a string
+// (stdlib/stdio.fin:160, `path.length == 10`). Before this every one of those five
+// sites reported `Type '<the array>' is not a struct`, which is what visit(MemberAccess&)
+// says when getStructType() comes back empty.
+//
+// The question is separate from "is *this* member one of them" on purpose, and the call
+// site needs both: a type with no member set at all keeps the old `is not a struct`
+// message, because for an `int` that message is the correct one -- there is no member
+// set for a member to be missing from -- while a type that has one and lacks the member
+// asked for gets `has no member`, so a typo stays a diagnostic instead of being handed
+// back a type. Soundness_BuiltinMembers holds both halves.
+bool typeHasBuiltinMembers(const TypePtr& type) {
+    if (!type) return false;
+
+    // Through pointers, recursively, exactly as getStructType does it above. Not an
+    // extra: arrays.fin passes its arrays by reference so that they are not copied (its
+    // own comment on :10 says so), which makes all three of its sites a member access
+    // on a `&[T]` rather than on a `[T]`.
+    if (auto* ptr = dynamic_cast<const PointerType*>(type.get())) {
+        return typeHasBuiltinMembers(ptr->pointee);
+    }
+
+    // Fixed and dynamic alike. ArrayType carries is_fixed_size and nothing here reads
+    // it, because a count is a count either way; a fixed array's length could be folded
+    // to a literal later without changing its type.
+    if (dynamic_cast<const ArrayType*>(type.get())) return true;
+
+    // A string is a PrimitiveType, not an array of char, so it needs saying separately.
+    // `[char]` is a different type and gets its length from the line above -- which is
+    // why stdlib/stdio.fin reads a length off both spellings and needs both rules.
+    if (auto* prim = dynamic_cast<const PrimitiveType*>(type.get())) {
+        return prim->name == "string";
+    }
+
+    // Deliberately not through a NullableType. `a.length` on a `[int]?` would be reading
+    // a count out of a possibly-absent array, and the rule everywhere else is that a
+    // nullable is narrowed before it is used; adding the hop here would exempt `.length`
+    // from that rule without anyone deciding to. No sample writes it. Whoever rules on
+    // the nullability edges owns this paragraph.
+    //
+    // Prototypes are absent for a different reason: stdlib/prototypes.fin:11,15 do read
+    // members off one (`prtp.0`, `prtp.1`), but those return an array of the keys and an
+    // array of the values, not a count -- a separate unit with a separate spec, and
+    // wiring it in here as a `.length` would be inventing a member the corpus never
+    // writes.
+    return false;
+}
+
 void SemanticAnalyzer::visit(PrototypeLiteral& node) {
     std::shared_ptr<Type> keyType = nullptr;
     std::shared_ptr<Type> valueType = nullptr;
@@ -561,6 +613,29 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
 
     if (!structType) {
         if (isErrorType(objType)) { lastExprType = errorType(); return; }  // see the method-call site
+
+        // Reached only once struct resolution has already failed, which is what makes
+        // "a declared field named `length` outranks the builtin" true by construction
+        // rather than by an ordering that a later edit could reverse. lib/std/collection.fin
+        // has a `length` field and reads it eight times, so the two must not compete;
+        // Soundness_BuiltinMembers.AStructFieldNamedLengthIsNotTheBuiltin pins it.
+        if (typeHasBuiltinMembers(objType)) {
+            // An `int`, on an array and on a string both. Forced, not chosen: Fin
+            // converts between no two integer types, so whatever width a length has is
+            // the only width it can be compared against, and all five corpus sites
+            // compare one against an `int` (`array.length <= 1`, `i < a.length - 1` with
+            // `i: int`, `path.length == 10`). A wider length would convict four of them
+            // on the day it landed. ALengthIsAnIntAndNotAnotherIntegerWidth is the test
+            // that makes a later widening ruling come past a red assertion.
+            if (node.member == "length") {
+                lastExprType = currentScope->resolveType("int");
+                return;
+            }
+            error(node, fmt::format("Type '{}' has no member '{}'", objType->toString(), node.member));
+            lastExprType = nullptr;
+            return;
+        }
+
         error(node, fmt::format("Type '{}' is not a struct", objType->toString()));
         lastExprType = nullptr;
         return;

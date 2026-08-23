@@ -69,7 +69,28 @@ void SemanticAnalyzer::visit(ForeachLoop& node) {
     // Define loop variable
     auto type = resolveTypeFromAST(node.var_type.get());
     if(type) currentScope->define({node.var_name, type, false, true});
-    
+
+    // And the index binding of the two-binding form. The parser has stored it on the
+    // node since `foreach (idx <int>, element <int> in a)` began to parse (parser.y:2047
+    // and :2058, one production per spelling) and nothing here read it, so loops.fin:19 --
+    // whose body is `blame element == a[idx];` -- reported `Undefined variable 'idx'`.
+    // That was the last diagnostic standing between loops.fin and `//@ ok`.
+    //
+    // An empty name means the one-binding form and not a nameless binding; ControlFlow.hpp
+    // says so where the fields are declared, and the grammar cannot produce an empty
+    // IDENTIFIER. Defined non-const to match the element beside it: assigning to either
+    // is meaningless, but immutability is not enforced anywhere yet
+    // (KnownDefect_Declarations), and making the index the one place it bites would be a
+    // rule invented here rather than one the corpus asked for.
+    //
+    // The written type is trusted, exactly as the element's is --
+    // KnownDefect_Foreach.ABindingTypeIsNeverCheckedAgainstTheIterable holds that, and it
+    // is one defect for both bindings rather than a new one introduced here.
+    if (!node.index_name.empty()) {
+        auto indexType = resolveTypeFromAST(node.index_type.get());
+        if (indexType) currentScope->define({node.index_name, indexType, false, true});
+    }
+
     if(node.iterable) node.iterable->accept(*this);
     if(node.body) node.body->accept(*this);
     exitScope();

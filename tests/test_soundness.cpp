@@ -3862,6 +3862,143 @@ TEST(Soundness_Arrays, AFixedListInitialisesADynamicArrayOfTheSameElementType) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `.length` on an array and on a string.
+//
+// The corpus writes it five times across four samples and declares it nowhere:
+// arrays.fin:12,17,18 (`array.length`, where `array: &[T]`), loops.fin:14
+// (`a.length`, where `a: [int, 5]`), const.fin:67 (`a.value.length`, reached through
+// an rptr), and stdlib/stdio.fin:160 (`path.length`, where `path: string`). Every one
+// of them reported `Type '<the array>' is not a struct` -- which is what
+// visit(MemberAccess&) says when getStructType() returns nothing, because before this
+// the analyser resolved no member on any non-struct type whatsoever.
+//
+// Typed `int`, and that is forced rather than chosen. Fin converts between no two
+// integer types at all (KnownDefect_IntegerWidths.AnIntIsNotAssignableToAnUnsigned),
+// so whatever width `.length` returns is the *only* width it can be compared with --
+// and all five corpus sites compare it against an `int`: `array.length <= 1`,
+// `i < a.length - 1` with `i: int` declared in the same header, `path.length == 10`.
+// A `ulong` length would convict four of the five sites the day it landed, so `int` is
+// what the samples say. ALengthIsAnIntAndNotAnotherIntegerWidth is what pins it, so a
+// later widening ruling has to come past a red test rather than through a silent edit.
+//
+// Deliberately narrow. Arrays and strings get one member and no methods, because one
+// member and no methods is what the corpus asks for; `letssee.fin:63` writes
+// `a.length()` with parentheses but `a` there is a `Vec2` with a method of that name,
+// which is a different thing that already worked. Nothing here gives a prototype,
+// an enum or a nullable a `.length`, and the two `is not a struct` diagnostics that
+// remain on prototypes (stdlib/prototypes.fin:11,15 -- `prtp.0`) are a separate unit
+// with a separate spec: they return arrays of keys and of values, not a count.
+
+TEST(Soundness_BuiltinMembers, ADynamicArrayHasALengthOfTypeInt) {
+    const FincRun r = compile(
+        "fun main() <noret> { let a <[int]> = [1, 2, 3]; let n <int> = a.length; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a dynamic array's `.length` must be an int:\n" << r.err;
+}
+
+TEST(Soundness_BuiltinMembers, AFixedArrayHasALengthOfTypeInt) {
+    // loops.fin:14 verbatim in miniature. A fixed array knows its count statically and
+    // could in principle be folded to a literal; it is still typed `int`, because the
+    // sample writes `i < a.length - 1` against an `int` loop variable and arithmetic on
+    // a differently-typed constant would be no better off than arithmetic on a `ulong`.
+    const FincRun r = compile(
+        "fun main() <noret> { let a <[int, 5]> = [1,2,3,4,5]; let n <int> = a.length; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a fixed array's `.length` must be an int:\n" << r.err;
+}
+
+TEST(Soundness_BuiltinMembers, ALengthIsReachedThroughAPointerToAnArray) {
+    // arrays.fin's spelling: the array is a parameter passed by reference so that it is
+    // not copied (the sample's own comment on :10 says so), which makes every one of
+    // its three sites a `.length` on a `&[T]` and not on a `[T]`. Resolving the member
+    // on the array but not through the pointer would have left all three red.
+    for (const char* code : {
+             "fun f(a: &[int]) <int> { return a.length; }\n"
+             "fun main() <noret> { let v <[int]> = [1]; let n <int> = f(&v); }\n",
+             // Two indirections. Nothing in the corpus writes one, but the unwrap is
+             // recursive for structs (getStructType, Analyzer_Expr.cpp:13) and an
+             // array that stopped after one hop would be an inconsistency to explain.
+             "fun f(a: &&[int]) <int> { return a.length; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << "`.length` must be reachable through a pointer to "
+                                    "an array:\n" << code << r.err;
+    }
+}
+
+TEST(Soundness_BuiltinMembers, AnArraysElementTypeDoesNotAffectItsLength) {
+    // arrays.fin:12 exactly: `fun sort<T: Number>(array: &[T])` then `array.length`.
+    // The element type is a generic parameter with a bound, so anything that reached
+    // for the element's members -- or that resolved the array through its element --
+    // would fail here while passing on `[int]`.
+    const FincRun r = compile(
+        "fun sort<T>(array: &[T]) <int> { return array.length; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "an unresolved element type must not stop `.length`:\n" << r.err;
+}
+
+TEST(Soundness_BuiltinMembers, AStringHasALengthOfTypeInt) {
+    // stdlib/stdio.fin:160, `path.length == 10`. A string is a PrimitiveType here and
+    // not an array of char, so it needs saying separately; `[char]` is a different type
+    // and gets its length from the array rule above.
+    const FincRun r = compile(
+        "fun main() <noret> { let s <string> = \"abc\"; let n <int> = s.length; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a string's `.length` must be an int:\n" << r.err;
+}
+
+TEST(Soundness_BuiltinMembers, ALengthIsAnIntAndNotAnotherIntegerWidth) {
+    // The test that makes the width a decision instead of an accident. With no
+    // conversion between integer types, `let n <ulong> = a.length;` is rejected if and
+    // only if `.length` is not itself a `ulong` -- so this failing means the width
+    // moved, and the four corpus sites that compare a length against an `int` moved
+    // with it. If a ruling widens it, that ruling owns this test and the samples.
+    for (const char* code : {"fun main() <noret> { let a <[int]> = [1]; let n <ulong> = a.length; }\n",
+                             "fun main() <noret> { let s <string> = \"a\"; let n <ulong> = s.length; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 1) << "`.length` is an int, so a ulong target must be "
+                                    "rejected while no integer conversion exists:\n"
+                                 << code << r.err;
+        EXPECT_NE(stripAnsi(r.err).find("expected 'ulong', got 'int'"), std::string::npos)
+            << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_BuiltinMembers, AStructFieldNamedLengthIsNotTheBuiltin) {
+    // lib/std/collection.fin has a `length` field and reads it eight times, so a
+    // builtin that outranked a declared field would break the standard library. It
+    // cannot, because the builtin is only consulted for types that have no fields at
+    // all -- but "cannot by construction" is exactly the claim worth a test, since the
+    // construction is one `if` away from changing.
+    const FincRun r = compile(
+        "struct S {\n"
+        "  pub:\n"
+        "    length <string>,\n"
+        "}\n"
+        "fun main() <noret> { let s <S>; let n <string> = s.length; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a declared field named `length` keeps its own type:\n" << r.err;
+}
+
+TEST(Soundness_BuiltinMembers, AnUnknownMemberOnAnArrayIsStillDiagnosed) {
+    // The failure mode this whole unit risks: resolving one member on arrays by
+    // handing back a type, and then handing back a type for every other member too.
+    // A typo must still be a diagnostic, and it now says which member was missing
+    // rather than `is not a struct` -- the latter is true of an array and tells the
+    // author nothing they did not already know.
+    for (const char* code : {"fun main() <noret> { let a <[int]> = [1]; let n <int> = a.lenght; }\n",
+                             "fun main() <noret> { let s <string> = \"a\"; let n <int> = s.size; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 1) << "an unknown member must still be reported:\n" << code << r.err;
+        EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("has no member"), std::string::npos)
+            << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_BuiltinMembers, ATypeWithNoMembersStillSaysSo) {
+    // And the rest of the type system keeps the old message, because for an `int` the
+    // old message is the right one: there is no member set to be missing from.
+    const FincRun r = compile("fun main() <noret> { let x <int> = 5; let n <int> = x.length; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "an int has no members:\n" << r.err;
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("is not a struct"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
 TEST(KnownDefect_IntegerConstants, AnArrayOfConstantsDoesNotTakeTheAnnotatedElementType) {
     // `let myarr <[uint]> = [7,3,4];` (arrays.fin:29) reports
     // `expected '[uint]', got '[int; fixed]'`. The message names two differences but
@@ -5165,4 +5302,109 @@ TEST(KnownDefect_ParameterDefaults, ADefaultedConstructorParameterIsStillRequire
     EXPECT_EQ(r.exitCode, 1) << "today a constructor's default does not make it optional:\n" << r.err;
     EXPECT_NE(stripAnsi(r.err).find("expects 2 arguments, got 1"), std::string::npos)
         << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// `foreach`, and the index binding the parser stores but nobody read.
+//
+// loops.fin:19 writes `foreach(idx <int>, element <int> in a)` and its own comment
+// names the first binding the index and the second the element. Both spellings of that
+// form parse -- parenthesised and bare, four productions in all (parser.y:2030) -- and
+// ForeachLoop carries `index_name` and `index_type` for it. visit(ForeachLoop&) defined
+// only `var_name`, so the body's `a[idx]` reported `Undefined variable 'idx'`: parsed,
+// stored, and read by nobody, which is the third time that shape has turned up (see
+// also the parameter defaults and `namespace_path`).
+//
+// This was the last diagnostic standing between loops.fin and `//@ ok`.
+
+TEST(Soundness_Foreach, TheIndexBindingIsDefined) {
+    // Both spellings, because there are two productions for the two-binding form and
+    // one of them could be fixed while the other stayed broken -- they build the same
+    // node but from different numbered slots, which is exactly how a transposed `$3`
+    // hides.
+    for (const char* code : {
+             "fun main() <noret> { let a <[int]> = [1];\n"
+             "  foreach (idx <int>, element <int> in a) { blame element == a[idx]; } }\n",
+             "fun main() <noret> { let a <[int]> = [1];\n"
+             "  foreach idx <int>, element <int> in a { blame element == a[idx]; } }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << "the index binding must be defined in the loop body:\n"
+                                 << code << r.err;
+    }
+}
+
+TEST(Soundness_Foreach, TheIndexBindingIsScopedToTheLoop) {
+    // Written as one program with both halves so that it cannot pass vacuously. Before
+    // the fix `idx` was undefined everywhere, so an after-the-loop test on its own was
+    // green for the wrong reason -- the same trap that a draft of
+    // Soundness_DiagnosticLocation.ADeclarationReportsWhereItWasWritten fell into. Here
+    // the first use must resolve and the second must not, and no single mistake gives
+    // both.
+    const FincRun r = compile(
+        "fun main() <noret> { let a <[int]> = [1];\n"
+        "  foreach (idx <int>, element <int> in a) { let inside <int> = idx; }\n"
+        "  let outside <int> = idx; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "the index binding must not outlive the loop:\n" << r.err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u)
+        << "exactly one: the use after the loop. Two means the use inside it failed too, "
+           "and the scoping half of this test is then vacuous.\n"
+        << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Undefined variable 'idx'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Foreach, TheElementBindingIsDefinedInEveryForm) {
+    // The control. All four productions, so that adding the index binding to some of
+    // them cannot lose the element binding from any of them.
+    for (const char* code : {
+             "fun main() <noret> { let a <[int]> = [1]; foreach (e <int> in a) { let z <int> = e; } }\n",
+             "fun main() <noret> { let a <[int]> = [1]; foreach e <int> in a { let z <int> = e; } }\n",
+             "fun main() <noret> { let a <[int]> = [1]; foreach (i <int>, e <int> in a) { let z <int> = e; } }\n",
+             "fun main() <noret> { let a <[int]> = [1]; foreach i <int>, e <int> in a { let z <int> = e; } }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << "the element binding must be defined:\n" << code << r.err;
+    }
+}
+
+TEST(KnownDefect_Foreach, ABindingTypeIsNeverCheckedAgainstTheIterable) {
+    // `foreach (e <string> in a)` over a `[int]` is accepted, and so is an index bound
+    // as anything at all. visit(ForeachLoop&) resolves each written type and defines a
+    // variable of it; it never asks the iterable what its elements are, so the
+    // annotation is taken on trust and the body then type-checks against a lie.
+    //
+    // Not fixed here because it is not one check but a definition Fin has not written
+    // down: what is iterable. An array yields its elements and an index that is an
+    // `int` (arrays are indexed by `int` and nothing else -- Soundness_Arrays), a string
+    // plausibly yields `char`, and a prototype has two candidate answers. The corpus
+    // writes `foreach` twice, both over an array, both correctly annotated, so it
+    // settles the array case and says nothing about the rest. Ruling first, then this
+    // inverts into Soundness_Foreach.ABindingTypeIsCheckedAgainstTheIterable.
+    for (const char* code : {
+             "fun main() <noret> { let a <[int]> = [1]; foreach (e <string> in a) { let z <string> = e; } }\n",
+             "fun main() <noret> { let a <[int]> = [1]; foreach (i <string>, e <int> in a) { let z <string> = i; } }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "FIXED: a foreach binding is now checked against the iterable. Invert this "
+               "and record which types are iterable and what each one yields.\n"
+            << code << r.err;
+    }
+}
+
+TEST(KnownDefect_Foreach, TheIterableIsNeverCheckedForBeingIterable) {
+    // `foreach (e <int> in 5)` compiles clean. The iterable is walked -- so an undefined
+    // name in it is still reported -- and then discarded without being asked whether it
+    // can be iterated at all. Same blocked ruling as above and the same inversion; kept
+    // separate because it is the cheaper half: refusing a non-container needs only the
+    // list of container kinds, while checking the binding needs each kind's yield.
+    const FincRun r = compile("fun main() <noret> { foreach (e <int> in 5) { let z <int> = e; } }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: a non-iterable is now refused. Invert this into "
+           "Soundness_Foreach.TheIterableMustBeIterable.\n"
+        << r.err;
+    // The walk itself must keep happening, or the fix above would be building on a
+    // silence rather than on a type.
+    const FincRun q = compile("fun main() <noret> { foreach (e <int> in nosuchthing) { } }\n");
+    EXPECT_EQ(q.exitCode, 1) << "the iterable expression must still be walked:\n" << q.err;
+    EXPECT_NE(messagesOnly(stripAnsi(q.err)).find("nosuchthing"), std::string::npos)
+        << stripAnsi(q.err);
 }
