@@ -1428,6 +1428,47 @@ TEST(KnownDefect_TypeAliases, AGenericTypeAliasIsNeverDeclared) {
     EXPECT_EQ(plain.exitCode, 0) << stripAnsi(plain.err);
 }
 
+TEST(KnownDefect_TypeAliases, GenericArgumentsOnANonGenericAliasAreDiscarded) {
+    // The other half of the alias gap, and the one the corpus actually leans on.
+    // `type Any = any;` (lib/std/types.fin:35) takes no parameters, and every corpus
+    // use writes arguments anyway: `X: Any<Printable>` (stdlib/stdio.fin:23, 28, 35),
+    // `T: Any<...>` (stdlib/typing.fin:13), `T: Strict<Stream>` (stdlib/stdio.fin:48).
+    // The arguments are dropped in silence -- not diagnosed as too many, not stored
+    // anywhere -- so the bound is bare `any`, and `any` carries no members a method
+    // lookup can find. Six diagnostics in the corpus read `Type 'X' does not have
+    // methods` for a parameter whose bound names the interface three characters away.
+    //
+    // Booked and not fixed because two separate answers are missing. The alias needs a
+    // parameter list to bind arguments to (see AGenericTypeAliasIsNeverDeclared above),
+    // and `Any<Printable>` has to be *given* a meaning: the sample's comments read it as
+    // "anything implementing Printable", which is the `any implements <Error>` form
+    // spelled with arguments instead, and that is the owner's ruling on whether a bound
+    // of `any` narrows -- not something to invent here.
+    const FincRun r = compile("interface Printable { pub fun format_str() <string>; }\n"
+                              "type Any = any;\n"
+                              "fun show<X: Any<Printable>>(o: X) <void> { o.format_str(); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("does not have methods"), std::string::npos)
+        << "GOOD NEWS: an alias with arguments carries them now. Invert this test -- the\n"
+           "program should compile clean -- and rename it to\n"
+           "Soundness_TypeAliases.GenericArgumentsOnAnAliasReachItsTarget.\n"
+        << stripAnsi(r.err);
+
+    // Nothing is said about the arguments either, which is what makes this a silent
+    // drop rather than a refusal: one diagnostic, and it is about the method lookup.
+    // Counted rather than matched on a word -- the temp file's own name is printed in
+    // the diagnostic, so any needle like "Alias" finds the path and not the message.
+    // If a diagnostic about the discarded arguments ever appears, this count moves and
+    // this test is where it is decided whether it is the right one.
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+
+    // The control: the same bound written as a real interface resolves and the call is
+    // fine (Soundness_GenericBounds.ABoundIsVisibleToMethodResolution owns that rule).
+    // So the loss is the alias's, not method resolution's.
+    const FincRun direct = compile("interface Printable { pub fun format_str() <string>; }\n"
+                                   "fun show<X: Printable>(o: X) <void> { o.format_str(); }\n");
+    EXPECT_EQ(direct.exitCode, 0) << stripAnsi(direct.err);
+}
+
 TEST(Soundness_ErrorRecovery, AMemberDefaultIsReportedOncePerProgramNotOncePerPass) {
     // Not a cascade -- the opposite failure, and found while fixing the fields
     // above. visit(StructDeclaration) walked every member default twice: once in
@@ -6620,4 +6661,84 @@ TEST(KnownDefect_ExternAlias, ANamespaceQualifierOnAnExternPathIsNotChecked) {
                               "extern nosuchns::myfunc as f;\n"
                               "fun main() <noret> { f(); }\n");
     EXPECT_EQ(r.exitCode, 0) << "a qualifier that names nothing is accepted\n" << stripAnsi(r.err);
+}
+
+// `Result<T, U> implements <IResult> { ... }` -- stdlib/typing.fin:27 and
+// stdlib/stdio.fin:54, which the sample annotates: "Enums can also be implemented
+// (meaning methods can be implemented for it BUT ONLY ON CONDITIONS like having their
+// first parameter the enum value itself)".
+//
+// ImplementsBlock::target_generics was built by the grammar with a comment saying "The
+// methods in the body use these names, so they cannot be dropped", and then nothing
+// read it. So they were dropped: every `T` and `U` written in the body's own signatures
+// reported undefined, thirteen diagnostics across the two files, all of them about
+// parameters declared right there in the header.
+//
+// The names are bound to the *target's* parameters rather than to fresh ones, so
+// `Result<A, B> implements <IResult>` would bind A to Result's own first parameter.
+// A block that renames them still talks about the same type.
+TEST(Soundness_ImplementsGenerics, AnImplementsBlockDeclaresItsTargetsGenericParameters) {
+    const FincRun r = compile("struct Box<T> { pub v <T>, }\n"
+                              "interface IBox<T> { pub fun get(b: Box<T>) <T>; }\n"
+                              "Box<T> implements <IBox> { pub fun get(b: Box<T>) <T> { return b.v; } }\n"
+                              "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsGenerics, AnImplementsBlockOnAGenericEnumDeclaresThemToo) {
+    // The corpus site. typing.fin:27 is an enum, not a struct, and the two go through
+    // the same visit(ImplementsBlock&) now that an enum's type is a StructType.
+    const FincRun r = compile("enum Result<T, U> { Ok(T), Err(U) }\n"
+                              "interface IResult<T, U> { pub fun unwrap(e: Result<T, U>) <T>; }\n"
+                              "Result<T, U> implements <IResult> {\n"
+                              "  pub fun unwrap(e: Result<T, U>) <T> { return e.nothing; }\n"
+                              "}\n"
+                              "fun main() <noret> { }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Undefined type 'T'"), std::string::npos) << err;
+    EXPECT_EQ(err.find("Undefined type 'U'"), std::string::npos) << err;
+}
+
+TEST(Soundness_ImplementsGenerics, ATargetsGenericParameterDoesNotLeakPastTheBlock) {
+    const FincRun r = compile("struct Box<T> { pub v <T>, }\n"
+                              "interface IBox<T> { pub fun get(b: Box<T>) <T>; }\n"
+                              "Box<T> implements <IBox> { pub fun get(b: Box<T>) <T> { return b.v; } }\n"
+                              "fun main() <noret> { let x <T> = 1; }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'T'"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsGenerics, AConcreteTargetArgumentIsNotTakenAsAParameterName) {
+    // `Box<int> implements <IBox>` names an instantiation, not a parameter. Binding
+    // `int` as a generic would redefine the builtin for the length of the block, which
+    // is why the binding only happens for a name that resolves to nothing yet.
+    const FincRun r = compile("struct Box<T> { pub v <T>, }\n"
+                              "interface IBox<T> { pub fun get(b: Box<T>) <T>; }\n"
+                              "Box<int> implements <IBox> { pub fun get(b: Box<int>) <int> { return b.v; } }\n"
+                              "fun main() <noret> { let n <int> = 1; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsGenerics, AnImplementsBlockWithTheWrongArityIsReported) {
+    // The header claims to be talking about the target's parameters, so claiming a
+    // different number of them is a typo worth a diagnostic. Nothing in the corpus
+    // writes one -- both sites match exactly.
+    const FincRun r = compile("struct Box<T> { pub v <T>, }\n"
+                              "interface IBox<T> { pub fun get(b: Box<T>) <T>; }\n"
+                              "Box<T, U> implements <IBox> { pub fun get(b: Box<T>) <T> { return b.v; } }\n"
+                              "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Generic count mismatch"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ImplementsGenerics, AGenericParameterInABlockIsStillTheTargetsOwn) {
+    // Not a fresh unconstrained name that merely happens to resolve: the parameter is
+    // the one the target declared, so its bound comes with it. `Box<T: Number>` makes
+    // `T` a Number inside the block as well, and a body that violates the bound reports.
+    const FincRun r = compile("interface Number { pub fun z(n: int) <int>; }\n"
+                              "struct Box<T: Number> { pub v <T>, }\n"
+                              "interface IBox<T> { pub fun get(b: Box<T>) <T>; }\n"
+                              "Box<T> implements <IBox> { pub fun get(b: Box<T>) <T> { let n <int> = b.v.z(1); return b.v; } }\n"
+                              "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << "the bound travels with the parameter\n" << stripAnsi(r.err);
 }

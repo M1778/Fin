@@ -1149,7 +1149,42 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
     currentScope->defineType("Self", structType);
     auto prevContext = currentStructContext;
     currentStructContext = structType;
-    
+
+    // `Result<T, U> implements <IResult>` (stdlib/typing.fin:27, stdlib/stdio.fin:54).
+    // ImplementsBlock::target_generics was built by the grammar with a comment saying
+    // the body's methods use these names and they cannot be dropped, and then nothing
+    // read it -- so every `T` and `U` in the body's own signatures reported undefined,
+    // thirteen diagnostics across the two files, all about parameters written in the
+    // header three characters away.
+    //
+    // Bound to the *target's* parameters, not to fresh ones. `Box<A> implements <IBox>`
+    // on a `struct Box<T: Number>` binds A to Box's own T, so the bound travels with it
+    // and a method body can call what the bound promises
+    // (Soundness_ImplementsGenerics.AGenericParameterInABlockIsStillTheTargetsOwn).
+    // Fresh GenericTypes would have resolved the names and lost every constraint.
+    if (!node.target_generics.empty()) {
+        if (node.target_generics.size() != structType->generic_args.size()) {
+            // The header claims to be talking about the target's parameters, so a
+            // different number of them is a typo. Both corpus sites match exactly.
+            error(node, fmt::format("Generic count mismatch: '{}' declares {} parameter(s), "
+                                    "the implements block writes {}",
+                                    node.target_type, structType->generic_args.size(),
+                                    node.target_generics.size()));
+        }
+        const size_t n = std::min(node.target_generics.size(), structType->generic_args.size());
+        for (size_t i = 0; i < n; ++i) {
+            const std::string& written = node.target_generics[i]->name;
+            // Only a name that resolves to nothing yet. `Box<int> implements <IBox>`
+            // names an instantiation rather than a parameter, and binding `int` here
+            // would redefine the builtin for the length of the block --
+            // Soundness_ImplementsGenerics.AConcreteTargetArgumentIsNotTakenAsAParameterName.
+            if (currentScope->resolveType(written)) continue;
+            currentScope->defineType(written, structType->generic_args[i]);
+            debugLog(fg(fmt::color::gray), "      [Implements] Target generic '{}' -> '{}'\n",
+                     written, structType->generic_args[i]->toString());
+        }
+    }
+
     for (auto& method : node.methods) {
         // The signature is resolved in a scope of the method's own, because a
         // generic method carries type parameters that exist only for the length of
