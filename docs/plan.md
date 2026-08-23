@@ -2242,6 +2242,11 @@ with three cases and a free-function control that proves the arity check exists 
 it is inverted, the signature belongs on `StructType`, built once, not rebuilt per implements block. A booked
 defect is what makes a deletion reversible.
 
+That inversion has since happened -- see *A method call was checked against nothing* below -- and it landed
+where the booking said it would: `StructType::methods` holds a whole `FunctionType`, built once by
+`buildMethodSignature`, and the implements block calls that instead of rebuilding a vector it drops. The
+deletion was reversible because the booking said what would reverse it.
+
 *Three mechanisms hiding each other.* `R-checktype`, `R-assign` and `I-castall` all killed nothing, and the
 reason was not any test: `ErrorType` overrode both assignability directions, `Type::isAssignableTo` had a
 branch for the sentinel, and `checkType` short-circuited before either could run. Any two covered for the
@@ -2733,6 +2738,130 @@ scoped, because it puts back a behaviour whose tests are known. A permissive one
 can break a test anywhere -- and the tests most likely to notice are the `KnownDefect_*` ones, which assert
 that something is *rejected* today. Those are the assertions a permissive mutant flips, and they are the ones a
 filter drawn around "this unit's suites" leaves out.
+
+### A method call was checked against nothing
+
+`KnownDefect_MethodCalls.AMethodCallIsNotCheckedAgainstItsSignature` had been booked for four sections, and the
+booking was worse than it read. `s.m("x", "y")` on a one-parameter method reported nothing, which is the half
+the name describes. The other half was that the call's *type* was the type of its last argument:
+`StructType::methods` mapped a name to a return type, `visit(MethodCall&)` walked the arguments after reading
+that map, and `lastExprType` was left holding whatever the last argument turned out to be. So a program could
+be wrong in a way that produced a confidently wrong diagnostic somewhere else:
+
+```fin
+self.values[self.get_index(key)] = value;   // stdlib/hashmap.fin:39
+// error: Type mismatch: expected 'int', got 'T'
+```
+
+`get_index` returns `int`. `T` is the type of `key`, its last argument. Two of the corpus's own diagnostics were
+this, in two different samples, and neither had been recognised as one bug -- `letssee.fin` carried
+`expected '&Vec2<float>', got 'float'` for `c.scale(2.0)` and `expected '&Vec2<float>', got 'Vec2<float>'` for
+`a.add(*b)`, both the last argument, both looking like plausible unrelated `Self` problems.
+
+Ten tests were written before any of it was implemented, and eight of them failed. The two that passed are
+worth naming, because "write the test first" is usually justified by the failures: `AMethodParameterAnnotation-
+IsStillReportedOnce` and `AMethodWithAnUnresolvedParameterKeepsItsWrittenArity` were predictions that the new
+check would not *introduce* a duplicate diagnostic or lose a parameter, and they were green in the RED baseline
+because there was no check yet. They are the tests that would have caught the implementation going wrong in the
+two ways it nearly did.
+
+**The signature had to be built somewhere, and the somewhere already existed six times.** Struct pass 1, class
+pass 1, the implements block, and their three interface counterparts each resolved a method's parameters and
+return type with slightly different code and slightly different bugs. `buildMethodSignature` is now the one
+copy: open a scope, declare the method's own generics, resolve each parameter, skip a written `self`, resolve
+the return type, close the scope. The implements block's hand-rolled version -- deleted as dead in the previous
+unit because `StructType::methods` had nowhere to put a parameter list -- is that call now, which is what the
+booking predicted.
+
+**Skipping a written `self` is a corpus reading, not a convenience.** `struct_methods.fin` writes both
+spellings in one struct: `fun area(self: &Self) <int>` and `fun describe() <noret>`, called the same way. The
+receiver is injected whether or not it is written, so a signature that counted it would make one of those two
+spellings wrong about its own arity. The stored `FunctionType` therefore excludes the receiver, and
+`AWrittenSelfParameterIsNotAnArgument` asserts both spellings accept `s.m(1)` and reject `s.m()`.
+
+**Resolving parameters in the signature pass tripled a diagnostic, and the fix was a rule, not a flag.** The
+pass runs before bodies and resolves the same `TypeNode`s the body pass resolves, so `fun m(a: NoSuchType)`
+went from two `Undefined type` diagnostics to three. `SemanticAnalyzer::QuietPass` makes the signature pass
+report nothing -- and the legality condition is narrow enough to write down:
+
+> A pre-pass may be quiet only when a later pass repeats every resolution it performed and reports.
+
+The interface is the case that fixes the boundary and it is *not* quiet: an interface method has no body, so
+nothing runs after its signature pass, so its signature pass is the only chance to report. Counting what the
+quiet pass covers is also what found a separate bug: `visit(InterfaceDeclaration&)` opened a scope per method
+and never called `declareGenericParams` for it -- the operator loop three lines below did -- so
+`pub fun m<T>(a: T) <T>;` reported `Undefined type 'T'` twice, about a parameter it declares one token earlier.
+`Soundness_GenericConstraints.AMethodInAnInterfaceDeclaresItsOwnGenerics` covers it, with a second case
+asserting one method's `T` does not leak into the next.
+
+Quieting the signature pass also turned `KnownDefect_ErrorRecovery.AnAnnotationInAStructSignatureIsReportedOnce-
+PerPass` green -- five cases of it, including the class copies and an operator return type nobody had booked --
+and it turned a *second* `KnownDefect` green by accident, which is the interesting one.
+
+### Suppression is not a fix, and green is not proof
+
+`KnownDefect_Generics.AnOperatorsOwnGenericParameterIsNotInScopeInPassOne` went green with the quiet pass. It
+should not have. The defect it books is that the signature pass resolves an operator's return type without the
+operator's own generic parameters in scope, so `operator + : <T>(other: <T>) <T>` reported `Undefined type 'T'`
+*and registered the operator returning the error sentinel*. `QuietPass` removed the diagnostic. The wrong
+registration stayed. Loud wrongness became silent wrongness and a test said "fixed".
+
+Two things followed. The fix, which is the three lines the `KnownDefect`'s own comment had specified and
+deferred -- a scope, `declareGenericParams`, resolve -- deferred until something collapsed the identical hole in
+the method loop, which `buildMethodSignature` now is. And a test that a quiet pass cannot fake:
+
+```
+Soundness_Generics.AnOperatorsRegisteredReturnTypeIsWhatItsCallIsTyped
+```
+
+The sentinel is *silent by construction* -- `checkType` stops before it compares -- so a wrong registration
+makes programs compile clean, and every assertion of the form "this diagnostic appears" is satisfiable by
+registering nothing at all. The test asserts against a program that must report: `let r <string> = s - 1` on an
+operator returning `int` is one mismatch, and on the generic operator the assertion is that *something real*
+was registered (`errorCount == 1` and no `<error>` in the output) rather than which type. That second half is
+what makes dropping the registration observable.
+
+**And then the deletion.** The `KnownDefect` ended with an instruction: check whether `visit(Operator-
+Declaration&)`'s second `defineOperator` is now redundant, and delete it if so. It is. All four containers --
+struct, class, interface, implements block -- now declare the operator's generics before resolving its return
+type, `Self` is defined before pass 1 in each, and every path that reaches `visit(OperatorDeclaration&)` comes
+through one of them, so the second write could only repeat the first. That argument is a claim, so it was
+measured: `D-opdecl` restores the deleted line and kills 0 of 128 tests. Zero kills is the result being sought
+here, not a hole -- it is what "redundant" means, in the same matrix that treats zero kills as a finding
+everywhere else. The difference is which direction the mutant runs: `D-opdecl` *adds* code back, and code that
+adds nothing observable is code that was adding nothing.
+
+The pair `R-opret`/`R-opdecl` had each killed nothing in the previous unit, and the resolution recorded there
+was "two mechanisms that are not redundant, keep both." That was right then and is wrong now: what made the
+second registration load-bearing was the first one being broken. Fix the first and the pair collapses. Dropping
+the signature pass's registration (`D-opreg`) now kills five tests including a corpus-wide one, and dropping
+just its generics (`D-opgen`) kills two. The mutant that measured nothing became two mutants that measure.
+
+### The corpus moved, and the direction had to be checked
+
+Total corpus diagnostics went 233 -> 231, and a count going down is not by itself good news -- a check that
+stopped running looks exactly like a false positive that stopped firing. Diffing the snapshots per sample:
+`letssee.fin` 4 -> 3 and `stdlib/hashmap.fin` 18 -> 17. Reading the actual text rather than the counts, three
+false positives went away -- all three the last-argument bug -- and one new diagnostic appeared:
+
+```
+letssee.fin:73:21  error: Type mismatch: expected '&Self', got '&Vec2<float>'
+```
+
+`Vec2::normalize(scaled)`. A static call resolves `Vec2` by name, gets the uninstantiated template whose `Self`
+is still `Self`, and now that arguments are checked, the mismatch shows up in argument position for the first
+time. It is the same root cause as the two static *return types* the sample already books, so the finding is one
+defect with a new symptom rather than a regression, and it is booked with the method call as its control --
+`g.m(g)` and `g.r()` on the same generic struct are both clean, because a method call substitutes through the
+instance receiver. `KnownDefect_MethodCalls.AStaticCallOnAGenericStructIsCheckedAgainstTheTemplate` holds all
+of it, and `letssee.fin`'s `//@ unimplemented` note now says which three of its diagnostics are that defect and
+that every method call in the file types correctly.
+
+The generic hole underneath is the same one as `KnownDefect_Generics.AnOperatorsGenericParameterIsNotInferred-
+FromItsOperand`, found by the same probe: `s + 1` on `operator + : <T>(other: <T>) <T>` reports
+`expected 'string', got 'T'` -- a type name that exists only inside the operator's own declaration. There is no
+inference from arguments to generic parameters anywhere yet, on any of the three call paths, and that is one
+unification pass with its own tests rather than a patch in this unit.
 
 ## Rulings owed
 

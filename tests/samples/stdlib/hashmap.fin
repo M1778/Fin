@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`module not found: collection` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107), so `Collection` and `Error` are undefined and a cascade follows. The whole file parses now, the `implements cast<...>(...)` form on line 50 included"
+//@ unimplemented "`module not found: collection` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107), so `Collection` and `Error` are undefined and a cascade follows. The whole file parses now, the `implements cast<...>(...)` form on line 50 included. `self.values[self.get_index(key)] = value` on line 39 types correctly since a method call is typed as its return type rather than its last argument"
 #[stdimport] %{
 import { Collection } from collection::std;
 import { Error } from error::std;
