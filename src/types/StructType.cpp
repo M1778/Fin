@@ -203,6 +203,34 @@ TypePtr StructType::instantiate(const std::vector<TypePtr>& concreteArgs) {
     return substitute(mapping);
 }
 
+// Does this constructor satisfy that requirement? Parameters only, deliberately.
+//
+// A constructor's return type is the type being constructed, so an interface's
+// requirement is registered `fn(params) -> TheInterface` and the implementor's own
+// constructor `fn(params) -> TheImplementor` (Analyzer_Decl.cpp registers both).
+// FunctionType::equals compares return types -- correctly, for every other kind of
+// function -- and the pair therefore never matched, whatever the parameters said. No
+// struct in the language could satisfy `Self(data: [char]);`, which is the whole of
+// `Struct 'Stream' does not implement interface 'IStream'` at stdlib/stdio.fin:93.
+//
+// Not a looser check than equals but a differently aimed one: the parameters are still
+// compared exactly, and Soundness_InterfaceConstructors has a guard on each way of
+// getting them wrong -- absent, wrong arity, wrong type.
+static bool constructorSatisfies(const TypePtr& mine, const TypePtr& required) {
+    auto* m = mine ? mine->as<FunctionType>() : nullptr;
+    auto* r = required ? required->as<FunctionType>() : nullptr;
+    // A requirement that is not a FunctionType is not something this can match. It
+    // should not happen -- both registration sites build one -- and returning false
+    // rather than asserting leaves a diagnostic rather than a crash if it ever does.
+    if (!m || !r) return false;
+    if (m->is_vararg != r->is_vararg) return false;
+    if (m->param_types.size() != r->param_types.size()) return false;
+    for (size_t i = 0; i < m->param_types.size(); ++i) {
+        if (!typesEqual(m->param_types[i], r->param_types[i])) return false;
+    }
+    return true;
+}
+
 bool StructType::implements(const StructType* interface) const {
     for (const auto& [methodName, retType] : interface->methods) {
         if (methods.find(methodName) == methods.end()) return false;
@@ -214,7 +242,7 @@ bool StructType::implements(const StructType* interface) const {
     for (const auto& ifaceCtor : interface->constructors) {
         bool found = false;
         for (const auto& myCtor : this->constructors) {
-            if (myCtor->equals(*ifaceCtor)) { found = true; break; }
+            if (constructorSatisfies(myCtor, ifaceCtor)) { found = true; break; }
         }
         if (!found) return false;
     }

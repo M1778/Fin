@@ -2522,6 +2522,112 @@ TEST(KnownDefect_Interfaces, AFieldOfTheWrongTypeIsAccepted) {
 }
 
 // ---------------------------------------------------------------------------
+// A constructor requirement.
+//
+// An interface can require one, written `Self(data: [char]);` -- the parser has a
+// production of its own for it (parser.y:1167) and visit(InterfaceDeclaration&)
+// registers it as `fn([char]) -> IStream`. The implementor writes its constructor
+// under its own name, `Stream(data: [char])`, and that registers as
+// `fn([char]) -> Stream`. StructType::implements compared the pair with
+// FunctionType::equals, which compares return types -- so the two could never match
+// and no struct in the language could satisfy a constructor requirement.
+//
+// A constructor's return type is the type being constructed. Comparing it is not a
+// stricter check, it is a check of the one thing guaranteed to differ.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_InterfaceConstructors, AnInterfaceConstructorIsSatisfiedByTheImplementorsOwn) {
+    // The corpus case, reduced: stdlib/stdio.fin:88 requires `Self(data: [char])`
+    // and :132 writes `Stream(data: [char])`, and the whole of
+    // `Struct 'Stream' does not implement interface 'IStream'` was this.
+    const FincRun r = compile(
+        "interface IThing {\n"
+        "  pub fun go() <bool>;\n"
+        "  Self(d: int);\n"
+        "}\n"
+        "struct Thing : <IThing> {\n"
+        "  pub:\n"
+        "    d <int>,\n"
+        "    fun go() <bool> { return true; }\n"
+        "    Thing(d: int) { self.d = d; }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("does not implement"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_InterfaceConstructors, AZeroParameterRequirementIsSatisfied) {
+    // The same rule with nothing to compare in the parameter list, so a fix that
+    // matched parameters and then still compared return types would fail here too.
+    const FincRun r = compile(
+        "interface IThing { Self(); }\n"
+        "struct Thing : <IThing> { pub: d <int>, Thing() { self.d = 0; } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_InterfaceConstructors, AClassSatisfiesOneToo) {
+    // visit(ClassDeclaration&) runs the same conformance check through the same
+    // StructType::implements (Analyzer_Decl.cpp:1112), so the fix has to reach it.
+    const FincRun r = compile(
+        "interface IThing { Self(d: int); }\n"
+        "class Thing : <IThing> { pub: d <int>, Thing(d: int) { self.d = d; } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_InterfaceConstructors, AStructWithNoConstructorDoesNotSatisfyOne) {
+    // The first of three guards. Dropping the return-type comparison must not
+    // amount to dropping the requirement: a struct that declares no constructor at
+    // all has nothing to match, and the check has to say so.
+    const FincRun r = compile(
+        "interface IThing { Self(d: int); }\n"
+        "struct Thing : <IThing> { pub d <int>, }\n");
+    EXPECT_NE(r.exitCode, 0) << "a constructor requirement is still a requirement";
+    EXPECT_NE(stripAnsi(r.err).find("does not implement"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_InterfaceConstructors, AConstructorOfTheWrongArityDoesNotSatisfyOne) {
+    const FincRun r = compile(
+        "interface IThing { Self(d: int); }\n"
+        "struct Thing : <IThing> {\n"
+        "  pub:\n"
+        "    d <int>,\n"
+        "    Thing(d: int, e: int) { self.d = d; }\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << "two parameters do not satisfy a requirement for one";
+    EXPECT_NE(stripAnsi(r.err).find("does not implement"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_InterfaceConstructors, AConstructorOfTheWrongParameterTypeDoesNotSatisfyOne) {
+    // The sharpest of the three: the arity matches, so a fix that compared only
+    // sizes would pass this and the parameter types would go unchecked -- which is
+    // exactly the hole KnownDefect_Interfaces.AFieldOfTheWrongTypeIsAccepted
+    // records for fields, and the reason not to open a second one here.
+    const FincRun r = compile(
+        "interface IThing { Self(d: int); }\n"
+        "struct Thing : <IThing> {\n"
+        "  pub:\n"
+        "    d <int>,\n"
+        "    Thing(d: string) { self.d = 0; }\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << "a string parameter does not satisfy a requirement for an int";
+    EXPECT_NE(stripAnsi(r.err).find("does not implement"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_InterfaceConstructors, AnInterfaceThatRequiresNoneIsNotGivenOne) {
+    // The last guard, and the one that keeps the rule one-directional: the
+    // implementor may have constructors the interface never asked about. Only the
+    // requirements are iterated, so an extra constructor is not a mismatch.
+    const FincRun r = compile(
+        "interface IThing { pub fun go() <bool>; }\n"
+        "struct Thing : <IThing> {\n"
+        "  pub:\n"
+        "    d <int>,\n"
+        "    fun go() <bool> { return true; }\n"
+        "    Thing(d: int) { self.d = d; }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
 // Integer widths are a lie.
 //
 // resolveTypeFromAST (Analyzer_Core.cpp) walks the `{N}` width annotation for
