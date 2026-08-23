@@ -1,0 +1,31 @@
+// Enum reflection.
+//
+// tests/samples/stdlib/enums.fin is the specification. Both functions are compiler
+// intrinsics -- the draft's bodies are `compiler.enums.resolve_id(value)` and
+// `enum_member._keyid`, neither of which the language can express -- so they are
+// declared without a body (parser.y:471) rather than given a placeholder that would
+// report on its own return statement.
+//
+// `Enum` is declared here. The draft writes `pub type EnumType = any implements
+// <Enum>;` and its `//@ unimplemented` note records that no file in the corpus
+// declares `Enum`, which is what made the bound undefined once bounds on aliases
+// started being resolved. The standard library is where that name belongs.
+namespace std {
+
+#[export]
+#[type(enum)]
+pub interface Enum {}
+
+#[export]
+#[type(enum)]
+pub type EnumType = any implements <Enum>;
+
+#[llvm_name="enums_getkeyid"]
+pub fun getkeyid(value: EnumType) <int>;
+
+// `keyidof(Ok)` -- the argument is an enum *member*, not a value of the enum, which
+// is what the `$enum_member` meta-type is for (Soundness_MetaTypes).
+#[llvm_name="enums_keyidof"]
+pub fun keyidof(enum_member: $enum_member) <int>;
+
+}

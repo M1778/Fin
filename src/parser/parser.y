@@ -187,7 +187,7 @@
 %precedence STATIC_VALUE_PREC
 %right ARROW
 %right EQUAL PLUSEQUAL MINUSEQUAL MULTEQUAL DIVEQUAL SHIFTLEFTEQUAL SHIFTRIGHTEQUAL
-%right KW_NEW KW_CAST KW_SIZEOF LPAREN
+%right KW_NEW KW_CAST KW_SIZEOF
 %right QUESTION COLON
 %left OR
 %left AND
@@ -200,7 +200,17 @@
 %left PLUS MINUS
 %left MULT DIV MOD
 %right NOT UMINUS ADDRESSOF_PREC DEREFERENCE_PREC
-%left LBRACKET DOT LBRACE
+/* LPAREN is the call operator and a call is postfix, so it binds tighter than every
+   infix operator. It used to sit with KW_NEW/KW_CAST/KW_SIZEOF near the bottom of
+   this table, where a prefix keyword belongs, and the effect was that `i < g . LPAREN`
+   compared the rule `expression LT expression` against the lookahead LPAREN, found the
+   rule tighter and reduced -- so `i < g` became the callee and the whole comparison was
+   rebuilt as `FunctionCall("unknown")`. Every binary operator was affected, and so was
+   unary minus: `-g()` reduced to `(-g)()`. Soundness_Precedence.ACallOnTheRightOfA-
+   BinaryOperatorIsStillACall is the sixteen-operator record of it.
+   `STATIC_VALUE_PREC` above is documented as "ranked below LPAREN so the call always
+   wins"; moving LPAREN up keeps that true. */
+%left LBRACKET DOT LBRACE LPAREN
 %left INCREMENT DECREMENT
 %precedence DENULLIFY
 %left HIGH_PREC

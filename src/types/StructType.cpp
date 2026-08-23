@@ -1,7 +1,61 @@
 #include "StructType.hpp"
 #include "TypeImpl.hpp"
+#include <algorithm>
+#include <sstream>
+#include <unordered_map>
+#include <vector>
 
 namespace fin {
+
+namespace {
+
+// Instantiating a struct that mentions `Self` makes that struct self-referential:
+// `pub fun me(self: &Self) <Self>` on `C<T>` becomes `fn() -> C<int>` on the very
+// object being built. That is what `Self` means and the cycle has to stay -- but it
+// means the *next* substitution of that object walks the member, arrives back at the
+// object, and starts over. `struct H<T> { keys <&C<T>>, }` is enough to reach it, and
+// lib/std reaches it for real: `HashMap<T, U>` holds two `Collection`s and
+// `Collection<T>` declares `from_prototype() <Self>`.
+//
+// So a substitution publishes its result before it walks its members, and a recursive
+// visit for the same (struct, mapping, Self) is handed that result instead of starting
+// a second descent. Types are immutable once built, so sharing the object is not just
+// safe, it is the answer: the recursive occurrence *is* the type being built.
+//
+// Soundness_MachineContract.ASelfReferentialInstantiationIsNotFatal is the record.
+std::unordered_map<std::string, TypePtr>& substitutionsInProgress() {
+    static thread_local std::unordered_map<std::string, TypePtr> inProgress;
+    return inProgress;
+}
+
+// Keyed on the mapping's contents rather than its address: `instantiate` builds its
+// TypeMap on the stack, and two unrelated instantiations can be handed the same
+// address once the first has returned.
+std::string substitutionKey(const void* subject, const TypeMap& mapping,
+                            const TypePtr& selfReplacement) {
+    std::vector<std::string> entries;
+    entries.reserve(mapping.size());
+    for (const auto& kv : mapping) {
+        entries.push_back(kv.first + "=" + (kv.second ? kv.second->toString() : std::string("<null>")));
+    }
+    std::sort(entries.begin(), entries.end());
+    std::ostringstream os;
+    os << subject << '|' << static_cast<const void*>(selfReplacement.get()) << '|';
+    for (const auto& e : entries) os << e << ';';
+    return os.str();
+}
+
+struct InProgressGuard {
+    std::string key;
+    InProgressGuard(std::string k, const TypePtr& value) : key(std::move(k)) {
+        substitutionsInProgress()[key] = value;
+    }
+    ~InProgressGuard() { substitutionsInProgress().erase(key); }
+    InProgressGuard(const InProgressGuard&) = delete;
+    InProgressGuard& operator=(const InProgressGuard&) = delete;
+};
+
+} // namespace
 
 std::string StructType::toString() const {
     if (generic_args.empty()) return name;
@@ -80,10 +134,16 @@ TypePtr StructType::clone() const {
 }
 
 TypePtr StructType::substitute(const TypeMap& mapping, TypePtr selfReplacement) {
+    const std::string key = substitutionKey(this, mapping, selfReplacement);
+    auto& inProgress = substitutionsInProgress();
+    auto found = inProgress.find(key);
+    if (found != inProgress.end()) return found->second;
+
     std::vector<TypePtr> newArgs;
     for(auto& arg : generic_args) newArgs.push_back(arg->substitute(mapping, selfReplacement));
     
     auto newStruct = std::make_shared<StructType>(name, newArgs);
+    const InProgressGuard guard(key, newStruct);
     
     // Pass selfReplacement (or newStruct if we are the struct being instantiated)
     TypePtr nextSelf = selfReplacement ? selfReplacement : newStruct;

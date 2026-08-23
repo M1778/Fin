@@ -1,0 +1,40 @@
+// The standard error class.
+//
+// tests/samples/stdlib/error.fin is the full specification of this module and this
+// is the part of it that compiles today: the class, its fields, its constructor and
+// a formatter. What is left out is left out because the compiler cannot express it
+// yet, not because the design changed --
+//
+//   #[stderror] / #[uncastable] / #[llvm_name]  attributes with no reader
+//   format!("Error: {}", self.message)          no formatting macro exists
+//   err_code: int = null                        the draft then assigns to the
+//                                               parameter, which finc denies
+//   @special(pub) is_error_type(t: $type)       needs the compiler API
+//
+// Seven samples import `Error` from here, and four of them subclass it
+// (`struct IOError: <Error> {}`), so the inheritable shape is the load-bearing part.
+namespace std {
+
+#[class]
+pub struct Error {
+    pub message <string>,
+    pub error_id <int> = -1,
+
+    // One parameter, not the draft's `Error(msg: string, err_code: int = -1)`.
+    // Every call in the corpus writes one argument -- `Error("The answer is
+    // forbidden")` in blame_assert.fin, `CollectionError("Index out of bounds")` in
+    // stdlib/collection.fin -- and a defaulted parameter is still required at the
+    // call site today (KnownDefect_ParameterDefaults.ADefaultedConstructorParameter-
+    // IsStillRequired). Writing the two-parameter form here would make every one of
+    // those calls an arity error inside the library's own consumers. The second
+    // parameter comes back with that defect, not before.
+    Error(msg: string) {
+        return new Error{message: msg};
+    }
+
+    pub fun format(self: &Self) <string> {
+        return self.message;
+    }
+}
+
+}

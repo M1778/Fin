@@ -1,0 +1,110 @@
+// The dynamic array.
+//
+// tests/samples/stdlib/collection.fin is the specification. `Collection` is the
+// most-used library type in the corpus: `hashmap.fin` builds both of its halves out
+// of it, `macro_definitions.fin` writes `new Collection::<int>{}` twice,
+// `prototype_test.fin` coerces a prototype into one and `useful_macros.fin` has a
+// `coll!` literal macro. So the shape below is fixed by four consumers, not one.
+//
+// Divergences from the draft, each because the compiler says so today:
+//
+//   _arr <[T]>            the draft's own `self._arr = new [T, amount]{}` does not
+//                         typecheck against it -- `new` yields a pointer, so the
+//                         allocation is `&[T; fixed]` and the field has to be
+//                         `<&[T]>`. The draft is wrong about its own field, not the
+//                         compiler.
+//   push_back = null      a nullable method slot nothing in the corpus calls, whose
+//                         only writer is the draft's `@implements(pub)
+//                         Collection<T>::push_back = ...` overwriter
+//   getitem = __get       a field initialised to a method name; a method is not a
+//   setitem = __set       value in scope today
+//   cast<auto>(self._arr) `allocate` grows into a fresh buffer here instead, which
+//                         is what the draft's copy-then-delete meant to do
+//   blame CollectionError the throw form of `blame` is commented out in the corpus
+//     ("...")             too (blame_assert.fin:15); the assert form is what exists
+//   @implements blocks    an overwriter and a second constructor arriving through
+//                         `implements <NoLengthCollection>`, both of which need a
+//                         pass that reopens a declared type
+//
+// `operator []=` takes two parameters where `IndexAssign` declares one. Nothing
+// checks an operator's arity against the interface that requires it -- conformance
+// compares operator names only (StructType::implements) -- so this passes today for
+// the wrong reason. It is written the way index-assignment actually works, because
+// when that check arrives it is the interface in operators::std that should move.
+#[stdimport] %{
+import { Index, IndexAssign } from operators::std;
+import { Error } from error::std;
+}%
+
+namespace std {
+
+#[export]
+pub struct CollectionError : <Error> {}
+
+#[export]
+pub struct Collection<T> : <Index, IndexAssign> {
+    priv:
+      length <int>,
+      filled <int>,
+      _arr <&[T]>,
+
+    pub:
+      fun push(self: &Self, item: T) <noret> {
+        if (self.filled >= self.length) {
+            self.length++;
+            self.allocate(self.length);
+          }
+        self._arr[self.filled] = item;
+        self.filled++;
+      }
+
+      fun pop_last(self: &Self) <T> {
+        self.filled--;
+        return self._arr[self.filled];
+      }
+
+      fun get(self: &Self, index: int) <T> {
+        return self._arr[index];
+      }
+
+      fun len(self: &Self) <int> {
+        return self.filled;
+      }
+
+    priv fun allocate(self: &Self, amount: int) <noret> {
+        let grown <&[T]> = new [T, amount]{};
+        for (let i <int> = 0; i < self.filled; i++) {
+            grown[i] = self._arr[i];
+          }
+        self._arr = grown;
+      }
+
+    pub fun __get(self: &Self, index: int) <T> {
+        blame index < self.filled, "Index out of bounds";
+        return self._arr[index];
+      }
+
+    pub fun __set(self: &Self, index: int, value: T) <noret> {
+        blame index < self.filled, "Index out of bounds";
+        self._arr[index] = value;
+      }
+
+    pub operator [](index: <int>) <T> {
+        return self.__get(index);
+      }
+
+    pub operator []=(index: <int>, value: <T>) <noret> {
+        self.__set(index, value);
+      }
+
+    // `Collection::from_prototype({ 0: 10, 1: 20 })` in prototype_test.fin:30. The
+    // body cannot read the prototype yet -- a prototype resolves no member and no
+    // index -- so it produces the empty collection and the keys are dropped. It is
+    // declared because the corpus calls it; it is empty because the language has no
+    // way to walk a prototype.
+    pub static fun from_prototype(prtp: {int, T}) <Self> {
+        return Collection{length: 0, filled: 0, _arr: new [T, 1]{}};
+      }
+  }
+
+}

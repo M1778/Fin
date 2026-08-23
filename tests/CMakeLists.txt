@@ -7,6 +7,7 @@ add_executable(fin_tests
     test_cli.cpp
     test_semantics.cpp
     test_soundness.cpp
+    test_stdlib.cpp
     test_module_loader.cpp
     test_macro_expander.cpp
     Corpus.cpp

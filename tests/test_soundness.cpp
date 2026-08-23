@@ -1972,6 +1972,183 @@ TEST(KnownDefect_IndexOperator, AnIndexExpressionNeverConsultsOperatorBracket) {
     EXPECT_EQ(errorCount(arr), 1u) << arr;
 }
 
+// `a + f()` is not a call.
+//
+// LPAREN was declared at line 190 of parser.y, `%right KW_NEW KW_CAST KW_SIZEOF
+// LPAREN`, which is near the bottom of the precedence table -- looser than every
+// binary operator. So in `i < g . LPAREN` bison compared the rule `expression LT
+// expression` (precedence LT, line 198) against the lookahead LPAREN (line 190),
+// found the rule tighter, and reduced: `i < g` became the callee and the whole
+// comparison was rebuilt as `FunctionCall("unknown", {})` by the else branch of the
+// postfix-call production. Every binary operator was affected, not just the
+// comparisons -- `i + g()`, `i * g()`, `i == g()` and `i - g()` each reported
+// "Undefined function or type 'unknown'" about an expression that names no function
+// at all.
+//
+// Found while standing up lib/std/hashmap.fin: `for (let i <int> = 0; i <
+// self.keys.len(); i++)` would not compile, and the draft in
+// tests/samples/stdlib/hashmap.fin writes that loop three times (lines 19, 26 and
+// 41). No sample caught it because all four samples that reach such a loop fail on
+// `module not found` first, so the corpus was measuring the import and never the
+// body.
+//
+// A call is a postfix operator and it binds tighter than any infix one. LPAREN now
+// sits with LBRACKET, DOT and LBRACE.
+TEST(Soundness_Precedence, ACallOnTheRightOfABinaryOperatorIsStillACall) {
+    const std::string prelude =
+        "fun g() <int> { return 3; }\n"
+        "fun g0() <bool> { return true; }\n";
+
+    // One per operator, because the defect was in the precedence table and not in any
+    // single production: whatever binds looser than LPAREN mis-parses, and that was
+    // everything.
+    struct Row { const char* expr; const char* type; };
+    const Row rows[] = {
+        {"1 + g()", "int"},   {"1 - g()", "int"},   {"1 * g()", "int"},
+        {"1 / g()", "int"},   {"1 % g()", "int"},
+        {"1 < g()", "bool"},  {"1 > g()", "bool"},  {"1 <= g()", "bool"},
+        {"1 >= g()", "bool"}, {"1 == g()", "bool"}, {"1 != g()", "bool"},
+        {"1 << g()", "int"},  {"1 >> g()", "int"},
+        {"true && g0()", "bool"}, {"true || g0()", "bool"},
+        // `1 & g()`, `1 | g()` and `1 ^ g()` are absent from this table because those
+        // three have no binary production at all -- see
+        // KnownDefect_Operators.EightOperatorsCanBeDeclaredAndNeverWritten. This test
+        // is about precedence, and a token with no production has none to get wrong.
+    };
+    for (const auto& r : rows) {
+        const std::string err = stripAnsi(compile(
+            prelude + "fun main() <int> { let a <" + r.type + "> = " + r.expr + "; return 0; }\n").err);
+        EXPECT_EQ(errorCount(err), 0u) << r.expr << " is a binary expression\n" << err;
+        EXPECT_EQ(err.find("'unknown'"), std::string::npos)
+            << r.expr << " names no function\n" << err;
+    }
+
+    // And the operator's own type survives the parse. If `1 < g()` were still a call
+    // the annotation would be compared against the callee's return type and this would
+    // be quiet; the diagnostic is the proof that a comparison was built.
+    const std::string wrong = stripAnsi(compile(
+        prelude + "fun main() <int> { let a <int> = 1 < g(); return 0; }\n").err);
+    EXPECT_EQ(errorCount(wrong), 1u) << "a comparison is a bool\n" << wrong;
+    EXPECT_NE(wrong.find("expected 'int', got 'bool'"), std::string::npos) << wrong;
+
+    // A method call on the right-hand side is the shape lib/std/hashmap.fin needed.
+    const std::string method = stripAnsi(compile(
+        "struct S { n <int>, fun len(self: &Self) <int> { return self.n; } }\n"
+        "fun main() <int> {\n"
+        "  let s <&S> = new S{n: 2};\n"
+        "  for (let i <int> = 0; i < s.len(); i++) { }\n"
+        "  return 0;\n"
+        "}\n").err);
+    EXPECT_EQ(errorCount(method), 0u) << "a loop bound can be a method call\n" << method;
+
+    // A call on the left never broke -- the callee was already reduced by the time the
+    // operator was seen -- and it still does not.
+    const std::string lhs = stripAnsi(compile(
+        prelude + "fun main() <int> { let a <int> = g() + 1; return 0; }\n").err);
+    EXPECT_EQ(errorCount(lhs), 0u) << lhs;
+
+    // Chained, so the fix is not "one call per expression".
+    const std::string chain = stripAnsi(compile(
+        prelude + "fun main() <int> { let a <int> = g() + g() * g(); return 0; }\n").err);
+    EXPECT_EQ(errorCount(chain), 0u) << chain;
+
+    // Unary minus was broken by the same entry and is fixed by the same move: UMINUS
+    // used to be tighter than LPAREN, so `-g()` reduced to `(-g)()`.
+    const std::string unary = stripAnsi(compile(
+        prelude + "fun main() <int> { let a <int> = -g(); let b <int> = 1 - -g(); return 0; }\n").err);
+    EXPECT_EQ(errorCount(unary), 0u) << "-g() negates a call\n" << unary;
+
+    // The parenthesised primary still parses, which is what LPAREN's old precedence
+    // was next to. `(g())` and a call whose argument is a parenthesised expression are
+    // the two shapes that share the token.
+    const std::string paren = stripAnsi(compile(
+        prelude + "fun h(x: int) <int> { return x; }\n"
+        "fun main() <int> { let a <int> = 1 + (g()); let b <int> = h((1 + 2) * 3); return 0; }\n").err);
+    EXPECT_EQ(errorCount(paren), 0u) << paren;
+}
+
+// Eight operators can be declared, required by an interface, and never written.
+//
+// The declaration side is nearly complete: `operator &`, `operator |`, `operator ^`,
+// `operator %=`, `operator &=`, `operator |=`, `operator <<=` and `operator >>=` all
+// parse in an interface or a struct, and lib/std/operators.fin declares seven of them
+// because tests/samples/stdlib/operators.fin does -- BitAnd, BitOr, BitAndAssign,
+// BitOrAssign, ModAssign, ShiftLeftAssign, ShiftRightAssign. The expression side has no
+// production for any of them, so an interface that requires `operator &` requires
+// something no program can invoke.
+//
+// Three of the eight are worse than missing, they are half-declared: SHIFTLEFTEQUAL and
+// SHIFTRIGHTEQUAL sit in the assignment precedence group at parser.y:189 and CARET has
+// its own `%left CARET` line, so the precedence table ranks three tokens against
+// operators they can never meet.
+//
+// `^` is in neither the spec nor any sample -- the lexer produces CARET (lexer.l:265)
+// and `ASTTokenKind::CARET` exists for the declaration form, and that is the whole of
+// it. `^=` is the one spelling that exists nowhere at all: no token spells it, so
+// `operator ^=` does not even declare, which is why the count is eight and not nine.
+//
+// `&` and `|` are the two with a reason to be careful rather than just absent: `&` is
+// also address-of and the reference marker, `|` is also the union-type separator. `^`
+// has no second meaning at all.
+//
+// Found while fixing Soundness_Precedence.ACallOnTheRightOfABinaryOperatorIsStillACall,
+// whose first draft asserted sixteen operators and discovered three of them do not
+// exist. The asymmetry is the point: the compiler will happily typecheck a program
+// whose interfaces demand operators the grammar cannot spell.
+//
+// When this is fixed, invert it: Soundness_Operators.EveryDeclarableOperatorHasAn-
+// ExpressionThatInvokesIt, asserting zero diagnostics for each row instead.
+TEST(KnownDefect_Operators, EightOperatorsCanBeDeclaredAndNeverWritten) {
+    // Every one of the eight is accepted as a requirement.
+    const std::string decls = stripAnsi(compile(
+        "interface BitAnd { pub operator &(rhs: any) <int>; }\n"
+        "interface BitOr { pub operator |(rhs: any) <int>; }\n"
+        "interface Xor { pub operator ^(rhs: any) <int>; }\n"
+        "interface ModAssign { pub operator %=(rhs: any) <int>; }\n"
+        "interface BitAndAssign { pub operator &=(rhs: any) <int>; }\n"
+        "interface BitOrAssign { pub operator |=(rhs: any) <int>; }\n"
+        "interface ShiftLeftAssign { pub operator <<=(rhs: any) <int>; }\n"
+        "interface ShiftRightAssign { pub operator >>=(rhs: any) <int>; }\n"
+        "fun main() <int> { return 0; }\n").err);
+    EXPECT_EQ(errorCount(decls), 0u) << "all eight are declarable\n" << decls;
+
+    // `^=` is not among them: no token spells it, so the declaration itself is a syntax
+    // error and there is nothing to require.
+    const std::string xoreq = stripAnsi(compile(
+        "interface XorAssign { pub operator ^=(rhs: any) <int>; }\n"
+        "fun main() <int> { return 0; }\n").err);
+    EXPECT_NE(xoreq.find("syntax error"), std::string::npos)
+        << "`^=` does not lex as one operator\n" << xoreq;
+
+    // And none of the eight is writable.
+    const char* binary[] = {"1 & 2", "1 | 2", "1 ^ 2"};
+    for (const char* e : binary) {
+        const std::string err = stripAnsi(compile(
+            std::string("fun main() <int> { let a <auto> = ") + e + "; return 0; }\n").err);
+        EXPECT_NE(err.find("syntax error"), std::string::npos)
+            << e << " has no binary production\n" << err;
+    }
+    const char* compound[] = {"%=", "&=", "|=", "<<=", ">>="};
+    for (const char* op : compound) {
+        const std::string err = stripAnsi(compile(
+            std::string("fun main() <int> { let a <int> = 1; a ") + op + " 2; return 0; }\n").err);
+        EXPECT_NE(err.find("syntax error"), std::string::npos)
+            << op << " has no assignment production\n" << err;
+    }
+
+    // The four that do exist, as the control: whatever is wrong above is not "compound
+    // assignment does not work".
+    const char* works[] = {"+=", "-=", "*=", "/="};
+    for (const char* op : works) {
+        const std::string err = stripAnsi(compile(
+            std::string("fun main() <int> { let a <int> = 1; a ") + op + " 2; return 0; }\n").err);
+        EXPECT_EQ(errorCount(err), 0u) << op << " is the control\n" << err;
+    }
+    const std::string shifts = stripAnsi(compile(
+        "fun main() <int> { let a <auto> = (1 << 2) >> 1; return 0; }\n").err);
+    EXPECT_EQ(errorCount(shifts), 0u) << "the shifts themselves exist\n" << shifts;
+}
+
 TEST(Soundness_GenericConstraints, AMethodInAnInterfaceDeclaresItsOwnGenerics) {
     // The sibling of Soundness_GenericConstraints.AMethodInAnImplementsBlockDeclares-
     // ItsOwnGenerics, and it was broken: visit(InterfaceDeclaration) opened a scope per
@@ -4043,6 +4220,102 @@ TEST(Soundness_MachineContract, NewOnAnUndefinedTypeIsRejectedRatherThanFatal) {
         EXPECT_NE(stripAnsi(r.err).find("Undefined type 'Nope'"), std::string::npos)
             << code << r.err;
     }
+}
+
+// ---------------------------------------------------------------------------
+// A generic struct that mentions `Self` becomes self-referential the moment it is
+// instantiated, and substituting it a second time used to recurse until the stack
+// ran out.
+//
+// `pub fun me(self: &Self) <Self>` on `C<T>` is stored as `fn() -> Self`. Instantiating
+// C replaces that `Self` with the new `C<int>` -- correctly, that is what `Self` means
+// -- and the result is a StructType one of whose members points back at it. Nothing was
+// wrong until the type was substituted again, which is what happens when C appears as a
+// field of another generic struct: `struct H<T> { keys <&C<T>>, }`. Substituting
+// `H<int>` walks the field, which walks `C<T>`, which walks its method's return type,
+// which is `C<T>`, which walks its method's return type, for as long as the stack lasts.
+//
+// A single instantiation never crashed -- `let c <C<int>>;` builds the cycle and stops
+// -- so the defect needed two levels to show, and the corpus reaches two levels only
+// through the standard library: `HashMap<T, U>` holds two `Collection`s and
+// `Collection<T>` has `from_prototype() <Self>`. The crash appeared the hour lib/std
+// started resolving, on prototype_test.fin, as SIGSEGV in
+// Soundness_MachineContract.NoSampleTerminatesTheCompilerBySignal.
+//
+// The cycle is not the bug and must not be broken: `Self` really is the type being
+// built. The fix is that a substitution in progress publishes its result before it walks
+// its members, so a recursive visit finds it instead of starting again.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_MachineContract, ASelfReferentialInstantiationIsNotFatal) {
+    // The shape that crashed, at its smallest. EQ 0 and an empty stderr, because 139 is
+    // a nonzero exit code and "it reported something" is not the assertion.
+    const FincRun nested = compile(
+        "struct C<T> {\n"
+        "  v <T>,\n"
+        "  pub fun me(self: &Self) <Self> { return C{v: self.v}; }\n"
+        "}\n"
+        "struct H<T> { keys <&C<T>>, }\n"
+        "fun main() <int> { let h <H<int>>; return 0; }\n");
+    EXPECT_EQ(nested.exitCode, 0) << "a struct held by a struct is not a stack overflow:\n"
+                                  << stripAnsi(nested.err);
+    EXPECT_EQ(errorCount(stripAnsi(nested.err)), 0u) << stripAnsi(nested.err);
+
+    // A static returning `Self` is the spelling lib/std/collection.fin uses
+    // (`from_prototype`), and it is the one prototype_test.fin reaches.
+    const FincRun statik = compile(
+        "struct C<T> {\n"
+        "  v <T>,\n"
+        "  pub static fun make(x: T) <Self> { return C{v: x}; }\n"
+        "}\n"
+        "struct H<T, U> { keys <&C<T>>, values <&C<U>>, }\n"
+        "fun main() <int> { let h <&H<string, int>> = new H::<string, int>{}; return 0; }\n");
+    EXPECT_EQ(statik.exitCode, 0) << stripAnsi(statik.err);
+    EXPECT_EQ(errorCount(stripAnsi(statik.err)), 0u) << stripAnsi(statik.err);
+
+    // Three levels, so the fix is not "one level of nesting".
+    const FincRun deep = compile(
+        "struct A<T> { v <T>, pub fun me(self: &Self) <Self> { return A{v: self.v}; } }\n"
+        "struct B<T> { a <&A<T>>, pub fun me(self: &Self) <Self> { return B{a: self.a}; } }\n"
+        "struct C2<T> { b <&B<T>>, }\n"
+        "fun main() <int> { let c <C2<int>>; return 0; }\n");
+    EXPECT_EQ(deep.exitCode, 0) << stripAnsi(deep.err);
+    EXPECT_EQ(errorCount(stripAnsi(deep.err)), 0u) << stripAnsi(deep.err);
+
+    // The same struct used twice at the same level, which is what HashMap does with
+    // Collection: the two substitutions must not be confused for one another.
+    const FincRun twice = compile(
+        "struct C<T> { v <T>, pub fun me(self: &Self) <Self> { return C{v: self.v}; } }\n"
+        "struct H<T, U> { a <&C<T>>, b <&C<U>>, }\n"
+        "fun main() <int> {\n"
+        "  let h <H<int, string>>;\n"
+        "  let g <H<string, int>>;\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_EQ(twice.exitCode, 0) << stripAnsi(twice.err);
+    EXPECT_EQ(errorCount(stripAnsi(twice.err)), 0u) << stripAnsi(twice.err);
+
+    // And a single instantiation, which never crashed, still does not: the guard must
+    // not turn a working case into a wrong one.
+    const FincRun single = compile(
+        "struct C<T> { v <T>, pub fun me(self: &Self) <Self> { return C{v: self.v}; } }\n"
+        "fun main() <int> { let c <C<int>>; return 0; }\n");
+    EXPECT_EQ(single.exitCode, 0) << stripAnsi(single.err);
+
+    // The cycle is still a cycle. `me` returns the instantiated type, so its result has
+    // the instantiated field type -- if the guard had cut the recursion by handing back
+    // the uninstantiated template instead, `c.me().v` would be `T` and this would report.
+    const FincRun preserved = compile(
+        "struct C<T> { pub: v <T>, pub fun me(self: &Self) <Self> { return C{v: self.v}; } }\n"
+        "struct H<T> { pub: keys <&C<T>>, }\n"
+        "fun main() <int> {\n"
+        "  let h <&H<int>> = new H::<int>{};\n"
+        "  let n <int> = h.keys.me().v;\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_EQ(preserved.exitCode, 0)
+        << "the self-reference survives instantiation\n" << stripAnsi(preserved.err);
+    EXPECT_EQ(errorCount(stripAnsi(preserved.err)), 0u) << stripAnsi(preserved.err);
 }
 
 // ---------------------------------------------------------------------------

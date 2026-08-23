@@ -1,0 +1,35 @@
+// `Result` and the interface it implements.
+//
+// tests/samples/stdlib/typing.fin is the specification. This copy keeps the enum, the
+// interface and the implements block; what it drops is the `ErrorLike` union bound on
+// `Result`'s second generic parameter, because the draft spells it
+// `string | any implements <Error>` and this file would then have to import `Error`
+// from a module that imports nothing back -- a cycle the loader has no rule for yet.
+// The bound is a hint, not a constraint the corpus depends on.
+//
+// The draft's `Result<T, U> implements <IResult> { ... }` block is dropped for a
+// second reason, and it is the draft's own: an enum cannot implement an interface
+// today -- `Type 'Result' is not a struct/class and cannot implement interfaces`,
+// which stdlib/typing.fin's `//@ unimplemented` note already records. So `IResult` is
+// declared and unimplemented here, exactly as far as the compiler goes.
+#[stdimport] %{
+import { getkeyid, keyidof } from enums::std;
+}%
+
+namespace std {
+
+#[llvm_name="Result"]
+pub enum Result <T, U> {
+    Ok(T),
+    Err(U),
+}
+
+#[export]
+pub interface IResult<T, U> {
+    pub:
+      fun unwrap(enum_ : Result<T, U>) <T>;
+      fun expect(enum_ : Result<T, U>) <noret>;
+      fun select(enum_ : Result<T, U>, callback : fn(T) -> void) <noret>;
+}
+
+}
