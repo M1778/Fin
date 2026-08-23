@@ -44,12 +44,17 @@ public:
     // (tests/samples/stdlib/stdio.fin:42). Distinguishes a forward declaration
     // from a struct whose body is genuinely empty.
     bool is_forward_declaration = false;
-    // Parse-time only: the default visibility set by the most recent `pub:` /
-    // `priv:` label in this body. It lives on the accumulator node so that each
-    // body has its own, rather than in a parser-global that a nested body would
-    // inherit. Meaningless after parsing -- every member already carries the
-    // `is_public` this produced.
-    bool label_public = false;
+    // Parse-time only: the default visibility for members of this body -- the
+    // language default until a `pub:` / `priv:` label changes it, and that label's
+    // value afterwards. It lives on the accumulator node so that each body has its
+    // own, rather than in a parser-global that a nested body would inherit.
+    // Meaningless after parsing -- every member already carries the `is_public`
+    // this produced.
+    //
+    // `true` because an unprefixed field is public: tests/samples/structs.fin
+    // declares Vector3's three fields with no modifier and reads them from main()
+    // at :10. See parser.y's `member_visibility` for the rest of the evidence.
+    bool label_public = true;
     
     StructDeclaration(std::string n, std::vector<std::unique_ptr<StructMember>> m, bool pub);
     void accept(Visitor& v) override;
@@ -67,7 +72,7 @@ public:
     std::vector<std::unique_ptr<Attribute>> attributes;
     std::vector<std::unique_ptr<GenericParam>> generic_params;
     bool is_public;
-    bool label_public = false; // see StructDeclaration::label_public
+    bool label_public = true; // see StructDeclaration::label_public
     
     InterfaceDeclaration(std::string n, 
                          std::vector<std::unique_ptr<StructMember>> m, 

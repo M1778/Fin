@@ -24,10 +24,11 @@ public:
     // the `Self();` the interface declares. It is not a FunctionDeclaration, so it
     // cannot go in `methods`.
     std::vector<std::unique_ptr<ConstructorDeclaration>> constructors;
-    // Parse-time only: the default visibility set by the most recent `pub:` /
-    // `priv:` label in this body (tests/samples/stdlib/stdio.fin:55). On the
-    // accumulator so each body has its own, like StructDeclaration::label_public.
-    bool label_public = false;
+    // Parse-time only: the default visibility for members of this body -- public
+    // until a `pub:` / `priv:` label changes it (tests/samples/stdlib/stdio.fin:55).
+    // On the accumulator so each body has its own, like
+    // StructDeclaration::label_public, whose comment carries the reasoning.
+    bool label_public = true;
     // `@implements Collection<T> { ... }` rather than
     // `Collection<T> implements <ICollection> { ... }`: the body's methods are
     // added to the target or overwrite its own, and no interface is named

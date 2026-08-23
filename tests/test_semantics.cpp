@@ -108,12 +108,18 @@ TEST(SemanticAnalyzer, AcceptsAPublicStructFieldAccess) {
     EXPECT_TRUE(a.clean()) << "errors: " << a.errorCount;
 }
 
-TEST(SemanticAnalyzer, RejectsAPrivateStructFieldAccessFromOutside) {
-    // Fields are private unless declared `pub`. This records the behaviour the
-    // analyzer has today rather than asserting a preference: reading an
-    // undecorated field from a free function is `Cannot access private field`.
+TEST(SemanticAnalyzer, RejectsAPrivFieldAccessFromOutside) {
+    // Reading a field declared `priv` from a free function is `Cannot access private
+    // field`. The subject used to be an *undecorated* field, on the premise that
+    // fields are private unless declared `pub` -- and the comment said outright that
+    // it recorded the behaviour of the day rather than a claim. The corpus says the
+    // opposite: structs.fin is `//@ ok` and reads three unprefixed fields from
+    // main(), so the default is public. Rewritten to keep what it was really
+    // protecting -- that the refusal exists -- with a subject that is actually
+    // private. The default itself is now Soundness_FieldVisibility's, in
+    // test_soundness.cpp.
     auto a = analyze(
-        "struct Point { x <int>, y <int> }\n"
+        "struct Point { priv x <int>, pub y <int> }\n"
         "fun main() <noret> { let p <Point>; let n <int> = p.x; }\n");
     ASSERT_TRUE(a.parsed);
     EXPECT_TRUE(a.analyzerFlag || a.engineErrors);

@@ -289,6 +289,7 @@
 %type <std::vector<std::pair<std::string, std::unique_ptr<fin::Expression>>>> field_assignments
 %type <std::vector<std::pair<std::unique_ptr<fin::Expression>, std::unique_ptr<fin::Expression>>>> prototype_elements
 %type <bool> visibility_opt
+%type <int> member_visibility
 %type <bool> implements_visibility fun_kw readonly_opt visibility_label
 
 /* Added missing types */
@@ -824,8 +825,8 @@ struct_body_content:
         $1->label_public = $3;
         $$ = std::move($1);
     }
-    | struct_body_content attributes_opt visibility_opt readonly_opt struct_item_rest {
-        const bool vis = $3 || $1->label_public;
+    | struct_body_content attributes_opt member_visibility readonly_opt struct_item_rest {
+        const bool vis = $3 < 0 ? $1->label_public : ($3 == 1);
         if (auto* member = dynamic_cast<fin::StructMember*>($5.get())) {
             member->attributes = std::move($2);
             member->is_public = vis;
@@ -1066,8 +1067,8 @@ interface_body_content:
         $1->label_public = $3;
         $$ = std::move($1);
     }
-    | interface_body_content attributes_opt visibility_opt readonly_opt interface_item_rest {
-        const bool vis = $3 || $1->label_public;
+    | interface_body_content attributes_opt member_visibility readonly_opt interface_item_rest {
+        const bool vis = $3 < 0 ? $1->label_public : ($3 == 1);
         if (auto* member = dynamic_cast<fin::StructMember*>($5.get())) {
             member->attributes = std::move($2);
             member->is_public = vis;
@@ -1607,8 +1608,8 @@ implements_body_content:
         $1->label_public = $3;
         $$ = std::move($1);
     }
-    | implements_body_content attributes_opt visibility_opt implements_item_rest {
-        const bool vis = $3 || $1->label_public;
+    | implements_body_content attributes_opt member_visibility implements_item_rest {
+        const bool vis = $3 < 0 ? $1->label_public : ($3 == 1);
         if (auto* func = dynamic_cast<fin::FunctionDeclaration*>($4.get())) {
             func->attributes = std::move($2);
             func->is_public = vis;
@@ -2815,19 +2816,54 @@ field_assignments:
 
 /* --- HELPERS --- */
 
+/* Visibility where it decides *export*: a top-level declaration, and the
+   `@special(pub)` form. Two-state on purpose -- an unwritten modifier and a
+   written `priv` mean the same thing there, since neither exports. Whether `pub`
+   is required to export at all is an open question for the owner and this
+   production does not settle it either way.
+
+   Members use `member_visibility` instead, which distinguishes the two. */
 visibility_opt:
     KW_PUB { $$ = true; }
     | KW_PRIV { $$ = false; }
     | %empty { $$ = false; }
     ;
 
+/* Visibility of a member of a struct, interface, implements block or enum, as
+   three states: 1 for `pub`, 0 for `priv`, -1 for nothing written. The third is
+   the point. A member with no modifier takes the body's default -- the label in
+   force, or the language default if there is none -- and that default is
+   **public**.
+
+   tests/samples/structs.fin settles it. It is `//@ ok` and therefore normative,
+   and it writes `struct Vector3 { x <float>, y <float>, z <float> }` with no
+   modifier on any field, then reads all three from `main()` at :10. A private
+   default makes that sample unwritable. Three more pieces of evidence agree:
+
+     - `priv` and `priv:` are written in eight corpus files (stdlib/stdptr.fin:11
+       and :38, lib/std/stdio.fin:98 and :112, letssee.fin:10,
+       lib/std/hashmap.fin:46, stdlib/hashmap.fin:16, stdlib/collection.fin:13,
+       :45 and :51, stdlib/types.fin:13, stdlib/enums.fin:12). Every one of those
+       is redundant in a private-by-default language.
+     - every privacy claim in the corpus is explicit; no sample relies on a field
+       being private without saying so.
+     - complex.fin:13 reads `b.val` of `struct Box<T> { val <T> }` from `main()`.
+
+   Before this, members shared `visibility_opt` and an unwritten modifier was
+   indistinguishable from a written `priv`. */
+member_visibility:
+    KW_PUB { $$ = 1; }
+    | KW_PRIV { $$ = 0; }
+    | %empty { $$ = -1; }
+    ;
+
 /* A visibility *label*, `pub:` or `priv:`, which changes the default for every
    item after it in the same type body until the next label -- as against
-   `visibility_opt`, which decorates one item. tests/samples/letssee.fin:10,
+   `member_visibility`, which decorates one item. tests/samples/letssee.fin:10,
    readonly.fin:18 and :35, stdlib/types.fin:13, stdlib/collection.fin:13 and
    stdlib/stdptr.fin:11 all open a body with one.
 
-   No conflict with `visibility_opt: KW_PUB`, even though both start with the
+   No conflict with `member_visibility: KW_PUB`, even though both start with the
    same token: nothing in an item can begin with COLON, so a COLON lookahead
    after KW_PUB can only be this. The state carrying the current default is a
    field on the body accumulator (`label_public`) rather than a parser-global,
@@ -2861,33 +2897,39 @@ enum_values:
     | %empty { $$ = std::vector<fin::EnumMember>(); }
     ;
 
-/* A member of an enum. Every production starts with `visibility_opt` -- even the
-   two that cannot be labelled -- because a `visibility_opt` that can be empty has
-   to be reduced with the member's own IDENTIFIER as the lookahead, and the parser
-   cannot both reduce the empty visibility and shift that IDENTIFIER for a
-   production that lacks it. Same reason `struct_body_content` routes its label
-   through `attributes_opt`. */
+/* A member of an enum. Every production starts with `member_visibility` --
+   even the ones that cannot be labelled -- because a `member_visibility` that can
+   be empty has to be reduced with the member's own IDENTIFIER as the lookahead,
+   and the parser cannot both reduce the empty visibility and shift that IDENTIFIER
+   for a production that lacks it. Same reason `struct_body_content` routes its
+   label through `attributes_opt`.
+
+   An enum body has no `pub:` / `priv:` labels, so an unwritten modifier resolves
+   straight to the language default, which is public -- `$1 != 0` rather than a
+   consultation of any accumulator. Nothing reads an enum member's `is_public`
+   today; it is spelled this way so that whoever first does gets the same answer a
+   struct field gives. */
 enum_value:
-    visibility_opt IDENTIFIER {
-        $$ = fin::EnumMember{$2, nullptr, {}, $1};
+    member_visibility IDENTIFIER {
+        $$ = fin::EnumMember{$2, nullptr, {}, $1 != 0};
     }
-    | visibility_opt IDENTIFIER EQUAL expression {
-        $$ = fin::EnumMember{$2, std::move($4), {}, $1};
+    | member_visibility IDENTIFIER EQUAL expression {
+        $$ = fin::EnumMember{$2, std::move($4), {}, $1 != 0};
     }
     /* A member with a payload: `RGB(uint{8}, uint{8}, uint{8})` --
        tests/samples/enums.fin:8, `Ok(T)` -- stdlib/typing.fin:15. The types are
        what the member carries, which is what makes a generic enum Fin's sum type. */
-    | visibility_opt IDENTIFIER LPAREN type_list RPAREN {
-        $$ = fin::EnumMember{$2, nullptr, std::move($4), $1};
+    | member_visibility IDENTIFIER LPAREN type_list RPAREN {
+        $$ = fin::EnumMember{$2, nullptr, std::move($4), $1 != 0};
     }
     /* The bracketed spelling of the same thing, one type: `pub Err <IOError>` --
        tests/samples/stdlib/stdio.fin:50-51. Both spellings are in the corpus, as
        they are for a parameter type and for a type alias, so both are accepted and
        neither is preferred. */
-    | visibility_opt IDENTIFIER LT type GT {
+    | member_visibility IDENTIFIER LT type GT {
         std::vector<std::unique_ptr<fin::TypeNode>> types;
         types.push_back(std::move($4));
-        $$ = fin::EnumMember{$2, nullptr, std::move(types), $1};
+        $$ = fin::EnumMember{$2, nullptr, std::move(types), $1 != 0};
     }
     ;
 

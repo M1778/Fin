@@ -5526,3 +5526,211 @@ TEST(Soundness_Readonly, AReadonlyMemberIsStillReadableAndStillTypeChecked) {
     EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
         << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// Field visibility, and specifically what an unprefixed field is.
+//
+// tests/samples/structs.fin is `//@ ok` and therefore normative. It writes
+//
+//     struct Vector3 { x <float>, y <float>, z <float> }
+//
+// with no modifier on any field, and then at :10 reads them from `main()`. That
+// alone settles the default: a private default makes a normative sample
+// unwritable. Three further pieces of corpus evidence point the same way.
+//
+//   * `priv` and `priv:` are written in eight corpus files (stdlib/stdptr.fin:11
+//     and :38, lib/std/stdio.fin:98 and :112, letssee.fin:10, lib/std/hashmap.fin:46,
+//     stdlib/hashmap.fin:16, stdlib/collection.fin:13/:45/:51, stdlib/types.fin:13,
+//     stdlib/enums.fin:12). In a private-by-default language every one of those is
+//     redundant, and nobody writes a keyword eight times for no effect.
+//
+//   * Every privacy claim in the corpus is explicit. No sample anywhere relies on
+//     a field being private without saying so.
+//
+//   * complex.fin:13 -- `struct Box<T> { val <T> }` read as `b.val` from `main()` --
+//     is the last diagnostic standing between that sample and `//@ ok`.
+//
+// The parser conflated "nothing written" with "priv written": `visibility_opt`
+// returned a plain bool with `%empty` giving false. The fix is a three-state
+// modifier for members only (`member_visibility`), leaving `visibility_opt`
+// alone where it decides *export* at the top level -- whether `pub` is required
+// to export is a separate question and not one this unit gets to answer by
+// accident.
+
+TEST(Soundness_FieldVisibility, AnUnprefixedFieldIsReadableFromOutside) {
+    // structs.fin in miniature. This is the whole unit.
+    const FincRun r = compile(
+        "struct V { x <float>, y <float> }\n"
+        "fun main() <noret> { let v <V> = V{x: 1.0, y: 2.0}; let a <float> = v.x; }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "an unprefixed field is public: structs.fin declares Vector3's three fields "
+           "with no modifier and reads them from main() at :10, so a private default "
+           "would make a normative sample unwritable.\n"
+        << r.err;
+}
+
+TEST(Soundness_FieldVisibility, AnUnprefixedFieldOnAGenericStructIsReadableFromOutside) {
+    // complex.fin:6-13 exactly. Separate from the test above because the field's type
+    // is a generic parameter and the read goes through an instantiation, so it travels
+    // StructType::substitute -- which copies `is_public` across, and would have to keep
+    // doing so for this to stay green.
+    const FincRun r = compile(
+        "struct Box<T> { val <T> }\n"
+        "fun main() <noret> { let b <Box<int>> = Box::<int>{val: 100}; if (b.val > 50) { } }\n");
+    EXPECT_EQ(r.exitCode, 0) << "complex.fin:13 requires this:\n" << r.err;
+}
+
+TEST(Soundness_FieldVisibility, APrivFieldIsNotReadableFromOutside) {
+    // The other side, and the reason the change is a default and not a removal.
+    // Without this test "make everything public" passes the whole block.
+    const FincRun r = compile(
+        "struct S { priv secret <int>, open <int> }\n"
+        "fun main() <noret> { let s <S> = S{secret: 1, open: 2}; let a <int> = s.secret; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "`priv` must still mean private:\n" << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("Cannot access private field 'secret' of struct 'S'"), std::string::npos)
+        << err;
+    EXPECT_EQ(errorCount(err), 1u)
+        << "the sibling field declared after `priv secret` is unaffected -- `priv` "
+           "decorates one member, it does not open a section:\n"
+        << err;
+}
+
+TEST(Soundness_FieldVisibility, APrivLabelSectionIsNotReadableFromOutside) {
+    // letssee.fin:10 and stdlib/collection.fin:13 open a body with `priv:`. Both
+    // fields after the label are private, which is what makes this different from the
+    // test above.
+    const FincRun r = compile(
+        "struct S {\n"
+        "  priv:\n"
+        "  a <int>,\n"
+        "  b <int>,\n"
+        "}\n"
+        "fun main() <noret> { let s <S> = S{a: 1, b: 2}; let x <int> = s.a; let y <int> = s.b; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("Cannot access private field 'a'"), std::string::npos) << err;
+    EXPECT_NE(err.find("Cannot access private field 'b'"), std::string::npos)
+        << "a label carries to every member after it, not just the next one:\n"
+        << err;
+}
+
+TEST(Soundness_FieldVisibility, APubLabelAfterAPrivLabelRestoresPublicAccess) {
+    // readonly.fin:18 and :35 switch labels inside one body. Written as one program so
+    // it cannot pass by the label being ignored in both directions: the count pins that
+    // exactly one of the two reads is refused.
+    const FincRun r = compile(
+        "struct S {\n"
+        "  priv:\n"
+        "  hidden <int>,\n"
+        "  pub:\n"
+        "  shown <int>,\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  let s <S> = S{hidden: 1, shown: 2};\n"
+        "  let a <int> = s.hidden;\n"
+        "  let b <int> = s.shown;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("Cannot access private field 'hidden'"), std::string::npos) << err;
+    EXPECT_EQ(err.find("'shown'"), std::string::npos)
+        << "`pub:` after `priv:` returns the body to public:\n"
+        << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(Soundness_FieldVisibility, AnUnprefixedFieldAfterAPrivLabelIsStillPrivate) {
+    // The default and the label are two different mechanisms, and the label wins over
+    // the default inside its section. Without this, "default public" could be
+    // implemented as an unconditional true and the label would stop working.
+    const FincRun r = compile(
+        "struct S {\n"
+        "  pub visible <int>,\n"
+        "  priv:\n"
+        "  after <int>,\n"
+        "}\n"
+        "fun main() <noret> { let s <S> = S{visible: 1, after: 2}; let a <int> = s.after; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Cannot access private field 'after'"),
+              std::string::npos)
+        << messagesOnly(stripAnsi(r.err));
+}
+
+TEST(Soundness_FieldVisibility, APrivFieldIsReadableFromInsideItsOwnStruct) {
+    // What `priv` is for. stdlib/collection.fin's private `length` is read by its own
+    // methods eight times.
+    const FincRun r = compile(
+        "struct S {\n"
+        "  priv secret <int>,\n"
+        "  pub fun get() <int> { return self.secret; }\n"
+        "}\n"
+        "fun main() <noret> { let s <S> = S{secret: 1}; let a <int> = s.get(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a struct can read its own private field:\n" << r.err;
+}
+
+TEST(Soundness_FieldVisibility, APrivFieldIsStillTypeChecked) {
+    // A refused read must not also lose the field's type, or one mistake becomes two
+    // diagnostics and the second one is noise. Asserts the count, not just the message.
+    const FincRun r = compile(
+        "struct S { priv secret <int> }\n"
+        "fun main() <noret> { let s <S> = S{secret: 1}; let a <string> = s.secret; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("Cannot access private field 'secret'"), std::string::npos) << err;
+    EXPECT_EQ(err.find("expected 'string', got '<error>'"), std::string::npos)
+        << "the field keeps its type through the visibility refusal:\n"
+        << err;
+}
+
+TEST(KnownDefect_FieldVisibility, AStructLiteralInitialisesAPrivateFieldFromOutside) {
+    // StructInstantiation never consults isFieldPublic, so a body can be filled in from
+    // anywhere regardless of what its members say. Every test above relies on this to
+    // build its subject, which is why it is asserted here rather than left implicit.
+    //
+    // Not obviously a defect: readonly.fin:20 and stdlib/collection.fin both construct
+    // types whose fields are private, and no corpus sample constructs one from outside
+    // and expects a refusal. Recorded as a KnownDefect because the compiler cannot both
+    // refuse `s.secret` and permit `S{secret: 1}` on a principle it can state.
+    const FincRun r = compile(
+        "struct S { priv secret <int> }\n"
+        "fun main() <noret> { let s <S> = S{secret: 1}; }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "TODAY: a struct literal ignores field visibility. If this fails, the "
+           "instantiation path grew a visibility check -- decide whether construction "
+           "from outside is legal (readonly.fin:20 and the stdlib both do it, so it "
+           "probably is inside the declaring module) and either move this to Soundness_ "
+           "inverted, or keep it and say where the boundary is.\n"
+        << r.err;
+}
+
+TEST(Soundness_FieldVisibility, AnInheritedUnprefixedFieldIsReadableFromOutside) {
+    // deeptest2.fin:71-72 is why. `struct Person { name <string>, age <int> }` has
+    // unprefixed fields and `struct Student : <Person>` writes them through
+    // `super::<Person>::name = name;` -- whose own comment says "this is how we access
+    // fields and functions of parent class". Those two lines reported `Cannot access
+    // private field` before this unit, and it turned out not to be a `super::` defect
+    // at all: the same wrong default, showing up a second time through a second path.
+    //
+    // Separate test because the answer travels StructType::isFieldPublic's walk over
+    // `parents`, which the direct case never touches.
+    const FincRun r = compile(
+        "struct Base { inherited <int> }\n"
+        "struct Derived : <Base> { own <int> }\n"
+        "fun main() <noret> { let d <Derived>; let a <int> = d.inherited; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "deeptest2.fin:71-72 requires this:\n" << r.err;
+}
+
+TEST(Soundness_FieldVisibility, AnInheritedPrivFieldIsNotReadableFromOutside) {
+    // The other half of the parent walk, and the reason the test above is not
+    // "inherited fields skip the check": `priv` on a parent field still means private
+    // when the child is the one being read through.
+    const FincRun r = compile(
+        "struct Base { priv hidden <int> }\n"
+        "struct Derived : <Base> { own <int> }\n"
+        "fun main() <noret> { let d <Derived>; let a <int> = d.hidden; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Cannot access private field 'hidden'"),
+              std::string::npos)
+        << messagesOnly(stripAnsi(r.err));
+}
