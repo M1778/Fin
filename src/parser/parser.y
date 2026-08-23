@@ -495,16 +495,23 @@ declaration_body:
         $$ = std::move(sd);
         $$->setLoc(@$);
     }
+    /* setLoc, like every other production that builds a node the analyzer can raise
+       a diagnostic against. It was missing here and on the three declaration forms
+       below -- only the forward-declaration case above had it -- so a conformance
+       failure was reported at 1:1, which in the corpus is the `//@` expectation
+       comment. Soundness_DiagnosticLocation.ADeclarationReportsWhereItWasWritten. */
     | KW_STRUCT IDENTIFIER generic_params_opt inheritance_opt LBRACE struct_body_content RBRACE {
         $6->name = $2;
         $6->generic_params = std::move($3);
         $6->parents = std::move($4);
         $$ = std::move($6);
+        $$->setLoc(@$);
     }
     | KW_INTERFACE IDENTIFIER generic_params_opt LBRACE interface_body_content RBRACE {
         $5->name = $2;
         $5->generic_params = std::move($3);
         $$ = std::move($5);
+        $$->setLoc(@$);
     }
     /* `generic_params_opt` because tests/samples/stdlib/typing.fin:14 declares
        `pub enum Result <T: Any<...>, U: ErrorLike> { Ok, Err }` -- an enum whose
@@ -523,6 +530,7 @@ declaration_body:
         en->generic_params = std::move($3);
         en->member_payloads = std::move(payloads);
         $$ = std::move(en);
+        $$->setLoc(@$);
     }
     | KW_CLASS IDENTIFIER generic_params_opt inheritance_opt LBRACE struct_body_content RBRACE {
         auto cls = std::make_unique<fin::ClassDeclaration>($2, std::move($6->members), false);
@@ -534,6 +542,7 @@ declaration_body:
         cls->generic_params = std::move($3);
         cls->parents = std::move($4);
         $$ = std::move(cls);
+        $$->setLoc(@$);
     }
     | KW_LET IDENTIFIER LT type GT EQUAL expression SEMICOLON {
         $$ = std::make_unique<fin::VariableDeclaration>(true, $2, std::move($4), std::move($7));

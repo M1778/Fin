@@ -4184,6 +4184,93 @@ TEST(Soundness_DiagnosticLocation, AMissingReturnReportsWhereTheFunctionIsDeclar
         << "a method's missing-return diagnostic must keep pointing at the method";
 }
 
+// A struct, interface, enum and class declaration each had no location at all.
+//
+// Only the *forward* declaration production called setLoc (parser.y:496); the four
+// full-body ones -- `KW_STRUCT IDENTIFIER generic_params_opt inheritance_opt LBRACE
+// struct_body_content RBRACE` and its interface, enum and class siblings -- built the
+// node and returned it without one. So every diagnostic raised against a declaration
+// landed on 1:1, and 1:1 in the corpus is a `//@` expectation comment: `stdlib/
+// hashmap.fin`'s conformance failure pointed the reader at the line that says what the
+// file is *expected* to do, which is the most misleading place in the file for it to go.
+// Soundness_DiagnosticAttribution.NoDiagnosticPointsAtAnExpectationComment over the
+// whole corpus is what caught it.
+//
+// All four productions get the call, and two of them can be tested. The other two have
+// no diagnostic that reaches the declaration node at all yet:
+//
+//   * An interface cannot inherit an interface -- `interface D : <Base>` is a syntax
+//     error, because KW_INTERFACE's production has no `inheritance_opt` where the struct
+//     and class ones do -- so conformance never runs on one. No sample writes that form,
+//     which is why it stays a note here rather than a KnownDefect of its own.
+//   * An enum member's payload type is never resolved, so `enum E { pub Ok <Nope>, }`
+//     compiles clean. That one is booked:
+//     KnownDefect_Enums.AnEnumMemberPayloadTypeIsNeverResolved.
+//
+// A first draft of this test asserted the interface case and *passed*, which is the trap
+// worth recording: the syntax error above happens to be reported on the same line the
+// conformance diagnostic would have used, so a green result meant nothing.
+TEST(Soundness_DiagnosticLocation, ADeclarationReportsWhereItWasWritten) {
+    // A struct that promises an interface and does not deliver.
+    EXPECT_EQ(reportedLine("interface I { pub fun f(self: &Self) <int>; }\n"
+                           "struct S : <I> { pub: v <int>, }\n"
+                           "fun main() <noret> { }\n"), "4")
+        << "the conformance diagnostic belongs on the struct, not on line 1";
+
+    // The same, one line further down, so a hardcoded line number cannot pass.
+    EXPECT_EQ(reportedLine("interface I { pub fun f(self: &Self) <int>; }\n"
+                           "\n"
+                           "struct S : <I> { pub: v <int>, }\n"
+                           "fun main() <noret> { }\n"), "5");
+
+    // A class, which is a different production building a different node type.
+    EXPECT_EQ(reportedLine("interface I { pub fun f(self: &Self) <int>; }\n"
+                           "class K : <I> { pub: v <int>, }\n"
+                           "fun main() <noret> { }\n"), "4")
+        << "KW_CLASS ... RBRACE builds a ClassDeclaration and needs its own setLoc";
+}
+
+// An enum member's payload type is never resolved.
+//
+// `enum E { pub Ok <Nope>, }` compiles clean, and `Nope` is undefined. The payloads are
+// parsed and stored -- EnumDeclaration::member_payloads is built in the KW_ENUM
+// production and CloneVisitor carries it -- but nothing walks them looking for a type to
+// resolve, so a typo in a payload type is silent until something tries to use the value.
+//
+// This is load-bearing for the library rather than hypothetical:
+// `tests/samples/stdlib/stdio.fin:49` declares `pub enum IOResult<T: Strict<Stream>> {
+// pub Err <IOError>, pub Ok <T>, }` and `lib/std/stdio.fin` carries its own copy. If
+// `IOError` were misspelled there, eleven importers would inherit the mistake and none
+// of them would say so.
+//
+// The inversion is Soundness_Enums.AnEnumMemberPayloadTypeIsResolvedWhereItIsWritten,
+// and the diagnostic then wants the payload's own location, not the enum's.
+TEST(KnownDefect_Enums, AnEnumMemberPayloadTypeIsNeverResolved) {
+    const FincRun undefinedPayload = compile(
+        "enum E { pub Ok <Nope>, }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(undefinedPayload.exitCode, 0)
+        << "when this starts reporting, invert the test and rename it\n"
+        << stripAnsi(undefinedPayload.err);
+
+    // Not a quirk of `pub`, and not a quirk of the single-member case.
+    const FincRun several = compile(
+        "struct Real {}\n"
+        "enum E { Ok <Real>, Err <AlsoNope>, }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(several.exitCode, 0) << stripAnsi(several.err);
+
+    // The control: the very same name in the very same file *is* reported when it is
+    // written in a place that gets resolved, so the name is genuinely undefined and it
+    // is the payload position that is not looked at.
+    const FincRun control = compile(
+        "enum E { pub Ok <Nope>, }\n"
+        "fun main() <noret> { let x <Nope> = 1; }\n");
+    EXPECT_EQ(control.exitCode, 1) << stripAnsi(control.err);
+    EXPECT_NE(stripAnsi(control.err).find("Undefined type 'Nope'"), std::string::npos)
+        << stripAnsi(control.err);
+}
+
 // ---------------------------------------------------------------------------
 // `new` on a type that does not resolve killed the compiler.
 //

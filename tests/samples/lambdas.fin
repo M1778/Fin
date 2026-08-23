@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`module not found: operators` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107), plus `Undefined type 'Addable'` at 71:40, which is the same cause one step on: `Addable` is declared in `operators` and the bound that names it is resolved now. The generic lambda and the generic `fn` type on line 69 both compile (Soundness_GenericLambdas)"
+//@ ok
 import { Addable } from operators::std;
 
 @define printf(fmt: string, ...) <noret>;

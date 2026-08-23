@@ -1234,12 +1234,23 @@ TEST(Soundness_ModuleDiagnostics, AnImportCycleIsReportedOnceAndTerminates) {
     const fs::path root = uniqueTempPath("fin_cycle", "_libs");
     std::error_code ec;
     fs::create_directories(root, ec);
-    std::ofstream(root / "a.fin", std::ios::binary)
-        << "import \"b\";\nfun fa() <int> { return 1; }\n";
-    std::ofstream(root / "b.fin", std::ios::binary)
-        << "import \"a\";\nfun fb() <int> { return 2; }\n";
 
-    TempFin f("import \"a\";\nfun main() <noret> {}\n", "cycle");
+    // The module names carry the unique directory's stem rather than being "a" and "b".
+    // The entry file lives in the system temp directory, and ModuleLoader consults the
+    // *importing file's own directory* before any search path (resolvePath CASE B step
+    // 1), so a stray /tmp/a.fin shadows the pinned library and this test measures a
+    // syntax error in somebody else's leftover probe instead of a cycle. That is not
+    // hypothetical -- it happened, which is also what
+    // KnownDefect_LibraryPaths.AFileBesideTheSourceShadowsAPinnedLibrary is about.
+    const std::string tag = root.filename().string();
+    const std::string modA = "cyc_a_" + tag;
+    const std::string modB = "cyc_b_" + tag;
+    std::ofstream(root / (modA + ".fin"), std::ios::binary)
+        << "import \"" << modB << "\";\nfun fa() <int> { return 1; }\n";
+    std::ofstream(root / (modB + ".fin"), std::ios::binary)
+        << "import \"" << modA << "\";\nfun fb() <int> { return 2; }\n";
+
+    TempFin f("import \"" + modA + "\";\nfun main() <noret> {}\n", "cycle");
     auto r = runFinc({f.str(), "--fin-libs=" + root.string()}, noFinLibs());
     const std::string err = stripAnsi(r.err);
     fs::remove_all(root, ec);
@@ -1248,6 +1259,59 @@ TEST(Soundness_ModuleDiagnostics, AnImportCycleIsReportedOnceAndTerminates) {
     EXPECT_NE(err.find("circular dependency"), std::string::npos) << err;
     EXPECT_LE(countOccurrences(err, "circular dependency detected"), 1u)
         << "one cycle, one statement of it.\n" << err;
+}
+
+// A file beside the source shadows a library the build pinned.
+//
+// Driver.cpp goes to real trouble for hermeticity: as soon as `--fin-libs` or `FIN_LIBS`
+// names a path it drops the working directory from the search list, because "leaving it
+// in would let a file in the project shadow a module the build pinned", and it says
+// outright that `finn` "cannot fix that from its side at any price". The reasoning is
+// right and the working directory is duly gone -- but the *importing file's own
+// directory* is still consulted, and it is consulted first: ModuleLoader::resolvePath
+// CASE B step 1 checks `rootBasePath / rawImport` before it looks at a single search
+// path. So `import "collection";` next to a stray collection.fin picks up the stray, and
+// the pin is worth nothing.
+//
+// Two readings, and the corpus does not settle which is right, so this is booked rather
+// than fixed. A quoted import is overloaded: `import "tests/samples/macros.fin";`
+// (importing.fin:7) is a path relative to the project and has to resolve against the
+// source, while `import "somelib";` (extern_as.fin:9) is emphatically a *library* lookup
+// with no path at all -- "HOW DOES THE COMPILER KNOW WHERE TO IMPORT THIS LIBRARY". One
+// spelling, two meanings, and only the second one should honour a pin. A plausible rule
+// is that a name with no separator and no `.fin` is a library lookup and skips the
+// source directory, but that is a language decision and it is the owner's.
+//
+// It has already cost something: Soundness_ModuleDiagnostics.AnImportCycleIsReportedOnce-
+// AndTerminates went red because a probe file left in /tmp shadowed the library it had
+// pinned, and it took a while to see that the test was right and the leftover was not.
+//
+// The inversion is Soundness_LibraryPaths.APinnedLibraryIsNotShadowedByASiblingFile.
+TEST(KnownDefect_LibraryPaths, AFileBesideTheSourceShadowsAPinnedLibrary) {
+    // The library the build pins, and a decoy of the same name beside the source. The
+    // two differ in a way the diagnostic can see: only the decoy has an error in it.
+    TempLib lib;  // writes <dir>/mylib.fin, empty and valid
+
+    const fs::path decoy = fs::path(uniqueTempPath("fin_shadow", "_src"));
+    std::error_code ec;
+    fs::create_directories(decoy, ec);
+    std::ofstream(decoy / "mylib.fin", std::ios::binary)
+        << "fun shadowed() <int> { return nope_from_the_decoy; }\n";
+    const fs::path src = decoy / "app.fin";
+    std::ofstream(src, std::ios::binary) << kImportsMyLib;
+
+    const auto r = runFinc({src.string(), "--fin-libs=" + lib.dir()}, noFinLibs());
+    const std::string err = stripAnsi(r.err);
+    fs::remove_all(decoy, ec);
+
+    EXPECT_EQ(r.exitCode, 1)
+        << "when this starts exiting 0 the pin is being honoured -- invert and rename\n"
+        << err;
+    EXPECT_NE(err.find("nope_from_the_decoy"), std::string::npos)
+        << "the decoy beside the source was loaded instead of the pinned library.\n"
+           "If this stops matching, resolvePath stopped preferring the source directory\n"
+           "and the pin now wins, which is the fix this test is waiting for.\n"
+        << err;
 }
 
 // --- Pinning a library against a same-named file next to the source ---
