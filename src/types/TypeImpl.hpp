@@ -12,3 +12,4 @@
 #include "SelfType.hpp"
 #include "PrototypeType.hpp"
 #include "ErrorType.hpp"
+#include "DynamicType.hpp"

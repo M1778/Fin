@@ -15,6 +15,24 @@ bool Type::isAssignableTo(const Type& other) const {
     if (this->equals(other)) return true;
     if (other.toString() == "auto") return true;
 
+    // Every type fits `any` and `object`. Here rather than as an override on
+    // DynamicType because the rule is about the *target*: an override can only speak
+    // for the source, and it is every other type that has to accept this target.
+    //
+    // Here rather than in checkType, too, and that is the load-bearing choice: this
+    // is reached recursively -- ArrayType::isAssignableTo asks its element types, so
+    // `[int]` fits `[any]` through this line. A copy in checkType would answer for
+    // `any` and not for `[any]`, and stdlib/types.fin:102 takes `const &arr: [any]`.
+    //
+    // `null` is excluded, and the corpus is explicit about why. nullifier.fin:36
+    // writes `let _ <any> = mibombo?;` and comments "this should be an error since
+    // type any cannot be null". `null` is not a value of some type that is being
+    // erased; it is the absence of one, and NullType::isAssignableTo falls through to
+    // here -- so a rule stated as "a dynamic target accepts anything" accepts null
+    // too, silently. A program that means it writes `any?`, which is a NullableType
+    // and is answered before this.
+    if (other.as<DynamicType>() && !this->as<NullType>()) return true;
+
     // No rule for the error sentinel here, deliberately. checkType short-circuits on
     // isErrorType before it ever calls this (Analyzer_Core.cpp:361), and checkType is
     // the only caller outside this directory -- so a rule here could not fire, and a

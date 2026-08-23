@@ -92,6 +92,21 @@ SemanticAnalyzer::SemanticAnalyzer(DiagnosticEngine& d, bool debug)
     currentScope->defineType("ulong", std::make_shared<PrimitiveType>("ulong"));
     currentScope->defineType("ushort", std::make_shared<PrimitiveType>("ushort"));
     
+    // The two dynamic types. Builtins because the corpus uses them in files with no
+    // imports at all -- `nullifier.fin:34` and `literal_struct.fin:4` write `any`,
+    // `prototype_test.fin:40` writes `object` -- and two names rather than one alias
+    // because the corpus distinguishes them: `any` is compile-time erasure
+    // (stdlib/types.fin:97), `object` is a runtime box (prototype_test.fin:40). See
+    // DynamicType.hpp for why that difference is not yet observable.
+    //
+    // `Any` is *not* registered here. `stdlib/types.fin:69` declares `pub type Any =
+    // any;` behind `#[export]`, which makes it a library alias; handing it out with
+    // the builtin would compile programs here that a real standard library rejects.
+    // Soundness_DynamicTypes.AnUnknownTypeNameIsStillUndefined forbids it, along with
+    // `Object` and `AnyType`, which are nobody's spelling.
+    currentScope->defineType("any", std::make_shared<DynamicType>("any"));
+    currentScope->defineType("object", std::make_shared<DynamicType>("object"));
+
     // Mock Castable
     currentScope->defineType("Castable", std::make_shared<StructType>("Castable"));
 
@@ -286,6 +301,21 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
              auto instantiated = structDef->instantiate(args);
              if (instantiated) type = instantiated;
              else error(*node, "Generic count mismatch");
+        } else if (auto* dyn = type->as<DynamicType>()) {
+             // `any<int>` is still an `any`. The fabrication below would have made it
+             // a struct named `any`, which rejected every value it was written to
+             // accept and answered member access with `Struct 'any' has no member` --
+             // the same fiction visit(TypeDefinition&) used to produce, at the site
+             // that the corpus actually reaches: stdlib/types.fin:74 declares
+             // `type Any<...> = any implements <...>;` and the library uses `Any<...>`
+             // as a generic bound, so every use went through here.
+             //
+             // The arguments are dropped rather than recorded, because there is
+             // nothing yet that could read them and a field nobody reads is a claim
+             // that the bound is honoured. Whether `any<int>` should narrow at all is
+             // an owner ruling -- KnownDefect_DynamicTypes
+             // .GenericArgumentsOnADynamicTypeAreNotConstraints books the state.
+             (void)dyn;
         } else {
              type = std::make_shared<StructType>(node->name, args);
         }

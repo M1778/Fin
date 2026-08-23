@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`module not found: error` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107). The union type alias on line 53 parses now. With the library resolvable it reports `Undefined type 'any'` instead; `$type` resolves now (Soundness_MetaTypes)"
+//@ unimplemented "`module not found: error` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107). The union type alias on line 53 parses now, and `any` resolves now (Soundness_DynamicTypes), taking this file from twelve diagnostics to seven. What is left after the module failure is `_static_string` at 14:14, `compiler` at 25:12, 84:25 and 91:25 -- `#[use(compiler)]` binds no name -- and `_resolve_type` at 98:10. `$type` resolves now (Soundness_MetaTypes)"
 #[stdimport]
 import { Error } from error::std; // import `Error` from error -> std namespace
 

@@ -591,15 +591,37 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
 
     // 2. Resolve Aliased Type
     std::shared_ptr<Type> type = nullptr;
+    // `type EnumType = any implements <Enum>;` (stdlib/enums.fin:6),
+    // `type nullptr = any implements <&void>;` (stdlib/types.fin:78).
+    //
+    // What stood here fabricated `std::make_shared<StructType>("any")` and threw both
+    // the aliased type and the bound away. It was the worst answer available, because
+    // it was an authoritative one: the fiction rendered as `any`, so
+    // `let x <EnumType> = 5;` reported `Type mismatch: expected 'any', got 'int'` -- a
+    // claim about a type the program never wrote as a concrete type -- and `v.nosuch`
+    // reported `Struct 'any' has no member 'nosuch'` about a struct that does not
+    // exist. An unresolved name at least sends the reader to the right line.
+    //
+    // The target is now resolved like any other alias target, which is what makes
+    // `any` reaching here mean the builtin (Analyzer_Core.cpp) rather than a name this
+    // branch invents.
+    type = resolveTypeOrError(node.aliased_type.get());
+
     if (node.has_implements) {
-         // Handle "type Any<...> = any implements <...>"
-         // This creates a special "Any" type with constraints.
-         // For now, treat as 'any' (if we had it) or 'void*' equivalent, or just 'AnyType'.
-         // We'll define a struct type "any" or similar.
-         auto anyType = std::make_shared<StructType>("any"); // Placeholder
-         type = anyType;
-    } else {
-        type = resolveTypeOrError(node.aliased_type.get());
+        // The bounds are resolved whether or not anything reads them yet, because
+        // resolution is what reports a typo in one. They were never looked at before,
+        // so `type E = any implements <NoSuchInterface>;` was silently accepted -- and
+        // an unenforced bound that also fails to reject a misspelling is not a partial
+        // implementation, it is a blind spot.
+        std::vector<TypePtr> bounds;
+        for (auto& bnd : node.implements_list) bounds.push_back(resolveTypeOrError(bnd.get()));
+
+        // Attached only to a dynamic target, which is the only shape the corpus writes
+        // a bound on. On anything else the bound has nowhere to live yet and the alias
+        // is still worth defining -- see
+        // KnownDefect_DynamicTypes.AnImplementsBoundOnANonDynamicAliasIsDropped.
+        if (auto* dyn = type ? type->as<DynamicType>() : nullptr)
+            type = std::make_shared<DynamicType>(dyn->name, std::move(bounds));
     }
 
     // The twenty-first site of the same rule, and the one that cost the corpus most:

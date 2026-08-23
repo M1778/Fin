@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`module not found: hashmap` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107). With the library resolvable it reports `Undefined type 'object'` and indexing a prototype instead"
+//@ unimplemented "`module not found: hashmap` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107). `object` resolves now (Soundness_DynamicTypes); what stands in its place at 40:34 is `Type mismatch: expected '<{object, object}>', got '<{any, any}>'`, because a heterogeneous prototype literal infers `any` for its members where this line annotates `object` -- the corpus distinguishes the two (compile-time erasure versus a runtime box) and KnownDefect_Prototypes.AHeterogeneousPrototypeLiteralInfersAnyNotObject books it. The rest is indexing and member access on a prototype, which resolve nothing"
 import { HashMap } from hashmap::std;
 import { Collection } from collection::std;
 

@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`compiler.enums.resolve_id(value)` at 13:11 -- \"Undefined variable 'compiler'\"; `#[use(compiler)]` on line 10 grants the special function a compiler component, and nothing binds that name. `@getenumkeyid(value)` on line 18 parses now, and is then reported as an undefined function"
+//@ unimplemented "`any implements <Enum>` at 6:37 -- \"Undefined type 'Enum'\"; no file in the corpus declares `Enum`, and this file imports nothing. The diagnostic is new and is the bound being resolved for the first time: an `implements` bound on a type alias used to be discarded unread, so a misspelled or missing one was silently accepted (Analyzer_Decl.cpp, visit(TypeDefinition&)). Also `compiler.enums.resolve_id(value)` at 13:11 -- \"Undefined variable 'compiler'\"; `#[use(compiler)]` on line 10 grants the special function a compiler component, and nothing binds that name. `@getenumkeyid(value)` on line 18 parses now, and is then reported as an undefined function. `any` resolves now (Soundness_DynamicTypes)"
 namespace std {
 #[export]
 #[type(enum)]

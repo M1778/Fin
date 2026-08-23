@@ -687,6 +687,464 @@ TEST(Soundness_ErrorRecovery, ATypeAliasWhoseTargetDidNotResolveStillNamesSometh
     EXPECT_EQ(errorCount(err), 1u) << err;
 }
 
+// ---------------------------------------------------------------------------
+// `any` and `object`: the two dynamic types.
+//
+// Neither is declared anywhere in the corpus, and both are *used* there, which is
+// what makes them builtins rather than library names. The evidence is an absence:
+// `nullifier.fin` writes `let mibombo? <any> = null;` and `literal_struct.fin`
+// writes `fun make_default<T: any implements Struct>` with **zero imports** in
+// either file, and `prototype_test.fin` writes `<{object, object}>` importing only
+// `HashMap` and `Collection`. A name a file uses without importing it is a name the
+// compiler owes.
+//
+// `Any` is the opposite case and the control below pins it: `stdlib/types.fin:69`
+// declares `pub type Any = any;`, so `Any` is a library alias of the builtin and a
+// program that has not imported it must still be told so. Registering `any` and
+// getting `Any` for free would compile programs here that a real standard library
+// would reject.
+//
+// The two are distinct, and the corpus says how. `any` is compile-time erasure --
+// "any type that is visible in compile time (can be identified in compile time)"
+// (types.fin:97) -- while `object` is boxing: "an expensive type but can fit any
+// datatype in it at the cost of memory and speed" (prototype_test.fin:40). Nothing
+// below distinguishes their *behaviour*, because nothing in the analyser can yet:
+// the difference is what the code generator emits. They are registered as two names
+// so that the day it matters the names are already right, in the same spirit as the
+// `$type` family (Analyzer_Core.cpp) -- registering a name is not deciding its
+// semantics.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_DynamicTypes, AnyIsABuiltinAndNeedsNoImport) {
+    // nullifier.fin:34 and literal_struct.fin:4, both with no import statement.
+    const FincRun r = compile("fun main() <int> { let x <any> = 5; return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Undefined type 'any'"), std::string::npos)
+        << "two corpus samples write `any` with no imports at all\n" << err;
+    EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_DynamicTypes, ObjectIsABuiltinAndNeedsNoImport) {
+    // prototype_test.fin:40 writes `<{object, object}>`, importing only `HashMap`
+    // and `Collection` -- neither of which declares `object`.
+    const FincRun r = compile("fun main() <int> { let x <object> = 5; return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Undefined type 'object'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_DynamicTypes, AnyIsSpellableInEveryPositionTheCorpusWritesIt) {
+    // One program per position rather than one test per position: the failure mode
+    // being guarded against is a name registered in the scope but unreachable from
+    // one syntactic form, and a single program shows which form in its diagnostic.
+    //
+    //   parameter          stdlib/types.fin:90   `@special _resolve_type(v: any)`
+    //   array element      stdlib/types.fin:102  `resolve_arr_type(const &arr: [any])`
+    //   prototype halves   stdlib/prototypes.fin:19 `typeof_keys(prtp: {any, any})`
+    //   return type        implied by `resolve_type` returning what it was handed
+    //   alias target       stdlib/types.fin:69   `pub type Any = any;`
+    //   generic bound      literal_struct.fin:4  `make_default<T: any implements Struct>`
+    //   operator parameter stdlib/operators.fin:9 `pub operator ==(other: any)`
+    const FincRun r = compile(
+        "type Aliased = any;\n"
+        "fun byvalue(v: any) <int> { return 0; }\n"
+        "fun byarray(a: [any]) <int> { return 0; }\n"
+        "fun byproto(p: {any, any}) <int> { return 0; }\n"
+        "fun returns() <any> { return 5; }\n"
+        "fun bounded<T: any>(v: T) <int> { return 0; }\n"
+        "struct S { pub v <int>, operator +(other: any) <int> { return 0; } }\n"
+        "fun main() <int> { return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Undefined type 'any'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_DynamicTypes, EveryConcreteTypeIsAssignableToAny) {
+    // The whole point of the type. `stdlib/operators.fin` declares thirty
+    // requirements taking `(other: any)`, which means every operand of every
+    // operator in the language reaches an `any` parameter.
+    const FincRun r = compile(
+        "struct S { pub v <int> }\n"
+        "fun take(v: any) <int> { return 0; }\n"
+        "fun main() <int> {\n"
+        "  let s <&S> = new S{v: 1};\n"
+        "  take(1); take(\"str\"); take(true); take(1.5); take(s);\n"
+        "  let a <any> = 1; let b <any> = \"str\"; let c <any> = true;\n"
+        "  return 0;\n"
+        "}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(errorCount(err), 0u)
+        << "nothing may fail to fit `any`; a target that rejects a value is not `any`\n"
+        << err;
+}
+
+TEST(Soundness_DynamicTypes, AnArrayOfAnyAcceptsAnArrayOfInt) {
+    // `stdlib/types.fin:102` takes `const &arr: [any]`, which is useless if the
+    // only thing assignable to `[any]` is another `[any]`.
+    //
+    // This is the recursive reach of the rule, and it is a separate assertion
+    // because it is a separate mechanism: ArrayType::isAssignableTo asks the
+    // element types, so a rule written only at the top level of a comparison
+    // answers for `any` and not for `[any]`.
+    const FincRun r = compile(
+        "fun take(a: [any]) <int> { return 0; }\n"
+        "fun main() <int> { let v <[int]> = [1, 2]; return take(v); }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_DynamicTypes, TwoArraysWithAssignableElementsAreAssignable) {
+    // Found while writing the test above, and independent of `any`: an array was
+    // assignable to another array only when it was *fixed-size* and the target was
+    // not (ArrayType.cpp). Two dynamic arrays of the same element type went through
+    // `equals` in the base and nothing else, so `[int] -> [auto]` -- the same shape
+    // with a more permissive element -- was rejected.
+    //
+    // Kept as its own test because it is its own rule: whoever narrows the `any`
+    // rule must not be able to take this with it.
+    const FincRun r = compile(
+        "fun take(a: [auto]) <int> { return 0; }\n"
+        "fun main() <int> { let v <[int]> = [1, 2]; return take(v); }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(errorCount(err), 0u) << err;
+
+    // The control, because "assignable elements" is the load-bearing half: an
+    // element type that does not fit must still fail, or arrays have stopped
+    // being checked at all.
+    const FincRun bad = compile(
+        "fun take(a: [string]) <int> { return 0; }\n"
+        "fun main() <int> { let v <[int]> = [1, 2]; return take(v); }\n");
+    EXPECT_NE(stripAnsi(bad.err).find("Type mismatch"), std::string::npos)
+        << "[int] does not fit [string]\n" << stripAnsi(bad.err);
+}
+
+TEST(Soundness_DynamicTypes, AnyDoesNotInferFromItsInitialiser) {
+    // The distinction from `auto`, and the reason `any` cannot be implemented by
+    // aliasing it. `let x <auto> = 5;` makes `x` an `int`, so the next line reports
+    // `got 'int'`. `any` is a type, not an instruction to infer one: `x` is an
+    // `any`, and a diagnostic about it has to say so.
+    //
+    // Asserted on the message text rather than on the count because both spellings
+    // produce exactly one diagnostic here. The count cannot tell them apart, and a
+    // test that cannot tell the wrong answer from the right one is not a test --
+    // the same lesson as Soundness_ErrorRecovery.AnUnresolvedAnnotationDoesNot
+    // InferFromItsInitialiser, which had this exact hole.
+    const FincRun r = compile(
+        "fun main() <int> { let x <any> = 5; let y <string> = x; return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("got 'any'"), std::string::npos)
+        << "`x` is an `any`, not the `int` it was initialised from\n" << err;
+    EXPECT_EQ(err.find("got 'int'"), std::string::npos)
+        << "that is what `auto` would say\n" << err;
+}
+
+TEST(Soundness_DynamicTypes, AnyIsNotImplicitlyAssignableToAConcreteType) {
+    // One direction only, and the corpus says which. `stdlib/types.fin:74`: "ANY
+    // type is allowed to be passed but it has to be casted or handled by the user
+    // itself". A dynamic type that flows back out into a concrete slot for free is
+    // not a dynamic type, it is a hole -- every `(other: any)` operator parameter
+    // in stdlib/operators.fin would become assignable to everything.
+    const FincRun r = compile(
+        "fun take(v: any) <int> { let n <int> = v; return n; }\n"
+        "fun main() <int> { return take(1); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos)
+        << "an `any` reaching an `int` slot needs a cast\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_DynamicTypes, AnyDoesNotAcceptNull) {
+    // nullifier.fin:36 states the rule in the sample: "type any cannot be null".
+    //
+    // It is the one case where "everything is assignable to `any`" has to be read as
+    // "every *type* is". `null` is not a value of a type, it is the absence of one,
+    // and NullType::isAssignableTo falls through to the base -- so the rule stated as
+    // "a target that is `any` accepts anything" silently accepts null as well. The
+    // `!this->as<NullType>()` in Type.cpp is what this test is here for.
+    //
+    // Asserted in *assignment* position, and that is not a weaker choice than the
+    // declaration the sample writes -- it is the only position where the rule is
+    // decidable at all. A declaration initialised to `null` is accepted whatever it
+    // is annotated (checkInitializer, Analyzer_Core.cpp:401), because deeptest4.fin:6
+    // writes `integer <int> = null` and stdlib/error.fin:11 writes `err_code: int =
+    // null` and neither is nullable. So `let x <any> = null;` is clean for a reason
+    // that has nothing to do with `any`, and asserting on it would have tested
+    // checkInitializer while claiming to test this rule.
+    const char* targets[] = {"any", "object"};
+    for (const char* ty : targets) {
+        const FincRun r = compile(std::string("fun main() <int> { let x <") + ty +
+                                  "> = 5; x = null; return 0; }\n");
+        const std::string err = stripAnsi(r.err);
+        EXPECT_NE(err.find(std::string("expected '") + ty + "', got 'null'"), std::string::npos)
+            << ty << " cannot be null -- nullifier.fin:36\n" << err;
+    }
+
+    // Control, and the reason the exclusion is on NullType and not on the target:
+    // null is not banned from every target, only from one that did not ask for it.
+    const FincRun nullable = compile(
+        "fun main() <int> { let x? <int> = 5; x = null; return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(nullable.err)), 0u)
+        << "`int?` asked to hold null\n" << stripAnsi(nullable.err);
+
+    // And `any?` is spellable: nullifier.fin:34 writes `let mibombo? <any> = null;`
+    // in the sample as ordinary code. The type that "cannot be null" can still be
+    // wrapped in the type that can, which is what makes the rule above about `any`
+    // and not about a prohibition on the word.
+    const FincRun ok = compile("fun main() <int> { let mibombo? <any> = null; return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(ok.err)), 0u)
+        << "nullifier.fin:34 writes exactly this\n" << stripAnsi(ok.err);
+}
+
+TEST(KnownDefect_Nullability, DenullifyingANullableAnyIsNotAnError) {
+    // The other half of nullifier.fin:34-36, which the Soundness test above
+    // deliberately does not claim:
+    //
+    //     let mibombo? <any> = null;
+    //     let _ <any> = mibombo?;   // "this should be an error since type any
+    //                               //  cannot be null"
+    //
+    // The sample requires a diagnostic on the second line and gives the reason, but
+    // not the culprit, and the two candidates are different fixes. Either `any?` is
+    // not a legal type -- in which case the diagnostic belongs on line 34, which the
+    // sample writes without comment -- or postfix `?` on an `any?` is what cannot be
+    // typed, in which case line 34 stands and the denullify is the error. Choosing is
+    // an owner ruling (docs/plan.md, Rulings owed: the nullability edges), so this
+    // books the state instead of guessing at the shape of a diagnostic.
+    //
+    // Note also that this file's `//@ unimplemented` note expected `Undefined type
+    // 'any'` at 36:12; that diagnostic is gone now, which is what promoted this line
+    // from "blocked behind `any`" to an open question.
+    const FincRun r = compile(
+        "fun main() <int> { let mibombo? <any> = null; let _ <any> = mibombo?; return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u)
+        << "when this fails, the ruling has been made: turn it into "
+           "Soundness_Nullability and assert the ruled diagnostic\n"
+        << stripAnsi(r.err);
+
+    // Control: denullifying a nullable *concrete* type is not in question and must
+    // stay clean whichever way the ruling goes.
+    const FincRun ctl = compile(
+        "fun main() <int> { let m? <int> = null; let _ <int> = m?; return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(ctl.err)), 0u)
+        << "`int?` denullifies -- nullifier.fin:29\n" << stripAnsi(ctl.err);
+}
+
+TEST(Soundness_DynamicTypes, AnUnknownTypeNameIsStillUndefined) {
+    // The control for the wrong fix. Two names are registered, not a rule that
+    // shrugs at unknown ones, and the third case is the one that matters most:
+    // `Any` is *library* -- `stdlib/types.fin:69` declares `pub type Any = any;`
+    // behind `#[export]` -- so a program that has not imported it must be told.
+    // Handing it out with `any` would compile files here that a real standard
+    // library rejects, which is the worst kind of green.
+    for (const char* name : {"anyy", "objekt", "Any", "Object", "AnyType"}) {
+        const FincRun r = compile(
+            std::string("fun main() <int> { let x <") + name + "> = 5; return 0; }\n");
+        EXPECT_NE(stripAnsi(r.err).find(std::string("Undefined type '") + name + "'"),
+                  std::string::npos)
+            << name << " is not a builtin\n" << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_DynamicTypes, ATypeAliasWithAnImplementsBoundIsNotAFabricatedStruct) {
+    // `visit(TypeDefinition&)` answered an `implements` bound by fabricating
+    // `StructType("any")` -- a struct with no fields, no methods, no relation to
+    // the interface, and a `toString()` of `any`. It was the worst available answer
+    // because it was authoritative: `type E = any implements <I>; let x <E> = 5;`
+    // reported `Type mismatch: expected 'any', got 'int'`, naming a type the
+    // program never wrote as a concrete type, and `v.nosuch` reported `Struct
+    // 'any' has no member 'nosuch'` about a struct that does not exist.
+    //
+    // What the bound *means* -- whether an `int` satisfies `implements <I>` -- is a
+    // separate question and an owner ruling (docs/plan.md, "Rulings owed"). This
+    // test asserts only that the answer is not a fiction, which is true under
+    // every reading of the bound.
+    const FincRun r = compile(
+        "interface I { fun m(self: &Self) <int>; }\n"
+        "type E = any implements <I>;\n"
+        "fun f(v: E) <int> { return v.nosuch; }\n"
+        "fun main() <int> { return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("Struct 'any' has no member"), std::string::npos)
+        << "there is no struct named `any` in this program\n" << err;
+    EXPECT_EQ(err.find("Undefined type 'E'"), std::string::npos)
+        << "`E` is declared on line 2; dropping it is the cascade this project "
+           "spent a unit removing\n" << err;
+}
+
+TEST(Soundness_DynamicTypes, ABoundIsRenderedInTheDiagnosticThatQuotesTheType) {
+    // The bound is stored on DynamicType rather than dropped, and this is what that
+    // buys: the type in a diagnostic is a string the reader can find in their own
+    // source. `type Bound = any implements <I>;` renders as `any implements <I>`, not
+    // as a bare `any` that matches three other aliases in stdlib/types.fin, and not
+    // as the fabricated struct that used to render as `any` while claiming to be one.
+    //
+    // Reached through the *concrete* direction, because that is the only direction
+    // that produces a mismatch: everything is assignable to a dynamic type, so a
+    // diagnostic quoting one can only come from it being the source.
+    const FincRun r = compile(
+        "interface I { pub fun m() <int>; }\n"
+        "type Bound = any implements <I>;\n"
+        "fun main() <int> { let a <Bound> = 5; let b <int> = a; return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("got 'any implements <I>'"), std::string::npos)
+        << "the bound the program wrote is part of the type's name\n" << err;
+}
+
+TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnADynamicTypeIsNotEnforced) {
+    // `type EnumType = any implements <Enum>;` (stdlib/enums.fin:6) reads as "any
+    // type that implements Enum". Only the first half is enforced: the bound is
+    // resolved and recorded on the DynamicType, and nothing consults it, so a struct
+    // that implements nothing is accepted where the bound was written.
+    //
+    // Booked rather than fixed because enforcing it needs the answer to a question
+    // the corpus does not settle -- stdlib/types.fin:78 writes `type nullptr = any
+    // implements <&void>;`, where the bound is a *pointer type* and not an interface
+    // at all, and stdlib/typing.fin:10 writes `string | any implements <Error>` inside
+    // a union. A check that only understands interfaces would reject both of those
+    // spellings, which the corpus writes as ordinary library code. See docs/plan.md,
+    // "Rulings owed": does a primitive satisfy an interface bound.
+    const char* prog =
+        "interface I { pub fun m() <int>; }\n"
+        "struct Good { pub v <int> }\n"
+        "Good implements <I> { pub fun m() <int> { return self.v; } }\n"
+        "struct Bad { pub v <int> }\n"
+        "type Bound = any implements <I>;\n";
+
+    // The satisfying case must stay clean whichever way the ruling goes.
+    const FincRun good = compile(std::string(prog) +
+        "fun main() <int> { let a <Bound> = new Good{v: 1}; return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(good.err)), 0u)
+        << "Good implements I\n" << stripAnsi(good.err);
+
+    // These two are the defect. When either starts failing, the bound is enforced:
+    // split this test, keep the `Good` case as Soundness_DynamicTypes, and assert
+    // the ruled diagnostic on whichever of the two the ruling covers.
+    const FincRun bad = compile(std::string(prog) +
+        "fun main() <int> { let a <Bound> = new Bad{v: 1}; return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(bad.err)), 0u)
+        << "Bad implements nothing and is accepted today\n" << stripAnsi(bad.err);
+
+    const FincRun prim = compile(std::string(prog) +
+        "fun main() <int> { let a <Bound> = 5; return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(prim.err)), 0u)
+        << "an int where `implements <I>` was written -- this is the case the ruling "
+           "is about, since `implements <&void>` in stdlib/types.fin:78 means the "
+           "answer cannot simply be no\n" << stripAnsi(prim.err);
+}
+
+TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnANonDynamicAliasIsDropped) {
+    // The bound is attached only when the alias target is `any` or `object`, because
+    // that is the only shape the corpus writes it on -- except literal_struct.fin:15,
+    // `type PlayerStructLike = Struct implements <_PlayerStructLike>;`, where the
+    // target is `Struct` and the whole construct is part of the unimplemented struct
+    // literal feature.
+    //
+    // On any other target the bound is resolved and then discarded. Resolving it is
+    // deliberate and is what the second half of this test pins: an unenforced bound
+    // that also fails to reject a misspelling is not a partial implementation, it is
+    // a blind spot, and that was the state before this unit.
+    const FincRun r = compile(
+        "interface I { pub fun m() <int>; }\n"
+        "type F = int implements <I>;\n"
+        "fun main() <int> { let x <F> = 5; return 0; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u)
+        << "`F` is a plain `int` today; the bound went nowhere\n" << stripAnsi(r.err);
+
+    // The alias is still the alias -- dropping the bound must not have dropped the
+    // target with it.
+    const FincRun mismatch = compile(
+        "interface I { pub fun m() <int>; }\n"
+        "type F = int implements <I>;\n"
+        "fun main() <int> { let x <F> = \"s\"; return 0; }\n");
+    EXPECT_NE(stripAnsi(mismatch.err).find("expected 'int', got 'string'"), std::string::npos)
+        << "F resolves to int\n" << stripAnsi(mismatch.err);
+
+    // A typo in a dropped bound is still reported. This half is Soundness in spirit
+    // and lives here so that a fix to the paragraph above cannot quietly take it out.
+    const FincRun typo = compile(
+        "type F = int implements <NoSuchIface>;\n"
+        "fun main() <int> { let x <F> = 5; return 0; }\n");
+    EXPECT_NE(stripAnsi(typo.err).find("Undefined type 'NoSuchIface'"), std::string::npos)
+        << "a bound is resolved even where it is not kept\n" << stripAnsi(typo.err);
+}
+
+TEST(Soundness_DynamicTypes, AnyWithGenericArgumentsIsStillDynamic) {
+    // The second fabrication site, and the same mistake as the first.
+    // resolveTypeUnwrapped's generics arm ends in `type =
+    // std::make_shared<StructType>(node->name, args)` for any resolved type that is
+    // not a StructType, so `any<int>` came back as a struct named `any` -- which
+    // rejected every value (`Type mismatch: expected 'any<int>', got 'int'`) and
+    // answered member access with `Struct 'any' has no member`, the exact fiction
+    // ATypeAliasWithAnImplementsBoundIsNotAFabricatedStruct forbids on the alias path.
+    //
+    // This is not a hypothetical spelling. stdlib/types.fin:74 declares `type Any<...>
+    // = any implements <...>;` and the library uses `Any<...>` as a generic bound, so
+    // every use of it went through this arm.
+    const FincRun r = compile("fun main() <noret> { let x <any<int>> = 5; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("expected 'any<int>'"), std::string::npos)
+        << "a dynamic type with generic arguments is still dynamic\n" << err;
+    EXPECT_EQ(errorCount(err), 0u) << err;
+
+    const FincRun mem = compile(
+        "fun f(v: any<int>) <int> { return v.nosuch; }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(stripAnsi(mem.err).find("Struct 'any' has no member"), std::string::npos)
+        << "there is no struct named `any` in this program either\n" << stripAnsi(mem.err);
+
+    // `object` is the same production and must not be fixed only for `any`.
+    const FincRun obj = compile("fun main() <noret> { let x <object<int>> = 5; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(obj.err)), 0u) << stripAnsi(obj.err);
+}
+
+TEST(KnownDefect_DynamicTypes, GenericArgumentsOnADynamicTypeAreNotConstraints) {
+    // Having kept `any<int>` dynamic, the open question is whether the `<int>` means
+    // anything. Today it does not: `any<int>` accepts a string.
+    //
+    // The corpus does not settle it, and the one spelling it actually writes points
+    // away from narrowing: stdlib/types.fin:74 is `type Any<...> = any implements
+    // <...>;`, whose argument is the literal variadic `...`, and whose comment says
+    // "ANY type is allowed to be passed but it has to be casted or handled by the user
+    // itself". A narrowing reading would make `Any<...>` mean "any type that is `...`",
+    // which is not a type. So the arguments are carried and ignored, and the ruling on
+    // whether a written `any<int>` should narrow is owed (docs/plan.md).
+    const FincRun r = compile("fun main() <noret> { let x <any<int>> = \"s\"; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u)
+        << "when this fails, `any<T>` narrows: make it Soundness and assert the "
+           "mismatch, and check stdlib/types.fin:74's `Any<...>` still resolves\n"
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Prototypes, AHeterogeneousPrototypeLiteralInfersAnyNotObject) {
+    // `prototype_test.fin:14` writes `let a <auto> = { 10 : 10, "a": true };` and
+    // says in the sample: "auto would resolve to `<{object, object}>`". Inference
+    // reaches for `any` instead -- and it did so before `any` was a type anyone
+    // could write, so the inferred type printed a name that did not resolve.
+    //
+    // The distinction is the corpus's own (types.fin:97 vs prototype_test.fin:40):
+    // `any` is compile-time erasure of a type that *is* known, `object` is a box
+    // for one that is not. A literal mixing an `int` key with a `string` key has no
+    // single compile-time key type, so `object` is the truthful answer and `any` is
+    // a claim the compiler cannot make good on.
+    //
+    // TO FIX: infer `object` for the mixed case in the prototype-literal rule, and
+    // invert this into
+    // Soundness_Prototypes.AHeterogeneousPrototypeLiteralInfersObject. Keep the
+    // homogeneous control below -- `{int, int}` must not become `{object, object}`,
+    // or every prototype in the corpus starts boxing.
+    const FincRun r = compile(
+        "fun main() <int> { let a <auto> = { 1: 2, \"a\": true }; "
+        "let y <string> = a; return 0; }\n");
+    EXPECT_NE(stripAnsi(r.err).find("got '<{any, any}>'"), std::string::npos)
+        << "GOOD NEWS IF THIS FAILED: if it now says `<{object, object}>`, invert "
+           "this test into Soundness_Prototypes and strike the defect\n"
+        << stripAnsi(r.err);
+
+    // The control: a literal whose keys and values *are* of one type keeps it.
+    const FincRun homo = compile(
+        "fun main() <int> { let a <auto> = { 1: 2 }; let y <string> = a; return 0; }\n");
+    EXPECT_NE(stripAnsi(homo.err).find("got '<{int, int}>'"), std::string::npos)
+        << stripAnsi(homo.err);
+}
+
 TEST(KnownDefect_TypeAliases, AGenericTypeAliasIsNeverDeclared) {
     // Not the drop-the-entity rule -- worse. visit(TypeDefinition&) returns early for any
     // alias with generic parameters, resolving the target for its diagnostics and never
@@ -971,23 +1429,32 @@ TEST(KnownDefect_IntegerWidths, TheWidthIsAbsentFromDiagnosticText) {
 // plus types.fin, prototypes.fin and enums.fin.
 // ---------------------------------------------------------------------------
 
-TEST(KnownDefect_AnyType, IsNotRegistered) {
+TEST(Soundness_DynamicTypes, AnyIsRegistered) {
+    // Inverted from KnownDefect_AnyType.IsNotRegistered, which asserted `Undefined
+    // type 'any'` and said "Invert this" in its own failure message.
+    //
+    // Kept as its own test rather than folded into AnyIsABuiltinAndNeedsNoImport,
+    // because the program is different in a way that used to matter: the declaration
+    // has *no initialiser*. Registration and inference are separate mechanisms, and
+    // an `any` that only worked where something was assigned to it would pass every
+    // other test in this suite.
     auto r = compile("fun main() <void> { let x <any>; }\n");
-    EXPECT_NE(r.exitCode, 0) << "FIXED: `any` is a registered type now. Invert this.";
     const std::string err = stripAnsi(r.err);
-    EXPECT_NE(err.find("Undefined type 'any'"), std::string::npos) << err;
-    // It lexes and parses; the gap is registration alone. Asserting this is what
-    // keeps the fix from being attempted in the lexer or the grammar.
+    EXPECT_EQ(err.find("Undefined type 'any'"), std::string::npos)
+        << "`any` is registered in the SemanticAnalyzer constructor\n" << err;
+    // Retained from the original: the fix belonged in registration, not in the lexer
+    // or the grammar, and this is what says so.
     EXPECT_EQ(err.find("syntax error"), std::string::npos)
-        << "`any` must still parse — if it stopped parsing, that is a new defect: " << err;
+        << "`any` must still parse -- if it stopped parsing, that is a new defect: " << err;
+    EXPECT_EQ(errorCount(err), 0u) << err;
 }
 
-TEST(KnownDefect_AnyType, IsNotRegisteredAsAParameterTypeEither) {
-    auto r = compile("fun f(x: any) <void> {}\n");
-    EXPECT_NE(r.exitCode, 0)
-        << "FIXED: `any` works in the position the whole standard library uses it in.";
-    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'any'"), std::string::npos) << r.err;
-}
+// KnownDefect_AnyType.IsNotRegisteredAsAParameterTypeEither is deliberately not
+// inverted into a test of its own. Its program was `fun f(x: any) <void> {}` and its
+// point was the parameter position; that position is one of the seven in
+// Soundness_DynamicTypes.AnyIsSpellableInEveryPositionTheCorpusWritesIt, which also
+// covers the six the original missed. A second copy would be the redundancy this
+// suite has removed elsewhere.
 
 // ---------------------------------------------------------------------------
 // The raise half of `blame` is rejected.
@@ -2607,19 +3074,29 @@ TEST(Soundness_DiagnosticLocation, TheCaretSpansTheTypeNameAndNothingElse) {
     EXPECT_EQ(caretRow("fun main() <noret> { let x <Nope> = 1; }\n"), "^^^^ here")
         << "the caret must cover `Nope` exactly";
     EXPECT_EQ(caretRow("fun f(p: Nope) <noret> { }\nfun main() <noret> { }\n"), "^^^^ here");
-    EXPECT_EQ(caretRow("fun main() <noret> { let x <any> = 1; }\n"), "^^^ here")
+    // Was `any` until `any` became a registered type and stopped producing a
+    // diagnostic to place a caret under. The assertion is about the *width* tracking
+    // the name, so any three-character undefined name serves; the point is that a
+    // four-caret answer here would mean the span was hardcoded to `Nope`.
+    EXPECT_EQ(caretRow("fun main() <noret> { let x <Zap> = 1; }\n"), "^^^ here")
         << "three carets for a three-character type";
 }
 
-TEST(Soundness_DiagnosticLocation, TheAnyTypeReportsWhereItWasWritten) {
-    // Its own test: `any` is KW_ANY, a different production, and the one that
-    // mattered most -- 40 of the corpus's 99 `Undefined type` diagnostics name it.
-    // A fix aimed only at `IDENTIFIER` would have left this one wrong, which is
-    // why it was never a case in the loop above.
-    EXPECT_EQ(reportedLine("fun main() <noret> { let x <any> = 1; }\n"), "3");
-    EXPECT_EQ(reportedLine("fun main() <noret> { let x <any<int>> = 1; }\n"), "3")
-        << "`any` and `any<...>` are two productions; both must carry a location";
-}
+// Soundness_DiagnosticLocation.TheAnyTypeReportsWhereItWasWritten was removed here,
+// and the reason is worth recording because removing a Soundness test is not a thing
+// this suite does lightly.
+//
+// It asserted that `Undefined type 'any'` carried a line rather than 1:1, and its
+// comment gave the stake: "40 of the corpus's 99 `Undefined type` diagnostics name
+// it". Registering `any` and `object` retired that diagnostic, and with it the only
+// diagnostic that could point at a KW_ANY type node -- `any` now resolves in every
+// position, `S implements <any>` is accepted, and `new any{}` fails in the parser
+// with a token location rather than a node one. There is nothing left to observe, so
+// the test could only have been kept by giving it a different vehicle, which would
+// have made it a second copy of AnUndefinedNamedTypeReportsWhereItWasWritten above.
+//
+// The location machinery it guarded is still guarded: the loop above covers the
+// IDENTIFIER production, and Soundness_DynamicTypes covers what `any` does now.
 
 TEST(Soundness_DiagnosticLocation, ABareSelfOutsideAStructReportsWhereItWasWritten) {
     // KW_SELF_TYPE, a third production. The diagnostic itself is arguably right --

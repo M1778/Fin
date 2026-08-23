@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`array.length` at 12:9 -- \"Type '&[T]' is not a struct\"; the analyzer resolves no member on an array or slice type. The union type alias on line 9 parses now"
+//@ unimplemented "`array.length` at 12:9 -- \"Type '&[T]' is not a struct\"; the analyzer resolves no member on an array or slice type. The union type alias on line 9 parses now. One diagnostic fewer than before: two arrays whose element types are assignable are assignable now (Soundness_DynamicTypes.TwoArraysWithAssignableElementsAreAssignable), which ArrayType::isAssignableTo used to reject unless the types were equal"
 
 type ArrayType<T> = [T]; // simple generic array type
 type IntArray = [int]; // array of integers

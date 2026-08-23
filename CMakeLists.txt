@@ -128,6 +128,8 @@ add_library(fin_core STATIC
 
     # Types System
     src/types/Type.cpp
+    src/types/ErrorType.cpp
+    src/types/DynamicType.cpp
     src/types/ArrayType.cpp
     src/types/FunctionType.cpp
     src/types/GenericType.cpp

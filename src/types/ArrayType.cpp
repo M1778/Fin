@@ -19,8 +19,17 @@ bool ArrayType::isAssignableTo(const Type& other) const {
     if (Type::isAssignableTo(other)) return true;
     if (auto* otherArr = other.as<ArrayType>()) {
         if (!element_type->isAssignableTo(*otherArr->element_type)) return false;
-        if (is_fixed_size && !otherArr->is_fixed_size) return true;
-        return false;
+
+        // A fixed-size array decays into a dynamic one. Not the reverse: the size is
+        // what the target promises and a dynamic source cannot promise it.
+        if (is_fixed_size != otherArr->is_fixed_size) return is_fixed_size;
+
+        // Same shape, and the elements already agreed. What stood here returned false,
+        // so `[int]` did not fit `[auto]` or `[any]` -- two dynamic arrays only ever
+        // matched through `equals` in the base, which is exact. The element check
+        // above is the whole rule; reaching it and then discarding its answer meant
+        // every permissive element type stopped at the array boundary.
+        return true;
     }
     return false;
 }
