@@ -43,14 +43,22 @@ void configureLoader(ModuleLoader& loader, const CompilerOptions& options) {
     // environment. The flag *replaces* rather than extends, because `finn` passes
     // it to pin the environment a build compiles against, and an ambient
     // `FIN_LIBS` leaking into a pinned build is exactly the drift it exists to
-    // prevent. Both are split on the platform separator (SearchPaths.hpp).
+    // prevent. Both are split on the platform separator (SearchPaths.hpp). An empty
+    // `FIN_LIBS` counts as unset rather than as "no paths" -- see below.
     bool librariesSpecified = false;
     if (options.finLibsGiven) {
         librariesSpecified = true;
         for (const auto& path : options.finLibPaths) {
             loader.addSearchPath(path);
         }
-    } else if (const char* envLibs = std::getenv("FIN_LIBS")) {
+    } else if (const char* envLibs = std::getenv("FIN_LIBS");
+               envLibs != nullptr && *envLibs != '\0') {
+        // Empty is unset. `--fin-libs=` is an explicit pin to nothing and suppresses
+        // the bundle below; `FIN_LIBS=` is how a shell spells "clear this variable",
+        // and reading it as a pin took the standard library away from anyone with
+        // `export FIN_LIBS=` in a profile -- then told them to set the variable they
+        // had set. LibraryPaths.AnEmptyEnvironmentVariableIsUnsetAndDoesNotSuppressTheBundle
+        // holds the two spellings apart.
         librariesSpecified = true;
         for (const auto& path : splitSearchPaths(envLibs)) {
             loader.addSearchPath(path);

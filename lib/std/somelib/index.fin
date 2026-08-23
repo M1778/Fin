@@ -1,0 +1,13 @@
+//@ bundled
+// tests/samples/stdlib/somelib.fin is the specification and it says "Empty lib".
+//
+// This one is a directory rather than a file, and that is the whole point of it.
+// `extern_as.fin:9` is emphatic about why: "IMPORTANT: THIS IS SO IMPORTANT BECAUSE WE
+// DO NOT GIVE ANY PATH TO IT SO HOW DOES THE COMPILER KNOW WHERE TO IMPORT THIS
+// LIBRARY, as we assume somelib is a directory containing modules." So `import
+// "somelib";` has to resolve a *directory* off a search path, and the resolution it
+// exercises is ModuleLoader.cpp's third candidate: `<base>/<name>/index.fin`. A file
+// named somelib.fin would resolve through the first candidate and leave the directory
+// form untested.
+namespace std {
+}

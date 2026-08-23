@@ -70,6 +70,11 @@ size_t errorCount(const std::string& stripped) {
 // One row per `import` spelling in the corpus. `path` is written exactly as the
 // corpus writes it, `symbols` are the names it selects, and `sample` is where to
 // look when a row fails.
+//
+// The `sample` column is not asserted on -- it is the message a failure prints -- so it
+// went wrong quietly: six rows named a sample that does not import them, and one named
+// no sample at all ("stdlib/operators.fin's own consumer", which is lambdas.fin). The
+// authority is `grep -rn "from operators::std" tests/samples/`, not memory.
 struct Row {
     const char* path;      // as written after `from`, e.g. "error::std"
     const char* symbols;   // as written inside the braces
@@ -81,14 +86,14 @@ const std::vector<Row>& corpusImports() {
         {"error::std",     "Error",                "enums.fin, readonly.fin, and five more"},
         {"collection::std","Collection",           "prototype_test.fin, stdlib/hashmap.fin"},
         {"hashmap::std",   "HashMap",              "deeptest4.fin, prototype_test.fin"},
-        {"operators::std", "Index, IndexAssign",   "lambdas.fin, stdlib/collection.fin"},
-        {"operators::std", "Addable",              "stdlib/operators.fin's own consumer"},
+        {"operators::std", "Index, IndexAssign",   "stdlib/collection.fin, stdlib/hashmap.fin"},
+        {"operators::std", "Addable",              "lambdas.fin"},
         {"stdptr::std",    "rptr",                 "const.fin"},
-        {"types::std",     "resolve_type",         "stdlib/memory.fin"},
-        {"types::std",     "Any",                  "stdlib/typing.fin"},
-        {"types",          "number2str",           "stdlib/stdio.fin"},
+        {"types::std",     "resolve_type",         "stdlib/prototypes.fin"},
+        {"types::std",     "Any",                  "stdlib/stdio.fin"},
+        {"types",          "number2str",           "stdlib/memory.fin"},
         {"enums::std",     "getkeyid, keyidof",    "stdlib/typing.fin"},
-        {"typing::std",    "IResult",              "stdlib/prototypes.fin"},
+        {"typing::std",    "IResult",              "stdlib/stdio.fin"},
         {"stdio",          "printf",               "complex.fin, importing.fin"},
     };
     return rows;

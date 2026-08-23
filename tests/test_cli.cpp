@@ -566,6 +566,40 @@ TEST(LibraryPaths, AnEmptyFlagValueMeansNoLibraryPaths) {
     EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
 }
 
+// An empty `FIN_LIBS` is not the same statement as an empty `--fin-libs=`.
+//
+// The flag is `finn` pinning what a build compiles against, so `--fin-libs=` means "pin
+// it to nothing" and the bundled library is suppressed -- that is the test above, and it
+// stays. But `FIN_LIBS=` in a shell is how POSIX spells *unset*: `export FIN_LIBS=` in a
+// profile, a CI job that writes the variable before it has a value, `env FIN_LIBS= finc`
+// in a script that means to clear it. Treating that as "pinned to nothing" took the
+// standard library away from anyone who had ever cleared the variable, and then told them
+// `no library search paths were given; pass --fin-libs or set FIN_LIBS` -- advice to set
+// the thing they had set. `getenv` cannot distinguish empty from unset in any useful way,
+// so the compiler has to decide, and an empty environment variable means unset here.
+TEST(LibraryPaths, AnEmptyEnvironmentVariableIsUnsetAndDoesNotSuppressTheBundle) {
+    TempFin f("import { Error } from error::std;\nfun main() <noret> {}\n", "emptyenv");
+
+    // The control: with FIN_LIBS truly absent the bundled library resolves. If this
+    // fails the bundle is missing and the rest of the test proves nothing.
+    const auto unset = runFinc({f.str()}, noFinLibs());
+    EXPECT_EQ(unset.exitCode, 0) << "the bundled library has to resolve for this test to "
+                                    "mean anything\n" << stripAnsi(unset.err);
+
+    const auto empty = runFinc({f.str()}, {{"FIN_LIBS", ""}});
+    EXPECT_EQ(empty.exitCode, 0)
+        << "an empty FIN_LIBS is unset, not \"pinned to no libraries\"\n"
+        << stripAnsi(empty.err);
+    EXPECT_EQ(empty.err.find("module not found"), std::string::npos) << stripAnsi(empty.err);
+
+    // And the flag still means what it means, with an empty environment underneath it:
+    // the two spellings have to stay distinguishable.
+    const auto flag = runFinc({f.str(), "--fin-libs="}, {{"FIN_LIBS", ""}});
+    EXPECT_EQ(flag.exitCode, 1)
+        << "--fin-libs= is an explicit pin to nothing and must still suppress the bundle\n"
+        << stripAnsi(flag.err);
+}
+
 TEST(LibraryPaths, AnEmptyEntryIsDroppedAndDoesNotBecomeTheWorkingDirectory) {
     TempFin f(kImportsMyLib, "emptyentry");
     const std::string justSeparators(3, fin::kSearchPathSeparator);
