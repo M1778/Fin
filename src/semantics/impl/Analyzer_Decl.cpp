@@ -549,7 +549,14 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     currentScope->defineType(node.name, ifaceType);
     
     enterScope();
-    declareGenericParams(node.generic_params);
+    // Collected onto the interface's own type, as visit(StructDeclaration&) and
+    // visit(EnumDeclaration&) do. Without it an interface declared `interface IBox<T>`
+    // had a StructType with no generic_args at all -- the parameters went into this
+    // scope and nowhere else -- so nothing could instantiate it: `Self<T>` in its own
+    // body and `IBox<int>` as a parent both reported `Generic count mismatch` against
+    // zero parameters. Soundness_SelfGenerics.AnInterfaceRecordsItsGenericParameters-
+    // OnItsType.
+    declareGenericParams(node.generic_params, &ifaceType->generic_args);
     currentScope->defineType("Self", ifaceType);
 
     // resolveTypeOrError, not resolveTypeFromAST, because an interface member is a

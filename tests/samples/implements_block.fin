@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`Generic count mismatch` at 13:22 and 28:19 -- `pub` on a member inside a top-level `X implements <...>` block parses now, and the analyzer then miscounts the block's generic arguments. Two sites, distinguishable now that types carry locations; both rendered at 1:1 before"
+//@ ok
 // Better examples exists in stdlib
 
 interface GetVal<T> {

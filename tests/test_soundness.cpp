@@ -7246,3 +7246,142 @@ TEST(KnownDefect_ImplementsConstructors, ABlocksConstructorIsNotAnOverloadOfTheT
     EXPECT_NE(r.exitCode, 0) << "if this passes, constructor overloads resolve -- invert this test";
     EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// `Self<T>` and an interface's generic parameters.
+//
+// stdlib/stdptr.fin writes `Self<T>` four times inside `interface rptr_iface<T>` --
+// on 16, 22, 23 and 32 -- and every one of them reported `Generic count mismatch`,
+// because visit(InterfaceDeclaration&) built the interface's StructType with no
+// generic_args at all: it declared the parameters into the signature scope and stored
+// none of them, so instantiating `Self` with one argument was compared against zero.
+//
+// Two halves. The interface records its parameters, which also makes `IBox<int>`
+// writable as a parent. And `Self<T>` inside a declaration of `X<T>` is `Self`: the
+// arguments repeat the parameters the header already declared, so it names the type
+// being declared and not an instantiation of it. Instantiating there would have
+// produced a copy of the interface as it stood at that line -- on 16 that is before
+// any method is registered, so a member typed `&Self<T>` would have answered every
+// method call with `has no member`.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_SelfGenerics, SelfWithTheEnclosingParametersIsAcceptedInAnInterface) {
+    // stdptr.fin:22, `fun own() <Self<T>>;`, reduced.
+    const FincRun r = compile("interface IBox<T> { pub fun get() <Self<T>>; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SelfGenerics, SelfWithTheEnclosingParametersIsTheInterfaceItself) {
+    // Not a copy of it. The copy is the hazard: it is taken at the line `Self<T>` is
+    // written on, so it carries whatever had been registered by then and nothing after.
+    // `get` returns `Self<T>` and `use` calls a method declared *after* it, which is
+    // only there to be found if the type is the live one.
+    const FincRun r = compile(
+        "interface IBox<T> {\n"
+        "  pub fun get() <Self<T>>;\n"
+        "  pub fun later() <int>;\n"
+        "}\n"
+        "struct Box : <IBox<int>> {\n"
+        "  pub:\n"
+        "    fun get() <Box> { return self; }\n"
+        "    fun later() <int> { return 1; }\n"
+        "}\n"
+        // Through the interface, not through Box: `b.get()` is typed by what the
+        // *interface* said `Self<T>` was, which is the whole point.
+        "fun use(b: IBox<int>) <int> { return b.get().later(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << "the type Self<T> names is whole, not a snapshot:\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_SelfGenerics, SelfWithTheEnclosingParametersIsAcceptedOnAMember) {
+    // stdptr.fin:16, `readonly restrict <&Self<T>>;` -- the first diagnostic in the
+    // file, and the earliest position: the interface has nothing registered yet.
+    const FincRun r = compile("interface IBox<T> { readonly restrict <&Self<T>>; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SelfGenerics, SelfWithTheEnclosingParametersIsAcceptedInAConstructorRequirement) {
+    // stdptr.fin:32. A constructor requirement's parameter list is resolved by the
+    // interface's own pass, so it is a third reader of the same rule.
+    const FincRun r = compile("interface IBox<T> { Self(o: Self<T>); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SelfGenerics, TwoParametersAreMatchedInOrder) {
+    const FincRun r = compile("interface IPair<A, B> { pub fun get() <Self<A, B>>; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SelfGenerics, TwoParametersOutOfOrderStillResolve) {
+    // `Self<B, A>` inside `IPair<A, B>` is a genuine instantiation -- the parameters
+    // swapped -- so it does not take the shortcut, which is by position and not by set
+    // membership. It still has to resolve.
+    const FincRun r = compile(
+        "interface IPair<A, B> { pub fun get() <Self<B, A>>; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SelfGenerics, SelfWithTheWrongArityIsStillReported) {
+    // The guard. Recording the parameters must not amount to accepting any number of
+    // arguments after `Self`: one parameter and two arguments is still a mismatch.
+    const FincRun r = compile("interface IBox<T> { pub fun get() <Self<T, T>>; }\n");
+    EXPECT_NE(r.exitCode, 0) << "two arguments do not fit one parameter";
+    EXPECT_NE(stripAnsi(r.err).find("Generic count mismatch"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SelfGenerics, AnInterfaceRecordsItsGenericParametersOnItsType) {
+    // The other half, observable on its own: an interface with no generic_args cannot
+    // be instantiated at all, so `IBox<int>` as a parent reported `Generic count
+    // mismatch` -- about an interface declared with exactly one parameter.
+    const FincRun r = compile(
+        "interface IBox<T> { pub fun get() <T>; }\n"
+        "struct Box : <IBox<int>> { pub fun get() <int> { return 1; } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SelfGenerics, AnInstantiatedInterfaceParentIsStillCheckedForConformance) {
+    // Instantiating the interface must not lose what it requires.
+    const FincRun r = compile(
+        "interface IBox<T> { pub fun get() <T>; }\n"
+        "struct Box : <IBox<int>> { pub d <int>, }\n");
+    EXPECT_NE(r.exitCode, 0) << "an instantiated interface is still an interface";
+    EXPECT_NE(stripAnsi(r.err).find("does not implement"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SelfGenerics, SelfWithTheEnclosingParametersIsAcceptedInAStructToo) {
+    // The struct side of the same spelling. `Self` is a SelfType there rather than the
+    // struct's own StructType, so `Self<T>` fell through to the fabrication arm of
+    // resolveTypeFromAST and produced a struct *named* `Self` with one argument --
+    // which is why `return self` reported `expected 'Self<T>', got 'Self'`, a mismatch
+    // between a type and itself. stdptr.fin:52 writes `<&Self<T>>` inside
+    // `class rptr<T>`.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, pub fun me() <Self<T>> { return self; } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SelfGenerics, SelfWithTheEnclosingParametersIsAcceptedInAClassToo) {
+    const FincRun r = compile(
+        "class Box<T> { pub v <T>, pub fun me() <Self<T>> { return self; } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SelfGenerics, ABareSelfIsUnaffected) {
+    // The control. Nothing above touches `Self` written without arguments, which is
+    // what every other corpus file uses.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, pub fun me() <Self> { return self; } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_SelfGenerics, SelfWithConcreteArgumentsInAStructIsAFabricatedType) {
+    // Booked: `Self<int>` inside `Box<T>` names the instantiation `Box<int>`, and in a
+    // struct it still reaches the fabrication arm -- a struct literally named `Self`
+    // with one argument -- because `Self` is a SelfType there and only a StructType can
+    // be instantiated. Reaching the real `Box<int>` means giving SelfType a way to be
+    // instantiated, which is a bigger change than the rule above and has no corpus site
+    // asking for it. If this starts passing, invert it.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, pub fun me() <Self<int>> { return self; } }\n");
+    EXPECT_NE(r.exitCode, 0) << "if this passes, Self<int> resolves properly -- invert this test";
+    EXPECT_NE(stripAnsi(r.err).find("Self<int>"), std::string::npos) << stripAnsi(r.err);
+}

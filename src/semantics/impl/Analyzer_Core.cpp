@@ -46,6 +46,48 @@ bool isFloatingName(const std::string& n) {
     return n == "float" || n == "double";
 }
 
+// `Self<T>` written inside a declaration of `X<T>` names the type being declared,
+// not an instantiation of it: the arguments repeat the parameters the header
+// declared three characters earlier. stdlib/stdptr.fin writes it four times inside
+// `interface rptr_iface<T>` -- on 16, 22, 23 and 32 -- and every one reported
+// `Generic count mismatch`.
+//
+// Answering "yes" here means the caller hands back the type it already resolved,
+// which for an interface is the live interface rather than a copy of it. That
+// matters more than it looks: the copy would be taken at the line `Self<T>` is
+// written on, so `readonly restrict <&Self<T>>;` on 16 -- before any method is
+// registered -- would have produced an interface with no methods, and every call
+// through that member would have reported `has no member`.
+// Soundness_SelfGenerics.SelfWithTheEnclosingParametersIsTheInterfaceItself.
+//
+// By position and by name, and only for a bare parameter name: `Self<B, A>` inside
+// `IPair<A, B>` and `Self<int>` inside `Box<T>` are genuine instantiations and fall
+// through to the general path. `&Self<T>` reaches here as the inner node, so the
+// pointer_depth guard is about `Self<&T>`, which names something else again.
+bool selfNamesEnclosingType(const TypeNode* node, const TypePtr& resolved) {
+    if (!node || node->name != "Self" || !resolved) return false;
+
+    // In a struct or class `Self` is a SelfType wrapping the struct; in an interface
+    // it is the interface's own StructType (Analyzer_Decl.cpp:276 and :553).
+    const std::vector<TypePtr>* params = nullptr;
+    if (auto* self = resolved->as<SelfType>()) {
+        if (auto s = std::dynamic_pointer_cast<StructType>(self->originalStruct))
+            params = &s->generic_args;
+    } else if (auto* st = resolved->as<StructType>()) {
+        params = &st->generic_args;
+    }
+    if (!params || params->size() != node->generics.size() || params->empty()) return false;
+
+    for (size_t i = 0; i < params->size(); ++i) {
+        const TypeNode* written = node->generics[i].get();
+        if (!written || !(*params)[i]) return false;
+        if (!written->generics.empty() || written->pointer_depth != 0 ||
+            written->is_array || written->is_nullable) return false;
+        if (written->name != (*params)[i]->toString()) return false;
+    }
+    return true;
+}
+
 } // namespace
 
 bool SemanticAnalyzer::constantFitsType(const ASTNode& node, const Type& target) {
@@ -273,7 +315,7 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
     }
     
     // 5. Generics
-    if (!node->generics.empty()) {
+    if (!node->generics.empty() && !selfNamesEnclosingType(node, type)) {
         std::vector<std::shared_ptr<Type>> args;
         auto structDef = std::dynamic_pointer_cast<StructType>(type);
         bool argsResolved = true;
