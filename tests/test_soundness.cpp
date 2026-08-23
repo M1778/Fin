@@ -1610,66 +1610,68 @@ TEST(KnownDefect_IntegerConstants, AnArrayOfConstantsDoesNotTakeTheAnnotatedElem
 }
 
 // ---------------------------------------------------------------------------
-// A default value is never checked against the type it defaults.
+// A parameter default: walked now, still not type-checked.
 //
-// visit(Parameter&) resolves the parameter's type and then visits the default
-// expression, and never compares them -- so `fun f(x: uint = "nope")` compiles
-// clean. This is the soundness category the plan puts first: wrong code that
-// produces no diagnostic at all.
+// This block was written when neither happened, and the split it predicted held.
+// The walk was the whole defect's first half and is fixed -- see
+// Soundness_ParameterDefaults, which owns that half and its eight call sites. The
+// diagnosis here was right about the cause and wrong about the remedy: visit(Parameter&)
+// does walk the default, but nothing dispatches to it, so the fix was not to add a
+// checkType inside a dead visitor but to reach the defaults from the eleven parameter
+// loops that do run. It is still dead code; Analyzer_Core.cpp says so at its definition.
 //
-// Found while measuring the integer-constant rule, and separate from it: the
-// constant rule decides *what a constant may become*, and this is the check that
-// never asks. Fixing it is one checkType() call, but it is its own unit of work
-// because it convicts stdlib/stdio.fin:107 (`nbytes: ulong = -1`) the moment it
-// lands, which is the ruling named above. Measured, and worth knowing: the corpus
-// test for that sample would NOT catch it -- stdio.fin's expectation is prose
-// (`//@ unimplemented "..."`), so a new diagnostic in that file flips nothing. The
-// two tests below are the only thing watching this.
+// What remains below is the type half, and it is blocked rather than unwritten. Adding
+// the check convicts stdlib/stdio.fin:87 and :109 (`nbytes: ulong = -1`) the moment it
+// lands, which is the integer ruling. Mutation-tested in advance: applying the naive
+// version (checkType, not checkInitializer) kills ANullDefaultIsStillAccepted, because
+// stdlib/error.fin:11 writes `err_code: int = null` and a plain checkType has no null
+// exemption. So the eventual fix is checkInitializer, and that is known before it is
+// written rather than after.
+//
+// Measured, and still worth knowing: the corpus test for stdio.fin would NOT catch a
+// regression here -- its expectation is prose (`//@ unimplemented "..."`), so a new
+// diagnostic in that file flips nothing. These tests are the only thing watching.
 // ---------------------------------------------------------------------------
 
-TEST(KnownDefect_Declarations, AParameterDefaultIsNotAnalysedAtAll) {
-    // Stronger than the type test below, and it needs no type system to see: an
-    // undefined name in a parameter default is not reported either. The default
-    // expression is never walked at all.
+TEST(Soundness_ParameterDefaults, AParameterDefaultIsAnalysed) {
+    // Inverted from KnownDefect_Declarations.AParameterDefaultIsNotAnalysedAtAll, which
+    // asserted that an undefined name in a parameter default went unreported, and which
+    // asked its successor to "check that the diagnostic points inside the default rather
+    // than at the function". It does: column 16 in both programs below is where the
+    // default expression starts, not where `fun` or the parameter does.
     //
-    // Cause, and it is not a missing checkType: SemanticAnalyzer::visit(Parameter&)
-    // does call `default_value->accept(*this)` (Analyzer_Core.cpp:284) but nothing
-    // ever reaches it. visit(FunctionDeclaration&) iterates node.params by hand to
-    // resolve their types and define them (Analyzer_Decl.cpp:53-66) and never calls
-    // param->accept(*this), so that visitor is dead code for every function in the
-    // language. A mutation that added checkType inside it changed no test result --
-    // which is how this was found.
-    //
-    // Its own test, separate from the type check, because the two fixes are not the
-    // same edit: calling accept() on the default makes this go green while the type
-    // mismatch below stays undetected.
+    // Two spellings because they take different paths through the analyser -- a bare name
+    // reports `Undefined variable`, a call reports `Undefined function or type` -- and a
+    // fix that reached only one of them would leave the other silent.
     for (const char* code : {"fun f(x: int = nosuchthing) <noret> { }\nfun main() <noret> { }\n",
                              "fun f(x: int = nosuchfn()) <noret> { }\nfun main() <noret> { }\n"}) {
         const FincRun r = compile(code);
-        EXPECT_EQ(r.exitCode, 0)
-            << "FIXED: a parameter default is analysed now. Invert this, and check that "
-               "the diagnostic points inside the default rather than at the function.\n"
-            << code << r.err;
+        EXPECT_EQ(r.exitCode, 1) << "a parameter default is analysed:\n" << code << r.err;
+        const std::string err = stripAnsi(r.err);
+        EXPECT_NE(err.find("nosuch"), std::string::npos) << code << err;
+        EXPECT_NE(err.find(":1:16"), std::string::npos)
+            << "the caret belongs inside the default, at the expression:\n" << code << err;
     }
 
-    // The same expression one line lower is caught, which is what rules out "the
-    // analyser cannot see this expression" as an explanation.
+    // The same expression one line lower is caught, which is what ruled out "the
+    // analyser cannot see this expression" as an explanation when this was a defect.
     const FincRun body = compile("fun f() <noret> { let x <int> = nosuchthing; }\nfun main() <noret> { }\n");
     EXPECT_NE(body.exitCode, 0) << "an undefined name in a body must still be caught: " << body.err;
 }
 
-TEST(KnownDefect_Declarations, AParameterDefaultIsNotCheckedAgainstItsType) {
-    // The type half. Reached only after the walk above exists, so a fix that adds
-    // accept() without adding checkType leaves this one still asserting the defect.
+TEST(KnownDefect_ParameterDefaults, AParameterDefaultIsNotCheckedAgainstItsType) {
+    // The type half. The walk it waited on exists now (Soundness_ParameterDefaults),
+    // and this still asserts the defect -- which is exactly the split predicted when
+    // both halves were one test.
     const FincRun r = compile("fun f(x: uint = \"nope\") <noret> { }\nfun main() <noret> { }\n");
     EXPECT_EQ(r.exitCode, 0)
         << "FIXED: a parameter default is type-checked now. Invert this into "
-           "Soundness_Declarations and check the negative-constant case too -- "
+           "Soundness_ParameterDefaults and check the negative-constant case too -- "
            "`fun f(x: uint = -1)` is the corpus's own spelling and the ruling on it "
            "decides whether that is a second diagnostic or none.";
 }
 
-TEST(KnownDefect_Declarations, AStructFieldDefaultIsCheckedButAParameterIsNot) {
+TEST(KnownDefect_ParameterDefaults, AStructFieldDefaultIsCheckedButAParameterIsNot) {
     // The asymmetry is the evidence that this is a missing call and not a missing
     // capability: the same wrong default in a struct field is both walked and checked
     // (Analyzer_Decl.cpp:181 accepts it, :183 calls checkType). Its own test because a
@@ -2420,4 +2422,246 @@ TEST(Soundness_Nullability, ANullablePointerIsStillAPointer) {
     // is_nullable on the outer TypeNode, so `p? <&int>` is `(&int)?`.
     auto r = compile("fun main() <int> { let p? <&int> = null; let q <&int> = p?; return 0; }\n");
     EXPECT_EQ(r.exitCode, 0) << "`(&int)?` denullifies to `&int`:\n" << r.err;
+}
+
+// ---------------------------------------------------------------------------
+// Soundness_ParameterDefaults
+//
+// A parameter's default value was the only expression in the language that no
+// pass ever visited. `fun g(n: int = nosuchvar)` compiled clean, and so did the
+// same default on a struct method, a class method, a struct constructor, a class
+// constructor, and an interface method requirement -- six spellings, six loops,
+// none of which looked at `default_value`. `visit(Parameter&)` does visit it, and
+// nothing calls `visit(Parameter&)`: every parameter loop in Analyzer_Decl.cpp
+// walks `param->type` by hand. The same "N copies of one loop" shape as the
+// generic-parameter bounds, and found the same way -- by asking why a construct
+// that is checked in a struct member (`pub v <int> = nosuchvar` reports it) is not
+// checked one line away in a constructor signature.
+//
+// These tests assert only that the default is *visited*, which is what catches the
+// undefined name. They deliberately do not assert that it is type-checked against
+// the parameter's declared type -- see KnownDefect_ParameterDefaults below, which
+// records why that half is blocked.
+//
+// One test per declaration form on purpose: the loops are separate copies, so a
+// fix that reaches `visit(FunctionDeclaration&)` leaves the four others green.
+
+TEST(Soundness_ParameterDefaults, AFunctionDefaultIsVisited) {
+    auto r = compile("fun g(n: int = nosuchvar) <int> { return 0; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "an undefined name in a default must be reported:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, AStructMethodDefaultIsVisited) {
+    auto r = compile("struct S { pub fun m(self: &Self, n: int = nosuchvar) <int> { return 0; } }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "a struct method's default:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, AClassMethodDefaultIsVisited) {
+    auto r = compile("class C { pub v <int>, pub fun m(self: &Self, n: int = nosuchvar) <int> { return 0; } }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "a class method's default:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, AStructConstructorDefaultIsVisited) {
+    // stdlib/error.fin:11's shape. A constructor's parameters are walked twice --
+    // once to register the signature, once for the body -- so this is also the
+    // test that would catch the default being reported twice.
+    auto r = compile("struct S { pub v <int>, S(n: int = nosuchvar) { self.v = n; } }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "a struct constructor's default:\n" << r.err;
+    const std::string err = stripAnsi(r.err);
+    // Count the *message*, not the identifier: the caret snippet echoes the offending
+    // source line, so `nosuchvar` legitimately appears twice in one report. The first
+    // draft counted the identifier and went red against a correct compiler.
+    const std::string msg = "Undefined variable 'nosuchvar'";
+    EXPECT_NE(err.find(msg), std::string::npos) << err;
+    EXPECT_EQ(err.find(msg, err.find(msg) + 1), std::string::npos)
+        << "reported once, not once per pass over the parameter list:\n" << err;
+}
+
+TEST(Soundness_ParameterDefaults, AClassConstructorDefaultIsVisited) {
+    auto r = compile("class C { pub v <int>, C(n: int = nosuchvar) { self.v = n; } }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "a class constructor's default:\n" << r.err;
+    const std::string err = stripAnsi(r.err);
+    // Count the *message*, not the identifier: the caret snippet echoes the offending
+    // source line, so `nosuchvar` legitimately appears twice in one report. The first
+    // draft counted the identifier and went red against a correct compiler.
+    const std::string msg = "Undefined variable 'nosuchvar'";
+    EXPECT_NE(err.find(msg), std::string::npos) << err;
+    EXPECT_EQ(err.find(msg, err.find(msg) + 1), std::string::npos)
+        << "reported once, not once per pass over the parameter list:\n" << err;
+}
+
+TEST(Soundness_ParameterDefaults, AnInterfaceMethodDefaultIsVisited) {
+    // stdlib/stdio.fin:87 `fun read(nbytes: ulong = -1) <[char]>;` -- a requirement
+    // with no body, and the only pass over its parameters is the one that registers
+    // the requirement. So it is the site most likely to be missed by a fix aimed at
+    // function bodies.
+    auto r = compile("interface I { fun m(n: int = nosuchvar) <int>; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "an interface method requirement's default:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, AnOperatorDefaultIsVisited) {
+    // deeptest2.fin:29's form. An operator declaration has its own parameter loop
+    // and its own visit, so it is a seventh copy rather than a special case of the
+    // method loop.
+    auto r = compile("struct S { pub v <int>, operator +(self: &Self, other: int = nosuchvar) <int> { return 0; } }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "an operator's default:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, AnInterfaceOperatorDefaultIsVisited) {
+    // deeptest2.fin:15 `operator +(self: &Self, other : T) <T>;` -- a requirement,
+    // and an eighth loop.
+    auto r = compile("interface I { operator +(self: &Self, other: int = nosuchvar) <int>; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "an interface operator requirement's default:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, AnExternDeclarationDefaultIsVisited) {
+    // `@define printf(fmt: string, ...) <int>;` is struct_methods.fin:3 and
+    // complex.fin:5. An extern has no body, so like the interface requirement it
+    // gets exactly one pass over its parameters.
+    auto r = compile("@define ext(fmt: string = nosuchvar, ...) <int>;\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "an extern's default:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, ASpecialDeclarationDefaultIsVisited) {
+    // `@special(pub) typeid(T: $type) <int>` is the standard library's spelling
+    // (stdlib/types.fin:24). Compile-time functions are analyzed by their own visit.
+    auto r = compile("@special sp(n: int = nosuchvar) <int> { return 0; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "a compile-time function's default:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("nosuchvar"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, AValidDefaultIsStillAccepted) {
+    // The control. Visiting the default must not make a correct one an error.
+    auto r = compile("fun g(n: int = 3) <int> { return n; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`n: int = 3` is legal:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ANullDefaultIsStillAccepted) {
+    // stdlib/error.fin:11 `err_code: int = null`. Guards the nullability rule
+    // (Soundness_Nullability, checkInitializer) against this change.
+    auto r = compile("fun g(n: int = null) <int> { return 0; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`n: int = null` is stdlib/error.fin:11:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultMayNameAnEarlierDeclaration) {
+    // Visiting the default has to happen somewhere, and where decides what a
+    // default may name. Nothing in the corpus needs a global here and no ruling
+    // covers it, so the looser reading is taken deliberately rather than inventing
+    // a scoping rule that would reject a sample nobody has written yet.
+    // This test alone does NOT pin the placement: a global is visible from the
+    // enclosing scope as well, so a mutant that moved the visit above the
+    // parameter-declaring loop survived it. ADefaultMayNameASiblingParameter is
+    // the one that pins it.
+    auto r = compile("let g_default <int> = 7;\n"
+                     "fun g(n: int = g_default) <int> { return n; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a default may name a global:\n" << r.err;
+}
+
+// ---------------------------------------------------------------------------
+// KnownDefect_ParameterDefaults
+//
+// The other half of the same defect, and the half that is blocked. A parameter's
+// default is not compared against the parameter's declared type, so
+// `fun g(n: string = 3)` is accepted. Every other default in the language is
+// checked -- a struct member's `pub v <int> = "nope"` reports `expected 'int', got
+// 'string'` -- so this is an inconsistency, not a design.
+//
+// It is not fixed here because the corpus would regress on a question the owner
+// has not answered. stdlib/stdio.fin:87 and :109 both write
+// `fun read(nbytes: ulong = -1)`, and `let x <ulong> = -1` is an error today
+// (`expected 'ulong', got 'int'`). Adding the check therefore puts two new
+// diagnostics on a normative sample, and whether it should is exactly the integer
+// ruling in docs/plan.md: is `-1` a legal unsigned constant? Answer that and this
+// becomes a two-line change at the site the tests above already reach.
+
+TEST(KnownDefect_ParameterDefaults, ADefaultOfTheWrongTypeIsAccepted) {
+    auto r = compile("fun g(n: string = 3) <int> { return 0; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "when this fails, the default is being type-checked: invert it, and check\n"
+           "stdlib/stdio.fin -- `nbytes: ulong = -1` decides whether that is correct.\n"
+        << r.err;
+}
+
+TEST(KnownDefect_ParameterDefaults, AnUnsignedParameterDefaultingToMinusOneIsAccepted) {
+    // stdlib/stdio.fin:87 and :109, reduced. This is the sample line that the fix
+    // above would break, kept as its own test so that the blocker is visible from
+    // the suite and not only from the plan.
+    auto r = compile("fun g(n: ulong = -1) <int> { return 0; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "stdlib/stdio.fin:87's `nbytes: ulong = -1`:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultMayNameASiblingParameter) {
+    // The test that pins *where* the default is visited. The call sits after the
+    // loop that defines each parameter in the body scope, so an earlier parameter
+    // is in scope in a later one's default. Move the call above that loop and this
+    // is the only test that notices -- which is why it exists separately from
+    // ADefaultMayNameAnEarlierDeclaration, whose global resolves either way.
+    // Both arguments are passed: whether a defaulted parameter may be *omitted* is
+    // a different question, held open by KnownDefect_ParameterDefaults below.
+    auto r = compile("fun g(a: int, b: int = a) <int> { return a + b; }\n"
+                     "fun main() <int> { let z <int> = g(1, 2); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "an earlier parameter is in scope in a later default:\n" << r.err;
+}
+
+// The second half of the same root cause, and a bigger change than the first.
+//
+// `required` is computed in Analyzer_Expr's arity check as the index of the last
+// parameter that is not nullable, plus one -- so a nullable parameter is optional and
+// nothing else is. A parameter with a default is still counted as required, which
+// leaves the default with no observable purpose at a call site: it can be named in an
+// expression (see above) but never actually supplied by omission.
+//
+// Not fixed here, for a reason worth writing down rather than a lack of clarity about
+// the meaning. The arity check reads a `FunctionType`, and `FunctionType` records only
+// `param_types`, `return_type` and `is_vararg` -- it has no idea which parameters had
+// defaults. Fixing this means a new field carried through eleven construction sites
+// plus `substitute` and `clone`, which is the same "N copies of one loop" shape that
+// this wave has now hit three times. It is a unit of its own.
+//
+// It is also, by measurement, a low-ranked one: the corpus declares exactly three
+// defaulted parameters (stdlib/stdio.fin:87 and :109, stdlib/error.fin:11) and calls
+// none of them. The one call that would need this, `Error("The answer is forbidden")`
+// at blame_assert.fin:15, is commented out. So the corpus effect of the fix is zero
+// diagnostics, which puts it below every other unit currently queued.
+
+TEST(KnownDefect_ParameterDefaults, ADefaultedParameterIsStillRequired) {
+    // Passes by asserting the defect. When the arity check learns about defaults this
+    // goes red -- invert it to EXPECT_EQ(r.exitCode, 0) and move it to Soundness.
+    auto r = compile("fun g(a: int, b: int = 2) <int> { return a + b; }\n"
+                     "fun main() <int> { let z <int> = g(1); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "today a default does not make a parameter optional:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expects 2 arguments, got 1"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_ParameterDefaults, ADefaultedConstructorParameterIsStillRequired) {
+    // stdlib/error.fin:11's shape, called the way blame_assert.fin:15 wants to call it.
+    // A constructor is reached as `S(args)` and goes through the same arity check.
+    auto r = compile("struct S { pub v <int>, S(msg: int, code: int = null) { return new S{v: msg}; } }\n"
+                     "fun main() <int> { let b <S> = S(1); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "today a constructor's default does not make it optional:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expects 2 arguments, got 1"), std::string::npos)
+        << stripAnsi(r.err);
 }

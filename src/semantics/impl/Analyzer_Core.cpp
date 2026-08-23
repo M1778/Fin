@@ -366,6 +366,15 @@ bool SemanticAnalyzer::checkInitializer(ASTNode& node, std::shared_ptr<Type> act
     return checkType(node, actual, expected);
 }
 
+void SemanticAnalyzer::visitParameterDefaults(const std::vector<std::unique_ptr<Parameter>>& params) {
+    for (auto& param : params) {
+        if (param->default_value) param->default_value->accept(*this);
+    }
+}
+
+// Unreachable, and left in place because the Visitor interface requires it: no
+// parameter loop dispatches to it, they all walk `param->type` directly. Logic
+// added here will not run -- see visitParameterDefaults.
 void SemanticAnalyzer::visit(Parameter& node) {
     resolveTypeFromAST(node.type.get());
     if (node.default_value) node.default_value->accept(*this);

@@ -65,6 +65,7 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
             signatureResolved = false;
         }
     }
+    visitParameterDefaults(node.params);
 
     // 4. Implicit Self Injection
     if (currentStructContext && !node.is_static && !hasSelf) {
@@ -257,6 +258,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
             auto t = resolveTypeFromAST(param->type.get());
             if (t) currentScope->define({param->name, t, false, true});
         }
+        visitParameterDefaults(ctor->params);
         // Inject Self
         currentScope->define({"self", structType, true, true});
         
@@ -312,6 +314,7 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
         auto t = resolveTypeFromAST(param->type.get());
         if (t) currentScope->define({param->name, t, false, true});
     }
+    visitParameterDefaults(node.params);
     
     // 3. Inject Self
     currentScope->define({"self", structType, true, true});
@@ -389,6 +392,7 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     for (auto& method : node.methods) {
         enterScope();
         for (auto& param : method->params) resolveTypeFromAST(param->type.get());
+        visitParameterDefaults(method->params);
         std::shared_ptr<Type> retType = nullptr;
         if(method->return_type) retType = resolveTypeFromAST(method->return_type.get());
         else retType = currentScope->resolveType("void");
@@ -401,6 +405,7 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
         enterScope();
         declareGenericParams(op->generic_params);
         for (auto& param : op->params) resolveTypeFromAST(param->type.get());
+        visitParameterDefaults(op->params);
         std::shared_ptr<Type> retType = nullptr;
         if(op->return_type) retType = resolveTypeFromAST(op->return_type.get());
         else retType = currentScope->resolveType("void");
@@ -531,6 +536,7 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
         auto t = resolveTypeFromAST(param->type.get());
         if (t) paramTypes.push_back(t);
     }
+    visitParameterDefaults(node.params);
 
     auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg);
     currentScope->define({node.name, funcType, false, true});
@@ -584,6 +590,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
          auto t = resolveTypeFromAST(param->type.get());
          if (t) currentScope->define({param->name, t, false, true});
     }
+    visitParameterDefaults(node.params);
     
     if (node.return_type) resolveTypeFromAST(node.return_type.get());
     
@@ -708,6 +715,7 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
             auto t = resolveTypeFromAST(param->type.get());
             if (t) currentScope->define({param->name, t, false, true});
         }
+        visitParameterDefaults(ctor->params);
         currentScope->define({"self", structType, true, true});
         if (ctor->body) ctor->body->accept(*this);
         exitScope();

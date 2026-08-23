@@ -154,6 +154,25 @@ private:
     // that also record them on a StructType as its generic_args.
     void declareGenericParams(const std::vector<std::unique_ptr<GenericParam>>& params,
                               std::vector<std::shared_ptr<Type>>* collect = nullptr);
+
+    // A parameter's default value was the only expression in the language that no
+    // pass ever visited, so `fun g(n: int = nosuchvar)` compiled clean. `visit(Parameter&)`
+    // does visit it and nothing calls `visit(Parameter&)`: every parameter loop in
+    // Analyzer_Decl.cpp walks `param->type` by hand and eight of them can carry a
+    // default. Same shape as declareGenericParams above, found the same way -- by
+    // asking why a struct member's `= nosuchvar` is reported and a constructor
+    // parameter's is not. Held by Soundness_ParameterDefaults, one test per site.
+    //
+    // Called from the eight *definition* sites, and deliberately not from the two
+    // signature-registration passes over the same constructor parameters (struct
+    // and class), which would report every diagnostic twice.
+    //
+    // It visits and does not type-check. Comparing the default against the declared
+    // type is blocked on the integer ruling: stdlib/stdio.fin:87 and :109 write
+    // `nbytes: ulong = -1`, and `let x <ulong> = -1` is an error today, so the check
+    // would put two new diagnostics on a normative sample over a question the owner
+    // has not answered. KnownDefect_ParameterDefaults holds that half.
+    void visitParameterDefaults(const std::vector<std::unique_ptr<Parameter>>& params);
     bool checkReturnPaths(Statement* node);
     
     template <typename... Args>

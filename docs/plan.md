@@ -1943,6 +1943,84 @@ Suite: **357 tests, all passing**, corpus 50/50. Lane note: `src/types/**` and `
 crossing already disclosed, plus `CMakeLists.txt`, `tests/test_soundness.cpp`, and two expectation comments in
 `tests/samples/**`; no parser change.
 
+### A visitor nobody called
+
+`fun g(n: int = nosuchvar)` compiled clean. The byte-identical struct-member spelling,
+`struct S { pub v <int> = nosuchvar, }`, reports `Undefined variable 'nosuchvar'`. A parameter default was
+the only expression in the language that no pass ever visited.
+
+The cause is not a missing check. `SemanticAnalyzer::visit(Parameter&)` exists, resolves the parameter's type
+and walks the default -- and nothing dispatches to it. Every parameter list in the analyser is iterated by
+hand: eleven loops that read `param->name` and `param->type` and never `param->default_value`. So the visitor
+was correct and dead, and a check added inside it would have changed nothing. That is the same shape this wave
+has now hit three times -- `declareGenericParams` had eight copies, the parameter loops have eleven -- and the
+same lesson: in this codebase, "where is this handled?" and "where is this reached from?" are different
+questions, and the second one is the one that matters.
+
+The fix splits along a ruling, so it was built as two halves and only one landed.
+
+**The walk.** Ruling-free and now done: a helper, `visitParameterDefaults`, called from eight of the eleven
+loops. The three exclusions are deliberate. A struct constructor's parameters are walked twice, once to
+register the signature and once for the body, and a class constructor's likewise; the call belongs to the
+body pass only, or the diagnostic appears twice. The interface-constructor loop is unreachable for this
+purpose because `I(n: int = ...)` does not parse. `visit(Parameter&)` was left in place -- the Visitor
+interface requires it -- with a comment at its definition saying it is dead, so the next reader does not spend
+what this cost to find out.
+
+**The type check.** Written as `KnownDefect_ParameterDefaults` rather than as code, because it is blocked on
+the integer ruling: `stdlib/stdio.fin:87` and `:109` write `nbytes: ulong = -1`, and checking a default would
+put `Type mismatch: expected 'ulong', got 'int'` on two lines of a normative sample. That is ruling #1, and it
+now blocks two things.
+
+Twelve mutants over the unit's tests. The eight per-site mutants each delete one call, and each is killed by
+exactly the tests belonging to that site and no others -- which is the useful result, because it proves the
+ten walk tests map onto the eight sites with nothing redundant and nothing unreached. Making the helper a
+no-op restores the original defect and kills all ten at once. Adding the call to both constructor *signature*
+passes kills exactly the two constructor tests, which is what proves their "reported once" assertions bite.
+Dropping the helper's null guard kills four. And applying the blocked half naively -- `checkType` instead of
+`checkInitializer` -- kills three, of which one is the interesting one: `ANullDefaultIsStillAccepted`, because
+`stdlib/error.fin:11` writes `err_code: int = null` and a plain `checkType` has no null exemption. So the
+eventual shape of the blocked half is known before it is written rather than discovered after: it must be
+`checkInitializer`.
+
+Two of the twelve found problems, and for the second unit running, neither was in the compiler.
+
+The pair of tests asserting the diagnostic appears *once* went red against a correct compiler. They counted
+occurrences of `nosuchvar` in stderr, and the caret snippet echoes the offending source line -- which contains
+`nosuchvar`. Every correct single report looks like two. Count the message, not the identifier.
+
+And a mutant survived: moving the walk above the loop that defines the parameters in scope changed no test
+result. `ADefaultMayNameAnEarlierDeclaration` claimed to establish what a default may name, but it named a
+*global*, which is visible from the enclosing scope too, so it could not tell where the walk happened. The
+sibling-parameter case is what pins it -- `fun g(a: int, b: int = a)` -- and with that test added the mutant
+dies. Both findings are the same kind as the nullability wave's: over a correct implementation a weak test is
+invisible, and mutation is the only thing that looks.
+
+One pre-existing `KnownDefect` went red, which is the convention working. `AParameterDefaultIsNotAnalysedAtAll`
+had diagnosed this defect earlier, reached the wrong remedy (it proposed adding `checkType` to the dead
+visitor), and left an instruction for whoever fixed it: invert this, and check that the diagnostic points
+inside the default rather than at the function. It does -- column 16 in `fun f(x: int = nosuchthing)` is where
+the default expression starts -- so the inverted test asserts the column, in both the bare-name and the call
+spelling, since those take different paths and report different messages. Its two type-half siblings moved to
+`KnownDefect_ParameterDefaults` so the unit's evidence sits together.
+
+A second defect turned up in passing and was measured rather than fixed. A default does not make a parameter
+optional: the arity check computes `required` as the index of the last non-nullable parameter plus one, so
+nullability makes a parameter optional and nothing else does, and a default has no observable effect at a call
+site at all. Fixing it is not a line -- the arity check reads a `FunctionType`, which records only
+`param_types`, `return_type` and `is_vararg`, so it means a new field through eleven construction sites plus
+`substitute` and `clone`. By measurement it also ranks last: the corpus declares exactly three defaulted
+parameters (`stdlib/stdio.fin:87`, `:109`, `stdlib/error.fin:11`) and calls none of them, and the one call that
+would need this, `Error("The answer is forbidden")` at `blame_assert.fin:15`, is commented out. Corpus effect
+of the fix: zero diagnostics. Two `KnownDefect` tests hold it open with that reasoning attached.
+
+Corpus effect of what did land: none. 335 diagnostics before, 335 after, snapshot byte-identical -- which is
+the expected answer and worth confirming rather than assuming, since the three defaults the corpus does write
+are `-1` and `null` and both walk clean.
+
+Suite: **375 tests, all passing**, corpus 50/50. Lane note: `src/semantics/**` and `tests/test_soundness.cpp`;
+no parser change, no type-system change, no sample change.
+
 ## Rulings owed
 
 Every entry below is a question only the language owner can answer, discovered by measurement and blocking
@@ -1952,7 +2030,11 @@ exist yet and which will be written against whatever the answers turn out to be.
 so an answer converts directly into work rather than into more discussion.
 
 **Integers.** Is `-1` a legal unsigned constant by C wraparound, or must a maximum be spelled explicitly?
-(`stdlib/stdio.fin:107` and `:110` write it; parameter-default analysis is blocked on the answer.) Does an
+This one now blocks two things and the evidence is exact. `stdlib/stdio.fin:87` and `:109` both write
+`fun read(nbytes: ulong = -1)` -- a parameter default -- and `:110` compares `nbytes == -1`. A parameter
+default is now *visited* (see below), but it is deliberately not *type-checked*, because the check would put
+`Type mismatch: expected 'ulong', got 'int'` on two lines of a normative sample. `KnownDefect_ParameterDefaults`
+holds the gap open with a test naming this ruling as the blocker. Does an
 `int`-typed *expression* convert to unsigned implicitly as in C, or require a cast as in Rust and Zig?
 (Five `int` <- `ulong` diagnostics in the corpus.) What are the widths of `int`, `long`, `short` and `char`,
 and is `char` signed? (Nothing can range-check a literal until these are fixed, and the answer is ABI, so it
