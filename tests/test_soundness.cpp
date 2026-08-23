@@ -5408,3 +5408,121 @@ TEST(KnownDefect_Foreach, TheIterableIsNeverCheckedForBeingIterable) {
     EXPECT_NE(messagesOnly(stripAnsi(q.err)).find("nosuchthing"), std::string::npos)
         << stripAnsi(q.err);
 }
+
+// ---------------------------------------------------------------------------
+// `catch (Error as err)`: which side is the type.
+//
+// The corpus writes exactly one catch clause, readonly.fin:50, and it writes
+// `catch (Error as err)`. The grammar read the two the other way round --
+// `KW_CATCH LPAREN IDENTIFIER KW_AS type RPAREN`, so `Error` became the binding name
+// and `err` was handed to resolveTypeFromAST -- and the sample's single remaining
+// diagnostic was `Undefined type 'err'`, pointing at its own binding.
+//
+// Type-on-the-left is not a coin toss: every other `as` in Fin reads the same way.
+// `import stdio as io` and `extern original as local` (extern_as.fin, whose whole
+// subject it is) both name something that exists on the left and bind it on the right.
+// A catch clause that inverted that would be the only one, and the one corpus site
+// agrees with the rest of the language rather than with the grammar.
+
+TEST(Soundness_TryCatch, TheCatchClauseBindsTheTypeOnTheLeftToTheNameOnTheRight) {
+    // Three claims in one program, and the third is what rules out a fix that merely
+    // swaps the diagnostic: the type resolves, the name is bound, and the bound name
+    // carries the type's members. Swapping the slots without meaning it would leave
+    // `e.code` reporting on a struct called `e`.
+    const FincRun r = compile(
+        "struct MyErr {\n"
+        "  pub:\n"
+        "    code <int>,\n"
+        "}\n"
+        "fun main() <noret> { try { } catch (MyErr as e) { let c <int> = e.code; } }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`catch (T as name)` binds name to T:\n" << r.err;
+}
+
+TEST(Soundness_TryCatch, TheCatchBindingIsScopedToTheCatchBlock) {
+    // Both halves in one program for the reason Soundness_Foreach.TheIndexBindingIsScopedToTheLoop
+    // gives: before the swap the binding was undefined everywhere, so an
+    // after-the-block assertion on its own would have been green against the bug.
+    const FincRun r = compile(
+        "struct MyErr {\n"
+        "  pub:\n"
+        "    code <int>,\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  try { } catch (MyErr as e) { let inside <int> = e.code; }\n"
+        "  let outside <int> = e.code; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "the catch binding must not outlive its block:\n" << r.err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u)
+        << "exactly one: the use after the block. Two means the use inside it failed "
+           "too, and the scoping half of this test is vacuous.\n"
+        << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Undefined variable 'e'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_TryCatch, AnUnknownCatchTypeIsReportedAsAType) {
+    // The direct inversion of the bug. It reported `Undefined type 'err'` -- the name
+    // the author chose -- for a clause whose type was perfectly good; it must report
+    // the type, and only when the type is the thing that is missing.
+    const FincRun r = compile(
+        "fun main() <noret> { try { } catch (NoSuchErr as e) { } }\n");
+    EXPECT_EQ(r.exitCode, 1) << "an unresolved catch type must be reported:\n" << r.err;
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Undefined type 'NoSuchErr'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("'e'"), std::string::npos)
+        << "the binding name must not appear in a diagnostic about the type:\n"
+        << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// `readonly` is a run-time guarantee, not a compile-time one.
+//
+// This was booked as a defect -- "readonly is not enforced; a write from outside is
+// accepted" -- on the strength of a probe, and the sample it was booked against says
+// the opposite. readonly.fin:48-52 is
+//
+//     try {
+//         a.v1 = 5; // this will blame an error
+//     } catch (Error as err) {
+//         printf("ERROR: cannot change value of readonly members");
+//       }
+//
+// A write to a readonly member from outside the struct, wrapped in a `try` and expected
+// to *blame* -- Fin's run-time error mechanism -- and caught as an `Error`. A compiler
+// that rejected line 49 statically would make that sample unwritable, and the sample is
+// normative. So accepting the write is the ratified behaviour, and the missing half is
+// the run-time check, which belongs to codegen (wave 5) along with everything else that
+// has to exist at run time.
+//
+// Kept as a Soundness test rather than struck as a non-defect, because "the compiler
+// accepts this" is a thing a future readonly-enforcement change would silently break.
+// Whoever adds static enforcement has to come past this test and past readonly.fin.
+
+TEST(Soundness_Readonly, AWriteToAReadonlyMemberFromOutsideIsNotACompileTimeError) {
+    // readonly.fin:49 in miniature, minus the try/catch, which is not what makes it
+    // legal -- a `try` does not license its contents.
+    const FincRun r = compile(
+        "struct S {\n"
+        "  pub readonly v <int>,\n"
+        "}\n"
+        "fun main() <noret> { let a <S> = S{v: 10}; a.v = 5; }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "readonly.fin:49 requires this to compile -- the violation there is caught at "
+           "run time by `catch (Error as err)`, so static rejection would make a "
+           "normative sample unwritable. If enforcement is ruled to be static after all, "
+           "that ruling owns this test and readonly.fin:48-52.\n"
+        << r.err;
+}
+
+TEST(Soundness_Readonly, AReadonlyMemberIsStillReadableAndStillTypeChecked) {
+    // The other half, and the reason the test above is not simply "readonly is ignored":
+    // the modifier must not cost the member its type or its visibility. readonly.fin:46
+    // copies one into an `int` and :56 compares one against an int literal.
+    const FincRun r = compile(
+        "struct S {\n"
+        "  pub readonly v <int>,\n"
+        "}\n"
+        "fun main() <noret> { let a <S> = S{v: 10}; let bad <string> = a.v; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "a readonly member keeps its type:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}

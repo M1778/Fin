@@ -173,3 +173,76 @@ TEST(KnownDefect_BundledStdlib, TheNamespaceSelectorInAnImportIsNotChecked) {
            "(`grep -rn namespace_path src/` finds only the declaration).\n"
         << err;
 }
+
+// ---------------------------------------------------------------------------
+// Calling through a module qualifier.
+//
+// complex.fin:14 writes `stdio.printf("Big")` with its own comment saying "uses stdio
+// printf", and it reported `Type 'module<stdio>' does not have methods`. Reading a
+// module member already worked -- visit(MemberAccess&) has a NamespaceType branch and
+// `stdio.nosuch` reports `Namespace 'stdio' has no exported member 'nosuch'` -- but
+// visit(MethodCall&) went straight to getStructType, which knows nothing about
+// namespaces, so a member could be named and not called.
+//
+// These live here rather than in test_soundness.cpp because they need a module, and a
+// module means either the bundle or a two-file fixture. The bundle is the honest choice:
+// `stdio` exports `printf` because lib/std/stdio.fin declares it, and if that ever stops
+// being true these tests should say so.
+
+TEST(Soundness_Modules, AModuleFunctionIsCallableThroughADot) {
+    const std::string err = stripAnsi(compileBundled(
+        "import stdio;\n"
+        "fun main() <int> { stdio.printf(\"hi\\n\"); return 0; }\n").err);
+    EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_Modules, AModuleCallIsCheckedAgainstTheSignatureItResolvedTo) {
+    // The failure mode a namespace branch invites: resolve the member, then call it
+    // without looking at what it is. `println` takes one argument (lib/std/stdio.fin),
+    // so passing none must still be an arity error -- otherwise the branch is a hole in
+    // the call checking rather than a route into it.
+    //
+    // Not `printf`, which is the member complex.fin actually calls: it is variadic, and
+    // a variadic signature is exempt from the arity check entirely
+    // (checkCallArguments's `!sig.is_vararg` guard, and mutating that guard away kills
+    // four corpus samples). A vararg callee would have made this test green against a
+    // branch that skipped checking altogether.
+    const std::string err = stripAnsi(compileBundled(
+        "import stdio;\n"
+        "fun main() <int> { stdio.println(); return 0; }\n").err);
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("expects 1 arguments, got 0"), std::string::npos)
+        << "a call through a module must be checked like any other:\n" << err;
+}
+
+TEST(Soundness_Modules, AnUnknownModuleMemberIsReportedWhetherReadOrCalled) {
+    // Read and called must agree, and both must name the namespace. Before this the two
+    // spellings gave different diagnostics for the same mistake: the read said which
+    // module had no such export, the call said the module had no methods.
+    for (const char* code : {"import stdio;\nfun main() <int> { let x <int> = stdio.nosuch; return 0; }\n",
+                             "import stdio;\nfun main() <int> { stdio.nosuch(); return 0; }\n"}) {
+        const std::string err = stripAnsi(compileBundled(code).err);
+        EXPECT_NE(err.find("has no exported member 'nosuch'"), std::string::npos) << code << err;
+    }
+}
+
+TEST(KnownDefect_Modules, AModuleStructIsNotConstructibleThroughADot) {
+    // `stdio.IOError("x")` resolves the name -- lib/std/stdio.fin exports the struct --
+    // and then finds no FunctionType behind it, because a struct's constructors live on
+    // its StructType and the namespace branch only looks in the value table.
+    //
+    // Left alone because the dot is not the only half that is missing: `let e <stdio.IOError>;`
+    // is a *syntax* error (`unexpected DOT, expecting GT`), so a module's types cannot be
+    // named in a type position at all, and making them constructible while they stay
+    // unwritable would be a strange place to stop. The corpus writes neither -- complex.fin
+    // needs only the function call -- so both wait on whoever rules on namespace
+    // semantics. Inverts into Soundness_Modules.AModuleStructIsConstructibleThroughADot
+    // together with the type-position grammar.
+    const std::string err = stripAnsi(compileBundled(
+        "import stdio;\n"
+        "fun main() <int> { stdio.IOError(); return 0; }\n").err);
+    EXPECT_NE(errorCount(err), 0u)
+        << "FIXED: a module's struct is now constructible through a dot. Check that "
+           "`let e <stdio.IOError>;` parses too, then invert this.\n"
+        << err;
+}

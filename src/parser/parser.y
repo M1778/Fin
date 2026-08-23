@@ -2077,8 +2077,18 @@ delete_statement:
     ;
 
 try_catch_statement:
-    KW_TRY block KW_CATCH LPAREN IDENTIFIER KW_AS type RPAREN block {
-        $$ = std::make_unique<fin::TryCatch>(std::move($2), $5, std::move($7), std::move($9));
+    /* `catch (Error as err)` -- type on the left, binding on the right. This read the
+       two the other way round (`IDENTIFIER KW_AS type`), so readonly.fin:50 handed its
+       own binding name to resolveTypeFromAST and reported `Undefined type 'err'`.
+
+       The corpus writes one catch clause and it writes this order, and every other `as`
+       in Fin agrees with it: `import stdio as io` and `extern original as local`
+       (extern_as.fin, whose whole subject it is) both name something that exists on the
+       left and bind it on the right. Soundness_TryCatch holds all three claims --
+       the type resolves, the name is bound, and an unresolved *type* is what gets
+       reported. */
+    KW_TRY block KW_CATCH LPAREN type KW_AS IDENTIFIER RPAREN block {
+        $$ = std::make_unique<fin::TryCatch>(std::move($2), $7, std::move($5), std::move($9));
         $$->setLoc(@$);
     }
     ;

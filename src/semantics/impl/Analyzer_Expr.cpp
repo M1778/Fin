@@ -436,6 +436,43 @@ void SemanticAnalyzer::visit(MethodCall& node) {
     
     if (!objType) return; 
 
+    // A call through a module qualifier: `stdio.printf("Big")`, complex.fin:14, whose
+    // own comment says "uses stdio printf". Reading a module member already worked --
+    // visit(MemberAccess&) has this branch and `stdio.nosuch` reports which module has
+    // no such export -- but this function went straight to getStructType, which knows
+    // nothing about namespaces, so a member could be named and not called and the two
+    // spellings of the same mistake gave different diagnostics.
+    //
+    // The lookup and its failure message are deliberately the same as MemberAccess's, so
+    // that `stdio.nosuch` and `stdio.nosuch()` agree; Soundness_Modules.AnUnknownModuleMemberIsReportedWhetherReadOrCalled
+    // holds them together. What is *not* shared is the arity and argument checking, which
+    // has to be reached explicitly -- a branch that resolved a member and returned its
+    // return type without calling checkCallArguments would be a hole in the call checking
+    // rather than a route into it.
+    if (auto* ns = dynamic_cast<const NamespaceType*>(objType.get())) {
+        Symbol* sym = ns->scope->resolve(node.method_name);
+        if (!sym) {
+            error(node, fmt::format("Namespace '{}' has no exported member '{}'", ns->name, node.method_name));
+            lastExprType = nullptr;
+            return;
+        }
+        auto funcType = std::dynamic_pointer_cast<FunctionType>(sym->type);
+        if (!funcType) {
+            // Resolved, but not to something callable. A struct lands here: its
+            // constructors live on its StructType and this looks only in the value
+            // table, so `stdio.IOError()` is refused --
+            // KnownDefect_Modules.AModuleStructIsNotConstructibleThroughADot, which waits
+            // on the same ruling as `let e <stdio.IOError>;` (a syntax error today, so a
+            // module's types cannot be named in a type position at all).
+            error(node, fmt::format("'{}.{}' is not a function", ns->name, node.method_name));
+            lastExprType = nullptr;
+            return;
+        }
+        checkCallArguments(node, "Function", ns->name + "." + node.method_name, *funcType, node.args);
+        lastExprType = funcType->return_type;
+        return;
+    }
+
     auto structType = getStructType(objType, currentScope);
 
     if (!structType) {

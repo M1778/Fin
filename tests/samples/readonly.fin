@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`module not found: error` -- `readonly` members and the `pub:` labels parse now, but the standard library is on no search path, so the import on line 3 fails before line 9 is reached. The ratified `error` expectation for lines 46-49 cannot be written until it is"
+//@ ok
 import { Error } from error::std;
 
 @define printf(fmt: string, ...) <noret>;
