@@ -15,6 +15,20 @@ bool Type::isAssignableTo(const Type& other) const {
     if (this->equals(other)) return true;
     if (other.toString() == "auto") return true;
 
+    // A `T?` slot accepts a plain `T`. nullifier.fin:7 returns an `int?` member
+    // from a body whose declared return type is `int` under `fun?`, and :27
+    // assigns an `A?` call result into an `A?` binding.
+    //
+    // The two sources this must not answer for are a NullableType (`int?` into
+    // `string?` is a question about the inner types, not about both sides being
+    // nullable) and NullType (`null` fits *every* `T?`, whatever the inner type
+    // is). Both have their own overrides, and both call back into here, so
+    // stepping over them is also what stops the recursion.
+    if (auto* otherNullable = other.as<NullableType>()) {
+        if (!this->as<NullableType>() && !this->as<NullType>())
+            return this->isAssignableTo(*otherNullable->inner);
+    }
+
     if (auto* self = this->as<SelfType>()) {
       return self->originalStruct->isAssignableTo(other);
     }

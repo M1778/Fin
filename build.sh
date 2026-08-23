@@ -1,41 +1,45 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # ==============================================================================
-# Fin Compiler - Advanced Build Script
+# Fin Compiler - Build Script
 # ==============================================================================
+# Mirrors what .github/workflows/ci.yml does, so a green local run and a green
+# CI run mean the same thing.
 
-# Exit immediately if a command exits with a non-zero status
-set -e
+set -euo pipefail
 
 # --- Colors for Output ---
-BOLD="\033[1m"
-RED="\033[1;31m"
-GREEN="\033[1;32m"
-YELLOW="\033[1;33m"
-BLUE="\033[1;34m"
-RESET="\033[0m"
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  BOLD="\033[1m"; RED="\033[1;31m"; GREEN="\033[1;32m"
+  YELLOW="\033[1;33m"; BLUE="\033[1;34m"; RESET="\033[0m"
+else
+  BOLD=""; RED=""; GREEN=""; YELLOW=""; BLUE=""; RESET=""
+fi
 
 # --- Configuration ---
-BUILD_DIR="build"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_DIR="$REPO_ROOT/build"
 BUILD_TYPE="Debug"
+CONAN_PROFILE="$REPO_ROOT/conan/profiles/fin"
 RUN_TESTS=true
 CLEAN_BUILD=false
 VERBOSE=false
+WITH_LLVM=OFF
 
 # --- Helper Functions ---
 log_info() { echo -e "${BLUE}[INFO]${RESET} $1"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${RESET} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${RESET} $1"; }
-log_error() { echo -e "${RED}[ERROR]${RESET} $1"; }
+log_error() { echo -e "${RED}[ERROR]${RESET} $1" >&2; }
 
 print_banner() {
   echo -e "${BOLD}==============================================${RESET}"
-  echo -e "${BOLD}       Fin Compiler Build System (Linux)      ${RESET}"
+  echo -e "${BOLD}          Fin Compiler Build System           ${RESET}"
   echo -e "${BOLD}==============================================${RESET}"
 }
 
 check_dependency() {
-  if ! command -v $1 &>/dev/null; then
+  if ! command -v "$1" &>/dev/null; then
     log_error "$1 could not be found. Please install it."
     exit 1
   fi
@@ -47,6 +51,7 @@ usage() {
   echo "  --release       Build in Release mode (default: Debug)"
   echo "  --clean         Clean build directory before building"
   echo "  --no-test       Skip running tests after build"
+  echo "  --with-llvm     Link LLVM (ADR 0010 pins the major; see CMakeLists.txt)"
   echo "  --verbose       Enable verbose build output"
   echo "  --help          Show this help message"
   exit 0
@@ -58,6 +63,7 @@ while [[ "$#" -gt 0 ]]; do
   --release) BUILD_TYPE="Release" ;;
   --clean) CLEAN_BUILD=true ;;
   --no-test) RUN_TESTS=false ;;
+  --with-llvm) WITH_LLVM=ON ;;
   --verbose) VERBOSE=true ;;
   --help) usage ;;
   *)
@@ -74,85 +80,76 @@ print_banner
 # 1. Check Environment
 log_info "Checking dependencies..."
 check_dependency cmake
-check_dependency make
-check_dependency uvx conan
-check_dependency g++
-check_dependency llvm-config
+check_dependency conan
+check_dependency bison
+check_dependency flex
+
+if command -v ninja &>/dev/null; then
+  GENERATOR="Ninja"
+else
+  log_warn "ninja not found; falling back to the default CMake generator."
+  GENERATOR=""
+fi
 
 # 2. Clean if requested
 if [ "$CLEAN_BUILD" = true ]; then
   log_warn "Cleaning build directory..."
-  rm -rf $BUILD_DIR
+  rm -rf "$BUILD_DIR"
 fi
 
-# 3. Setup Build Directory
-if [ ! -d "$BUILD_DIR" ]; then
-  mkdir -p $BUILD_DIR
-  FIRST_RUN=true
-else
-  FIRST_RUN=false
+# 3. Conan Install
+#    conan/profiles/fin does `include(default)`, so `default` has to exist. It is
+#    machine-specific (it records the local compiler and its version) which is
+#    exactly why it is detected here rather than committed.
+if ! conan profile path default &>/dev/null; then
+  log_warn "No default Conan profile. Detecting..."
+  conan profile detect --force
 fi
 
-# 4. Conan Install
-log_info "Installing dependencies with Conan..."
-# Detect profile if missing
-if ! uvx conan profile list | grep -q "fin-debug"; then
-  log_warn "No default Conan profile found. Detecting..."
-  uvx conan profile detect --force
+log_info "Installing dependencies with Conan ($BUILD_TYPE)..."
+conan install "$REPO_ROOT" \
+  --output-folder="$BUILD_DIR" \
+  --build=missing \
+  -pr:a="$CONAN_PROFILE" \
+  -s build_type="$BUILD_TYPE"
+
+TOOLCHAIN="$BUILD_DIR/build/$BUILD_TYPE/generators/conan_toolchain.cmake"
+if [ ! -f "$TOOLCHAIN" ]; then
+  # Single-config generators put the generators folder one level up.
+  TOOLCHAIN="$BUILD_DIR/build/generators/conan_toolchain.cmake"
 fi
-
-uvx conan install . --output-folder=. --build=missing -s build_type=$BUILD_TYPE --profile=fin-debug
-
-# 5. CMake Configure
-log_info "Configuring CMake ($BUILD_TYPE)..."
-cd $BUILD_DIR
-
-CMAKE_ARGS="-DCMAKE_TOOLCHAIN_FILE=Debug/generators/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=$BUILD_TYPE -GNinja"
-if [ "$FIRST_RUN" = true ] || [ "$CLEAN_BUILD" = true ]; then
-  cmake .. $CMAKE_ARGS
-else
-  # Just refresh
-  cmake . $CMAKE_ARGS
-fi
-
-# 6. Build
-log_info "Compiling..."
-if [ "$VERBOSE" = true ]; then
-  cmake --build . -- -j$(nproc)
-else
-  cmake --build . -- -j$(nproc)
-fi
-
-if [ $? -eq 0 ]; then
-  log_success "Build complete!"
-else
-  log_error "Build failed."
+if [ ! -f "$TOOLCHAIN" ]; then
+  log_error "Conan toolchain not found under $BUILD_DIR/build."
   exit 1
 fi
 
-# 7. Run Tests
+# 4. CMake Configure
+log_info "Configuring CMake ($BUILD_TYPE)..."
+CMAKE_ARGS=(
+  -S "$REPO_ROOT"
+  -B "$BUILD_DIR"
+  -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"
+  -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+  -DFIN_WITH_LLVM="$WITH_LLVM"
+)
+[ -n "$GENERATOR" ] && CMAKE_ARGS+=(-G "$GENERATOR")
+cmake "${CMAKE_ARGS[@]}"
+
+# 5. Build
+log_info "Compiling..."
+BUILD_ARGS=(--build "$BUILD_DIR" --config "$BUILD_TYPE" --parallel)
+[ "$VERBOSE" = true ] && BUILD_ARGS+=(--verbose)
+cmake "${BUILD_ARGS[@]}"
+log_success "Build complete!"
+
+# 6. Run Tests
 if [ "$RUN_TESTS" = true ]; then
-  log_info "Running Tests..."
-
-  # Check if test executable exists
-  if [ -f "./tests/fin_tests" ]; then
-    cd tests
-    ./fin_tests
-    TEST_EXIT_CODE=$?
-    cd ..
-
-    if [ $TEST_EXIT_CODE -eq 0 ]; then
-      log_success "All tests passed!"
-    else
-      log_error "Some tests failed."
-      exit $TEST_EXIT_CODE
-    fi
-  else
-    log_warn "Test executable not found. Did the build succeed?"
-  fi
+  log_info "Running tests..."
+  ctest --test-dir "$BUILD_DIR" --build-config "$BUILD_TYPE" --output-on-failure
+  log_success "All tests passed!"
 else
   log_info "Skipping tests."
 fi
 
 echo ""
-log_success "Fin Compiler is ready at: ./$BUILD_DIR/finc"
+log_success "Fin Compiler is ready at: $BUILD_DIR/finc"

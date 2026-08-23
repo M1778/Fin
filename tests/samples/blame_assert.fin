@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 fun check(val: int) <void> {
     // Assert-like blame with message
     blame val > 0, "Value must be positive";

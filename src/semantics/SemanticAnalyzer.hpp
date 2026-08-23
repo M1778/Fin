@@ -107,10 +107,53 @@ private:
     void enterScope();
     void exitScope();
     
+    // Resolves a written type, honouring `TypeNode::is_nullable`. Every caller
+    // wants that, which is why the flag is read here and not at the twenty
+    // grammar sites that set it.
     std::shared_ptr<Type> resolveTypeFromAST(TypeNode* node);
+
+    // The body of the above, without the nullable wrap. Split out rather than
+    // handled at each `return` because there are eight of them and a new arm
+    // silently forgetting the wrap is exactly the bug this feature was.
+    std::shared_ptr<Type> resolveTypeUnwrapped(TypeNode* node);
+
     void error(ASTNode& node, const std::string& msg);
     bool checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected);
+
+    // checkType, except that `null` is accepted whatever the declared type is.
+    // For a declaration's initialiser and a member or parameter default only --
+    // see the comment on the definition for why the two cannot share one check.
+    bool checkInitializer(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected);
+
+    // Whether an integer constant written as `node` may take the type `target`.
+    //
+    // An integer constant has no type of its own until its context supplies one,
+    // which is what makes `let p <ulong> = 0;` and `blame myarr[0] == 0;` legal.
+    // It cannot live in PrimitiveType::isAssignableTo because the answer depends
+    // on the expression and not only on the two types: `1` and `i` both have type
+    // `int`, and only one of them may become a `uint`.
+    //
+    // Static because visit(BinaryOp&) asks the same question about an operand.
+    static bool constantFitsType(const ASTNode& node, const Type& target);
     bool checkConstraint(TypeNode* typeNode, std::shared_ptr<Type> actualType, std::shared_ptr<Type> constraint);
+
+    // Declares `<T>` / `<T: C>` into the current scope and resolves each
+    // constraint. Every declaration form that can be generic calls this, which is
+    // the point: the six sites had six near-identical loops, three of which
+    // resolved the constraint and three of which did not, so
+    // `fun f<T: NoSuchType>()` compiled clean while `struct S<T: NoSuchType>` did
+    // not. Held by Soundness_GenericBounds in tests/test_soundness.cpp, one
+    // test per site.
+    //
+    // Two passes on purpose: every name is defined before any constraint is
+    // resolved, so a constraint may refer to a parameter declared beside it or to
+    // the one it constrains -- `<T: Comparable<T>>`, `<T: Castable, U: T>`. The
+    // single-pass order the struct site used rejected both.
+    //
+    // `collect` receives the GenericTypes in declaration order, for the callers
+    // that also record them on a StructType as its generic_args.
+    void declareGenericParams(const std::vector<std::unique_ptr<GenericParam>>& params,
+                              std::vector<std::shared_ptr<Type>>* collect = nullptr);
     bool checkReturnPaths(Statement* node);
     
     template <typename... Args>

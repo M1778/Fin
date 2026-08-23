@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`module not found: collection` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107), so `Collection` and `Error` are undefined and a cascade follows. The whole file parses now, the `implements cast<...>(...)` form on line 50 included"
 #[stdimport] %{
 import { Collection } from collection::std;
 import { Error } from error::std;

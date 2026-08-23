@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 struct Vector3 {
     x <float>,
     y <float>,

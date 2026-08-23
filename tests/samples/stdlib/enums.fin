@@ -1,7 +1,9 @@
+//@ normative
+//@ unimplemented "`compiler.enums.resolve_id(value)` at 13:11 -- \"Undefined variable 'compiler'\"; `#[use(compiler)]` on line 10 grants the special function a compiler component, and nothing binds that name. `@getenumkeyid(value)` on line 18 parses now, and is then reported as an undefined function"
 namespace std {
 #[export]
 #[type(enum)]
-pub type EnumType = any implements Enum;
+pub type EnumType = any implements <Enum>;
 
 #[llvm_name="_getenumkeyid"]
 #[private]

@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`module not found: types` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107), so all three imports fail and a cascade follows. The whole file parses now, `pub implements c_printf = printf;` on line 15 included"
 #[stdimport] %{
 import { Any } from types::std;
 import { Error } from error::std;

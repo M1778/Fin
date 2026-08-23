@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`Type '[int; fixed]' is not a struct` at 14:26 -- `a.length` on a fixed-size array. The colon `for` header, `do...while` and the parenthesised `foreach` (both bindings) parse now, and the `m1778 { }` loop form is gone by the ratified wave 2 edit"
 @define printf(fmt: string, ...) <noret>;
 
 
@@ -44,7 +46,4 @@ fun main() <noret> {
     let b <auto> = recursive(5);
 
     // Special loop (infinite loop => while true):
-    m1778 { // using the m1778 keyword and LBRACE AND RBRACE means this is a infinite loop and you'll have to exit out of it using `break`
-        break;
-    }
   }

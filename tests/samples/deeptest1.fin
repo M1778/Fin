@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 
 @define printf(fmt: string, ...) <noret>;
 

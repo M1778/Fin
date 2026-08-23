@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`return interface { ... }` at 20:16 -- \"unexpected KW_INTERFACE\". An interface literal is an expression and the AST has no node for one; ADR 0004 makes `accept` pure virtual, so adding a node means adding a `visit` to src/ast/Visitor.hpp. `@implements(struct_, iface)` as an expression on line 6 parses now"
 
 
 fun compatible(iface: $interface, struct_: $struct) <bool> {

@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`type Output = Any<...>;` on line 6 -- \"Undefined type 'Any'\"; the analyzer registers neither the `Any` meta-type nor `any`. Every operator declaration in the file parses now, the compound-assignment forms from line 41 on included. The diagnostic renders at 6:15, where `Any` is written"
 namespace std { // std namespace
 namespace ops { // std::ops namespace
 #[export] %{

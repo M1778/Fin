@@ -1,3 +1,5 @@
+//@ aspirational
+//@ unimplemented "`format!(...)` at 26:16 -- \"Undefined macro 'format!'\"; nothing defines a formatting macro and there is no prelude. The constructor member-initialiser list on line 40 parses now"
 @define printf(fmt: string, ...) <noret>;
 @define free(ptr: &void ) <noret>;
 
@@ -35,7 +37,7 @@ struct Person { // a normal popular example
     name <string>,
     age <int>,
 
-    Person():age(10), name("Hello")( { // this is a constructor
+    Person():age(10), name("Hello") { // this is a constructor
                // we're using c++-like variable assignment in constructor (this works best with const declared variables
                // constructors with no parameters intake
 	       // we could just assign them like `self.age = 10;` but this is easier

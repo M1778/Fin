@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 interface Person {
    pub name <string>;
    pub fun get_name() <string>;

@@ -70,7 +70,12 @@ void SemanticAnalyzer::visit(Literal& node) {
         case ASTTokenKind::FLOAT:   lastExprType = currentScope->resolveType("float"); break;
         case ASTTokenKind::STRING_LITERAL:  lastExprType = currentScope->resolveType("string"); break;
         case ASTTokenKind::BOOL:    lastExprType = currentScope->resolveType("bool"); break;
-        case ASTTokenKind::KW_NULL: lastExprType = std::make_shared<PointerType>(currentScope->resolveType("void")); break;
+        // Was `&void`, which bought pointer assignability for free and cost
+        // every diagnostic about it: `let x <int> = null` reported "got '&void'",
+        // naming a pointer type in a program with no pointer in it. NullType is
+        // assignable to every `T?` and every `&T` and to nothing else -- see
+        // src/types/NullableType.hpp.
+        case ASTTokenKind::KW_NULL: lastExprType = std::make_shared<NullType>(); break;
         default: lastExprType = nullptr;
     }
 }
@@ -167,7 +172,33 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
     if (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ ||
         node.op == ASTTokenKind::LT || node.op == ASTTokenKind::GT ||
         node.op == ASTTokenKind::LTEQ || node.op == ASTTokenKind::GTEQ) {
-        checkType(*node.right, rightType, leftType);
+        // `0 == a` and `a == 0` are the same question, so a constant is looked for
+        // on both sides. Without this the left operand is the expectation and a
+        // constant on the left makes the *variable* the error: `blame 0 == a` for a
+        // `uint` a reported "expected 'int', got 'uint'".
+        //
+        // Only constants are treated symmetrically. Whether two differently-typed
+        // variables may be compared at all is a separate question, so when neither
+        // side is a constant that fits, the check runs exactly as it did before and
+        // reports at the same operand with the same message.
+        // `x == null` is legal whatever x is, and so is `null == x`.
+        // nullifier.fin:40 compares a *denullified* `_` -- a plain `int` by then --
+        // with null, and the sample's own gloss (`assert @unpacked(_) == null`)
+        // makes that the intended reading rather than a slip. stdlib/error.fin:12
+        // does the same with a plain `int` parameter. Assignability is the wrong
+        // question to ask about the one literal every type can be compared to.
+        //
+        // Only for `==` and `!=`. `x < null` falls through and is still reported,
+        // because no sample orders anything against null and inventing an order
+        // would be a ruling.
+        const bool nullComparison = (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ)
+                                    && (isNullLiteral(leftType) || isNullLiteral(rightType));
+
+        if (!nullComparison &&
+            !constantFitsType(*node.right, *leftType) &&
+            !constantFitsType(*node.left, *rightType)) {
+            checkType(*node.right, rightType, leftType);
+        }
         lastExprType = currentScope->resolveType("bool");
         return;
     }
@@ -187,6 +218,27 @@ void SemanticAnalyzer::visit(UnaryOp& node) {
     if (node.op == ASTTokenKind::AMPERSAND) {
         lastExprType = std::make_shared<PointerType>(type);
     } 
+    else if (node.op == ASTTokenKind::QUESTION) {
+        // Postfix denullify -- nullifier.fin:31 `make_A(-1)?`, :42
+        // `make_A(10)?.get_b()?`, undefined_behavior.fin:16 `add2()?`. It strips
+        // exactly one level: `parser.y` gives it its own DENULLIFY precedence, and
+        // the grammar admits no `T??` spelling for it to have to unwrap twice.
+        //
+        // The panic when the value *is* null is wave 4's -- there is no code
+        // generator yet -- and it does not change the type either way, which is
+        // why the whole runtime half of this operator is absent here.
+        if (auto* nullable = type->as<NullableType>()) {
+            lastExprType = nullable->inner;
+        } else {
+            // A `?` on something that was not nullable. nullifier.fin:36 says the
+            // `any` case "should be an error", but `any` is not a resolved type at
+            // all yet (docs/plan.md, Rulings owed), and no sample denullifies an
+            // ordinary value. The identity, rather than a guess: a wrong error
+            // here would be worse than a missing one, because it would reject
+            // programs the corpus has not ruled on.
+            lastExprType = type;
+        }
+    }
     else if (node.op == ASTTokenKind::MULT) {
         if (auto* ptr = dynamic_cast<const PointerType*>(type.get())) {
             lastExprType = ptr->pointee;
@@ -257,8 +309,30 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
     size_t expected = funcType->param_types.size();
     size_t actual = node.args.size();
 
-    if (!funcType->is_vararg && actual != expected) {
-        error(node, fmt::format("Function '{}' expects {} arguments, got {}", funcName, expected, actual));
+    // A nullable parameter is optional at the call site. nullifier.fin:39 calls
+    // `make_A()` with no arguments and says why: "since make_A says \"n?: int\" we
+    // know that n can be null and we don't need to pass any arguments".
+    //
+    // The minimum is one past the *last* required parameter rather than the count
+    // of required ones, because arguments bind positionally: `(a?: int, b: int)`
+    // still needs both written, `(a: int, b?: int)` needs one. That falls out of
+    // positional binding and needs no rule about which order the two kinds may
+    // appear in -- which matters, because the corpus only ever writes the trailing
+    // form and a rule invented here would be unratified.
+    size_t required = 0;
+    for (size_t i = 0; i < expected; ++i) {
+        if (!funcType->param_types[i]->as<NullableType>()) required = i + 1;
+    }
+
+    if (!funcType->is_vararg && (actual < required || actual > expected)) {
+        if (required == expected) {
+            error(node, fmt::format("Function '{}' expects {} arguments, got {}", funcName, expected, actual));
+        } else {
+            // "expects 2 arguments, got 0" is a lie about a function one of whose
+            // parameters is optional, so the range is spelled out.
+            error(node, fmt::format("Function '{}' expects between {} and {} arguments, got {}",
+                                    funcName, required, expected, actual));
+        }
     }
 
     for (size_t i = 0; i < actual; ++i) {
@@ -378,7 +452,12 @@ void SemanticAnalyzer::visit(NewExpression& node) {
     for(auto& f : node.init_fields) f.second->accept(*this);
     
     auto allocatedType = resolveTypeFromAST(node.type.get());
-    lastExprType = std::make_shared<PointerType>(allocatedType);
+    // A PointerType over a null pointee is worse than no type at all: it is
+    // non-null, so every `if (!type) return;` downstream lets it through, and the
+    // first toString() -- checkType's own error message, usually -- dereferences
+    // the null. `new Nope{}` died in PointerType.cpp:6 that way. resolveTypeFromAST
+    // has already reported why it failed, so there is nothing to add here.
+    lastExprType = allocatedType ? std::make_shared<PointerType>(allocatedType) : nullptr;
 }
 
 void SemanticAnalyzer::visit(MemberAccess& node) {
@@ -502,6 +581,16 @@ void SemanticAnalyzer::visit(SizeofExpression& node) {
 }
 
 void SemanticAnalyzer::visit(LambdaExpression& node) {
+    // The scope is entered before the signature is resolved, and the lambda's own
+    // type parameters are registered in it first, because `<T>(m: T) <T> => m`
+    // declares T and then immediately uses it: resolving the signature outside
+    // the scope left T undefined in the one place it is introduced, and the
+    // parameter it typed undefined in the body. This mirrors what
+    // visit(FunctionDeclaration&) does at Analyzer_Decl.cpp:43.
+    enterScope();
+
+    declareGenericParams(node.generic_params);
+
     std::shared_ptr<Type> retType = nullptr;
     if (node.return_type) {
         retType = resolveTypeFromAST(node.return_type.get());
@@ -509,8 +598,6 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
         retType = currentScope->resolveType("void"); 
     }
 
-    enterScope();
-    
     std::vector<std::shared_ptr<Type>> paramTypes;
     for(auto& param : node.params) {
         auto t = resolveTypeFromAST(param->type.get());
@@ -535,7 +622,10 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
     context.currentFuncReturnType = prevRet;
     exitScope();
     
-    lastExprType = std::make_shared<FunctionType>(paramTypes, retType);
+    // Not when the return type did not resolve: FunctionType dereferences it in
+    // toString(), and nullptr already means "unknown, stop asking" to every
+    // reader of lastExprType.
+    lastExprType = retType ? std::make_shared<FunctionType>(paramTypes, retType) : nullptr;
 }
 
 void SemanticAnalyzer::visit(QuoteExpression& node) {
@@ -550,8 +640,19 @@ void SemanticAnalyzer::visit(TernaryOp& node) {
     node.false_expr->accept(*this);
     auto f = lastExprType;
     if (t && f) {
-        checkType(*node.false_expr, f, t);
-        lastExprType = t;
+        // A ternary has no expected branch either. When one branch is an integer
+        // constant it takes the other branch's type, and the *other* branch's type
+        // is the result -- otherwise `true : 1 ? a` for a `uint` a would report the
+        // variable as the error and then hand `int` to whatever consumes it, which
+        // is two wrong diagnostics from one constant.
+        if (constantFitsType(*node.false_expr, *t)) {
+            lastExprType = t;
+        } else if (constantFitsType(*node.true_expr, *f)) {
+            lastExprType = f;
+        } else {
+            checkType(*node.false_expr, f, t);
+            lastExprType = t;
+        }
     }
 }
 

@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`Type mismatch: expected '&Vec2<float>', got '&Self'` at 59:28 -- the `priv:` and `pub:` visibility labels parse now; the analyzer does not resolve `Self` to the enclosing type"
 @define printf(fmt: string, ...) <noret>;
 @define sin(f: float) <float>;
 @define cos(f: float) <float>;

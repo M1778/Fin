@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`module not found: error` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107), so `Error` is undefined and a cascade follows. The whole file parses now, `readonly restrict <&Self<T>>;` on line 16 included"
 #[stdimport]
 import { Error } from error::std;
 

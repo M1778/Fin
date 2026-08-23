@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 /* [WIP]
 import { Collection } from collection::std;
 import { HashMap } from hashmap::std;

@@ -1,0 +1,46 @@
+# Line endings are decided here, once, rather than per checkout.
+#
+# `\r\n` is one terminator and `\r` is never a column, so a CRLF sample would
+# report diagnostics at the wrong column on a Windows checkout. Seventeen
+# samples were committed with CRLF; normalising them fixes the files, and this
+# file is what stops it recurring.
+
+# Default: let git detect text and store it with LF.
+* text=auto eol=lf
+
+# Fin sources.
+*.fin text eol=lf
+
+# C/C++ sources and headers.
+*.c    text eol=lf
+*.h    text eol=lf
+*.cc   text eol=lf
+*.cpp  text eol=lf
+*.hpp  text eol=lf
+*.hh   text eol=lf
+
+# flex and bison inputs: both tools are line oriented.
+*.l text eol=lf
+*.y text eol=lf
+
+# Build and CI.
+CMakeLists.txt text eol=lf
+*.cmake        text eol=lf
+*.yml          text eol=lf
+*.yaml         text eol=lf
+*.json         text eol=lf
+*.py           text eol=lf
+*.sh           text eol=lf diff=bash
+*.md           text eol=lf
+
+# Windows shells need their own terminator.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Never touched.
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.gz   binary
+*.zip  binary

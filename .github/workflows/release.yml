@@ -1,0 +1,394 @@
+# ADR 0010: the matrix that proves finc builds is the thing that ships it.
+#
+# Six archives, named `finc-<semver>-<rust-target-triple>`, because `finn` builds
+# the expected asset name from its own build-time target constant.  Matching on
+# an OS substring alone is the bug in `finn`'s download.rs:62-65 that hands an
+# arm64 user an x86_64 build; a name carrying both OS and arch makes that
+# mismatch impossible rather than merely discouraged.
+#
+# Every archive unpacks to exactly `bin/finc[.exe]` and `lib/std/**`.  There is
+# no version directory inside: `finn` supplies the versioned parent.
+#
+# Each sha256 is published twice -- as an `<asset>.sha256` sidecar next to the
+# asset, and inside the version index.  The index is authoritative; the sidecar
+# is for a human with curl.  The index is generated here on every release and is
+# never hand-maintained, and it is fetched by `finn` at runtime from
+# <server>/<repo>/releases/latest/download/index.json.
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  FIN_BUILD_TYPE: Release
+  WINFLEXBISON_URL: https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip
+  WINFLEXBISON_SHA256: 8d324b62be33604b2c45ad1dd34ab93d722534448f55a16ca7292de32b6ac135
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Conan
+        run: python -m pip install "conan>=2.4,<3"
+
+      - name: Resolve and check the version
+        id: v
+        run: |
+          # `project(FinCompiler VERSION ...)` in CMakeLists.txt is the only
+          # place the compiler's version is written down.  conanfile.py's
+          # set_version() reads it from there and Version.hpp consumes the
+          # FINC_VERSION macro CMake defines from it, so there is nothing here to
+          # keep in step -- only something to confirm.  Reading it twice, once
+          # through the recipe and once directly, is what confirms it.
+          version="$(conan inspect . -f json \
+                     | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          cmake_version="$(sed -n 's/^project(FinCompiler VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
+          if [ -z "$version" ] || [ -z "$cmake_version" ]; then
+            echo "::error::could not read the version (conan '$version', CMakeLists '$cmake_version')"
+            exit 1
+          fi
+          if [ "$version" != "$cmake_version" ]; then
+            echo "::error::conan reports $version, CMakeLists.txt says $cmake_version"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+            if [ "$tag" != "v$version" ]; then
+              echo "::error::tag $tag does not match project version $version (expected v$version)"
+              exit 1
+            fi
+          else
+            tag="v$version"
+          fi
+          case "$version" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing finc $version as $tag (prerelease=$prerelease)"
+
+      - name: Refuse to ship a toolchain with no standard library
+        run: |
+          # `finn` pins a compiler version per project and lib/std/ ships inside
+          # the versioned toolchain directory, so an archive without it is a
+          # toolchain that cannot compile anything that imports the standard
+          # library.  Failing here is the point.
+          if [ ! -d lib/std ] || [ -z "$(find lib/std -name '*.fin' -print -quit)" ]; then
+            echo "::error::lib/std/ is missing or contains no .fin files; refusing to build release archives."
+            exit 1
+          fi
+          echo "lib/std contains $(find lib/std -name '*.fin' | wc -l) .fin files"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            conan_arch: x86_64
+            generator: Ninja
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            conan_arch: armv8
+            generator: Ninja
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            conan_arch: x86_64
+            generator: Ninja
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            conan_arch: armv8
+            generator: Ninja
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            conan_arch: x86_64
+            generator: Visual Studio 17 2022
+            vs_platform: x64
+    env:
+      FIN_VERSION: ${{ needs.preflight.outputs.version }}
+      FIN_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Conan
+        run: python -m pip install "conan>=2.4,<3"
+
+      - name: Install Ninja
+        if: matrix.generator == 'Ninja'
+        run: python -m pip install ninja
+
+      - name: Install bison and flex (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison flex
+
+      - name: Install bison and flex (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install bison flex
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Install bison and flex (Windows)
+        if: runner.os == 'Windows'
+        # PowerShell rather than bash for this one step: Git for Windows does not
+        # reliably ship unzip, and Expand-Archive is on every Windows runner
+        # including the arm64 one.
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:WINFLEXBISON_URL -OutFile winflexbison.zip
+          $got = (Get-FileHash winflexbison.zip -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:WINFLEXBISON_SHA256) {
+            throw "winflexbison.zip has sha256 $got, expected $env:WINFLEXBISON_SHA256"
+          }
+          $dest = Join-Path $env:RUNNER_TEMP 'winflexbison'
+          Expand-Archive -Path winflexbison.zip -DestinationPath $dest -Force
+          Add-Content -Path $env:GITHUB_PATH -Value $dest
+
+      - name: Build
+        run: |
+          conan profile detect --force
+          conan install . \
+            --output-folder=build \
+            --build=missing \
+            -pr:a=conan/profiles/fin \
+            -s arch=${{ matrix.conan_arch }} \
+            -s build_type="$FIN_BUILD_TYPE"
+          tc="$(find build -name conan_toolchain.cmake -print | head -n 1)"
+          if command -v cygpath >/dev/null; then tc="$(cygpath -m "$(pwd)")/$tc"; else tc="$(pwd)/$tc"; fi
+          args=(-S . -B build -G "${{ matrix.generator }}"
+                -DCMAKE_TOOLCHAIN_FILE="$tc"
+                -DCMAKE_BUILD_TYPE="$FIN_BUILD_TYPE"
+                -DFIN_BUILD_TESTS=OFF)
+          if [ -n "${{ matrix.vs_platform }}" ]; then args+=(-A "${{ matrix.vs_platform }}"); fi
+          cmake "${args[@]}"
+          cmake --build build --config "$FIN_BUILD_TYPE" --parallel
+
+      - name: Stage the archive layout
+        run: |
+          rm -rf stage
+          cmake --install build --config "$FIN_BUILD_TYPE" --prefix stage
+          # The layout is a promise to `finn`, so it is asserted rather than
+          # assumed: bin/finc[.exe] plus lib/std/**, and nothing above them.
+          if [ ! -f stage/bin/finc ] && [ ! -f stage/bin/finc.exe ]; then
+            echo "::error::stage/bin/finc[.exe] is missing after install"
+            ls -R stage || true
+            exit 1
+          fi
+          if [ -z "$(find stage/lib/std -name '*.fin' -print -quit 2>/dev/null)" ]; then
+            echo "::error::stage/lib/std/**.fin is missing after install"
+            ls -R stage || true
+            exit 1
+          fi
+          # The archive name promises an architecture; this reads the machine
+          # field out of the binary and refuses to ship a name that lies.
+          binary=stage/bin/finc
+          [ -f "$binary" ] || binary=stage/bin/finc.exe
+          python3 .github/scripts/check_arch.py "$binary" "$FIN_TARGET"
+          ls -R stage
+
+      - name: Archive (tar.gz)
+        if: runner.os != 'Windows'
+        run: tar -czf "finc-$FIN_VERSION-$FIN_TARGET.tar.gz" -C stage bin lib
+
+      - name: Archive (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path stage/bin, stage/lib `
+            -DestinationPath "finc-$env:FIN_VERSION-$env:FIN_TARGET.zip" `
+            -CompressionLevel Optimal
+
+      - name: Checksum
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            asset="finc-$FIN_VERSION-$FIN_TARGET.zip"
+          else
+            asset="finc-$FIN_VERSION-$FIN_TARGET.tar.gz"
+          fi
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+          cat "$asset.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            finc-*.tar.gz
+            finc-*.zip
+            finc-*.sha256
+
+  # musl is built inside an Alpine container rather than on the host, so the
+  # binary a user downloads has no glibc in it at all.  Docker rather than
+  # `container:` so that checkout and artifact upload stay on the host runner.
+  build-musl:
+    name: x86_64-unknown-linux-musl
+    needs: preflight
+    runs-on: ubuntu-24.04
+    env:
+      FIN_VERSION: ${{ needs.preflight.outputs.version }}
+      FIN_TARGET: x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and stage in Alpine
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.20 sh -eux -c '
+            apk add --no-cache build-base cmake ninja bison flex flex-dev \
+                               python3 py3-pip git perl linux-headers
+            pip install --break-system-packages "conan>=2.4,<3"
+            conan profile detect --force
+            conan install . --output-folder=build-musl --build=missing \
+              -pr:a=conan/profiles/fin -s build_type=Release
+            tc="$(find build-musl -name conan_toolchain.cmake -print | head -n 1)"
+            cmake -S . -B build-musl -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="/src/$tc" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DFIN_BUILD_TESTS=OFF \
+              -DCMAKE_EXE_LINKER_FLAGS=-static
+            cmake --build build-musl --parallel
+            rm -rf stage-musl
+            cmake --install build-musl --prefix stage-musl
+            ldd stage-musl/bin/finc || true
+          '
+          if [ ! -f stage-musl/bin/finc ]; then
+            echo "::error::stage-musl/bin/finc is missing after install"
+            exit 1
+          fi
+          if [ -z "$(find stage-musl/lib/std -name '*.fin' -print -quit 2>/dev/null)" ]; then
+            echo "::error::stage-musl/lib/std/**.fin is missing after install"
+            exit 1
+          fi
+          python3 .github/scripts/check_arch.py stage-musl/bin/finc "$FIN_TARGET"
+
+      - name: Archive and checksum
+        run: |
+          asset="finc-$FIN_VERSION-$FIN_TARGET.tar.gz"
+          sudo chown -R "$(id -u):$(id -g)" stage-musl
+          tar -czf "$asset" -C stage-musl bin lib
+          sha256sum "$asset" > "$asset.sha256"
+          cat "$asset.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-x86_64-unknown-linux-musl
+          if-no-files-found: error
+          path: |
+            finc-*.tar.gz
+            finc-*.sha256
+
+  publish:
+    name: publish
+    needs: [preflight, build, build-musl]
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FIN_VERSION: ${{ needs.preflight.outputs.version }}
+      FIN_TAG: ${{ needs.preflight.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: asset-*
+          merge-multiple: true
+
+      - name: Check that all six archives are present and intact
+        run: |
+          cd dist
+          expected="
+          finc-$FIN_VERSION-x86_64-unknown-linux-gnu.tar.gz
+          finc-$FIN_VERSION-aarch64-unknown-linux-gnu.tar.gz
+          finc-$FIN_VERSION-x86_64-unknown-linux-musl.tar.gz
+          finc-$FIN_VERSION-x86_64-apple-darwin.tar.gz
+          finc-$FIN_VERSION-aarch64-apple-darwin.tar.gz
+          finc-$FIN_VERSION-x86_64-pc-windows-msvc.zip
+          "
+          missing=0
+          for f in $expected; do
+            if [ ! -f "$f" ]; then echo "::error::missing asset $f"; missing=1; fi
+            if [ ! -f "$f.sha256" ]; then echo "::error::missing sidecar $f.sha256"; missing=1; fi
+          done
+          [ "$missing" = 0 ] || exit 1
+          # An asset nobody expected is as much of a problem as a missing one:
+          # `finn` matches on the name, so a stray name is a name it may pick.
+          for f in *; do
+            case "$f" in
+              *.sha256) continue ;;
+            esac
+            echo "$expected" | tr -s '[:space:]' '\n' | grep -qx "$f" || {
+              echo "::error::unexpected asset $f"; exit 1; }
+          done
+          cat ./*.sha256 | sha256sum -c -
+          ls -l
+
+      - name: Generate the version index
+        run: |
+          # The index is generated from the assets that were just built, plus the
+          # index attached to the previous release.  Nothing here is edited by
+          # hand, so the index cannot disagree with what shipped.
+          mkdir -p prev
+          gh release download --pattern index.json --dir prev 2>/dev/null \
+            || echo "no previous index.json; starting a new index"
+          python3 .github/scripts/build_index.py \
+            --version "$FIN_VERSION" \
+            --tag "$FIN_TAG" \
+            --prerelease "${{ needs.preflight.outputs.prerelease }}" \
+            --base-url "${{ github.server_url }}/${{ github.repository }}/releases/download/$FIN_TAG" \
+            --dist dist \
+            --previous prev/index.json \
+            --output index.json
+          cat index.json
+
+      - name: Create the release
+        run: |
+          notes="finc $FIN_VERSION
+          
+          Each archive unpacks to \`bin/finc\` and \`lib/std/\`.  Verify a download with
+          its \`.sha256\` sidecar; \`index.json\` carries the authoritative sums and is
+          what \`finn\` reads."
+          flags=()
+          if [ "${{ needs.preflight.outputs.prerelease }}" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$FIN_TAG" \
+            --title "finc $FIN_VERSION" \
+            --notes "$notes" \
+            "${flags[@]}" \
+            dist/* index.json

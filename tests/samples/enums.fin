@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`module not found: error` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107 looks for <exe dir>/../lib/std, which no build produces), so `Error` is undefined and a cascade follows. The enum member payloads on lines 8-15 parse now"
 import { Error } from error::std;
 
 @define printf(fmt: string, ...) <noret>;

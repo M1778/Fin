@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`module not found: operators` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107), so `Error` and the operator interfaces are undefined and a cascade follows. The whole file parses now, the `@implements Collection<T>` overwriter on line 93 included"
 #[stdimport] %{ // multi set attribute for statements
 import { Index, IndexAssign } from operators::std;
 import { Error } from error::std;

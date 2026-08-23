@@ -1,0 +1,2423 @@
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "Corpus.hpp"
+#include "Pipeline.hpp"
+#include "ast/decls/ClassDecl.hpp"
+#include "ast/decls/Program.hpp"
+#include "semantics/SemanticAnalyzer.hpp"
+#include "types/StructType.hpp"
+
+// The soundness defects listed at the top of docs/plan.md, each pinned by a test
+// that runs the real compiler. They are gathered in one file because they share a
+// convention, and the convention is the reason the file exists.
+//
+// Two suites, and the difference between them is which direction a failure means.
+//
+//   `Soundness_*`   asserts what the compiler must do. A failure is a regression.
+//                   These must pass forever.
+//
+//   `KnownDefect_*` asserts what the compiler does *wrong today*, verified by
+//                   running it. These pass now. **A failure here is good news: it
+//                   means the defect was fixed.** The fixer inverts the assertion,
+//                   moves the test into `Soundness_*`, and strikes the defect from
+//                   docs/plan.md. Every one of them names the correct behaviour in
+//                   its failure message, so the flip needs no archaeology.
+//
+// This is the same discipline the corpus uses for `//@ unimplemented "<reason>"`
+// (ADR 0008): record what happens now, so that behaviour changing is what trips the
+// alarm. A defect nobody asserts is a defect that gets fixed and un-fixed in
+// silence, and a defect asserted as `EXPECT_TRUE(broken)` with no note is a booby
+// trap for whoever fixes it.
+//
+// A `KnownDefect` is not a licence. Each one accepts a wrong program, so each is
+// worth more than the feature work queued behind it.
+
+namespace fs = std::filesystem;
+using namespace fin::testing;
+
+namespace {
+
+// A temp .fin file. test_cli.cpp has its own; duplicated rather than shared
+// because these two files have no other reason to be coupled, and the copy is
+// nine lines.
+class Src {
+public:
+    explicit Src(const std::string& contents) {
+        path_ = uniqueTempPath("fin_sound", ".fin");
+        std::ofstream f(path_, std::ios::binary);
+        f.write(contents.data(), (std::streamsize)contents.size());
+    }
+    ~Src() { std::error_code ec; fs::remove(path_, ec); }
+    std::string str() const { return path_.string(); }
+
+private:
+    fs::path path_;
+};
+
+// Compiles a string and returns what the machine contract says (ADR 0009):
+// 0 accepted, 1 rejected with diagnostics.
+FincRun compile(const std::string& code) {
+    Src s(code);
+    return runFinc({s.str()});
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Interface fields are not checked at all.
+//
+// Analyzer_Decl.cpp resolves an interface's member types without ever calling
+// defineField, so StructType::implements (StructType.cpp) has no fields to
+// compare and checks methods and constructors only. Every interface contract in
+// the standard library is decorative until this is fixed, which is what makes it
+// the most serious item in the plan rather than merely the oldest.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Interfaces, AMissingMethodIsRejected) {
+    // The control. Method checking works, which is what localises the defect to
+    // fields: without this test, "interfaces are unchecked" would fit the
+    // evidence just as well, and the fix would be aimed at the wrong function.
+    auto r = compile(
+        "interface I { fun m(self: &Self) <int>; }\n"
+        "struct S : <I> { y <int>, }\n");
+    EXPECT_NE(r.exitCode, 0) << "a struct missing a required method must be rejected";
+    EXPECT_NE(r.err.find("does not implement"), std::string::npos) << r.err;
+}
+
+TEST(KnownDefect_Interfaces, AMissingFieldIsAccepted) {
+    auto r = compile(
+        "interface I { x <int>; }\n"
+        "struct S : <I> { y <int>, }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: a struct that does not carry a required field is now rejected. "
+           "Invert this to EXPECT_NE(r.exitCode, 0), move it to Soundness_Interfaces, "
+           "and delete the interface-fields entry from docs/plan.md.";
+}
+
+TEST(KnownDefect_Interfaces, AMissingFieldIsAcceptedEvenWhenTheMethodsAreChecked) {
+    // Sharper than the test above. Here the struct satisfies the method half, so
+    // `implements` runs to completion and returns true anyway — the field is not
+    // merely unchecked when nothing else is, it is invisible to a check that did
+    // happen.
+    auto r = compile(
+        "interface I { x <int>; fun m(self: &Self) <int>; }\n"
+        "struct S : <I> {\n"
+        "  y <int>,\n"
+        "  fun m(self: &Self) <int> { return 1; }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: the field half of an interface contract is now checked "
+           "alongside the method half. See KnownDefect_Interfaces.AMissingFieldIsAccepted.";
+}
+
+TEST(KnownDefect_Interfaces, AFieldOfTheWrongTypeIsAccepted) {
+    // And the field is not checked even when it is present: `x <string>` where
+    // the interface said `x <int>`. So the fix needs both a presence check and a
+    // type comparison, and a fix that only adds presence will leave this failing.
+    auto r = compile(
+        "interface I { x <int>; }\n"
+        "struct S : <I> { pub x <string>, }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: a required field's type is now compared. If the presence check "
+           "landed but not this, that is the remaining half.";
+}
+
+// ---------------------------------------------------------------------------
+// Integer widths are a lie.
+//
+// resolveTypeFromAST (Analyzer_Core.cpp) walks the `{N}` width annotation for
+// side effects and returns the unannotated type, so uint{8} and uint{64} are one
+// type. lib/std builds i64, i128, u64, u128 and size_t on top of this. Harmless
+// exactly as long as there is no codegen, and wrong machine code the day there is.
+// ---------------------------------------------------------------------------
+
+TEST(KnownDefect_IntegerWidths, AWiderValueAssignsToANarrowerBinding) {
+    auto r = compile(
+        "fun main() <void> {\n"
+        "  let a <uint{8}>;\n"
+        "  let b <uint{64}> = a;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: width annotations now produce distinct types. Widening may well "
+           "be legal by a language decision — if so, keep this as Soundness and "
+           "record the decision; the narrowing test below is the one that must reject.";
+}
+
+TEST(KnownDefect_IntegerWidths, ANarrowerParameterAcceptsAWiderArgument) {
+    // This is the direction that cannot be excused by any implicit-conversion
+    // rule: passing uint{64} where uint{8} was asked for truncates.
+    auto r = compile(
+        "fun f(x: uint{8}) <void> {}\n"
+        "fun main() <void> {\n"
+        "  let big <uint{64}>;\n"
+        "  f(big);\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: a narrowing argument is now rejected. Invert and move to "
+           "Soundness_IntegerWidths.";
+}
+
+TEST(KnownDefect_IntegerWidths, TheWidthIsAbsentFromDiagnosticText) {
+    // Evidence for the *cause* rather than the symptom, and the reason this one is
+    // worth its own test: the annotation is gone by the time anything can see it,
+    // so a diagnostic about `uint{8}` says plain `uint`. That also makes the fix
+    // observable without codegen — when the type carries its width, this text
+    // changes, and a user reading `expected 'uint'` while having written
+    // `uint{8}` is being told something untrue today.
+    auto r = compile("fun main() <void> { let a <uint{8}> = -1; }\n");
+    ASSERT_NE(r.exitCode, 0) << "expected a signedness mismatch here: " << r.err;
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("expected 'uint'"), std::string::npos) << err;
+    EXPECT_EQ(err.find("uint{8}'"), std::string::npos)
+        << "FIXED: the diagnostic now names the annotated width. " << err;
+}
+
+// ---------------------------------------------------------------------------
+// `any` is not a registered type. Analyzer_Core.cpp never registers it, so
+// `fun f(x: any)` is `Undefined type 'any'`. The single highest-leverage fix for
+// the standard library: all 25 interfaces in operators.fin take `other: any`,
+// plus types.fin, prototypes.fin and enums.fin.
+// ---------------------------------------------------------------------------
+
+TEST(KnownDefect_AnyType, IsNotRegistered) {
+    auto r = compile("fun main() <void> { let x <any>; }\n");
+    EXPECT_NE(r.exitCode, 0) << "FIXED: `any` is a registered type now. Invert this.";
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("Undefined type 'any'"), std::string::npos) << err;
+    // It lexes and parses; the gap is registration alone. Asserting this is what
+    // keeps the fix from being attempted in the lexer or the grammar.
+    EXPECT_EQ(err.find("syntax error"), std::string::npos)
+        << "`any` must still parse — if it stopped parsing, that is a new defect: " << err;
+}
+
+TEST(KnownDefect_AnyType, IsNotRegisteredAsAParameterTypeEither) {
+    auto r = compile("fun f(x: any) <void> {}\n");
+    EXPECT_NE(r.exitCode, 0)
+        << "FIXED: `any` works in the position the whole standard library uses it in.";
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'any'"), std::string::npos) << r.err;
+}
+
+// ---------------------------------------------------------------------------
+// The raise half of `blame` is rejected.
+//
+// Analyzer_Stmt.cpp requires the first operand to be bool and the second string,
+// so `blame CollectionError("...")` — which is how collection.fin:63 and
+// stdptr.fin:54 spell it — fails with `expected 'bool', got 'CollectionError'`.
+// CONTEXT.md ratifies one keyword doing two jobs and the analyzer implements one.
+// Per ADR 0008 the normative samples convict the compiler, so the analyzer changes.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Blame, TheAssertHalfWorks) {
+    // The control, in both spellings the corpus uses: blame_assert.fin:5 with a
+    // message and :8 without.
+    auto r = compile(
+        "fun check(val: int) <void> {\n"
+        "  blame val > 0, \"Value must be positive\";\n"
+        "  blame val < 100;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(KnownDefect_Blame, RaisingAValueIsRejected) {
+    auto r = compile(
+        "struct E { pub m <string>, }\n"
+        "fun main() <void> {\n"
+        "  let e <E>;\n"
+        "  blame e;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << "FIXED: `blame <value>` raises now. Invert this test.";
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("expected 'bool'"), std::string::npos)
+        << "still rejected, but no longer for the documented reason — read this "
+           "before assuming the defect is unchanged: " << err;
+}
+
+// ---------------------------------------------------------------------------
+// `true` and `false` are literals.
+//
+// Not in the plan's list, found while probing the one above: the lexer had no
+// rule for either word, so both fell through to the identifier rule and the
+// analyzer reported `Undefined variable 'true'` — in a condition, an initialiser
+// and a return alike. Fixed in wave 2 with two lexer rules (`KW_TRUE`,
+// `KW_FALSE` in lexer.l beside `"null"`) and two `literal` productions in
+// parser.y building `Literal(text, ASTTokenKind::BOOL)`. Nothing downstream
+// needed changing: ASTTokenKind::BOOL already existed (ast/nodes/ASTNode.hpp)
+// and Analyzer_Expr.cpp already typed that kind as `bool`.
+//
+// These four tests were written pointing the other way, asserting the defect, and
+// were inverted by the change that fixed it. They stay because the words are now
+// keywords: a regression here is either a lost lexer rule or a lost production,
+// and both show up as a nonzero exit on one of these four lines.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_BooleanLiterals, TrueIsALiteralInAnInitialiser) {
+    auto r = compile("fun main() <void> { let b <bool> = true; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_BooleanLiterals, FalseIsALiteralInAnInitialiser) {
+    auto r = compile("fun main() <void> { let b <bool> = false; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_BooleanLiterals, TrueIsALiteralInACondition) {
+    auto r = compile("fun main() <void> { if (true) { } }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_BooleanLiterals, TrueIsALiteralInAReturn) {
+    // The position that matters most: every `@special` predicate in the stdlib
+    // returns one, e.g. error.fin's is_error_type.
+    auto r = compile("fun f() <bool> { return true; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+// ---------------------------------------------------------------------------
+// Attributes.
+//
+// Half of this defect is fixed and half is not, so the split is on purpose. The
+// parser's attribute dispatch now has a ClassDeclaration branch (parser.y), and
+// Attribute::accept now dispatches instead of having an empty body — both were
+// wave 1 work. What remains is that nothing reads an attribute: `attributes` does
+// not appear anywhere in src/semantics/ or src/driver/. So `#[export]`,
+// `#[llvm_name=...]` and `#[use(compiler)]` reach the AST and stop there, which
+// matters because `#[use(...)]` is the gate on the component API (CONTEXT.md).
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Attributes, AnAttributeOnAClassReachesTheAST) {
+    // Regression lock on the fixed half. The bug was a dynamic_cast chain with no
+    // ClassDeclaration branch, and ClassDeclaration does not derive from
+    // StructDeclaration, so the attribute was dropped without a diagnostic. A
+    // silent drop is invisible from the CLI, which is why this test reads the AST.
+    fin::DiagnosticEngine diag("", "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    auto parsed = parseSource("#[export]\nclass C { }\n", diag);
+    ASSERT_TRUE(parsed.parsed) << "#[export] class C {} must parse";
+    ASSERT_EQ(parsed.ast->statements.size(), 1u);
+    auto* cls = dynamic_cast<fin::ClassDeclaration*>(parsed.ast->statements[0].get());
+    ASSERT_NE(cls, nullptr) << "expected a ClassDeclaration";
+    ASSERT_EQ(cls->attributes.size(), 1u)
+        << "the attribute was dropped: parser.y's attribute dispatch lost its "
+           "ClassDeclaration branch";
+    EXPECT_EQ(cls->attributes[0]->name, "export");
+}
+
+TEST(KnownDefect_Attributes, AnUnknownAttributeIsAccepted) {
+    // Nothing validates an attribute name, so a misspelled one is silently inert
+    // — the failure mode CONTEXT.md's "known component name" rule exists to
+    // prevent for components, applied one level up. Whether an unknown *attribute*
+    // is an error is a language decision and not yet ratified; this test exists so
+    // that decision is taken deliberately rather than discovered.
+    auto r = compile("#[definitely_not_an_attribute]\nfun f() <void> {}\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "CHANGED: attribute names are validated now. If that was a ratified "
+           "language decision, move this to Soundness_Attributes and invert it.";
+}
+
+// ---------------------------------------------------------------------------
+// Field declaration order is destroyed.
+//
+// StructType::fields is std::unordered_map<std::string, FieldInfo> and
+// defineField is its only writer, so the order the fields were declared in is
+// lost when the semantic type is built. The AST has it; the type throws it away.
+// Layout, ABI, offsets and every pointer map are functions of declaration order.
+//
+// This is the one defect here with no CLI-visible symptom, because nothing yet
+// consumes layout. It is asserted at the type instead, and that comes with a
+// limit worth stating plainly: the test reads `fields`, so a fix that adds a
+// separate ordered accessor and leaves `fields` alone will not trip it. It is
+// evidence that order is lost, not a guarantee that it stays lost. Whoever fixes
+// this should replace the body rather than trust it.
+// ---------------------------------------------------------------------------
+
+TEST(KnownDefect_FieldOrder, TheSemanticTypeCannotReproduceDeclarationOrder) {
+    // Several candidate field-name sets, because whether one particular set comes
+    // back in declaration order is an accident of the hash. If order is preserved,
+    // *every* set round-trips; one mismatch proves it is not preserved. That makes
+    // the test independent of the standard library's hash function, which a test
+    // asserting one specific wrong order would not be.
+    //
+    // Do not reduce this to one candidate. Measured against both containers: all
+    // five misorder under an unordered_map, but only three of the five misorder
+    // under a std::map — `{a..f}` and `{first,second,third}` are already in
+    // alphabetical order and would round-trip. So a single-candidate version using
+    // either of those would report "fixed" if someone swapped the container for a
+    // std::map, which does not preserve declaration order either. The set is the
+    // test.
+    const std::vector<std::vector<std::string>> candidates = {
+        {"alpha", "beta", "gamma", "delta"},
+        {"a", "b", "c", "d", "e", "f"},
+        {"first", "second", "third"},
+        {"x", "y", "z", "w", "v", "u", "t", "s"},
+        {"header", "payload", "checksum", "footer", "reserved"},
+    };
+
+    bool anyMisordered = false;
+    std::string report;
+
+    for (const auto& names : candidates) {
+        std::string src = "struct S {";
+        for (const auto& n : names) src += " pub " + n + " <int>,";
+        src += " }\n";
+
+        fin::DiagnosticEngine diag("", "<test>");
+        diag.setColorMode(fin::ColorMode::Never);
+        auto parsed = parseSource(src, diag);
+        ASSERT_TRUE(parsed.parsed) << src;
+
+        fin::SemanticAnalyzer analyzer(diag, false);
+        analyzer.visit(*parsed.ast);
+        ASSERT_FALSE(diag.hasErrors()) << src;
+
+        auto st = std::dynamic_pointer_cast<fin::StructType>(
+            analyzer.getGlobalScope()->resolveType("S"));
+        ASSERT_NE(st, nullptr) << "the analyzer must publish a struct type for S";
+        ASSERT_EQ(st->fields.size(), names.size()) << "a field went missing entirely";
+
+        std::vector<std::string> seen;
+        for (const auto& kv : st->fields) seen.push_back(kv.first);
+        if (seen != names) {
+            anyMisordered = true;
+            report = "declared:";
+            for (const auto& n : names) report += " " + n;
+            report += " / recovered:";
+            for (const auto& n : seen) report += " " + n;
+            break;
+        }
+    }
+
+    EXPECT_TRUE(anyMisordered)
+        << "FIXED, or the hash got lucky " << candidates.size() << " times in a row. "
+           "If StructType now records declaration order, delete this test and assert "
+           "the real ordered accessor instead — see this test's comment for why it "
+           "cannot detect that itself.";
+    if (anyMisordered) {
+        // Not an assertion. Printed so the run carries the evidence rather than
+        // just a green tick, since a passing test here means a live defect.
+        ::testing::Test::RecordProperty("misordered", report);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conditions are not type-checked.
+//
+// `if (1)`, `if ("s")`, `while (1)` and a `for` header's `1` all compile clean.
+// Not in the plan's list, and not findable by counting samples: no sample fails
+// because of it, because accepting too much never fails.
+//
+// What makes this a defect rather than a design choice is that the analyzer
+// already decided the question twice, in the other direction, and once in this
+// very file. `let b <bool> = 1;` is rejected. `blame 1;` is rejected with
+// `expected 'bool', got 'int'` — the check at Analyzer_Stmt.cpp:116. And the
+// same check is *written* for `if` at Analyzer_Stmt.cpp:34 and commented out,
+// justified as "(optional, C++ allows int)". Fin is not C++ and has already
+// refused the C++ rule in the two places above, so the comment's premise is
+// contradicted twenty lines away from itself. `WhileLoop` (:39) and `ForLoop`
+// (:47) do not even carry the commented-out line.
+//
+// The corpus does not license the loose reading. Every condition in all fifty
+// samples is boolean-valued — comparisons, `!`, `bool` fields, calls returning
+// `bool`, and `true`/`false`. Nothing writes `if (ptr)` or `if (n)`:
+// nullability is always spelled `== null`, in both `//@ ok` samples that have a
+// condition at all (`blame_assert.fin`, `deeptest3.fin`).
+//
+// One sample does write it: `undefined_behavior.fin` has `if (0)` twice, and it
+// is *normative*. It licenses nothing, and the reason is worth stating because
+// it is a property of the harness rather than of that file. Its expectation is
+// `//@ error`, and this runner reads `//@ error` as "at least this diagnostic"
+// — `checkSampleAgainstFinc` searches stderr for the message and never asserts
+// it is the only one. So an `//@ error` sample cannot make anything legal; only
+// `//@ ok` licenses. `if (0)` there is the C idiom for a provably-dead branch,
+// written to demonstrate return-path analysis, and the file says nothing about
+// conditions either way.
+//
+// So this is pinned rather than fixed, because the fix is one uncommented line
+// that changes what the language accepts, and `undefined_behavior.fin` — a
+// normative sample — stops compiling the moment it lands. Under ADR 0008 a
+// normative sample changes only by a deliberate language decision, so enabling
+// the check and rewriting that sample's `if (0)` to `if (false)` is one ruling,
+// not two edits. If the ruling goes the other way, delete these tests and
+// delete the commented-out line, so that the next reader does not find the same
+// contradiction and reopen it.
+// ---------------------------------------------------------------------------
+
+// The controls. These are what make the tests below evidence of an
+// inconsistency rather than merely of a missing check: the bool check exists,
+// it works, and it is applied everywhere except in a condition.
+TEST(Soundness_Conditions, ABoolBindingStillRejectsAnInteger) {
+    auto r = compile("fun main() <void> { let b <bool> = 1; }\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Conditions, BlameStillRejectsAnInteger) {
+    auto r = compile("fun main() <void> { blame 1; }\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Conditions, AnIfAcceptsAnInteger) {
+    auto r = compile("fun main() <void> { if (1) { } }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: conditions are checked now. Invert these and rule on "
+           "undefined_behavior.fin's `if (0)` — see this block's comment.\n"
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Conditions, AnIfAcceptsAString) {
+    // A separate test from the integer because "C allows int" is at least an
+    // argument, and there is none at all for a string. If a ruling ever does
+    // admit truthiness, it has to say what this line means.
+    auto r = compile("fun main() <void> { if (\"s\") { } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Conditions, AnIfAcceptsANonBoolVariable) {
+    // Not a literal, so this cannot be dismissed as constant folding.
+    auto r = compile("fun main() <void> { let n <int> = 3; if (n) { } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Conditions, AWhileAcceptsAnInteger) {
+    // Separate from `if` because the fix is separate: WhileLoop has no
+    // commented-out check to uncomment, so a fix that only edits line 34
+    // leaves this one passing.
+    auto r = compile("fun main() <void> { while (1) { } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Conditions, AForHeaderAcceptsAnInteger) {
+    auto r = compile("fun main() <void> { for (let i <int> = 0; 1; i = i + 1) { } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// A binary operator checks that its operands agree with each other, never that
+// the operator accepts them.
+//
+// Analyzer_Expr.cpp:176 ends visit(BinaryOp&) with
+//
+//     if (!checkType(node, rightType, leftType)) { lastExprType = nullptr; }
+//     else { lastExprType = leftType; }
+//
+// which asks one question — are the two sides the same type — and answers the
+// other one by assumption. So `1 + "s"` is rejected, correctly but for the wrong
+// reason (the operands disagree, not that `+` is undefined on strings), and
+// `"a" - "b"`, `"a" % "b"`, `true + false` and `true / false` are all accepted,
+// each yielding the operand type.
+//
+// The same function already does this right twice. At :158 `&&` and `||` check
+// both operands against `bool` and yield `bool`; at :148 an operand-specific
+// lookup handles struct operator overloads. So the fix is a third case of a shape
+// the file already contains, not new machinery — which is the argument for
+// treating this as a defect rather than an unimplemented feature.
+//
+// Nothing in the corpus licenses the loose reading. There is no `+` on strings in
+// any of the fifty samples; string building is `format!(...)` throughout
+// (deeptest2.fin:26, error.fin:19, stdio.fin:36), so string arithmetic is not a
+// feature waiting for a checker to catch up with it.
+//
+// Comparisons at :168 share the shape — `checkType(right, left)` then yield
+// `bool` — and accept `"x" < "y"` and `true < false`. Those are deliberately not
+// asserted here: ordering strings is a real operation in many languages, and C++
+// orders `bool`, so "the operator accepts these operands" may well be the right
+// answer for `<`. The defect is that the question is never asked; where the
+// answer would be yes, no test should pretend otherwise.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_BinaryOperators, IntegerArithmeticStillCompiles) {
+    // The control that costs the fix something. Any repair narrow enough to
+    // reject `"a" - "b"` must still admit this.
+    auto r = compile("fun main() <void> { let a <int> = 1 + 2 * 3 - 4 % 5; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_BinaryOperators, MismatchedOperandsAreStillRejected) {
+    // This is the check that does exist, and pinning it is what makes the
+    // KnownDefects below diagnostic rather than anecdotal: they are not "no type
+    // checking here", they are "the wrong question, asked properly".
+    auto r = compile("fun main() <void> { let a <int> = 1 + \"s\"; }\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_BinaryOperators, LogicalAndStillRequiresBooleanOperands) {
+    // The proof that this file already knows how to check an operator against its
+    // operands. If this ever fails, the fix for the defects below went in by
+    // deleting the working case rather than joining it.
+    auto r = compile("fun main() <void> { let a <bool> = 1 && 2; }\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_BinaryOperators, SubtractionAcceptsTwoStrings) {
+    // Asserting the *result type*, not merely that it compiles: this passes only
+    // if `"a" - "b"` was typed `string`, which is the pass-through at :176 rather
+    // than some unrelated leniency.
+    auto r = compile("fun main() <void> { let a <string> = \"a\" - \"b\"; }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: a binary operator now checks that it accepts its operands. "
+           "Invert this and the two below to EXPECT_NE, move them to "
+           "Soundness_BinaryOperators, and strike the entry from docs/plan.md.\n"
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_BinaryOperators, ModuloAcceptsTwoStrings) {
+    // Separate from subtraction because `%` is the case with no reading at all:
+    // a fix that whitelists `+` and `-` for strings on the way to concatenation
+    // would leave this one accepted, and it should not.
+    auto r = compile("fun main() <void> { let a <string> = \"a\" % \"b\"; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_BinaryOperators, ArithmeticAcceptsTwoBooleans) {
+    // A different operand kind, so a numeric whitelist that admits `bool` by way
+    // of integer promotion would leave this green while the string cases go red.
+    auto r = compile("fun main() <void> { let a <bool> = true / false; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// A unary operator other than `&` and `*` returns its operand's type without
+// checking anything.
+//
+// visit(UnaryOp&) handles two operators and then gives up. Analyzer_Expr.cpp:207:
+//
+//     else { lastExprType = type; }
+//
+// `&` builds a PointerType, `*` unwraps one and errors on a non-pointer, and
+// every other operator — `!`, unary `-`, `~`, `++`, `--` — falls into that
+// clause. So `!` on an integer yields `int` and unary `-` on a string yields
+// `string`.
+//
+// This defect hides behind the binding it appears in, which is why it took a
+// deliberate probe to see. `let a <bool> = !1;` *is* rejected, so `!` looks
+// checked; the diagnostic is "expected 'bool', got 'int'" from the initialiser,
+// because `!1` was typed `int` and the binding caught it. Give the binding the
+// pass-through type instead — `let a <int> = !1;` — and it compiles. Every test
+// below therefore states the type it expects the expression to have, since
+// exit-code-only assertions here measure the binding rather than the operator.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_UnaryOperators, NegationAndNotStillWorkOnTheRightTypes) {
+    auto r = compile("fun main() <void> { let a <bool> = !true; let b <int> = -1; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_UnaryOperators, DereferencingANonPointerIsStillRejected) {
+    // The control. One branch of this function does check its operand, so the
+    // defect is the missing cases and not the function being unreachable.
+    auto r = compile("fun main() <void> { let n <int> = 1; let a <int> = *n; }\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("Cannot dereference"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_UnaryOperators, NotPassesAnIntegerStraightThrough) {
+    // `<int>`, not `<bool>`: this compiling is the proof that `!1` is typed
+    // `int`. With `<bool>` the file already rejects it, for the wrong reason.
+    auto r = compile("fun main() <void> { let a <int> = !1; }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: `!` now requires a boolean operand. Invert this and the one "
+           "below, move them to Soundness_UnaryOperators, and strike the entry "
+           "from docs/plan.md.\n"
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_UnaryOperators, NegationPassesAStringStraightThrough) {
+    // Separate operator, separate case in the fix: `!` wants `bool` and `-`
+    // wants a number, so a repair that only learns about `!` leaves this green.
+    auto r = compile("fun main() <void> { let a <string> = -\"s\"; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// Redeclaring a name in one scope silently replaces the first declaration.
+//
+// Scope.hpp:30 is the whole of it:
+//
+//     void define(Symbol sym) { symbols[sym.name] = sym; }
+//
+// `operator[]` on an unordered_map assigns over an existing key, so a second
+// declaration overwrites the first with no diagnostic and the later one wins.
+// Both `let` and `fun` reach it: variables at Analyzer_Decl.cpp:27, functions at
+// Analyzer_Decl.cpp:86, which register into the parent scope through the same
+// call. One line, one fix, both symptoms.
+//
+// Unlike the conditions defect, this one does not need an owner ruling — the
+// corpus already answered it in writing. stdlib/stdio.fin:33 declares a second
+// `printf` under `#[overwrite(printf)]`, commented in the sample itself as
+// "this tells the compiler we are overwriting printf and it will ignore the
+// current definition of it and doesn't raise an error". An attribute whose stated
+// job is to suppress the error presupposes the error, and stdio.fin is normative.
+// So a bare duplicate must be rejected, and silently taking the second is exactly
+// the behaviour `#[overwrite]` exists to have to ask for.
+//
+// Two defects currently cancel in that sample. Attributes are parsed and carried
+// but nothing interprets one (docs/plan.md, wave 4), so `#[overwrite]` does
+// nothing today — and the duplicate it guards is accepted anyway, because no
+// duplicate is ever refused. Whoever fixes this line must therefore land it with
+// the attribute, or stdio.fin starts failing on a construct it was written to
+// demonstrate. That ordering constraint is the reason this is recorded here
+// rather than filed as a one-line fix.
+//
+// Not asserted as defects, because they are ordinary: shadowing in a nested
+// scope, and a `let` shadowing a parameter. Both were probed, both are accepted,
+// and neither is a redeclaration in *one* scope.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Duplicates, AnUndeclaredNameIsStillRejected) {
+    // The control: resolution does fail when it should, so the defect is the
+    // missing check at definition and not a scope that admits anything.
+    auto r = compile("fun main() <void> { let a <int> = nosuchvar; }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Duplicates, ShadowingInANestedScopeStillWorks) {
+    // Pinned so the fix stays aimed at one scope. The cheap repair — reject any
+    // name that already resolves — would break this, and it is legitimate.
+    auto r = compile("fun main() <void> { let a <int> = 1; { let a <string> = \"s\"; } }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Duplicates, ARedeclarationSilentlyChangesTheType) {
+    auto r = compile("fun main() <void> { let a <int> = 1; let a <string> = \"s\";\n"
+                     "                    let b <string> = a; }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: a duplicate declaration in one scope is now refused. Check it "
+           "was landed together with #[overwrite] support, or stdlib/stdio.fin "
+           "breaks; then invert this and the one below into Soundness_Duplicates "
+           "and strike the entry from docs/plan.md.\n"
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Duplicates, ARedeclaredFunctionSilentlyReplacesTheFirst) {
+    // Binding `<string>` is what proves the second definition won: the call sees
+    // the later signature, so the first `f` became unreachable without a word.
+    auto r = compile("fun f() <int> { return 1; }\n"
+                     "fun f() <string> { return \"s\"; }\n"
+                     "fun main() <void> { let x <string> = f(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// Not a defect: a call must follow its declaration, and `@define` is how the
+// corpus says so.
+//
+// A probe found that `fun main() <void> { g(); } fun g() <void> {}` is rejected
+// with "Undefined function or type 'g'", and that mutual recursion between two
+// plain definitions is impossible for the same reason: Analyzer_Core.cpp:195
+// walks top-level statements once in source order, and a function registers
+// itself in the enclosing scope at Analyzer_Decl.cpp:86 partway through its own
+// visit — after its predecessors, before its body.
+//
+// That reads like a serious defect and is not one. Declaration-before-use with an
+// explicit prototype is C's design, and the corpus follows it without exception:
+// zero of the fifty samples call a top-level function declared later, and eight
+// of them open with `@define printf(fmt: string, ...) <noret>;` (letssee.fin:3,
+// enums.fin:5, complex.fin:5, readonly.fin:5, hashmap.fin:10, and others). The
+// mechanism works, including for mutual recursion, which the tests below pin.
+//
+// It is recorded here because a finding characterised and dismissed is worth as
+// much as one confirmed, and cheaper to write down than to re-derive. Hoisting
+// every top-level signature would make `@define` decorative and change what the
+// eight samples above are demonstrating — so it is a language decision (ADR
+// 0008), not a repair, and nobody should reach for it on the strength of the
+// probe alone.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Declarations, ADefineLetsACallPrecedeTheDefinition) {
+    auto r = compile("@define g() <void>;\n"
+                     "fun main() <void> { g(); }\n"
+                     "fun g() <void> {}\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "@define is the corpus's forward declaration and eight samples open "
+           "with one; if this fails they all do.\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Declarations, MutualRecursionWorksThroughADefine) {
+    // The case that makes declaration-before-use liveable. Without this the
+    // language would have no way to write two functions that call each other,
+    // and the ordering rule really would be a defect.
+    auto r = compile("@define b() <void>;\n"
+                     "fun a() <void> { b(); }\n"
+                     "fun b() <void> { a(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// `cast` admits any primitive to any other, and refuses both casts the corpus
+// actually writes. One rule, wrong in both directions.
+//
+// Analyzer_Expr.cpp:361 is the too-broad half:
+//
+//     else if (dynamic_cast<const PrimitiveType*>(sourceType.get()) &&
+//              dynamic_cast<const PrimitiveType*>(targetType.get())) valid = true;
+//
+// and Analyzer_Core.cpp:21 registers `string` as a `PrimitiveType`. So `string`
+// is lumped in with the numerics and `cast<int>("s")`, `cast<string>(1)` and
+// `cast<bool>("s")` are all accepted. Turning a string into an int is not a
+// conversion, it is parsing; the other direction is formatting. Neither is a
+// reinterpretation of a value, which is what a cast is for.
+//
+// The same rule is too narrow, and this is the half that matters more, because
+// the corpus depends on it. Both casts written in the fifty samples are rejected
+// today: `cast<[char]>("SomeData for testing")` (stdio.fin:156) fails with
+// "Invalid cast from 'string' to '[char]'" because `[char]` is an ArrayType and
+// so the pair is not two primitives, and `cast<&auto>(base_val)`
+// (deeptest2.fin:26) fails the same way for a PointerType. A permissive rule
+// that still refuses the only two real uses is not erring on the side of
+// permissive — it is not looking at the question.
+//
+// Both are masked. stdio.fin and deeptest2.fin are `//@ unimplemented` for
+// unrelated reasons, so neither cast is reached and no test goes red for either.
+// Whoever repairs this should expect those two samples to be the acceptance
+// criteria and not to find them in the failing list first.
+//
+// A related *grammar* gap, reported to the frontend owner rather than fixed
+// here: `cast<&int>(p)` is a syntax error ("unexpected TYPE_INT, expecting
+// IDENTIFIER") while `cast<&auto>(n)` parses, because the cast's type argument
+// accepts `&IDENTIFIER` but not `&`-plus-a-builtin-type-keyword. So the pointer
+// half of this defect cannot even be written down in a test yet.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Casts, NumericConversionStillWorks) {
+    // The control that constrains the fix: narrowing the primitive rule must not
+    // take the numeric casts with it.
+    auto r = compile("fun main() <void> { let a <float> = cast<float>(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Casts, AStructToAnIntIsStillRejected) {
+    // Proof the function does refuse things, so the accepts below are the rule
+    // being wrong rather than the check being absent.
+    auto r = compile("struct S { }\n"
+                     "fun main() <void> { let a <int> = cast<int>(S()); }\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("Invalid cast"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Casts, AStringToAnIntegerIsAccepted) {
+    auto r = compile("fun main() <void> { let a <int> = cast<int>(\"s\"); }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: `cast` no longer treats `string` as interchangeable with the "
+           "numerics. Invert this and the one below into Soundness_Casts, and "
+           "check the two too-narrow tests below now pass.\n"
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Casts, AnIntegerToAStringIsAccepted) {
+    // Separate direction, separate fix: a repair that adds a string-to-number
+    // parse would leave this one accepted, and formatting is not a cast either.
+    auto r = compile("fun main() <void> { let a <string> = cast<string>(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Casts, TheCorpusOwnStringToCharArrayCastIsRejected) {
+    // stdio.fin:156 writes exactly this. The `KnownDefect` here asserts a
+    // *rejection*, which is the opposite shape to every other test in this file:
+    // the defect is that a legitimate cast fails, so the assertion that must
+    // eventually flip is EXPECT_NE, not EXPECT_EQ.
+    auto r = compile("fun main() <void> { let a <[char]> = cast<[char]>(\"data\"); }\n");
+    EXPECT_NE(r.exitCode, 0)
+        << "FIXED: string to [char] now converts, which is what stdio.fin:156 "
+           "needs. Invert to EXPECT_EQ and move to Soundness_Casts.";
+    EXPECT_NE(stripAnsi(r.err).find("Invalid cast"), std::string::npos)
+        << "still failing, but no longer on the cast — check this is not now a "
+           "parse error, which would mean the grammar regressed:\n"
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Casts, TheCorpusOwnPointerCastIsRejected) {
+    // deeptest2.fin:26 writes `cast<&auto>(base_val)`. Written with `&auto`
+    // rather than `&int` on purpose: `cast<&int>(p)` does not parse at all, so
+    // `&auto` is the only spelling in which this defect is reachable today.
+    auto r = compile("fun main() <void> { let n <int> = 1; let a <&auto> = cast<&auto>(n); }\n");
+    EXPECT_NE(r.exitCode, 0)
+        << "FIXED: a pointer cast is accepted, which deeptest2.fin:26 needs.";
+    EXPECT_NE(stripAnsi(r.err).find("Invalid cast"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// A generic bound is never enforced, and on a function it is never even read.
+// `debugLog` is the only consumer of a resolved constraint in the compiler.
+//
+// Two sites, two different failures. `Analyzer_Decl.cpp:40-42` registers a
+// function's generic parameters and never mentions `gen->constraint` at all:
+//
+//     for (auto& gen : node.generic_params) {
+//         currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
+//     }
+//
+// so `fun f<T: NoSuchI>(x: T)` compiles — the bound is invisible, and a typo in
+// one is silent. `Analyzer_Decl.cpp:117-122` (structs) and `:560-567` do read it:
+//
+//     if (gen->constraint) {
+//         auto constraintType = resolveTypeFromAST(gen->constraint.get());
+//         if (constraintType) {
+//             debugLog(..., "      [Constraint] Generic '{}' : '{}'\n", ...);
+//         }
+//     }
+//
+// which resolves the bound — so a bogus name *is* caught there — and then passes
+// the result to a debug message and drops it. It is never stored on the
+// `GenericType` and never consulted at an instantiation, so `S<int>` satisfies
+// `<T: I>` for any `I`.
+//
+// The asymmetry is the useful part of this finding: the same construct is
+// rejected on a struct and accepted on a function, which localises the first fix
+// to three lines that already exist twenty lines away in the same file. The
+// second fix — storing the bound and checking arguments against it — is real
+// work, and it is what wave 3's monomorphisation needs anyway.
+//
+// **Both halves of the first fix have landed; read the rest of this comment as
+// history.** There were seven copies of that loop, not two: function, struct,
+// class, interface, interface-operator, implements-block operator, and the `fn<T>`
+// type node, plus the lambda expression. All eight now call
+// SemanticAnalyzer::declareGenericParams (Analyzer_Core.cpp), which declares every
+// parameter name first and *then* resolves the bounds — two passes, so a bound may
+// name a sibling parameter or the one it constrains, which the single-pass struct
+// version rejected. The resolved bound is assigned to `GenericType::constraint`
+// instead of being logged and dropped.
+//
+// That one assignment turned out to un-deaden two separate readers, which is the
+// part worth remembering: `checkConstraint` (Analyzer_Core.cpp) and `getStructType`
+// (Analyzer_Expr.cpp:27-33, "If T : Interface, treat T as Interface") both read
+// that field behind a null guard, so both had been unreachable since they were
+// written. The second is why a method call on a bounded parameter works now.
+//
+// The two KnownDefects below survive the fix, and for a reason that is no longer
+// the one written above: the bound *is* stored and *is* consulted now.
+// checkConstraint only reports when the argument is itself a StructType, so
+// `S<int>` against `<T: I>` passes because `int` is a PrimitiveType and there is
+// no ruling yet on whether a primitive satisfies an interface bound — `Castable`
+// and `Any` are erasure markers (ADR 0018) that primitives must surely satisfy, so
+// rejecting every non-struct is not obviously right. Function *calls* are not
+// checked against bounds at any point, which is the other one.
+//
+// This is the defect the standard library is most exposed to after interface
+// fields. `stdio.fin` alone declares `<X: Any<Printable>>` three times and
+// `<T: Strict<Stream>>` once, and the erasure markers `Any` and `Castable`
+// (ADR 0018) are *spelled as bounds* — so "bounds are decorative" means the
+// erasure machinery has nothing to read. A bound that cannot be trusted is worse
+// than no generics for a library author, because the signature documents a
+// guarantee the compiler does not make.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_GenericBounds, ABogusBoundOnAStructIsRejected) {
+    // The control, and the half of the asymmetry that works. Without it "bounds
+    // are ignored" would fit the evidence and the fix would be aimed at the
+    // wrong function.
+    auto r = compile("struct S<T: NoSuchI> { x <T>, }\n"
+                     "fun main() <void> {}\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'NoSuchI'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericBounds, ArityIsStillCheckedOnAGenericFunction) {
+    // Proves a generic call is checked at all, so the accepts below are the bound
+    // being ignored rather than generic calls being skipped wholesale.
+    auto r = compile("fun f<T>(x: T) <noret> {}\n"
+                     "fun main() <void> { f(1,2); }\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expects 1 arguments"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericBounds, ABogusBoundOnAFunctionIsRejected) {
+    // Was KnownDefect_GenericBounds.ABogusBoundOnAFunctionIsAccepted. The
+    // asymmetry this suite was built around -- same text, rejected on a struct and
+    // accepted on a function -- is gone: all seven sites that can declare a
+    // generic parameter now go through SemanticAnalyzer::declareGenericParams,
+    // which resolves the bound. Compare with the struct control above; they must
+    // agree from here on.
+    auto r = compile("fun f<T: NoSuchI>(x: T) <noret> {}\n"
+                     "fun main() <void> {}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'NoSuchI'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericBounds, ABogusBoundOnAnInterfaceIsRejected) {
+    auto r = compile("interface I<T: NoSuchI> { pub fun m() <int>; }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'NoSuchI'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericBounds, ABogusBoundOnAnOperatorIsRejected) {
+    // The operator site is reached twice -- once for an operator *requirement*
+    // inside an interface and once for an operator *definition* inside an
+    // implements block -- and both had their own copy of the loop.
+    auto r = compile(
+        "interface Marker { pub fun mk() <int>; }\n"
+        "struct P { x <int> }\n"
+        "P implements <Marker> {\n"
+        "    pub fun mk() <int> { return 1; }\n"
+        "    operator + : <T: NoSuchI>(other: <T>) <int> { return 1; }\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'NoSuchI'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericBounds, AMethodInAnImplementsBlockDeclaresItsOwnGenerics) {
+    // A false *rejection*, found while probing the six sites above, and the
+    // opposite failure mode to the rest of this suite: visit(ImplementsBlock&)
+    // resolved each method's parameter types in the block's scope without opening
+    // one for the method or declaring its generic_params, so `T` was undefined
+    // inside its own signature.
+    auto r = compile(
+        "interface Marker { pub fun mk() <int>; }\n"
+        "struct S { v <int> }\n"
+        "S implements <Marker> {\n"
+        "    pub fun mk() <int> { return 1; }\n"
+        "    pub fun m<T>(item: T) <int> { return 1; }\n"
+        "}\n");
+    EXPECT_EQ(stripAnsi(r.err).find("Undefined type 'T'"), std::string::npos)
+        << "a method's own generic parameter must be in scope for its signature:\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericBounds, ABoundIsVisibleToMethodResolution) {
+    // Storing the bound on the GenericType did more than enable the check below:
+    // getStructType (Analyzer_Expr.cpp:27-33) already said "If T : Interface,
+    // treat T as Interface" and had been dead for exactly as long, because the
+    // field it reads was never assigned. So a method call on a bounded type
+    // parameter now resolves, which is the defect `tests/samples/interfaces.fin`
+    // was pinned on -- it reported `Type 'T' does not have methods` for
+    // `item.to_string()` at :17. This test is what keeps that working.
+    auto r = compile(
+        "interface Printable { pub fun to_string() <string>; }\n"
+        "fun show<T: Printable>(item: T) <string> { return item.to_string(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("does not have methods"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericBounds, AnUnboundedParameterStillHasNoMethods) {
+    // The other side of the test above, and the one that keeps the fix honest:
+    // resolving methods *through* a bound must not mean resolving methods on
+    // anything shaped like a generic. Without a bound there is nothing to consult
+    // and the call has to stay an error.
+    auto r = compile(
+        "fun show<T>(item: T) <string> { return item.to_string(); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("does not have methods"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_GenericBounds, AnArgumentViolatingAFunctionBoundIsAccepted) {
+    // `int` does not implement `I`, and `f` says it requires it. The bound is
+    // resolved and stored now (see the Soundness tests above), so what is missing
+    // here is the call site: nothing on the path through visit(FunctionCall&) looks
+    // at the callee's generic parameters at all, so there is no place the bound
+    // would be consulted even though it is finally there to consult.
+    auto r = compile("interface I { fun m() <int>; }\n"
+                     "fun f<T: I>(x: T) <noret> {}\n"
+                     "fun main() <void> { f(1); }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: an argument is checked against its generic bound.\n"
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_GenericBounds, AStructInstantiationViolatingItsBoundIsAccepted) {
+    // Still accepted, but no longer for the reason it was written for. The bound is
+    // stored now and checkConstraint does run on it; it returns true because the
+    // argument `int` is a PrimitiveType and checkConstraint only reports on a
+    // StructType argument. So the fix is a ruling followed by three lines, not
+    // plumbing: does a primitive satisfy an interface bound? `Castable` and `Any`
+    // are bounds in the standard library that every primitive must satisfy
+    // (ADR 0018), so the answer is not simply "no".
+    auto r = compile("interface I { fun m() <int>; }\n"
+                     "struct S<T: I> { x <T>, }\n"
+                     "fun main() <void> { let s <S<int>>; }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: a generic argument is checked against the parameter's bound.\n"
+        << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// A type that failed to resolve was carried on as if it had resolved.
+//
+// `resolveTypeFromAST` (Analyzer_Core.cpp) reports `Undefined type 'X'` and
+// returns nullptr when a name does not resolve -- correct, and every caller
+// checks it. But each *composite* branch wraps whatever the recursive call
+// returned without looking at it: `PointerType(inner)` at :58,
+// `ArrayType(inner, fixed)` at :79, `FunctionType(pTypes, rType)` at :89,
+// `PrototypeType(keyType, valueType)` at :107 and the generic `args` at :123.
+// A failed child therefore comes back inside a *non-null* composite, every
+// caller's `if (!type) return;` passes, and the first `toString()` on the tree
+// dereferences the null child and segfaults.
+//
+// Nine of the fifty samples died this way. The tests are split one per branch
+// because the crash surfaces in the type layer -- PointerType.cpp:6,
+// FunctionType.cpp:9, PrototypeType.hpp:17 -- where a null check in any one
+// `toString()` would turn that spelling green and leave the rest crashing,
+// while fixing nothing: a composite over a type that does not exist is not a
+// type, and rendering it as `&<unknown>` would only move the crash to the next
+// caller that asks it a real question.
+//
+// Each is asserted against the compiler's own behaviour on the simplest
+// spelling of the same mistake -- the undefined type named directly, with no
+// composite around it -- rather than against a written-down exit code or
+// message. The claim under test is that wrapping a mistake does not change what
+// the compiler decides about it.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The undefined type named on its own: the one spelling that already works.
+FincRun bareUndefinedType() {
+    return compile("fun f() <int> { let x <NoSuchType>; return 0; }");
+}
+
+size_t occurrencesOf(const std::string& haystack, const std::string& needle) {
+    size_t n = 0;
+    for (size_t at = haystack.find(needle); at != std::string::npos;
+         at = haystack.find(needle, at + needle.size())) {
+        ++n;
+    }
+    return n;
+}
+
+// Asserts that `code` -- which names `NoSuchType` inside some composite -- ends
+// the same way as naming `NoSuchType` by itself.
+void expectResolvesLikeTheBareSpelling(const std::string& code, const std::string& composite) {
+    const FincRun bare = bareUndefinedType();
+    ASSERT_EQ(bare.exitCode, 1)
+        << "an undefined type named directly must be a plain rejection, or this test has no "
+           "baseline to compare against\n" << bare.err;
+    ASSERT_NE(bare.err.find("Undefined type 'NoSuchType'"), std::string::npos)
+        << "the baseline no longer reports the cause it is supposed to\n" << bare.err;
+
+    const FincRun r = compile(code);
+    EXPECT_EQ(r.exitCode, bare.exitCode)
+        << "`" << composite << "` over an undefined type did not end the way the undefined "
+           "type does on its own"
+        << (r.exitCode >= 128
+                ? std::string(": the compiler was killed by signal ")
+                      + std::to_string(r.exitCode - 128)
+                      + ", because the failed resolution was wrapped in a composite type "
+                        "instead of being propagated, so the null child was dereferenced "
+                        "by that composite's toString()."
+                : std::string("."))
+        << "\nstderr:\n" << r.err;
+    EXPECT_NE(r.err.find("Undefined type 'NoSuchType'"), std::string::npos)
+        << "the cause must still be reported when it is wrapped in `" << composite
+        << "`, not swallowed by whatever propagates it\nstderr:\n" << r.err;
+}
+
+} // namespace
+
+TEST(Soundness_TypeResolution, APointerToAnUndefinedTypeIsRejectedNotFatal) {
+    expectResolvesLikeTheBareSpelling(
+        "fun f() <int> { let p <&NoSuchType>; return 0; }", "&T");
+}
+
+TEST(Soundness_TypeResolution, AnArrayOfAnUndefinedTypeIsRejectedNotFatal) {
+    expectResolvesLikeTheBareSpelling(
+        "fun f() <int> { let a <[NoSuchType]>; return 0; }", "[T]");
+}
+
+TEST(Soundness_TypeResolution, AFunctionTypeTakingAnUndefinedTypeIsRejectedNotFatal) {
+    expectResolvesLikeTheBareSpelling(
+        "fun f() <int> { let g <fn(NoSuchType) -> int>; return 0; }", "fn(T) -> int");
+}
+
+// Separate from the parameter case: the parameters and the return type are
+// resolved by two different lines (Analyzer_Core.cpp:86 and :88) and reach
+// FunctionType through two different arguments, so a fix that checks one and
+// not the other leaves this green.
+TEST(Soundness_TypeResolution, AFunctionTypeReturningAnUndefinedTypeIsRejectedNotFatal) {
+    expectResolvesLikeTheBareSpelling(
+        "fun f() <int> { let g <fn(int) -> NoSuchType>; return 0; }", "fn(int) -> T");
+}
+
+TEST(Soundness_TypeResolution, APrototypeOverAnUndefinedTypeIsRejectedNotFatal) {
+    expectResolvesLikeTheBareSpelling(
+        "fun f() <int> { let p <{NoSuchType, int}>; return 0; }", "<{T, int}>");
+}
+
+TEST(Soundness_TypeResolution, AGenericArgumentThatIsUndefinedIsRejectedNotFatal) {
+    expectResolvesLikeTheBareSpelling(
+        "struct S<T> { x <T> }\n"
+        "fun f() <int> { let s <S<NoSuchType>>; return 0; }", "S<T>");
+}
+
+// The same failure through a different door, and the one that killed six of the
+// nine samples. Analyzer_Decl.cpp:74 resolves the declared return type, :78
+// stores it in `context.currentFuncReturnType` whether or not it resolved, and
+// :95 dereferences it to ask whether it is void. No composite type is involved,
+// so every fix to the branches above leaves this one crashing.
+TEST(Soundness_TypeResolution, AFunctionReturningAnUndefinedTypeIsRejectedNotFatal) {
+    expectResolvesLikeTheBareSpelling(
+        "fun f() <NoSuchType> { let x <int> = 1; }", "fun f() <T>");
+}
+
+// Propagating a failure must not report it twice. The child that could not
+// resolve has already said so; a composite that adds its own account of the
+// same mistake makes one error read as two, which is the defect
+// Soundness_ModuleIdentity guards against on the module side.
+TEST(Soundness_TypeResolution, WrappingAnUndefinedTypeDoesNotReportItTwice) {
+    const FincRun bare = bareUndefinedType();
+    const size_t expected = occurrencesOf(bare.err, "Undefined type 'NoSuchType'");
+    ASSERT_EQ(expected, 1u)
+        << "the bare spelling must report the cause exactly once, or this test has no "
+           "baseline\n" << bare.err;
+
+    const std::vector<std::pair<std::string, std::string>> spellings = {
+        {"&T",           "fun f() <int> { let p <&NoSuchType>; return 0; }"},
+        {"[T]",          "fun f() <int> { let a <[NoSuchType]>; return 0; }"},
+        {"fn(T) -> int", "fun f() <int> { let g <fn(NoSuchType) -> int>; return 0; }"},
+        {"fn(int) -> T", "fun f() <int> { let g <fn(int) -> NoSuchType>; return 0; }"},
+        {"<{T, int}>",   "fun f() <int> { let p <{NoSuchType, int}>; return 0; }"},
+        {"fun f() <T>",  "fun f() <NoSuchType> { let x <int> = 1; }"},
+    };
+    for (const auto& s : spellings) {
+        const FincRun r = compile(s.second);
+        EXPECT_EQ(occurrencesOf(r.err, "Undefined type 'NoSuchType'"), expected)
+            << "`" << s.first << "` reported the one undefined type a different number of "
+               "times than naming it directly does\nstderr:\n" << r.err;
+    }
+}
+
+// A lambda's return type is resolved and wrapped by a second construction site
+// (Analyzer_Expr.cpp:538) that repeats the mistake independently of
+// resolveTypeFromAST's branches, so fixing those leaves this crashing. This is
+// the site that killed lambdas.fin, whose `//@ unimplemented` reason recorded
+// the segfault in prose while the harness enforced nothing about it.
+TEST(Soundness_TypeResolution, ALambdaReturningAnUndefinedTypeIsRejectedNotFatal) {
+    expectResolvesLikeTheBareSpelling(
+        "fun main() <int> { let g <auto> = (m: int) <NoSuchType> => m; return 0; }",
+        "(m: int) <T> =>");
+}
+
+// ---------------------------------------------------------------------------
+// A generic lambda's type parameters are in scope in its own signature.
+//
+// Was a defect: visit(LambdaExpression&) resolved the return type and the
+// parameter types *before* enterScope(), and nothing registered the lambda's
+// `<T>` at all, so T was undefined in the one place it is introduced and the
+// parameter it typed was undefined in the body that used it. Fixed by entering
+// the scope first and registering the generic params in it, as
+// visit(FunctionDeclaration&) does at Analyzer_Decl.cpp:43.
+//
+// Both spellings are exercised because lambdas.fin declares both -- the arrow
+// form on line 69 and the `fun` form on line 71 -- and they reach the same
+// visitor by different parser paths.
+// ---------------------------------------------------------------------------
+TEST(Soundness_GenericLambdas, ATypeParameterIsInScopeInItsOwnSignature) {
+    const FincRun r = compile(
+        "fun main() <int> { let c <auto> = <T>(m: T) <T> => m; return 0; }");
+    EXPECT_EQ(r.exitCode, 0)
+        << "a generic lambda must compile: `<T>` introduces T for the rest of the "
+           "signature and the body\nstderr:\n" << r.err;
+    EXPECT_EQ(r.err.find("Undefined type 'T'"), std::string::npos)
+        << "T was reported undefined in the signature that declares it\nstderr:\n" << r.err;
+    EXPECT_EQ(r.err.find("Undefined variable 'm'"), std::string::npos)
+        << "the parameter typed by T was not visible in the body\nstderr:\n" << r.err;
+}
+
+TEST(Soundness_GenericLambdas, TheFunSpellingAlsoHasItsTypeParametersInScope) {
+    const FincRun r = compile(
+        "fun main() <int> { let c <auto> = fun <G>(a: G, b: G) <G> { return a; }; return 0; }");
+    EXPECT_EQ(r.exitCode, 0)
+        << "the `fun <G>(...)` lambda spelling must compile too (lambdas.fin:71)\nstderr:\n"
+        << r.err;
+}
+
+// ---------------------------------------------------------------------------
+// A generic lambda is not instantiated at its call site.
+//
+// With its type parameters now in scope, `<T>(m: T) <T> => m` has type
+// `fn(T) -> T`, and calling it with an int compares the argument against the
+// uninstantiated `T` instead of binding T to int. Named types get this right
+// through StructType::instantiate; a lambda's FunctionType has no equivalent
+// path, so the call is rejected.
+//
+// Booked rather than fixed because inferring a lambda's type arguments from its
+// call is a distinct piece of work from getting its declaration in scope, and
+// the declaration is what lambdas.fin:69 writes.
+// ---------------------------------------------------------------------------
+TEST(KnownDefect_GenericLambdas, CallingOneDoesNotBindItsTypeParameters) {
+    const FincRun r = compile(
+        "fun main() <int> { let c <auto> = <T>(m: T) <T> => m; return c(1); }");
+    EXPECT_NE(r.err.find("Type mismatch"), std::string::npos)
+        << "FIXED? A generic lambda now accepts an argument. Correct behaviour is that "
+           "`c(1)` binds T to int and yields int, the way a call to a generic function "
+           "does. Invert this into Soundness_GenericLambdas.\n"
+        << r.err;
+    EXPECT_NE(r.exitCode, 0)
+        << "FIXED? The call now compiles.\n" << r.err;
+}
+
+// ---------------------------------------------------------------------------
+// A generic `fn` type's parameters are in scope inside that type.
+//
+// The same defect as Soundness_GenericLambdas, in the other place the language
+// writes generic parameters: the *type annotation*
+// `fn<T: Castable>(m: T) -> T`. resolveTypeFromAST's FunctionTypeNode branch
+// (Analyzer_Core.cpp) resolved the parameter and return types without ever
+// registering the node's own generic_params, so T was undefined in the type that
+// declares it.
+//
+// Separate from the lambda test because it is a separate branch in a separate
+// function: fixing the lambda leaves this reporting `Undefined type 'T'`, which
+// is exactly what lambdas.fin:69 did once its lambda half was fixed -- the
+// annotation and the value on that one line each declare `<T>` and each needed
+// it in scope.
+// ---------------------------------------------------------------------------
+TEST(Soundness_GenericLambdas, AGenericFnTypeHasItsTypeParametersInScope) {
+    const FincRun r = compile("fun main() <int> { let f <fn<T>(m: T) -> T>; return 0; }");
+    EXPECT_EQ(r.exitCode, 0)
+        << "a generic `fn` type must resolve: `fn<T>` introduces T for the parameter and "
+           "return types that follow it\nstderr:\n" << r.err;
+    EXPECT_EQ(r.err.find("Undefined type 'T'"), std::string::npos)
+        << "T was reported undefined in the type that declares it\nstderr:\n" << r.err;
+}
+
+// The whole of lambdas.fin:69: the annotation and the lambda each declare `<T>`.
+TEST(Soundness_GenericLambdas, AGenericFnTypeAcceptsAGenericLambda) {
+    const FincRun r = compile(
+        "fun main() <int> { let c <fn<T>(m: T) -> T> = <T>(m: T) <T> => m; return 0; }");
+    EXPECT_EQ(r.exitCode, 0)
+        << "the spelling lambdas.fin:69 writes must compile\nstderr:\n" << r.err;
+}
+
+// ---------------------------------------------------------------------------
+// A call to a function whose signature did not resolve reports a second, false
+// error.
+//
+// visit(FunctionDeclaration&) does not register a function whose parameter or
+// return types failed to resolve (Analyzer_Decl.cpp step 6), because a
+// FunctionType cannot hold a null part and a signature with its unresolved
+// parameters silently dropped advertises the wrong arity -- which is what made
+// `fun f(p: NoSuchType)` called as `f(1)` report "expects 0 arguments, got 1",
+// a claim about a function nobody wrote. Not registering it trades that for
+// "Undefined function or type 'f'", which is no truer: f is defined, its type is
+// merely unknown.
+//
+// The real fix is a sentinel error type -- one that resolution returns instead of
+// nullptr, that is assignable to and from everything, and that suppresses any
+// further complaint about the expression it reaches. That would let the function
+// be registered with its correct arity and let this call go quiet, and it would
+// also retire the "null means unknown, stop asking" convention that
+// Analyzer_Stmt.cpp:15,21 and Analyzer_Decl.cpp step 7 each implement by hand.
+// Booked rather than built because it touches every Type subclass.
+//
+// What must never come back is the crash: Soundness_TypeResolution above holds
+// that line, and this test only pins how loud the aftermath is.
+// ---------------------------------------------------------------------------
+TEST(KnownDefect_TypeResolution, ACallToAFunctionWithAnUnresolvedSignatureCascades) {
+    // Guard: with the type defined, the same two files compile clean, so the
+    // cascade below is caused by the unresolved type and not by the shape of the
+    // program.
+    const FincRun control = compile(
+        "fun f(p: int) <int> { return 0; }\n"
+        "fun main() <int> { return f(1); }");
+    ASSERT_EQ(control.exitCode, 0)
+        << "declaring and calling a one-parameter function must compile, or this test has "
+           "no baseline\nstderr:\n" << control.err;
+
+    for (const auto& code : {
+            std::string("fun f(p: NoSuchType) <int> { return 0; }\n"
+                        "fun main() <int> { return f(1); }"),
+            std::string("fun f() <NoSuchType> { return 0; }\n"
+                        "fun main() <int> { let y <auto> = f(); return 0; }")}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(r.err.find("Undefined function or type 'f'"), std::string::npos)
+            << "FIXED? The call no longer cascades. Correct behaviour is that the one "
+               "undefined type is the only diagnostic: f is defined, so nothing should say "
+               "otherwise. Invert this into Soundness_TypeResolution.\n"
+            << r.err;
+    }
+}
+
+// The half of that defect which is fixed: whatever the call reports, it must not
+// report an arity nobody wrote. An unresolved parameter used to be dropped from
+// paramTypes and the function registered anyway, so `fun f(p: NoSuchType)` called
+// as `f(1)` was told it "expects 0 arguments, got 1" -- a false statement about a
+// signature the program does not contain, and the kind of diagnostic that sends
+// someone to edit the call site instead of the type name.
+TEST(Soundness_TypeResolution, AnUnresolvedParameterDoesNotChangeTheReportedArity) {
+    const FincRun r = compile(
+        "fun f(p: NoSuchType) <int> { return 0; }\n"
+        "fun main() <int> { return f(1); }");
+    EXPECT_EQ(r.err.find("expects 0 arguments"), std::string::npos)
+        << "the unresolved parameter was dropped from the signature, so the call was judged "
+           "against an arity the program never declared\nstderr:\n" << r.err;
+    // Guard: the undefined type itself is still reported, so this is not passing
+    // merely because the compiler went quiet.
+    EXPECT_NE(r.err.find("Undefined type 'NoSuchType'"), std::string::npos)
+        << "the cause must still be reported\nstderr:\n" << r.err;
+}
+
+// ---------------------------------------------------------------------------
+// An integer constant had exactly one type, and it was `int`.
+//
+// `let x <long> = 1;` did not compile. Neither did `<short>`, `<char>`,
+// `<uint>`, `<ulong>`, `<ushort>` or `<double>` -- every integer type Fin has
+// except `int` itself rejected a decimal literal, in every position: an
+// initializer, a struct field default, a `const`, a function argument, a
+// `return`, an assignment, a `for` counter, a comparison, a ternary branch.
+// `visit(Literal&)` gave INTEGER the type `int` and `PrimitiveType::isAssignableTo`
+// admitted one conversion, `int` to `float`, so `pointer <ulong> = 0` in
+// stdlib/stdio.fin was a type error and so was `blame myarr[0] == 0` in
+// arrays.fin.
+//
+// The rule now: an integer *constant* takes the integer type its context asks
+// for. Fin's own spelling of the distinction is what makes this checkable
+// without inference -- a literal is a `Literal` node and `-1` is a `UnaryOp`
+// over one, so "is this expression an integer constant, and is it negative"
+// is a question about the syntax rather than about a value flowing through the
+// analyzer.
+//
+// What is deliberately NOT admitted, each with its own test below: an `int`-typed
+// *expression* assigned to an unsigned type (a language decision, not a defect --
+// see KnownDefect_IntegerConstants), and a constant too large for its target (the
+// widths do not exist yet; KnownDefect_IntegerWidths owns that line).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Every integer type Analyzer_Core.cpp registers, in the order it registers them.
+const std::vector<std::string>& integerTypeNames() {
+    static const std::vector<std::string> names{
+        "int", "long", "short", "char", "uint", "ulong", "ushort"};
+    return names;
+}
+
+} // namespace
+
+TEST(Soundness_IntegerConstants, ANonNegativeConstantTakesAnyIntegerType) {
+    for (const std::string& t : integerTypeNames()) {
+        const FincRun r = compile("fun main() <noret> { let x <" + t + "> = 1; }\n");
+        EXPECT_EQ(r.exitCode, 0)
+            << "`let x <" << t << "> = 1;` must compile: 1 is representable in every "
+               "integer type Fin has, and a language in which it is not cannot spell "
+               "an unsigned zero.\nstderr:\n" << r.err;
+    }
+}
+
+TEST(Soundness_IntegerConstants, ZeroIsAValidUnsignedInitialiser) {
+    // Separate from the loop above because this is the case the corpus actually
+    // contains -- `pointer <ulong> = 0` (stdlib/stdio.fin:97) -- and because a fix
+    // keyed on the literal being nonzero would leave the loop green and this red.
+    const FincRun r = compile("fun main() <noret> { let p <ulong> = 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_IntegerConstants, TheConstantIsAcceptedInEveryPositionThatChecksAType) {
+    // One test per call site of checkType() that the corpus reaches with a literal.
+    // Split from the loop above because checkType() is called with the literal node
+    // in some positions and with a parent node in others: a fix that only handles
+    // `let` leaves all of these red, and they are where the standard library lives.
+    struct Case { const char* what; std::string code; };
+    const std::vector<Case> cases{
+        {"struct field default",
+         "struct S { pub a <uint> = 1, }\nfun main() <noret> { }\n"},
+        {"const declaration",
+         "const N <ulong> = 100;\nfun main() <noret> { }\n"},
+        {"function argument",
+         "fun f(x: uint) <noret> { }\nfun main() <noret> { f(1); }\n"},
+        {"return value",
+         "fun f() <uint> { return 1; }\nfun main() <noret> { }\n"},
+        {"assignment",
+         "fun main() <noret> { let a <uint>; a = 1; }\n"},
+        {"compound assignment",
+         "fun main() <noret> { let a <uint>; a += 1; }\n"},
+        {"for counter",
+         "fun main() <noret> { for (i: uint = 0; i > 3; i++) { } }\n"},
+        {"comparison, constant on the right",
+         "fun main() <noret> { let a <uint> = 0; blame a == 0; }\n"},
+        {"comparison, constant on the left",
+         "fun main() <noret> { let a <uint> = 0; blame 0 == a; }\n"},
+        {"ternary branch",
+         "fun main() <noret> { let a <uint> = 0; let b <uint> = true : 1 ? a; }\n"},
+    };
+    for (const Case& c : cases) {
+        const FincRun r = compile(c.code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "an integer constant is rejected in this position: " << c.what
+            << "\n" << c.code << "stderr:\n" << r.err;
+    }
+}
+
+TEST(Soundness_IntegerConstants, AConstantComparesTheSameOnEitherSide) {
+    // `0 == a` and `a == 0` are the same question, and the compiler answered them
+    // differently: the comparison branch of visit(BinaryOp&) took the left operand
+    // as the expectation, so a constant on the left made the *variable* the error
+    // ("expected 'int', got 'uint'"). Its own test because the constant rule above
+    // fixes one order and not the other -- checkType() receives the right operand.
+    //
+    // The rule added is only about constants, not about comparisons in general: a
+    // comparison between two differently-typed *variables* is judged exactly as it
+    // was, because whether `int` and `float` may be compared is a separate question
+    // and nothing here answers it.
+    const FincRun onLeft = compile("fun main() <noret> { let a <uint> = 0; blame 0 == a; }\n");
+    const FincRun onRight = compile("fun main() <noret> { let a <uint> = 0; blame a == 0; }\n");
+    EXPECT_EQ(onLeft.exitCode, onRight.exitCode)
+        << "`0 == a` and `a == 0` must be judged alike.\n"
+        << "constant on the left:\n" << onLeft.err << "constant on the right:\n" << onRight.err;
+    EXPECT_EQ(onLeft.exitCode, 0) << onLeft.err;
+}
+
+TEST(Soundness_IntegerConstants, AConstantIsAlsoAFloatOrADouble) {
+    // `int` to `float` was the one conversion PrimitiveType admitted; `double` was
+    // not, so `let x <double> = 1;` failed while `let x <float> = 1;` passed. Same
+    // rule, and it is asserted here so that narrowing the constant rule to integers
+    // alone shows up as a failure rather than as a silent regression.
+    for (const std::string& t : {"float", "double"}) {
+        const FincRun r = compile("fun main() <noret> { let x <" + t + "> = 1; }\n");
+        EXPECT_EQ(r.exitCode, 0) << "`let x <" << t << "> = 1;`\n" << r.err;
+    }
+}
+
+TEST(Soundness_IntegerConstants, ANegativeConstantIsNotUnsigned) {
+    // The half of the rule that must reject, and the reason the fix reads the AST
+    // rather than widening PrimitiveType::isAssignableTo: `-1` is a UnaryOp over a
+    // Literal, so "negative constant" is a syntactic question with an exact answer.
+    // A fix that admits `int` to `uint` wholesale passes every test above and this
+    // one is the only thing that catches it.
+    //
+    // **The corpus disagrees, and this is the one place in this file where that is
+    // true.** stdlib/stdio.fin:107 writes `fun read(nbytes: ulong = -1)` and :110
+    // tests `nbytes == -1`, which is the C idiom for "the maximum" -- so a normative
+    // sample says a negative constant on an unsigned type is legal and wraps. No ADR
+    // rules on it, so this test keeps the rejection that was already there before the
+    // constant rule existed: the rule admitted new spellings and must not be what
+    // smuggles that one in. **Ruling needed** -- if the answer is C wraparound, invert
+    // this test and delete the `!negative` in constantFitsType; if it is that unsigned
+    // maxima are spelled explicitly, stdio.fin needs a ratified edit. Either way the
+    // sample is currently rejected either way, so nothing depends on the answer today.
+    for (const std::string& t : {"uint", "ulong", "ushort"}) {
+        const FincRun r = compile("fun main() <noret> { let x <" + t + "> = -1; }\n");
+        EXPECT_NE(r.exitCode, 0)
+            << "`let x <" << t << "> = -1;` must be rejected -- -1 is not representable "
+               "in an unsigned type, and accepting it is worse than rejecting `= 1` was.";
+    }
+    // And it stays legal where it is representable.
+    for (const std::string& t : {"int", "long", "short", "float", "double"}) {
+        const FincRun r = compile("fun main() <noret> { let x <" + t + "> = -1; }\n");
+        EXPECT_EQ(r.exitCode, 0) << "`let x <" << t << "> = -1;`\n" << r.err;
+    }
+}
+
+TEST(Soundness_IntegerConstants, AConstantIsStillNotABoolOrAString) {
+    // The rule is about integer and floating targets and nothing else. Without this,
+    // "the context decides" is indistinguishable from "the check was deleted".
+    for (const std::string& t : {"bool", "string"}) {
+        const FincRun r = compile("fun main() <noret> { let x <" + t + "> = 1; }\n");
+        EXPECT_NE(r.exitCode, 0)
+            << "`let x <" << t << "> = 1;` must still be a type error.";
+        EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos) << r.err;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What the constant rule does not reach, booked rather than built.
+// ---------------------------------------------------------------------------
+
+TEST(KnownDefect_IntegerConstants, AnIntTypedExpressionIsNotUnsigned) {
+    // Not a defect in the same sense as the above: whether `let u <uint> = i;` for an
+    // `int` i is legal is a language decision, and the corpus needs an answer because
+    // stdlib/stdio.fin does mixed arithmetic on `int` counters and `ulong` fields at
+    // :110, :112, :115, :124 and :126 -- seven sites in one file, reported three times
+    // over because three samples import it.
+    //
+    // C converts silently, Rust and Zig refuse without a cast. Fin has `cast<T>` and a
+    // `Castable` interface, which is an argument for refusing. This test asserts the
+    // refusal that exists today so that whichever way it is ruled, the change is
+    // deliberate; if the ruling is "convert", invert this and widen
+    // PrimitiveType::isAssignableTo, which is a one-line change and would then also
+    // subsume the constant rule.
+    const FincRun r = compile("fun main() <noret> { let i <int> = 1; let u <uint> = i; }\n");
+    EXPECT_NE(r.exitCode, 0)
+        << "FIXED or RULED: an int-typed expression now converts to unsigned. If that "
+           "was the ruling, record it and invert this test.";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'uint', got 'int'"), std::string::npos) << r.err;
+}
+
+TEST(KnownDefect_IntegerWidths, AConstantTooLargeForItsTargetIsAccepted) {
+    // Introduced by the constant rule and recorded here in the same commit, which is
+    // the whole point of this suite: the rule checks the *sign* of a constant and not
+    // its magnitude, because Fin has not said how wide `short` or `char` is. The
+    // `{N}` annotation that would say is erased before anything can read it (see
+    // TheWidthIsAbsentFromDiagnosticText above), so a magnitude check today would be
+    // inventing the widths rather than enforcing them.
+    //
+    // Rejecting every constant was the alternative and it is strictly worse: it makes
+    // `let p <ulong> = 0;` unwritable. When the widths become real this is where the
+    // range check goes, and this test inverts into
+    // Soundness_IntegerConstants.AConstantMustFitItsTarget.
+    for (const char* code : {"fun main() <noret> { let x <short> = 99999; }\n",
+                             "fun main() <noret> { let x <char> = 300; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "FIXED: the constant's magnitude is now checked against its target. "
+               "Invert this and name the widths in the ADR that decided them.\n"
+            << code << r.err;
+    }
+}
+
+TEST(Soundness_Arrays, AFixedListInitialisesADynamicArrayOfTheSameElementType) {
+    // Split out of the KnownDefect below, where it was asserted only as a sentence in
+    // a comment. It is what makes that defect single-cause: if this ever regressed,
+    // the KnownDefect would keep passing for a reason its own text denies.
+    for (const char* code : {"fun main() <noret> { let a <[int]> = [1, 2]; }\n",
+                             "fun main() <noret> { let x <int> = 1; let a <[int]> = [x, x]; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << "a fixed list must initialise a dynamic array of "
+                                    "the same element type:\n" << code << r.err;
+    }
+}
+
+TEST(KnownDefect_IntegerConstants, AnArrayOfConstantsDoesNotTakeTheAnnotatedElementType) {
+    // `let myarr <[uint]> = [7,3,4];` (arrays.fin:29) reports
+    // `expected '[uint]', got '[int; fixed]'`. The message names two differences but
+    // only one of them is a defect: `let a <[int]> = [1,2];` compiles clean, so a
+    // fixed list already converts to a dynamic array of the same element type
+    // (ArrayType.cpp:22, and Soundness_Arrays.AFixedListInitialisesADynamicArray
+    // holds that). The `fixed` in the text is only how the right-hand side prints.
+    //
+    // So the single cause is the element type: checkType() is handed the ArrayLiteral,
+    // whose type is an ArrayType, and by then nothing remembers that its elements were
+    // constants. The fix belongs with whoever gives ArrayType an element-wise
+    // conversion -- a constant list has no element type of its own until its context
+    // supplies one -- and because there is only one cause, one fix ends this test.
+    const FincRun r = compile("fun main() <noret> { let a <[uint]> = [1,2]; }\n");
+    EXPECT_NE(r.exitCode, 0)
+        << "FIXED: an array of constants now takes its annotated element type. Invert "
+           "this into Soundness_IntegerConstants; the element type is the whole claim, "
+           "the `fixed` half of the old message was never a defect.";
+    EXPECT_NE(stripAnsi(r.err).find("[int; fixed]"), std::string::npos) << r.err;
+}
+
+// ---------------------------------------------------------------------------
+// A default value is never checked against the type it defaults.
+//
+// visit(Parameter&) resolves the parameter's type and then visits the default
+// expression, and never compares them -- so `fun f(x: uint = "nope")` compiles
+// clean. This is the soundness category the plan puts first: wrong code that
+// produces no diagnostic at all.
+//
+// Found while measuring the integer-constant rule, and separate from it: the
+// constant rule decides *what a constant may become*, and this is the check that
+// never asks. Fixing it is one checkType() call, but it is its own unit of work
+// because it convicts stdlib/stdio.fin:107 (`nbytes: ulong = -1`) the moment it
+// lands, which is the ruling named above. Measured, and worth knowing: the corpus
+// test for that sample would NOT catch it -- stdio.fin's expectation is prose
+// (`//@ unimplemented "..."`), so a new diagnostic in that file flips nothing. The
+// two tests below are the only thing watching this.
+// ---------------------------------------------------------------------------
+
+TEST(KnownDefect_Declarations, AParameterDefaultIsNotAnalysedAtAll) {
+    // Stronger than the type test below, and it needs no type system to see: an
+    // undefined name in a parameter default is not reported either. The default
+    // expression is never walked at all.
+    //
+    // Cause, and it is not a missing checkType: SemanticAnalyzer::visit(Parameter&)
+    // does call `default_value->accept(*this)` (Analyzer_Core.cpp:284) but nothing
+    // ever reaches it. visit(FunctionDeclaration&) iterates node.params by hand to
+    // resolve their types and define them (Analyzer_Decl.cpp:53-66) and never calls
+    // param->accept(*this), so that visitor is dead code for every function in the
+    // language. A mutation that added checkType inside it changed no test result --
+    // which is how this was found.
+    //
+    // Its own test, separate from the type check, because the two fixes are not the
+    // same edit: calling accept() on the default makes this go green while the type
+    // mismatch below stays undetected.
+    for (const char* code : {"fun f(x: int = nosuchthing) <noret> { }\nfun main() <noret> { }\n",
+                             "fun f(x: int = nosuchfn()) <noret> { }\nfun main() <noret> { }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "FIXED: a parameter default is analysed now. Invert this, and check that "
+               "the diagnostic points inside the default rather than at the function.\n"
+            << code << r.err;
+    }
+
+    // The same expression one line lower is caught, which is what rules out "the
+    // analyser cannot see this expression" as an explanation.
+    const FincRun body = compile("fun f() <noret> { let x <int> = nosuchthing; }\nfun main() <noret> { }\n");
+    EXPECT_NE(body.exitCode, 0) << "an undefined name in a body must still be caught: " << body.err;
+}
+
+TEST(KnownDefect_Declarations, AParameterDefaultIsNotCheckedAgainstItsType) {
+    // The type half. Reached only after the walk above exists, so a fix that adds
+    // accept() without adding checkType leaves this one still asserting the defect.
+    const FincRun r = compile("fun f(x: uint = \"nope\") <noret> { }\nfun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "FIXED: a parameter default is type-checked now. Invert this into "
+           "Soundness_Declarations and check the negative-constant case too -- "
+           "`fun f(x: uint = -1)` is the corpus's own spelling and the ruling on it "
+           "decides whether that is a second diagnostic or none.";
+}
+
+TEST(KnownDefect_Declarations, AStructFieldDefaultIsCheckedButAParameterIsNot) {
+    // The asymmetry is the evidence that this is a missing call and not a missing
+    // capability: the same wrong default in a struct field is both walked and checked
+    // (Analyzer_Decl.cpp:181 accepts it, :183 calls checkType). Its own test because a
+    // fix that adds checking to parameters must not disturb the path that works.
+    const FincRun field = compile("struct S { pub x <uint> = \"nope\", }\nfun main() <noret> { }\n");
+    EXPECT_NE(field.exitCode, 0)
+        << "a struct field default of the wrong type must still be caught: " << field.err;
+    EXPECT_NE(stripAnsi(field.err).find("Type mismatch"), std::string::npos) << field.err;
+
+    const FincRun param = compile("fun f(x: uint = \"nope\") <noret> { }\nfun main() <noret> { }\n");
+    EXPECT_EQ(param.exitCode, 0)
+        << "FIXED: parameters are checked like fields now. Invert this.";
+}
+
+// ---------------------------------------------------------------------------
+// Every unresolved type reports where it was written.
+//
+// It did not, and the scale is why this is here: `Undefined type 'X'` is the
+// largest single error class in the corpus -- 99 occurrences, more than twice the
+// next one -- and every one of them rendered at 1:1. Not a rendering bug.
+// SemanticAnalyzer reports at the TypeNode's own `loc` (Analyzer_Core.cpp:204),
+// and `base_type` in parser.y built a TypeNode without ever calling `setLoc(@$)`:
+// of its fifteen productions, five did -- the five wave 2 added -- and of the older
+// ten, eight did not, `IDENTIFIER` included (the other two are pass-throughs that
+// keep the inner type's location on purpose). parser.y calls setLoc 280 times
+// elsewhere, so the omission was local to types and not a convention the file
+// declines to follow. `pointer_type` and `array_type` already set theirs, which
+// is why `[Nope]` pointed at line 1 through its *element*, not its brackets.
+//
+// The consequence was worse than a misplaced caret. Line 1 of every sample is its
+// `//@` expectation comment, so an unlocated diagnostic was attributed to the very
+// sentence describing it -- and in a project where the samples are the
+// specification, that corrupts the evidence rather than merely presenting it
+// badly. KnownDefect_DiagnosticAttribution.DiagnosticsAreAttributedToExpectationComments
+// (test_cli.cpp) counts that corpus-wide; the tests below are the unit-level
+// companions and name the production behind each case.
+//
+// Every case puts the offending type on line 3, so "line 1" is wrong by two lines
+// and cannot be an accident of a one-line file. Written as three KnownDefect tests
+// first, confirmed red for the stated reason, then inverted here when the nine
+// productions gained their locations.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The `--> path:line:column` of a rendered diagnostic as "line:column", or "" if
+// it carried none. Reads the rendered text rather than the JSON on purpose: the
+// human renderer is what the corpus census reads, so it is what must agree.
+std::string firstLocation(const std::string& stderrText) {
+    const std::string err = stripAnsi(stderrText);
+    const size_t arrow = err.find("--> ");
+    if (arrow == std::string::npos) return "";
+    const size_t eol = err.find('\n', arrow);
+    const std::string line = err.substr(arrow + 4, eol - arrow - 4);
+    const size_t colon = line.rfind(':', line.rfind(':') - 1);
+    if (colon == std::string::npos) return "";
+    return line.substr(colon + 1);
+}
+
+// Two comment lines, so the code under test starts at line 3.
+const char* kPad = "// line 1\n// line 2\n";
+
+std::string reportedLoc(const std::string& body) {
+    const FincRun r = compile(std::string(kPad) + body);
+    return firstLocation(r.err);
+}
+
+std::string reportedLine(const std::string& body) {
+    const std::string loc = reportedLoc(body);
+    return loc.substr(0, loc.find(':'));
+}
+
+// The caret row of the first diagnostic, trimmed -- "^^^^ here". What the reader
+// actually looks at, and the only thing that shows the *span* is right rather
+// than just the start column.
+std::string caretRow(const std::string& body) {
+    const FincRun r = compile(std::string(kPad) + body);
+    const std::string err = stripAnsi(r.err);
+    const size_t here = err.find("^");
+    if (here == std::string::npos) return "";
+    const size_t eol = err.find('\n', here);
+    std::string row = err.substr(here, eol - here);
+    while (!row.empty() && row.back() == ' ') row.pop_back();
+    return row;
+}
+
+} // namespace
+
+TEST(Soundness_DiagnosticLocation, ADiagnosticThatHasALocationReportsIt) {
+    // The control, and it was not optional: while the three tests below asserted a
+    // defect, this is what ruled out "the extractor is broken" as the reason they
+    // passed. Both errors here are raised by the same analyzer on the same line as
+    // the type errors below, so the node is the only difference.
+    EXPECT_EQ(reportedLine("fun main() <noret> { let x <int> = nope; }\n"), "3")
+        << "an undefined variable on line 3 must be reported on line 3";
+    EXPECT_EQ(reportedLine("fun main() <noret> { let x <bool> = 1; }\n"), "3")
+        << "a type mismatch on line 3 must be reported on line 3";
+}
+
+TEST(Soundness_DiagnosticLocation, AnUndefinedNamedTypeReportsWhereItWasWritten) {
+    // Thirteen positions, and they share one production: every named type in the
+    // language comes from `base_type: IDENTIFIER` (or its generic form), wherever it
+    // appears. Looped rather than split for that reason -- and if a change ever makes
+    // some pass and not others, the loop names which, which is why all thirteen stay.
+    //
+    // The expected line is carried per case rather than assumed. One case needs two
+    // lines of setup and its type is genuinely on line 4; asserting 3 there would be
+    // asserting the wrong answer, and the first run of this loop did exactly that.
+    struct Case { const char* line; const char* body; };
+    for (const Case& c : {
+             Case{"3", "fun main() <noret> { let x <Nope> = 1; }\n"},          // let annotation
+             Case{"3", "fun f(p: Nope) <noret> { }\nfun main() <noret> { }\n"},  // parameter
+             Case{"3", "fun f() <Nope> { }\nfun main() <noret> { }\n"},       // return type
+             Case{"3", "fun main() <noret> { let x <Nope<int>> = 1; }\n"},     // generic base
+             Case{"4", "struct S<T> { pub x <T>, }\n"                          // generic argument
+                       "fun main() <noret> { let s <S<Nope>> = 0; }\n"},
+             Case{"3", "struct S { pub x <Nope>, }\nfun main() <noret> { }\n"},  // struct field
+             Case{"3", "fun main() <noret> { let a <[Nope]> = 0; }\n"},        // array element
+             Case{"3", "fun main() <noret> { let a <&Nope> = 0; }\n"},         // pointer target
+             Case{"3", "fun main() <noret> { let a <{Nope, int}> = 0; }\n"},   // prototype element
+             Case{"3", "const C <Nope> = 1;\nfun main() <noret> { }\n"},      // const
+             Case{"3", "fun main() <noret> { let f <fn(Nope) -> int> = 0; }\n"},  // fn-type param
+             Case{"3", "type A = Nope;\nfun main() <noret> { }\n"},           // alias target
+             Case{"3", "fun main() <noret> { let x <int> = cast<Nope>(1); }\n"},  // cast target
+         }) {
+        EXPECT_EQ(reportedLine(c.body), c.line)
+            << "an undefined type must be reported on the line it was written on, "
+               "not on line 1 -- line 1 of a sample is its `//@` expectation:\n"
+            << c.body;
+    }
+}
+
+TEST(Soundness_DiagnosticLocation, TheCaretSpansTheTypeNameAndNothingElse) {
+    // Split from the line test because they fail apart: a TypeNode could carry the
+    // right line with a one-column caret, or a span covering the whole annotation,
+    // and the line assertion above would not notice either. The span is what makes
+    // the diagnostic usable, so it is asserted where it is determinate.
+    EXPECT_EQ(reportedLoc("fun main() <noret> { let x <Nope> = 1; }\n"), "3:29");
+    EXPECT_EQ(caretRow("fun main() <noret> { let x <Nope> = 1; }\n"), "^^^^ here")
+        << "the caret must cover `Nope` exactly";
+    EXPECT_EQ(caretRow("fun f(p: Nope) <noret> { }\nfun main() <noret> { }\n"), "^^^^ here");
+    EXPECT_EQ(caretRow("fun main() <noret> { let x <any> = 1; }\n"), "^^^ here")
+        << "three carets for a three-character type";
+}
+
+TEST(Soundness_DiagnosticLocation, TheAnyTypeReportsWhereItWasWritten) {
+    // Its own test: `any` is KW_ANY, a different production, and the one that
+    // mattered most -- 40 of the corpus's 99 `Undefined type` diagnostics name it.
+    // A fix aimed only at `IDENTIFIER` would have left this one wrong, which is
+    // why it was never a case in the loop above.
+    EXPECT_EQ(reportedLine("fun main() <noret> { let x <any> = 1; }\n"), "3");
+    EXPECT_EQ(reportedLine("fun main() <noret> { let x <any<int>> = 1; }\n"), "3")
+        << "`any` and `any<...>` are two productions; both must carry a location";
+}
+
+TEST(Soundness_DiagnosticLocation, ABareSelfOutsideAStructReportsWhereItWasWritten) {
+    // KW_SELF_TYPE, a third production. The diagnostic itself is arguably right --
+    // `Self` really is undefined outside a struct -- which is why this test is
+    // about the location alone and says nothing about whether the error should
+    // exist. If `Self` ever becomes legal here, delete the test; do not weaken it.
+    EXPECT_EQ(reportedLine("fun main() <noret> { let x <Self> = 1; }\n"), "3");
+}
+
+TEST(Soundness_DiagnosticLocation, ANewExpressionsTypeReportsWhereItWasWritten) {
+    // A fourth production, found by re-running the corpus census after the nine
+    // above were fixed rather than by reading the grammar: `new Nope{}` builds its
+    // TypeNode inside the `KW_NEW IDENTIFIER` action (parser.y:2301) and set a
+    // location on the NewExpression but not on the type inside it -- and it is the
+    // type that fails to resolve. Its own test because it is its own production:
+    // fixing `base_type` did nothing for it, which is how it survived to be found.
+    EXPECT_EQ(reportedLine("fun main() <noret> { let x <int> = new Nope{}; }\n"), "3");
+    EXPECT_EQ(reportedLine("fun main() <noret> { let x <int> = new Nope::<int>{}; }\n"), "3")
+        << "the turbofish form is a second production and must carry one too";
+}
+
+TEST(Soundness_DiagnosticLocation, AMissingReturnReportsWhereTheFunctionIsDeclared) {
+    // Not a type diagnostic at all -- `error(node, ...)` at Analyzer_Decl.cpp:121
+    // reports against the FunctionDeclaration -- and it is here because the corpus
+    // census does not care what kind of node lost its location, only that three of
+    // the five diagnostics still landing on `//@` lines came from this one message.
+    EXPECT_EQ(reportedLine("fun f(a: int) <int> { if (a > 0) { return 1; } }\n"
+                           "fun main() <noret> { }\n"), "3");
+
+    // The control, and the reason this is one test and not two: a method already
+    // reported correctly (parser.y:894 sets a location, :465 did not), so the two
+    // productions differ by exactly the missing call and nothing else. If this half
+    // ever breaks, the fix went to the wrong place.
+    EXPECT_EQ(reportedLine("struct S {\n"
+                           "  pub fun m(self: &Self, a: int) <int> { if (a > 0) { return 1; } }\n"
+                           "}\n"
+                           "fun main() <noret> { }\n"), "4")
+        << "a method's missing-return diagnostic must keep pointing at the method";
+}
+
+// ---------------------------------------------------------------------------
+// `new` on a type that does not resolve killed the compiler.
+//
+// visit(NewExpression&) (Analyzer_Expr.cpp:393) wrapped the allocated type in a
+// PointerType without asking whether it resolved, so an unresolved type produced
+// a non-null PointerType over a null pointee -- which passes every
+// `if (!type) return;` downstream and dies at the first toString(), in
+// PointerType.cpp:6, reached from checkType's own error message.
+//
+// The same shape and the same crash site as the nine samples in the earlier
+// composite-type sweep, at a place that sweep did not reach: it fixed the
+// branches of resolveTypeFromAST, and this one is in an expression visitor. A
+// grep of every remaining make_shared<PointerType|ArrayType|FunctionType|
+// PrototypeType> in src/semantics found the other six all guarded -- the
+// prototype literal falls back to `any`, the rest return early -- so this was
+// the last one.
+//
+// Found while asserting where its diagnostic points, from the 1.2 seconds the
+// location test spent writing a core file. That is worth saying plainly: the
+// exit code was never checked, because 139 satisfies EXPECT_NE(exitCode, 0).
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_MachineContract, NewOnAnUndefinedTypeIsRejectedRatherThanFatal) {
+    // EQ 1, not NE 0. The whole reason this defect survived a passing suite is
+    // that a segfault is a nonzero exit code, so `NE 0` is not an assertion that
+    // the compiler ran -- ADR 0009 admits exactly {0,1,2,3} and 139 is none of them.
+    for (const char* code : {"fun main() <noret> { let x <int> = new Nope{}; }\n",
+                             "fun main() <noret> { let x <int> = new Nope::<int>{}; }\n",
+                             "fun main() <noret> { let x <int> = new Nope{a: 1}; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 1)
+            << "a `new` over an unresolved type must be a diagnostic, not a signal:\n"
+            << code << r.err;
+        EXPECT_NE(stripAnsi(r.err).find("Undefined type 'Nope'"), std::string::npos)
+            << code << r.err;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The four meta-types are unregistered, so every declaration that annotates one
+// is rejected.
+//
+// `$type`, `$struct`, `$interface` and `$enum_member` are the compile-time
+// reflection types. The corpus says what they are rather than leaving it to be
+// guessed: `stdlib/types.fin:33` writes `fun cast<_Type: $type>(value: Any<...>)`
+// and comments "$type == literal type"; `:83` returns one from `tftid(tid: uint)
+// <$type>`, "returns a type from typeid"; `stdlib/enums.fin:22` takes
+// `$enum_member` with the example `keyidof(Ok)`; `literal_interface.fin:5` takes
+// both `$interface` and `$struct` in one signature.
+//
+// The grammar learned all four in wave 2 -- parser.y:1776-1778 build a TypeNode
+// named `$type` / `$struct` / `$interface` from `DOLLAR` plus the keyword, and
+// `$enum_member` arrives through the `DOLLAR IDENTIFIER` catch-all at :1783 --
+// and the analyzer learned none of them, so all four die at Analyzer_Core.cpp:204.
+// That makes this a name-resolution gap and nothing more: what a `$type` *value*
+// can do belongs to wave 4, and registering the name does not decide it.
+//
+// Four tests and not one, because the productions differ. A fix that registers
+// `$type` alone leaves the other three exactly as broken, and `$enum_member`
+// reaches the analyzer down a different grammar path than the other three.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_MetaTypes, DollarTypeIsADeclarableType) {
+    auto r = compile("fun f(t: $type) <int> { return 1; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`$type` is a builtin meta-type, not an undefined name:\n" << r.err;
+}
+
+TEST(Soundness_MetaTypes, DollarStructIsADeclarableType) {
+    auto r = compile("fun f(s: $struct) <int> { return 1; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    // The old diagnostic offered `did you mean 'struct'?`, which is the one
+    // suggestion that must never be taken: `struct` is the declaration keyword
+    // and `$struct` is a type. A regression that resolved `$struct` *to* a struct
+    // would pass the exit-code check above, so the suggestion is asserted gone.
+    EXPECT_EQ(stripAnsi(r.err).find("did you mean"), std::string::npos) << r.err;
+}
+
+TEST(Soundness_MetaTypes, DollarInterfaceIsADeclarableType) {
+    auto r = compile("fun f(i: $interface) <int> { return 1; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_MetaTypes, DollarEnumMemberIsADeclarableType) {
+    // Reaches resolveTypeFromAST through `DOLLAR IDENTIFIER` (parser.y:1783),
+    // not through a keyword production like the three above.
+    auto r = compile("fun f(e: $enum_member) <int> { return 1; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_MetaTypes, EveryPositionThatTakesATypeTakesAMetaType) {
+    // Return, binding, array element and pointee, because resolveTypeFromAST is
+    // reached from each and the array and pointer arms run *before* the name
+    // lookup (Analyzer_Core.cpp:130-180): they recurse, so a fix that registered
+    // the name only for a bare annotation would leave `[$type]` broken.
+    for (const char* code : {"fun f() <$type> { return 1; }\n",
+                             "fun f() <int> { let t <$type> = 1; return 1; }\n",
+                             "fun f(a: [$type]) <int> { return 1; }\n",
+                             "fun f(p: &$type) <int> { return 1; }\n"}) {
+        auto r = compile(code);
+        EXPECT_EQ(stripAnsi(r.err).find("Undefined type '$type'"), std::string::npos)
+            << "the meta-type must resolve in every type position:\n" << code << r.err;
+    }
+}
+
+TEST(Soundness_MetaTypes, AnUnknownDollarNameIsStillUndefined) {
+    // The guard, and the reason the fix is four names rather than a prefix rule.
+    // `DOLLAR IDENTIFIER` (parser.y:1783) accepts *any* `$name` as a type, so
+    // "resolve anything beginning with `$`" is a one-line fix that turns every
+    // typo into a silently accepted type. This test is what forbids it.
+    auto r = compile("fun f(x: $wierd) <int> { return 1; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "only the four reflection meta-types exist:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type '$wierd'"), std::string::npos) << r.err;
+}
+
+TEST(Soundness_MetaTypes, AMetaTypeIsNotAssignableFromAnOrdinaryValue) {
+    // Registering the name must not make `$type` a synonym for `auto`. An int
+    // initialiser for a `$type` binding has to be rejected -- and this is the
+    // assertion that distinguishes "the meta-type resolves" from "the meta-type
+    // swallows anything", which is what a PrimitiveType named `any` would do.
+    auto r = compile("fun f() <int> { let t <$type> = 1; return 1; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "an int is not a type value:\n" << r.err;
+}
+
+
+// ---------------------------------------------------------------------------
+// Nullability.
+//
+// tests/samples/nullifier.fin is a complete specification of it, and every rule
+// below is quoted from that file or from another sample that exercises the same
+// construct. The grammar has accepted all of it since wave 2 --
+// `TypeNode::is_nullable` is set in twenty places in parser.y -- and until this
+// wave nothing in src/semantics/ or src/types/ ever read the flag. So every
+// nullable spelling parsed and then meant exactly what the non-nullable spelling
+// meant, which is the worst of the three possible states: the source says the
+// value may be absent, and the compiler agrees to nothing.
+//
+// The rules, and where each comes from:
+//
+//   `T?` accepts `null`              nullifier.fin:4, :18, :34
+//   `T?` accepts a plain `T`         nullifier.fin:7 (`b? <int>`, `return self.b`)
+//   `T` rejects a `T?`              nullifier.fin:31 -- the `?` on `make_A(-1)?`
+//                                    is what makes it assignable, so without the
+//                                    `?` it must not be
+//   `T` rejects `null`              nullifier.fin:31 again, and undefined_behavior.fin:16
+//   `&T` accepts `null`              deeptest3.fin:64, :75, :80 -- a pointer is
+//                                    already nullable and stays that way
+//   postfix `?` strips one `?`       nullifier.fin:31, :42, undefined_behavior.fin:16
+//   `fun?` makes the return nullable nullifier.fin:6, :16, undefined_behavior.fin:9
+//   `fun?` may fall off the end      nullifier.fin:23 "Automatically returns null
+//                                    even without an else statement", and
+//                                    undefined_behavior.fin:9 "this function compiles"
+//   `n?: int` is optional at a call  nullifier.fin:39 "since make_A says \"n?: int\"
+//                                    we know that n can be null and we don't need
+//                                    to pass any arguments"
+//   anything may be compared to null nullifier.fin:40 compares a *denullified*
+//                                    `_` with null and calls it correct, so the
+//                                    comparison cannot require a nullable operand.
+//                                    stdlib/error.fin:12 compares a plain `int`
+//                                    parameter with null.
+//   `= null` on an explicit type     nullifier.fin:4 calls `b? <int>` "equavelant
+//                                    to `b <int> = null`". deeptest4.fin:6-7 and
+//                                    stdlib/error.fin:11 both write the `= null`
+//                                    spelling on a non-nullable type and then use
+//                                    the member or parameter *without* a denullify
+//                                    (deeptest4.fin:16 `a["Hi"].integer == 10`,
+//                                    error.fin:14 `error_id: err_code`), which is
+//                                    what settles the reading: `= null` is a
+//                                    permitted "absent" initialiser, and it does
+//                                    not change the declared type. The stronger
+//                                    reading -- that it makes the declaration
+//                                    nullable -- would require both of those
+//                                    normative samples to denullify, and neither
+//                                    does. See ANullDefaultDoesNotMakeItNullable.
+//
+// What is *not* decided here, and is booked in docs/plan.md instead: what a
+// postfix `?` on an already-non-nullable value means (nullifier.fin:36 says
+// `mibombo?` on an `any` "should be an error", but `any` itself is unresolved),
+// and whether two nullable types of different inner type may be compared.
+
+TEST(Soundness_Nullability, ANullableSlotAcceptsNull) {
+    // nullifier.fin:34, spelled exactly as the sample spells it.
+    //
+    // Read what this does and does not prove. It is a *declaration*, so
+    // checkInitializer waves the null through before assignability is consulted:
+    // it would still pass with NullType assignable to nothing at all. Mutation
+    // confirmed that -- M6 ("NullType is not assignable to a nullable") does not
+    // kill it. What it pins is that the sample's own line compiles; the
+    // assignability rule is pinned by the two tests below, which are in positions
+    // no exemption covers.
+    auto r = compile("fun main() <int> { let x? <int> = null; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`let x? <int> = null` is nullifier.fin:34:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, ANullableSlotMayBeAssignedNull) {
+    // The assignment position, which nothing exempts -- so this is the test that
+    // actually reaches "NullType is assignable to a NullableType". The
+    // declaration above cannot get there.
+    auto r = compile("fun main() <int> { let x? <int> = 1; x = null; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`x = null` on an `int?` is legal:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, ANonNullableParameterRejectsNull) {
+    // The control. If this ever passes, `?` has stopped meaning anything and
+    // every test above it is vacuous.
+    //
+    // An argument, not `let x <int> = null` -- that spelling is a *declaration*
+    // and is legal (AnExplicitTypeMayBeInitialisedToNull below, deeptest4.fin:6).
+    // The first draft of this test used it and passed for the wrong reason, which
+    // is the argument for the boundary test that follows the two of them.
+    auto r = compile("fun g(n: int) <int> { return 0; }\n"
+                     "fun main() <int> { let z <int> = g(null); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "a plain `int` parameter cannot take null:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int'"), std::string::npos) << r.err;
+}
+
+TEST(Soundness_Nullability, ANonNullableReturnRejectsNull) {
+    // The other non-declaration position, and the one undefined_behavior.fin:9
+    // turns on: a plain `fun` may not return null, a `fun?` may. Split from the
+    // argument case because `visit(ReturnStatement&)` and the argument loop in
+    // `visit(FunctionCall&)` are separate checks.
+    auto r = compile("fun f() <int> { return null; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "a plain `fun` cannot return null:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, NullNamesItselfInADiagnostic) {
+    // Split from the control above because the two have different fixes: the
+    // rejection was already right, the *message* was not. `&void` was an
+    // implementation detail of how the literal was typed, and it named a pointer
+    // type in a diagnostic about a program containing no pointer.
+    auto r = compile("fun g(n: int) <int> { return 0; }\n"
+                     "fun main() <int> { let z <int> = g(null); return 0; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("got 'null'"), std::string::npos)
+        << "the literal's type should print as `null`, not as a pointer:\n" << err;
+    EXPECT_EQ(err.find("&void"), std::string::npos)
+        << "no diagnostic about `null` should mention a pointer type:\n" << err;
+}
+
+TEST(Soundness_Nullability, TheNullInitialiserRuleStopsAtTheDeclaration) {
+    // The boundary, in one program, because the three positions are three
+    // separate checks and only the first is permitted. Written as one compile so
+    // that a future change which widens the rule from declarations to "anywhere"
+    // cannot pass by fixing one position at a time.
+    auto r = compile("fun g(n: int) <int> { return 0; }\n"
+                     "fun main() <int> {\n"
+                     "    let x <int> = null;\n"   // legal: a declaration
+                     "    x = null;\n"             // not: an assignment
+                     "    let z <int> = g(null);\n" // not: an argument
+                     "    return 0;\n"
+                     "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string err = stripAnsi(r.err);
+    // Two diagnostics, on lines 4 and 5. Line 3 must produce none.
+    EXPECT_NE(err.find(":4:"), std::string::npos) << "`x = null` must be reported:\n" << err;
+    EXPECT_NE(err.find(":5:"), std::string::npos) << "`g(null)` must be reported:\n" << err;
+    EXPECT_EQ(err.find(":3:"), std::string::npos)
+        << "`let x <int> = null` is a declaration and must not be:\n" << err;
+}
+
+TEST(Soundness_Nullability, APointerStillAcceptsNull) {
+    // deeptest3.fin:75 `print_if_exists(null)` against `val_ptr: &int`. A pointer
+    // was nullable before this wave and must stay nullable: retyping the literal
+    // must not take that away.
+    //
+    // An argument, not `let p <&int> = null`. The first draft used the
+    // declaration, and a mutant that removed the pointer arm from
+    // NullType::isAssignableTo entirely *survived* it -- because a declaration's
+    // initialiser is exempted from the type check before assignability is ever
+    // asked (checkInitializer). The test asserted a rule it never reached.
+    auto r = compile("fun g(p: &int) <int> { return 0; }\n"
+                     "fun main() <int> { let z <int> = g(null); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a pointer is nullable (deeptest3.fin:75):\n" << r.err;
+}
+
+TEST(Soundness_Nullability, APointerMayBeAssignedNull) {
+    // The third position, and the one no exemption covers: a plain assignment.
+    // deeptest3.fin:80's `pub next <&Node> = null` is a declaration, so on its own
+    // it leaves the assignment case unpinned.
+    auto r = compile("fun main() <int> { let a <int> = 1; let p <&int> = &a; p = null; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`p = null` on a pointer is legal:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, AMemberOfANullableStructNeedsADenullify) {
+    // The safety property the whole feature is for: a value that may be absent
+    // must not be walked into. Reaching a field through an `S?` has to be refused,
+    // and it is the one consequence of nullability that is about *use* rather than
+    // about assignment.
+    auto r = compile("struct S { pub b <int>, }\n"
+                     "fun main() <int> { let s? <S> = S{b: 1}; let v <int> = s.b; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "`s.b` on an `S?` must be refused:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("'S?'"), std::string::npos)
+        << "and the diagnostic must name the nullable type:\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, AMethodOnANullableStructNeedsADenullify) {
+    // Same property, different visit: MethodCall and MemberAccess are separate
+    // functions with separate diagnostics (Analyzer_Expr.cpp:357 and :482), so a
+    // fix reaching one leaves the other.
+    auto r = compile("struct S { pub fun m(self: &Self) <int> { return 1; } }\n"
+                     "fun main() <int> { let s? <S> = S{}; let v <int> = s.m(); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "`s.m()` on an `S?` must be refused:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("'S?'"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, DenullifyThenReachIntoIt) {
+    // nullifier.fin:42 `make_A(10)?.get_b()?` -- the pair to the two tests above,
+    // and the reason they are not simply "nullable values are unusable". One `?`
+    // is the difference between the three programs.
+    auto r = compile("struct S { pub fun m(self: &Self) <int> { return 1; } }\n"
+                     "fun main() <int> { let v <int> = 0; let s? <S> = S{}; v = s?.m(); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`s?.m()` is nullifier.fin:42:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, ANullableSlotAcceptsAPlainValue) {
+    // nullifier.fin:7 returns `self.b` -- an `int?` member -- from a `fun?`
+    // returning `int`, and the reverse direction appears at :27. Passed before
+    // the fix too, but for the wrong reason (`int?` *was* `int`), so it is here
+    // to pin that widening survived the type actually existing.
+    auto r = compile("fun main() <int> { let x? <int> = 5; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`T?` is wider than `T`:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, ANonNullableSlotRejectsANullableValue) {
+    // The other half, and the half that was silently wrong. nullifier.fin:31
+    // spells `let myvar2 <A> = make_A(-1)?` with a `?`, and the comment says the
+    // `?` is what "makes any null value raise a panic error OR just returns the
+    // normal value". If the assignment were legal without it, the `?` would be
+    // decoration and the sample would be lying about why it is there.
+    auto r = compile("fun main() <int> { let a? <int> = 5; let b <int> = a; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "an `int?` needs a denullify to become an `int`:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("got 'int?'"), std::string::npos)
+        << "and the diagnostic has to say which type is nullable:\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, DenullifyMakesItAssignable) {
+    // The pair to the test above: identical program plus one `?`. Split from it
+    // because a fix that made `int?` and `int` interchangeable again would leave
+    // this one green, and only the pair pins that the `?` is what did the work.
+    auto r = compile("fun main() <int> { let a? <int> = 5; let b <int> = a?; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "postfix `?` strips the nullability (nullifier.fin:31):\n" << r.err;
+}
+
+TEST(Soundness_Nullability, DenullifyStripsExactlyOneLevel) {
+    // `let b? <int> = a?` must still be legal -- widening back to nullable -- and
+    // more importantly a single `?` must not be read as "make this assignable to
+    // anything". Without this, `isAssignableTo` returning true unconditionally
+    // for a denullified value would pass every other test in the suite.
+    auto r = compile("fun main() <int> { let a? <int> = 5; let b <string> = a?; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "denullifying an `int?` gives an `int`, not a free pass:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, ANullableStructMemberIsNullable) {
+    // nullifier.fin:4. The member spellings are six separate grammar rules
+    // (parser.y, `IDENTIFIER QUESTION LT type GT` and its five siblings), so a
+    // fix that only reached `let` would leave the sample's own construct broken.
+    auto r = compile("struct S { pub v? <int>, }\n"
+                     "fun main() <int> { let s <S> = S{}; let q <int> = s.v; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "`v? <int>` is an `int?`, and `q <int>` needs a denullify:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("got 'int?'"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, ANullableParameterIsNullable) {
+    // parser.y's `IDENTIFIER QUESTION COLON type` -- nullifier.fin:16 `n?: int`.
+    // Same reason as the member test: a different grammar rule sets the flag, so
+    // it needs its own assertion that the flag was read.
+    auto r = compile("fun g(n?: int) <int> { let k <int> = n; return 0; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "`n?: int` is an `int?` inside the body:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("got 'int?'"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, ANullableParameterMayBeOmitted) {
+    // nullifier.fin:39, quoted in the header comment above. Was `Function 'g'
+    // expects 1 arguments, got 0`.
+    auto r = compile("fun g(n?: int) <int> { return 0; }\n"
+                     "fun main() <int> { let z <int> = g(); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a nullable parameter is optional at the call site:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, APlainParameterIsStillRequired) {
+    // The control for the arity change. One `?` apart from the test above.
+    auto r = compile("fun g(n: int) <int> { return 0; }\n"
+                     "fun main() <int> { let z <int> = g(); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "a plain parameter is still required:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expects 1 arguments, got 0"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, TooManyArgumentsIsStillAnError) {
+    // The other side of the arity change: making the minimum smaller must not
+    // make the maximum unbounded. Without this, "skip the arity check when any
+    // parameter is nullable" would pass every arity test in the suite.
+    auto r = compile("fun g(n?: int) <int> { return 0; }\n"
+                     "fun main() <int> { let z <int> = g(1, 2); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "two arguments for one parameter is still wrong:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, ANullableParameterAcceptsNull) {
+    // The point of declaring it nullable. Was rejected with `expected 'int', got
+    // '&void'` -- the argument check ran against the un-nullified `int`.
+    auto r = compile("fun g(n?: int) <int> { return 0; }\n"
+                     "fun main() <int> { let z <int> = g(null); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`n?: int` accepts null:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, FunQuestionMakesTheReturnTypeNullable) {
+    // nullifier.fin:16's comment: "using '?' in types tells us that it might
+    // return that type OR null". undefined_behavior.fin:16 then writes
+    // `add2()?`, and the `?` is only meaningful if the call's type needs one.
+    auto r = compile("fun? f() <int> { return 1; }\n"
+                     "fun main() <int> { let x <int> = f(); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "`fun?` returns `int?`, so this assignment needs a `?`:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("got 'int?'"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, DenullifyingAFunQuestionCallGivesThePlainType) {
+    // undefined_behavior.fin:16 exactly. Pairs with the test above the way
+    // DenullifyMakesItAssignable pairs with ANonNullableSlotRejectsANullableValue.
+    auto r = compile("fun? f() <int> { return 1; }\n"
+                     "fun main() <int> { let x <int> = f()?; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`f()?` is an `int` (undefined_behavior.fin:16):\n" << r.err;
+}
+
+TEST(Soundness_Nullability, FunQuestionMayReturnNull) {
+    // nullifier.fin:18 `return null;` inside `fun? make_A(...) <A>`.
+    auto r = compile("fun? f() <int> { return null; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a `fun?` may return null explicitly:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, FunQuestionMayFallOffTheEnd) {
+    // nullifier.fin:23 -- "Automatically returns null even without an else
+    // statement" -- and undefined_behavior.fin:9, whose comment says in so many
+    // words "this function compiles". It did not: finc reported "Function 'add2'
+    // is missing a return statement on some paths" on the very line the sample
+    // says is legal. The sample passed anyway because `//@ error` means "at least
+    // this diagnostic" (test_expectations.cpp), so the extra one was invisible.
+    auto r = compile("fun? f() <int> { if (0) { return 1; } }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a `fun?` has an implicit `return null`:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, APlainFunctionStillNeedsAReturnOnEveryPath) {
+    // The control, and undefined_behavior.fin:3 is the sample that pins it. One
+    // `?` apart from the test above; the whole missing-return check must not be
+    // what got suppressed.
+    auto r = compile("fun f() <int> { if (0) { return 1; } }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "a plain function must return on every path:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("missing a return statement"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, AnythingMayBeComparedToNull) {
+    // nullifier.fin:40 `blame _? == null;` compares a denullified value -- a
+    // plain `int` -- with null, and the sample's own gloss (`assert @unpacked(_)
+    // == null`) says that is the intended reading. stdlib/error.fin:12 does the
+    // same with a plain `int` parameter. Both were `expected 'int', got '&void'`.
+    auto r = compile("fun main() <int> { let x <int> = 0; blame x == null; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "comparing against null is always legal:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, NullMayBeTheLeftOperandOfAComparison) {
+    // Split from the test above because the equality path checks the right
+    // operand against the left (Analyzer_Expr.cpp, visit(BinaryOp&)), so the two
+    // orders take different branches and a fix aimed at one leaves the other red.
+    auto r = compile("fun main() <int> { let x <int> = 0; blame null == x; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`null == x` is the same question as `x == null`:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, NullIsNotOrdered) {
+    // The scope limit on the comparison rule. `==` and `!=` against null are
+    // always legal; `<` is not, because no sample orders anything against null and
+    // deciding what "less than null" means would be a ruling, not a fix. Without
+    // this line, extending the exemption to the whole relational family -- the
+    // six comparison operators share one branch in visit(BinaryOp&) -- passes
+    // every other test in the suite.
+    auto r = compile("fun main() <int> { let x <int> = 0; blame x < null; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "`x < null` is not a question with an answer:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, NullIsStillRejectedInAnOrdinaryAssignment) {
+    // The scope limit on the `= null` rule below. A *declaration* may say
+    // `= null`; a later assignment to a non-nullable variable may not. Without
+    // this line, "accept null against anything" passes the whole suite.
+    auto r = compile("fun main() <int> { let x <int> = 0; x = null; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "`x = null` on a non-nullable `int` is an error:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, AnExplicitTypeMayBeInitialisedToNull) {
+    // deeptest4.fin:6-7 and stdlib/error.fin:11. Both normative, both write
+    // `= null` against a non-nullable type, and both were rejected twice over --
+    // struct members are checked in registration and again in the visit, so
+    // deeptest4's two members produced four diagnostics.
+    auto r = compile("struct S { v <int> = null, }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`v <int> = null` is deeptest4.fin:6:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, ANullDefaultDoesNotMakeItNullable) {
+    // The reading this fix commits to, and the one measurement that separates it
+    // from the alternative. deeptest4.fin:16 uses `a["Hi"].integer` in an `== 10`
+    // comparison and stdlib/error.fin:14 passes `err_code` straight into an
+    // `<int>` field, neither with a denullify -- so `= null` cannot have made
+    // those declarations nullable. If it had, both normative samples would need
+    // a `?` they do not write.
+    auto r = compile("struct S { pub v <int> = null, }\n"
+                     "fun main() <int> { let s <S> = S{}; let q <int> = s.v; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`v <int> = null` leaves v an `int` (deeptest4.fin:16):\n" << r.err;
+}
+
+TEST(Soundness_Nullability, ANullDefaultOnAParameterIsAccepted) {
+    // stdlib/error.fin:11 `Error(msg: string, err_code: int = null)`. A separate
+    // grammar path from the struct member, hence a separate test.
+    //
+    // Unprovable, on purpose, and the reason is worth keeping: no mutant of this
+    // wave can kill it, because `visit(Parameter&)` resolves the declared type and
+    // visits the default expression without ever comparing the two. `fun g(n: string = 3)`
+    // is accepted for the same reason. So this passes because the check is absent,
+    // not because null is exempt -- and when that defect is fixed (docs/plan.md,
+    // "a parameter's default value is never checked") this test starts asserting
+    // something, and a `= null` default must keep passing while `= 3` starts failing.
+    auto r = compile("fun g(n: int = null) <int> { return n; }\n"
+                     "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`n: int = null` is stdlib/error.fin:11:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, ANullableTypeIsPrintedWithItsQuestionMark) {
+    // The diagnostic contract for the new type. `int?` and `int` are different
+    // types now, so a message naming both must be readable -- "expected 'int',
+    // got 'int'" is worse than no message.
+    auto r = compile("fun main() <int> { let a? <int> = 5; let b <string> = a; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int?'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, ANullableIsNotAssignableToADifferentNullable) {
+    // `int?` and `string?` are as distinct as `int` and `string`. Guards against
+    // "target is nullable, therefore anything goes", which is the shortest wrong
+    // implementation of the widening rule.
+    auto r = compile("fun main() <int> { let a? <int> = 5; let b? <string> = a; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "`int?` is not a `string?`:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string?', got 'int?'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, ANullablePointerIsStillAPointer) {
+    // `&int` and `&int?` are both nullable at runtime but they are not the same
+    // written type, and the wrapper must nest rather than collapse. parser.y sets
+    // is_nullable on the outer TypeNode, so `p? <&int>` is `(&int)?`.
+    auto r = compile("fun main() <int> { let p? <&int> = null; let q <&int> = p?; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`(&int)?` denullifies to `&int`:\n" << r.err;
+}

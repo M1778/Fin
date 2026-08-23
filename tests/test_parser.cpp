@@ -40,7 +40,9 @@ protected:
         // 2. Setup Diagnostic Engine
         fin::DiagnosticEngine diag(code, filename);
         
-        // 3. Setup Lexer
+        // 3. Setup Lexer. The catch-all rule reports through whichever engine
+        // is installed, so a unit test does not lose an unlexable byte.
+        fin::setLexerDiagnostics(&diag);
         YY_BUFFER_STATE buffer = yy_scan_string(code.c_str());
         
         // 4. Setup Parser
@@ -51,6 +53,7 @@ protected:
         
         // 6. Cleanup
         yy_delete_buffer(buffer);
+        fin::setLexerDiagnostics(nullptr);
         
         return res == 0 && !diag.hasErrors();
     }
@@ -102,56 +105,14 @@ TEST_F(ParserTest, StructMethods) {
     EXPECT_TRUE(parseString(code));
 }
 
-// Dynamic File Tests ---
-
-class FileParserTest : public ParserTest, public ::testing::WithParamInterface<std::string> {};
-
-TEST_P(FileParserTest, ParsesSuccessfully) {
-    std::string filePath = GetParam();
-    std::string code = readFile(filePath);
-    
-    ASSERT_FALSE(code.empty()) << "Could not read file: " << filePath;
-    
-    bool success = parseString(code, filePath);
-    
-    EXPECT_TRUE(success) << "Failed to parse file: " << filePath;
-}
-
-std::vector<std::string> GetFinFiles() {
-    std::vector<std::string> files;
-    std::string path = "samples"; 
-    
-    if (!fs::exists(path)) {
-        path = "tests/samples"; 
-    }
-    
-    if (fs::exists(path)) {
-        for (const auto& entry : fs::recursive_directory_iterator(path)) {
-            if (entry.path().extension() == ".fin") {
-                files.push_back(entry.path().string());
-            }
-        }
-    }
-    return files;
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    AutoDiscovered,
-    FileParserTest,
-    ::testing::ValuesIn(GetFinFiles()),
-    [](const testing::TestParamInfo<std::string>& info) {
-        std::string name = info.param;
-        // Strip the common prefix "tests/samples/" or "samples/"
-        size_t pos = name.find("samples/");
-        if (pos != std::string::npos) {
-            name = name.substr(pos + 8);
-        }
-        // Remove .fin extension
-        if (name.size() > 4 && name.substr(name.size() - 4) == ".fin") {
-            name = name.substr(0, name.size() - 4);
-        }
-        // Replace non-alphanumeric with underscores
-        std::replace_if(name.begin(), name.end(), [](char c){ return !isalnum(c); }, '_');
-        return name;
-    }
-);
+// FileParserTest and GetFinFiles() used to live here. Both are deleted:
+//
+//  * FileParserTest asserted that all fifty samples parse. Authority is
+//    per-expectation (ADR 0008), so an aspirational sample failing is the
+//    expected outcome and a suite that cannot say so is red for reasons that
+//    are not bugs. tests/test_expectations.cpp replaces it.
+//  * GetFinFiles() ran during static initialisation and probed "samples" then
+//    "tests/samples" relative to the working directory, so a wrong cwd
+//    registered zero file tests and the suite reported success.
+//    tests/Corpus.cpp::sampleFiles() replaces it: an absolute compile-time
+//    path, and zero-sample discovery is a hard failure.

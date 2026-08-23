@@ -19,7 +19,10 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
                 type = lastExprType;
                 debugLog(fg(fmt::color::green), "      [Inference] Inferred type '{}' for variable '{}'\n", type->toString(), node.name);
             } else {
-                checkType(*node.initializer, lastExprType, type);
+                // checkInitializer, not checkType: `let x <int> = null;` is a
+                // declaration and is legal (deeptest4.fin:6), while `x = null;`
+                // is an assignment and is not.
+                checkInitializer(*node.initializer, lastExprType, type);
             }
         }
     }
@@ -38,14 +41,16 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     // 1. Enter Scope for the function body (to hold generics and params)
     enterScope();
 
-    // 2. Register Generics (e.g. <T>)
-    for (auto& gen : node.generic_params) {
-        currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
-    }
+    // 2. Register Generics (e.g. <T>) and resolve their constraints
+    declareGenericParams(node.generic_params);
 
     // 3. Resolve Parameters & Build Signature
     std::vector<std::shared_ptr<Type>> paramTypes;
     bool hasSelf = false;
+    // A parameter whose type did not resolve is left out of paramTypes, which
+    // silently changes the function's arity. Tracked so that a signature which
+    // did not resolve is not registered as though it had; see step 6.
+    bool signatureResolved = true;
     
     for (auto& param : node.params) {
         if (param->name == "self") hasSelf = true;
@@ -56,6 +61,8 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
             currentScope->define({param->name, type, false, true});
             // Register in signature
             paramTypes.push_back(type);
+        } else {
+            signatureResolved = false;
         }
     }
 
@@ -75,12 +82,23 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     } else {
         retType = currentScope->resolveType("void");
     }
+    // nullptr here means "the return type is unknown", which every other reader
+    // of this field already treats as "stop asking" (Analyzer_Stmt.cpp:15,21).
     context.currentFuncReturnType = retType;
+    if (!retType) signatureResolved = false;
 
     // 6. REGISTER FUNCTION IN PARENT SCOPE (CRITICAL FIX)
     // Register 'add' and 'compute' in the Global Scope (currentScope->parent)
     // so that 'main' can find them later.
-    if (currentScope->parent) {
+    //
+    // Only when the signature resolved. FunctionType dereferences its return
+    // type and its parameters in toString(), so registering one built over an
+    // unresolved part hands a live null to every later caller -- and registering
+    // one whose unresolved parameters were quietly dropped advertises the wrong
+    // arity, which made `fun f(p: NoSuchType)` called as `f(1)` report a second,
+    // false error about expecting 0 arguments. Calls to such a function still
+    // cascade, as KnownDefect_TypeResolution records.
+    if (currentScope->parent && signatureResolved) {
         auto funcType = std::make_shared<FunctionType>(paramTypes, retType);
         // Mark as immutable and initialized
         currentScope->parent->define({node.name, funcType, false, true});
@@ -90,7 +108,23 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     // 7. Analyze Body
     if (node.body) node.body->accept(*this);
     
-    if (node.body && !node.return_type->name.empty() && node.return_type->name != "void" && node.return_type->name != "noret") {
+    // `node.return_type` is null for a function that declared none -- the
+    // grammar does not currently admit one, but the AST does, and step 5 above
+    // already tests it before use. `currentFuncReturnType` is null when the
+    // declared return type did not resolve; the cause has been reported, and
+    // there is no type here to ask whether it is void.
+    //
+    // `fun?` is exempt. nullifier.fin:23 -- "Automatically returns null even
+    // without an else statement" -- and undefined_behavior.fin:9, whose comment
+    // says of a `fun?` with one conditional return "this function compiles". It
+    // did not: finc reported the missing-return error on that very line. The
+    // sample stayed green because `//@ error` means "at least this diagnostic"
+    // (tests/test_expectations.cpp), so the extra one was invisible to the
+    // harness -- which is the whole argument for making that form exhaustive.
+    if (node.body && node.return_type && context.currentFuncReturnType
+        && !node.return_type->is_nullable
+        && !node.return_type->name.empty() && node.return_type->name != "void"
+        && node.return_type->name != "noret") {
         // Check if void/noret was resolved to actual void type
         if (context.currentFuncReturnType->toString() != "void") {
             if (!checkReturnPaths(node.body.get())) {
@@ -112,17 +146,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
     enterScope();
 
     // --- SETUP GENERICS ---
-    for (auto& gen : node.generic_params) {
-        auto genType = std::make_shared<GenericType>(gen->name);
-        if (gen->constraint) {
-            auto constraintType = resolveTypeFromAST(gen->constraint.get());
-            if (constraintType) {
-                debugLog(fg(fmt::color::gray), "      [Constraint] Generic '{}' : '{}'\n", gen->name, constraintType->toString());
-            }
-        }
-        currentScope->defineType(gen->name, genType);
-        structType->generic_args.push_back(genType);
-    }
+    declareGenericParams(node.generic_params, &structType->generic_args);
 
     currentScope->defineType("Self", std::make_shared<SelfType>(structType));
 
@@ -156,7 +180,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         if (member->default_value) {
             member->default_value->accept(*this);
             if (lastExprType && memberType) {
-                checkType(*member->default_value, lastExprType, memberType);
+                checkInitializer(*member->default_value, lastExprType, memberType);
             }
         }
     }
@@ -211,7 +235,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
             member->default_value->accept(*this);
             auto memberType = structType->getFieldType(member->name);
             if (lastExprType && memberType) {
-                checkType(*member->default_value, lastExprType, memberType);
+                checkInitializer(*member->default_value, lastExprType, memberType);
             }
         }
     }
@@ -281,9 +305,7 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
     enterScope();
     
     // 1. Generics
-    for (auto& gen : node.generic_params) {
-        currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
-    }
+    declareGenericParams(node.generic_params);
     
     // 2. Params
     for (auto& param : node.params) {
@@ -359,9 +381,7 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     currentScope->defineType(node.name, ifaceType);
     
     enterScope();
-    for (auto& gen : node.generic_params) {
-        currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
-    }
+    declareGenericParams(node.generic_params);
     currentScope->defineType("Self", ifaceType);
 
     for (auto& member : node.members) resolveTypeFromAST(member->type.get());
@@ -379,7 +399,7 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     
     for (auto& op : node.operators) {
         enterScope();
-        for (auto& gen : op->generic_params) currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
+        declareGenericParams(op->generic_params);
         for (auto& param : op->params) resolveTypeFromAST(param->type.get());
         std::shared_ptr<Type> retType = nullptr;
         if(op->return_type) retType = resolveTypeFromAST(op->return_type.get());
@@ -433,6 +453,35 @@ void SemanticAnalyzer::visit(ImportModule& node) {
     
     if (!moduleScope) {
         error(node, "Failed to load module '" + node.source + "'");
+        return;
+    }
+
+    // Case 0: `import * from m;` -- every symbol the module has, not a symbol
+    // literally named `*`. The parser records the star as a `*` target
+    // (parser.y:740), and looking that up as an identifier is what produced
+    // `Module 'm' does not export '*'` followed by an `Undefined ...` for every
+    // use of a symbol the import was supposed to bind.
+    //
+    // Explicit beats wildcard: a name is taken from the module only if this scope
+    // does not already have one. That is the rule Python, Java and C# all use, and
+    // here it does two separate jobs. The one that matters: without it a library can
+    // rename a type out from under the file importing it, because a star import would
+    // outrank a declaration the importer wrote itself
+    // (Soundness_Imports.ImportStarDoesNotShadowTheImportersOwnDeclaration). The
+    // other is hygiene -- a module's scope IS an analyzer's global scope
+    // (ModuleLoader.cpp:308), so it carries the fourteen builtin types every analyzer
+    // registers (Analyzer_Core.cpp:79-94), and copying it wholesale would replace
+    // this file's `int` and `string` with another analyzer's copies of them. Harmless
+    // today, because types compare by name and not by identity; not worth relying on.
+    //
+    // Only the module scope's own maps are read, never `resolve`, which walks
+    // parents: the module scope has no parent today and this must not start
+    // importing a parent's contents if it ever gains one.
+    if (node.targets.size() == 1 && node.targets[0] == "*") {
+        for (const auto& kv : moduleScope->symbols)
+            if (!currentScope->resolve(kv.first)) currentScope->define(kv.second);
+        for (const auto& kv : moduleScope->types)
+            if (!currentScope->resolveType(kv.first)) currentScope->defineType(kv.first, kv.second);
         return;
     }
 
@@ -501,9 +550,7 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
         // For this immediate task, we'll verify the aliased type structure.
         
         enterScope();
-        for(auto& gen : node.generic_params) {
-            currentScope->defineType(gen->name, std::make_shared<GenericType>(gen->name));
-        }
+        declareGenericParams(node.generic_params);
         if (node.aliased_type) resolveTypeFromAST(node.aliased_type.get());
         exitScope();
         return;
@@ -555,17 +602,7 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
     enterScope();
 
     // --- SETUP GENERICS ---
-    for (auto& gen : node.generic_params) {
-        auto genType = std::make_shared<GenericType>(gen->name);
-        if (gen->constraint) {
-            auto constraintType = resolveTypeFromAST(gen->constraint.get());
-            if (constraintType) {
-                debugLog(fg(fmt::color::gray), "      [Constraint] Generic '{}' : '{}'\n", gen->name, constraintType->toString());
-            }
-        }
-        currentScope->defineType(gen->name, genType);
-        structType->generic_args.push_back(genType);
-    }
+    declareGenericParams(node.generic_params, &structType->generic_args);
 
     currentScope->defineType("Self", std::make_shared<SelfType>(structType));
 
@@ -598,7 +635,7 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
         if (member->default_value) {
             member->default_value->accept(*this);
             if (lastExprType && memberType) {
-                checkType(*member->default_value, lastExprType, memberType);
+                checkInitializer(*member->default_value, lastExprType, memberType);
             }
         }
     }
@@ -649,7 +686,7 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
             member->default_value->accept(*this);
             auto memberType = structType->getFieldType(member->name);
             if (lastExprType && memberType) {
-                checkType(*member->default_value, lastExprType, memberType);
+                checkInitializer(*member->default_value, lastExprType, memberType);
             }
         }
     }
@@ -732,6 +769,16 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
     currentStructContext = structType;
     
     for (auto& method : node.methods) {
+        // The signature is resolved in a scope of the method's own, because a
+        // generic method carries type parameters that exist only for the length of
+        // its declaration. Without this, `pub fun m<T>(item: T)` inside an
+        // implements block reported `Undefined type 'T'` -- the method's own
+        // parameter, undefined in its own signature. The scope is also what keeps
+        // one method's generics from leaking into the next.
+        // Soundness_GenericConstraints.AMethodInAnImplementsBlockDeclaresItsOwnGenerics.
+        enterScope();
+        declareGenericParams(method->generic_params);
+
         std::vector<std::shared_ptr<Type>> paramTypes;
         for (auto& param : method->params) {
             auto t = resolveTypeFromAST(param->type.get());
@@ -742,17 +789,28 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
         if (method->return_type) retType = resolveTypeFromAST(method->return_type.get());
         else retType = currentScope->resolveType("void");
         
+        exitScope();
+
         if (retType) {
             structType->defineMethod(method->name, retType);
         }
         
+        // Outside the signature scope: visit(FunctionDeclaration&) opens its own
+        // and declares the same parameters there, so declaring them twice in
+        // nested scopes would be harmless but says something untrue about which
+        // scope owns them.
         method->accept(*this);
     }
     
     for (auto& op : node.operators) {
+        enterScope();
+        declareGenericParams(op->generic_params);
+
         std::shared_ptr<Type> retType = nullptr;
         if (op->return_type) retType = resolveTypeFromAST(op->return_type.get());
         else retType = currentScope->resolveType("void");
+
+        exitScope();
         
         if (retType) structType->defineOperator((int)op->op, retType);
         

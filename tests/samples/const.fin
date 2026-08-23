@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`module not found: stdptr` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107). Const parameters, which are what this sample is about, parse now. With the library resolvable it reports `Undefined type 'rptr'` and `Generic count mismatch` instead"
 import { rptr } from stdptr::std;
 
 // ALL const usages

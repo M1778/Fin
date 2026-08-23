@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "every import form in the file parses, `import * from m;` included, and none of them resolves. A quoted path is looked up against the working directory rather than against the importing file, so line 3 gives `module not found: tests/samples/structs.fin` from the harness's directory and resolves from the repository root; the standard library is on no search path (src/driver/SearchPaths.hpp:107)"
 import { Vector3 } from "tests/samples/structs.fin"; // This is allowed and ONLY imports the symbol (Vector3) [supports special functions, macros, ...]
 import { printf } from stdio; // this looks in builtins directory which we haven't implemented yet but it looks for either a file named "stdio.fin" or "stdio.finlib" OR looks for a directory named "stdio" and looks for a file named "printf.fin" in it (THERE ARE SO MANY POSSIBILIES THAT CAN HAPPEN WITH DOTS TOO like "stdio.buffers" and more)
 import networking; // looks for this in builtins and imports the whole module which allows to be used like "networking.invoke()"

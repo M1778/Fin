@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`map!{ ... }` at 5:35 -- \"Undefined macro 'map!'\"; the brace and bracket macro-call forms parse now on both sides of an `=`, and nothing defines `map!`, `coll!` or `format!`"
 
 fun main() <noret> {
    let a <HashMap<string, int>> = map!{

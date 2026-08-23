@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`format!(\"Error: {}\", self.message)` at 19:16 -- \"Undefined macro 'format!'\"; the standard library calls a formatting macro nothing defines. `namespace`, the default parameter value on line 11 and the `@special(pub)` header parse now. Line 11's `err_code: int = null` type-checks now too (Soundness_Nullability), and line 12's `err_code == null` with it -- what is left on line 13 is `Cannot assign to immutable variable 'err_code'`, i.e. whether a parameter is assignable inside the body, which this file assumes and finc denies"
 namespace std {
 #[llvm_name="Error"]
 #[uncastable]

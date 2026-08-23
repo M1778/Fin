@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 enum Status {
     OK = 0,
     ERROR

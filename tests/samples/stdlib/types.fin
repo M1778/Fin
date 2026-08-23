@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`module not found: error` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107). The union type alias on line 53 parses now. With the library resolvable it reports `Undefined type 'any'` instead; `$type` resolves now (Soundness_MetaTypes)"
 #[stdimport]
 import { Error } from error::std; // import `Error` from error -> std namespace
 

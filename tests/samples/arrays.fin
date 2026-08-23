@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`array.length` at 12:9 -- \"Type '&[T]' is not a struct\"; the analyzer resolves no member on an array or slice type. The union type alias on line 9 parses now"
 
 type ArrayType<T> = [T]; // simple generic array type
 type IntArray = [int]; // array of integers
@@ -11,7 +13,7 @@ fun sort<T: Number>(array: &[T]) <noret> { // sorts an array of numbers (passed 
         return;
       }
 
-    let temp: int;
+    let temp <int>;
     for (i:int = 0; i < array.length - 1; i++) {
         for (j:int = 0; j < array.length - 1; j++) {
             if (array[i] > array[j]) {

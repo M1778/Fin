@@ -1,0 +1,224 @@
+# ADR 0010: one LLVM major for every platform, and CI is what proves it.
+#
+# Six platform/arch combinations, each of which BUILDS and TESTS.  The matrix is
+# the enforcement mechanism for the single-version rule, so a job that only
+# compiles is not enough: it has to run the suite too.
+#
+# build.sh mirrors these steps for a local run.  When you change one, change the
+# other; the build-script job at the end runs build.sh itself, so a build.sh that
+# has drifted into not working is a red mark of its own.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # bash on every runner, Windows included, so there is one script per step
+    # rather than one per operating system.
+    shell: bash
+
+env:
+  FIN_BUILD_TYPE: Release
+  # winflexbison ships bison 3.8.2 and flex 2.6.4 as win_bison.exe/win_flex.exe,
+  # which is what CMake's FindBISON/FindFLEX already look for.  Pinned by digest
+  # rather than installed from a package manager so that every Windows job in
+  # the matrix -- x86_64 and arm64 -- gets the same generator.
+  WINFLEXBISON_URL: https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip
+  WINFLEXBISON_SHA256: 8d324b62be33604b2c45ad1dd34ab93d722534448f55a16ca7292de32b6ac135
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Every platform reports, because "which platforms are broken" is the
+      # question this matrix exists to answer.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            conan_arch: x86_64
+            generator: Ninja
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            conan_arch: armv8
+            generator: Ninja
+          - name: macos-arm64
+            runner: macos-15
+            conan_arch: armv8
+            generator: Ninja
+          - name: macos-x86_64
+            runner: macos-15-intel
+            conan_arch: x86_64
+            generator: Ninja
+          - name: windows-x86_64
+            runner: windows-2022
+            conan_arch: x86_64
+            generator: Visual Studio 17 2022
+            vs_platform: x64
+          - name: windows-arm64
+            runner: windows-11-arm
+            conan_arch: armv8
+            generator: Visual Studio 17 2022
+            vs_platform: ARM64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Conan
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "conan>=2.4,<3"
+          conan --version
+
+      - name: Install Ninja
+        if: matrix.generator == 'Ninja'
+        run: python -m pip install ninja
+
+      - name: Install bison and flex (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison flex
+
+      - name: Install bison and flex (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # The bison Apple ships is 2.3, which predates the parser's grammar
+          # features and fails find_package(BISON 3.2).  Homebrew's is keg-only,
+          # so it has to be put on PATH by hand.
+          brew install bison flex
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Install bison and flex (Windows)
+        if: runner.os == 'Windows'
+        # PowerShell rather than bash for this one step: Git for Windows does not
+        # reliably ship unzip, and Expand-Archive is on every Windows runner
+        # including the arm64 one.
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:WINFLEXBISON_URL -OutFile winflexbison.zip
+          $got = (Get-FileHash winflexbison.zip -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:WINFLEXBISON_SHA256) {
+            throw "winflexbison.zip has sha256 $got, expected $env:WINFLEXBISON_SHA256"
+          }
+          $dest = Join-Path $env:RUNNER_TEMP 'winflexbison'
+          Expand-Archive -Path winflexbison.zip -DestinationPath $dest -Force
+          Add-Content -Path $env:GITHUB_PATH -Value $dest
+
+      - name: Report generator versions
+        run: |
+          cmake --version
+          if command -v bison >/dev/null; then bison --version | head -1; else win_bison --version | head -1; fi
+          if command -v flex  >/dev/null; then flex  --version | head -1; else win_flex  --version | head -1; fi
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: conan-${{ matrix.name }}-${{ hashFiles('conanfile.py', 'conan/profiles/fin') }}
+          restore-keys: conan-${{ matrix.name }}-
+
+      - name: Conan install
+        run: |
+          # conan/profiles/fin does `include(default)`, so a detected default
+          # profile has to exist first.  It records this machine's compiler,
+          # which is why it is detected here and not committed.
+          conan profile detect --force
+          conan profile show -pr:a=conan/profiles/fin
+          conan install . \
+            --output-folder=build \
+            --build=missing \
+            -pr:a=conan/profiles/fin \
+            -s arch=${{ matrix.conan_arch }} \
+            -s build_type="$FIN_BUILD_TYPE"
+
+      - name: Locate the Conan toolchain
+        run: |
+          # Single-config generators put generators/ under build/build/<config>/,
+          # multi-config ones under build/build/.  Find it instead of guessing.
+          tc="$(find build -name conan_toolchain.cmake -print | head -n 1)"
+          if [ -z "$tc" ]; then
+            echo "::error::conan_toolchain.cmake was not generated under build/"
+            exit 1
+          fi
+          if command -v cygpath >/dev/null; then
+            tc="$(cygpath -m "$(pwd)")/$tc"
+          else
+            tc="$(pwd)/$tc"
+          fi
+          echo "FIN_TOOLCHAIN=$tc" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          args=(-S . -B build
+                -G "${{ matrix.generator }}"
+                -DCMAKE_TOOLCHAIN_FILE="$FIN_TOOLCHAIN"
+                -DCMAKE_BUILD_TYPE="$FIN_BUILD_TYPE")
+          if [ -n "${{ matrix.vs_platform }}" ]; then
+            args+=(-A "${{ matrix.vs_platform }}")
+          fi
+          cmake "${args[@]}"
+
+      - name: Build
+        run: cmake --build build --config "$FIN_BUILD_TYPE" --parallel
+
+      - name: Test
+        # No `|| true`, and no continue-on-error.  A corpus sample that is known
+        # to fail is the harness's business to declare (an aspirational sample
+        # carries an `unimplemented` expectation); silencing ctest here would
+        # make the matrix prove nothing, which is the thing ADR 0010 is against.
+        run: ctest --test-dir build --build-config "$FIN_BUILD_TYPE" --output-on-failure
+
+      - name: finc --version
+        # An exit criterion in its own right: `finn` reads this to check the
+        # version it pinned is the version it got, so a finc that cannot answer
+        # is a finc no package manager can drive.
+        run: |
+          for candidate in "build/finc" "build/finc.exe" \
+                           "build/$FIN_BUILD_TYPE/finc" "build/$FIN_BUILD_TYPE/finc.exe"; do
+            if [ -x "$candidate" ]; then finc="$candidate"; break; fi
+          done
+          if [ -z "${finc:-}" ]; then
+            echo "::error::no finc binary under build/"
+            find build -maxdepth 2 -name 'finc*' || true
+            exit 1
+          fi
+          version="$("$finc" --version)"
+          echo "$finc --version -> $version"
+          case "$version" in
+            finc\ *) ;;
+            *) echo "::error::--version printed '$version', which does not start with 'finc '"; exit 1 ;;
+          esac
+
+  # The exit criterion is that build.sh runs as committed.  It is a separate job
+  # so that a broken build.sh is a distinct red mark from a broken build.
+  build-script:
+    name: build.sh runs as committed
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install toolchain
+        run: |
+          python -m pip install "conan>=2.4,<3" ninja
+          sudo apt-get update
+          sudo apt-get install -y bison flex
+      - name: ./build.sh --release
+        run: ./build.sh --release

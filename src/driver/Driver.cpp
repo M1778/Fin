@@ -7,12 +7,12 @@
 #include "../ast/ASTPrinter.hpp"
 #include "../macros/MacroExpander.hpp"
 #include "../utils/ModuleLoader.hpp"
+#include "SearchPaths.hpp"
 
 #include <fstream>
 #include <sstream>
 #include <filesystem>
 #include <fmt/core.h>
-#include <fmt/color.h>
 
 namespace fin {
 
@@ -21,11 +21,14 @@ extern std::unique_ptr<Program> root;
 Driver::Driver(CompilerOptions opts) : options(std::move(opts)) {}
 Driver::~Driver() {}
 
-std::string Driver::readFile(const std::string& path) {
-    std::ifstream t(path);
-    if (!t.is_open()) return "";
+std::optional<std::string> Driver::readFile(const std::string& path) {
+    std::error_code ec;
+    if (std::filesystem::is_directory(path, ec)) return std::nullopt;
+    std::ifstream t(path, std::ios::binary);
+    if (!t.is_open()) return std::nullopt;
     std::stringstream buffer;
     buffer << t.rdbuf();
+    if (t.bad()) return std::nullopt;
     return buffer.str();
 }
 
@@ -36,51 +39,117 @@ void configureLoader(ModuleLoader& loader, const CompilerOptions& options) {
         loader.addSearchPath(path);
     }
 
-    // 2. Add Environment Paths
-    if (const char* envLibs = std::getenv("FIN_LIBS")) {
-        std::string libsStr = envLibs;
-        std::stringstream ss(libsStr);
-        std::string path;
-        while (std::getline(ss, path, ':')) {
+    // 2. Add Library Paths: `--fin-libs` when it was given at all, otherwise the
+    // environment. The flag *replaces* rather than extends, because `finn` passes
+    // it to pin the environment a build compiles against, and an ambient
+    // `FIN_LIBS` leaking into a pinned build is exactly the drift it exists to
+    // prevent. Both are split on the platform separator (SearchPaths.hpp).
+    bool librariesSpecified = false;
+    if (options.finLibsGiven) {
+        librariesSpecified = true;
+        for (const auto& path : options.finLibPaths) {
+            loader.addSearchPath(path);
+        }
+    } else if (const char* envLibs = std::getenv("FIN_LIBS")) {
+        librariesSpecified = true;
+        for (const auto& path : splitSearchPaths(envLibs)) {
             loader.addSearchPath(path);
         }
     }
 
-    // 3. Add Default Test Paths
-    loader.addSearchPath("tests/samples/stdlib");
-    loader.addSearchPath(".");
+    // 3. The bundled standard library, when nothing above named one.
+    //
+    // Found relative to this executable, never relative to the working
+    // directory. What stood here was a hardcoded `tests/samples/stdlib`, which
+    // put a path from whichever checkout did the build inside every shipped
+    // binary. It was also doing nothing: the test harness runs finc from
+    // `build/tests`, where that relative path does not exist, and a sample
+    // importing a sibling resolves against the importing file instead
+    // (ModuleLoader::resolvePath step 1).
+    //
+    // Suppressed when `--fin-libs` or `FIN_LIBS` named paths, including when it
+    // named none. `finn` passes the flag to pin what a build compiles against,
+    // and a stdlib silently appearing underneath the pin is the drift the flag
+    // exists to prevent.
+    if (!librariesSpecified) {
+        for (const auto& path : bundledLibraryPaths()) {
+            loader.addSearchPath(path);
+        }
+    }
+
+    // 4. The working directory, last, and only when no library paths were named.
+    //
+    // Where you stand should not change what compiles. It is kept for a bare
+    // `finc foo.fin` typed by hand, where the working directory is the obvious
+    // thing to mean and no one is promising hermeticity — but a build that named
+    // its library paths *is* promising hermeticity, and the working directory is
+    // the project root, so leaving it in would let a file in the project shadow
+    // a module the build pinned.
+    //
+    // `finn` cannot fix that from its side at any price, which is what makes it
+    // this function's problem rather than a language question: no flag removes a
+    // path the compiler adds unconditionally.
+    if (!librariesSpecified) {
+        loader.addSearchPath(".");
+    }
 }
 
 int Driver::compile() {
-    // 1. Read Source
-    std::string source = readFile(options.inputFile);
-    if (source.empty()) {
-        fmt::print(fg(fmt::color::red), "[ERROR] Could not read file: {}\n", options.inputFile);
-        return 1;
+    DiagnosticEngine diag("", options.inputFile);
+    diag.setFormat(options.diagFormat);
+    diag.setColorMode(options.colorMode);
+
+    // Every return from here on goes through `finish`, so the JSON summary
+    // object is written exactly once on every exit path.
+    auto finish = [&](ExitCode code) {
+        int value = static_cast<int>(code);
+        diag.emitSummary(value);
+        setLexerDiagnostics(nullptr);
+        return value;
+    };
+
+    // 1. Read Source. A missing file is a usage error; an empty file is a legal
+    // program that compiles to nothing.
+    std::optional<std::string> source = readFile(options.inputFile);
+    if (!source.has_value()) {
+        diag.reportError(fmt::format("could not read file: {}", options.inputFile));
+        return finish(ExitCode::Usage);
     }
 
     // 2. Preprocessor
-    std::string processedCode = runPreprocessor(source);
+    std::string processedCode = runPreprocessor(*source, diag);
 
-    DiagnosticEngine diag(processedCode, options.inputFile);
+    diag.setSource(processedCode, options.inputFile);
+    setLexerDiagnostics(&diag);
 
     // 3. Parser
     std::unique_ptr<Program> ast;
     if (!runParser(processedCode, ast, diag)) {
-        return 1;
+        return finish(ExitCode::Diagnostics);
+    }
+
+    // The parser can succeed while the lexer rejected a byte that produced no
+    // token at all, so the engine has to be consulted and not just the parse
+    // result. This is the `Build Successful.` defect.
+    if (diag.hasErrors()) {
+        return finish(ExitCode::Diagnostics);
     }
 
     // --- SHARED MODULE LOADER ---
     std::filesystem::path p(options.inputFile);
     std::string basePath = p.parent_path().string();
-    if(basePath.empty()) basePath = ".";
+    if (basePath.empty()) basePath = ".";
 
     ModuleLoader loader(basePath);
+    loader.setDiagnostics(&diag);
     configureLoader(loader, options);
+    // This file is already being compiled, so an import of it is a cycle and not a module
+    // to go and load. See `ModuleLoader::beginRootFile`.
+    loader.beginRootFile(options.inputFile);
     // ----------------------------
 
     // 3.5 Macro Expansion
-    if (options.debugParser) fmt::print("[INFO] Running Macro Expansion...\n");
+    if (options.debugParser) diag.note("[INFO] Running Macro Expansion...");
 
     auto macroScope = std::make_shared<Scope>(nullptr);
     MacroExpander expander(diag, macroScope.get());
@@ -88,47 +157,57 @@ int Driver::compile() {
     expander.expand(*ast);
 
     if (options.debugParser) {
-        fmt::print("\n[DEBUG] AST Structure:\n");
+        diag.note("\n[DEBUG] AST Structure:");
         ASTPrinter printer;
         printer.print(*ast);
-        fmt::print("\n");
+        diag.note("");
     }
 
     // 4. Semantic Analysis
     if (!options.skipSemantics) {
-        if (options.debugSema) fmt::print("[INFO] Running Semantic Analysis...\n");
+        if (options.debugSema) diag.note("[INFO] Running Semantic Analysis...");
 
         SemanticAnalyzer analyzer(diag, options.debugSema);
         analyzer.setModuleLoader(&loader); // Use same loader
         analyzer.visit(*ast);
 
-        if (analyzer.hasError) {
-            return 1;
+        if (analyzer.hasError || diag.hasErrors()) {
+            return finish(ExitCode::Diagnostics);
         }
 
-        if (options.debugSema) fmt::print(fg(fmt::color::green), "[SUCCESS] Semantics Verified.\n");
+        if (options.debugSema) diag.success("[SUCCESS] Semantics Verified.");
     }
 
     // 5. CodeGen
     if (!options.skipCodegen) {
         if (!runCodeGen(*ast)) {
-            return 1;
+            return finish(ExitCode::Diagnostics);
         }
     }
 
-    fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "Build Successful.\n");
-    return 0;
+    // Exit 0 implies zero diagnostics, so this is the last gate rather than the
+    // analyzer's own flag.
+    if (diag.hasErrors()) {
+        return finish(ExitCode::Diagnostics);
+    }
+
+    diag.success("Build Successful.");
+    return finish(ExitCode::Success);
 }
 
-std::string Driver::runPreprocessor(const std::string& source) {
-    if (options.debugParser) fmt::print("[INFO] Running Preprocessor...\n");
+std::string Driver::runPreprocessor(const std::string& source, DiagnosticEngine& diag) {
+    if (options.debugParser) diag.note("[INFO] Running Preprocessor...");
     Preprocessor pp;
     return pp.process(source);
 }
 
 bool Driver::runParser(const std::string& source, std::unique_ptr<Program>& outAST, DiagnosticEngine& diag) {
     fin::root = nullptr;
-    YY_BUFFER_STATE buffer = yy_scan_string(source.c_str());
+    fin::reset_lexer_location();
+    // Byte-counted rather than `c_str()`: a NUL byte is a byte of the file like any
+    // other, and passing a C string made the lexer stop at the first one -- so a file
+    // with a NUL in the middle compiled as its prefix and reported success for the whole.
+    YY_BUFFER_STATE buffer = yy_scan_bytes(source.data(), (int)source.size());
     fin::parser parser(diag);
     int res = parser.parse();
     yy_delete_buffer(buffer);

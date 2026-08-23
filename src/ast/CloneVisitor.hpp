@@ -85,6 +85,10 @@ public:
     void visit(PointerTypeNode& node) override;
     void visit(ArrayTypeNode& node) override;
     void visit(StaticMethodCall& node) override;
+
+    // Attribute and GenericParam: see the comment on Visitor::visit(Attribute&).
+    void visit(Attribute& node) override;
+    void visit(GenericParam& node) override;
 };
 
 } // namespace fin

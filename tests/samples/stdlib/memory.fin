@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`module not found: types` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107). `@GET_MEMORY_LIMIT()` as an expression on line 14 parses now, and is then reported as an undefined function"
 #[stdimport]
 import { number2str } from types;
 

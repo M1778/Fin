@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`Undefined type 'any'` at 12:30, 34:19 and 36:12, `Undefined variable 'v'` at 13:24 cascading from the first, and `Type mismatch: expected 'int?', got 'A?'` at 39:20 -- nullability itself is implemented now (Soundness_Nullability): `?` on a declaration, member, parameter and `fun?` return all produce a NullableType, postfix `?` denullifies, a nullable parameter is optional at the call site, and `= null` is a permitted initialiser. What is left is `any`, which the analyzer still does not register as a type (docs/plan.md, Rulings owed), and line 39, where this file writes `let _? <int> = make_A()` for a function returning `<A>`; that line is about the omitted argument, and whether the `<int>` is a slip for `<A>` or `_` suppresses the check is an owner ruling"
 struct A {
     pub b? <int>, // using '?' makes its default value null and it might not exists (equavelant to `b <int> = null,`)
 

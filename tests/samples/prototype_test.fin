@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`module not found: hashmap` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107). With the library resolvable it reports `Undefined type 'object'` and indexing a prototype instead"
 import { HashMap } from hashmap::std;
 import { Collection } from collection::std;
 

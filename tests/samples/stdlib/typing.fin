@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`module not found: enums` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107), so neither import resolves and `Type 'Result' is not a struct/class and cannot implement interfaces` follows. The whole file parses now, the union type alias on line 10 included"
 #[stdimport] %{
 import { getkeyid, keyidof } from enums::std;
 import { Error } from error::std;
