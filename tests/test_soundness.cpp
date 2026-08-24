@@ -11198,3 +11198,164 @@ TEST(Soundness_PrototypeLiteralElements, ANonConstantOfTheWrongTypeIsStillRefuse
     EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
         << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// A constant index is inside the extent it indexes.
+//
+// The extent became part of the type in the array-extent unit, and that is what
+// makes this answerable at all: `[int, 3]` and `[int, 8]` used to be one semantic
+// type, so there was no number here to compare an index against.
+//
+// Only a *constant* index, and only against a *known* extent. `a[i]` is a run-time
+// value and `[int]` is a run-time length, and refusing either would be refusing the
+// language: arrays.fin's `sort` indexes a `&[T]` with a loop variable. What this
+// catches is the case where the compiler already holds both numbers -- and holding
+// both and emitting the read anyway is how `a[5]` on three elements becomes a word
+// nobody wrote.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_ArrayBounds, AConstantIndexPastAFixedExtentIsRefused) {
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <[int, 3]> = [1, 2, 3];\n"
+                           "    let x <int> = a[5];\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0) << "a[5] on three elements";
+    EXPECT_NE(stripAnsi(r.err).find("3 elements"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayBounds, TheLastElementIsInBounds) {
+    // The off-by-one this check could introduce, asserted in the direction that a
+    // wrong bound would break: index 2 of three elements is the last one.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <[int, 3]> = [1, 2, 3];\n"
+                           "    let x <int> = a[2];\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayBounds, OnePastTheEndIsRefused) {
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <[int, 3]> = [1, 2, 3];\n"
+                           "    let x <int> = a[3];\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0) << "index 3 of three elements is one past the end";
+}
+
+TEST(Soundness_ArrayBounds, ANegativeConstantIndexIsRefused) {
+    // Separately from the bound, and with its own message: a negative index is
+    // wrong whatever the extent is, including on a dynamic array where there is no
+    // extent to be past.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <[int, 3]> = [1, 2, 3];\n"
+                           "    let x <int> = a[-1];\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("negative"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayBounds, ANegativeConstantIndexOnADynamicArrayIsAlsoRefused) {
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <[int]> = [1, 2, 3];\n"
+                           "    let x <int> = a[-1];\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0) << "there is no length that makes -1 an index";
+}
+
+TEST(Soundness_ArrayBounds, AZeroLengthArrayHasNoElementZero) {
+    // `[T, 0]` is a legal type of zero bytes, following the empty-struct precedent.
+    // Legal and empty: every index is out of it.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <[int, 0]> = [];\n"
+                           "    let x <int> = a[0];\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0) << "a zero-length array has no element 0";
+}
+
+TEST(Soundness_ArrayBounds, ARunTimeIndexIsNotChecked) {
+    // The language arrays.fin writes. `sort(array: &[T])` indexes with `i` and `j`,
+    // both loop variables, and a compiler that demanded a constant there would
+    // refuse the corpus's own sort.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <[int, 3]> = [1, 2, 3];\n"
+                           "    for (i: int = 0; i < 3; i++) { let x <int> = a[i]; }\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayBounds, ADynamicExtentIsNotChecked) {
+    // `[int]` has no extent, so there is nothing to be past. The length is a
+    // run-time property and a bound check on it is a run-time check, which is a
+    // separate ruling from this one.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <[int]> = [1, 2, 3];\n"
+                           "    let x <int> = a[99];\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayBounds, AConstantIndexIntoAPointerIsNotChecked) {
+    // A `&int` is indexed as pointer arithmetic and its bound is not a thing the
+    // type says. Only an ArrayType carries an extent.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let n <int> = 1;\n"
+                           "    let p <&int> = &n;\n"
+                           "    let x <int> = p[7];\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayBounds, TheCheckSeesThroughAPointerToAFixedArray) {
+    // `&[int, 3]` is indexed as the array it points at -- visit(ArrayAccess&)
+    // unwraps it -- so the extent is known here too and the same rule applies.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <[int, 3]> = [1, 2, 3];\n"
+                           "    let p <&[int, 3]> = &a;\n"
+                           "    let x <int> = p[5];\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0) << "the pointee's extent is still an extent";
+}
+
+TEST(Soundness_ArrayBounds, AnIndexIsStillTypeCheckedFirst) {
+    // One mistake, one diagnostic: `a["x"]` is a wrong type rather than a wrong
+    // number, and the bound has nothing to say about it.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <[int, 3]> = [1, 2, 3];\n"
+                           "    let x <int> = a[\"x\"];\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayBounds, AnAssignmentThroughAnOutOfBoundsIndexIsRefused) {
+    // The write is the dangerous direction: a read past the end returns a word
+    // nobody wrote, and a write past the end overwrites one somebody did.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <[int, 3]> = [1, 2, 3];\n"
+                           "    a[7] = 1;\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0) << "a[7] = 1 on three elements";
+}
+
+TEST(Soundness_ArrayBounds, AStructsSubscriptOperatorIsUnaffected) {
+    // A struct that declares `operator []` decides its own bounds, and its index is
+    // whatever the operator's parameter says. Nothing here may reach it.
+    const auto r = compile("struct Box {\n"
+                           "    pub v <int>\n"
+                           "    pub operator [](i: int) <int> { return self.v; }\n"
+                           "}\n"
+                           "fun main() <noret> {\n"
+                           "    let b <Box> = Box { v: 1 };\n"
+                           "    let x <int> = b[99];\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayBounds, APrototypeKeyIsNotAnIndex) {
+    // `info["MemoryCardModel"]` (stdlib/memory.fin:30) is a key, and a key that is
+    // not in the prototype yet is how a prototype is grown, not an error.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let m <{int, int}> = { 1 : 1 };\n"
+                           "    let x <int> = m[99];\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}

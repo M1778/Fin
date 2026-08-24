@@ -20,6 +20,7 @@ class ModuleLoader; // Forward declaration
 // type in front of every translation unit that analyses anything.
 class FunctionType;
 class StructType; // buildOperatorSignature takes the owner, to look a method up in it
+class ArrayType;  // checkIndexInBounds reads its extent
 
 struct AnalysisContext {
     bool inLoop = false;
@@ -344,6 +345,11 @@ private:
         return typeHintFor == &node ? typeHint : nullptr;
     }
     bool checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected);
+
+    // Whether a constant subscript is inside a known extent. Both halves of that are
+    // the rule: a run-time index and a dynamic array are both normal, and neither is
+    // a thing this can answer. See the definition in Analyzer_Expr.cpp.
+    void checkIndexInBounds(const ArrayAccess& node, const ArrayType& arr);
 
     // checkType, except that `null` is accepted whatever the declared type is.
     // For a declaration's initialiser and a member or parameter default only --

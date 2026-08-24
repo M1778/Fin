@@ -79,6 +79,7 @@ add_library(fin_core STATIC
     src/diagnostics/DiagnosticEngine.cpp
     src/driver/Driver.cpp
     src/utils/ModuleLoader.cpp
+    src/utils/IntegerConstant.cpp
 
     # AST Base & Utilities
     src/ast/ASTNode.cpp

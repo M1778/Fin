@@ -1,5 +1,6 @@
 #include "../SemanticAnalyzer.hpp"
 #include "../../types/TypeImpl.hpp"
+#include "../../utils/IntegerConstant.hpp"
 #include <fmt/core.h>
 #include <fmt/color.h>
 
@@ -1045,6 +1046,57 @@ void SemanticAnalyzer::visit(MethodCall& node) {
     }
 }
 
+// Whether a *constant* subscript is inside a *known* extent.
+//
+// Both halves of that are the rule rather than a limitation of it. `a[i]` is a
+// run-time value and `[int]` is a run-time length, and refusing either would refuse
+// the language the corpus writes: arrays.fin's `sort(array: &[T])` indexes a dynamic
+// array with two loop variables. What this catches is the case where the compiler
+// already holds both numbers -- and it can only hold the extent at all because the
+// array-extent unit put it in the type, where `[int, 3]` and `[int, 8]` used to be
+// one type with no number in it.
+//
+// The negative case is separate and is checked whether or not there is an extent: no
+// length makes -1 an index, so a dynamic array refuses it too.
+void SemanticAnalyzer::checkIndexInBounds(const ArrayAccess& node, const ArrayType& arr) {
+    bool negative = false;
+    if (!integerConstant(*node.index, negative)) return;  // a run-time index
+
+    if (negative) {
+        error(*node.index, "An array index cannot be negative");
+        return;
+    }
+    if (!arr.extent) return;  // a run-time length has no bound to be past
+
+    uint64_t index = 0;
+    std::string written;
+    // TooLarge is past every extent that fits in 64 bits, so it is reported as out of
+    // bounds rather than as an unreadable constant: the number is legible and what is
+    // wrong with it is its size. It has no `index` to print, so the message names what
+    // the author wrote instead of a number this reader could not finish reading.
+    switch (readConstant(*node.index, index)) {
+        case ConstantRead::Ok:
+            if (index < *arr.extent) return;
+            written = std::to_string(index);
+            break;
+        case ConstantRead::TooLarge:
+            written = "that index";
+            break;
+        case ConstantRead::Negative:
+        case ConstantRead::NotConstant:
+            // integerConstant said otherwise a moment ago. Nothing to report that the
+            // caller has not already reported, and guessing a bound is the one thing
+            // this function must not do.
+            return;
+    }
+
+    // The extent is in the message because it is the fact the author does not have in
+    // front of them: `a[5]` is only wrong relative to a length written somewhere else.
+    error(*node.index,
+          fmt::format("{} is out of bounds for an array of {} element{}", written,
+                      *arr.extent, *arr.extent == 1 ? "" : "s"));
+}
+
 void SemanticAnalyzer::visit(ArrayAccess& node) {
     node.array->accept(*this);
     auto arrExprType = lastExprType;
@@ -1125,7 +1177,9 @@ void SemanticAnalyzer::visit(ArrayAccess& node) {
     }
 
     if (auto* arrType = dynamic_cast<const ArrayType*>(arrExprType.get())) {
-        checkType(*node.index, idxType, intType);
+        // Only when the type check agreed, so that `a["x"]` gets the one diagnostic
+        // about its type and not a second about a number it does not have.
+        if (checkType(*node.index, idxType, intType)) checkIndexInBounds(node, *arrType);
         lastExprType = arrType->element_type;
     } else if (isErrorType(arrExprType)) {
         lastExprType = errorType();  // see the note at the method-call site

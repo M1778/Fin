@@ -1,5 +1,6 @@
 #include "../SemanticAnalyzer.hpp"
 #include "../../types/TypeImpl.hpp"
+#include "../../utils/IntegerConstant.hpp"
 #include <fmt/core.h>
 #include <fmt/color.h>
 
@@ -7,70 +8,17 @@ namespace fin {
 
 namespace {
 
-// Fin spells a negative constant as a UnaryOp over a Literal -- the lexer never
-// produces a signed INTEGER token (parser.y:2139) -- so "is this an integer
-// constant, and is it negative" is answerable from the syntax alone, with no
-// evaluation and no constant folder.
+// integerConstant and readConstant used to be defined here. They moved to
+// src/utils/IntegerConstant.hpp when the backend started lowering fixed arrays,
+// because both passes read the *same* constants and have to agree about them:
+// this file decides `[int, 5]`'s extent and whether `a[7]` is inside it, and the
+// backend decides how many elements to allocate and which one a GEP lands on. Two
+// readers that agree today are two readers that disagree after one edit, and the
+// disagreement is a program that compiles and indexes past its own array.
 //
-// `1 + 1` is deliberately *not* a constant here. Whether an int-typed expression
-// converts to an unsigned type is a language decision rather than a defect, and
-// KnownDefect_IntegerConstants holds it open; folding arithmetic would answer it
-// by accident for the subset that happens to be foldable.
-bool integerConstant(const ASTNode& node, bool& negative) {
-    if (auto* lit = dynamic_cast<const Literal*>(&node)) {
-        negative = false;
-        return lit->kind == ASTTokenKind::INTEGER;
-    }
-    if (auto* un = dynamic_cast<const UnaryOp*>(&node)) {
-        if (un->op != ASTTokenKind::MINUS || !un->operand) return false;
-        bool inner = false;
-        if (!integerConstant(*un->operand, inner)) return false;
-        negative = !inner;  // `--1` is non-negative; nesting costs nothing to allow
-        return true;
-    }
-    return false;
-}
-
-// What an array's extent expression states, and why it states nothing.
-//
-// `[int, 5]`, and `[int, SIZE]` after a `#cdef`, are an integer Literal by the time
-// the analyzer runs -- the preprocessor and the macro expander are two passes
-// earlier -- and a Literal's `value` is the text it was spelled with, which
-// {DIGIT}+ in the lexer makes pure digits with no suffix and no separators.
-//
-// Nothing else is a constant here, on purpose and for integerConstant's reason
-// above: `1 + 1` is not folded, and a `const` variable is not read, because a
-// `const` in Fin is a variable whose mutability is checked rather than a
-// compile-time value the type system may substitute. Both would be answering an
-// open ruling by accident for whichever subset happens to be reachable.
-enum class ExtentRead { Ok, NotConstant, Negative, TooLarge };
-
-ExtentRead readExtent(const ASTNode& node, uint64_t& out) {
-    bool negative = false;
-    if (!integerConstant(node, negative)) return ExtentRead::NotConstant;
-    if (negative) return ExtentRead::Negative;
-
-    // `--5` is what integerConstant calls non-negative, and it is a UnaryOp rather
-    // than the Literal, so the wrapping is peeled rather than assumed away.
-    const ASTNode* inner = &node;
-    while (auto* un = dynamic_cast<const UnaryOp*>(inner)) inner = un->operand.get();
-    auto* lit = dynamic_cast<const Literal*>(inner);
-    if (!lit || lit->value.empty()) return ExtentRead::NotConstant;
-
-    // Accumulated a digit at a time rather than through stoull, which stops at the
-    // first character it does not like and reports success for the prefix: a
-    // spelling this reader does not know would come back as a *number*, and a
-    // number is what the layout pass and the backend both believe.
-    uint64_t value = 0;
-    for (char c : lit->value) {
-        if (c < '0' || c > '9') return ExtentRead::NotConstant;
-        const uint64_t digit = static_cast<uint64_t>(c - '0');
-        if (value > (UINT64_MAX - digit) / 10) return ExtentRead::TooLarge;
-        value = value * 10 + digit;
-    }
-    out = value;
-    return ExtentRead::Ok;
-}
+// The local alias keeps this file's call sites reading as they did.
+using ExtentRead = ConstantRead;
+constexpr auto readExtent = readConstant;
 
 // The three unsigned types Analyzer_Core registers. `char` is not among them:
 // whether it is signed is undecided, so it accepts a negative constant rather
