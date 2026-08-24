@@ -1494,9 +1494,36 @@ void SemanticAnalyzer::visit(StructInstantiation& node) {
 }
 
 void SemanticAnalyzer::visit(ArrayLiteral& node) {
+    // The element type this literal is about to be checked against, when something
+    // said one. `let b <[uint]> = [7, 3, 4];` (tests/samples/arrays.fin:29) reported
+    // `expected '[uint]', got '[int, 3]'`: every element is a non-negative integer
+    // constant, constantFitsType has said since the integer work that such a constant
+    // is a `uint`, and the literal never asked -- it typed itself from its first
+    // element and the whole array was then compared as a unit, by which point the
+    // constants are gone and the only thing left to compare is `int` against `uint`.
+    //
+    // Offered to the elements, one at a time, exactly as checkCallArguments offers a
+    // parameter type to an argument. The hint is keyed on the node, so this is the
+    // *only* way it reaches inward -- and one level inward is all this does: an
+    // element that is itself a literal gets the hint for its own elements from its own
+    // annotation-shaped offer, not from this one.
+    std::shared_ptr<Type> wanted = nullptr;
+    if (auto hint = hintFor(node)) {
+        if (auto* arr = hint->as<ArrayType>()) wanted = arr->element_type;
+    }
+
     if (node.elements.empty()) {
-        error(node, "Empty array literal cannot infer type.");
-        lastExprType = nullptr;
+        // `[]` has no element to infer from, so the annotation is the only thing that
+        // can say what it holds -- tests/samples/prototype_test.fin:45 writes
+        // `[5,5,5] : []` under `<{[int], [{int, string}]}>` and its own comment calls
+        // it "empty array". Without one there is genuinely nothing, and the message
+        // has to keep saying so rather than invent an element type.
+        if (!wanted) {
+            error(node, "Empty array literal cannot infer type.");
+            lastExprType = nullptr;
+            return;
+        }
+        lastExprType = std::make_shared<ArrayType>(wanted, uint64_t{0});
         return;
     }
 
@@ -1508,19 +1535,74 @@ void SemanticAnalyzer::visit(ArrayLiteral& node) {
     //
     // The sentinel does both jobs. Every element is still visited, and each one is
     // compared against `<error>`, which checkType absorbs.
+    typeHintFor = wanted ? node.elements[0].get() : nullptr;
+    typeHint = wanted;
     node.elements[0]->accept(*this);
+    typeHintFor = nullptr;
+    typeHint = nullptr;
     auto firstType = lastExprType ? lastExprType : errorType();
 
+    // What every element is compared against: the annotation's element type when there
+    // is one, and otherwise the first element's, which is the rule an unannotated
+    // literal has always had. The first element is compared too once there is a hint --
+    // it is no longer the one that defines the answer, so it is no longer exempt from
+    // it, and `let a <[string]> = [1, 2];` reports both of its elements rather than
+    // only the second.
+    auto expected = wanted ? wanted : firstType;
+
+    // And, separately, the elements have to agree with *each other*. That is a
+    // different question from whether each fits the annotation, and `[any]` is where
+    // the two come apart: every type fits `any`, so asking only the annotation would
+    // accept `let a <[any]> = [1, "x"];` -- and both corpus uses of `[any]` read it as
+    // one unknown type rather than a mixed bag. stdlib/types.fin:102's
+    // `resolve_arr_type(const &arr: [any])` answers for the whole array by reading
+    // `arr[0]`, and stdlib/operators.fin:134 calls it "a static array of items with
+    // unknown type", singular. The boxed spelling for genuinely mixed contents is
+    // `object`, which prototype_test.fin:40 writes and :14's comment explains.
+    //
+    // Asked second, and only of an element that satisfied the annotation, so that one
+    // mistake is still one diagnostic: `let a <[int]> = [1, "x"];` reports the element
+    // against `int` and stops.
+    //
+    // And asked *only* of a dynamic element type, because everywhere else the
+    // annotation is the authority on how much it pins down and asking again would
+    // overrule it. `let a <[[uint]]> = [[1, 2], [3]];` is the case that shows it: the
+    // annotation's element type is the dynamic `[uint]`, which waives the extent on
+    // purpose, and comparing the second inner literal against the first would put the
+    // extent back and report `expected '[uint, 2]', got '[uint, 1]'` about a program
+    // that asked for neither. A DynamicType is the one target that constrains nothing,
+    // which is exactly why it needs a second question asked and why nothing else does.
+    const bool alsoCheckAgreement = wanted && wanted->as<DynamicType>() &&
+                                    !typesEqual(expected, firstType);
+
+    if (wanted) checkType(*node.elements[0], firstType, expected);
+
     for (size_t i = 1; i < node.elements.size(); ++i) {
+        typeHintFor = wanted ? node.elements[i].get() : nullptr;
+        typeHint = wanted;
         node.elements[i]->accept(*this);
-        checkType(*node.elements[i], lastExprType, firstType);
+        typeHintFor = nullptr;
+        typeHint = nullptr;
+        auto elemType = lastExprType;
+        if (checkType(*node.elements[i], elemType, expected) && alsoCheckAgreement) {
+            checkType(*node.elements[i], elemType, firstType);
+        }
     }
 
     // The literal's own extent: it states its elements, so it knows how many. This
     // was `true` -- a flag meaning "fixed, count unknown" -- and the count was
     // sitting right here in `node.elements`, which is what made `let a <[int, 3]> =
     // [1, 2];` compile and every read of `a[2]` after it a word nobody wrote.
-    lastExprType = std::make_shared<ArrayType>(firstType, node.elements.size());
+    //
+    // And `expected` rather than `firstType` for the element type, which is what stops
+    // the elements' diagnostics from being followed by the array's own. `let a <[uint]>
+    // = [7, 3, 4]` is an `[int, 3]` under the old rule, and `[int]` does not fit
+    // `[uint]` however well each constant does -- so the per-element check would have
+    // been an addition rather than a replacement, and every accepted literal would have
+    // reported anyway. Where the elements disagree with the hint they have already said
+    // so, once each, at the element (AnUnrelatedAnnotationDoesNotBecomeTheElementType);
+    // adopting the type they were checked against is what keeps that the whole report.
+    lastExprType = std::make_shared<ArrayType>(expected, node.elements.size());
 }
 
 void SemanticAnalyzer::visit(SizeofExpression& node) {

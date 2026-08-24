@@ -4629,26 +4629,22 @@ TEST(Soundness_BuiltinMembers, ATypeWithNoMembersStillSaysSo) {
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_IntegerConstants, AnArrayOfConstantsDoesNotTakeTheAnnotatedElementType) {
-    // `let myarr <[uint]> = [7,3,4];` (arrays.fin:29) reports
-    // `expected '[uint]', got '[int, 3]'`. The message names two differences but
-    // only one of them is a defect: `let a <[int]> = [1,2];` compiles clean, so a
-    // fixed list already converts to a dynamic array of the same element type
-    // (ArrayType.cpp, and Soundness_Arrays.AFixedListInitialisesADynamicArray
-    // holds that). The extent in the text is only how the right-hand side prints --
-    // a literal states its elements, so it has one.
+TEST(Soundness_IntegerConstants, AnArrayOfConstantsTakesTheAnnotatedElementType) {
+    // `let myarr <[uint]> = [7,3,4];` (arrays.fin:29) reported `expected '[uint]', got
+    // '[int, 3]'`. The message named two differences and only one of them was a defect:
+    // `let a <[int]> = [1,2];` already compiled, so a fixed list has always converted to
+    // a dynamic array of the same element type (Soundness_Arrays
+    // .AFixedListInitialisesADynamicArray) -- the extent was only how the right-hand
+    // side prints.
     //
-    // So the single cause is the element type: checkType() is handed the ArrayLiteral,
-    // whose type is an ArrayType, and by then nothing remembers that its elements were
-    // constants. The fix belongs with whoever gives ArrayType an element-wise
-    // conversion -- a constant list has no element type of its own until its context
-    // supplies one -- and because there is only one cause, one fix ends this test.
+    // The element type was the whole claim, and its cause was that checkType was handed
+    // the ArrayLiteral after the fact, by which point nothing remembered its elements
+    // were constants. Fixed where the diagnosis said it belonged: the literal is offered
+    // its element type and checks its elements against it one at a time
+    // (Soundness_ArrayLiteralElements), so each constant answers constantFitsType for
+    // itself, exactly as `let a <uint> = 7;` always has.
     const FincRun r = compile("fun main() <noret> { let a <[uint]> = [1,2]; }\n");
-    EXPECT_NE(r.exitCode, 0)
-        << "FIXED: an array of constants now takes its annotated element type. Invert "
-           "this into Soundness_IntegerConstants; the element type is the whole claim, "
-           "the `fixed` half of the old message was never a defect.";
-    EXPECT_NE(stripAnsi(r.err).find("[int, 2]"), std::string::npos) << r.err;
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -8783,6 +8779,178 @@ TEST(Soundness_ArrayExtent, AnExtentSurvivesAPreprocessorDefine) {
     EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
 }
 
+
+// ---------------------------------------------------------------------------
+// An array literal is checked element by element against what it is becoming.
+//
+// `let b <[uint]> = [7, 3, 4];` (tests/samples/arrays.fin:29) said `expected '[uint]',
+// got '[int, 3]'`. Every one of those elements is a non-negative integer constant and
+// constantFitsType has said since the integer work that such a constant *is* a `uint` --
+// but the literal never asked. It typed itself from its first element with nothing
+// offered to it, and the whole array was then compared as a unit, at which point the
+// only thing left to compare is `int` against `uint` and the constants are gone.
+//
+// So the hint reaches the elements. It is the same hint an initialiser already gets
+// (the members' comment in SemanticAnalyzer.hpp lists its three sites) and the same
+// element rule checkType already applies one value at a time -- what was missing is
+// that an array literal is not one value, and offering it the array type offers its
+// elements nothing.
+//
+// The element hint is *not* what the literal's own type is built from. `[7, 3, 4]`
+// under a `[uint]` annotation stays an `[int, 3]`, and the assignment succeeds because
+// each element fits, exactly as `let a <uint> = 7;` succeeds without 7 becoming a
+// different literal. Typing the literal as the hint would be a claim about a value the
+// program did not write, and it would also make `[1, "x"]` under `[any]` report nothing
+// at all -- the mismatch has to survive.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_ArrayLiteralElements, IntegerConstantsFitAnUnsignedElementType) {
+    // tests/samples/arrays.fin:29 exactly.
+    const FincRun r = compile("fun main() <noret> { let myarr <[uint]> = [7,3,4,7,12,4,6,9,0]; }");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, TheSameRuleAppliesToEveryIntegerWidth) {
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let a <[long]> = [1, 2];\n"
+        "    let b <[short]> = [1, 2];\n"
+        "    let c <[ulong]> = [1, 2];\n"
+        "    let d <[ushort]> = [1, 2];\n"
+        "    let e <[double]> = [1, 2];\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, ANegativeConstantStillDoesNotFitAnUnsignedElement) {
+    // The whole reason constantFitsType takes the sign: this is the one thing the
+    // element rule must keep refusing, and it is refused per element rather than by
+    // the array comparison, so the message names the element's type.
+    const FincRun r = compile("fun main() <noret> { let a <[uint]> = [1, -2]; }");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'uint', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, ANonConstantOfTheWrongTypeIsStillRefused) {
+    // A constant is what the rule is about. A *variable* of type int is not a uint,
+    // and nothing here changes that -- otherwise the hint would have become a cast.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let n <int> = 7;\n"
+        "    let a <[uint]> = [n];\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'uint', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, AWrongElementIsStillReportedAtTheElement) {
+    const FincRun r = compile("fun main() <noret> { let a <[int]> = [1, \"x\"]; }");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u)
+        << "the element is the diagnostic; the array must not report a second time\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, AMixedLiteralUnderADynamicElementStillReports) {
+    // `[any]` accepts anything, so the *elements* agree with the hint -- but they do
+    // not agree with each other, and that check is the literal's own and stays.
+    const FincRun r = compile("fun main() <noret> { let a <[any]> = [1, \"x\"]; }");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, TheLiteralIsStillItsOwnTypeAndItsOwnExtent) {
+    // The hint is offered to the elements and is not adopted as the literal's type.
+    // If it were, this would compile: the annotation says two and the literal is three.
+    const FincRun r = compile("fun main() <noret> { let a <[int, 2]> = [1, 2, 3]; }");
+    EXPECT_NE(stripAnsi(r.err).find("expected '[int, 2]', got '[int, 3]'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, TheHintReachesAFixedAnnotationsElementsToo) {
+    const FincRun r = compile("fun main() <noret> { let a <[uint, 3]> = [1, 2, 3]; }");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, TheHintReachesAnArgumentsElements) {
+    // The fourth hint site -- a parameter -- goes through the same path.
+    const FincRun r = compile(
+        "fun take(a: [uint]) <noret> { }\n"
+        "fun main() <noret> { take([7, 3, 4]); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, ANestedLiteralGetsItsElementTypeToo) {
+    const FincRun r = compile("fun main() <noret> { let a <[[uint]]> = [[1, 2], [3]]; }");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, ADynamicElementTypeStillWaivesWhatItWaives) {
+    // The agreement check is asked only of a dynamic element type, and only about the
+    // element type itself. `[[uint]]` waives the inner extent on purpose, so two inner
+    // literals of different lengths are both what it asked for -- comparing the second
+    // against the first would report `expected '[uint, 2]', got '[uint, 1]'` about a
+    // program that asked for neither length.
+    const FincRun r = compile("fun main() <noret> { let a <[[uint]]> = [[1, 2], [3]]; }");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, AFixedInnerAnnotationStillPinsTheInnerExtent) {
+    // The other half: written `[[uint, 2]]`, the inner extent is not waived and the
+    // one-element inner literal is refused. The annotation decides, in both directions.
+    const FincRun r = compile("fun main() <noret> { let a <[[uint, 2]]> = [[1, 2], [3]]; }");
+    EXPECT_NE(stripAnsi(r.err).find("expected '[uint, 2]', got '[uint, 1]'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, AnUnannotatedLiteralIsUnchanged) {
+    // With nothing offered, the first element still says what the array is.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let a <auto> = [1, 2, 3];\n"
+        "    let s <string> = a[0];\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, AnUnrelatedAnnotationDoesNotBecomeTheElementType) {
+    // The hint is offered, the elements do not fit it, and the elements are what
+    // report -- the array comparison must not then report the same mistake again.
+    const FincRun r = compile("fun main() <noret> { let a <[string]> = [1, 2]; }");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 2u)
+        << "one per element that does not fit, and nothing from the array itself\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, AnEmptyLiteralTakesItsElementTypeFromTheAnnotation) {
+    // `[]` had nothing to infer from and said so. Under an annotation it does: the
+    // annotation is the only thing that can say, and tests/samples/prototype_test.fin
+    // :45 writes exactly this -- `[5,5,5] : []` inside `<{[int], [{int, string}]}>`.
+    const FincRun r = compile("fun main() <noret> { let a <[int]> = []; }");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, AnEmptyLiteralIsAsLongAsItIs) {
+    // Zero elements, so `[int, 0]` fits and `[int, 3]` does not. The empty literal
+    // takes the annotation's *element* type, not its extent -- same rule as every
+    // other literal.
+    const FincRun r = compile("fun main() <noret> { let a <[int, 3]> = []; }");
+    EXPECT_NE(stripAnsi(r.err).find("expected '[int, 3]', got '[int, 0]'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayLiteralElements, AnEmptyLiteralWithNothingToGoOnIsStillRefused) {
+    // No annotation, no parameter, nothing -- there is genuinely no element type, and
+    // the message has to keep saying so rather than inventing one.
+    const FincRun r = compile("fun main() <noret> { let a <auto> = []; }");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Empty array literal"), std::string::npos)
+        << stripAnsi(r.err);
+}
 
 // ---------------------------------------------------------------------------
 // Deleting an array.
