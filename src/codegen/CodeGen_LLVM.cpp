@@ -4,6 +4,7 @@
 #include "../ast/Visitor.hpp"
 #include "../diagnostics/DiagnosticEngine.hpp"
 #include "../types/Layout.hpp"
+#include "../utils/IntegerConstant.hpp"
 
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
@@ -119,7 +120,7 @@ namespace {
 struct StructInfo;
 
 struct CgType {
-    enum class Kind { Void, Int, Float, Ptr, Struct };
+    enum class Kind { Void, Int, Float, Ptr, Struct, Array };
     llvm::Type* llvmType = nullptr;
     Kind kind = Kind::Void;
     bool isSigned = true;
@@ -138,8 +139,26 @@ struct CgType {
     // which is never rehashed after declareStructs finishes.
     const StructInfo* structInfo = nullptr;
 
+    // Set for Kind::Array and null otherwise: what one element is. Held by value
+    // through a shared_ptr rather than inline, because a CgType cannot contain
+    // itself and `[[int, 2], 2]` needs it to contain one.
+    //
+    // The extent is a separate field and not read off the llvm::ArrayType, because
+    // `.length` is answered from it and an ArrayType's element count is the same
+    // number only as long as nothing here starts lowering an array as anything but
+    // an [N x T]. A dynamic `[T]` never becomes a CgType at all -- its
+    // representation is undecided (ADR 0003's neighbourhood) and it refuses at the
+    // mapper.
+    std::shared_ptr<CgType> element;
+    uint64_t extent = 0;
+
     bool isVoid() const { return kind == Kind::Void; }
     bool isStruct() const { return kind == Kind::Struct; }
+    bool isArray() const { return kind == Kind::Array; }
+    // What may not cross an `@define` boundary or a C variadic: the platform ABI
+    // decides how each is passed and clang implements that classification, so
+    // emitting the LLVM aggregate would link cleanly and pass garbage.
+    bool isAggregate() const { return isStruct() || isArray(); }
 };
 
 // One field, in declaration order. The order is the whole point: the layout pass
@@ -218,16 +237,61 @@ public:
         // generic argument list all mean "not this slice" rather than "the base
         // name" -- silently dropping the decoration is how `&int` would become
         // `int` and start being copied by value.
+        // An array is the one decoration this slice does lower, and only when its
+        // extent is written and constant. See mapArray.
+        if (auto* arr = dynamic_cast<const ArrayTypeNode*>(node)) {
+            if (node->pointer_depth != 0 || node->is_nullable) return std::nullopt;
+            return mapArray(*arr);
+        }
         if (node->pointer_depth != 0 || node->is_array || node->is_nullable ||
             node->is_prototype || !node->generics.empty() ||
             !node->implements_list.empty() || node->array_size ||
             dynamic_cast<const FunctionTypeNode*>(node) ||
-            dynamic_cast<const PointerTypeNode*>(node) ||
-            dynamic_cast<const ArrayTypeNode*>(node)) {
+            dynamic_cast<const PointerTypeNode*>(node)) {
             return std::nullopt;
         }
         if (auto scalar = byName(node->name)) return scalar;
         return structByName(node->name);
+    }
+
+    // `[T, N]` becomes an LLVM [N x T]: N of the element, laid end to end, with LLVM
+    // placing them. The stride is the element's size rounded up to its alignment and
+    // LLVM computes it, which is the same division of labour a struct gets here --
+    // this file hands over the shape and does not do the arithmetic.
+    // Soundness_Codegen.TheLayoutTableAgreesWithLLVM is what keeps that agreeing with
+    // what src/types/Layout.cpp computes for a collector.
+    //
+    // A *dynamic* `[T]` returns nullopt, and it is not a fixed array with a number
+    // missing. How a `[T]` is represented -- a pointer and a length side by side, a
+    // header word ahead of the elements, something else -- is undecided, and it decides
+    // what `array.length` compiles to inside a callee that was handed one
+    // (arrays.fin's `sort(array: &[T])`). The caller turns the nullopt into a refusal
+    // naming the line, which is the same answer Layout.cpp gives at the same fork.
+    //
+    // A non-constant extent returns nullopt too. The analyzer has already refused it
+    // -- `new [T, n]` is Fin's spelling for a run-time count -- so this is a
+    // disagreement between the two passes rather than a program error, and reading it
+    // as anything (least of all as 1) would be a stack slot the wrong size.
+    std::optional<CgType> mapArray(const ArrayTypeNode& node) const {
+        if (!node.element_type || !node.size) return std::nullopt;
+
+        uint64_t extent = 0;
+        if (readConstant(*node.size, extent) != ConstantRead::Ok) return std::nullopt;
+
+        auto element = map(node.element_type.get());
+        if (!element) return std::nullopt;
+        // An array of void or of an incomplete struct has no size, so it is not an
+        // array of anything. LLVM would assert rather than refuse.
+        if (element->isVoid() || !element->llvmType || !element->llvmType->isSized()) {
+            return std::nullopt;
+        }
+
+        CgType t;
+        t.kind = CgType::Kind::Array;
+        t.llvmType = llvm::ArrayType::get(element->llvmType, extent);
+        t.element = std::make_shared<CgType>(*element);
+        t.extent = extent;
+        return t;
     }
 
     // The widths come from src/types/Layout.hpp and are not repeated here.
@@ -389,13 +453,50 @@ private:
         std::string name = type ? type->name : std::string("<none>");
         if (type && (type->pointer_depth || dynamic_cast<const PointerTypeNode*>(type)))
             name = "&" + name;
-        if (type && (type->is_array || dynamic_cast<const ArrayTypeNode*>(type)))
+        if (auto* arr = dynamic_cast<const ArrayTypeNode*>(type)) {
+            // The element's name, not the node's own, which an ArrayTypeNode leaves
+            // empty: `[int]` used to print as `[array]`, naming nothing the program
+            // wrote. And the extent when there is one, because "a variable of type
+            // '[int]'" and "of type '[int, 3]'" are refused for different reasons and
+            // only one of them is a decision waiting on a ruling.
+            const std::string inner = arr->element_type ? arr->element_type->name
+                                                        : std::string("?");
+            uint64_t extent = 0;
+            const bool fixed = arr->size &&
+                               readConstant(*arr->size, extent) == ConstantRead::Ok;
+            name = fixed ? fmt::format("[{}, {}]", inner, extent)
+                         : "[" + inner + "]";
+        } else if (type && type->is_array) {
             name = "[" + name + "]";
+        }
         unsupported(node, fmt::format("{} of type '{}'", role, name));
     }
 
     void debugLog(const std::string& text) {
         if (debug_) diag_.note("[codegen] " + text);
+    }
+
+    // What an array literal is being built as, for the moment it is being built.
+    //
+    // An array literal has no type of its own here: `[1, 2, 3]` could be an
+    // `[int, 3]` or a `[uint, 3]` and the front end has already decided which, from
+    // an annotation this file does not carry on the literal node. So the type comes
+    // from where the literal is going -- a declaration's annotation, a parameter, a
+    // return type -- and it is set for exactly one `emit` and cleared.
+    //
+    // Deliberately not a general expression hint. It reaches one node, it is
+    // consumed by the one visitor that cannot work without it, and an array literal
+    // nested inside one gets the element type from its parent rather than from here
+    // (visit(ArrayLiteral&) saves and restores it around each element).
+    const CgType* arrayHint_ = nullptr;
+
+    // Emits `expr` with `type` offered to it, when it is a literal that needs one.
+    CgVal emitAs(Expression& expr, const CgType& type) {
+        auto* saved = arrayHint_;
+        arrayHint_ = type.isArray() ? &type : nullptr;
+        CgVal v = emit(expr);
+        arrayHint_ = saved;
+        return v;
     }
 
     // ---- scopes -----------------------------------------------------------
@@ -582,8 +683,10 @@ private:
         // that classification itself rather than leaving it to LLVM. Emitting the
         // aggregate and calling it C-compatible would link cleanly and pass garbage.
         // Settling it needs the ABI classifier, which is a unit of its own.
-        if (isExtern && info.returnType.isStruct()) {
-            unsupported(node, fmt::format("an extern '{}' returning a struct", name));
+        if (isExtern && info.returnType.isAggregate()) {
+            unsupported(node, fmt::format("an extern '{}' returning {}", name,
+                                          info.returnType.isArray() ? "an array"
+                                                                    : "a struct"));
             return;
         }
 
@@ -595,8 +698,12 @@ private:
             auto t = types_.map(p->type.get());
             if (!t) { unsupportedType(*p, p->type.get(), "a parameter"); return; }
             if (t->isVoid()) { unsupported(*p, "a parameter of type 'void'"); return; }
-            if (isExtern && t->isStruct()) {
-                unsupported(*p, fmt::format("a struct parameter on extern '{}'", name));
+            if (isExtern && t->isAggregate()) {
+                // An array parameter on a C function is a pointer by C's own decay
+                // rule, so passing an LLVM [N x T] by value would link cleanly and
+                // pass garbage -- the same trap as the struct, one type further along.
+                unsupported(*p, fmt::format("{} parameter on extern '{}'",
+                                            t->isArray() ? "an array" : "a struct", name));
                 return;
             }
             info.paramTypes.push_back(*t);
@@ -733,6 +840,39 @@ private:
                                                         member->member);
             return Addr{ptr, base->type.structInfo->fields[index].type};
         }
+        if (auto* access = dynamic_cast<ArrayAccess*>(&expr)) {
+            // Only through an address. An array that is a *value* -- `make()[0]` --
+            // has no home to index into, and unlike a struct field there is no
+            // extractvalue with a run-time index: LLVM's extractvalue takes constants
+            // only. Returning nullopt sends it to visit(ArrayAccess&), which refuses
+            // rather than materialising a temporary the program did not ask for.
+            auto base = emitAddress(*access->array);
+            if (!base) return std::nullopt;
+            if (!base->type.isArray() || !base->type.element) return std::nullopt;
+
+            CgVal idx = emit(*access->index);
+            if (failed_ || !idx.ok()) return std::nullopt;
+            if (idx.type.kind != CgType::Kind::Int) return std::nullopt;
+
+            // Two indices, and the first is the constant 0: the pointer is to the
+            // array, so it is stepped over zero whole arrays and then to element i.
+            // A single-index GEP on an array pointer strides by the *array*, which
+            // is the classic way to land one full array past where the program meant.
+            //
+            // The index is widened to i64 first. A GEP index narrower than the
+            // pointer is sign-extended by LLVM anyway, but doing it here keeps the
+            // signedness this file's own -- a Fin `int` is signed, and a `uint`
+            // index must not be read as a negative offset.
+            llvm::Value* i = idx.type.bits == 64
+                                 ? idx.value
+                                 : (idx.type.isSigned
+                                        ? builder_.CreateSExt(idx.value, builder_.getInt64Ty())
+                                        : builder_.CreateZExt(idx.value, builder_.getInt64Ty()));
+            llvm::Value* ptr = builder_.CreateInBoundsGEP(
+                base->type.llvmType, base->ptr,
+                {builder_.getInt64(0), i}, "elem");
+            return Addr{ptr, *base->type.element};
+        }
         return std::nullopt;
     }
 
@@ -844,7 +984,7 @@ private:
 
         CgVal init;
         if (node.initializer) {
-            init = emit(*node.initializer);
+            init = declared ? emitAs(*node.initializer, *declared) : emit(*node.initializer);
             if (failed_) return;
             if (!init.ok()) { unsupported(node, "this initialiser"); return; }
         } else if (isAuto) {
@@ -895,7 +1035,7 @@ private:
             return;
         }
 
-        CgVal v = emit(*node.value);
+        CgVal v = emitAs(*node.value, currentFn_->returnType);
         if (failed_) return;
         if (!v.ok()) { unsupported(node, "this returned expression"); return; }
 
@@ -1419,7 +1559,12 @@ private:
 
         std::vector<llvm::Value*> args;
         for (size_t i = 0; i < node.args.size(); ++i) {
-            CgVal a = emit(*node.args[i]);
+            // The parameter's type is offered to the argument, which is how an array
+            // literal written at a call site knows what it is. A vararg position has
+            // no declared type to offer, and an array literal there refuses.
+            CgVal a = i < info.paramTypes.size()
+                          ? emitAs(*node.args[i], info.paramTypes[i])
+                          : emit(*node.args[i]);
             if (failed_) return;
             if (!a.ok()) { unsupported(node, "this argument"); return; }
 
@@ -1457,14 +1602,15 @@ private:
     // skipped this compiles and prints garbage, which is why
     // FloatsAreDoublesAtTheVarargBoundary is a run test and not an IR test.
     llvm::Value* promoteVararg(ASTNode& node, const CgVal& v) {
-        if (v.type.isStruct()) {
-            // `printf("%d", p)` for a struct `p` type-checks -- printf's parameter
-            // is `...` and the analyzer does not read the format string. Passing the
-            // aggregate would emit a call whose ABI is not the one C's va_arg reads,
-            // so the value printed would be arbitrary. Refused, because the default
-            // in this function is to pass the value through unchanged and that is
-            // the wrong default for an aggregate.
-            unsupported(node, "a struct passed to a C variadic");
+        if (v.type.isAggregate()) {
+            // `printf("%d", p)` for a struct or an array `p` type-checks -- printf's
+            // parameter is `...` and the analyzer does not read the format string.
+            // Passing the aggregate would emit a call whose ABI is not the one C's
+            // va_arg reads, so the value printed would be arbitrary. Refused, because
+            // the default in this function is to pass the value through unchanged and
+            // that is the wrong default for an aggregate.
+            unsupported(node, v.type.isArray() ? "an array passed to a C variadic"
+                                               : "a struct passed to a C variadic");
             return nullptr;
         }
         if (v.type.kind == CgType::Kind::Float &&
@@ -1583,6 +1729,39 @@ private:
             unsupported(node, fmt::format("the static member '{}'", node.member));
             return;
         }
+        // `a.length` on a fixed array is the extent, and the extent is a number this
+        // file already holds -- so it folds to a constant rather than loading
+        // anything. There is no length field to load: an [N x T] carries its count in
+        // its type and nowhere in its bytes.
+        //
+        // Typed as a signed i32 because the analyzer types `.length` as `int`
+        // (Soundness_Members.ALengthIsAnIntAndNotAnotherIntegerWidth), and all five
+        // corpus sites compare one against an int. A dynamic `[T]` has no extent here
+        // and never reaches this -- it refuses at the mapper, because its
+        // representation is what decides where a run-time length lives.
+        if (node.member == "length" && !node.is_static && node.object) {
+            // Through the address when there is one, so that reading the length does
+            // not emit a load of the whole array. Either way the answer is the type's.
+            std::optional<CgType> arrayType;
+            if (auto addr = emitAddress(*node.object)) {
+                if (addr->type.isArray()) arrayType = addr->type;
+            }
+            if (!arrayType && !failed_) {
+                CgVal object = emit(*node.object);
+                if (failed_) return;
+                if (object.ok() && object.type.isArray()) arrayType = object.type;
+            }
+            if (failed_) return;
+            if (arrayType) {
+                CgType i32 = types_.intType(32, true);
+                value_ = CgVal{llvm::ConstantInt::get(i32.llvmType, arrayType->extent, true),
+                               i32};
+                return;
+            }
+            // Not an array. A `string`'s length is a library question (ADR 0003) and a
+            // struct's `length` field falls through to the ordinary field path below.
+        }
+
         // The addressed path first: a GEP and a load of one field, rather than a
         // load of the whole struct followed by an extract. Both are correct; this
         // one does not copy the aggregate to read a byte of it.
@@ -1647,7 +1826,10 @@ private:
                 return;
             }
             if (!entry.second) { unsupported(node, "a field with no value"); return; }
-            CgVal v = emit(*entry.second);
+            // The field's type is offered to its value, which is what makes an array
+            // field's literal know what it is: `Row { cells: [7, 8, 9] }` has no other
+            // source for the element type.
+            CgVal v = emitAs(*entry.second, info.fields[index].type);
             if (failed_) return;
             if (!v.ok()) {
                 unsupported(node, fmt::format("the value for field '{}'", entry.first));
@@ -1666,8 +1848,66 @@ private:
         value_ = CgVal{aggregate, type};
     }
     void visit(PrototypeLiteral& node) override { unsupported(node, "a prototype literal"); }
-    void visit(ArrayLiteral& node) override { unsupported(node, "an array literal"); }
-    void visit(ArrayAccess& node) override { unsupported(node, "an index expression"); }
+    void visit(ArrayLiteral& node) override {
+        // Built as a value, the way a struct literal is, and stored whole by whoever
+        // asked for it. That is what makes `let c <[int, 3]> = a;` a copy: an LLVM
+        // array value is a value.
+        //
+        // The element type comes from the hint the surrounding declaration set, and
+        // there is exactly one thing that can set it -- a literal reaching here with
+        // no hint has no element type to be an array *of*. `[1, 2, 3]` on its own is
+        // not `[int, 3]` by inspection: the front end may have typed those constants
+        // as `uint` against an annotation this file cannot see, and guessing from the
+        // first element is how the two passes come to disagree about a stride.
+        if (!arrayHint_ || !arrayHint_->element) {
+            unsupported(node, "an array literal with no declared type");
+            return;
+        }
+        const CgType type = *arrayHint_;
+        if (node.elements.size() != type.extent) {
+            // The front end refuses a literal whose length does not match its type,
+            // which is what the extent being part of the type bought. A disagreement
+            // here would be a store off the end of the slot.
+            unsupported(node, fmt::format("an array literal of {} element{} for a type of {}",
+                                          node.elements.size(),
+                                          node.elements.size() == 1 ? "" : "s",
+                                          type.extent));
+            return;
+        }
+
+        // Zero first, so that a literal is never partly undefined even for the
+        // moment between insertions.
+        llvm::Value* aggregate = llvm::Constant::getNullValue(type.llvmType);
+        for (size_t i = 0; i < node.elements.size(); ++i) {
+            if (!node.elements[i]) { unsupported(node, "an array element with no value"); return; }
+            // Each element gets the *element's* type as its own hint, which is what
+            // makes `[[1, 2], [3, 4]]` lower: the inner literals are array literals
+            // too and need to know what they are. Saved and restored rather than
+            // cleared, because this literal's own hint has to survive its elements.
+            auto* saved = arrayHint_;
+            arrayHint_ = type.element->isArray() ? type.element.get() : nullptr;
+            CgVal v = emit(*node.elements[i]);
+            arrayHint_ = saved;
+            if (failed_) return;
+            if (!v.ok()) { unsupported(node, "this array element"); return; }
+            llvm::Value* stored = convert(node, v, *type.element);
+            if (!stored) return;
+            aggregate = builder_.CreateInsertValue(aggregate, stored, {(unsigned)i});
+        }
+        value_ = CgVal{aggregate, type};
+    }
+    void visit(ArrayAccess& node) override {
+        if (auto addr = emitAddress(node)) {
+            value_ = CgVal{builder_.CreateLoad(addr->type.llvmType, addr->ptr, "load"),
+                           addr->type};
+            return;
+        }
+        if (failed_) return;
+        // No address. An index into a struct's `operator []`, into a prototype, into
+        // a pointer, or into an array that is a value with no home -- all of which
+        // are their own units, and none of which may be read as "element 0".
+        unsupported(node, "this index expression");
+    }
     void visit(NewExpression& node) override { unsupported(node, "'new'"); }
     void visit(SizeofExpression& node) override { unsupported(node, "'sizeof'"); }
     void visit(LambdaExpression& node) override { unsupported(node, "a lambda"); }

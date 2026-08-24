@@ -437,6 +437,298 @@ BACKEND_TEST(Soundness_Codegen, ARejectedProgramProducesNoArtifact) {
     fs::remove(exe, ec);
 }
 
+
+// ---------------------------------------------------------------------------
+// Fixed arrays.
+//
+// A fixed array is the second aggregate to lower, and what unblocked it is the
+// same thing that unblocked structs: a number the backend is not allowed to guess.
+// `[int, 4]` and `[int, 8]` used to be one semantic type, so an alloca here would
+// have been a guess at how much stack to reserve -- and a guessed size is a
+// program that runs and writes past what it reserved. The extent is part of the
+// type now and the layout pass measures it (ADR 0015's second moment), so this
+// file hands LLVM an [N x T] and lets LLVM place it, exactly as it hands over a
+// struct's field list.
+//
+// A *dynamic* `[T]` is deliberately still refused, and it is not the same feature
+// with a number missing. How a `[T]` is represented -- a pointer and a length side
+// by side, a header word ahead of the elements, something else -- is an undecided
+// ruling that decides what `array.length` compiles to inside a callee that was
+// handed one (arrays.fin's `sort(array: &[T])` is the corpus's own case). Refused
+// rather than guessed at, for the reason Layout.cpp gives at the same fork.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AFixedArrayIsIndexedAtRunTime) {
+    // The loop is what makes this a test of a GEP rather than of constant folding:
+    // the index is a variable the front end cannot have read.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [10, 20, 30];\n"
+        "    for (i: int = 0; i < 3; i++) { printf(\"%d \", a[i]); }\n"
+        "    printf(\"\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10 20 30 \n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, EachElementIsItsOwnSlot) {
+    // Three distinct values read back in one printf: a lowering that stored every
+    // element at the same offset, or read every index from element 0, prints the
+    // same number three times and passes AFixedArrayIsIndexedAtRunTime's shape
+    // only if the values happen to agree.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [10, 20, 30];\n"
+        "    printf(\"%d %d %d\\n\", a[0], a[1], a[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10 20 30\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnElementIsAssignedThroughItsIndex) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [1, 2, 3];\n"
+        "    a[1] = 99;\n"
+        "    printf(\"%d %d %d\\n\", a[0], a[1], a[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 99 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAssignmentThroughARunTimeIndexWritesOneElement) {
+    // The write half of the GEP, with an index the front end could not fold, and an
+    // assertion that it wrote *one* element rather than smearing across the array.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 4]> = [0, 0, 0, 0];\n"
+        "    for (i: int = 0; i < 4; i++) { a[i] = i * i; }\n"
+        "    printf(\"%d %d %d %d\\n\", a[0], a[1], a[2], a[3]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0 1 4 9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayWithNoInitialiserIsZeroed) {
+    // The same answer a scalar local with no initialiser gets, and for the same
+    // reason: undefined stack contents is the one answer that cannot be tested.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]>;\n"
+        "    printf(\"%d %d %d\\n\", a[0], a[1], a[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0 0 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArraysLengthIsAConstant) {
+    // `.length` on a fixed array is the extent, known here and folded to it. The
+    // analyzer types it as `int` (Soundness_Members.ALengthIsAnIntAndNotAnother-
+    // IntegerWidth), so `%d` reads it.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 7]>;\n"
+        "    printf(\"%d\\n\", a.length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ALengthIsUsableInArithmetic) {
+    // Not just printable: `i < a.length - 1` is how arrays.fin:16 writes its loop
+    // bound, so the constant has to be an ordinary int value and not a special form.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 5]> = [1, 2, 3, 4, 5];\n"
+        "    let total <int> = 0;\n"
+        "    for (i: int = 0; i < a.length; i++) { total = total + a[i]; }\n"
+        "    printf(\"%d %d\\n\", total, a.length - 1);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "15 4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayOfAWiderElementStrides) {
+    // The stride is the element's size, not a word. An array of `long` read with an
+    // int-sized stride returns halves of neighbouring elements, which is exactly the
+    // failure a hardcoded stride produces and is invisible with i32 elements.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[long, 3]> = [4294967296, 8589934592, 12884901888];\n"
+        "    printf(\"%ld %ld %ld\\n\", a[0], a[1], a[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4294967296 8589934592 12884901888\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayOfFloatsRoundTrips) {
+    // `float` rather than `double` because a float literal does not widen to
+    // `double` in the front end today -- `[double, 3] = [1.5, ...]` reports
+    // `expected 'double', got 'float'`, which is a booked front-end gap and not a
+    // property of arrays. The elements still cross the vararg boundary as doubles,
+    // which is what promoteVararg is for.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[float, 3]> = [1.5, 2.5, 3.5];\n"
+        "    printf(\"%.1f %.1f %.1f\\n\", a[0], a[1], a[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1.5 2.5 3.5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayOfStructsIndexesAndReadsAField) {
+    // Two aggregates composed: the GEP lands on an element and the struct GEP lands
+    // on a field of it. Getting the stride wrong here reads one struct's field at
+    // another's offset, and both are well-typed ints.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let ps <[P, 2]> = [P { a: 1, b: 2 }, P { a: 3, b: 4 }];\n"
+        "    printf(\"%d %d %d %d\\n\", ps[0].a, ps[0].b, ps[1].a, ps[1].b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 3 4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayFieldOfAStructIsAddressed) {
+    // The other composition order. A struct containing an array is what the layout
+    // pass's pointer-map repeat exists for, and its field GEP has to land on the
+    // start of the array rather than on a word.
+    const Built b = build(std::string(kPrintf) +
+        "struct Row { n <int>, cells <[int, 3]> }\n"
+        "fun main() <noret> {\n"
+        "    let r <Row> = Row { n: 9, cells: [7, 8, 9] };\n"
+        "    printf(\"%d %d %d %d\\n\", r.n, r.cells[0], r.cells[1], r.cells[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9 7 8 9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnElementOfAStructFieldIsAssigned) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Row { cells <[int, 3]> }\n"
+        "fun main() <noret> {\n"
+        "    let r <Row> = Row { cells: [1, 2, 3] };\n"
+        "    r.cells[2] = 42;\n"
+        "    printf(\"%d %d %d\\n\", r.cells[0], r.cells[1], r.cells[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedArrayIndexesInBothDimensions) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let g <[[int, 2], 2]> = [[1, 2], [3, 4]];\n"
+        "    printf(\"%d %d %d %d\\n\", g[0][0], g[0][1], g[1][0], g[1][1]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 3 4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayIsCopiedByValueIntoAVariable) {
+    // Fin has not ruled on whether an array assigned to another variable aliases or
+    // copies, and an LLVM array value is a value -- so this lowers as a copy, which
+    // is the same answer a struct gets. Asserted rather than assumed: if the ruling
+    // lands the other way this test is the one that has to change, and a silent
+    // aliasing lowering would be a program that mutates a variable nobody assigned.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [1, 2, 3];\n"
+        "    let c <[int, 3]> = a;\n"
+        "    c[0] = 99;\n"
+        "    printf(\"%d %d\\n\", a[0], c[0]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 99\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayCrossesAFinToFinCallByValue) {
+    // Same rule as the struct parameter, and the same reason it is only a Fin-to-Fin
+    // boundary: the platform ABI decides how an aggregate is passed and clang
+    // implements that classification, so an array on an `@define` refuses below.
+    const Built b = build(std::string(kPrintf) +
+        "fun total(a: [int, 3]) <int> { return a[0] + a[1] + a[2]; }\n"
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [1, 2, 3];\n"
+        "    printf(\"%d\\n\", total(a));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayIsReturnedByValue) {
+    const Built b = build(std::string(kPrintf) +
+        "fun make() <[int, 3]> { return [4, 5, 6]; }\n"
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = make();\n"
+        "    printf(\"%d %d %d\\n\", a[0], a[1], a[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4 5 6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AZeroLengthArrayLowers) {
+    // `[T, 0]` is a legal type of zero bytes, following the empty-struct precedent
+    // -- and unlike an empty struct it is not refused, because it has an element
+    // type and therefore a stride. Nothing may index it, which the front end
+    // enforces (Soundness_ArrayBounds.AZeroLengthArrayHasNoElementZero).
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 0]> = [];\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADynamicArrayIsRefused) {
+    // Not a fixed array with a number missing. How a `[T]` is represented is an
+    // undecided ruling, and it decides what `array.length` compiles to inside a
+    // callee that was handed one. Refused rather than guessed at.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let a <[int]> = [1, 2, 3];\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayOnAnExternBoundaryIsRefused) {
+    // The struct rule at the second aggregate. A C function's parameter of array
+    // type is a pointer by C's own decay rule, and passing an LLVM [3 x i32] by
+    // value would link cleanly and pass garbage.
+    const Built b = build(
+        "@define take(a: [int, 3]) <noret>;\n"
+        "fun main() <noret> { let a <[int, 3]> = [1, 2, 3]; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayPassedToACVariadicIsRefused) {
+    // printf's `...` gives the analyzer nothing to check against, so this reaches
+    // the backend well-typed. What va_arg reads is not an aggregate.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [1, 2, 3];\n"
+        "    printf(\"%d\\n\", a);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayLiteralWithTooFewElementsCannotReachTheBackend) {
+    // The front end refuses this (`expected '[int, 3]', got '[int, 2]'`), which is
+    // what the extent being part of the type bought. Asserted here because the
+    // backend's alloca trusts it: an array literal shorter than its type would be a
+    // store off the end of the slot.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [1, 2];\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
 // ---------------------------------------------------------------------------
 // The layout table and the backend are the same table.
 // ---------------------------------------------------------------------------
