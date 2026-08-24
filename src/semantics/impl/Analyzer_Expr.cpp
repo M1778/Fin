@@ -214,6 +214,40 @@ void SemanticAnalyzer::visit(Identifier& node) {
         }
     }
     
+    // 3. A type's name, where a `$type` is what is expected.
+    //
+    // tests/samples/stdlib/error.fin:27 writes `compiler.types.cmp_types(t, Error)`
+    // inside `@special(pub) is_error_type( t: $type )`, naming the struct its own
+    // line 8 declares. `cmp_types` takes two `$type` arguments, so the name is a
+    // type used as a value -- "$type == literal type", as stdlib/types.fin:33 puts
+    // it.
+    //
+    // Read last, so a variable and a field of that name both still win, and read
+    // only under the expectation. A general rule -- any type name is a value
+    // anywhere -- would cost two things the corpus can point at: a misspelled
+    // variable that collides with a type name would stop being reported as
+    // undefined, and enums.fin:26's `enum_ == Ok(T)` means "is this the Ok
+    // variant", so turning its `T` into a `$type` would answer a question that
+    // line is not asking. Soundness_TypeAsValue holds both halves.
+    //
+    // Only `$type`. Whether `$interface`, `$struct` and `$enum_member` accept a
+    // name the same way, and whether they check the named type's kind if they do,
+    // is unsettled -- the corpus writes none of the three, and `implements(bool;
+    // $type, $interface)` is the only member that would ask.
+    //
+    // The identity of the type is not carried: the expression's type is `$type`
+    // and not "the type Error". Nothing needs it yet -- `cmp_types` answers at
+    // compile time, and `gettype::<T>` takes its subject through the turbofish,
+    // where identity travels as a type argument rather than as a value.
+    if (auto hint = hintFor(node)) {
+        if (auto* prim = hint->as<PrimitiveType>()) {
+            if (prim->name == "$type" && currentScope->resolveType(node.name)) {
+                lastExprType = hint;
+                return;
+            }
+        }
+    }
+
     error(node, "Undefined variable '" + node.name + "'");
     lastExprType = nullptr;
 }
@@ -549,7 +583,22 @@ void SemanticAnalyzer::checkCallArguments(ASTNode& node, const char* kind,
 
     size_t expected = sig.param_types.size();
     for (size_t i = 0; i < args.size(); ++i) {
+        // The fourth thing that says what a value is about to become: the parameter
+        // this argument is passed to. The other three -- an annotation, an
+        // assignment target, a return's function -- are on typeHint in the header,
+        // and the contract there is that nothing distinguishes them once installed.
+        //
+        // Installed before the argument is walked, because that is when it has to be
+        // there, and keyed on the argument node so it does not reach inward: the `S`
+        // of `cmp_types(t, id(S))` is `id`'s argument and not this one's
+        // (Soundness_TypeAsValue.TheExpectationDoesNotReachASubexpression).
+        if (i < expected) {
+            typeHintFor = args[i].get();
+            typeHint = sig.param_types[i];
+        }
         args[i]->accept(*this);
+        typeHintFor = nullptr;
+        typeHint = nullptr;
         if (i < expected) {
             checkType(*args[i], lastExprType, sig.param_types[i]);
         }

@@ -7844,17 +7844,56 @@ TEST(Soundness_EnumInference, AReturnsSeedStillChecksWhatWasWritten) {
 }
 
 TEST(Soundness_EnumInference, AReturnDoesNotSeedASubexpression) {
-    // The hint is keyed to the expression being returned, so an inner call is inferred
-    // from its own arguments and checked against the parameter it is passed to -- the
-    // same property AnAnnotationDoesNotReachASubexpression holds for a declaration.
+    // The hint is keyed to the expression being returned, so the enclosing `<Opt<int>>`
+    // does not reach the inner call -- the same property AnAnnotationDoesNotReachA-
+    // Subexpression holds for a declaration. What reaches it instead is the parameter
+    // it is passed to, `Opt<string>`, which is the fourth hint site
+    // (Soundness_TypeAsValue.AnOrdinaryArgumentIsUnaffected).
+    //
+    // That is what the inner message proves. Seeded from `f`'s return type the inner
+    // `Some(1)` would be an `Opt<int>`, its argument would fit, and the mismatch would
+    // be the outer one naming two Opts; seeded from `g`'s parameter, `T` is `string` and
+    // the written `1` is the thing reported. It is also the better place to report it --
+    // the same trade the hint makes at a declaration, where `let b <Box<string>> =
+    // Box(1);` points at the argument rather than at the call.
     const FincRun r = compile(
         std::string(kOptDecl) +
         "fun g(o: Opt<string>) <Opt<int>> { return Some(1); }\n"
         "fun f() <Opt<int>> { return g(Some(1)); }\n"
         "fun main() <noret> { let o <Opt<int>> = f(); }\n");
-    EXPECT_NE(stripAnsi(r.err).find("expected 'Opt<string>', got 'Opt<int>'"), std::string::npos)
-        << "the argument was inferred from its own argument, not from the return type\n"
-        << stripAnsi(r.err);
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("expected 'string', got 'int'"), std::string::npos)
+        << "the argument was seeded from the parameter it is passed to, not from the "
+           "enclosing return type\n" << err;
+    EXPECT_EQ(err.find("expected 'Opt<string>', got 'Opt<int>'"), std::string::npos) << err;
+}
+
+TEST(KnownDefect_EnumInference, APayloadlessEnumeratorIgnoresTheHint) {
+    // `Nothing` carries no payload, so nothing about the written value says what `T` is
+    // and the hint is the only thing that does. It is not read: a payload-less
+    // enumerator named on its own yields the enum still holding its own parameter, and
+    // `Opt<T>` is then compared against the annotation and rejected.
+    //
+    // Not about the argument site -- the annotation says it too, and the annotation has
+    // been a hint since generic inference existed. What is missing is that an enumerator
+    // reached as a plain name never goes through checkGenericCall, so nothing unifies
+    // the enum's parameters against what is expected. `Some("x")` on the next line is
+    // fine, because its payload says what `T` is without being asked.
+    //
+    // No corpus sample writes this, which is why it is booked rather than built: the
+    // corpus's payload-less enumerators are all compared (`enums.fin:26`) or returned
+    // under a declared type that is already instantiated.
+    const FincRun r = compile(
+        std::string(kOptDecl) +
+        "fun g(o: Opt<string>) <int> { return 1; }\n"
+        "fun main() <noret> {\n"
+        "  let a <Opt<string>> = Nothing;\n"
+        "  const n <int> = g(Nothing);\n"
+        "  let b <Opt<string>> = Some(\"x\");\n"
+        "}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(errorCount(err), 2u) << err;
+    EXPECT_NE(err.find("expected 'Opt<string>', got 'Opt<T>'"), std::string::npos) << err;
 }
 
 TEST(Soundness_EnumInference, AStaticEnumeratorCallInfersToo) {
@@ -9523,4 +9562,151 @@ TEST(Soundness_CompilerApi, TheApiIsNotInScopeAtTopLevel) {
         "fun main() <noret> { const x <int> = compiler.types.cmp_types(1, 1); }\n");
     EXPECT_NE(stripAnsi(r.err).find("Undefined variable 'compiler'"), std::string::npos)
         << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// A type's name, written where a `$type` is expected, denotes that type.
+//
+// tests/samples/stdlib/error.fin:27 is the whole of the corpus evidence:
+//
+//     const result <int> = compiler.types.cmp_types(t, Error);
+//
+// inside `@special(pub) is_error_type( t: $type ) <bool>`, where `Error` is the
+// struct the same file declares on line 8. `cmp_types` takes two `$type`
+// arguments, so the second one is a type named as a value -- the reading
+// stdlib/types.fin:33 writes down as "$type == literal type".
+//
+// The rule is contextual and not general: a type's name is a value only where a
+// `$type` is what is expected. Two reasons, both from the corpus. A general rule
+// would make every type name a legal expression everywhere, so a misspelled
+// variable that happens to collide with a type name would stop being reported as
+// undefined and start being reported as a mismatch far from the mistake. And
+// enums.fin:26 writes `enum_ == Ok(T)` where `T` is a type -- but it means "is
+// this the Ok variant", not "$type", and the general rule would replace that
+// line's honest "Undefined variable 'T'" with a mismatch that describes the
+// wrong question. What is expected is already carried, node-keyed, by typeHint;
+// this adds the fourth write site, the parameter an argument is passed to.
+//
+// The value scope is still read first, so a variable named like a type wins. And
+// only `$type` does this. Whether `$interface`, `$struct` and `$enum_member`
+// accept a name the same way -- and whether they check the kind when they do --
+// is unsettled: the corpus never writes one, and `implements(bool; $type,
+// $interface)` is the only member that would ask.
+//
+// What is *not* carried is the type's identity: the argument's type is `$type`,
+// not "the type Error". Nothing in the corpus needs it -- `cmp_types` answers at
+// compile time and `gettype::<T>` takes its subject through the turbofish, where
+// identity travels as a type argument and not as a value -- so the narrower thing
+// is built and this is booked.
+// ---------------------------------------------------------------------------
+
+static const char* kTypesGrant = "#[use(compiler)]\n#[use(compiler.components.types)]\n";
+
+TEST(Soundness_TypeAsValue, AStructsNameIsATypeWhereATypeIsExpected) {
+    const FincRun r = compile(apiSpecial(
+        std::string("struct S { pub x <int>, }\n") + kTypesGrant,
+        "return compiler.types.cmp_types(t, S);"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeAsValue, TheCorpusLineTypeChecks) {
+    // stdlib/error.fin:27 verbatim, minus the parts of that file that are about
+    // something else.
+    const FincRun r = compile(
+        std::string("pub struct Error { pub message <string>, }\n") + kTypesGrant +
+        "@special(pub) is_error_type( t: $type ) <bool> {\n"
+        "  const result <int> = compiler.types.cmp_types(t, Error);\n"
+        "  return result == -1;\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeAsValue, AnEnumsNameIsAType) {
+    const FincRun r = compile(apiSpecial(
+        std::string("enum E { A, B }\n") + kTypesGrant,
+        "return compiler.types.cmp_types(t, E);"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeAsValue, AnInterfacesNameIsAType) {
+    const FincRun r = compile(apiSpecial(
+        std::string("interface I { fun f() <int>; }\n") + kTypesGrant,
+        "return compiler.types.cmp_types(t, I);"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeAsValue, AnAliasesNameIsAType) {
+    // The alias resolves to what it names, so this also says the rule reads the
+    // type scope rather than a list of declaration kinds.
+    const FincRun r = compile(apiSpecial(
+        std::string("type Alias = int;\n") + kTypesGrant,
+        "return compiler.types.cmp_types(t, Alias);"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeAsValue, AnUnknownNameIsStillUndefined) {
+    // The rule reaches the type scope; it does not stop reporting.
+    const FincRun r = compile(apiSpecial(
+        kTypesGrant, "return compiler.types.cmp_types(t, NoSuchType);"));
+    EXPECT_NE(stripAnsi(r.err).find("Undefined variable 'NoSuchType'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeAsValue, AValueOfThatNameWins) {
+    // The value scope is read first, so a variable named like a type is that
+    // variable. The mismatch is the proof: `s` is an `int` where a `$type` is
+    // wanted, and nothing quietly turned the name back into the struct.
+    const FincRun r = compile(apiSpecial(
+        std::string("struct S { pub x <int>, }\n") + kTypesGrant,
+        "let S <int> = 1;\n  return compiler.types.cmp_types(t, S);"));
+    EXPECT_NE(stripAnsi(r.err).find("expected '$type'"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeAsValue, ATypeNameIsNotAValueWhereNoTypeIsExpected) {
+    // The other half of "contextual". An `int` is expected here, so `S` is a name
+    // that is not there -- reported where the mistake is, not two steps later.
+    const FincRun r = compile(
+        "struct S { pub x <int>, }\n"
+        "fun main() <noret> { const y <int> = S; }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined variable 'S'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeAsValue, AnAnnotationExpectsATypeToo) {
+    // `$type` can be written by hand, and the declaration annotation is one of the
+    // three sites that already said what a value is about to become.
+    const FincRun r = compile(
+        std::string("struct S { pub x <int>, }\n") + kTypesGrant +
+        "@special(pub) probe() <int> {\n"
+        "  let a <$type> = S;\n"
+        "  return compiler.types.cmp_types(a, a);\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeAsValue, TheExpectationDoesNotReachASubexpression) {
+    // The hint is keyed on the node it belongs to, so `S` inside another call is
+    // that call's argument and not this one's: an `int` is expected there.
+    const FincRun r = compile(apiSpecial(
+        std::string("struct S { pub x <int>, }\n"
+                    "fun id(v: int) <int> { return v; }\n") + kTypesGrant,
+        "return compiler.types.cmp_types(t, id(S));"));
+    EXPECT_NE(stripAnsi(r.err).find("Undefined variable 'S'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeAsValue, AnOrdinaryArgumentIsUnaffected) {
+    // The fourth hint site is installed for every argument, not only for a
+    // meta-typed one. This is the guard that saying what a parameter expects did
+    // not change what an ordinary call accepts.
+    const FincRun r = compile(
+        "fun takes(a: int, b: string) <int> { return a; }\n"
+        "fun main() <noret> {\n"
+        "  const ok <int> = takes(1, \"x\");\n"
+        "  const bad <int> = takes(\"x\", 1);\n"
+        "}\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 2u) << stripAnsi(r.err);
 }
