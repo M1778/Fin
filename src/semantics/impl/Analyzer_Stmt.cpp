@@ -134,13 +134,13 @@ void SemanticAnalyzer::visit(DeleteStatement& node) {
     // buffer that way on 54 and frees it with `delete self._arr` on 46, where `_arr` is
     // declared `[T]`. One buffer, both ends, one file.
     //
-    // A *fixed*-extent array is refused. `[int; fixed]` is what an annotation carrying
-    // an extent and an array literal both produce, neither of which came from an
+    // A *fixed*-extent array is refused. `[int, 3]` is what an annotation carrying an
+    // extent and an array literal both produce, neither of which came from an
     // allocator, and no corpus line deletes one. What the type cannot tell us is
     // provenance -- a `[T]` that decayed from a literal is accepted here -- but that is
     // the latitude `delete p` already has over a pointer to a local.
     if (dynamic_cast<PointerType*>(type.get())) return;
-    if (auto* arr = dynamic_cast<ArrayType*>(type.get()); arr && !arr->is_fixed_size) return;
+    if (auto* arr = dynamic_cast<ArrayType*>(type.get()); arr && !arr->isFixed()) return;
 
     error(node, fmt::format("Cannot delete non-pointer type '{}'", type->toString()));
 }

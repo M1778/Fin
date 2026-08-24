@@ -120,9 +120,9 @@ bool typeHasBuiltinMembers(const TypePtr& type) {
         return typeHasBuiltinMembers(ptr->pointee);
     }
 
-    // Fixed and dynamic alike. ArrayType carries is_fixed_size and nothing here reads
-    // it, because a count is a count either way; a fixed array's length could be folded
-    // to a literal later without changing its type.
+    // Fixed and dynamic alike. ArrayType carries an extent and nothing here reads it,
+    // because a count is a count either way; a fixed array's `.length` could be folded
+    // to its extent later without changing its type.
     if (dynamic_cast<const ArrayType*>(type.get())) return true;
 
     // A string is a PrimitiveType, not an array of char, so it needs saying separately.
@@ -567,9 +567,10 @@ void unifyGeneric(const TypePtr& param, const TypePtr& arg, TypeMap& out) {
         return;
     }
     if (auto* a = param->as<ArrayType>()) {
-        // is_fixed_size is not matched. `rptr([1,2,3,4])` (tests/samples/const.fin:98)
-        // hands a fixed-size literal to a parameter written `[T]`, and the size is not
-        // part of what T is.
+        // The extent is not matched. `rptr([1,2,3,4])` (tests/samples/const.fin:98)
+        // hands a four-element literal to a parameter written `[T]`, and the size is
+        // not part of what T is -- if it were, T would bind to `[int, 4]` and the
+        // `rptr<[int]>` annotation on that line would not fit it.
         if (auto* aa = arg->as<ArrayType>()) unifyGeneric(a->element_type, aa->element_type, out);
         return;
     }
@@ -1203,6 +1204,33 @@ void SemanticAnalyzer::visit(NewExpression& node) {
     for(auto& arg : node.args) arg->accept(*this);
     for(auto& f : node.init_fields) f.second->accept(*this);
     
+    // An array allocation resolves its *element* type rather than the whole
+    // ArrayTypeNode, because the two paths disagree about the extent on purpose.
+    // An annotation's extent has to be a constant -- `[int, n]` names a type whose
+    // size nobody can state -- and an allocation's extent is exactly the run-time
+    // value that rule exists to send here: `new [T, amount]{}` (collection.fin:54)
+    // and `new [char, nbytes - self.pointer]` (stdio.fin:112). Handing this node to
+    // resolveTypeFromAST would refuse both of the corpus's own allocations.
+    //
+    // The extent expression is still analysed, and against `int`, so that
+    // `new [int, "x"]` and `new [int, nosuchvar]` are diagnosed here rather than
+    // walked past.
+    if (auto* arrNode = dynamic_cast<ArrayTypeNode*>(node.type.get())) {
+        auto element = resolveTypeFromAST(arrNode->element_type.get());
+        if (arrNode->size) {
+            arrNode->size->accept(*this);
+            if (lastExprType) {
+                auto intType = currentScope->resolveType("int");
+                if (!checkType(*arrNode->size, lastExprType, intType)) {
+                    error(*arrNode->size, "An allocation's size must be an integer");
+                }
+            }
+        }
+        if (!element) { lastExprType = nullptr; return; }
+        lastExprType = std::make_shared<ArrayType>(element);
+        return;
+    }
+
     auto allocatedType = resolveTypeFromAST(node.type.get());
     if (!allocatedType) {
         // A PointerType over a null pointee is worse than no type at all: it is
@@ -1214,28 +1242,23 @@ void SemanticAnalyzer::visit(NewExpression& node) {
         return;
     }
 
-    // An array allocation is a `[T]`, and not a pointer to one.
-    //
-    // Every other `new` is a pointer to what it allocated: `new Vec2::<float>{x: 3.0, y:
-    // 4.0}` is a `&Vec2<float>` (tests/samples/letssee.fin:58). An array is the exception
-    // because `[T]` already carries a length and an address -- there is nothing for the
-    // extra indirection to hold -- and the corpus states it at every site:
+    // Every other `new` is a pointer to what it allocated: `new Vec2::<float>{x:
+    // 3.0, y: 4.0}` is a `&Vec2<float>` (tests/samples/letssee.fin:58). An array is
+    // the exception, handled above, because `[T]` already carries a length and an
+    // address -- there is nothing for the extra indirection to hold -- and the
+    // corpus states it at every site:
     //
     //     self._arr = new [T, amount]{};   stdlib/collection.fin:54, `_arr` is `[T]`
     //     _arr: new [T, length]{}          :84, the same field through a literal
     //     self.stream_length = _temp.length;  stdlib/stdio.fin:130, a length off it
     //
-    // Not fixed-size either, whatever the extent looks like. `amount` is an `int`
-    // parameter and `nbytes + self.stream_length` (stdio.fin:124) is an expression, so
-    // the size is not part of the type -- and making it part of the type when the extent
-    // happens to be a literal would make `new [int, 3]` and `new [int, n]` different
-    // types for no reason the language draws anywhere else. An array *literal* is still
-    // fixed: it states its elements rather than an extent.
-    if (auto* arr = allocatedType->as<ArrayType>()) {
-        lastExprType = std::make_shared<ArrayType>(arr->element_type, false);
-        return;
-    }
-
+    // Dynamic whatever the extent looks like, including when it is written as a
+    // literal. `amount` is an `int` parameter and `nbytes + self.stream_length`
+    // (stdio.fin:124) is an expression, so the count is not part of the type -- and
+    // making it part of the type when the extent happens to be a literal would make
+    // `new [int, 3]` and `new [int, n]` different types for no reason the language
+    // draws anywhere else. An array *literal* is fixed instead: it states its
+    // elements rather than an extent.
     lastExprType = std::make_shared<PointerType>(allocatedType);
 }
 
@@ -1326,7 +1349,7 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
         if (auto* proto = objType->as<PrototypeType>()) {
             if (position == 0 || position == 1) {
                 lastExprType = std::make_shared<ArrayType>(
-                    position == 0 ? proto->keyType : proto->valueType, false);
+                    position == 0 ? proto->keyType : proto->valueType);
                 return;
             }
             error(node, fmt::format("Type '{}' has no member '{}'", objType->toString(), node.member));
@@ -1485,7 +1508,11 @@ void SemanticAnalyzer::visit(ArrayLiteral& node) {
         checkType(*node.elements[i], lastExprType, firstType);
     }
 
-    lastExprType = std::make_shared<ArrayType>(firstType, true);
+    // The literal's own extent: it states its elements, so it knows how many. This
+    // was `true` -- a flag meaning "fixed, count unknown" -- and the count was
+    // sitting right here in `node.elements`, which is what made `let a <[int, 3]> =
+    // [1, 2];` compile and every read of `a[2]` after it a word nobody wrote.
+    lastExprType = std::make_shared<ArrayType>(firstType, node.elements.size());
 }
 
 void SemanticAnalyzer::visit(SizeofExpression& node) {

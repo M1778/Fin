@@ -4610,11 +4610,12 @@ TEST(Soundness_BuiltinMembers, ATypeWithNoMembersStillSaysSo) {
 
 TEST(KnownDefect_IntegerConstants, AnArrayOfConstantsDoesNotTakeTheAnnotatedElementType) {
     // `let myarr <[uint]> = [7,3,4];` (arrays.fin:29) reports
-    // `expected '[uint]', got '[int; fixed]'`. The message names two differences but
+    // `expected '[uint]', got '[int, 3]'`. The message names two differences but
     // only one of them is a defect: `let a <[int]> = [1,2];` compiles clean, so a
     // fixed list already converts to a dynamic array of the same element type
-    // (ArrayType.cpp:22, and Soundness_Arrays.AFixedListInitialisesADynamicArray
-    // holds that). The `fixed` in the text is only how the right-hand side prints.
+    // (ArrayType.cpp, and Soundness_Arrays.AFixedListInitialisesADynamicArray
+    // holds that). The extent in the text is only how the right-hand side prints --
+    // a literal states its elements, so it has one.
     //
     // So the single cause is the element type: checkType() is handed the ArrayLiteral,
     // whose type is an ArrayType, and by then nothing remembers that its elements were
@@ -4626,7 +4627,7 @@ TEST(KnownDefect_IntegerConstants, AnArrayOfConstantsDoesNotTakeTheAnnotatedElem
         << "FIXED: an array of constants now takes its annotated element type. Invert "
            "this into Soundness_IntegerConstants; the element type is the whole claim, "
            "the `fixed` half of the old message was never a defect.";
-    EXPECT_NE(stripAnsi(r.err).find("[int; fixed]"), std::string::npos) << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("[int, 2]"), std::string::npos) << r.err;
 }
 
 // ---------------------------------------------------------------------------
@@ -8261,6 +8262,41 @@ TEST(KnownDefect_WrittenGenericArguments, AFreeFunctionsTurbofishBindsNothing) {
         << stripAnsi(r.err);
 }
 
+TEST(KnownDefect_GenericReturn, OnlyAStructReturnIsInstantiated) {
+    // The gate on the generic-call path is `return_type->as<StructType>()`, so a callee
+    // whose return type mentions a parameter *without* being a struct is never
+    // instantiated: `fun first<T>(a: [T]) <T>` types its call as `T` and every use of
+    // the result reports against the template.
+    //
+    // Not the array work's doing -- it reproduces identically at the commit before it.
+    // The gate was written when a constructor was the only callee whose return type
+    // named the thing being called, and `mentionsGenericParam` (which the same
+    // condition already calls) is the check that generalises it; the struct test in
+    // front of it is what narrows it back down. Four return shapes are affected: a bare
+    // `T`, `[T]`, `&T`, and `T?`.
+    //
+    // Whoever widens the gate should invert this into
+    // Soundness_GenericReturn.ABareParameterReturnIsInstantiatedFromItsArguments and
+    // check all four -- the parameter-side unification for each already exists in
+    // unifyGeneric, so it is the gate and not the matching that is missing.
+    const FincRun r = compile(
+        "fun first<T>(a: [T]) <T> { return a[0]; }\n"
+        "fun main() <noret> { let n <int> = first([1, 2, 3, 4]); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'T'"), std::string::npos)
+        << "instantiated, this would be `int` and the program would compile\n"
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_GenericReturn, AnArrayReturnIsNotInstantiatedEither) {
+    // Same gate, and the shape that matters most to the array work: `[T]` is what a
+    // `sort`/`map`/`filter` in tests/samples/arrays.fin would return.
+    const FincRun r = compile(
+        "fun wrap<T>(p: T) <[T]> { return [p]; }\n"
+        "fun main() <noret> { let a <[int]> = wrap(1); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected '[int]', got '[T]'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
 // ---------------------------------------------------------------------------
 // `new [T, n]` is a `[T]`.
 //
@@ -8393,9 +8429,233 @@ TEST(Soundness_HeapArrays, AFixedAnnotationDoesNotAcceptAnAllocation) {
     // promise the size a fixed-size target requires (src/types/ArrayType.cpp).
     const FincRun r = compile(
         "fun main() <noret> { let a <[int, 3]> = new [int, 3]; }\n");
-    EXPECT_NE(stripAnsi(r.err).find("expected '[int; fixed]', got '[int]'"), std::string::npos)
+    EXPECT_NE(stripAnsi(r.err).find("expected '[int, 3]', got '[int]'"), std::string::npos)
         << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// An array's extent is part of its type.
+//
+// `[int, 3]` and `[int, 5]` were one type. ArrayTypeNode carried the extent as an
+// expression, the cloner and the macro expander both preserved it, and nothing in
+// src/semantics read it -- so ArrayType had a `fixed` flag and no number, and the
+// layout pass refused *every* array rather than only the dynamic ones, because a
+// fixed array whose extent were guessed is a struct that is silently the wrong size
+// (the retired KnownDefect_Layout.AFixedArrayHasNoExtentToLayOut).
+//
+// This is the same shape of defect as the field order that unblocked structs: the
+// AST has the answer and the semantic type threw it away. Two things follow from
+// putting it back, and the second is why this suite is here rather than only in
+// test_layout.cpp:
+//
+//   * A fixed array has a size, so it can be laid out and lowered.
+//   * An extent is a promise the type system can now *check*. `let a <[int, 3]> =
+//     [1, 2];` was accepted, and the program that followed read a third element
+//     that the initialiser never wrote.
+//
+// The extent has to be a constant, and the reason is not convenience: a type whose
+// size is a run-time value has no size at compile time, and every consumer of it --
+// `sizeof`, a field offset, an alloca -- would be answering from a number nobody
+// has. Fin already has a spelling for "however many at run time", which is
+// `new [T, n]`, and that one yields a dynamic `[T]` (Soundness_HeapArrays). So the
+// two forms divide cleanly, and the tests below hold both halves.
+
+TEST(Soundness_ArrayExtent, AnExtentThatDisagreesWithTheLiteralIsRefused) {
+    // The soundness win, on its own line. This compiled before, and `a[2]` after it
+    // read a word the initialiser never wrote.
+    const FincRun r = compile(
+        "fun main() <noret> { let a <[int, 3]> = [1, 2]; }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    // And the message distinguishes the two, which is the other half of putting the
+    // number in the type: `expected '[int; fixed]', got '[int; fixed]'` was what a
+    // reader would have got from a flag.
+    EXPECT_NE(stripAnsi(r.err).find("expected '[int, 3]', got '[int, 2]'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, AnExtentThatAgreesIsAccepted) {
+    // tests/samples/loops.fin:12 and deeptest3.fin:49, which are the corpus's only
+    // fixed-extent annotations and both state their elements exactly.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let a <[int, 5]> = [1, 2, 3, 4, 5];\n"
+        "    let b <[int, 3]> = [10, 20, 30];\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, TwoDifferentExtentsDoNotMix) {
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [1, 2, 3];\n"
+        "    let b <[int, 5]> = a;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, AFixedArrayStillDecaysIntoADynamicOne) {
+    // Unchanged, and load-bearing: tests/samples/deeptest1.fin:38 and
+    // arrays_enums.fin:10 both initialise a `[int]` from a literal, and const.fin:98
+    // hands `[1,2,3,4]` to an `rptr<[int]>`. The extent is what the source promises,
+    // and a target that promises nothing accepts anything.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let a <[int]> = [1, 2, 3];\n"
+        "    let b <[int, 2]> = [7, 8];\n"
+        "    let c <[int]> = b;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, ADynamicArrayDoesNotFitAFixedAnnotation) {
+    // The reverse of the decay, through a parameter rather than an allocation, so
+    // that the rule is asserted about the *types* and not about `new`.
+    const FincRun r = compile(
+        "fun f(a: [int]) <noret> { let b <[int, 3]> = a; }\n"
+        "fun main() <noret> { f([1, 2, 3]); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected '[int, 3]', got '[int]'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, AnExtentIsCheckedAtACallBoundary) {
+    const FincRun r = compile(
+        "fun f(a: [int, 3]) <noret> {}\n"
+        "fun main() <noret> { f([1, 2]); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, ANonConstantExtentIsRefused) {
+    // Not "unimplemented": a type whose size is a run-time value has no size at
+    // compile time, and the alternative to a diagnostic is a `[int]` the writer did
+    // not ask for. `new [int, n]` is the spelling for that, and the next test holds
+    // it open.
+    const FincRun r = compile(
+        "fun f(n: int) <noret> { let a <[int, n]> = [1, 2, 3]; }\n"
+        "fun main() <noret> { f(3); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("constant"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, AnAllocationsExtentNeedNotBeConstant) {
+    // The exemption, and the reason visit(NewExpression) resolves an array's element
+    // type itself instead of handing the whole ArrayTypeNode to resolveTypeFromAST:
+    // tests/samples/stdlib/collection.fin:54 allocates `new [T, amount]{}` from an
+    // `int` parameter and stdio.fin:112 from `nbytes - self.pointer`. Both are
+    // dynamic arrays, so neither needs an extent in its type -- and refusing them
+    // here would have been this unit breaking two samples to tighten a third.
+    const FincRun r = compile(
+        "fun f(n: int) <noret> {\n"
+        "    let a <[char]> = new [char, n - 1];\n"
+        "    let b <[int]> = new [int, n]{};\n"
+        "}\n"
+        "fun main() <noret> { f(4); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, ANegativeExtentIsRefused) {
+    const FincRun r = compile(
+        "fun main() <noret> { let a <[int, -1]> = [1]; }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("negative"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, AnExtentOfZeroIsAType) {
+    // Following Soundness_Layout.AnEmptyStructHasNoBytes rather than deciding
+    // anything new: a type with nothing in it is a type, and it is zero bytes. There
+    // is no corpus line either way, and refusing would be the larger invention --
+    // `[T, 0]` is what a generic that computes its own extent lands on at the edge.
+    const FincRun r = compile("struct S { pub a <[int, 0]>, pub n <int>, }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, APointerToAFixedArrayDereferencesToItsOwnType) {
+    // tests/samples/deeptest3.fin:104-116, which is the only corpus site that puts a
+    // fixed extent behind a pointer and takes it back out. Both halves depend on the
+    // extent being *the same number* on each side -- `&[int, 3]` accepting a
+    // `&[int, 5]` would be the same bug one indirection out.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let my_array <[int, 3]> = [10, 20, 30];\n"
+        "    let ptr_to_arr <&[int, 3]> = &my_array;\n"
+        "    let copy_of_arr <[int, 3]> = *ptr_to_arr;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, APointerToAFixedArrayOfTheWrongExtentIsRefused) {
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let my_array <[int, 3]> = [10, 20, 30];\n"
+        "    let ptr_to_arr <&[int, 5]> = &my_array;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, AFixedArrayStillReportsItsLength) {
+    // Soundness_BuiltinMembers already holds that an array has `.length`; asserted
+    // again here because a fixed array's length is now a number the compiler knows,
+    // which is a standing invitation to give it a different type from the dynamic
+    // one's. It is an `int` either way, because all five corpus sites compare it
+    // against an `int`.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [1, 2, 3];\n"
+        "    let n <int> = a.length;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, AGenericParameterStillDoesNotBindTheExtent) {
+    // tests/samples/const.fin:98 -- `rptr([1,2,3,4])` into an `rptr<[int]>`. The extent
+    // is deliberately not part of what T is: bound, T would be `[int, 4]`, and a struct
+    // compares its generic arguments exactly, so the annotation one character to the
+    // left would reject the very call it is annotating.
+    //
+    // Written with a struct return rather than the shorter `fun first<T>(a: [T]) <T>`,
+    // because that shorter spelling proves nothing today -- a bare `T` return is not
+    // instantiated at all (KnownDefect_GenericReturn.OnlyAStructReturnIsInstantiated),
+    // so it would report `got 'T'` whatever the extent did.
+    const FincRun r = compile(
+        "struct rptr<T> { pub value <T>, rptr(v: T) { self.value = v; } }\n"
+        "fun main() <noret> { let arr <rptr<[int]>> = rptr([1, 2, 3, 4]); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, AFixedLiteralReachesADynamicParameter) {
+    // The other half of the same rule, at a plain parameter rather than through a
+    // generic argument: `[T]` is dynamic, the literal is `[int, 4]`, and the decay is
+    // what carries it. Every array a sample passes anywhere is a literal or a `new`.
+    const FincRun r = compile(
+        "fun take<T>(a: [T]) <noret> { }\n"
+        "fun main() <noret> { take([1, 2, 3, 4]); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ArrayExtent, AnExtentSurvivesAPreprocessorDefine) {
+    // The extent reader accepts an integer *literal* and nothing else, so it has to
+    // run after expansion or a defined extent is a diagnostic. tests/samples/macros2
+    // .fin:11 writes `data <[int, CONFIG_MAX!()]>` and is the corpus's only
+    // non-literal extent -- but that sample is truncated into a comment block, so
+    // nothing was checking this. `#cdef` is the spelling that works today
+    // (preprocessor.fin); the `@macro` form has no expression body yet.
+    const FincRun r = compile(
+        "#cdef SIZE 3\n"
+        "fun main() <noret> {\n"
+        "    let a <[int, SIZE]> = [1, 2, 3];\n"
+        "    let bad <[int, SIZE]> = [1, 2];\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    // Not just "it compiled": the *number* has to have arrived, which only the
+    // refusal of the two-element initialiser proves.
+    EXPECT_NE(stripAnsi(r.err).find("expected '[int, 3]', got '[int, 2]'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
 
 // ---------------------------------------------------------------------------
 // Deleting an array.
@@ -8449,14 +8709,14 @@ TEST(Soundness_DeletingAnArray, APointerIsStillDeletable) {
 }
 
 TEST(Soundness_DeletingAnArray, AFixedExtentArrayIsNotDeletable) {
-    // Stack memory. `[int; fixed]` is what an annotation with an extent, and an
-    // array literal, both produce -- neither came from an allocator.
+    // Stack memory. `[int, 3]` is what an annotation with an extent, and an array
+    // literal of three elements, both produce -- neither came from an allocator.
     const FincRun r = compile(
         "fun main() <noret> {\n"
         "    let a <[int, 3]> = [1, 2, 3];\n"
         "    delete a;\n"
         "}\n");
-    EXPECT_NE(stripAnsi(r.err).find("Cannot delete non-pointer type '[int; fixed]'"),
+    EXPECT_NE(stripAnsi(r.err).find("Cannot delete non-pointer type '[int, 3]'"),
               std::string::npos)
         << stripAnsi(r.err);
     EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);

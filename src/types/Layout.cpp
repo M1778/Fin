@@ -251,15 +251,71 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
         return inner;
     }
 
-    if (t.as<ArrayType>()) {
-        // Not "arrays are unimplemented": the extent is *gone*. TypeNode carries
-        // `array_size` as an expression, the cloner and the macro expander both
-        // preserve it, and nothing in src/semantics reads it -- so `[int; 4]` and
-        // `[int; 8]` are one type. Guessing a length here is how a struct silently
-        // becomes the wrong size (KnownDefect_Layout.AFixedArrayHasNoExtentToLayOut).
-        return {{}, refuse(t, "an array's extent is not resolved into its type, so there is "
-                              "no element count to multiply a stride by; a dynamic array's "
-                              "representation is undecided besides")};
+    if (auto* arr = t.as<ArrayType>()) {
+        // A fixed array is N of its element, laid end to end. A dynamic one is not
+        // laid out at all: how a `[T]` is *represented* -- a pointer and a length
+        // side by side, a header word ahead of the elements, something else -- is
+        // undecided, and the extent does not decide it.
+        //
+        // This used to refuse both, and the reason was the extent rather than the
+        // arithmetic: `[int, 4]` and `[int, 8]` were one semantic type, so any size
+        // reported here would have been a guess, and a guessed size is a struct that
+        // silently has the wrong shape. The retired
+        // KnownDefect_Layout.AFixedArrayHasNoExtentToLayOut is what held that open.
+        if (!arr->extent) {
+            return {{}, refuse(t, "a dynamic array's representation -- a pointer and a "
+                                  "length side by side, a header ahead of the elements, "
+                                  "something else -- is undecided")};
+        }
+        if (!arr->element_type) return {{}, refuse(t, "it has no element type")};
+        auto element = layoutOf(arr->element_type);
+        if (!element.ok()) {
+            return {{}, refuse(t, "its element '" + arr->element_type->toString() +
+                                      "' has none -- " + element.refusal)};
+        }
+
+        TypeLayout out;
+        // The element's alignment, not the whole array's size. Sixteen bytes of ints
+        // is 4-aligned, and demanding 16 would over-align every array field in every
+        // struct that has one.
+        out.align = std::max<uint64_t>(1, element.layout.align);
+        // The stride is the element's size rounded up to its own alignment, which is
+        // what makes the *second* element land aligned as well as the first. Those
+        // two numbers are always equal for every layout this engine produces today
+        // -- a struct's size is already rounded up to its own alignment and a
+        // scalar's size is a multiple of its own -- so the round-up is here for the
+        // first type where that stops being true, rather than to fix a case that
+        // exists. Packing instead would misalign every element after the first.
+        const uint64_t stride = alignUp(element.layout.size, out.align);
+        const uint64_t count = *arr->extent;
+        if (stride != 0 && count > UINT64_MAX / stride) {
+            return {{}, refuse(t, "its size does not fit in 64 bits")};
+        }
+        out.size = stride * count;
+
+        // The element's pointer map, repeated once per element. This is the reason
+        // this file exists (ADR 0003): a collector handed a struct with a
+        // `[&Node, 3]` field must be told about three pointers, not one and not
+        // none, and an array is the first type whose map is a repeat rather than a
+        // walk of named fields.
+        //
+        // Emitted flat, like every other map here, which for a large array of
+        // pointers is a large vector. That is a size problem rather than a wrong
+        // number, and the eventual answer is a repeat encoding -- an offset, a
+        // stride and a count -- in TypeLayout::pointers itself, so that a
+        // nested array does not multiply out either. Owed, not guessed at here: the
+        // shape a collector wants to walk is the collector's ruling.
+        if (!element.layout.pointers.empty()) {
+            for (uint64_t i = 0; i < count; ++i) {
+                const uint64_t base = i * stride;
+                for (const auto& slot : element.layout.pointers) {
+                    out.pointers.push_back({base + slot.offset, slot.pointee});
+                }
+            }
+        }
+        // No `fields`. An element has an index, and an index is not a name that
+        // TypeLayout::field() could answer.
+        return {out, ""};
     }
 
     if (t.as<GenericType>()) {

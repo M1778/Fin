@@ -31,6 +31,47 @@ bool integerConstant(const ASTNode& node, bool& negative) {
     return false;
 }
 
+// What an array's extent expression states, and why it states nothing.
+//
+// `[int, 5]`, and `[int, SIZE]` after a `#cdef`, are an integer Literal by the time
+// the analyzer runs -- the preprocessor and the macro expander are two passes
+// earlier -- and a Literal's `value` is the text it was spelled with, which
+// {DIGIT}+ in the lexer makes pure digits with no suffix and no separators.
+//
+// Nothing else is a constant here, on purpose and for integerConstant's reason
+// above: `1 + 1` is not folded, and a `const` variable is not read, because a
+// `const` in Fin is a variable whose mutability is checked rather than a
+// compile-time value the type system may substitute. Both would be answering an
+// open ruling by accident for whichever subset happens to be reachable.
+enum class ExtentRead { Ok, NotConstant, Negative, TooLarge };
+
+ExtentRead readExtent(const ASTNode& node, uint64_t& out) {
+    bool negative = false;
+    if (!integerConstant(node, negative)) return ExtentRead::NotConstant;
+    if (negative) return ExtentRead::Negative;
+
+    // `--5` is what integerConstant calls non-negative, and it is a UnaryOp rather
+    // than the Literal, so the wrapping is peeled rather than assumed away.
+    const ASTNode* inner = &node;
+    while (auto* un = dynamic_cast<const UnaryOp*>(inner)) inner = un->operand.get();
+    auto* lit = dynamic_cast<const Literal*>(inner);
+    if (!lit || lit->value.empty()) return ExtentRead::NotConstant;
+
+    // Accumulated a digit at a time rather than through stoull, which stops at the
+    // first character it does not like and reports success for the prefix: a
+    // spelling this reader does not know would come back as a *number*, and a
+    // number is what the layout pass and the backend both believe.
+    uint64_t value = 0;
+    for (char c : lit->value) {
+        if (c < '0' || c > '9') return ExtentRead::NotConstant;
+        const uint64_t digit = static_cast<uint64_t>(c - '0');
+        if (value > (UINT64_MAX - digit) / 10) return ExtentRead::TooLarge;
+        value = value * 10 + digit;
+    }
+    out = value;
+    return ExtentRead::Ok;
+}
+
 // The three unsigned types Analyzer_Core registers. `char` is not among them:
 // whether it is signed is undecided, so it accepts a negative constant rather
 // than having this function invent the answer.
@@ -243,27 +284,62 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
         return std::make_shared<PointerType>(inner);
     }
 
-    // 2. Array Type (FIXED: Validate Size)
+    // 2. Array Type. The extent is resolved into the type, not just validated.
+    //
+    // `[int, 4]` and `[int, 8]` were one type before this: the size was analysed
+    // for its own diagnostics and the *value* went nowhere, so ArrayType had a
+    // `fixed` flag and no number. That is why the layout pass refused every array
+    // rather than only the dynamic ones -- any size it reported would have been a
+    // guess, and a guessed size is a struct that is silently the wrong shape.
+    //
+    // Which makes a non-constant extent a refusal rather than a fallback. Storing
+    // it as "fixed, size unknown" would be the same defect in a new spelling, and
+    // silently demoting it to `[int]` would give the writer a type they did not
+    // ask for. `new [T, n]` is the spelling for a run-time count of elements, and
+    // visit(NewExpression) keeps it out of this path for exactly that reason.
     if (auto* arrNode = dynamic_cast<ArrayTypeNode*>(node)) {
         auto inner = resolveTypeFromAST(arrNode->element_type.get());
-        bool fixed = (arrNode->size != nullptr);
-        
-        if (fixed) {
-            // Analyze the size expression
+        std::optional<uint64_t> extent;
+
+        if (arrNode->size) {
             arrNode->size->accept(*this);
-            
+
             // Ensure it evaluates to an integer
             auto intType = currentScope->resolveType("int");
+            bool integral = true;
             if (lastExprType) {
                 if (!checkType(*arrNode->size, lastExprType, intType)) {
                     error(*arrNode->size, "Array size must be an integer");
+                    integral = false;
+                }
+            }
+
+            // Only when the type check agreed, so that a `[int, "x"]` gets the one
+            // diagnostic about its type and not a second about its constness.
+            if (integral) {
+                uint64_t count = 0;
+                switch (readExtent(*arrNode->size, count)) {
+                    case ExtentRead::Ok:
+                        extent = count;
+                        break;
+                    case ExtentRead::Negative:
+                        error(*arrNode->size, "An array's size cannot be negative");
+                        break;
+                    case ExtentRead::TooLarge:
+                        error(*arrNode->size, "An array's size is too large to represent");
+                        break;
+                    case ExtentRead::NotConstant:
+                        error(*arrNode->size,
+                              "An array's size must be a constant integer; `new [T, n]` "
+                              "allocates a run-time number of elements");
+                        break;
                 }
             }
         }
-        
-        // After the size check, so that `[NoSuchType; wrongsize]` reports both.
+
+        // After the size check, so that `[NoSuchType, wrongsize]` reports both.
         if (!inner) return nullptr;
-        return std::make_shared<ArrayType>(inner, fixed);
+        return std::make_shared<ArrayType>(inner, extent);
     }
 
     // 3. Function Type

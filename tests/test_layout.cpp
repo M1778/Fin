@@ -560,29 +560,207 @@ TEST(Soundness_Layout, AMinAlignRequestMustBeAPowerOfTwo) {
     EXPECT_FALSE(e.requestMinAlign(s, 0).empty());
 }
 
-// --- known defects ---------------------------------------------------------
+// --- fixed arrays ----------------------------------------------------------
+//
+// The predecessor of this section was KnownDefect_Layout.AFixedArrayHasNoExtentToLayOut,
+// and its instruction was "invert this test and add the `N * stride` case, including
+// the stride's own padding". What it was asserting is that `[int, 4]` and `[int, 8]`
+// were the same semantic type -- ArrayTypeNode carried the extent as an expression,
+// the cloner and the macro expander both preserved it, and nothing in src/semantics
+// read it -- so the layout pass refused *every* array rather than only the dynamic
+// ones, because a guessed extent is a struct that is silently the wrong size.
+//
+// The extent is in the type now, so the fixed case has an answer and the dynamic one
+// still does not: a `[T]`'s representation (a pointer and a length side by side, a
+// header ahead of the elements, something else) is undecided, and an extent does not
+// decide it.
 
-TEST(KnownDefect_Layout, AFixedArrayHasNoExtentToLayOut) {
-    // `[int; 4]` and `[int; 8]` are the same semantic type. TypeNode carries
-    // `array_size` as an expression, CloneTypes and the macro expander both
-    // preserve it, and *nothing in src/semantics reads it* -- so ArrayType has
-    // `is_fixed_size` and no size. This is the same defect class as the field
-    // order this unit's predecessor fixed: the AST has the answer and the semantic
-    // type throws it away.
-    //
-    // Which is why the layout pass refuses every array rather than only dynamic
-    // ones: a fixed array whose extent were guessed would produce a struct that
-    // is the wrong size, which is the exact failure this whole suite exists to
-    // make impossible. Whoever resolves the extent into ArrayType should invert
-    // this test and add the `N * stride` case, including the stride's own padding.
+TEST(Soundness_Layout, AFixedArrayIsItsExtentTimesItsStride) {
     LayoutEngine e;
-    auto four = std::make_shared<ArrayType>(prim("int"), true);
-    auto dynamic = std::make_shared<ArrayType>(prim("int"), false);
-    EXPECT_TRUE(four->equals(*std::make_shared<ArrayType>(prim("int"), true)))
-        << "two fixed int arrays of different lengths are indistinguishable";
-    EXPECT_FALSE(e.layoutOf(four).ok());
-    EXPECT_FALSE(e.layoutOf(dynamic).ok());
+    const TypeLayout four = must(e.layoutOf(std::make_shared<ArrayType>(prim("int"), uint64_t{4})));
+    EXPECT_EQ(four.size, 16u);
+    // Its element's alignment, not its own size's. Sixteen bytes of ints is
+    // 4-aligned; asking for 16 would over-align every array field in every struct.
+    EXPECT_EQ(four.align, 4u);
+    // Elements are not fields. A field has a name and `field("xs")` looks it up;
+    // an element has an index, and an index is not a lookup this struct answers.
+    EXPECT_TRUE(four.fields.empty());
+    EXPECT_TRUE(four.pointers.empty());
+
+    const TypeLayout eight = must(e.layoutOf(std::make_shared<ArrayType>(prim("double"), uint64_t{8})));
+    EXPECT_EQ(eight.size, 64u);
+    EXPECT_EQ(eight.align, 8u);
+
+    const TypeLayout one = must(e.layoutOf(std::make_shared<ArrayType>(prim("char"), uint64_t{1})));
+    EXPECT_EQ(one.size, 1u);
+    EXPECT_EQ(one.align, 1u);
 }
+
+TEST(Soundness_Layout, TwoFixedArraysOfDifferentLengthsAreDifferentTypes) {
+    // The defect itself, asserted directly rather than through a size: these two
+    // compared *equal*, so a program could put eight ints where four fit with the
+    // type system agreeing. Every number in the tests above depends on this line.
+    auto four = std::make_shared<ArrayType>(prim("int"), uint64_t{4});
+    auto eight = std::make_shared<ArrayType>(prim("int"), uint64_t{8});
+    EXPECT_FALSE(four->equals(*eight));
+    EXPECT_TRUE(four->equals(*std::make_shared<ArrayType>(prim("int"), uint64_t{4})));
+    // And neither of them is the dynamic array, which promises nothing about how
+    // many. This was true before -- `is_fixed_size` distinguished that much -- and
+    // is asserted here so that the extent replacing the flag does not lose it.
+    EXPECT_FALSE(four->equals(*std::make_shared<ArrayType>(prim("int"))));
+    EXPECT_FALSE(std::make_shared<ArrayType>(prim("int"))->equals(*four));
+}
+
+TEST(Soundness_Layout, AnElementsOwnPaddingIsPartOfTheStride) {
+    // `N * stride`, and the stride is the element's *size*, which already includes
+    // whatever tail padding the element needs to be followed by another of itself.
+    // Two ways of getting this wrong: multiplying by the element's payload and
+    // packing (the second element then starts misaligned), or aligning up the total
+    // instead of each element (only the last one lands right).
+    auto p = typeFromSource("struct P { pub a <char>, pub b <int>, }\n", "P");
+    ASSERT_TRUE(p != nullptr);
+    LayoutEngine e;
+    const TypeLayout one = must(e.layoutOf(p));
+    ASSERT_EQ(one.size, 8u);   // char, 3 bytes of padding, int
+    ASSERT_EQ(one.align, 4u);
+
+    const TypeLayout three = must(e.layoutOf(std::make_shared<ArrayType>(p, uint64_t{3})));
+    EXPECT_EQ(three.size, 24u);
+    EXPECT_EQ(three.align, 4u);
+}
+
+TEST(Soundness_Layout, EveryElementOfAPointerArrayIsInTheMap) {
+    // The reason this file exists (ADR 0003): a tracing collector handed a struct
+    // with a `[&Node, 3]` field must be told about three pointers, not one and not
+    // none. An array is the first type whose map is a *repeat* of its element's.
+    LayoutEngine e;
+    auto arr = std::make_shared<ArrayType>(std::make_shared<PointerType>(prim("int")), uint64_t{3});
+    const TypeLayout l = must(e.layoutOf(arr));
+    EXPECT_EQ(l.size, 24u);
+    EXPECT_EQ(l.align, 8u);
+    ASSERT_EQ(l.pointers.size(), 3u);
+    EXPECT_EQ(l.pointers[0].offset, 0u);
+    EXPECT_EQ(l.pointers[1].offset, 8u);
+    EXPECT_EQ(l.pointers[2].offset, 16u);
+    for (const auto& slot : l.pointers) {
+        ASSERT_TRUE(slot.pointee != nullptr);
+        EXPECT_EQ(slot.pointee->toString(), "int");
+    }
+}
+
+TEST(Soundness_Layout, AnArrayOfStructsRepeatsTheElementsWholeMap) {
+    auto node = typeFromSource("struct Node { pub next <&Node>, pub v <int>, }\n", "Node");
+    ASSERT_TRUE(node != nullptr);
+    LayoutEngine e;
+    const TypeLayout one = must(e.layoutOf(node));
+    ASSERT_EQ(one.size, 16u);
+    ASSERT_EQ(one.pointers.size(), 1u);
+
+    const TypeLayout two = must(e.layoutOf(std::make_shared<ArrayType>(node, uint64_t{2})));
+    EXPECT_EQ(two.size, 32u);
+    EXPECT_EQ(two.align, 8u);
+    ASSERT_EQ(two.pointers.size(), 2u);
+    EXPECT_EQ(two.pointers[0].offset, 0u);
+    EXPECT_EQ(two.pointers[1].offset, 16u);
+}
+
+TEST(Soundness_Layout, ANestedArrayIsAnArrayOfArrays) {
+    LayoutEngine e;
+    auto inner = std::make_shared<ArrayType>(prim("int"), uint64_t{2});
+    auto outer = std::make_shared<ArrayType>(inner, uint64_t{3});
+    const TypeLayout l = must(e.layoutOf(outer));
+    EXPECT_EQ(l.size, 24u);
+    EXPECT_EQ(l.align, 4u);
+}
+
+TEST(Soundness_Layout, AnArrayOfNoElementsHasNoBytes) {
+    // Following AnEmptyStructHasNoBytes rather than deciding anything new: a type
+    // with nothing in it is zero bytes here, and a struct that contains one has its
+    // next field at the same offset. Whether the *language* accepts `[int, 0]` is a
+    // separate question, answered by the analyzer, not by this file.
+    LayoutEngine e;
+    const TypeLayout l = must(e.layoutOf(std::make_shared<ArrayType>(prim("int"), uint64_t{0})));
+    EXPECT_EQ(l.size, 0u);
+    EXPECT_EQ(l.align, 4u);
+    EXPECT_TRUE(l.pointers.empty());
+}
+
+TEST(Soundness_Layout, AFixedArrayWhoseElementHasNoLayoutIsRefusedAndSaysWhy) {
+    LayoutEngine e;
+    auto arr = std::make_shared<ArrayType>(std::make_shared<GenericType>("T"), uint64_t{4});
+    const LayoutResult r = e.layoutOf(arr);
+    ASSERT_FALSE(r.ok());
+    EXPECT_NE(r.refusal.find("element"), std::string::npos) << r.refusal;
+    EXPECT_NE(r.refusal.find("monomorphisation"), std::string::npos) << r.refusal;
+}
+
+TEST(Soundness_Layout, AnArrayTooLargeToMeasureIsRefusedRatherThanWrapped) {
+    // `extent * stride` in uint64_t. The wrap is the failure mode this whole suite
+    // is about: `[long, 2^61]` would come out as zero bytes, which is a number, and
+    // a number is what a backend and a collector both believe.
+    LayoutEngine e;
+    auto huge = std::make_shared<ArrayType>(prim("long"), uint64_t{1} << 62);
+    const LayoutResult r = e.layoutOf(huge);
+    ASSERT_FALSE(r.ok());
+    EXPECT_NE(r.refusal.find("does not fit"), std::string::npos) << r.refusal;
+}
+
+TEST(Soundness_Layout, ADynamicArrayStillHasNoLayout) {
+    LayoutEngine e;
+    const LayoutResult r = e.layoutOf(std::make_shared<ArrayType>(prim("int")));
+    ASSERT_FALSE(r.ok());
+    // And the refusal no longer blames the missing extent, because the extent is
+    // not what is missing: `[int]` has no extent by design.
+    EXPECT_EQ(r.refusal.find("not resolved into its type"), std::string::npos) << r.refusal;
+    EXPECT_NE(r.refusal.find("undecided"), std::string::npos) << r.refusal;
+}
+
+TEST(Soundness_Layout, AFixedArrayFieldTakesItsWholeExtentInAStruct) {
+    // End to end, and the only test here that proves *the front end* resolves the
+    // extent: every other one hands LayoutEngine an ArrayType built by hand, which
+    // cannot tell whether resolveTypeFromAST reads `[int, 4]`'s size expression or
+    // throws it away as it used to.
+    auto s = typeFromSource("struct S { pub xs <[int, 4]>, pub n <int>, }\n", "S");
+    ASSERT_TRUE(s != nullptr);
+    LayoutEngine e;
+    const TypeLayout l = must(e.layoutOf(s));
+    EXPECT_EQ(l.size, 20u);
+    EXPECT_EQ(l.align, 4u);
+    ASSERT_EQ(l.fields.size(), 2u);
+    EXPECT_EQ(l.fields[0].offset, 0u);
+    EXPECT_EQ(l.fields[0].size, 16u);
+    EXPECT_EQ(l.fields[1].offset, 16u);
+    EXPECT_EQ(l.fields[1].size, 4u);
+    const FieldLayout* xs = l.field("xs");
+    ASSERT_TRUE(xs != nullptr);
+    EXPECT_EQ(xs->size, 16u);
+}
+
+TEST(Soundness_Layout, APointerArrayFieldsSlotsAreFlattenedIntoTheOuterMap) {
+    auto s = typeFromSource("struct S { pub a <int>, pub ps <[&int, 2]>, }\n", "S");
+    ASSERT_TRUE(s != nullptr);
+    LayoutEngine e;
+    const TypeLayout l = must(e.layoutOf(s));
+    EXPECT_EQ(l.align, 8u);
+    EXPECT_EQ(l.size, 24u);       // int, 4 bytes of padding, two pointers
+    ASSERT_EQ(l.fields.size(), 2u);
+    EXPECT_EQ(l.fields[1].offset, 8u);
+    ASSERT_EQ(l.pointers.size(), 2u);
+    EXPECT_EQ(l.pointers[0].offset, 8u);
+    EXPECT_EQ(l.pointers[1].offset, 16u);
+}
+
+TEST(Soundness_Layout, AFixedArrayOfAStructWithNoLayoutIsRefusedThroughTheField) {
+    auto s = typeFromSource("interface I { pub fun f() <int>; }\n"
+                            "struct S { pub xs <[I, 2]>, }\n", "S");
+    ASSERT_TRUE(s != nullptr);
+    LayoutEngine e;
+    const LayoutResult r = e.layoutOf(s);
+    ASSERT_FALSE(r.ok());
+    EXPECT_NE(r.refusal.find("field 'xs'"), std::string::npos) << r.refusal;
+}
+
+// --- known defects ---------------------------------------------------------
 
 TEST(KnownDefect_Layout, AWidthAnnotationDoesNotChangeTheSize) {
     // docs/plan.md, "Integer widths are a lie": resolveTypeFromAST walks
