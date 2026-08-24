@@ -216,7 +216,13 @@ private:
     // declared by the method, not by the struct. Without that the parameter resolves to
     // the sentinel, and a sentinel parameter silently switches the argument check off
     // rather than failing loudly.
-    std::shared_ptr<FunctionType> buildMethodSignature(FunctionDeclaration& method);
+    // `receiver` is the type the method is being declared on, and is passed only
+    // where a method may spell its receiver out under a name of its own -- an
+    // implements block on an enum (stdlib/typing.fin:27). Null elsewhere, which
+    // leaves the `self`-by-name rule as the only one, as it was everywhere before.
+    std::shared_ptr<FunctionType> buildMethodSignature(
+        FunctionDeclaration& method,
+        const std::shared_ptr<StructType>& receiver = nullptr);
     // The same for an operator, and the reason it is not buildMethodSignature is the
     // `implements cast<fn(Self, T)>(__get)` form (tests/samples/stdlib/hashmap.fin:50),
     // which has no parameter list and no written return type: both come out of the

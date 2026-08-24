@@ -56,7 +56,27 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
     debugLog(fg(fmt::color::gray), "[DEBUG] Defined variable '{}' of type '{}'\n", node.name, type->toString());
 }
 
-std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDeclaration& method) {
+// Is this parameter the value the method will be called on?
+//
+// `enum_ : Result<T, U>` in a method of `Result<T, U> implements <IResult>`
+// (stdlib/typing.fin:28). A pointer to it counts, because `self: &Self` is how the
+// receiver is written everywhere it is written by name and the two spellings differing
+// on which one is the receiver would be the surprise.
+//
+// By name, which is what StructType::equals asks first. The parameter's annotation
+// resolves to whatever instantiation the block's scope gives it and the target is the
+// declaration, so the two are not the same object and need not be: nothing else is
+// named `Result` in scope, and an argument list that disagreed would be a generic
+// mismatch reported at the call rather than a different method.
+static bool isReceiverOf(const std::shared_ptr<Type>& paramType, const StructType& target) {
+    auto t = paramType;
+    if (auto* ptr = t ? t->as<PointerType>() : nullptr) t = ptr->pointee;
+    auto* asStruct = t ? t->as<StructType>() : nullptr;
+    return asStruct && asStruct->name == target.name;
+}
+
+std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDeclaration& method,
+                                                             const std::shared_ptr<StructType>& receiver) {
     // A scope of its own, holding the method's generics: `fun set_x<U>(new_x: U)`
     // (struct_methods.fin:14) declares U itself, and the interface loop below used to
     // resolve its parameters without one -- which is why `pub fun m<T>(a: T) <T>;`
@@ -66,7 +86,8 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDec
     declareGenericParams(method.generic_params);
 
     std::vector<std::shared_ptr<Type>> paramTypes;
-    for (auto& param : method.params) {
+    for (size_t i = 0; i < method.params.size(); ++i) {
+        auto& param = method.params[i];
         auto type = resolveTypeOrError(param->type.get());
         defineParameter(*param, type);
         // The receiver is not a parameter of the call. struct_methods.fin writes both
@@ -75,6 +96,25 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDec
         // either way, so a signature that kept a written `self` would make the two
         // spellings disagree about arity.
         if (param->name == "self") continue;
+        // An enum spells the receiver out, and does not have to call it `self`.
+        // stdlib/typing.fin:27 is the rule, in the comment on the header of the block
+        // that uses it: "Enums can also be implemented (meaning methods can be
+        // implemented for it BUT ONLY ON CONDITIONS like having their first parameter
+        // the enum value itself)". Six declarations in the corpus are written that way
+        // -- typing.fin's three `(enum_ : Result<T, U>)`, stdio.fin's three
+        // `(enum_ : IOResult<T>)` -- and none of them says `self`, so `v.unwrap()`
+        // reported `expects 1 arguments, got 0` about the value it was called on.
+        //
+        // Enums only. A struct gets `self` injected whether or not it writes it, so a
+        // struct method whose first parameter is another instance of the struct is an
+        // ordinary two-operand method -- `fun eq(other: Box) <bool>` called `a.eq(a)`
+        // -- and dropping its argument would be silent and wrong
+        // (Soundness_EnumMethodReceiver.AStructsFirstParameterIsStillAnArgument).
+        //
+        // First position only, and only when the type matches: those are the two halves
+        // of the condition typing.fin states. A method that does not meet it keeps every
+        // parameter it wrote and reports about its own arity.
+        if (i == 0 && receiver && receiver->is_enum && isReceiverOf(type, *receiver)) continue;
         // The sentinel goes in, exactly as in visit(FunctionDeclaration&): dropping an
         // unresolved parameter would make `pub fun m(a: NoSuchType)` called `s.m(1)`
         // report "expects 0 arguments, got 1" on top of the one real diagnostic.
@@ -1225,7 +1265,7 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
         std::shared_ptr<FunctionType> sig;
         {
             QuietPass quiet(*this);
-            sig = buildMethodSignature(*method);
+            sig = buildMethodSignature(*method, structType);
         }
         if (sig) structType->defineMethod(method->name, sig);
 

@@ -6661,10 +6661,17 @@ TEST(Soundness_Enums, AnImplementsBlockOnAnEnumIsStillCheckedForConformance) {
 
 TEST(Soundness_Enums, AMethodFromAnImplementsBlockIsCallableOnAnEnumValue) {
     // enums.fin:45 -- `r.unwrap()`. Was "Method 'unwrap' not found in type 'Result'".
+    //
+    // The call passes nothing, and it used to be written `x.m(x)` here. That spelling
+    // is in no corpus file: the enum whose first parameter is the enum is the receiver
+    // (stdlib/typing.fin:27, Soundness_EnumMethodReceiver), and enums.fin:45 calls
+    // `unwrap` -- declared `fun unwrap(enum_ : Result<T, U>) <T>` -- with an empty
+    // argument list. Passing the receiver again was this test inventing an arity the
+    // spec does not have.
     const FincRun r = compile("enum E { A, B }\n"
                               "interface I { pub fun m(e: E) <int>; }\n"
                               "E implements <I> { pub fun m(e: E) <int> { return 1; } }\n"
-                              "fun main() <noret> { let x <E> = E::A; let n <int> = x.m(x); }\n");
+                              "fun main() <noret> { let x <E> = E::A; let n <int> = x.m(); }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
@@ -6678,11 +6685,21 @@ TEST(Soundness_Enums, AnEnumsMethodIsCheckedAgainstItsSignature) {
     EXPECT_EQ(ret.exitCode, 1) << "the call is typed as the method's return type\n"
                                << stripAnsi(ret.err);
 
+    // The arity is one short of what the method wrote, because the receiver is not one
+    // of the arguments: typing.fin:25's `select(enum_ : Result<T, U>, callback : ...)`
+    // is a one-argument method. So a second argument is the overrun, not a first.
     const FincRun arity = compile("enum E { A, B }\n"
-                                  "interface I { pub fun m(e: E) <int>; }\n"
-                                  "E implements <I> { pub fun m(e: E) <int> { return 1; } }\n"
-                                  "fun main() <noret> { let x <E> = E::A; let n <int> = x.m(); }\n");
+                                  "interface I { pub fun m(e: E, k: int) <int>; }\n"
+                                  "E implements <I> { pub fun m(e: E, k: int) <int> { return k; } }\n"
+                                  "fun main() <noret> { let x <E> = E::A; let n <int> = x.m(1, 2); }\n");
     EXPECT_EQ(arity.exitCode, 1) << "and against its arity\n" << stripAnsi(arity.err);
+
+    const FincRun ok = compile("enum E { A, B }\n"
+                               "interface I { pub fun m(e: E, k: int) <int>; }\n"
+                               "E implements <I> { pub fun m(e: E, k: int) <int> { return k; } }\n"
+                               "fun main() <noret> { let x <E> = E::A; let n <int> = x.m(1); }\n");
+    EXPECT_EQ(ok.exitCode, 0) << "and the argument that is not the receiver is passed\n"
+                              << stripAnsi(ok.err);
 }
 
 // The cast. `operators.fin:26` writes `cast<int>(s)` on an enum whose members carry
@@ -6776,10 +6793,14 @@ TEST(Soundness_Enums, AStaticMethodOnAnEnumIsStillCallableThroughItsType) {
     // so this is the test that says the ordering did not shadow the methods: an enum's
     // implements block still contributes to `::` calls, and only a name the enum
     // actually declares as a member is taken as a construction.
+    //
+    // The method deliberately does not take the enum as its first parameter: that
+    // parameter would be the receiver (Soundness_EnumMethodReceiver) and this test is
+    // about which lookup wins at `::`, not about arity.
     const FincRun r = compile("enum E { A, B }\n"
-                              "interface I { pub fun m(e: E) <int>; }\n"
-                              "E implements <I> { pub fun m(e: E) <int> { return 1; } }\n"
-                              "fun main() <noret> { let n <int> = E::m(E::A); }\n");
+                              "interface I { pub fun m(k: int) <int>; }\n"
+                              "E implements <I> { pub fun m(k: int) <int> { return k; } }\n"
+                              "fun main() <noret> { let n <int> = E::m(1); }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
@@ -8864,4 +8885,170 @@ TEST(Soundness_ParameterMutability, AConstLocalIsStillImmutable) {
     EXPECT_NE(stripAnsi(r.err).find("Cannot assign to immutable variable 'a'"),
               std::string::npos)
         << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// An enum method's receiver is its first parameter
+//
+// tests/samples/stdlib/typing.fin:27 states the rule in the comment on the header of
+// the block that uses it: "Enums can also be implemented (meaning methods can be
+// implemented for it BUT ONLY ON CONDITIONS like having their first parameter the
+// enum value itself)". Its three methods are written that way -- `fun unwrap(enum_ :
+// Result<T, U>) <T>`, `expect`, `select` -- stdlib/stdio.fin:54-73 repeats all three
+// for `IOResult<T>`, and enums.fin's `@implements Result<T, E>::unwrap` lambda takes
+// `enum_: Result<T, E>` as its only parameter. Six declarations, one shape, and the
+// corpus never writes `self` on an enum.
+//
+// So an enum spells the receiver out. A struct does not have to: `self` is injected
+// there whether or not it is written (struct_methods.fin:10 says so), which is why the
+// signature builder skipped a parameter *named* `self` and nothing else -- and why
+// `r.unwrap()` reported `Method 'unwrap' expects 1 arguments, got 0` about the
+// receiver.
+//
+// Enums only, and by the parameter's type as well as its position. A struct method
+// whose first parameter happens to be another instance of the struct is an ordinary
+// binary operation -- `fun eq(other: Box) <bool>` called `a.eq(a)` -- and losing its
+// argument would be silent and wrong. Nothing in the corpus asks for the rule on a
+// struct, and typing.fin frames it as the condition for implementing an *enum*.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// stdlib/typing.fin's shape, reduced: a generic enum, an interface declaring the
+// method with the receiver written out, and an implements block on the enum.
+constexpr const char* kEnumRecv =
+    "enum Result<T, E> {\n"
+    "  Ok(T),\n"
+    "  Err(E)\n"
+    "}\n"
+    "extern Result::Ok as Ok;\n"
+    "interface IResult<T, E> {\n"
+    "  fun unwrap(enum_: Result<T, E>) <T>;\n"
+    "}\n"
+    "Result<T, E> implements <IResult> {\n"
+    "  pub fun unwrap(enum_: Result<T, E>) <T> { return enum_.0; }\n"
+    "}\n";
+
+}  // namespace
+
+TEST(Soundness_EnumMethodReceiver, TheFirstParameterIsTheReceiver) {
+    const FincRun r = compile(std::string(kEnumRecv) +
+                              "fun main() <noret> {\n"
+                              "  let v <Result<int, string>> = Ok(10);\n"
+                              "  v.unwrap();\n"
+                              "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMethodReceiver, TheReceiverIsNotAlsoAnArgument) {
+    const FincRun r = compile(std::string(kEnumRecv) +
+                              "fun main() <noret> {\n"
+                              "  let v <Result<int, string>> = Ok(10);\n"
+                              "  v.unwrap(v);\n"
+                              "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expects 0 arguments, got 1"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMethodReceiver, TheBodyStillSeesTheReceiverByItsName) {
+    // Dropped from the signature, not from the scope: typing.fin's three bodies all
+    // read `enum_`, which is the parameter this rule stops counting.
+    const FincRun r = compile(std::string(kEnumRecv) +
+                              "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMethodReceiver, AFurtherParameterIsStillAnArgument) {
+    // typing.fin:25's `select(enum_ : Result<T, U>, callback : fn(T) -> void)` shape:
+    // the receiver goes, the rest stay, and the argument is checked against the second
+    // parameter and not the first.
+    const FincRun r = compile(
+        "enum E<T> { Ok(T) }\n"
+        "interface I<T> { fun tag(enum_: E<T>, prefix: string) <int>; }\n"
+        "E<T> implements <I> {\n"
+        "  pub fun tag(enum_: E<T>, prefix: string) <int> { return 1; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  let r <E<int>> = E::Ok(1);\n"
+        "  r.tag(\"x\");\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMethodReceiver, AFurtherParameterIsStillCounted) {
+    const FincRun r = compile(
+        "enum E<T> { Ok(T) }\n"
+        "interface I<T> { fun tag(enum_: E<T>, prefix: string) <int>; }\n"
+        "E<T> implements <I> {\n"
+        "  pub fun tag(enum_: E<T>, prefix: string) <int> { return 1; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  let r <E<int>> = E::Ok(1);\n"
+        "  r.tag();\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expects 1 arguments, got 0"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMethodReceiver, AFirstParameterOfAnotherTypeIsStillAnArgument) {
+    // The condition typing.fin:27 names is that the first parameter is "the enum value
+    // itself". A first parameter that is not stays an argument, so a method that does
+    // not meet the condition reports about its own arity rather than silently losing a
+    // parameter.
+    const FincRun r = compile(
+        "enum E<T> { Ok(T) }\n"
+        "interface I<T> { fun scale(factor: int) <int>; }\n"
+        "E<T> implements <I> {\n"
+        "  pub fun scale(factor: int) <int> { return factor; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  let r <E<int>> = E::Ok(1);\n"
+        "  r.scale(2);\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMethodReceiver, AStructsFirstParameterIsStillAnArgument) {
+    // The guard on the rule being enum-only. `a.eq(a)` is an ordinary two-operand
+    // method whose argument happens to be another Box, and it compiled before this
+    // rule existed.
+    const FincRun r = compile(
+        "struct Box { pub v <int>, }\n"
+        "interface IEq { fun eq(other: Box) <bool>; }\n"
+        "Box implements <IEq> {\n"
+        "  pub fun eq(other: Box) <bool> { return true; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  let a <Box> = Box{v: 1};\n"
+        "  a.eq(a);\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMethodReceiver, AStructsSelfSpellingIsUnchanged) {
+    const FincRun r = compile(
+        "struct Box { pub v <int>,\n"
+        "  pub fun get(self: &Self) <int> { return self.v; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  let a <Box> = Box{v: 1};\n"
+        "  a.get();\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMethodReceiver, AnEnumsSelfSpellingIsUnchangedToo) {
+    // The name rule and the position rule reach the same place; an enum written the
+    // struct way is not broken by the enum way existing.
+    const FincRun r = compile(
+        "enum E<T> { Ok(T) }\n"
+        "interface I<T> { fun m(self: Self) <int>; }\n"
+        "E<T> implements <I> {\n"
+        "  pub fun m(self: Self) <int> { return 1; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  let r <E<int>> = E::Ok(1);\n"
+        "  r.m();\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
