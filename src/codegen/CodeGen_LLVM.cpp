@@ -168,6 +168,10 @@ struct CgType {
 struct StructField {
     std::string name;
     CgType type;
+    // The declaration's `= expr`, or null. Borrowed from the AST, which outlives
+    // the emitter -- kept as an expression rather than folded to a constant here
+    // because it may be a call, and a call has to happen where the literal is.
+    Expression* defaultValue = nullptr;
 };
 
 struct StructInfo {
@@ -544,6 +548,26 @@ private:
         return v;
     }
 
+    // A field default, emitted where the literal is but resolved as if the literal
+    // were not there. The locals are put aside for the duration, because the default
+    // was written in the struct's declaration and the analyzer resolved its names in
+    // that scope: `x <int> = q` is "Undefined variable 'q'" even with a `q` in scope
+    // at every use. Leaving the caller's locals visible would let one of them capture
+    // a name the declaration had already bound to something else -- an enumerator, in
+    // the case the corpus can reach (ADefaultResolvesInTheStructsScopeAndNotTheUseSite)
+    // -- and that is a miscompile rather than a missing feature.
+    //
+    // One empty scope rather than none, so that anything reaching for `scopes_.back()`
+    // still finds a scope to put a name in.
+    CgVal emitDefault(Expression& expr, const CgType& target) {
+        std::vector<std::unordered_map<std::string, Local>> saved;
+        saved.swap(scopes_);
+        scopes_.emplace_back();
+        CgVal v = emitAs(expr, target);
+        scopes_.swap(saved);
+        return v;
+    }
+
     // A member's number as a value of the enum's representation, which is `int`'s.
     // Signed, so that `Neg = -1` is -1 and not 4294967295.
     CgVal enumConstant(int64_t value) {
@@ -680,16 +704,6 @@ private:
             StructInfo& info = structs_[s->name];
             std::vector<llvm::Type*> members;
             for (auto& m : s->members) {
-                if (m->default_value) {
-                    // The field default parses and nothing honours it. Zeroing the
-                    // field instead would be a value the program never wrote, so
-                    // this refuses until the pass that honours defaults exists --
-                    // Soundness_Codegen.AnOmittedFieldIsZeroed is the rule for a
-                    // field with no default, and changes when this does.
-                    unsupported(*m, fmt::format(
-                        "a default value for field '{}' of struct '{}'", m->name, s->name));
-                    return;
-                }
                 auto t = types_.map(m->type.get());
                 if (!t) { unsupportedType(*m, m->type.get(), "a struct field"); return; }
                 if (t->isVoid()) {
@@ -703,7 +717,13 @@ private:
                     return;
                 }
                 info.indexByName[m->name] = info.fields.size();
-                info.fields.push_back(StructField{m->name, *t});
+                // The default is recorded and not evaluated: it is an expression,
+                // and where it runs (each literal that omits the field) is not
+                // here. Nothing is checked about it at the declaration either --
+                // a struct nobody instantiates never runs its defaults, so a
+                // default this file could not lower is not a reason to refuse the
+                // type. The refusal lands at the literal that needs it.
+                info.fields.push_back(StructField{m->name, *t, m->default_value.get()});
                 members.push_back(t->llvmType);
             }
             if (members.empty()) {
@@ -1960,11 +1980,12 @@ private:
         }
         const StructInfo& info = found->second;
 
-        // Starts from all-zero, so a field the literal does not name is zero rather
-        // than whatever was in the slot. That is the same answer a local with no
-        // initialiser gets, and the reason a field carrying a *default* refuses in
-        // declareStructs instead of quietly getting this one.
+        // Starts from all-zero, so a field the literal names in neither its text nor
+        // a default is zero rather than whatever was in the slot. That is the same
+        // answer a local with no initialiser gets, and undefined contents is the one
+        // answer that cannot be tested.
         llvm::Value* aggregate = llvm::Constant::getNullValue(info.llvmType);
+        std::vector<bool> written(info.fields.size(), false);
 
         // Walked in the order written, inserted at the index declared. The written
         // order is not the stored order and this is the only place that could
@@ -1977,6 +1998,11 @@ private:
                 return;
             }
             if (!entry.second) { unsupported(node, "a field with no value"); return; }
+            if (written[index]) {
+                unsupported(node, fmt::format("field '{}' written twice in one literal",
+                                              entry.first));
+                return;
+            }
             // The field's type is offered to its value, which is what makes an array
             // field's literal know what it is: `Row { cells: [7, 8, 9] }` has no other
             // source for the element type.
@@ -1990,6 +2016,35 @@ private:
             if (!stored) return;
             aggregate = builder_.CreateInsertValue(aggregate, stored, {(unsigned)index},
                                                    entry.first);
+            written[index] = true;
+        }
+
+        // Then the defaults, for the fields the literal did not write, in declared
+        // order. After the written values and not interleaved with them: a default
+        // is not in the literal's text, so no order puts it between two visible
+        // lines, and running them last is the only arrangement a reader can predict
+        // (Soundness_Codegen.TheWrittenValuesRunBeforeTheDefaults).
+        //
+        // Evaluated here, at the literal, and once per literal that omits the field
+        // -- so `= tick()` ticks per instantiation. A default the literal *does*
+        // write is not evaluated at all, which is why this loop skips it rather
+        // than emitting and discarding.
+        for (size_t index = 0; index < info.fields.size(); ++index) {
+            const StructField& field = info.fields[index];
+            if (written[index] || !field.defaultValue) continue;
+
+            CgVal v = emitDefault(*field.defaultValue, field.type);
+            if (failed_) return;
+            if (!v.ok()) {
+                unsupported(*field.defaultValue,
+                            fmt::format("the default value of field '{}' of struct '{}'",
+                                        field.name, node.struct_name));
+                return;
+            }
+            llvm::Value* stored = convert(*field.defaultValue, v, field.type);
+            if (!stored) return;
+            aggregate = builder_.CreateInsertValue(aggregate, stored, {(unsigned)index},
+                                                   field.name);
         }
 
         CgType type;

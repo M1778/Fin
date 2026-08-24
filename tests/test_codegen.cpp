@@ -1407,8 +1407,8 @@ BACKEND_TEST(Soundness_Codegen, AnOmittedFieldIsZeroed) {
     // (`P { a: 1 }` with `b` unmentioned). The backend has to put *something*
     // there, and zero is the same answer a local with no initialiser already
     // gets -- undefined stack contents being the one answer that cannot be
-    // tested. A field default (`b <int> = 5`) parses and is not honoured
-    // anywhere yet; when it is, this expectation changes with it.
+    // tested. Zero is the answer for a field with *no* default; a field that
+    // declares one gets it instead (AnOmittedFieldTakesItsDeclaredDefault).
     const Built b = build(std::string(kPrintf) +
         "struct P { a <int>, b <int> }\n"
         "fun main() <noret> {\n"
@@ -1558,19 +1558,230 @@ BACKEND_TEST(Soundness_Codegen, AStructOnAnExternBoundaryIsRefused) {
     EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AFieldDefaultIsRefusedRatherThanIgnored) {
-    // `b <int> = 5` parses and nothing honours it. Zeroing `b` would give the
-    // program a value it never wrote, and honouring it is a front-end unit that
-    // does not exist -- so it refuses. This is the boundary of
-    // AnOmittedFieldIsZeroed: zero is the answer for a field with no default.
+// ---------------------------------------------------------------------------
+// A field default, which is a value the struct wrote once and every literal that
+// omits the field inherits.
+//
+// Three rules, and the middle one is the one with teeth:
+//
+//   * a field the literal omits takes its default; with no default it is zero
+//     (AnOmittedFieldIsZeroed), which is the same answer an uninitialised local
+//     gets;
+//   * the default is an *expression*, evaluated at each literal that omits the
+//     field and not at all at a literal that writes it -- so a default that calls
+//     something calls it once per instantiation, which is C++'s rule and the only
+//     one under which `= now()` means anything;
+//   * it is evaluated in the *struct's* scope and not the literal's. The analyzer
+//     already resolved its names there (`x <int> = q` is "Undefined variable 'q'"
+//     even with a `q` in scope at every use), and the backend has to agree: a
+//     local at the use site must not be able to capture a name the declaration
+//     resolved to something else.
+//
+// Order: what the literal writes evaluates in the order written, and the defaults
+// fill in afterwards in declaration order. The defaults are not in the literal's
+// text, so no order interleaves them with it -- putting them after is the only
+// choice that does not run invisible code between two visible lines.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AnOmittedFieldTakesItsDeclaredDefault) {
+    // tests/samples/deeptest1.fin:9 (`y <int> = 10`) is the corpus's first one.
     const Built b = build(std::string(kPrintf) +
         "struct P { a <int>, b <int> = 5 }\n"
         "fun main() <noret> {\n"
         "    let p <P> = P { a: 1 };\n"
         "    printf(\"%d %d\\n\", p.a, p.b);\n"
         "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWrittenValueBeatsTheDefault) {
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> = 5 }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 1, b: 2 };\n"
+        "    printf(\"%d %d\\n\", p.a, p.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ALiteralMayWriteNothingAtAll) {
+    // `P { }` with every field defaulted, which is the shape a struct of options
+    // is for. The empty literal parses and has to mean "all of them".
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int> = 1, b <int> = 2 }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { };\n"
+        "    printf(\"%d %d\\n\", p.a, p.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMixOfDefaultedAndBareFieldsFillsInBoth) {
+    // The two rules in one literal: `b` gets its default, `a` gets zero.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> = 5 }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { };\n"
+        "    printf(\"%d %d\\n\", p.a, p.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0 5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADefaultMayBeAnExpression) {
+    // Not just a literal. 14 rather than 20, so precedence is being read and not
+    // the digits.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int> = 2 + 3 * 4 }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { };\n"
+        "    printf(\"%d\\n\", p.a);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "14\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADefaultOfAStringFieldIsThatString) {
+    const Built b = build(std::string(kPrintf) +
+        "struct P { s <string> = \"hi\" }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { };\n"
+        "    printf(\"%s\\n\", p.s);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "hi\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADefaultOfAnArrayFieldIsThatArray) {
+    const Built b = build(std::string(kPrintf) +
+        "struct P { cells <[int, 3]> = [7, 8, 9] }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { };\n"
+        "    printf(\"%d %d %d\\n\", p.cells[0], p.cells[1], p.cells[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 8 9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADefaultOfAStructFieldIsThatStruct) {
+    // A default that is itself a literal, and so runs the same fill-in one level
+    // down: `Q { }` inside `P`'s default takes Q's own default.
+    const Built b = build(std::string(kPrintf) +
+        "struct Q { n <int> = 3 }\n"
+        "struct P { q <Q> = Q { } }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { };\n"
+        "    printf(\"%d\\n\", p.q.n);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADefaultRunsOncePerInstantiation) {
+    // The default is an expression and not a stored constant, so a call in one runs
+    // every time a literal omits the field. Two literals, two ticks.
+    const Built b = build(std::string(kPrintf) +
+        "fun tick() <int> { printf(\"tick \"); return 1; }\n"
+        "struct P { a <int> = tick() }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { };\n"
+        "    let q <P> = P { };\n"
+        "    printf(\"| %d %d\\n\", p.a, q.a);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "tick tick | 1 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADefaultIsNotEvaluatedWhenTheFieldIsWritten) {
+    // The other half of the same rule, and the half that would be a silent bug:
+    // evaluating a default whose value is then overwritten still runs its effects.
+    const Built b = build(std::string(kPrintf) +
+        "fun tick() <int> { printf(\"tick \"); return 1; }\n"
+        "struct P { a <int> = tick() }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 5 };\n"
+        "    printf(\"| %d\\n\", p.a);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "| 5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TheWrittenValuesRunBeforeTheDefaults) {
+    // The declared order is a, b; the literal writes only b. `b` runs first because
+    // it is what the literal says, and `a`'s default fills in after -- see the
+    // section note for why the invisible code goes last.
+    const Built b = build(std::string(kPrintf) +
+        "fun say(m: string) <int> { printf(\"%s\", m); return 1; }\n"
+        "struct P { a <int> = say(\"a\"), b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { b: say(\"b\") };\n"
+        "    printf(\"|\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ba|\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADefaultResolvesInTheStructsScopeAndNotTheUseSite) {
+    // The one that could go wrong quietly. `A` in P's default is the enumerator the
+    // declaration resolved it to; the `A` in scope at the literal is a different
+    // thing holding a different value. Printing both is the only way to tell them
+    // apart, and the backend must not read the local.
+    const Built b = build(std::string(kPrintf) +
+        "enum E { A = 1, B }\n"
+        "struct P { x <E> = A }\n"
+        "fun main() <noret> {\n"
+        "    let A <E> = B;\n"
+        "    let p <P> = P { };\n"
+        "    printf(\"%d %d\\n\", p.x, A);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADefaultThatNamesAnotherFieldIsRefused) {
+    // `y <int> = x` type-checks -- the analyzer has the members in scope while it
+    // checks the defaults -- and means nothing: x's default, or x's written value,
+    // or x at some point during a fill-in whose order is not the reader's. Refused
+    // rather than given one of the three.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { x <int> = 1, y <int> = x }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { };\n"
+        "    printf(\"%d\\n\", p.y);\n"
+        "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADefaultOfNullForANonNullableFieldIsRefused) {
+    // tests/samples/deeptest4.fin:6 writes `integer <int> = null` and the front end
+    // takes it. There is no null int -- 0 is a value the program did not write and
+    // the analyzer would not have accepted it as one -- so the backend refuses
+    // instead of picking the bit pattern that looks most like nothing.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { x <int> = null }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { };\n"
+        "    printf(\"%d\\n\", p.x);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADefaultedFieldStillCrossesACall) {
+    // The filled-in value is in the struct and not in the literal's shadow: it
+    // survives being passed and returned.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> = 5 }\n"
+        "fun sum(p: P) <int> { return p.a + p.b; }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", sum(P { a: 1 }));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "6\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AnIncompleteStructIsRefused) {
