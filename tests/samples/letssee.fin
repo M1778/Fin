@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`Type mismatch: expected '&Vec2<float>', got '&Self'` at 59:28 and 77:31, and its mirror `expected '&Self', got '&Vec2<float>'` at 73:21 -- the `priv:` and `pub:` visibility labels parse now, and every method call here types correctly; all three remaining diagnostics are static calls, which resolve `Vec2` by name and so get the uninstantiated template whose `Self` is still `Self`. KnownDefect_MethodCalls.AStaticCallOnAGenericStructIsCheckedAgainstTheTemplate"
+//@ ok
 @define printf(fmt: string, ...) <noret>;
 @define sin(f: float) <float>;
 @define cos(f: float) <float>;

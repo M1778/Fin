@@ -218,6 +218,29 @@ private:
     // error on `Box(1, 2)` still prints ahead of anything the arguments say.
     void checkCallArity(ASTNode& node, const char* kind, const std::string& name,
                         const FunctionType& sig, size_t actual);
+
+    // The type an expression is about to be checked against, and the exact expression
+    // node it belongs to.
+    //
+    // Read by generic inference at a call, which cannot always learn a parameter from
+    // the arguments: `Vec2::zero()` (tests/samples/letssee.fin:77) has none,
+    // `Vec2::from_angle(0.7854)` (:59) has one that says nothing about T, and
+    // `rptr([1,2,3,4])` (const.fin:98) has one whose type is a *fixed* array where the
+    // annotation's is not. In all three the annotation on the left is the only thing
+    // that says what the generic argument is.
+    //
+    // Keyed on the node so it cannot leak inward: only the expression the annotation
+    // actually applies to matches, and every subexpression has a different address. A
+    // plain member would seed the inner `Box("x")` of
+    // `let b <Box<int>> = unwrap(Box("x"));` from the outer annotation --
+    // Soundness_GenericInference.AnAnnotationDoesNotReachASubexpression.
+    const ASTNode* typeHintFor = nullptr;
+    std::shared_ptr<Type> typeHint = nullptr;
+
+    // The hint if it belongs to this node, else null.
+    std::shared_ptr<Type> hintFor(const ASTNode& node) const {
+        return typeHintFor == &node ? typeHint : nullptr;
+    }
     bool checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected);
 
     // checkType, except that `null` is accepted whatever the declared type is.

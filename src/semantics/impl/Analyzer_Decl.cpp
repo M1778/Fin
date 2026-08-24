@@ -21,7 +21,21 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
     if (!type) type = errorType();
 
     if (node.initializer) {
+        // The annotation, offered to the initialiser. A generic call that cannot learn
+        // its arguments from the arguments written reads this and nothing else does --
+        // see the members' comment in the header for why it is keyed on the node.
+        //
+        // Not for `auto`, which is not a type to unify against, and not for the
+        // sentinel: unifying `<error>` into a generic argument would make the call's own
+        // type mention it and print it (Soundness_GenericInference
+        // .AnUnresolvedAnnotationSeedsNothing).
+        if (type->toString() != "auto" && !isErrorType(type)) {
+            typeHintFor = node.initializer.get();
+            typeHint = type;
+        }
         node.initializer->accept(*this);
+        typeHintFor = nullptr;
+        typeHint = nullptr;
         if (lastExprType) {
             // Type inference for auto keyword
             if (type->toString() == "auto") {

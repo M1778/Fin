@@ -1842,25 +1842,22 @@ TEST(Soundness_MethodCalls, AMethodWithAnUnresolvedParameterKeepsItsWrittenArity
     EXPECT_EQ(err.find("arguments"), std::string::npos) << "arity is what was written\n" << err;
 }
 
-TEST(KnownDefect_MethodCalls, AStaticCallOnAGenericStructIsCheckedAgainstTheTemplate) {
-    // Now that a call is checked against its signature, a signature holding `Self` has to
-    // say which Self. For a method it does: the receiver is the *instance* type
-    // `G<int>`, StructType::substitute rewrote Self when the instance was made, and both
-    // the parameter and the return type compare clean. A static call has no receiver --
-    // it resolves `G` by name and gets the uninstantiated template, whose Self is still
-    // Self -- so the same signature reports against every argument and every use of the
-    // result.
+TEST(Soundness_MethodCalls, AStaticCallOnAGenericStructIsCheckedAgainstTheInstance) {
+    // Was KnownDefect_MethodCalls.AStaticCallOnAGenericStructIsCheckedAgainstTheTemplate.
+    // A signature holding `Self` has to say which Self. For a method it always did: the
+    // receiver is the *instance* type `G<int>`, and StructType::substitute rewrote Self
+    // when the instance was made. A static call has no receiver -- it resolves `G` by
+    // name and gets the template -- so the same signature reported against every
+    // argument and every use of the result.
     //
     // Found in the corpus, not here: tests/samples/letssee.fin went from four
     // diagnostics to three when method calls started being checked, and the one it
     // gained was `Vec2::normalize(scaled)` at line 73 -- an argument position, where
-    // before only the two static return types (59, 77) misreported. The sample's own
-    // //@ unimplemented note already books the root cause.
-    //
-    // The fix is generic argument inference on a static call path (`G::f(g)` has to
-    // learn T from somewhere -- the argument, or the `G::<int>::f` spelling the parser
-    // accepts), which is the same missing unification as
-    // KnownDefect_Generics.AnOperatorsGenericParameterIsNotInferredFromItsOperand.
+    // before only the two static return types (59, 77) misreported. All three are gone
+    // now and the sample is `//@ ok`: the arguments and the annotation say what the
+    // generic arguments are, and substitute() is handed the instantiated struct so
+    // `Self` becomes it. Soundness_StaticCallInference is the group that covers the rule
+    // directly.
     const FincRun r = compile(
         "struct G<T> {\n"
         "    v <T>,\n"
@@ -1873,19 +1870,15 @@ TEST(KnownDefect_MethodCalls, AStaticCallOnAGenericStructIsCheckedAgainstTheTemp
         "    let a <&G<int>> = G::g();\n"
         "    return 0;\n"
         "}\n");
-    const std::string err = stripAnsi(r.err);
-    EXPECT_NE(err.find("expected '&Self', got '&G<int>'"), std::string::npos)
-        << "GOOD NEWS: a static call substitutes the generic arguments into its\n"
-           "signature. Invert this test -- both statements should compile clean -- and\n"
-           "rename it Soundness_MethodCalls.AStaticCallOnAGenericStructIsCheckedAgainst-\n"
-           "TheInstance. Then re-run tests/tools/corpus_snapshot.sh: letssee.fin should\n"
-           "drop from three diagnostics to zero, and its //@ unimplemented note goes.\n"
-        << err;
-    EXPECT_NE(err.find("expected '&G<int>', got '&Self'"), std::string::npos)
-        << "the return-type half of the same defect\n" << err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u)
+        << "the argument position (a &G<int> against a written &Self) and the return\n"
+           "position (a &Self against a &G<int> annotation) are both the instance\n"
+        << stripAnsi(r.err);
 
-    // The control, and the reason this is a static-call defect and not a Self defect: a
-    // non-generic struct has nothing to substitute, so its static signature is right.
+    // The control, and the reason this was a static-call defect and not a Self defect: a
+    // non-generic struct has nothing to substitute, so its static signature was always
+    // right -- and still goes through checkCallArguments untouched, because the
+    // inference path is gated on the target mentioning a parameter.
     const FincRun plain = compile(
         "struct P {\n"
         "    v <int>,\n"
@@ -1898,8 +1891,8 @@ TEST(KnownDefect_MethodCalls, AStaticCallOnAGenericStructIsCheckedAgainstTheTemp
         "}\n");
     EXPECT_EQ(errorCount(stripAnsi(plain.err)), 0u) << stripAnsi(plain.err);
 
-    // The other control: the same generic struct reached through a receiver, where both
-    // positions are clean. This is what the static path should look like.
+    // The other control: the same generic struct reached through a receiver, which was
+    // clean before any of this and must stay clean.
     const FincRun method = compile(
         "struct G<T> {\n"
         "    v <T>,\n"
@@ -7411,12 +7404,17 @@ TEST(Soundness_GenericInference, AConstructorCallInfersTheStructsArgument) {
 
 TEST(Soundness_GenericInference, TheInferredArgumentIsWhatTheAnnotationIsCheckedAgainst) {
     // The sharp one. Inference must not become acceptance: `Box(1)` is a `Box<int>`,
-    // and a `Box<string>` annotation is still wrong -- with the inferred argument in
-    // the message rather than the parameter's name.
+    // and the annotation is still checked -- with the inferred argument in the message
+    // rather than the parameter's name.
+    //
+    // The annotation here is one no seed can come out of, deliberately: `int` is not a
+    // `Box` of anything, so the arguments are the only source and the diagnostic lands
+    // on the whole call. When the annotation *is* a Box, the seed wins and the mismatch
+    // surfaces on the argument instead -- AnArgumentIsCheckedAgainstTheSeededParameter.
     const FincRun r = compile(
         "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
-        "fun main() <noret> { let b <Box<string>> = Box(1); }\n");
-    EXPECT_NE(r.exitCode, 0) << "a Box<int> is not a Box<string>";
+        "fun main() <noret> { let b <int> = Box(1); }\n");
+    EXPECT_NE(r.exitCode, 0) << "a Box<int> is not an int";
     EXPECT_NE(stripAnsi(r.err).find("got 'Box<int>'"), std::string::npos)
         << "the diagnostic names what was inferred, not the template:\n" << stripAnsi(r.err);
 }
@@ -7450,30 +7448,6 @@ TEST(Soundness_GenericInference, AWholeArrayIsInferredForABareParameter) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_GenericInference, AFixedArrayInferredIntoAGenericArgumentDoesNotDecay) {
-    // `let arr <rptr<[int]>> = rptr([1,2,3,4]);` (tests/samples/const.fin:98). An array
-    // literal is typed fixed-size, so a bare `T` infers `[int; fixed]` and the struct
-    // comparison -- which is exact on generic arguments -- rejects the unsized
-    // annotation one character away.
-    //
-    // ArrayType::isAssignableTo already says a fixed array decays into a dynamic one;
-    // it is never asked, because StructType::equals compares generic arguments with
-    // typesEqual. Making that comparison assignability instead would also make
-    // `Box<Dog>` a `Box<Animal>`, which is variance and unsound for a mutable field --
-    // not a ruling to invent here.
-    //
-    // The fix is the other end: seed the mapping from the annotation before looking at
-    // the arguments, so T is `[int]` because that is what was written, and the literal
-    // is then checked against `[int]` and decays. That is the same missing machinery as
-    // AnArgumentlessConstructorIsNotInferredFromItsAnnotation below -- when it lands,
-    // invert both. Do not relax this by making arrays compare loosely.
-    const FincRun r = compile(
-        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
-        "fun main() <noret> { let b <Box<[int]>> = Box([1,2,3]); }\n");
-    EXPECT_NE(stripAnsi(r.err).find("expected 'Box<[int]>', got 'Box<[int; fixed]>'"),
-              std::string::npos)
-        << stripAnsi(r.err);
-}
 
 TEST(Soundness_GenericInference, AnArgumentIsMatchedThroughANestedGenericParameter) {
     const FincRun r = compile(
@@ -7532,14 +7506,215 @@ TEST(Soundness_GenericInference, AnInheritedConstructorIsInferredToo) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_GenericInference, AnArgumentlessConstructorIsNotInferredFromItsAnnotation) {
-    // Booked: nothing in `Box()` says what T is, and the annotation on the left is not
-    // read. Reaching for it means threading an expected type into expression analysis --
-    // a feature, not a fix -- and no corpus line asks for it: both const.fin sites pass
-    // the value the parameter is inferred from.
+
+// ---------------------------------------------------------------------------------
+// Generic inference at a static call, and from the annotation
+//
+// tests/samples/letssee.fin is three diagnostics and they are one root cause: a static
+// method is looked up on the type named to the left of `::`, which for `Vec2` with no
+// arguments written is the template, so `Self` in its signature is still Self and `T`
+// is still T. `Vec2::normalize(scaled)` (73) reports its argument;
+// `Vec2::from_angle(0.7854)` (59) and `Vec2::zero()` (77) report their results.
+//
+// Two of those three cannot learn T from an argument at all -- `from_angle` takes a
+// float and `zero` takes nothing -- and the sample's own comment on 59 says
+// "inference on static call". What is left to read is the annotation, which is also
+// what `let arr <rptr<[int]>> = rptr([1,2,3,4]);` (const.fin:98) needs, because there
+// the argument's own type is a *fixed* array and the annotation's is not.
+//
+// prototype_test.fin:27 and :30 are the argument-driven half:
+// `HashMap::from_prototype({ "a" : 10 })` against `from_prototype(prtp: {T, U})` is a
+// `HashMap<string, int>`.
+// ---------------------------------------------------------------------------------
+
+TEST(Soundness_StaticCallInference, AStaticCallInfersFromItsArguments) {
+    const FincRun r = compile(
+        "struct G<T> {\n"
+        "    v <T>,\n"
+        "    static fun of(p: T) <&Self> { return null; }\n"
+        "}\n"
+        "fun main() <noret> { let a <&G<int>> = G::of(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, ASelfParameterIsTheInstantiatedStruct) {
+    // tests/samples/letssee.fin:73, `Vec2::normalize(scaled)`. The parameter is written
+    // `&Self` on the template, and the argument is a `&Vec2<float>`; matching the two
+    // is what says T is float, and Self is then the instance rather than itself.
+    const FincRun r = compile(
+        "struct G<T> {\n"
+        "    v <T>,\n"
+        "    static fun f(p: <&Self>) <noret> { }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let g <&G<int>> = new G::<int>{v: 1};\n"
+        "    G::f(g);\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, ASelfReturnTypeIsTheInstantiatedStruct) {
+    const FincRun r = compile(
+        "struct G<T> {\n"
+        "    v <T>,\n"
+        "    static fun f(p: T) <&Self> { return null; }\n"
+        "}\n"
+        "fun main() <noret> { let a <&G<int>> = G::f(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, AnAnnotationSaysWhatNoArgumentCan) {
+    // tests/samples/letssee.fin:77, `let zero <&Vec2<float>> = Vec2::zero();`. There is
+    // no argument at all, so the only thing that says what T is is the annotation.
+    const FincRun r = compile(
+        "struct G<T> {\n"
+        "    v <T>,\n"
+        "    static fun g() <&Self> { return null; }\n"
+        "}\n"
+        "fun main() <noret> { let a <&G<int>> = G::g(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, AnAnnotationSeedsAParameterNoArgumentMentions) {
+    // tests/samples/letssee.fin:59, `Vec2::from_angle(0.7854)`: there is an argument,
+    // and it is a float that says nothing about T.
+    const FincRun r = compile(
+        "struct G<T> {\n"
+        "    v <T>,\n"
+        "    static fun h(angle: float) <&Self> { return null; }\n"
+        "}\n"
+        "fun main() <noret> { let a <&G<int>> = G::h(0.5); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, APrototypeArgumentInfersBothParameters) {
+    // tests/samples/prototype_test.fin:27 as written -- lib/std/hashmap.fin:95 declares
+    // `from_prototype(prtp: {T, U}) <Self>`, and the literal's key and value types are
+    // what T and U are. The annotation agrees here rather than seeding, which is the
+    // point: the arguments alone are enough.
+    const FincRun r = compile(
+        "struct M<T, U> {\n"
+        "    k <T>,\n"
+        "    v <U>,\n"
+        "    static fun from_prototype(p: {T, U}) <&Self> { return null; }\n"
+        "}\n"
+        "fun main() <noret> { let a <&M<string, int>> = M::from_prototype({ \"a\" : 10 }); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, TheArgumentsAreStillCheckedAgainstTheInstantiatedParameters) {
+    // Inference is not acceptance here either: T is int from the annotation, so a
+    // string argument is a string argument.
+    const FincRun r = compile(
+        "struct G<T> {\n"
+        "    v <T>,\n"
+        "    static fun of(p: T) <&Self> { return null; }\n"
+        "}\n"
+        "fun main() <noret> { let a <&G<int>> = G::of(\"x\"); }\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, ArityIsStillChecked) {
+    const FincRun r = compile(
+        "struct G<T> {\n"
+        "    v <T>,\n"
+        "    static fun of(p: T) <&Self> { return null; }\n"
+        "}\n"
+        "fun main() <noret> { let a <&G<int>> = G::of(1, 2); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expects 1 arguments, got 2"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, AStaticCallOnANonGenericStructIsUnaffected) {
+    const FincRun r = compile(
+        "struct P {\n"
+        "    v <int>,\n"
+        "    static fun f(p: <&P>) <noret> { }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <&P> = new P{v: 1};\n"
+        "    P::f(p);\n"
+        "}\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, AnEnumeratorIsUnaffected) {
+    // The enumerator branch runs before the method lookup and stays there: `Color::RGB`
+    // is not a static method and must not go down the inference path.
+    const FincRun r = compile(
+        "enum Color { RGB(int, int, int), Named(string) }\n"
+        "fun main() <noret> { let c <Color> = Color::RGB(1, 2, 3); }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, AnAnnotationSeedsAnArgumentlessConstructor) {
+    // Was KnownDefect_GenericInference.AnArgumentlessConstructorIsNotInferredFromIts-
+    // Annotation, whose note said no corpus line asked for it. letssee.fin:77 does, one
+    // call site over, and the same seed serves both.
     const FincRun r = compile(
         "struct Box<T> { pub v <T>, Box() { } }\n"
         "fun main() <noret> { let b <Box<int>> = Box(); }\n");
-    EXPECT_NE(r.exitCode, 0) << "if this passes, an annotation informs inference -- invert this test";
-    EXPECT_NE(stripAnsi(r.err).find("got 'Box<T>'"), std::string::npos) << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, AFixedArrayInferredIntoAGenericArgumentDecaysThroughTheAnnotation) {
+    // Was KnownDefect_GenericInference.AFixedArrayInferredIntoAGenericArgumentDoesNot-
+    // Decay -- `let arr <rptr<[int]>> = rptr([1,2,3,4]);` (tests/samples/const.fin:98).
+    // Fixed at the end the note said to fix it at: the annotation seeds T as `[int]`
+    // before the arguments are read, so the literal is checked against `[int]` and
+    // decays there, the way `let a <[int]> = [1,2,3];` already did. Nothing was made
+    // loose -- StructType still compares its generic arguments exactly, and `Box<Dog>`
+    // is still not a `Box<Animal>`.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> { let b <Box<[int]>> = Box([1,2,3]); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, AnArgumentIsCheckedAgainstTheSeededParameter) {
+    // The annotation wins over the arguments, so the mismatch surfaces where the
+    // mistake is -- on the argument -- rather than on the whole call. This is the case
+    // TheInferredArgumentIsWhatTheAnnotationIsCheckedAgainst used to cover before the
+    // seed existed; that test now uses an annotation that cannot seed.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> { let b <Box<string>> = Box(1); }\n");
+    EXPECT_NE(r.exitCode, 0) << "a Box<int> is not a Box<string>";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, AnAnnotationDoesNotReachASubexpression) {
+    // The hint is keyed on the exact expression node the annotation belongs to. Without
+    // that, the inner `Box("x")` below would be seeded `Box<int>` from the outer
+    // declaration and report twice: once for its own argument and once for `unwrap`'s.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun unwrap(v: Box<string>) <Box<int>> { return Box(1); }\n"
+        "fun main() <noret> { let b <Box<int>> = unwrap(Box(\"x\")); }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, AnAutoAnnotationSeedsNothing) {
+    // `auto` is not a type to unify against, and the arguments are the whole story.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> {\n"
+        "    let b <auto> = Box(1);\n"
+        "    let c <string> = b.v;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << "b.v proves T was int and nothing else\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericInference, AnUnresolvedAnnotationSeedsNothing) {
+    // The sentinel must not be unified into a generic argument -- that would make the
+    // call's type mention `<error>` and print it.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> { let b <NoSuchType> = Box(1); }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("<error>"), std::string::npos) << stripAnsi(r.err);
 }

@@ -418,6 +418,15 @@ void unifyGeneric(const TypePtr& param, const TypePtr& arg, TypeMap& out) {
         else unifyGeneric(n->inner, arg, out);
         return;
     }
+    // `Self` on a template stands for the enclosing struct, so matching `&Self`
+    // against `&Vec2<float>` (tests/samples/letssee.fin:73) is matching `Vec2<T>`
+    // against it -- which is what says T is float. Without this arm the one static call
+    // in the corpus with an informative argument teaches nothing, and a `<Self>` return
+    // type cannot be seeded from an annotation either (prototype_test.fin:27).
+    if (auto* self = param->as<SelfType>()) {
+        unifyGeneric(self->originalStruct, arg, out);
+        return;
+    }
     if (auto* s = param->as<StructType>()) {
         if (auto* sa = arg->as<StructType>()) {
             if (s->name == sa->name && s->generic_args.size() == sa->generic_args.size()) {
@@ -442,6 +451,22 @@ void unifyGeneric(const TypePtr& param, const TypePtr& arg, TypeMap& out) {
         }
         return;
     }
+}
+
+// What a struct's generic arguments became, in the order the struct declares them.
+//
+// StructType::instantiate takes a positional list, and a mapping learned from arguments
+// is by name and may be missing entries -- `G::g()` learns nothing at all. An entry
+// nothing bound keeps the parameter it already had, so substituting it is a no-op and
+// the struct stays the template rather than becoming a struct with fewer arguments than
+// it declares.
+std::vector<TypePtr> orderedGenericArgs(const std::shared_ptr<StructType>& st, const TypeMap& mapping) {
+    std::vector<TypePtr> out;
+    for (const auto& g : st->generic_args) {
+        auto it = mapping.find(g->toString());
+        out.push_back(it != mapping.end() ? it->second : g);
+    }
+    return out;
 }
 
 } // namespace
@@ -590,6 +615,21 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
         }
 
         TypeMap mapping;
+        // The annotation first, so it wins. `let arr <rptr<[int]>> = rptr([1,2,3,4]);`
+        // (tests/samples/const.fin:98) hands a fixed-size literal to a bare `T`: read
+        // the arguments first and T is `[int; fixed]`, which the annotation one
+        // character to the left then rejects, because a struct compares its generic
+        // arguments exactly. Seeded from the annotation, T is `[int]` and the literal is
+        // checked against `[int]` and decays there -- the same rule
+        // `let a <[int]> = [1,2,3];` has always had, now reaching inside the container.
+        //
+        // The cost is where a real mismatch is reported: `let b <Box<string>> = Box(1);`
+        // says "expected 'string', got 'int'" at the argument rather than naming the two
+        // Boxes. That points at the mistake instead of at the call, so it is the better
+        // of the two -- Soundness_GenericInference.AnArgumentIsCheckedAgainstTheSeeded-
+        // Parameter, with TheInferredArgumentIsWhatTheAnnotationIsCheckedAgainst holding
+        // the case no annotation can seed.
+        if (auto hint = hintFor(node)) unifyGeneric(funcType->return_type, hint, mapping);
         for (size_t i = 0; i < argTypes.size() && i < funcType->param_types.size(); ++i) {
             unifyGeneric(funcType->param_types[i], argTypes[i], mapping);
         }
@@ -1251,6 +1291,54 @@ void SemanticAnalyzer::visit(StaticMethodCall& node) {
     // stdlib/stdio.fin:153 and nullifier.fin:26, all static), so which of the two
     // spellings that is stays an owner question rather than a rule invented here.
     if (auto* sig = methodType->as<FunctionType>()) {
+        // A static call has no receiver, so nothing carries the generic arguments in.
+        // `Vec2::normalize(scaled)` resolves `Vec2` by name and gets the template, whose
+        // `Self` is still Self and whose `T` is still T -- so the signature reported
+        // against every argument passed to it and every use of its result. That was
+        // three of tests/samples/letssee.fin's three diagnostics.
+        //
+        // The arguments and the annotation are what say otherwise, so the same two
+        // sources the constructor path reads are read here, and the signature is checked
+        // and typed as the instantiation. `Self` is replaced too, by handing
+        // substitute() the instantiated struct: a signature written `&Self` on the
+        // template is `&Vec2<float>` on a `Vec2<float>`, which is exactly what a method
+        // call already gets for free because its receiver was instantiated.
+        //
+        // Gated on the target still mentioning a parameter, so `Vec2::<float>::f(...)`
+        // and every static call on a non-generic struct go through checkCallArguments
+        // untouched, in the order they always did.
+        if (mentionsGenericParam(structType)) {
+            TypeMap mapping;
+            // The annotation first, and for the same reason as at a constructor: two of
+            // the three corpus sites -- `Vec2::from_angle(0.7854)` (letssee.fin:59) and
+            // `Vec2::zero()` (:77) -- have no argument that mentions T at all, and the
+            // sample's own comment on 59 calls it "inference on static call".
+            if (auto hint = hintFor(node)) unifyGeneric(sig->return_type, hint, mapping);
+
+            checkCallArity(node, "Static method", node.method_name, *sig, node.args.size());
+
+            std::vector<std::shared_ptr<Type>> argTypes;
+            for (auto& arg : node.args) {
+                arg->accept(*this);
+                argTypes.push_back(lastExprType);
+            }
+            for (size_t i = 0; i < argTypes.size() && i < sig->param_types.size(); ++i) {
+                unifyGeneric(sig->param_types[i], argTypes[i], mapping);
+            }
+
+            auto inst = structType->instantiate(orderedGenericArgs(structType, mapping));
+            auto isig = std::dynamic_pointer_cast<FunctionType>(sig->substitute(mapping, inst));
+            if (isig) {
+                for (size_t i = 0; i < argTypes.size() && i < isig->param_types.size(); ++i) {
+                    checkType(*node.args[i], argTypes[i], isig->param_types[i]);
+                }
+                lastExprType = isig->return_type;
+            } else {
+                lastExprType = sig->return_type;
+            }
+            return;
+        }
+
         checkCallArguments(node, "Static method", node.method_name, *sig, node.args);
         lastExprType = sig->return_type;
     } else {
