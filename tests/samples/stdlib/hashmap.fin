@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`self.values[self.get_index(key)] = value` on line 39 reports `Type 'Collection<U>' is not an array or pointer`: an index-assignment expression never consults `operator []=`, which is why HashMap then fails to implement IndexAssign at 15:1 as well (KnownDefect_IndexOperator.AnIndexExpressionNeverConsultsOperatorBracket). Both imports resolve now -- lib/std carries collection, error and operators -- and the whole file parses, the `implements cast<...>(...)` form on line 50 included. The note this replaces claimed line 39 `types correctly`; it does not, and it never did: what the earlier probe had confirmed was the narrower fact that a method call is typed as its return type rather than its last argument, which is Soundness_MethodCalls.ACallsTypeIsItsReturnTypeNotItsLastArgument"
+//@ ok
 #[stdimport] %{
 import { Collection } from collection::std;
 import { Error } from error::std;

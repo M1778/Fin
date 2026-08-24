@@ -1,5 +1,9 @@
 #include "StructType.hpp"
 #include "TypeImpl.hpp"
+// `operators` is keyed by a plain `int` so that this layer need not know what an
+// operator token is. One rule below does need to know two of them by name, so the
+// header comes in here and not into StructType.hpp.
+#include "../ast/nodes/ASTNode.hpp"
 #include <algorithm>
 #include <sstream>
 #include <unordered_map>
@@ -260,7 +264,24 @@ bool StructType::implements(const StructType* interface) const {
         if (methods.find(methodName) == methods.end()) return false;
     }
     for (const auto& [op, retType] : interface->operators) {
-        if (operators.find(op) == operators.end()) return false;
+        if (operators.find(op) != operators.end()) continue;
+        // `operator=` is the other spelling of `operator []=`. stdlib/operators.fin:126
+        // requires `operator []=` for `IndexAssign`, and the two corpus structs that
+        // implement it write `operator=` -- stdlib/hashmap.fin:51 live, next to its
+        // `operator[]`, and stdlib/collection.fin:80 commented out beside the same
+        // pairing. Neither file writes the bracket form anywhere, and none of the thirty
+        // interfaces asks for a plain assignment operator, so nothing else claims the
+        // spelling.
+        //
+        // Only the requirement is lenient: a declaration keeps whichever kind it was
+        // written as, `operator []=` still satisfies this on its own, and the leniency is
+        // one-directional -- an `operator =` requirement is not satisfied by
+        // `operator []=` (Soundness_IndexAssignInterface).
+        if (op == static_cast<int>(ASTTokenKind::INDEX_ASSIGN) &&
+            operators.count(static_cast<int>(ASTTokenKind::EQUAL))) {
+            continue;
+        }
+        return false;
     }
     if (interface->has_destructor && !this->has_destructor) return false;
     for (const auto& ifaceCtor : interface->constructors) {

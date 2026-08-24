@@ -8303,3 +8303,124 @@ TEST(Soundness_DeletingAnArray, AnAddressOfIsStillDeletable) {
         "}\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// `operator=` satisfies an `operator []=` requirement.
+//
+// stdlib/operators.fin declares thirty interfaces, one per overloadable operator,
+// and `IndexAssign` on 125 requires `operator []=`. No corpus struct writes that
+// spelling. The two that implement the interface write `operator=` instead, both
+// of them paired with `operator[]` and both wired to a `__set`:
+//
+//     pub operator[] implements cast<fn(Self, T)>(__get);
+//     pub operator=  implements cast<fn(Self, T, U)>(__set);
+//       -- stdlib/hashmap.fin:50-51, live
+//     //pub operator[] implements cast<auto>(__get);
+//     //pub operator=  implements cast<auto>(__set);
+//       -- stdlib/collection.fin:79-80, commented out
+//
+// Two files, the same author, the same pairing. And the thirty interfaces contain
+// none for plain assignment, so `operator=` on a struct is not spoken for
+// elsewhere. The reading taken here is that `operator=` and `operator []=` are two
+// spellings of the subscript-assignment overload -- the declaration keeps whichever
+// kind it was written as, and only the *requirement* accepts both.
+//
+// Narrow on purpose. It does not make `operator=` mean plain assignment, it does not
+// touch what `a[i] = v` consults (still nothing --
+// KnownDefect_IndexOperator.AnAssignmentThroughASubscriptNeverConsultsOperatorBracketEquals),
+// and it is cheap for the owner to overturn: delete the second half of one
+// condition in StructType::implements.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The pair of interfaces stdlib/operators.fin:121-127 declares, with `Output`
+// written out -- `Output` is an associated type the corpus never resolves.
+static const char* const kIndexIfaces =
+    "interface Index {\n"
+    "   pub operator [](idx: any) <int>;\n"
+    "}\n"
+    "interface IndexAssign {\n"
+    "   pub operator []=(idx: any) <int>;\n"
+    "}\n";
+
+}  // namespace
+
+TEST(Soundness_IndexAssignInterface, TheEqualsSpellingSatisfiesIt) {
+    // stdlib/hashmap.fin:15 and :50-51 in miniature.
+    const FincRun r = compile(
+        std::string(kIndexIfaces) +
+        "struct S : <Index, IndexAssign> {\n"
+        "    priv v <int>,\n"
+        "    pub fun __get(self: &Self, i: int) <int> { return self.v; }\n"
+        "    pub fun __set(self: &Self, i: int, x: int) <noret> { self.v = x; }\n"
+        "    pub operator[] implements cast<fn(Self, int)>(__get);\n"
+        "    pub operator= implements cast<fn(Self, int, int)>(__set);\n"
+        "    S() { return new S{v: 0}; }\n"
+        "}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_IndexAssignInterface, TheBracketSpellingStillSatisfiesIt) {
+    // The interface's own spelling has to keep working -- this is an alternative
+    // accepted, not a replacement.
+    const FincRun r = compile(
+        std::string(kIndexIfaces) +
+        "struct S : <IndexAssign> {\n"
+        "    priv v <int>,\n"
+        "    pub operator[]=(i: int) <int> { return self.v; }\n"
+        "    S() { return new S{v: 0}; }\n"
+        "}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_IndexAssignInterface, NeitherSpellingIsStillUnsatisfied) {
+    const FincRun r = compile(
+        std::string(kIndexIfaces) +
+        "struct S : <IndexAssign> {\n"
+        "    priv v <int>,\n"
+        "    S() { return new S{v: 0}; }\n"
+        "}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(stripAnsi(r.err).find("Struct 'S' does not implement interface 'IndexAssign'"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_IndexAssignInterface, TheAlternativeIsOneDirectionOnly) {
+    // `operator []=` does not stand in for a plain `operator =` requirement. The
+    // corpus declares no interface asking for one, so nothing rests on this -- it is
+    // here to pin that the leniency was not added to both sides at once.
+    const FincRun r = compile(
+        "interface Assign {\n"
+        "   pub operator =(rhs: any) <int>;\n"
+        "}\n"
+        "struct S : <Assign> {\n"
+        "    priv v <int>,\n"
+        "    pub operator[]=(i: int) <int> { return self.v; }\n"
+        "    S() { return new S{v: 0}; }\n"
+        "}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(stripAnsi(r.err).find("Struct 'S' does not implement interface 'Assign'"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_IndexAssignInterface, AnIndexRequirementIsUnaffected) {
+    // `Index` asks for `operator []` and only `operator []` -- `operator=` is not a
+    // subscript *read*.
+    const FincRun r = compile(
+        std::string(kIndexIfaces) +
+        "struct S : <Index> {\n"
+        "    priv v <int>,\n"
+        "    pub fun __set(self: &Self, i: int, x: int) <noret> { self.v = x; }\n"
+        "    pub operator= implements cast<fn(Self, int, int)>(__set);\n"
+        "    S() { return new S{v: 0}; }\n"
+        "}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(stripAnsi(r.err).find("Struct 'S' does not implement interface 'Index'"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
