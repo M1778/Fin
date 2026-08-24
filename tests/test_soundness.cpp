@@ -3029,35 +3029,68 @@ TEST(KnownDefect_Attributes, AnUnknownAttributeIsAccepted) {
 }
 
 // ---------------------------------------------------------------------------
-// Field declaration order is destroyed.
+// A struct's fields keep the order they were declared in.
 //
-// StructType::fields is std::unordered_map<std::string, FieldInfo> and
-// defineField is its only writer, so the order the fields were declared in is
-// lost when the semantic type is built. The AST has it; the type throws it away.
-// Layout, ABI, offsets and every pointer map are functions of declaration order.
+// This block replaced KnownDefect_FieldOrder.TheSemanticTypeCannotReproduce-
+// DeclarationOrder, which asserted the opposite and said in its own comment what
+// should happen next: "Whoever fixes this should replace the body rather than
+// trust it." StructType::fields was an unordered_map, so the order the AST had
+// was thrown away the moment the semantic type was built -- and layout, ABI,
+// offsets, and every pointer map are functions of declaration order. It is now a
+// vector, with a name->index map beside it for the O(1) lookup the map used to
+// give for free.
 //
-// This is the one defect here with no CLI-visible symptom, because nothing yet
-// consumes layout. It is asserted at the type instead, and that comes with a
-// limit worth stating plainly: the test reads `fields`, so a fix that adds a
-// separate ordered accessor and leaves `fields` alone will not trip it. It is
-// evidence that order is lost, not a guarantee that it stays lost. Whoever fixes
-// this should replace the body rather than trust it.
+// Order is the thing being asserted, so these tests read the ordered container
+// directly rather than a symptom. There is not yet a CLI-visible symptom to read:
+// the layout pass is the next unit and struct lowering the one after, and until
+// one of them exists nothing downstream can tell the difference. The tests are
+// still the specification of what those two are entitled to assume.
+//
+// Two properties beyond "the declaration order comes back", both of them places
+// the order could plausibly be dropped again:
+//
+//   * clone() and substitute() rebuild a StructType field by field, so a generic
+//     struct's instantiation is a fresh type whose order has to be rebuilt too.
+//     `Pair<int, string>` laid out differently from `Pair<T, U>` is an ABI split
+//     between a generic function and its caller.
+//   * a name defined twice keeps its first position. The old map's `fields[n] = ...`
+//     overwrote, so a second declaration of one name left one entry; that is
+//     preserved, and what is added is *which slot* it is -- the first, because a
+//     field that moved when it was redeclared would move every offset after it.
+//     (Whether a duplicate field should be an error at all is
+//     KnownDefect_Duplicates', not this block's.)
 // ---------------------------------------------------------------------------
 
-TEST(KnownDefect_FieldOrder, TheSemanticTypeCannotReproduceDeclarationOrder) {
-    // Several candidate field-name sets, because whether one particular set comes
-    // back in declaration order is an accident of the hash. If order is preserved,
-    // *every* set round-trips; one mismatch proves it is not preserved. That makes
-    // the test independent of the standard library's hash function, which a test
-    // asserting one specific wrong order would not be.
-    //
-    // Do not reduce this to one candidate. Measured against both containers: all
-    // five misorder under an unordered_map, but only three of the five misorder
-    // under a std::map — `{a..f}` and `{first,second,third}` are already in
-    // alphabetical order and would round-trip. So a single-candidate version using
-    // either of those would report "fixed" if someone swapped the container for a
-    // std::map, which does not preserve declaration order either. The set is the
-    // test.
+namespace {
+
+// The declared field names of `S` in a compiled source, in the order the semantic
+// type reports them. Empty when there is no such type.
+std::vector<std::string> fieldOrderOf(const std::string& source,
+                                      const std::string& typeName = "S") {
+    fin::DiagnosticEngine diag("", "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    auto parsed = parseSource(source, diag);
+    if (!parsed.parsed) return {};
+
+    fin::SemanticAnalyzer analyzer(diag, false);
+    analyzer.visit(*parsed.ast);
+
+    auto st = std::dynamic_pointer_cast<fin::StructType>(
+        analyzer.getGlobalScope()->resolveType(typeName));
+    if (!st) return {};
+
+    std::vector<std::string> out;
+    for (const auto& f : st->fields) out.push_back(f.name);
+    return out;
+}
+
+}  // namespace
+
+TEST(Soundness_FieldOrder, DeclarationOrderSurvivesIntoTheSemanticType) {
+    // The same five candidate sets the KnownDefect used, and for the same reason:
+    // a single set can round-trip by accident. `{a..f}` and `{first,second,third}`
+    // are already alphabetical, so a std::map -- which does not preserve
+    // declaration order either -- would round-trip them. Every set must hold.
     const std::vector<std::vector<std::string>> candidates = {
         {"alpha", "beta", "gamma", "delta"},
         {"a", "b", "c", "d", "e", "f"},
@@ -3066,50 +3099,155 @@ TEST(KnownDefect_FieldOrder, TheSemanticTypeCannotReproduceDeclarationOrder) {
         {"header", "payload", "checksum", "footer", "reserved"},
     };
 
-    bool anyMisordered = false;
-    std::string report;
-
     for (const auto& names : candidates) {
         std::string src = "struct S {";
         for (const auto& n : names) src += " pub " + n + " <int>,";
         src += " }\n";
 
-        fin::DiagnosticEngine diag("", "<test>");
-        diag.setColorMode(fin::ColorMode::Never);
-        auto parsed = parseSource(src, diag);
-        ASSERT_TRUE(parsed.parsed) << src;
-
-        fin::SemanticAnalyzer analyzer(diag, false);
-        analyzer.visit(*parsed.ast);
-        ASSERT_FALSE(diag.hasErrors()) << src;
-
-        auto st = std::dynamic_pointer_cast<fin::StructType>(
-            analyzer.getGlobalScope()->resolveType("S"));
-        ASSERT_NE(st, nullptr) << "the analyzer must publish a struct type for S";
-        ASSERT_EQ(st->fields.size(), names.size()) << "a field went missing entirely";
-
-        std::vector<std::string> seen;
-        for (const auto& kv : st->fields) seen.push_back(kv.first);
-        if (seen != names) {
-            anyMisordered = true;
-            report = "declared:";
-            for (const auto& n : names) report += " " + n;
-            report += " / recovered:";
-            for (const auto& n : seen) report += " " + n;
-            break;
-        }
+        std::vector<std::string> seen = fieldOrderOf(src);
+        ASSERT_EQ(seen.size(), names.size()) << src;
+        EXPECT_EQ(seen, names) << src;
     }
+}
 
-    EXPECT_TRUE(anyMisordered)
-        << "FIXED, or the hash got lucky " << candidates.size() << " times in a row. "
-           "If StructType now records declaration order, delete this test and assert "
-           "the real ordered accessor instead — see this test's comment for why it "
-           "cannot detect that itself.";
-    if (anyMisordered) {
-        // Not an assertion. Printed so the run carries the evidence rather than
-        // just a green tick, since a passing test here means a live defect.
-        ::testing::Test::RecordProperty("misordered", report);
-    }
+TEST(Soundness_FieldOrder, MixedVisibilityDoesNotReorder) {
+    // Two groups that a layout pass might be tempted to sort -- public and
+    // private -- interleaved. Nothing may group them: the declaration order is the
+    // order, and `priv` says who may read a field rather than where it sits.
+    EXPECT_EQ(fieldOrderOf("struct S { pub one <int>, priv two <int>, pub three <int>,"
+                           " priv four <int>, }\n"),
+              (std::vector<std::string>{"one", "two", "three", "four"}));
+}
+
+TEST(Soundness_FieldOrder, WidthDoesNotReorder) {
+    // A layout pass will want to reorder these to close padding holes, and that is
+    // a decision for the layout pass to take explicitly against a documented rule
+    // -- not something it inherits by accident from the type. The declared order
+    // is what the type reports.
+    EXPECT_EQ(fieldOrderOf("struct S { pub a <char>, pub b <long>, pub c <char>,"
+                           " pub d <long>, }\n"),
+              (std::vector<std::string>{"a", "b", "c", "d"}));
+}
+
+TEST(Soundness_FieldOrder, ANameDeclaredTwiceKeepsItsFirstPosition) {
+    // One entry, as before -- defineField overwrote and still does. What is new is
+    // that it overwrites *in place*: `b` stays second. A duplicate that moved to
+    // the end would shift every field after it, so a struct with a typo in it
+    // would lay out differently from the one the author meant.
+    EXPECT_EQ(fieldOrderOf("struct S { pub a <int>, pub b <int>, pub c <int>,"
+                           " pub b <long>, }\n"),
+              (std::vector<std::string>{"a", "b", "c"}));
+}
+
+TEST(Soundness_FieldOrder, ARedeclaredFieldTakesTheLaterType) {
+    // The half that is unchanged, asserted so a fix to the position cannot quietly
+    // change which type won.
+    fin::DiagnosticEngine diag("", "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    auto parsed = parseSource("struct S { pub a <int>, pub a <string>, }\n", diag);
+    ASSERT_TRUE(parsed.parsed);
+    fin::SemanticAnalyzer analyzer(diag, false);
+    analyzer.visit(*parsed.ast);
+    auto st = std::dynamic_pointer_cast<fin::StructType>(
+        analyzer.getGlobalScope()->resolveType("S"));
+    ASSERT_NE(st, nullptr);
+    ASSERT_EQ(st->fields.size(), 1u);
+    auto type = st->getFieldType("a");
+    ASSERT_NE(type, nullptr);
+    EXPECT_EQ(type->toString(), "string");
+}
+
+TEST(Soundness_FieldOrder, LookupStillFindsEveryFieldAndItsVisibility) {
+    // The vector replaced a map, so the O(1) name lookup the map provided has to
+    // still be there and still be right -- for every field, not just the first.
+    //
+    // `priv` is written out on the private ones. A field with no modifier is
+    // public: the corpus spells privacy explicitly (`priv secret <int>`,
+    // Soundness_FieldVisibility) and never relies on the absence of `pub`, so
+    // "unmarked means private" is not the rule and asserting it here would be
+    // asserting a language Fin does not have.
+    fin::DiagnosticEngine diag("", "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    auto parsed = parseSource(
+        "struct S { pub a <int>, priv b <string>, pub c <bool>, priv d <long>, }\n", diag);
+    ASSERT_TRUE(parsed.parsed);
+    fin::SemanticAnalyzer analyzer(diag, false);
+    analyzer.visit(*parsed.ast);
+    auto st = std::dynamic_pointer_cast<fin::StructType>(
+        analyzer.getGlobalScope()->resolveType("S"));
+    ASSERT_NE(st, nullptr);
+
+    ASSERT_NE(st->getFieldType("a"), nullptr);
+    EXPECT_EQ(st->getFieldType("a")->toString(), "int");
+    ASSERT_NE(st->getFieldType("b"), nullptr);
+    EXPECT_EQ(st->getFieldType("b")->toString(), "string");
+    ASSERT_NE(st->getFieldType("c"), nullptr);
+    EXPECT_EQ(st->getFieldType("c")->toString(), "bool");
+    ASSERT_NE(st->getFieldType("d"), nullptr);
+    EXPECT_EQ(st->getFieldType("d")->toString(), "long");
+    EXPECT_EQ(st->getFieldType("nope"), nullptr);
+
+    EXPECT_TRUE(st->isFieldPublic("a"));
+    EXPECT_FALSE(st->isFieldPublic("b"));
+    EXPECT_TRUE(st->isFieldPublic("c"));
+    EXPECT_FALSE(st->isFieldPublic("d"));
+}
+
+TEST(Soundness_FieldOrder, CloneKeepsTheOrder) {
+    fin::DiagnosticEngine diag("", "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    auto parsed = parseSource(
+        "struct S { pub zulu <int>, pub alpha <int>, pub mike <int>, }\n", diag);
+    ASSERT_TRUE(parsed.parsed);
+    fin::SemanticAnalyzer analyzer(diag, false);
+    analyzer.visit(*parsed.ast);
+    auto st = std::dynamic_pointer_cast<fin::StructType>(
+        analyzer.getGlobalScope()->resolveType("S"));
+    ASSERT_NE(st, nullptr);
+
+    auto copy = std::dynamic_pointer_cast<fin::StructType>(st->clone());
+    ASSERT_NE(copy, nullptr);
+    std::vector<std::string> seen;
+    for (const auto& f : copy->fields) seen.push_back(f.name);
+    EXPECT_EQ(seen, (std::vector<std::string>{"zulu", "alpha", "mike"}));
+    // And the lookup index came with it, rather than being left behind pointing
+    // into the original's positions.
+    ASSERT_NE(copy->getFieldType("alpha"), nullptr);
+    EXPECT_EQ(copy->getFieldType("alpha")->toString(), "int");
+}
+
+TEST(Soundness_FieldOrder, InstantiatingAGenericStructKeepsTheOrder) {
+    // substitute() rebuilds the type, so this is the path where the order is most
+    // easily lost -- and the one where losing it costs most: `Pair<int, string>`
+    // laid out differently from `Pair<T, U>` is an ABI split between a generic
+    // function and its caller.
+    fin::DiagnosticEngine diag("", "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    auto parsed = parseSource(
+        "struct Pair<A, B> { pub second <B>, pub first <A>, pub tag <int>, }\n"
+        "fun main() <void> { let p <Pair<int, string>>; }\n", diag);
+    ASSERT_TRUE(parsed.parsed);
+    fin::SemanticAnalyzer analyzer(diag, false);
+    analyzer.visit(*parsed.ast);
+
+    auto generic = std::dynamic_pointer_cast<fin::StructType>(
+        analyzer.getGlobalScope()->resolveType("Pair"));
+    ASSERT_NE(generic, nullptr);
+    auto instance = std::dynamic_pointer_cast<fin::StructType>(generic->instantiate(
+        {analyzer.getGlobalScope()->resolveType("int"),
+         analyzer.getGlobalScope()->resolveType("string")}));
+    ASSERT_NE(instance, nullptr);
+
+    std::vector<std::string> seen;
+    for (const auto& f : instance->fields) seen.push_back(f.name);
+    EXPECT_EQ(seen, (std::vector<std::string>{"second", "first", "tag"}));
+
+    // The substitution itself still happened, so this is not passing because
+    // nothing was rebuilt.
+    ASSERT_NE(instance->getFieldType("first"), nullptr);
+    EXPECT_EQ(instance->getFieldType("first")->toString(), "int");
+    ASSERT_NE(instance->getFieldType("second"), nullptr);
+    EXPECT_EQ(instance->getFieldType("second")->toString(), "string");
 }
 
 // ---------------------------------------------------------------------------

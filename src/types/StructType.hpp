@@ -14,6 +14,10 @@
 namespace fin {
 
 struct FieldInfo {
+    // The field's own name. It used to be the key of an unordered_map and is now
+    // carried in the entry, because the entries are held in declaration order and a
+    // vector has no keys (Soundness_FieldOrder).
+    std::string name;
     TypePtr type;
     bool is_public;
 };
@@ -35,7 +39,22 @@ public:
     // mean "not an interface" test is_interface.
     bool is_enum = false;
     
-    std::unordered_map<std::string, FieldInfo> fields;
+    // Declaration order, which is what layout, ABI, offsets and every pointer map
+    // are functions of. This was an unordered_map until wave 4 step 5 -- the AST had
+    // the order and the semantic type threw it away, which is
+    // KnownDefect_FieldOrder.TheSemanticTypeCannotReproduceDeclarationOrder, now
+    // Soundness_FieldOrder.
+    //
+    // A vector rather than a std::map because alphabetical is not declaration order
+    // either; the map's O(1) name lookup is kept by `field_index` beside it. Iterate
+    // this for order, and go through findField/getFieldType for a name -- never a
+    // linear scan, and never `field_index` directly from outside, so the invariant
+    // that the two agree has exactly one owner (defineField).
+    std::vector<FieldInfo> fields;
+    // Name -> its position in `fields`. Parents are not in here: an inherited field
+    // is found by getFieldType's walk, and folding one in would give this type a slot
+    // it does not own.
+    std::unordered_map<std::string, size_t> field_index;
     // Name -> the method's FunctionType. It held only a return type until a method
     // call needed a signature to be checked against, which is why the map's value is
     // still a plain TypePtr: clone() and substitute() below already do the right thing
@@ -61,7 +80,31 @@ public:
     StructType(std::string n, std::vector<TypePtr> args = {}) 
         : name(std::move(n)), generic_args(std::move(args)) {}
 
-    void defineField(std::string n, TypePtr t, bool pub = false) { fields[n] = {t, pub}; }
+    // The only writer of `fields` and `field_index`, so that the two cannot disagree.
+    //
+    // A name defined twice overwrites *in place*: one entry, the later type, and the
+    // earlier position. The old map overwrote too, so only the position is new -- and
+    // it has to be the earlier one, because a field that moved when it was redeclared
+    // would shift every offset after it, and a struct with a typo in it would lay out
+    // differently from the one its author meant. Whether a duplicate field should be
+    // rejected outright is KnownDefect_Duplicates', not this function's.
+    void defineField(std::string n, TypePtr t, bool pub = false) {
+        auto found = field_index.find(n);
+        if (found != field_index.end()) {
+            fields[found->second].type = std::move(t);
+            fields[found->second].is_public = pub;
+            return;
+        }
+        field_index.emplace(n, fields.size());
+        fields.push_back({std::move(n), std::move(t), pub});
+    }
+
+    // This type's own field of that name, or null. No parent walk -- that is
+    // getFieldType's, and a caller asking for a *slot* means a slot in this type.
+    const FieldInfo* findField(const std::string& n) const {
+        auto found = field_index.find(n);
+        return found == field_index.end() ? nullptr : &fields[found->second];
+    }
     void defineMethod(std::string n, TypePtr t) { methods[n] = t; }
     void defineOperator(int op, TypePtr t) { operators[op] = t; }
     void addConstructor(TypePtr t) { constructors.push_back(t); }

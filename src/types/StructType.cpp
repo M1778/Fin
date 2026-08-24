@@ -73,7 +73,7 @@ std::string StructType::toString() const {
 }
 
 TypePtr StructType::getFieldType(const std::string& n) {
-    if (fields.count(n)) return fields.at(n).type;
+    if (auto* own = findField(n)) return own->type;
     for (const auto& parent : parents) {
         if (auto p = std::dynamic_pointer_cast<StructType>(parent)) {
             if (auto t = p->getFieldType(n)) return t;
@@ -83,7 +83,7 @@ TypePtr StructType::getFieldType(const std::string& n) {
 }
 
 bool StructType::isFieldPublic(const std::string& n) {
-    if (fields.count(n)) return fields.at(n).is_public;
+    if (auto* own = findField(n)) return own->is_public;
     for (const auto& parent : parents) {
         if (auto p = std::dynamic_pointer_cast<StructType>(parent)) {
             if (p->getFieldType(n)) return p->isFieldPublic(n);
@@ -143,7 +143,9 @@ TypePtr StructType::clone() const {
     for (auto& arg : generic_args) newArgs.push_back(arg->clone());
     
     auto s = std::make_shared<StructType>(name, newArgs);
-    for(auto& kv : fields) s->defineField(kv.first, kv.second.type->clone(), kv.second.is_public);
+    // In order, so the copy lays out the way the original does. defineField rebuilds
+    // field_index as it goes, which is why the index is never copied directly.
+    for(const auto& f : fields) s->defineField(f.name, f.type->clone(), f.is_public);
     for(auto& kv : methods) s->defineMethod(kv.first, kv.second->clone());
     for(auto& kv : operators) s->defineOperator(kv.first, kv.second->clone());
     for(const auto& p : parents) s->parents.push_back(p->clone());
@@ -172,7 +174,9 @@ TypePtr StructType::substitute(const TypeMap& mapping, TypePtr selfReplacement) 
     // Pass selfReplacement (or newStruct if we are the struct being instantiated)
     TypePtr nextSelf = selfReplacement ? selfReplacement : newStruct;
 
-    for(auto& kv : fields) newStruct->defineField(kv.first, kv.second.type->substitute(mapping, nextSelf), kv.second.is_public);
+    // In order: `Pair<int, string>` laid out differently from `Pair<T, U>` would be
+    // an ABI split between a generic function and its caller.
+    for(const auto& f : fields) newStruct->defineField(f.name, f.type->substitute(mapping, nextSelf), f.is_public);
     for(auto& kv : methods) newStruct->defineMethod(kv.first, kv.second->substitute(mapping, nextSelf));
     for(auto& kv : operators) newStruct->defineOperator(kv.first, kv.second->substitute(mapping, nextSelf));
     for(const auto& p : parents) newStruct->parents.push_back(p->substitute(mapping, nextSelf));
