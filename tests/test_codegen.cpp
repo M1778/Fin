@@ -6,6 +6,21 @@
 #include <vector>
 
 #include "Corpus.hpp"
+#include "types/Layout.hpp"
+#include "types/PrimitiveType.hpp"
+#include "types/StructType.hpp"
+
+#ifdef FIN_TESTS_HAVE_BACKEND
+#include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Type.h>
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/Target/TargetOptions.h>
+#include <llvm/TargetParser/Host.h>
+#endif
 
 // Wave 5, from the first artifact onwards.
 //
@@ -107,8 +122,19 @@ const char* const kPrintf = "@define printf(fmt: string, ...) <noret>;\n";
 #ifndef FIN_TESTS_HAVE_BACKEND
 // A build configured without the backend still has to compile this file, so the
 // tests exist and say why they did not run rather than vanishing from the count.
-#define BACKEND_TEST(suite, name) \
-    TEST(suite, name) { GTEST_SKIP() << "built with FIN_WITH_LLVM=OFF"; }
+//
+// The trailing declaration is what makes that true, and it was missing until wave
+// 4 step 6 found it: `TEST(s, n) { skip; }` followed by the test's own `{ ... }`
+// leaves a compound statement at namespace scope, which is not C++ -- so this
+// file did not compile at all with FIN_WITH_LLVM=OFF, and the switch nobody
+// exercises is exactly the switch that breaks. The body becomes the body of an
+// uncalled function instead, which keeps it *compiled* in an OFF build: a test
+// body that stops compiling should be a build error either way, not something a
+// configuration hides. A body that needs LLVM's own headers cannot live behind
+// this macro at all -- see the DataLayout tests at the end of the file.
+#define BACKEND_TEST(suite, name)                                          \
+    TEST(suite, name) { GTEST_SKIP() << "built with FIN_WITH_LLVM=OFF"; }  \
+    [[maybe_unused]] static void backend_body_##suite##_##name()
 #else
 #define BACKEND_TEST(suite, name) TEST(suite, name)
 #endif
@@ -394,3 +420,182 @@ BACKEND_TEST(Soundness_Codegen, ARejectedProgramProducesNoArtifact) {
     fs::remove(src, ec);
     fs::remove(exe, ec);
 }
+
+// ---------------------------------------------------------------------------
+// The layout table and the backend are the same table.
+// ---------------------------------------------------------------------------
+
+// These two cannot use BACKEND_TEST: their bodies name llvm::DataLayout and
+// llvm::Type directly, and an OFF build has no LLVM headers to compile them
+// against. So the guard is a real #ifdef, with stubs below so the count does not
+// move -- the same reason BACKEND_TEST skips rather than disappearing.
+#ifdef FIN_TESTS_HAVE_BACKEND
+
+TEST(Soundness_Codegen, TheLayoutTableAgreesWithLLVM) {
+    // The one test in this repository that asks a third party whether finc is
+    // right, and the reason it exists is the failure mode it guards.
+    //
+    // Two components compute the size of an `int`: src/types/Layout.hpp, which the
+    // layout pass and every `compiler.layout.*` query read, and LLVM, which lays
+    // out the struct types the backend builds. If those two disagree by one byte,
+    // nothing fails to compile: the front end reports one offset for a field, the
+    // emitted code reads another, and the program runs and prints garbage. No
+    // suite that only asserts what finc *says*, and none that only asserts what
+    // the produced program *does* for the cases someone thought to write, can find
+    // that. So the table is checked against LLVM's own DataLayout for the real
+    // target, name by name.
+    //
+    // The widths are shared rather than duplicated now (CodeGen_LLVM.cpp's byName
+    // reads scalarByName), which makes a disagreement much harder to introduce --
+    // but "harder" is not "impossible": a wrong *alignment* in the table would
+    // survive sharing untouched, since the table declares alignment and LLVM
+    // derives it from the target. That is exactly the case this catches. `long` is
+    // 8-aligned on x86-64 and 4-aligned on i686, and the table's maxScalarAlign
+    // knob is the only thing that knows.
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+
+    const std::string triple = llvm::sys::getDefaultTargetTriple();
+    std::string lookupError;
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, lookupError);
+    ASSERT_NE(target, nullptr) << lookupError;
+    llvm::TargetOptions options;
+    std::unique_ptr<llvm::TargetMachine> machine(target->createTargetMachine(
+        triple, "generic", "", options, llvm::Reloc::PIC_));
+    ASSERT_NE(machine, nullptr) << "no TargetMachine for " << triple;
+    const llvm::DataLayout dataLayout = machine->createDataLayout();
+
+    llvm::LLVMContext ctx;
+    const fin::TargetLayout finTarget;
+
+    // Every name the table answers for. Listed literally rather than iterated,
+    // because a table that could enumerate itself could also forget an entry and
+    // still pass.
+    const char* const names[] = {
+        "bool",  "char",  "byte",   "short", "ushort", "int",   "uint",
+        "long",  "ulong", "int8",   "uint8", "int16",  "uint16", "int32",
+        "uint32", "int64", "uint64", "float", "double", "string",
+    };
+
+    for (const char* name : names) {
+        auto info = fin::scalarByName(name);
+        ASSERT_TRUE(info.has_value()) << name << " is missing from the table";
+        ASSERT_NE(info->kind, fin::ScalarKind::Void) << name;
+
+        llvm::Type* llvmType = nullptr;
+        switch (info->kind) {
+            case fin::ScalarKind::Bool:
+            case fin::ScalarKind::Int:
+                llvmType = llvm::Type::getIntNTy(ctx, info->bits);
+                break;
+            case fin::ScalarKind::Float:
+                llvmType = info->bits == 32 ? llvm::Type::getFloatTy(ctx)
+                                            : llvm::Type::getDoubleTy(ctx);
+                break;
+            case fin::ScalarKind::Pointer:
+                llvmType = llvm::PointerType::getUnqual(ctx);
+                break;
+            case fin::ScalarKind::Void:
+                break;
+        }
+        ASSERT_NE(llvmType, nullptr) << name;
+
+        EXPECT_EQ(fin::sizeOfScalar(*info, finTarget),
+                  dataLayout.getTypeAllocSize(llvmType).getFixedValue())
+            << name << ": the layout pass and LLVM disagree about its size";
+        EXPECT_EQ(fin::alignOfScalar(*info, finTarget),
+                  dataLayout.getABITypeAlign(llvmType).value())
+            << name << ": the layout pass and LLVM disagree about its alignment";
+    }
+}
+
+TEST(Soundness_Codegen, AStructsLayoutMatchesWhatLLVMWouldChoose) {
+    // The same check one level up: given the field types in declaration order,
+    // finc's own offsets and size must be what LLVM computes for the equivalent
+    // literal struct. This is the check that says `alignUp` and the padding rule
+    // are the C rule and not merely a self-consistent invention -- and it is what
+    // the next unit, struct lowering, depends on being true, since that unit will
+    // build exactly these LLVM struct types and GEP into them by field index.
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    const std::string triple = llvm::sys::getDefaultTargetTriple();
+    std::string lookupError;
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, lookupError);
+    ASSERT_NE(target, nullptr) << lookupError;
+    llvm::TargetOptions options;
+    std::unique_ptr<llvm::TargetMachine> machine(target->createTargetMachine(
+        triple, "generic", "", options, llvm::Reloc::PIC_));
+    ASSERT_NE(machine, nullptr);
+    const llvm::DataLayout dataLayout = machine->createDataLayout();
+    llvm::LLVMContext ctx;
+    const fin::TargetLayout finTarget;
+    fin::LayoutEngine engine;
+
+    // Orders chosen so that padding lands in a different place in each: leading,
+    // trailing, interior, and none.
+    const std::vector<std::vector<const char*>> shapes = {
+        {"char", "long"},
+        {"long", "char"},
+        {"char", "int", "char"},
+        {"int", "int"},
+        {"char", "char", "char"},
+        {"double", "char", "short"},
+        {"string", "char"},
+        {"bool", "bool", "long"},
+    };
+
+    for (const auto& shape : shapes) {
+        auto s = std::make_shared<fin::StructType>("S");
+        std::vector<llvm::Type*> members;
+        std::string label;
+        for (size_t i = 0; i < shape.size(); ++i) {
+            s->defineField("f" + std::to_string(i),
+                           std::make_shared<fin::PrimitiveType>(shape[i]), true);
+            auto info = fin::scalarByName(shape[i]);
+            ASSERT_TRUE(info.has_value());
+            switch (info->kind) {
+                case fin::ScalarKind::Bool:
+                case fin::ScalarKind::Int:
+                    members.push_back(llvm::Type::getIntNTy(ctx, info->bits));
+                    break;
+                case fin::ScalarKind::Float:
+                    members.push_back(info->bits == 32 ? llvm::Type::getFloatTy(ctx)
+                                                       : llvm::Type::getDoubleTy(ctx));
+                    break;
+                case fin::ScalarKind::Pointer:
+                    members.push_back(llvm::PointerType::getUnqual(ctx));
+                    break;
+                case fin::ScalarKind::Void:
+                    break;
+            }
+            label += std::string(i ? ", " : "") + shape[i];
+        }
+        auto result = engine.layoutOf(s);
+        ASSERT_TRUE(result.ok()) << label << ": " << result.refusal;
+
+        // isPacked false: finc inserts padding, so the comparison must be against
+        // the padded LLVM struct. Comparing against a packed one would "pass" by
+        // agreeing that there is no padding anywhere.
+        llvm::StructType* llvmStruct = llvm::StructType::get(ctx, members, false);
+        const llvm::StructLayout* llvmLayout = dataLayout.getStructLayout(llvmStruct);
+
+        EXPECT_EQ(result.layout.size, llvmLayout->getSizeInBytes()) << "{" << label << "}";
+        EXPECT_EQ(result.layout.align, llvmLayout->getAlignment().value()) << "{" << label << "}";
+        ASSERT_EQ(result.layout.fields.size(), shape.size()) << "{" << label << "}";
+        for (size_t i = 0; i < shape.size(); ++i) {
+            EXPECT_EQ(result.layout.fields[i].offset, llvmLayout->getElementOffset(i))
+                << "{" << label << "} field " << i;
+        }
+    }
+}
+
+#else
+
+TEST(Soundness_Codegen, TheLayoutTableAgreesWithLLVM) {
+    GTEST_SKIP() << "built with FIN_WITH_LLVM=OFF";
+}
+TEST(Soundness_Codegen, AStructsLayoutMatchesWhatLLVMWouldChoose) {
+    GTEST_SKIP() << "built with FIN_WITH_LLVM=OFF";
+}
+
+#endif  // FIN_TESTS_HAVE_BACKEND

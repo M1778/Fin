@@ -148,6 +148,7 @@ add_library(fin_core STATIC
     src/types/PrimitiveType.cpp
     src/types/SelfType.cpp
     src/types/StructType.cpp
+    src/types/Layout.cpp
 
     # Macros & Preprocessor
     src/preprocessor/Preprocessor.cpp

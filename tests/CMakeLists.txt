@@ -8,6 +8,7 @@ add_executable(fin_tests
     test_semantics.cpp
     test_soundness.cpp
     test_codegen.cpp
+    test_layout.cpp
     test_stdlib.cpp
     test_module_loader.cpp
     test_macro_expander.cpp

@@ -3,6 +3,7 @@
 #include "../ast/ASTNode.hpp"   // the master AST include
 #include "../ast/Visitor.hpp"
 #include "../diagnostics/DiagnosticEngine.hpp"
+#include "../types/Layout.hpp"
 
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
@@ -65,13 +66,16 @@
 //   * The compiler API and `@special`. Wave 4 executes those at compile time; a
 //     `@special` reaching codegen means the interpreter did not consume it.
 //
-// TYPE WIDTHS are a choice this file makes and does not own. `int` is lowered as
-// i32 and `long` as i64, matching what a C `printf("%d")` reads, because the
-// corpus declares printf variadically (`functions.fin:3`) and every observable in
-// the sample set goes through it. The owner ruling on integer widths and on
+// TYPE WIDTHS are a choice this file makes and does not own, and as of wave 4
+// step 6 it does not even hold. `int` is lowered as i32 and `long` as i64,
+// matching what a C `printf("%d")` reads, because the corpus declares printf
+// variadically (`functions.fin:3`) and every observable in the sample set goes
+// through it -- but the table itself now lives in src/types/Layout.hpp, because
+// the layout pass has to answer `size_of` in a build with no backend and cannot
+// read a table that is inside one. The owner ruling on integer widths and on
 // conversions between integer types is still open -- see KnownDefect_Integer-
-// Constants and stdlib/stdio.fin's eleven mismatches -- and if it lands differently
-// this table is the one place that changes.
+// Constants and stdlib/stdio.fin's eleven mismatches -- and if it lands
+// differently, `scalarByName` is the one place that changes.
 //
 // NAMES ARE NOT MANGLED. A Fin `add` is an LLVM `add`. That has to be true for
 // `@define printf` -- an external C symbol has exactly one spelling -- and nothing
@@ -154,33 +158,45 @@ public:
         return byName(node->name);
     }
 
+    // The widths come from src/types/Layout.hpp and are not repeated here.
+    //
+    // They used to be a table in this function, which was one table too many: the
+    // layout pass has to answer `size_of` in a build with no backend at all
+    // (FIN_WITH_LLVM=OFF), so it needs the widths whether or not this file is
+    // compiled -- and two tables that agree today are two tables that disagree
+    // after one edit, with the disagreement showing up as a struct whose field
+    // offsets the backend and the collector compute differently. Which is an ABI
+    // split, and the worst kind: every program still compiles and runs.
+    //
+    // Soundness_Codegen.TheLayoutTableAgreesWithLLVM is the check that the widths
+    // this maps to are the widths LLVM's own DataLayout computes for the types
+    // built here.
     std::optional<CgType> byName(const std::string& name) const {
-        if (name == "void" || name == "noret") return voidType();
-        if (name == "bool") {
-            CgType t = intType(1, false);
-            t.isBool = true;
-            return t;
-        }
-        // The widths this slice fixes. See the file header: this table is what
-        // changes if the integer ruling lands differently.
-        if (name == "char" || name == "int8")  return intType(8, true);
-        if (name == "byte" || name == "uint8") return intType(8, false);
-        if (name == "short" || name == "int16")  return intType(16, true);
-        if (name == "ushort" || name == "uint16") return intType(16, false);
-        if (name == "int" || name == "int32")   return intType(32, true);
-        if (name == "uint" || name == "uint32") return intType(32, false);
-        if (name == "long" || name == "int64")   return intType(64, true);
-        if (name == "ulong" || name == "uint64") return intType(64, false);
-        if (name == "float")  return floatType(llvm::Type::getFloatTy(ctx_));
-        if (name == "double") return floatType(llvm::Type::getDoubleTy(ctx_));
-        // A Fin `string` is a pointer to NUL-terminated bytes for now, which is
-        // what makes `printf("%s", s)` work. A length-carrying string is a
-        // library decision (ADR 0003) and a different representation.
-        if (name == "string") {
-            CgType t;
-            t.kind = CgType::Kind::Ptr;
-            t.llvmType = llvm::PointerType::getUnqual(ctx_);
-            return t;
+        auto info = scalarByName(name);
+        if (!info) return std::nullopt;
+        switch (info->kind) {
+            case ScalarKind::Void:
+                return voidType();
+            case ScalarKind::Bool: {
+                CgType t = intType(info->bits, false);
+                t.isBool = true;
+                return t;
+            }
+            case ScalarKind::Int:
+                return intType(info->bits, info->isSigned);
+            case ScalarKind::Float:
+                return floatType(info->bits == 32 ? llvm::Type::getFloatTy(ctx_)
+                                                  : llvm::Type::getDoubleTy(ctx_));
+            case ScalarKind::Pointer: {
+                // The only Pointer-kinded scalar is `string`: a pointer to
+                // NUL-terminated bytes, which is what makes `printf("%s", s)`
+                // work. A length-carrying string is a library decision (ADR 0003)
+                // and a different representation.
+                CgType t;
+                t.kind = CgType::Kind::Ptr;
+                t.llvmType = llvm::PointerType::getUnqual(ctx_);
+                return t;
+            }
         }
         return std::nullopt;
     }
