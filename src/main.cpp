@@ -15,7 +15,8 @@ namespace {
 void printUsage(std::FILE* out) {
     fmt::print(out, "Usage: finc <file.fin> [options]\n");
     fmt::print(out, "Options:\n");
-    fmt::print(out, "  -o <path>              Output path (accepted, unused until codegen)\n");
+    fmt::print(out, "  -o <path>              Build an executable at <path>; without it finc only checks\n");
+    fmt::print(out, "  -O0, -O1, -O2, -O3     Optimisation level for a '-o' build (default -O0)\n");
     fmt::print(out, "  -I, --include <path>   Add a module search path\n");
     fmt::print(out, "  --fin-libs <paths>     Library search paths, '{}'-separated;\n", fin::kSearchPathSeparator);
     fmt::print(out, "                         replaces $FIN_LIBS rather than adding to it\n");
@@ -23,6 +24,7 @@ void printUsage(std::FILE* out) {
     fmt::print(out, "  --color=<when>         auto (default), always or never\n");
     fmt::print(out, "  --debug-ast            Print the parsed AST\n");
     fmt::print(out, "  --debug-sema           Print semantic analysis details\n");
+    fmt::print(out, "  --debug-codegen        Print what the backend lowers and the link command\n");
     fmt::print(out, "  --no-check             Skip semantic analysis (unsafe)\n");
     fmt::print(out, "  --version              Print version and machine contract version\n");
     fmt::print(out, "  --help                 Show this message\n");
@@ -132,6 +134,19 @@ int main(int argc, char** argv) {
             if (arg == "--debug-ast")  { opts.debugParser = true;   continue; }
             if (arg == "--debug-sema") { opts.debugSema = true;     continue; }
             if (arg == "--no-check")   { opts.skipSemantics = true; continue; }
+            if (arg == "--debug-codegen") { opts.debugCodegen = true; continue; }
+
+            // The levels are spelled out rather than parsed as a number, so that
+            // `-O9` is a usage error instead of silently meaning -O3. Both fields
+            // were already honoured by the backend and reachable from nowhere.
+            if (arg.rfind("-O", 0) == 0 && arg.size() == 3) {
+                const char level = arg[2];
+                if (level < '0' || level > '3')
+                    return fail("unknown optimisation level '" + arg +
+                                "' (expected -O0, -O1, -O2 or -O3)");
+                opts.optLevel = level - '0';
+                continue;
+            }
 
             if (arg == "-I" || arg == "--include") {
                 if (i + 1 >= args.size()) return fail("missing path for " + arg);

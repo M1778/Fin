@@ -252,12 +252,46 @@ static std::string objectPathFor(const std::string& outputPath) {
     return dir.empty() ? name : (dir / name).string();
 }
 
+// Whether the program defines the entry point, which is a top-level `fun main`
+// with a body.
+//
+// A body, because a declaration is not a definition: `@define main() <int>;` names
+// a symbol somebody else provides, and taking it for an entry point would put the
+// linker's diagnostic back. Top level, because that is where the backend looks for
+// it (CodeGen_LLVM declares `main` from the module's own statements) -- and a `main`
+// somewhere the backend would not emit is not one this check may promise.
+static bool hasEntryPoint(const Program& ast) {
+    for (const auto& stmt : ast.statements) {
+        auto* fn = dynamic_cast<const FunctionDeclaration*>(stmt.get());
+        if (fn && fn->name == "main" && fn->body) return true;
+    }
+    return false;
+}
+
 bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag) {
     // No `-o`, no artifact. `finc x.fin` is a check, and making it build would
     // mean every diagnostic test and every corpus snapshot linked an executable
     // -- and would turn "the backend cannot lower this yet" into a failure of a
     // run that only asked about types.
     if (!options.outputPathGiven) return true;
+
+    // An executable needs an entry point, and this is the pass that knows one was
+    // asked for. Checked here rather than after the object is emitted, because the
+    // answer does not depend on the backend: a build with FIN_WITH_LLVM=OFF is
+    // missing its `main` for exactly the same reason.
+    //
+    // Without it the object went to `cc`, which reported "undefined reference to
+    // `main`" from inside its own crt file -- a C diagnostic about a C file, for a
+    // Fin program, under a help line that blamed the C toolchain and suggested
+    // FIN_CC. Five corpus samples reach it and none of them has a broken toolchain.
+    if (!hasEntryPoint(ast)) {
+        diag.reportError("this program has no 'main'",
+                         "'-o' builds an executable and an executable starts "
+                         "somewhere: write 'fun main() <noret>'. A file that is a "
+                         "library has nothing to build -- check it with 'finc "
+                         "<file>' and no '-o'");
+        return false;
+    }
 
     if (!backendAvailable()) {
         // The stub says this too, but saying it here means the message does not

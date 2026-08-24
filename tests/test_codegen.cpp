@@ -169,6 +169,110 @@ BACKEND_TEST(Soundness_Codegen, MainsIntReturnIsTheProcessExitStatus) {
     EXPECT_EQ(b.runExit, 7) << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, AProgramWithNoMainSaysSoRatherThanFailingToLink) {
+    // `-o` is a request for an executable and an executable needs an entry point.
+    // Before this the object was emitted and handed to `cc`, which reported
+    // "undefined reference to `main`" from inside Scrt1.o -- a C diagnostic about a
+    // C file, for a Fin program, followed by finc's own help blaming the C toolchain
+    // and suggesting FIN_CC. Five corpus samples reach it (macros.fin, macros2.fin,
+    // macro_definitions.fin, stdlib/somelib.fin, stdlib/networking.fin), and every
+    // one of them is a file with no main rather than a broken toolchain.
+    const Built b = build(std::string(kPrintf) +
+        "fun helper() <void> {\n"
+        "    printf(\"never called\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("main"), std::string::npos) << b.why();
+    // Specifically not the linker's answer, and specifically not finc's help about
+    // the C toolchain: the program is what is wrong here.
+    EXPECT_EQ(b.compileErr.find("undefined reference"), std::string::npos) << b.why();
+    EXPECT_EQ(b.compileErr.find("FIN_CC"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ACheckWithNoOutputPathNeedsNoMain) {
+    // `finc x.fin` is a check and not a build (Driver::runCodeGen's first line), so a
+    // library -- which is what a corpus file with no main is -- still checks clean.
+    // This is what keeps the diagnostic above from turning every such sample into a
+    // corpus failure.
+    const fs::path src = uniqueTempPath("fin_nomain", ".fin");
+    {
+        std::ofstream f(src, std::ios::binary);
+        const std::string code = "fun helper() <void> { }\n";
+        f.write(code.data(), (std::streamsize)code.size());
+    }
+    const FincRun c = runFinc({src.string()});
+    EXPECT_EQ(c.exitCode, 0) << stripAnsi(c.err);
+    std::error_code ec;
+    fs::remove(src, ec);
+}
+
+// ---------------------------------------------------------------------------
+// The two backend options, which the backend honoured before anything could ask
+// for them: `optLevel` and `debugCodegen` were fields set by nobody.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AnOptimisedBuildRunsTheSameProgram) {
+    // -O2 runs LLVM's own pipeline at that level over the module. What is asserted
+    // is the only thing an optimisation level may change: nothing observable. The
+    // arithmetic is written so that a folded program and an unfolded one both have to
+    // print 30.
+    const fs::path src = uniqueTempPath("fin_opt", ".fin");
+    const fs::path exe = uniqueTempPath("fin_opt_exe");
+    {
+        std::ofstream f(src, std::ios::binary);
+        const std::string code = std::string(kPrintf) +
+            "fun triple(n: int) <int> { return n * 3; }\n"
+            "fun main() <noret> {\n"
+            "    let total <int> = 0;\n"
+            "    for (i: int = 1; i <= 4; i++) { total = total + triple(i); }\n"
+            "    printf(\"%d\\n\", total);\n"
+            "}\n";
+        f.write(code.data(), (std::streamsize)code.size());
+    }
+    const FincRun c = runFinc({src.string(), "-O2", "-o", exe.string()});
+    EXPECT_EQ(c.exitCode, 0) << stripAnsi(c.err);
+    ASSERT_TRUE(fs::exists(exe)) << stripAnsi(c.err);
+
+    const fs::path outPath = uniqueTempPath("fin_opt_out");
+    const std::string cmd = shellQuoteLocal(exe.string()) + " > " +
+                            shellQuoteLocal(outPath.string()) + " 2>&1";
+    EXPECT_EQ(std::system(cmd.c_str()), 0);
+    EXPECT_EQ(readWholeFile(outPath.string()), "30\n");
+
+    std::error_code ec;
+    fs::remove(src, ec);
+    fs::remove(exe, ec);
+    fs::remove(outPath, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, AnUnknownOptimisationLevelIsAUsageError) {
+    // Spelled out rather than parsed as a number: `-O9` means nothing, and a flag
+    // that silently means something else is the failure mode a programmatic caller
+    // cannot see. Exit 2 is Usage (ADR 0009).
+    const FincRun c = runFinc({"-O9", "nonexistent.fin"});
+    EXPECT_EQ(c.exitCode, 2) << stripAnsi(c.err);
+    EXPECT_NE(stripAnsi(c.err).find("-O9"), std::string::npos) << stripAnsi(c.err);
+}
+
+BACKEND_TEST(Soundness_Codegen, DebugCodegenSaysWhatItLowered) {
+    const fs::path src = uniqueTempPath("fin_dbg", ".fin");
+    const fs::path exe = uniqueTempPath("fin_dbg_exe");
+    {
+        std::ofstream f(src, std::ios::binary);
+        const std::string code = "fun main() <noret> { }\n";
+        f.write(code.data(), (std::streamsize)code.size());
+    }
+    const FincRun c = runFinc({src.string(), "--debug-codegen", "-o", exe.string()});
+    EXPECT_EQ(c.exitCode, 0) << stripAnsi(c.err);
+    const std::string err = stripAnsi(c.err);
+    EXPECT_NE(err.find("[codegen]"), std::string::npos) << err;
+    // The link command too, which is what makes a FIN_CC problem diagnosable.
+    EXPECT_NE(err.find("-o"), std::string::npos) << err;
+    std::error_code ec;
+    fs::remove(src, ec);
+    fs::remove(exe, ec);
+}
+
 // ---------------------------------------------------------------------------
 // Values computed at run time. Each of these would pass on a backend that
 // printed a constant, so each prints something the front end could not have

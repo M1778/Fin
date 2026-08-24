@@ -2164,9 +2164,11 @@ bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngin
 
     if (optLevel > 0) {
         // The IR-level pipeline, which is the half a TargetMachine's opt level does
-        // not cover. Nothing sets optLevel above 0 yet -- finc has no `-O` flag --
-        // so this is the shape and not yet a story (ADR 0002 names the story as a
-        // requirement, and it is owed).
+        // not cover. `finc -O2` reaches this (main.cpp), and what it runs is LLVM's
+        // own default pipeline at that level -- which is the shape and not yet a
+        // story: which passes a Fin build should run, and what it may assume about
+        // aliasing and about the collector, is owed (ADR 0002 names it a
+        // requirement).
         llvm::LoopAnalysisManager lam;
         llvm::FunctionAnalysisManager fam;
         llvm::CGSCCAnalysisManager cgam;
