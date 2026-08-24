@@ -19,7 +19,9 @@
 //   getitem = __get       a field initialised to a method name; a method is not a
 //   setitem = __set       value in scope today
 //   cast<auto>(self._arr) `allocate` grows into a fresh buffer here instead, which
-//                         is what the draft's copy-then-delete meant to do
+//                         is what the draft's copy-then-delete meant to do. The `delete`
+//                         half is back now that `delete` takes a dynamic array
+//                         (Soundness_DeletingAnArray); only the cast is still a stand-in.
 //   blame CollectionError the throw form of `blame` is commented out in the corpus
 //     ("...")             too (blame_assert.fin:15); the assert form is what exists
 //   @implements blocks    an overwriter and a second constructor arriving through
@@ -76,6 +78,10 @@ pub struct Collection<T> : <Index, IndexAssign> {
         for (let i <int> = 0; i < self.filled; i++) {
             grown[i] = self._arr[i];
           }
+        // The old buffer, after the copy and before the handle to it is lost. Every
+        // `_arr` this type ever holds came from `new` -- the constructor's `new [T, 1]{}`
+        // or this line's -- so it is always this method's to free.
+        delete self._arr;
         self._arr = grown;
       }
 

@@ -8196,3 +8196,110 @@ TEST(Soundness_HeapArrays, AFixedAnnotationDoesNotAcceptAnAllocation) {
     EXPECT_NE(stripAnsi(r.err).find("expected '[int; fixed]', got '[int]'"), std::string::npos)
         << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// Deleting an array.
+//
+// `delete` took a pointer and nothing else, so `delete self._arr` in
+// stdlib/collection.fin:46 -- where `_arr` is `[T]` -- reported `Cannot delete
+// non-pointer type '[T]'`. That looked like an owner question ("is an array
+// deletable?") only while `new [T, n]` was itself typed a pointer. It is not one
+// any more: the same method that frees the buffer on 46 allocates it with
+// `new [T, amount]{}` on 54, so the corpus both heap-allocates an array and hands
+// it to `delete`. One file, one buffer, both halves.
+//
+// What that licenses is narrow. A *dynamic* array is what `new` produces and what
+// `delete` may take. A fixed-extent one -- `[int; 3]`, from a literal or a
+// declaration that writes the extent -- is not heap memory and no corpus line
+// deletes one, so it keeps the diagnostic. The compiler cannot trace provenance
+// beyond the type, which is the same latitude `delete p` already has over a
+// pointer to a local.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_DeletingAnArray, ADynamicArrayIsDeletable) {
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let a <[int]> = new [int, 8];\n"
+        "    delete a;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeletingAnArray, TheAllocationIsDeletableWhereItIsUsed) {
+    // stdlib/collection.fin:46 and :54 in miniature: a generic field, allocated in
+    // one method through `new` and freed in another through `delete`.
+    const FincRun r = compile(
+        "struct C<T> {\n"
+        "    pub _arr <[T]>,\n"
+        "    fun grow(self: &Self, n: int) <noret> { self._arr = new [T, n]{}; }\n"
+        "    fun drop(self: &Self) <noret> { delete self._arr; }\n"
+        "}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeletingAnArray, APointerIsStillDeletable) {
+    const FincRun r = compile(
+        "struct P { pub v <int>, }\n"
+        "fun main() <noret> {\n"
+        "    let p <&P> = new P{v: 1};\n"
+        "    delete p;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeletingAnArray, AFixedExtentArrayIsNotDeletable) {
+    // Stack memory. `[int; fixed]` is what an annotation with an extent, and an
+    // array literal, both produce -- neither came from an allocator.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [1, 2, 3];\n"
+        "    delete a;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("Cannot delete non-pointer type '[int; fixed]'"),
+              std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeletingAnArray, AnIntIsStillNotDeletable) {
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let n <int> = 1;\n"
+        "    delete n;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("Cannot delete non-pointer type 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeletingAnArray, AStructIsStillNotDeletable) {
+    // The value, not a pointer to it: `delete` on a struct by value is the mistake
+    // the diagnostic exists for.
+    const FincRun r = compile(
+        "struct P { pub v <int>, }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P{v: 1};\n"
+        "    delete p;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("Cannot delete non-pointer type 'P'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeletingAnArray, TheDeletedExpressionIsStillWalked) {
+    // Whatever `delete` decides about the type, the expression under it is analysed:
+    // a diagnostic inside it is not swallowed by the statement.
+    const FincRun r = compile(
+        "fun main() <noret> { delete nope; }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined variable 'nope'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeletingAnArray, AnAddressOfIsStillDeletable) {
+    // simple_pointers.fin:10 `delete &temp;` and deeptest2.fin:50 `delete &name;`.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let temp <int> = 5;\n"
+        "    delete &temp;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
