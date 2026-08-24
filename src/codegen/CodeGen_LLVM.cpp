@@ -223,6 +223,14 @@ struct Local {
     CgType type;
 };
 
+// A module-scope variable. The same pair as a Local, with the home in the object
+// file instead of a frame -- which is why everything downstream of an address
+// treats the two alike (see emitAddress).
+struct GlobalVar {
+    llvm::GlobalVariable* var = nullptr;
+    CgType type;
+};
+
 struct FnInfo {
     llvm::Function* fn = nullptr;
     CgType returnType;
@@ -477,6 +485,11 @@ public:
         declareStructs(program);
         if (failed_) return false;
         declareTopLevel(program);
+        if (failed_) return false;
+        // After the signatures, because a global of struct type needs the struct and
+        // nothing else here needs a function -- an initialiser that called one is
+        // refused. Before the bodies, because every body may read every global.
+        declareGlobals(program);
         if (failed_) return false;
         for (auto& stmt : program.statements) {
             if (failed_) break;
@@ -777,6 +790,154 @@ private:
         return true;
     }
 
+    // Every module-scope variable, as an llvm::GlobalVariable with a constant
+    // initialiser.
+    //
+    // External linkage, and the name in the object is the name in the source: Fin
+    // does not mangle, and tests/samples/variables.fin:9 says a module-scope `let`
+    // "can be changed from outside of program" -- which internal linkage would make
+    // false. Whether `pub` should narrow that is an open question and is not decided
+    // by omission here: `is_public` is not read, so nothing depends on a rule that
+    // does not exist yet.
+    //
+    // Eager, like the structs and enums: a global this file cannot lower fails the
+    // build even if nothing reads it. A global quietly skipped is a name that later
+    // resolves to nothing, and a read of nothing is not a diagnostic, it is a load
+    // from wherever the linker put the next symbol.
+    void declareGlobals(Program& program) {
+        for (auto& stmt : program.statements) {
+            auto* var = dynamic_cast<VariableDeclaration*>(stmt.get());
+            if (!var) continue;
+
+            if (!var->attributes.empty()) {
+                // `#[slaveof($Fin)]` (variables.fin:35) says "live until the program
+                // exits", which a global already does -- but an attribute this file
+                // does not read may be one that changes where the variable lives, and
+                // ignoring that is how a working program ends up in the wrong section.
+                unsupported(*var, fmt::format("an attribute on global '{}'", var->name));
+                return;
+            }
+            if (globals_.count(var->name)) {
+                unsupported(*var, fmt::format("a second declaration of global '{}'",
+                                              var->name));
+                return;
+            }
+
+            // `<auto>` takes the initialiser's type, as it does for a local.
+            const bool isAuto = var->type && var->type->name == "auto" &&
+                                var->type->generics.empty() && !var->type->is_array &&
+                                var->type->pointer_depth == 0;
+            std::optional<CgType> declared;
+            if (!isAuto) {
+                declared = types_.map(var->type.get());
+                if (!declared) {
+                    unsupportedType(*var, var->type.get(), "a global");
+                    return;
+                }
+                if (declared->isVoid()) {
+                    unsupported(*var, fmt::format("a global '{}' of type 'void'",
+                                                  var->name));
+                    return;
+                }
+            } else if (!var->initializer) {
+                unsupported(*var, fmt::format("an '<auto>' global '{}' with no initialiser",
+                                              var->name));
+                return;
+            }
+
+            llvm::Constant* init = nullptr;
+            CgType type;
+            if (var->initializer) {
+                if (!constantInitializer(*var->initializer, declared, init, type)) return;
+            } else {
+                type = *declared;
+                // No initialiser: zero, which is the answer a local with no
+                // initialiser gets and also just where the object file puts it (.bss).
+                init = llvm::Constant::getNullValue(type.llvmType);
+            }
+
+            // isConstant for a `const`, which is what lets a read of one fold into
+            // the code that reads it. Sound because the analyzer already refuses
+            // assigning one ("Cannot assign to immutable variable"), so the two
+            // passes are saying the same thing rather than two things that agree.
+            auto* global = new llvm::GlobalVariable(
+                module_, type.llvmType, /*isConstant=*/!var->is_mutable,
+                llvm::GlobalValue::ExternalLinkage, init, var->name);
+
+            globals_[var->name] = GlobalVar{global, type};
+            registeredGlobals_.insert(var);
+            debugLog(fmt::format("declared global {}{}", var->is_mutable ? "" : "const ",
+                                 var->name));
+        }
+    }
+
+    // A global's initialiser, folded to a constant.
+    //
+    // Emitted into a throwaway function so that the ordinary expression path does the
+    // work -- literals, an array or struct literal, an enumerator, `sizeof`, a cast,
+    // and any arithmetic over those all fold through the IRBuilder's own folder, and
+    // this pass does not need a second, smaller constant evaluator that would
+    // disagree with the first one somewhere.
+    //
+    // The block has to come out *empty*. That is the test, and it is stricter than
+    // asking whether the result happens to be an llvm::Constant: an instruction left
+    // behind is a computation the program asked for, and this function is about to be
+    // deleted. `let G <int> = one();` lands there and is refused, because when code
+    // before `main` runs -- and in what order against every other module's -- is the
+    // initialisation-order rule and not something a lowering pass may decide. C
+    // refuses it too.
+    bool constantInitializer(Expression& expr, const std::optional<CgType>& declared,
+                             llvm::Constant*& out, CgType& outType) {
+        auto* holder = llvm::Function::Create(
+            llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_), false),
+            llvm::GlobalValue::InternalLinkage, "fin.global.init", module_);
+        auto* block = llvm::BasicBlock::Create(ctx_, "entry", holder);
+
+        // The emitter state a global initialiser must not see: no frame and no
+        // locals. The holder stands in for the current function, so an expression
+        // that wants a basic block gets a real one rather than a null dereference --
+        // and if it puts anything in it, the emptiness check below refuses.
+        FnInfo holderInfo;
+        holderInfo.fn = holder;
+        holderInfo.returnType = *types_.byName("int");
+        FnInfo* savedFn = currentFn_;
+        auto savedBlock = builder_.saveIP();
+        std::vector<std::unordered_map<std::string, Local>> savedScopes;
+        savedScopes.swap(scopes_);
+        scopes_.emplace_back();
+        currentFn_ = &holderInfo;
+        builder_.SetInsertPoint(block);
+
+        CgVal v = declared ? emitAs(expr, *declared) : emit(expr);
+
+        // Any block, not just the entry one: a short-circuit or a ternary would have
+        // made more of them, and they are all code this global cannot have.
+        const bool emittedCode = holder->size() != 1 || !block->empty();
+        builder_.restoreIP(savedBlock);
+        scopes_.swap(savedScopes);
+        currentFn_ = savedFn;
+
+        llvm::Constant* folded = v.ok() ? llvm::dyn_cast<llvm::Constant>(v.value) : nullptr;
+        CgType type = declared ? *declared : v.type;
+        llvm::Value* converted = nullptr;
+        if (folded && !emittedCode) {
+            // Through the same conversion an assignment uses, so an `int` literal
+            // reaching a `<double>` global widens here exactly as it would there.
+            converted = convert(expr, CgVal{folded, v.type}, type);
+        }
+        holder->eraseFromParent();
+
+        if (failed_) return false;
+        if (!v.ok() || !folded || emittedCode || !converted ||
+            !llvm::isa<llvm::Constant>(converted)) {
+            unsupported(expr, "a global initialiser that is not a constant");
+            return false;
+        }
+        out = llvm::cast<llvm::Constant>(converted);
+        outType = type;
+        return true;
+    }
+
     void declareTopLevel(Program& program) {
         for (auto& stmt : program.statements) {
             if (auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
@@ -964,6 +1125,12 @@ private:
     std::optional<Addr> emitAddress(Expression& expr) {
         if (auto* id = dynamic_cast<Identifier*>(&expr)) {
             if (Local* local = findLocal(id->name)) return Addr{local->slot, local->type};
+            // A global has an address for the same reasons a local does, and being one
+            // is the whole of what makes `Counter = Counter + 1` and `Cells[1] = 42`
+            // work at module scope: everything past this point is the same code.
+            auto global = globals_.find(id->name);
+            if (global != globals_.end())
+                return Addr{global->second.var, global->second.type};
             return std::nullopt;
         }
         if (auto* member = dynamic_cast<MemberAccess*>(&expr)) {
@@ -1106,8 +1273,9 @@ private:
     void visit(DefineDeclaration& node) override { (void)node; }  // prototype only
 
     void visit(VariableDeclaration& node) override {
+        if (registeredGlobals_.count(&node)) return;  // declareGlobals did it
         if (!currentFn_) {
-            unsupported(node, "a global variable");
+            unsupported(node, fmt::format("the variable '{}' declared here", node.name));
             return;
         }
 
@@ -1362,6 +1530,16 @@ private:
         if (Local* local = findLocal(node.name)) {
             value_ = CgVal{builder_.CreateLoad(local->type.llvmType, local->slot, node.name),
                            local->type};
+            return;
+        }
+        // Then the globals, which are the same kind of thing as a local with a
+        // different home -- and after them for the same reason: a local of the name
+        // shadows one (ALocalOutranksAGlobalOfTheSameName).
+        auto global = globals_.find(node.name);
+        if (global != globals_.end()) {
+            value_ = CgVal{builder_.CreateLoad(global->second.type.llvmType,
+                                               global->second.var, node.name),
+                           global->second.type};
             return;
         }
         // After the locals and not before: a local of the same name shadows the
@@ -2195,6 +2373,11 @@ private:
     // never saw is refused rather than assumed handled.
     std::set<const StructDeclaration*> registered_;
     std::vector<std::unordered_map<std::string, Local>> scopes_;
+
+    // Module-scope variables, and the declarations declareGlobals has already
+    // handled -- so that the top-level walk skips them instead of refusing.
+    std::unordered_map<std::string, GlobalVar> globals_;
+    std::set<const VariableDeclaration*> registeredGlobals_;
     std::vector<LoopTargets> loops_;
     FnInfo* currentFn_ = nullptr;
     CgVal value_;

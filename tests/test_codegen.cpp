@@ -1211,6 +1211,196 @@ BACKEND_TEST(Soundness_Codegen, AnEnumMemberValueThatIsNotConstantIsRefused) {
 }
 
 // ---------------------------------------------------------------------------
+// A global, which is a variable whose home is the object file rather than a frame.
+//
+// `tests/samples/variables.fin:6-11` writes four of them and calls module scope out
+// as its own thing: a `const` "cannot be reassigned", a `let` "can be changed from
+// outside of program". So the lowering is an `llvm::GlobalVariable` with external
+// linkage -- Fin does not mangle, so the name in the object is the name in the
+// source, and that is what makes `extern` and `@define` able to reach one.
+//
+// The initialiser must be a *constant*. Not a limitation of this pass so much as a
+// question it is not allowed to answer: code that runs before `main` runs at some
+// point in some order relative to every other module's, and picking one here would
+// be inventing the initialisation-order rule. `= f()` is refused, which is C's
+// answer and not C++'s.
+//
+// A `const` becomes an LLVM constant global, which is what lets it fold into the
+// code that reads it. The analyzer already refuses assigning one, so the two agree.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AGlobalIsReadFromAFunction) {
+    // tests/samples/extern_as.fin:6 (`const myglobv <int> = 10;`).
+    const Built b = build(std::string(kPrintf) +
+        "const K <int> = 10;\n"
+        "let Counter <int> = 3;\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d\\n\", K, Counter);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalWithNoInitialiserIsZero) {
+    // The same answer a local with no initialiser gets, and here it is also what the
+    // object file does anyway: a global with no value lives in .bss.
+    const Built b = build(std::string(kPrintf) +
+        "let Counter <int>;\n"
+        "fun main() <noret> { printf(\"%d\\n\", Counter); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalIsAssignedAndKeepsItsValueAcrossCalls) {
+    // The point of a global: one home, and every function sees the same one. A
+    // counter bumped by a callee and read by the caller is the smallest program that
+    // cannot be done with locals.
+    const Built b = build(std::string(kPrintf) +
+        "let Counter <int> = 0;\n"
+        "fun bump() <noret> { Counter = Counter + 1; }\n"
+        "fun main() <noret> {\n"
+        "    bump();\n"
+        "    bump();\n"
+        "    bump();\n"
+        "    printf(\"%d\\n\", Counter);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ACompoundAssignmentToAGlobalReadsAndWritesTheSameHome) {
+    const Built b = build(std::string(kPrintf) +
+        "let Counter <int> = 10;\n"
+        "fun main() <noret> {\n"
+        "    Counter += 5;\n"
+        "    Counter++;\n"
+        "    printf(\"%d\\n\", Counter);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "16\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ALocalOutranksAGlobalOfTheSameName) {
+    // The scope the analyzer resolved it in, and the same rule the enumerators
+    // already follow (ALocalOutranksAnEnumMemberOfTheSameName).
+    const Built b = build(std::string(kPrintf) +
+        "let G <int> = 1;\n"
+        "fun main() <noret> {\n"
+        "    let G <int> = 2;\n"
+        "    printf(\"%d\\n\", G);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalOfEachScalarTypeRoundTrips) {
+    // No `<double>` here: a float literal does not widen to double in the front end
+    // yet (a booked gap), which is a front-end limit and not a global one -- the
+    // `%f` promotion still exercises float, since printf's varargs widen it.
+    const Built b = build(std::string(kPrintf) +
+        "const F <float> = 3.5;\n"
+        "const B <bool> = true;\n"
+        "const S <string> = \"hi\";\n"
+        "const L <long> = 9000000000;\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%.2f %d %s %ld\\n\", F, B, S, L);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3.50 1 hi 9000000000\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalWithAnInferredTypeTakesItsInitialisers) {
+    // tests/samples/variables.fin:7 (`const MAX_FILE_SIZE <auto> = 1000;`).
+    const Built b = build(std::string(kPrintf) +
+        "const MAX <auto> = 1000;\n"
+        "fun main() <noret> { printf(\"%d\\n\", MAX); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1000\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalArrayIsIndexedAndAssigned) {
+    const Built b = build(std::string(kPrintf) +
+        "let Cells <[int, 3]> = [7, 8, 9];\n"
+        "fun main() <noret> {\n"
+        "    Cells[1] = 42;\n"
+        "    printf(\"%d %d %d\\n\", Cells[0], Cells[1], Cells[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 42 9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalStructHasItsFieldsReadAndWritten) {
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> = 5 }\n"
+        "let Origin <P> = P { a: 1 };\n"
+        "fun main() <noret> {\n"
+        "    Origin.a = 9;\n"
+        "    printf(\"%d %d\\n\", Origin.a, Origin.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9 5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalOfEnumTypeIsItsMembersNumber) {
+    const Built b = build(std::string(kPrintf) +
+        "enum E { A = 1, B }\n"
+        "const G <E> = B;\n"
+        "fun main() <noret> { printf(\"%d\\n\", G); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalsInitialiserMayBeAConstantExpression) {
+    // Folded, not run: `2 + 3 * 4` is a number by the time the object is written.
+    const Built b = build(std::string(kPrintf) +
+        "const N <int> = 2 + 3 * 4;\n"
+        "const M <int> = sizeof(long);\n"
+        "fun main() <noret> { printf(\"%d %d\\n\", N, M); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "14 8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalInitialisedByACallIsRefused) {
+    // When it would run, and in what order against every other module's, is the
+    // initialisation-order rule -- and that is a decision rather than a pass. C
+    // refuses this too; C++ does not, and pays for it.
+    const Built b = build(std::string(kPrintf) +
+        "fun one() <int> { return 1; }\n"
+        "let G <int> = one();\n"
+        "fun main() <noret> { printf(\"%d\\n\", G); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalWithAnAttributeIsRefused) {
+    // `#[slaveof($Fin)]` (variables.fin:35) is a lifetime instruction, and a global
+    // already outlives everything -- but an attribute this file does not read may be
+    // one that changes where the variable lives. The same rule as a struct's.
+    const Built b = build(std::string(kPrintf) +
+        "#[slaveof($Fin)]\n"
+        "const G <int> = 1;\n"
+        "fun main() <noret> { printf(\"%d\\n\", G); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(KnownDefect_Codegen, AGlobalDoesNotHoist) {
+    // A function above the global cannot see it: "Undefined variable 'G'" from the
+    // analyzer, not a refusal from here. The backend's half is done -- every global
+    // is declared before any body is emitted -- so this is the same missing
+    // declaration-hoisting pass that AStructTypeDoesNotHoist and
+    // AnEnumMemberDoesNotHoist book at the other two kinds of declaration. When it
+    // exists, this becomes Soundness_Codegen.AGlobalDeclaredBelowItsUseLowers.
+    const Built b = build(std::string(kPrintf) +
+        "fun get() <int> { return G; }\n"
+        "let G <int> = 7;\n"
+        "fun main() <noret> { printf(\"%d\\n\", get()); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("Undefined variable 'G'"), std::string::npos) << b.why();
+    EXPECT_EQ(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+// ---------------------------------------------------------------------------
 // `sizeof`, which is a number the layout has already decided.
 //
 // The grammar takes a type and only a type -- `sizeof(1 + 1)` is a syntax error and
