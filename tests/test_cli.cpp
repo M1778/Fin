@@ -169,15 +169,20 @@ TEST(MachineContract, TheBaselineArgvReproducerNoLongerCompilesTheWrongFile) {
         << "the operand of -o must not become the input file";
 }
 
-TEST(MachineContract, DashOIsAcceptedAndIgnored) {
+TEST(MachineContract, DashOProducesTheNamedExecutable) {
+    // This test used to be DashOIsAcceptedAndIgnored, and asserted the opposite:
+    // `-o` was stored and never honoured because runCodeGen returned true without
+    // emitting anything. Wave 5's first artifact is what changed it. What the CLI
+    // owes is narrow and is all that is checked here -- the file appears, at the
+    // path asked for, and the exit code still means what ADR 0009 says. Whether
+    // the program *runs* is Soundness_Codegen's, in tests/test_codegen.cpp.
     TempFin f("fun main() <noret> {}\n");
-    // Not a fixed path. This asserts the target is *not* created, so one stale
-    // file left in /tmp by any earlier run would have failed it permanently.
     const std::string target = uniqueTempPath("fin_o_flag_target");
     auto r = runFinc({f.str(), "-o", target});
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
-    EXPECT_FALSE(fs::exists(target))
-        << "-o is stored, not honoured, until codegen exists";
+    EXPECT_TRUE(fs::exists(target)) << "-o must name the artifact it produces";
+    std::error_code ec;
+    fs::remove(target, ec);
 }
 
 TEST(MachineContract, DashOWithoutAnOperandIsAUsageError) {

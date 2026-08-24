@@ -32,8 +32,14 @@ private:
     // Pipeline Stages
     std::string runPreprocessor(const std::string& source, DiagnosticEngine& diag);
     bool runParser(const std::string& source, std::unique_ptr<Program>& outAST, DiagnosticEngine& diag);
-    bool runCodeGen(Program& ast); // Code generation placeholder
-    bool runLinker();              // Not yet implemented
+    // Emits an object file and links it into `options.outputPath`. A no-op that
+    // returns true when `-o` was not written: `finc x.fin` checks a program and
+    // `finc x.fin -o x` builds one (see CompilerOptions::outputPathGiven).
+    bool runCodeGen(Program& ast, DiagnosticEngine& diag);
+    // `cc <object> -o <outputPath>`. Separate from runCodeGen because the object
+    // is what the backend owns and the executable is what a C toolchain does --
+    // and because `finn` will eventually want the object without the link.
+    bool runLinker(const std::string& objectPath, DiagnosticEngine& diag);
 };
 
 }

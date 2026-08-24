@@ -25,16 +25,18 @@ endif()
 # wearing the same version number" is precisely the failure ADR 0010 exists to
 # stop.
 #
-# FIN_WITH_LLVM defaults OFF because no translation unit in src/ includes an
-# LLVM header today (`grep -rn '#include *[<"]llvm' src` finds nothing) and
-# ConanCenter publishes no LLVM 18 for any platform, nor any llvm-core binary
-# at all for Linux armv8, macOS x86_64 or Windows armv8.  Turning it ON with a
-# system LLVM 18 present is supported and checked; wave 5 (codegen) is where
-# the switch flips and where the binaries have to come from somewhere.
+# FIN_WITH_LLVM is ON from wave 5 onwards -- this is the switch the comment above
+# said would flip, and src/codegen/CodeGen_LLVM.cpp is what flipped it.  With it
+# OFF the build still succeeds and finc still checks: src/codegen/CodeGen_Stub.cpp
+# takes the module's place and every `-o` refuses with "this build has no
+# backend", which is a diagnostic and not a silently empty artifact.  That is the
+# configuration for a platform where LLVM 18 cannot be had -- ConanCenter
+# publishes no LLVM 18 for Linux armv8, macOS x86_64 or Windows armv8, and none
+# of the six CI combinations may be allowed to go quiet over it.
 set(FIN_LLVM_MAJOR 18 CACHE STRING
     "The single LLVM major version finc is built against (ADR 0010)")
 option(FIN_WITH_LLVM
-    "Find and link LLVM ${FIN_LLVM_MAJOR}. Required from wave 5 (codegen)." OFF)
+    "Find and link LLVM ${FIN_LLVM_MAJOR}. Required from wave 5 (codegen)." ON)
 
 # --- Dependencies ---
 find_package(BISON 3.2 REQUIRED)
@@ -42,7 +44,13 @@ find_package(FLEX REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 
 if(FIN_WITH_LLVM)
-    find_package(LLVM ${FIN_LLVM_MAJOR} REQUIRED CONFIG)
+    # No version argument, deliberately.  LLVMConfigVersion.cmake compares
+    # major.minor, so asking for `18` leaves PACKAGE_FIND_VERSION_MINOR empty and
+    # LLVM 18.1.3 is *rejected* as incompatible with 18 -- which is the opposite
+    # of what the pin means.  The check below is the pin, and it is the honest
+    # place for it: it compares the major that ADR 0010 names against the major
+    # that was found, and it says which one it found and where.
+    find_package(LLVM REQUIRED CONFIG)
     if(NOT LLVM_VERSION_MAJOR VERSION_EQUAL FIN_LLVM_MAJOR)
         message(FATAL_ERROR
             "ADR 0010: finc is built against exactly one LLVM major, "
@@ -151,11 +159,24 @@ add_library(fin_core STATIC
     src/macros/expander/ExpanderTypes.cpp
 )
 
+# --- Backend (wave 5) ---------------------------------------------------------
+# Exactly one of these two is compiled, and both implement the whole of
+# src/codegen/CodeGen.hpp.  The stub is not a no-op: it refuses, so a build
+# without LLVM produces diagnostics rather than empty artifacts.
+if(FIN_WITH_LLVM)
+    target_sources(fin_core PRIVATE src/codegen/CodeGen_LLVM.cpp)
+else()
+    target_sources(fin_core PRIVATE src/codegen/CodeGen_Stub.cpp)
+endif()
+
 target_link_libraries(fin_core PUBLIC fmt::fmt)
 
 if(FIN_WITH_LLVM)
     target_link_libraries(fin_core PUBLIC LLVM)
     target_include_directories(fin_core PUBLIC ${LLVM_INCLUDE_DIRS})
+    # PUBLIC so tests/CMakeLists.txt can key its backend tests off the same
+    # switch without repeating the find_package result.
+    target_compile_definitions(fin_core PUBLIC FIN_WITH_LLVM=1)
 endif()
 
 target_include_directories(fin_core PUBLIC

@@ -157,6 +157,7 @@ int main(int argc, char** argv) {
             if (arg == "-o") {
                 if (i + 1 >= args.size()) return fail("missing path for -o");
                 opts.outputPath = args[++i];
+                opts.outputPathGiven = true;
                 continue;
             }
             if (arg.rfind("--diagnostics=", 0) == 0) {

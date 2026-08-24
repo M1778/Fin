@@ -16,8 +16,15 @@ enum class ExitCode : int {
 
 struct CompilerOptions {
     std::string inputFile;
-    // Accepted and stored, ignored until codegen exists.
     std::string outputPath = "a.out";
+    // Whether `-o` was actually written. Separate from comparing outputPath
+    // against its default because `-o a.out` is a real request and because the
+    // flag is what decides whether codegen runs at all: `finc x.fin` checks a
+    // program, `finc x.fin -o x` builds one. Every test that wants diagnostics,
+    // and tests/tools/corpus_snapshot.sh, invoke the first form -- so the
+    // default has to stay "check only", or a sample the backend cannot lower yet
+    // would start failing a run that only ever asked about its types.
+    bool outputPathGiven = false;
 
     std::vector<std::string> includePaths;
 

@@ -7,12 +7,23 @@
 #include "../ast/ASTPrinter.hpp"
 #include "../macros/MacroExpander.hpp"
 #include "../utils/ModuleLoader.hpp"
+#include "../codegen/CodeGen.hpp"
 #include "SearchPaths.hpp"
 
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
-#include <filesystem>
 #include <fmt/core.h>
+
+// Only for the process id in a temporary object's name (see objectPathFor).
+#ifdef _WIN32
+#include <process.h>
+#define FIN_GETPID _getpid
+#else
+#include <unistd.h>
+#define FIN_GETPID getpid
+#endif
 
 namespace fin {
 
@@ -188,7 +199,7 @@ int Driver::compile() {
 
     // 5. CodeGen
     if (!options.skipCodegen) {
-        if (!runCodeGen(*ast)) {
+        if (!runCodeGen(*ast, diag)) {
             return finish(ExitCode::Diagnostics);
         }
     }
@@ -227,7 +238,89 @@ bool Driver::runParser(const std::string& source, std::unique_ptr<Program>& outA
     return false;
 }
 
-bool Driver::runCodeGen(Program& ast) {
+// A path in the same directory as the executable being built, so a read-only
+// /tmp or a TMPDIR on a different filesystem cannot break a build, and so the
+// object sits where a `-c`-style flag would eventually want to leave it.
+static std::string objectPathFor(const std::string& outputPath) {
+    std::filesystem::path out(outputPath);
+    std::filesystem::path dir = out.parent_path();
+    std::string stem = out.stem().string();
+    if (stem.empty()) stem = "a";
+    // The pid keeps two concurrent builds of one target from writing the same
+    // object -- which `ctest -j` does, repeatedly.
+    std::string name = fmt::format(".{}.{}.fin.o", stem, (long)FIN_GETPID());
+    return dir.empty() ? name : (dir / name).string();
+}
+
+bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag) {
+    // No `-o`, no artifact. `finc x.fin` is a check, and making it build would
+    // mean every diagnostic test and every corpus snapshot linked an executable
+    // -- and would turn "the backend cannot lower this yet" into a failure of a
+    // run that only asked about types.
+    if (!options.outputPathGiven) return true;
+
+    if (!backendAvailable()) {
+        // The stub says this too, but saying it here means the message does not
+        // depend on having reached a node the emitter refuses.
+        return generateObject(ast, options.outputPath, diag, options.optLevel,
+                              options.debugCodegen);
+    }
+
+    const std::string objectPath = objectPathFor(options.outputPath);
+    std::error_code ec;
+
+    // Nothing from a previous build survives a failure of this one. A stale
+    // executable left in place is a `./a.out` that runs yesterday's code and
+    // reports it as today's.
+    std::filesystem::remove(options.outputPath, ec);
+
+    if (!generateObject(ast, objectPath, diag, options.optLevel, options.debugCodegen)) {
+        std::filesystem::remove(objectPath, ec);
+        return false;
+    }
+
+    bool linked = runLinker(objectPath, diag);
+    std::filesystem::remove(objectPath, ec);
+    if (!linked) {
+        std::filesystem::remove(options.outputPath, ec);
+        return false;
+    }
+    return true;
+}
+
+bool Driver::runLinker(const std::string& objectPath, DiagnosticEngine& diag) {
+    // `cc` rather than a linker directly: the C driver is what knows this
+    // platform's crt files, its dynamic loader, and where libc is. Fin has no
+    // runtime of its own to add yet, and when it does this is the one line that
+    // grows a `-lfin`.
+    //
+    // `FIN_CC` overrides it, because a cross build and a distro whose compiler
+    // is not on PATH as `cc` are both real and neither is worth a rebuild of
+    // finc to accommodate.
+    const char* fromEnv = std::getenv("FIN_CC");
+    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
+
+    auto quote = [](const std::string& s) {
+        std::string out = "'";
+        for (char c : s) {
+            if (c == '\'') out += "'\\''";
+            else out += c;
+        }
+        return out + "'";
+    };
+
+    std::string command = fmt::format("{} {} -o {}", quote(cc), quote(objectPath),
+                                      quote(options.outputPath));
+    if (options.debugCodegen) diag.note("[codegen] " + command);
+
+    int rc = std::system(command.c_str());
+    if (rc != 0) {
+        diag.reportError(fmt::format("link failed: {} exited with {}", cc, rc),
+                         "the object file was emitted, so this is the C toolchain "
+                         "rather than the Fin program; set FIN_CC to name a working "
+                         "compiler driver");
+        return false;
+    }
     return true;
 }
 
