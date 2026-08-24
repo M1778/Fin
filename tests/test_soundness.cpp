@@ -11007,3 +11007,194 @@ TEST(Soundness_Increment, AnIncrementHasTheTypeOfItsOperand) {
     const auto bad = compile("fun main() <noret> {\n    let i <int> = 1;\n    let s <string> = i++;\n}\n");
     EXPECT_NE(bad.exitCode, 0) << "`i++` is an int, so it must not initialise a string";
 }
+
+// ---------------------------------------------------------------------------
+// A prototype literal is offered what it is becoming.
+//
+// The same rule as Soundness_ArrayLiteralElements at the sibling container. A
+// prototype literal typed itself from its entries and was then compared as a unit,
+// so `let a <{uint, int}> = { 7 : 1 };` reported `expected '<{uint, int}>', got
+// '<{int, int}>'` about a non-negative integer constant that constantFitsType has
+// called a `uint` since the integer work -- and `let a <{int, [uint]}> = { 1 : [7,
+// 3] };` reported `got '<{int, [int, 2]}>'`, which is the array literal's own fixed
+// hint working correctly one level down from a boundary that never handed it
+// anything.
+//
+// One difference from the array, and it is not an oversight: there is no
+// entries-agree-with-each-other question here. An array literal keeps one, because
+// `[any]` reads as one unknown type in both of the corpus's uses of it. A prototype
+// widens a mixed literal to `object` *by design* -- prototype_test.fin:14 writes
+// `<auto>` over `{ 10 : 10, "a": true }` and its own comment says auto resolves to
+// `<{object, object}>` -- so mixed keys are what the container is for, and there is
+// no homogeneity rule to preserve.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_PrototypeLiteralElements, TheKeyTypeReachesTheKeys) {
+    // `expected '<{uint, int}>', got '<{int, int}>'` before this: every key is a
+    // non-negative integer constant, which is a `uint` when it is asked directly.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{uint, int}> = { 7 : 1 };\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeLiteralElements, TheValueTypeReachesTheValues) {
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{int, ulong}> = { 1 : 7 };\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeLiteralElements, AWrongValueIsReportedAtTheValue) {
+    // At the value and not at the literal, which is the point of offering the type
+    // inward: the caret lands on the entry that is wrong rather than on the brace.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{int, string}> = { 1 : 2 };\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0);
+    const auto stripped = stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripped), 1) << stripped;
+    EXPECT_NE(stripped.find("expected 'string', got 'int'"), std::string::npos) << stripped;
+}
+
+TEST(Soundness_PrototypeLiteralElements, AWrongKeyIsReportedAtTheKey) {
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{string, int}> = { 1 : 2 };\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0);
+    const auto stripped = stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripped), 1) << stripped;
+    EXPECT_NE(stripped.find("expected 'string', got 'int'"), std::string::npos) << stripped;
+}
+
+TEST(Soundness_PrototypeLiteralElements, EveryEntryIsChecked) {
+    // Two wrong values are two diagnostics. A literal compared as a unit could only
+    // ever produce one, however many of its entries were wrong.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{int, string}> = { 1 : 2, 2 : 3 };\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 2) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeLiteralElements, AnUnrelatedAnnotationReportsTheKeyAndTheValueAndNotTheLiteral) {
+    // Both halves of the one entry are wrong, so both are reported -- and the literal
+    // itself is not, because it adopts what its entries were checked against. A third
+    // diagnostic naming `<{string, string}>` against `<{int, int}>` would be the
+    // report of a mistake already reported twice.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{string, string}> = { 1 : 2 };\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0);
+    const auto stripped = stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripped), 2) << stripped;
+    // messagesOnly, because the echoed source line carries the annotation's own `<{`.
+    EXPECT_EQ(messagesOnly(stripped).find("<{"), std::string::npos)
+        << "the entries said it; the literal must not say it again\n" << stripped;
+}
+
+TEST(Soundness_PrototypeLiteralElements, AnEmptyArrayValueTakesItsElementTypeFromTheAnnotation) {
+    // tests/samples/prototype_test.fin:45 in miniature. `[]` has no element to infer
+    // from, and the annotation two boundaries up is the only thing that can say what
+    // it holds -- the sample's own comment on that line is "empty array".
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{int, [string]}> = { 1 : [] };\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeLiteralElements, TheHintChainsThroughToAnArraysElements) {
+    // `got '<{int, [int, 2]}>'` before this. The array literal's own hint handling was
+    // already right; the prototype boundary was handing it nothing, so the elements
+    // were typed from themselves and `[uint]` never reached them.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{int, [uint]}> = { 1 : [7, 3] };\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeLiteralElements, AFixedArrayKeyStillFitsADynamicAnnotation) {
+    // prototype_test.fin:43-46's shape: an array literal as a key, under an annotation
+    // whose key type waives the extent.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{[int], [{int, string}]}> = {\n"
+                           "        [1,2,3] : [{1 : \"Hello\"}, {100: \"Some\"}],\n"
+                           "        [5,5,5] : []\n"
+                           "    };\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeLiteralElements, ANestedPrototypeGetsItsOwnKeyAndValueTypes) {
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{int, {uint, string}}> = { 1 : { 2 : \"x\" } };\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeLiteralElements, AMixedLiteralStillWidensToObjectWithoutAnAnnotation) {
+    // prototype_test.fin:14 verbatim, and its comment is the assertion: "auto would
+    // resolve to `<{object, object}>`". Nothing about offering a type inward may change
+    // what happens when nothing offers one.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <auto> = { 10 : 10, \"a\" : true };\n"
+                           "    let b <int> = a;\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0);
+    const auto stripped = stripAnsi(r.err);
+    EXPECT_NE(stripped.find("got '<{object, object}>'"), std::string::npos) << stripped;
+}
+
+TEST(Soundness_PrototypeLiteralElements, AnObjectAnnotationStillAcceptsAMixedLiteral) {
+    // prototype_test.fin:40, whose comment explains the choice: "object type is an
+    // expensive type but can fit any datatype in it at the cost of memory and speed".
+    // Offering `object` to each key and value must not narrow that.
+    const auto r = compile("struct CustomDT {}\n"
+                           "fun main() <noret> {\n"
+                           "    let obj <{object, object}> = { 1: 1.0, \"a\": CustomDT{} };\n"
+                           "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeLiteralElements, TheLiteralIsStillItsOwnTypeWithoutAHint) {
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <auto> = { 1 : \"x\" };\n"
+                           "    let b <int> = a;\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("got '<{int, string}>'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeLiteralElements, AnUndefinedKeyStillReportsOnce) {
+    // The sentinel's job, and the reason the hint does not replace it: the key does not
+    // type, and the literal must not then report a second time about a key type the
+    // program never wrote. One mistake, one diagnostic.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{int, int}> = { nosuchvar : 1 };\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PrototypeLiteralElements, ANegativeKeyStillDoesNotFitAnUnsignedKeyType) {
+    // The hint reaching the keys is not the hint being obeyed by them. constantFitsType
+    // admits a non-negative integer constant to an unsigned target and no other, so this
+    // must still report.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let a <{uint, int}> = { -7 : 1 };\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0) << "a negative constant is not a uint";
+}
+
+TEST(Soundness_PrototypeLiteralElements, ANonConstantOfTheWrongTypeIsStillRefused) {
+    // Every test above that now compiles does so because a *constant* fits. A variable
+    // of the wrong type is not a constant and there is no conversion.
+    const auto r = compile("fun main() <noret> {\n"
+                           "    let s <string> = \"x\";\n"
+                           "    let a <{int, int}> = { 1 : s };\n"
+                           "}\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}

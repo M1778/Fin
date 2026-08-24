@@ -168,8 +168,41 @@ static bool isEnumType(const TypePtr& type) {
 }
 
 void SemanticAnalyzer::visit(PrototypeLiteral& node) {
-    std::shared_ptr<Type> keyType = nullptr;
-    std::shared_ptr<Type> valueType = nullptr;
+    // The key and value types this literal is about to be checked against, when
+    // something said them. `let a <{uint, int}> = { 7 : 1 };` reported
+    // `expected '<{uint, int}>', got '<{int, int}>'`: the key is a non-negative integer
+    // constant, which constantFitsType has called a `uint` since the integer work, and
+    // the literal never asked -- it typed itself from its entries and the whole
+    // prototype was then compared as a unit, by which point the constants are gone and
+    // the only thing left to compare is `int` against `uint`. The same mistake
+    // visit(ArrayLiteral&) made at the sibling container, and this is the same fix.
+    //
+    // The chain matters as much as the case: `let a <{int, [uint]}> = { 1 : [7, 3] };`
+    // reported `got '<{int, [int, 2]}>'`, where the array literal's own hint handling was
+    // already correct and this boundary was handing it nothing.
+    std::shared_ptr<Type> wantedKey = nullptr;
+    std::shared_ptr<Type> wantedValue = nullptr;
+    if (auto hint = hintFor(node)) {
+        if (auto* proto = hint->as<PrototypeType>()) {
+            wantedKey = proto->keyType;
+            wantedValue = proto->valueType;
+        }
+    }
+
+    // Seeded from the hint, which is also what the literal ends up being: adopting what
+    // the entries were *checked against* rather than what they turned out to be is what
+    // stops their diagnostics from being followed by the literal's own. `{ 7 : 1 }` under
+    // `<{uint, int}>` has an `int` key however well the constant fits, so a per-entry
+    // check that left the old unit comparison in place would have been an addition
+    // rather than a replacement, and every accepted literal would have reported anyway.
+    //
+    // And unlike the array there is no entries-agree-with-each-other question here. An
+    // array literal keeps one, because `[any]` reads as a single unknown type in both of
+    // the corpus's uses of it. A prototype widens a mixed literal to `object` on purpose
+    // -- see just below -- so mixed keys are what this container is for and there is no
+    // homogeneity rule for the hint to accidentally waive.
+    std::shared_ptr<Type> keyType = wantedKey;
+    std::shared_ptr<Type> valueType = wantedValue;
 
     // A heterogeneous literal widens to `object`, not to `any`. The two are not
     // interchangeable and prototype_test.fin says which is which: :14 writes
@@ -193,16 +226,30 @@ void SemanticAnalyzer::visit(PrototypeLiteral& node) {
     // And once a side is the sentinel it stays the sentinel: the widening below must not
     // overwrite it, or `{ nosuchvar : 1, 5 : 2 }` would see `<error>` and `int` disagree,
     // widen to `object`, and put the cascade back with a different type in it.
+    //
+    // Each half is offered its type and then checked against it, at the entry, so the
+    // caret lands on the key or the value that is wrong rather than on the brace. Where
+    // nothing offered one the widening below is exactly what it always was.
     for (auto& pair : node.elements) {
+        typeHintFor = wantedKey ? pair.first.get() : nullptr;
+        typeHint = wantedKey;
         pair.first->accept(*this);
+        typeHintFor = nullptr;
+        typeHint = nullptr;
         auto kType = lastExprType ? lastExprType : errorType();
-        if (!keyType) keyType = kType;
+        if (wantedKey) checkType(*pair.first, kType, wantedKey);
+        else if (!keyType) keyType = kType;
         else if (isErrorType(kType) || isErrorType(keyType)) keyType = errorType();
         else if (!kType->equals(*keyType)) keyType = currentScope->resolveType("object");
 
+        typeHintFor = wantedValue ? pair.second.get() : nullptr;
+        typeHint = wantedValue;
         pair.second->accept(*this);
+        typeHintFor = nullptr;
+        typeHint = nullptr;
         auto vType = lastExprType ? lastExprType : errorType();
-        if (!valueType) valueType = vType;
+        if (wantedValue) checkType(*pair.second, vType, wantedValue);
+        else if (!valueType) valueType = vType;
         else if (isErrorType(vType) || isErrorType(valueType)) valueType = errorType();
         else if (!vType->equals(*valueType)) valueType = currentScope->resolveType("object");
     }
