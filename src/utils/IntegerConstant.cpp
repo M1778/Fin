@@ -1,5 +1,7 @@
 #include "IntegerConstant.hpp"
 
+#include <cstdint>
+
 #include "../ast/ASTNode.hpp"
 
 namespace fin {
@@ -39,6 +41,33 @@ ConstantRead readConstant(const ASTNode& node, uint64_t& out) {
         value = value * 10 + digit;
     }
     out = value;
+    return ConstantRead::Ok;
+}
+
+ConstantRead readSignedConstant(const ASTNode& node, int64_t& out) {
+    bool negative = false;
+    if (!integerConstant(node, negative)) return ConstantRead::NotConstant;
+
+    // The magnitude is read by peeling the sign off and asking the unsigned reader,
+    // so there is exactly one digit loop and one overflow rule in this file.
+    const ASTNode* inner = &node;
+    while (auto* un = dynamic_cast<const UnaryOp*>(inner)) inner = un->operand.get();
+    if (!inner) return ConstantRead::NotConstant;
+
+    uint64_t magnitude = 0;
+    const ConstantRead read = readConstant(*inner, magnitude);
+    if (read != ConstantRead::Ok) return read;
+
+    // The two bounds are not symmetric: -9223372036854775808 fits and its positive
+    // twin does not.
+    const uint64_t limit = negative ? (static_cast<uint64_t>(INT64_MAX) + 1)
+                                    : static_cast<uint64_t>(INT64_MAX);
+    if (magnitude > limit) return ConstantRead::TooLarge;
+
+    // INT64_MIN spelled out rather than negated: negating the int64 form of its
+    // magnitude is the one case of this that is undefined.
+    if (negative && magnitude == limit) out = INT64_MIN;
+    else out = negative ? -static_cast<int64_t>(magnitude) : static_cast<int64_t>(magnitude);
     return ConstantRead::Ok;
 }
 

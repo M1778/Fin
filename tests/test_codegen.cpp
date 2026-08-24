@@ -730,6 +730,249 @@ BACKEND_TEST(Soundness_Codegen, AnArrayLiteralWithTooFewElementsCannotReachTheBa
 }
 
 // ---------------------------------------------------------------------------
+// An enum without payloads is an integer.
+//
+// Which integer is the ruling this slice makes: `int`-wide and signed, because the
+// analyzer checks every written member value against `int`
+// (Analyzer_Decl.cpp, visit(EnumDeclaration&)) and every corpus enum numbers its
+// members with small non-negative literals. It is also what C does, which matters
+// at an `@define` boundary.
+//
+// A member *with* a payload is refused. `Result { Ok <T>, Err <U> }` is a tagged
+// union whose layout -- where the tag sits, whether the payloads overlap, what the
+// alignment of the whole is -- is an owner ruling and not a detail to be picked
+// here, and picking one would be an ABI other passes would then have to match.
+
+BACKEND_TEST(Soundness_Codegen, AFieldlessEnumMemberIsAConstant) {
+    // arrays_enums.fin:3-6 and :17 verbatim in shape: a written zero, and the member
+    // read by its bare name rather than through the enum.
+    const Built b = build(std::string(kPrintf) +
+        "enum Status {\n"
+        "    OK = 0,\n"
+        "    ERROR\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <Status> = OK;\n"
+        "    printf(\"%d\\n\", s);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnUnnumberedMemberFollowsTheOneBeforeIt) {
+    const Built b = build(std::string(kPrintf) +
+        "enum Status {\n"
+        "    OK = 0,\n"
+        "    ERROR\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <Status> = ERROR;\n"
+        "    printf(\"%d\\n\", s);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, NumberingResumesFromTheLastWrittenValue) {
+    // operators.fin:6-9: `State { Alive = 1, Dead }`. Dead is 2 and not 1, which is
+    // the difference between counting from the member before it and counting
+    // positions.
+    const Built b = build(std::string(kPrintf) +
+        "enum State {\n"
+        "    Alive = 1,\n"
+        "    Dead\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d\\n\", Alive, Dead);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnEnumWithNoWrittenValuesCountsFromZero) {
+    // extern_as.fin:35-37: `MyEnum { A, B, C }`.
+    const Built b = build(std::string(kPrintf) +
+        "enum MyEnum { A, B, C }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d %d\\n\", A, B, C);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0 1 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AQualifiedMemberIsTheSameConstant) {
+    // extern_as.fin:44-45 writes both spellings of the same member two lines apart.
+    const Built b = build(std::string(kPrintf) +
+        "enum MyEnum { A, B, C }\n"
+        "fun main() <noret> {\n"
+        "    let a <MyEnum> = B;\n"
+        "    let b <MyEnum> = MyEnum::B;\n"
+        "    printf(\"%d %d\\n\", a, b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWrittenValueMayBeNegative) {
+    // The values are signed, so the reader is not the unsigned extent reader with a
+    // sign bolted on: `-1` is a UnaryOp over a Literal and has to come out as -1
+    // rather than as a very large unsigned number.
+    const Built b = build(std::string(kPrintf) +
+        "enum Sign { Neg = -1, Zero, Pos }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d %d\\n\", Neg, Zero, Pos);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "-1 0 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoMembersMayShareAValue) {
+    // Nothing in the language says the values are distinct, and C's do not have to
+    // be. This is here so that a later uniqueness check is a deliberate change.
+    const Built b = build(std::string(kPrintf) +
+        "enum E { A = 3, B = 3 }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d\\n\", A, B);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnEnumValueIsComparedByItsNumber) {
+    const Built b = build(std::string(kPrintf) +
+        "enum Status { OK = 0, ERROR }\n"
+        "fun main() <noret> {\n"
+        "    let s <Status> = ERROR;\n"
+        "    if (s == ERROR) { printf(\"yes\\n\"); }\n"
+        "    if (s == OK) { printf(\"no\\n\"); }\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "yes\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnEnumVariableIsReassigned) {
+    const Built b = build(std::string(kPrintf) +
+        "enum Status { OK = 0, ERROR }\n"
+        "fun main() <noret> {\n"
+        "    let s <Status> = OK;\n"
+        "    s = ERROR;\n"
+        "    printf(\"%d\\n\", s);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnEnumCrossesAFinToFinCallAndComesBack) {
+    const Built b = build(std::string(kPrintf) +
+        "enum Status { OK = 0, ERROR }\n"
+        "fun echo(s: Status) <Status> { return s; }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", echo(ERROR));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnEnumFieldOfAStructRoundTrips) {
+    // The enum has to be registered before the structs are, because a field of enum
+    // type needs its representation to exist -- the same ordering a field of struct
+    // type needs.
+    const Built b = build(std::string(kPrintf) +
+        "enum Status { OK = 0, ERROR }\n"
+        "struct Reply { st <Status>, n <int> }\n"
+        "fun main() <noret> {\n"
+        "    let r <Reply> = Reply { st: ERROR, n: 7 };\n"
+        "    printf(\"%d %d\\n\", r.st, r.n);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayOfEnumsIndexes) {
+    const Built b = build(std::string(kPrintf) +
+        "enum Status { OK = 0, ERROR }\n"
+        "fun main() <noret> {\n"
+        "    let a <[Status, 3]> = [OK, ERROR, OK];\n"
+        "    printf(\"%d %d %d\\n\", a[0], a[1], a[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0 1 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ALocalOutranksAnEnumMemberOfTheSameName) {
+    // The analyzer defines an enumerator in the scope the enum was declared in, so a
+    // local of that name shadows it. If the backend looked the name up in its enum
+    // table first, this would print 5's member value instead of 5.
+    const Built b = build(std::string(kPrintf) +
+        "enum Status { OK = 0, ERROR }\n"
+        "fun main() <noret> {\n"
+        "    let OK <int> = 5;\n"
+        "    printf(\"%d\\n\", OK);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(KnownDefect_Codegen, AnEnumMemberDoesNotHoist) {
+    // The same defect KnownDefect_Codegen.AStructTypeDoesNotHoist books, at the other
+    // kind of declaration: the analyzer defines an enum's members when it reaches the
+    // enum, so a member named above it is an undefined *variable* rather than an
+    // undefined type. Both halves are the same missing pass.
+    //
+    // The backend's half is done -- declareEnums numbers every enum in the module
+    // before any body is emitted -- which is why this asserts a front-end refusal.
+    // When declaration hoisting lands, this fails, becomes
+    // Soundness_Codegen.AnEnumDeclaredBelowItsUseLowers, and asserts the program
+    // prints 5, which it already would.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", Late);\n"
+        "}\n"
+        "enum E { Early = 4, Late }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("Undefined variable 'Late'"), std::string::npos) << b.why();
+    // And specifically not a codegen refusal, so that a front end which starts
+    // accepting it fails this rather than passing on the backend's answer.
+    EXPECT_EQ(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMemberWithAPayloadIsRefused) {
+    // The tagged union, which is a layout ruling and not a detail to pick here. The
+    // refusal is eager -- it fails the build whether or not anything uses the enum --
+    // for the reason declareStructs gives: a declaration that is quietly skipped is a
+    // type name that later resolves to nothing.
+    const Built b = build(
+        "enum R { Ok <int>, Err }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("payload"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericEnumIsRefused) {
+    // `Result <T: Any<...>, U: ErrorLike>` (stdlib/typing.fin:14). Erasure (ADR 0002)
+    // decides what a generic enum's members carry, and its members are what would be
+    // numbered here.
+    const Built b = build(
+        "enum E<T> { A, B }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("generic"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnEnumMemberValueThatIsNotConstantIsRefused) {
+    // Not a program error the analyzer let through -- it checks the value against
+    // `int` and `1 + 1` is an int -- so the backend is the first pass that needs the
+    // *number* and the first that can say it does not have one. Reading it as
+    // anything (least of all as the position) would number the member silently
+    // wrong.
+    const Built b = build(
+        "enum E { A = 1 + 1, B }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("value"), std::string::npos) << b.why();
+}
+
+// ---------------------------------------------------------------------------
 // The layout table and the backend are the same table.
 // ---------------------------------------------------------------------------
 

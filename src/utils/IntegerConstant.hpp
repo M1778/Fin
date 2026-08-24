@@ -42,4 +42,14 @@ enum class ConstantRead { Ok, NotConstant, Negative, TooLarge };
 // backend both believe.
 ConstantRead readConstant(const ASTNode& node, uint64_t& out);
 
+// The value of a *signed* integer constant, for the one caller whose constants may
+// be negative: an enum's written member values, which the analyzer checks against
+// `int` (`enum Sign { Neg = -1 }`). An extent cannot be negative and an index that
+// is has its own diagnostic, so neither of those uses this.
+//
+// Never returns ConstantRead::Negative -- a negative constant is the answer here
+// rather than a reason to refuse. TooLarge covers a magnitude that does not fit an
+// int64, in either direction.
+ConstantRead readSignedConstant(const ASTNode& node, int64_t& out);
+
 }  // namespace fin

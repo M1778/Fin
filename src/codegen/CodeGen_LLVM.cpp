@@ -193,6 +193,21 @@ struct StructInfo {
     }
 };
 
+// A fieldless enum: its name, and what number each member is.
+//
+// The numbers are computed once, here, rather than at each use. A member with no
+// written value is the one before it plus one, starting at 0, which is C's rule and
+// the only rule the corpus is consistent with -- `State { Alive = 1, Dead }`
+// (operators.fin:6) makes Dead 2, so the value is not the member's position.
+//
+// `members` keeps declaration order because the numbering depends on it;
+// `valueByName` is what a read consults.
+struct EnumInfo {
+    std::string finName;
+    std::vector<std::pair<std::string, int64_t>> members;
+    std::unordered_map<std::string, int64_t> valueByName;
+};
+
 struct CgVal {
     llvm::Value* value = nullptr;
     CgType type;
@@ -230,6 +245,10 @@ public:
         structs_ = structs;
     }
 
+    void bindEnums(const std::unordered_map<std::string, EnumInfo>* enums) {
+        enums_ = enums;
+    }
+
     std::optional<CgType> map(const TypeNode* node) const {
         if (!node) return voidType();
 
@@ -251,6 +270,7 @@ public:
             return std::nullopt;
         }
         if (auto scalar = byName(node->name)) return scalar;
+        if (auto e = enumByName(node->name)) return e;
         return structByName(node->name);
     }
 
@@ -340,6 +360,24 @@ public:
     // A name that is not a scalar may still be a struct. Checked second, so a
     // struct called `int` could not shadow the scalar -- the analyzer rejects that
     // name anyway, and the ordering means this file does not depend on it doing so.
+    // A fieldless enum is an `int`: the same width and signedness, from the same
+    // table, so an enum and an int are one representation and not two that agree.
+    //
+    // `int` because that is what the analyzer checks a written member value against
+    // (Analyzer_Decl.cpp, visit(EnumDeclaration&)), and because a C enum is an int at
+    // an `@define` boundary. Narrowing it to the smallest width that holds the members
+    // would be a size win and an ABI decision, and the ABI decision belongs to `finn`.
+    //
+    // The CgType is a plain Int and does not record which enum it came from. Nothing
+    // downstream needs to know: the analyzer has already decided what may be assigned
+    // to what, and this file's job at that point is to store a number. What it costs
+    // is that a backend-level check like "these two enums are different types" cannot
+    // be written here -- which is the analyzer's check, and it has it.
+    std::optional<CgType> enumByName(const std::string& name) const {
+        if (!enums_ || !enums_->count(name)) return std::nullopt;
+        return byName("int");
+    }
+
     std::optional<CgType> structByName(const std::string& name) const {
         if (!structs_) return std::nullopt;
         auto it = structs_->find(name);
@@ -377,6 +415,7 @@ public:
 private:
     llvm::LLVMContext& ctx_;
     const std::unordered_map<std::string, StructInfo>* structs_ = nullptr;
+    const std::unordered_map<std::string, EnumInfo>* enums_ = nullptr;
 };
 
 // Decodes one Fin string or character literal into the bytes it denotes.
@@ -421,9 +460,15 @@ public:
         : diag_(diag), debug_(debug), ctx_(), module_("fin", ctx_), builder_(ctx_),
           types_(ctx_) {
         types_.bindStructs(&structs_);
+        types_.bindEnums(&enums_);
     }
 
     bool run(Program& program) {
+        // Before the structs, because a field may be of enum type -- and before
+        // anything else for the same reason declareStructs runs early: a name has to
+        // have a representation before a signature that mentions it is built.
+        declareEnums(program);
+        if (failed_) return false;
         // Before the functions, because a function's signature may name a struct.
         declareStructs(program);
         if (failed_) return false;
@@ -499,6 +544,13 @@ private:
         return v;
     }
 
+    // A member's number as a value of the enum's representation, which is `int`'s.
+    // Signed, so that `Neg = -1` is -1 and not 4294967295.
+    CgVal enumConstant(int64_t value) {
+        CgType type = *types_.byName("int");
+        return CgVal{llvm::ConstantInt::getSigned(type.llvmType, value), type};
+    }
+
     // ---- scopes -----------------------------------------------------------
 
     void pushScope() { scopes_.emplace_back(); }
@@ -517,6 +569,75 @@ private:
     // Every top-level signature is declared before any body is emitted, for the
     // same reason the analyzer hoists them (6f48a89): a call may sit above its
     // declaration, and mutual recursion sits above both.
+    // Every fieldless enum the module declares, with its members numbered.
+    //
+    // One pass and not two: an enum's members are numbers, so nothing here can name
+    // a type that does not exist yet -- which is the whole reason a struct needs two.
+    //
+    // The refusals are eager, as declareStructs's are and for the reason given there:
+    // an enum declaration that is quietly skipped is a type name that later resolves
+    // to nothing, and "resolves to nothing" is how a variable gets a size this file
+    // invented.
+    void declareEnums(Program& program) {
+        for (auto& stmt : program.statements) {
+            auto* e = dynamic_cast<EnumDeclaration*>(stmt.get());
+            if (!e) continue;
+
+            if (!e->generic_params.empty()) {
+                unsupported(*e, fmt::format("a generic enum '{}'", e->name));
+                return;
+            }
+
+            EnumInfo info;
+            info.finName = e->name;
+            // The next number, which is 0 until a member says otherwise.
+            int64_t next = 0;
+            for (size_t i = 0; i < e->values.size(); ++i) {
+                const std::string& name = e->values[i].first;
+
+                // A payload makes this a tagged union rather than an integer. Checked
+                // per member and against the payload's own copy of the name, the way
+                // visit(EnumDeclaration&) in the analyzer checks it: nothing enforces
+                // that `values` and `member_payloads` stay parallel.
+                if (i < e->member_payloads.size() && e->member_payloads[i].name == name &&
+                    !e->member_payloads[i].types.empty()) {
+                    unsupported(*e, fmt::format("a payload on enum member '{}::{}'",
+                                                e->name, name));
+                    return;
+                }
+
+                if (Expression* written = e->values[i].second.get()) {
+                    int64_t value = 0;
+                    if (readSignedConstant(*written, value) != ConstantRead::Ok) {
+                        unsupported(*written,
+                                    fmt::format("the value of enum member '{}::{}' (it is "
+                                                "not an integer constant)",
+                                                e->name, name));
+                        return;
+                    }
+                    next = value;
+                }
+                info.members.emplace_back(name, next);
+                info.valueByName[name] = next;
+                ++next;
+            }
+
+            debugLog(fmt::format("enum {} with {} member(s)", info.finName,
+                                 info.members.size()));
+            const EnumInfo& stored = (enums_[e->name] = std::move(info));
+
+            // The bare name too: the analyzer defines every enumerator in the scope the
+            // enum was declared in (arrays_enums.fin:17 reads `OK` with no `Status::`),
+            // so a bare name has to reach the same member. Later declarations win, which
+            // is what a scope that redefines a symbol does; nothing in the corpus
+            // declares one name in two enums.
+            for (const auto& member : stored.members)
+                enumMembers_[member.first] = {&stored, member.second};
+
+            registeredEnums_.insert(e);
+        }
+    }
+
     // Every struct the module declares, as a named llvm::StructType, in two passes
     // so that a struct may name one declared above it.
     //
@@ -1223,6 +1344,14 @@ private:
                            local->type};
             return;
         }
+        // After the locals and not before: a local of the same name shadows the
+        // enumerator, because that is the scope the analyzer resolved it in
+        // (Soundness_Codegen.ALocalOutranksAnEnumMemberOfTheSameName).
+        auto member = enumMembers_.find(node.name);
+        if (member != enumMembers_.end()) {
+            value_ = enumConstant(member->second.value);
+            return;
+        }
         // A function named as a value needs a decision about what a Fin function
         // value *is* (a bare pointer, or a closure pair), so it refuses rather
         // than picking one.
@@ -1696,7 +1825,14 @@ private:
         unsupported(node, fmt::format("a declaration of struct '{}' here", node.name));
     }
     void visit(InterfaceDeclaration& node) override { unsupported(node, "an interface declaration"); }
-    void visit(EnumDeclaration& node) override { unsupported(node, "an enum declaration"); }
+    void visit(EnumDeclaration& node) override {
+        // Registered above and emits nothing: an enum's members are constants folded
+        // into their uses, so there is no symbol and no storage. One declareEnums never
+        // saw is refused rather than assumed handled -- an enum nested inside a
+        // function body would land here.
+        if (registeredEnums_.count(&node)) return;
+        unsupported(node, fmt::format("a declaration of enum '{}' here", node.name));
+    }
     void visit(ClassDeclaration& node) override { unsupported(node, "a class declaration"); }
     void visit(ImplementsBlock& node) override { unsupported(node, "an implements block"); }
     void visit(OperatorDeclaration& node) override { unsupported(node, "an operator declaration"); }
@@ -1725,7 +1861,22 @@ private:
     void visit(StaticMethodCall& node) override { unsupported(node, "a '::' call"); }
     void visit(MemberAccess& node) override {
         if (node.is_static) {
-            // `Colour::Red` names an enum member, and enums are not lowered.
+            // `MyEnum::B` -- the same member the bare `B` names and the same constant,
+            // which is what extern_as.fin:44-45 writes two lines apart. The object is
+            // an Identifier naming the *type* (the analyzer's visit(MemberAccess&) says
+            // so), so it is read as a name here and never emitted as a value.
+            if (auto* id = dynamic_cast<Identifier*>(node.object.get())) {
+                auto e = enums_.find(id->name);
+                if (e != enums_.end()) {
+                    auto value = e->second.valueByName.find(node.member);
+                    if (value != e->second.valueByName.end()) {
+                        value_ = enumConstant(value->second);
+                        return;
+                    }
+                }
+            }
+            // A `::` that is not an enum member: a static method, a namespaced symbol,
+            // an associated constant. Each needs a mangling scheme.
             unsupported(node, fmt::format("the static member '{}'", node.member));
             return;
         }
@@ -1938,6 +2089,18 @@ private:
     TypeMapper types_;
 
     std::unordered_map<std::string, FnInfo> functions_;
+    // Keyed by Fin name, and never erased from after declareEnums: enumMembers_
+    // points into it.
+    std::unordered_map<std::string, EnumInfo> enums_;
+    // One entry per member of every enum, by the member's own name, for a member read
+    // without its enum. The value is copied rather than looked up again because that
+    // is all a read needs; the owner is kept for diagnostics and for debugLog.
+    struct EnumMember {
+        const EnumInfo* owner = nullptr;
+        int64_t value = 0;
+    };
+    std::unordered_map<std::string, EnumMember> enumMembers_;
+    std::set<const EnumDeclaration*> registeredEnums_;
     // Keyed by Fin name. Never erased from or rehashed after declareStructs, because
     // CgType::structInfo points into it.
     std::unordered_map<std::string, StructInfo> structs_;
