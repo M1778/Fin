@@ -68,7 +68,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDec
     std::vector<std::shared_ptr<Type>> paramTypes;
     for (auto& param : method.params) {
         auto type = resolveTypeOrError(param->type.get());
-        currentScope->define({param->name, type, false, true});
+        defineParameter(*param, type);
         // The receiver is not a parameter of the call. struct_methods.fin writes both
         // spellings in one struct -- `fun print_point(self: &Self)` at :10 and
         // `fun set_x<U>(new_x: U)` at :14 -- and :10 says the compiler injects it
@@ -106,7 +106,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
     std::vector<std::shared_ptr<Type>> paramTypes;
     for (auto& param : op.params) {
         auto type = resolveTypeOrError(param->type.get());
-        currentScope->define({param->name, type, false, true});
+        defineParameter(*param, type);
         // The receiver is not an argument, exactly as in buildMethodSignature. No
         // corpus operator writes `self`, but the two functions should not disagree
         // about what a signature is.
@@ -192,7 +192,7 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
         
         auto type = resolveTypeOrError(param->type.get());
         // Define in body scope so the code can use the param
-        currentScope->define({param->name, type, false, true});
+        defineParameter(*param, type);
         // Register in signature. The sentinel goes in too: dropping an unresolved
         // parameter is what made `fun f(p: NoSuchType)` called as `f(1)` report
         // "expects 0 arguments, got 1" -- a claim about a signature nobody wrote.
@@ -423,7 +423,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
     for (auto& ctor : node.constructors) {
         enterScope();
         for (auto& param : ctor->params) {
-            currentScope->define({param->name, resolveTypeOrError(param->type.get()), false, true});
+            defineParameter(*param, resolveTypeOrError(param->type.get()));
         }
         visitParameterDefaults(ctor->params);
         // Inject Self
@@ -478,7 +478,7 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
     
     // 2. Params
     for (auto& param : node.params) {
-        currentScope->define({param->name, resolveTypeOrError(param->type.get()), false, true});
+        defineParameter(*param, resolveTypeOrError(param->type.get()));
     }
     visitParameterDefaults(node.params);
     
@@ -984,7 +984,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
     
     enterScope();
     for (auto& param : node.params) {
-         currentScope->define({param->name, resolveTypeOrError(param->type.get()), false, true});
+         defineParameter(*param, resolveTypeOrError(param->type.get()));
     }
     visitParameterDefaults(node.params);
     
@@ -1108,7 +1108,7 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
     for (auto& ctor : node.constructors) {
         enterScope();
         for (auto& param : ctor->params) {
-            currentScope->define({param->name, resolveTypeOrError(param->type.get()), false, true});
+            defineParameter(*param, resolveTypeOrError(param->type.get()));
         }
         visitParameterDefaults(ctor->params);
         currentScope->define({"self", structType, true, true});
@@ -1285,7 +1285,7 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
         // corpus block's body writes, and it is not analysable without either half.
         enterScope();
         for (auto& param : ctor->params) {
-            currentScope->define({param->name, resolveTypeOrError(param->type.get()), false, true});
+            defineParameter(*param, resolveTypeOrError(param->type.get()));
         }
         visitParameterDefaults(ctor->params);
         currentScope->define({"self", structType, true, true});

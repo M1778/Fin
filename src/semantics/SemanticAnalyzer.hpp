@@ -133,6 +133,36 @@ private:
     // sentinel would only hide the next question.
     std::shared_ptr<Type> resolveTypeOrError(TypeNode* node);
 
+    // Bind one parameter into the scope of the body that will read it.
+    //
+    // A parameter is a mutable binding unless it was written `const`. That is the
+    // same rule `let` and `const` follow for a local, and tests/samples/const.fin is
+    // where it is settled: the sample marks parameters `const` in eight places, says
+    // on 10 that a constant parameter "cannot be reassigned or changed inside
+    // function body", keeps `// a = 10;` commented out on 12 "since it raises an
+    // error", and then on 14-16 writes out the copy a caller is forced into --
+    // `let scope_a <int> = a; scope_a = 5;`. None of that says anything unless a
+    // parameter without the marker is assignable. stdlib/error.fin:13 is the corpus
+    // paying for the other reading, `err_code = -1;` inside the constructor that
+    // takes `err_code`.
+    //
+    // The constness is read off the *type* node, because that is where the parser
+    // put it (parser.y:1247) and `Parameter` has no mutability field of its own. The
+    // by-reference spelling `const &arr: [any]` (stdlib/types.fin:102) sets the flag
+    // on the pointer node the parser synthesises, so the outermost node is the right
+    // one to ask at all three productions. `Type` carries no constness, only
+    // `TypeNode` does, which is why this takes the AST node and not just the
+    // resolved type.
+    //
+    // Nine call sites, one per shape of thing that has parameters -- function,
+    // method, operator, constructor, lambda -- and they were nine copies of
+    // `define({param->name, t, false, true})`. One of them disagreeing is the bug
+    // this replaces.
+    void defineParameter(const Parameter& param, const std::shared_ptr<Type>& type) {
+        const bool isConst = param.type && param.type->is_const;
+        currentScope->define({param.name, type, !isConst, true});
+    }
+
     // A `::`-separated path from an `extern X as Y;` or a `pub implements Y = X;`,
     // resolved as a symbol rather than as a type. Null when the path names no symbol,
     // which is the caller's cue to read it as a type instead. Analyzer_Decl.cpp carries

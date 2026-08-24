@@ -8704,3 +8704,164 @@ TEST(Soundness_Blame, ABoolIsStillTheAssertForm) {
     const FincRun r = compile("fun f(v: bool) <void> { blame v; }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// A parameter is mutable unless it is `const`
+//
+// Every parameter the analyzer bound was immutable -- nine `define({param->name,
+// type, false, true})` sites, one per shape of thing that has parameters -- so
+// `err_code = -1;` inside `Error(msg: string, err_code: int = null)`
+// (stdlib/error.fin:11-13) reported `Cannot assign to immutable variable 'err_code'`.
+//
+// The corpus needs it at two sites and needs it for the same reason at both: a
+// parameter takes a sentinel default and the body replaces it with the real value.
+// stdlib/error.fin:11-13 is `err_code: int = null` then `if (err_code == null) {
+// err_code = -1; }`, and stdlib/stdio.fin:109-110 is `nbytes: ulong = -1` then
+// `if (nbytes > self.stream_length || nbytes == -1) nbytes = self.stream_length;`.
+// Neither can be written any other way while a default value is a value and not a
+// second overload.
+//
+// tests/samples/const.fin settles it, and settles it twice. It is the sample about
+// `const`, and what it says about a const parameter is that the constness is what
+// stops the assignment: "constant parameters (cannot be reassigned or changed inside
+// function body)" on 10, and on 12, commented out, `// a = 10; // raises an error if
+// we try to reassign it`. A marker that forbids reassignment says nothing at all
+// unless a parameter without it allows one -- and 14-16 spell out the workaround the
+// marker forces, `let scope_a <int> = a; scope_a = 5; // this is allowed since the
+// value is copied`, which nobody writes when the parameter itself is assignable.
+//
+// So the rule is the same one `let` and `const` already follow for locals: mutable is
+// the default, immutability is written. The parser already recorded it -- `const a:
+// int` sets `is_const` on the parameter's TypeNode (parser.y:1247), and that flag's
+// comment in TypeNode.hpp already said the pass refusing assignment to an immutable
+// local is where it would be read. It was read by nobody.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_ParameterMutability, APlainParameterIsAssignable) {
+    // stdlib/error.fin:11-14, with the default value dropped (a default parses but is
+    // not honoured, which is a separate booked defect).
+    const FincRun r = compile(
+        "struct Error {\n"
+        "  pub message <string>,\n"
+        "  pub error_id <int>,\n"
+        "  Error(msg: string, err_code: int) {\n"
+        "    if (err_code == 0) { err_code = -1; }\n"
+        "    return new Error{message: msg, error_id: err_code};\n"
+        "  }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterMutability, ASentinelDefaultIsReplaceableInTheBody) {
+    // stdlib/stdio.fin:109-110, the second corpus site, reduced to the parameter it
+    // turns on. The parameter is both the thing tested and the thing assigned, which
+    // is the whole point of the idiom.
+    const FincRun r = compile(
+        "fun read(nbytes: ulong) <ulong> {\n"
+        "  if (nbytes == 0) nbytes = 8;\n"
+        "  return nbytes;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterMutability, AConstParameterIsNot) {
+    // const.fin:11-12, with the line the sample keeps commented out written out.
+    const FincRun r = compile("fun test(const a: int) <noret> { a = 10; }\n");
+    EXPECT_NE(r.exitCode, 0) << "a const parameter cannot be reassigned";
+    EXPECT_NE(stripAnsi(r.err).find("Cannot assign to immutable variable 'a'"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterMutability, ACopyOfAConstParameterIsAssignable) {
+    // const.fin:14-16 exactly, which is the sample's own demonstration that the
+    // restriction is on the binding and not on the value.
+    const FincRun r = compile(
+        "fun test(const a: int) <noret> {\n"
+        "  let scope_a <int> = a;\n"
+        "  scope_a = 5;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterMutability, AFunctionsParameterIsAssignable) {
+    const FincRun r = compile("fun f(a: int) <int> { a = 5; return a; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterMutability, AMethodsParameterIsAssignable) {
+    const FincRun r = compile(
+        "struct S {\n"
+        "  pub v <int>,\n"
+        "  pub fun m(self: &Self, b: int) <int> { b = 7; return b; }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterMutability, AnOperatorsParameterIsAssignable) {
+    // The nine binding sites are nine shapes, and an operator is one of them.
+    const FincRun r = compile(
+        "struct S {\n"
+        "  pub v <int>,\n"
+        "  pub operator +(self: &Self, other: int) <int> { other = 1; return other; }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterMutability, ALambdasParameterIsAssignable) {
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "  let f <auto> = fun(a: int) <int> { a = 5; return a; };\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterMutability, AConstPointerParameterIsStillConst) {
+    // const.fin:20-25. The binding is const and the pointee is not: `*a = 20` "will
+    // work" per the sample's comment, and rebinding `a` is what 21 keeps commented out.
+    const FincRun r = compile(
+        "fun test_2(const a: &int) <noret> {\n"
+        "  *a = 20;\n"
+        "  a = new int(1);\n"
+        "}\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Cannot assign to immutable variable 'a'"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterMutability, TheByReferenceConstSpellingIsStillConst) {
+    // `const &arr: [any]` -- stdlib/types.fin:102, the corpus's only site for that
+    // spelling. The parser puts the flag on the PointerTypeNode it synthesises, so a
+    // reader that looked at the wrong node would let this one through.
+    const FincRun r = compile(
+        "fun resolve_arr_type(const &arr: [any]) <int> {\n"
+        "  arr = arr;\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("Cannot assign to immutable variable 'arr'"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterMutability, AGlobalConstIsStillImmutable) {
+    // const.fin:8. The control on the other half of the same diagnostic: this unit
+    // moves parameters and nothing else.
+    const FincRun r = compile(
+        "const myGlobalVar <int> = 100;\n"
+        "fun main() <noret> { myGlobalVar = 5; }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Cannot assign to immutable variable 'myGlobalVar'"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterMutability, AConstLocalIsStillImmutable) {
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "  const a <int> = 1;\n"
+        "  a = 2;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("Cannot assign to immutable variable 'a'"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}

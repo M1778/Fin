@@ -1352,7 +1352,7 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
     for(auto& param : node.params) {
         auto t = resolveTypeFromAST(param->type.get());
         if(t) {
-            currentScope->define({param->name, t, false, true});
+            defineParameter(*param, t);
             paramTypes.push_back(t);
         }
     }
