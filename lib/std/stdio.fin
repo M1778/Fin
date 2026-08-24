@@ -25,11 +25,14 @@
 //     import is dropped.
 //   * `IOResult`'s generic parameter loses the draft's `Strict<Stream>` bound: `Strict`
 //     is undefined -- no module declares it and it is not a builtin classifier.
-//   * The draft's `IOResult<T> implements <IResult> { ... }` block is dropped for the
-//     draft's own reason: an enum cannot implement an interface, which
-//     stdlib/typing.fin's note already records. Its bodies also read the payload as
-//     `enum_.0`, and positional payload access reports `Struct 'R' has no member '0'`.
-//     `IResult` is therefore not imported either, and the draft's third import goes too.
+//   * The draft's `IOResult<T> implements <IResult> { ... }` block is dropped for one
+//     reason, which is the draft's own: `keyidof(Ok)` in all three bodies reports
+//     `expected '$enum_member', got 'fn(...)'`, the undecided ruling
+//     stdlib/typing.fin's note records. Two reasons that used to stand here are gone --
+//     an enum can be the target of an implements block, and `enum_.0` reads as a
+//     positional payload access (Soundness_PositionalMembers), a `blame` of one
+//     included (Soundness_Blame.RaisingAValueOfErasedTypeIsAccepted). `IResult` is
+//     therefore still not imported, and the draft's third import goes with it.
 //   * `IStream` declares no constructor: a bodyless `Self(data: [char]);` in an
 //     interface is a syntax error twice over -- `Self` is not an IDENTIFIER in that
 //     position, and a constructor declaration without a body does not parse at all.

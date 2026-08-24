@@ -179,7 +179,14 @@ void SemanticAnalyzer::visit(BlameStatement& node) {
         // KnownDefect_Blame.RaisingAValueIsNotCheckedForBeingAnError records why: the
         // narrowing needs either the library's `Error` hardcoded here or the union
         // machinery behind `ErrorLike`, and `blame enum_.0` raises a bare `T`.
-        const bool isRaise = lastExprType && lastExprType->as<StructType>();
+        // A value whose static type is erased is a raise too. `any` is the type of a
+        // payload slot an enum's members disagree at (visit(MemberAccess&)), and the
+        // corpus raises exactly that four times -- `blame enum_.0` at
+        // stdlib/typing.fin:32 and :38, stdlib/stdio.fin:60 and :66. The reason it is
+        // the raise form and not the assert form: an assert's operand is a comparison,
+        // whose type is `bool`, and nothing erases a `bool`.
+        const bool isRaise = lastExprType &&
+                             (lastExprType->as<StructType>() || lastExprType->as<DynamicType>());
         auto boolType = currentScope->resolveType("bool");
         if (lastExprType && !isRaise) {
             checkType(*node.condition, lastExprType, boolType);

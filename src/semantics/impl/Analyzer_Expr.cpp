@@ -35,6 +35,22 @@ std::shared_ptr<StructType> getStructType(std::shared_ptr<Type> type, std::share
     return nullptr;
 }
 
+// `v.0`: is this member name a position rather than a name?
+//
+// The grammar makes the digits of `expression DOT INTEGER` the member name
+// (parser.y:2258), and a declared field cannot collide with them -- an identifier must
+// start with a letter or an underscore. So "every character is a digit" is the whole
+// test, and a name that is not one is not positional whatever else it is.
+//
+// The bound is on the *spelling*: nine digits fit any position a payload or a
+// prototype could have, and a longer one is out of range rather than an overflow.
+static bool positionalMember(const std::string& name, size_t& index) {
+    if (name.empty() || name.size() > 9) return false;
+    for (char c : name) if (c < '0' || c > '9') return false;
+    index = static_cast<size_t>(std::stoul(name));
+    return true;
+}
+
 // Does this type have members even though it is not a struct?
 //
 // Two do, both because the corpus reads a member off them and neither because anything
@@ -1109,6 +1125,67 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
         error(node, fmt::format("Namespace '{}' has no exported member '{}'", ns->name, node.member));
         lastExprType = nullptr;
         return;
+    }
+
+    // `v.0` -- a member by position, which two kinds of type have and no other does.
+    //
+    // A prototype's positions are its two halves as arrays: "accessing
+    // `{prototype}.0` returns an array of the keys" and "`.1` returns an array of the
+    // values", stated in a comment on the line in stdlib/prototypes.fin:11 and :15 and
+    // agreed with by the signatures around them -- `pub fun keys<T>(prtp: {T, any})
+    // <[T]>` returns the `.0`. Dynamic arrays: how many entries a prototype holds is
+    // not part of its type.
+    //
+    // An enum's positions are the slots of its members' payloads. `.N` is slot N of
+    // whichever member the value holds, and not an index into a flattening of the
+    // whole enum -- the corpus rules that out by writing the same `.0` for two
+    // different members' payloads, under an `Ok` guard and in its `else`
+    // (stdlib/typing.fin:30 and :32), and again with the members declared in the other
+    // order (stdlib/stdio.fin:58 and :60, where `Err` comes first).
+    //
+    // Which member a value holds is not statically known, so a position the members
+    // disagree at is an `any`: static erasure, which is what DynamicType.hpp says
+    // `any` is. Where they agree there is nothing to erase and the slot keeps its
+    // type, which is what makes `color1.0 == 100` (enums.fin:38) a real check --
+    // `Color`'s two members are `uint{8}` at position 0 either way. Narrowing the
+    // erased case by the guard the corpus writes needs `keyidof` of a payloaded member
+    // to mean something first; KnownDefect_PositionalMembers
+    // .ADisagreeingPayloadSlotIsNeverNarrowed books it.
+    //
+    // Anything else falls through, and the diagnostic it gets is still the right one:
+    // a struct's fields are named, and reading `.0` as "the first field" is a ruling
+    // with nothing in the corpus behind it.
+    if (size_t position = 0; positionalMember(node.member, position)) {
+        if (auto* proto = objType->as<PrototypeType>()) {
+            if (position == 0 || position == 1) {
+                lastExprType = std::make_shared<ArrayType>(
+                    position == 0 ? proto->keyType : proto->valueType, false);
+                return;
+            }
+            error(node, fmt::format("Type '{}' has no member '{}'", objType->toString(), node.member));
+            lastExprType = nullptr;
+            return;
+        }
+        // Through getStructType, so a positional read reaches an enum behind a pointer
+        // exactly as far as a named read reaches a field behind one. Nothing in the
+        // corpus needs it; the two forms differing would be the surprise.
+        if (auto asEnum = getStructType(objType, currentScope); asEnum && asEnum->is_enum) {
+            auto candidates = asEnum->enumeratorPayloadsAt(position);
+            if (candidates.empty()) {
+                error(node, fmt::format("Enum '{}' has no payload at position {}",
+                                        asEnum->name, position));
+                lastExprType = nullptr;
+                return;
+            }
+            bool agree = true;
+            for (const auto& c : candidates) {
+                if (!c || !candidates[0] || !c->equals(*candidates[0])) { agree = false; break; }
+            }
+            if (agree) { lastExprType = candidates[0]; return; }
+            auto anyType = currentScope->resolveType("any");
+            lastExprType = anyType ? anyType : std::make_shared<DynamicType>("any");
+            return;
+        }
     }
 
     auto structType = getStructType(objType, currentScope);

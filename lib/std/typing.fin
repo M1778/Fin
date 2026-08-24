@@ -8,10 +8,20 @@
 // The bound is a hint, not a constraint the corpus depends on.
 //
 // The draft's `Result<T, U> implements <IResult> { ... }` block is dropped for a
-// second reason, and it is the draft's own: an enum cannot implement an interface
-// today -- `Type 'Result' is not a struct/class and cannot implement interfaces`,
-// which stdlib/typing.fin's `//@ unimplemented` note already records. So `IResult` is
-// declared and unimplemented here, exactly as far as the compiler goes.
+// second reason, and one reason only: `keyidof(Ok)`, which every one of its three
+// bodies guards on, reports `expected '$enum_member', got 'fn(T) -> Result<T, U>'` --
+// a payloaded member named rather than called is its constructor, and whether that
+// satisfies the `$enum_member` meta-type is an owner ruling stdlib/typing.fin's note
+// records as undecided.
+//
+// The two reasons that used to stand here are gone. An enum *can* be the target of an
+// implements block, and the block declares its target's generic parameters, so every
+// `T` and `U` in the bodies' own signatures resolves; and the bodies' `enum_.0` reads
+// too -- positional payload access is slot N of whichever member the value holds
+// (Soundness_PositionalMembers), and raising one is the raise form of `blame` rather
+// than the assert form (Soundness_Blame.RaisingAValueOfErasedTypeIsAccepted). What is
+// left is one expression, so `IResult` is declared and unimplemented here, exactly as
+// far as the compiler goes.
 #[stdimport] %{
 import { getkeyid, keyidof } from enums::std;
 }%

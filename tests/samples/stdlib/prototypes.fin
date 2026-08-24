@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`module not found: types` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107). `prtp.0` positional prototype access on line 11 parses now. `any` resolves now (Soundness_DynamicTypes), which is what took this file from nine diagnostics to five; what is left after the module failure is `Type '<{T, any}>' is not a struct` at 11:12 and `Type '<{any, T}>' is not a struct` at 15:12 -- a prototype resolves no member -- and `resolve_type` at 20:12. `$type` resolves now (Soundness_MetaTypes)"
+//@ ok
 #[stdimport]
 import { resolve_type } from types::std;
 

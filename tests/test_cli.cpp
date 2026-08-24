@@ -2330,12 +2330,16 @@ TEST(Soundness_DiagnosticAttribution, NoDiagnosticPointsAtAnExpectationComment) 
     // nothing returns, and a vacuous pass here would hide a return of the defect.
     //
     // First: the detector reached the `//@` test at all. This counts every diagnostic the
-    // corpus emits about the file being compiled -- 322 when this floor was set -- so it
-    // falls as the compiler improves. When it approaches the floor, lower the floor
-    // deliberately and say so here; do not delete the check, and do not let it reach zero
-    // unnoticed. Proven to bind: pointing the detector at a path that does not exist takes
-    // `considered` to 0 and fails here, which is the shape a silently broken detector has.
-    EXPECT_GT(census.considered, 100u)
+    // corpus emits about the file being compiled -- 322 when this floor was first set,
+    // and 98 the day positional member access landed -- so it falls as the compiler
+    // improves. When it approaches the floor, lower the floor deliberately and say so
+    // here; do not delete the check, and do not let it reach zero unnoticed. Proven to
+    // bind: pointing the detector at a path that does not exist takes `considered` to 0
+    // and fails here, which is the shape a silently broken detector has.
+    //
+    // 100 -> 50 for that reason: the corpus is down to 98 located diagnostics about
+    // itself, and the floor was one unit away from failing for the right reason.
+    EXPECT_GT(census.considered, 50u)
         << "the corpus emitted almost no located diagnostics about its own files, so the "
            "assertion below would pass without measuring anything. Fix the detector (or "
            "lower this floor on purpose) before trusting an empty census.";

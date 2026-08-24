@@ -8424,3 +8424,283 @@ TEST(Soundness_IndexAssignInterface, AnIndexRequirementIsUnaffected) {
               std::string::npos)
         << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// A member by position: `v.0`
+//
+// The grammar has built these as a MemberAccess whose name is the digits since the
+// production was added (parser.y:2258), and nothing read them: an enum's StructType
+// has no `fields`, so `color1.0` reported `Struct 'Color' has no member '0'`, and a
+// prototype is not a struct at all, so `prtp.0` reported `Type '<{T, any}>' is not a
+// struct`. Twelve diagnostics across three samples, all of one shape.
+//
+// The prototype half is stated outright in the sample, in a comment on the line:
+// "accessing `{prototype}.0` returns an array of the keys" and "`.1` returns an array
+// of the values" (stdlib/prototypes.fin:11, :15). The signatures agree --
+// `pub fun keys<T>(prtp: {T, any}) <[T]>` returns the `.0` -- so position 0 is a
+// `[keyType]`, position 1 is a `[valueType]`, and there is no position 2.
+//
+// The enum half is positional payload access: `.N` is the N-th slot of the payload of
+// whichever member the value holds. Not an index into a flattening of the whole enum,
+// which the corpus rules out by writing the same `.0` for two different members'
+// payloads -- `Result { Ok(T), Err(U) }` reads `enum_.0` under an `Ok` guard and again
+// in its `else` (stdlib/typing.fin:30, :32), and `IOResult { Err <IOError>, Ok <T> }`
+// does the same with the members in the other order (stdlib/stdio.fin:58, :60). Both
+// declaration forms carry a payload, `Ok(T)` and `pub Ok <T>` alike, and
+// visit(EnumDeclaration&) already records both as a `fn(payload...) -> E`.
+//
+// Which member a value holds is not statically known, so a slot the members disagree
+// on is typed `any` -- static erasure, which is what DynamicType.hpp says `any` is for.
+// The alternative would be narrowing the type by the guard the corpus writes
+// (`getkeyid(enum_) == keyidof(Ok)`), and that is blocked on what `keyidof` of a
+// payloaded member even is -- stdlib/typing.fin's own note records it as undecided.
+// KnownDefect_PositionalMembers.ADisagreeingPayloadSlotIsNeverNarrowed books it.
+//
+// Where the members *agree* there is nothing to erase and the slot keeps its type:
+// `Color { RGB(uint{8}, uint{8}, uint{8}), RGBA(uint{8}, ...) }` has a `uint{8}` at
+// position 0 either way, so `color1.0 == 100` (enums.fin:38) is checked for real.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_PositionalMembers, AnEnumPayloadIsReadableByPosition) {
+    // enums.fin:35 and :38, with the `printf` declared so the file stands alone.
+    const FincRun r = compile(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "enum Color {\n"
+        "  RGB(uint{8}, uint{8}, uint{8}),\n"
+        "  RGBA(uint{8}, uint{8}, uint{8}, uint{8})\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  let color1 <Color> = Color::RGB(100, 200, 50);\n"
+        "  if (color1.0 == 100) { printf(\"True\"); }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, TheSlotsTypeIsThePayloadsTypeAtThatPosition) {
+    // Both slots of one member, and the second is not the first: an enum's payload is
+    // a tuple and the position picks one element of it.
+    const FincRun r = compile(
+        "enum E { M(int, string) }\n"
+        "fun main() <noret> {\n"
+        "  let e <E> = E::M(1, \"a\");\n"
+        "  let s <string> = e.1;\n"
+        "  let bad <int> = e.1;\n"
+        "}\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, ASlotTheMembersAgreeOnKeepsItsType) {
+    // Two members, the same type at position 0: nothing is unknown, so nothing is
+    // erased. This is what makes enums.fin:38's comparison a real check rather than a
+    // wave-through.
+    const FincRun r = compile(
+        "enum E { A(int), B(int) }\n"
+        "fun main() <noret> {\n"
+        "  let e <E> = E::A(1);\n"
+        "  let bad <string> = e.0;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, ASlotTheMembersDisagreeOnIsErased) {
+    // `Result { Ok(T), Err(U) }`, the corpus's own shape with the parameters bound.
+    // The value holds one member or the other and the analyzer cannot see which, so
+    // the slot is an `any`: assignable to anything that takes an `any`, and not
+    // silently one of the two candidates.
+    const FincRun r = compile(
+        "enum R { Ok(int), Err(string) }\n"
+        "fun main() <noret> {\n"
+        "  let r <R> = R::Ok(1);\n"
+        "  let erased <any> = r.0;\n"
+        "  let guessed <int> = r.0;\n"
+        "}\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'any'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, ASlotOnlyOneMemberHasIsStillReadable) {
+    // `RGBA` has a fourth component and `RGB` does not (enums.fin:8-9). Position 3 is
+    // read from the members that have one; a value holding `RGB` has nothing there,
+    // which is the same thing the guard idiom is for and not a type error.
+    const FincRun r = compile(
+        "enum Color { RGB(int, int, int), RGBA(int, int, int, int) }\n"
+        "fun main() <noret> {\n"
+        "  let c <Color> = Color::RGBA(0, 0, 0, 100);\n"
+        "  let alpha <int> = c.3;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, APositionPastEveryPayloadIsAnError) {
+    const FincRun r = compile(
+        "enum Color { RGB(int, int, int), RGBA(int, int, int, int) }\n"
+        "fun main() <noret> {\n"
+        "  let c <Color> = Color::RGB(1, 2, 3);\n"
+        "  let nope <int> = c.4;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << "position 4 is past every member's payload";
+    EXPECT_NE(stripAnsi(r.err).find("Enum 'Color' has no payload at position 4"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, APayloadlessEnumHasNoPositions) {
+    // `enum Status { OK, ERROR }` (arrays_enums.fin) carries nothing, so there is no
+    // position 0 to read.
+    const FincRun r = compile(
+        "enum Status { OK, ERROR }\n"
+        "fun main() <noret> {\n"
+        "  let s <Status> = OK;\n"
+        "  let nope <int> = s.0;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("Enum 'Status' has no payload at position 0"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, AStructStillHasNoPositionalFields) {
+    // The control on the reach of this unit. A struct's fields are named, and no
+    // corpus line reads one by position -- reading `.0` as "the first field" would be
+    // a separate ruling with no evidence behind it, so the old diagnostic stands.
+    const FincRun r = compile(
+        "struct S { pub x <int>, }\n"
+        "fun main() <noret> {\n"
+        "  let s <S>;\n"
+        "  let v <int> = s.0;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("Struct 'S' has no member '0'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, APrototypesFirstPositionIsItsKeys) {
+    // stdlib/prototypes.fin:10-12 exactly.
+    const FincRun r = compile(
+        "pub fun keys<T>(prtp: {T, any}) <[T]> {\n"
+        "  return prtp.0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, APrototypesSecondPositionIsItsValues) {
+    // stdlib/prototypes.fin:14-16 exactly.
+    const FincRun r = compile(
+        "pub fun values<T>(prtp: {any, T}) <[T]> {\n"
+        "  return prtp.1;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, ThePositionsAreArraysAndNotSingleEntries) {
+    // "returns an array of the keys", not a key. The signature in the sample says the
+    // same thing -- `<[T]>` and not `<T>` -- so a reader that handed back the key type
+    // would compile that file and mean something else.
+    const FincRun r = compile(
+        "fun first(prtp: {int, string}) <int> {\n"
+        "  return prtp.0;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got '[int]'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, TheValuesArrayIsOfTheValueType) {
+    // And position 1 is not position 0.
+    const FincRun r = compile(
+        "fun vals(prtp: {int, string}) <[int]> {\n"
+        "  return prtp.1;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected '[int]', got '[string]'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_PositionalMembers, APrototypeHasNoThirdPosition) {
+    // A prototype has a key and a value and nothing else.
+    const FincRun r = compile(
+        "fun third(prtp: {int, string}) <int> {\n"
+        "  return prtp.2;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("has no member '2'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_PositionalMembers, ADisagreeingPayloadSlotIsNeverNarrowed) {
+    // The corpus always guards a positional read -- `if (getkeyid(enum_) ==
+    // keyidof(Ok)) { return enum_.0; }` (stdlib/typing.fin:29-30) -- and the erasure
+    // ignores the guard entirely, which costs a real check in the direction that
+    // matters: a slot read where the member *is* known statically is still an `any`,
+    // so a use of it at its true type is rejected. The corpus does not pay for this,
+    // because both of its enums are generic and a `T` accepts an `any`; a concrete
+    // one does pay, which is what this asserts.
+    //
+    // Narrowing needs `keyidof` of a payloaded member to mean something first, and
+    // stdlib/typing.fin's own note records that as undecided.
+    const FincRun r = compile(
+        "enum R { Ok(int), Err(string) }\n"
+        "fun f(r: R, isOk: bool) <int> {\n"
+        "  if (isOk) { return r.0; }\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0)
+        << "FIXED: a payload slot is narrowed now. Say what narrows it, invert this "
+           "test and rename it -- and check that `return r.0` under an `Err` guard is "
+           "the error it should then be.";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'any'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// `blame` of a value whose type is erased
+//
+// The companion to the positional access above, and not a widening of what is
+// raisable for its own sake. A slot the enum's members disagree on is an `any`, and
+// the corpus raises exactly that four times: `blame enum_.0` at stdlib/typing.fin:32
+// and :38, stdlib/stdio.fin:60 and :66. Comparing an `any` against bool -- which is
+// what the assert half of `blame` does with everything that is not a StructType --
+// would have convicted all four the day positional access landed.
+//
+// The argument that it is the raise form and not the assert form: the assert form's
+// operand is a comparison, whose type is `bool`, and nothing erases a `bool`. A value
+// whose static type is `any` cannot have come from one.
+//
+// Still narrow. `blame "boom"` is still an error (KnownDefect_Blame
+// .RaisingAStringIsRejected) and `blame 1;` is still an error
+// (Soundness_Conditions.BlameStillRejectsAnInteger); whether a raised value has to be
+// error-like at all is still nobody's ruling here
+// (KnownDefect_Blame.RaisingAValueIsNotCheckedForBeingAnError).
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Blame, RaisingAValueOfErasedTypeIsAccepted) {
+    const FincRun r = compile("fun f(v: any) <void> { blame v; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Blame, RaisingABoxedValueIsAcceptedToo) {
+    // `object` is the other half of DynamicType and the same argument covers it.
+    const FincRun r = compile("fun f(v: object) <void> { blame v; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Blame, RaisingAnErasedEnumPayloadIsTheCorpusSpelling) {
+    // stdlib/typing.fin:28-34 with the parameters bound: both branches of an unwrap,
+    // one returning the slot and one raising it.
+    const FincRun r = compile(
+        "enum R { Ok(int), Err(string) }\n"
+        "fun unwrap(enum_: R, isOk: bool) <any> {\n"
+        "  if (isOk) {\n"
+        "    return enum_.0;\n"
+        "  } else {\n"
+        "    blame enum_.0;\n"
+        "  }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Blame, ABoolIsStillTheAssertForm) {
+    // The control: erasure is what moves an operand to the raise side, not merely
+    // being something other than a comparison.
+    const FincRun r = compile("fun f(v: bool) <void> { blame v; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}

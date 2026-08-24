@@ -95,6 +95,27 @@ public:
         return ctor;
     }
 
+    // The payload types at one position, across every enumerator that has one.
+    //
+    // A positional read is a slot of whichever member the value holds -- `enum_.0` is
+    // `Ok`'s payload under an `Ok` guard and `Err`'s in the `else`
+    // (stdlib/typing.fin:30, :32) -- so every member contributes its slot at that
+    // index and the members whose payload is shorter contribute nothing. What to do
+    // when the candidates disagree is the caller's: it is the analyzer that knows what
+    // an erased type is.
+    //
+    // Unordered, and nothing needs an order: the question asked of the result is
+    // whether the candidates agree, not which member each one came from.
+    std::vector<TypePtr> enumeratorPayloadsAt(size_t index) const {
+        std::vector<TypePtr> out;
+        for (const auto& [name, ctor] : enumerators) {
+            auto* sig = ctor ? ctor->as<FunctionType>() : nullptr;
+            if (!sig || index >= sig->param_types.size()) continue;
+            out.push_back(sig->param_types[index]);
+        }
+        return out;
+    }
+
     TypePtr getFieldType(const std::string& n);
     bool isFieldPublic(const std::string& n);
     // The method's whole signature, or null when the type has no such method.
