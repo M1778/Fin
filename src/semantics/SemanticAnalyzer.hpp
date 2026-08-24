@@ -226,10 +226,14 @@ private:
     // `owner` is the type the callee was reached through, whose instantiation becomes
     // `Self`; null where the return type carries the whole answer. See the definition for
     // what is read in which order.
+    // `seed` is the bindings the call already states outright -- a written turbofish --
+    // which outrank both of the sources this reads, because unifyGeneric's first binding
+    // wins and these are in the map before it runs.
     std::shared_ptr<Type> checkGenericCall(ASTNode& node, const char* kind,
                                            const std::string& name, FunctionType& sig,
                                            std::vector<std::unique_ptr<Expression>>& args,
-                                           const std::shared_ptr<StructType>& owner);
+                                           const std::shared_ptr<StructType>& owner,
+                                           TypeMap seed = {});
 
     // The type an expression is about to be checked against, and the exact expression
     // node it belongs to.

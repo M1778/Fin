@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "`module not found: hashmap` -- the standard library is on no search path (src/driver/SearchPaths.hpp:107), so the import fails before any construct in the file is reached"
+//@ ok
 import { HashMap } from hashmap::std;
 
 struct Data {

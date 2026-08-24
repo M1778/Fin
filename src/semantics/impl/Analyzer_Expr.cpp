@@ -549,8 +549,11 @@ void SemanticAnalyzer::checkCallArguments(ASTNode& node, const char* kind,
 // checkCallArity is called for explicitly here so that `Box(1, 2)` still reports its
 // arity ahead of anything its arguments say.
 //
-// Two things say what the parameters are and they are read in this order:
+// Three things say what the parameters are and they are read in this order:
 //
+//   `seed`      what the call wrote for itself: `Box::<int>()`. Nothing else can
+//               disagree with it -- it is a statement about the type rather than an
+//               implication drawn from a value.
 //   the hint    an annotation, an assignment target, or the enclosing function's
 //               declared return type -- whatever the call's *result* is known to be.
 //               First, so that it wins: `let arr <rptr<[int]>> = rptr([1,2,3,4]);`
@@ -578,8 +581,9 @@ std::shared_ptr<Type> SemanticAnalyzer::checkGenericCall(ASTNode& node, const ch
                                                         const std::string& name,
                                                         FunctionType& sig,
                                                         std::vector<std::unique_ptr<Expression>>& args,
-                                                        const std::shared_ptr<StructType>& owner) {
-    TypeMap mapping;
+                                                        const std::shared_ptr<StructType>& owner,
+                                                        TypeMap seed) {
+    TypeMap mapping = std::move(seed);
     if (auto hint = hintFor(node)) unifyGeneric(sig.return_type, hint, mapping);
 
     checkCallArity(node, kind, name, sig, args.size());
@@ -664,6 +668,44 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
         return;
     }
 
+    // The generic arguments the call wrote for itself: `Box::<int>()`, and
+    // `HashMap::<string, Data>()` at tests/samples/deeptest4.fin:11.
+    //
+    // FunctionCall::generic_args was set by the parser (the `Turbofish Call` production)
+    // and read by nobody, so the one spelling that needs no inference at all was the one
+    // that got none: the call was typed as the template and `a["Hi"].integer` on
+    // deeptest4.fin:16 reported `Type 'U' is not a struct`.
+    //
+    // Paired positionally against the *return type's* parameters, which for a
+    // constructor are the constructed struct's own, in declaration order. A free
+    // function's turbofish binds nothing -- a FunctionType has parameter types and no
+    // parameter names, so there is nothing to pair with; KnownDefect_Written-
+    // GenericArguments.AFreeFunctionsTurbofishBindsNothing books it and
+    // tests/samples/interfaces.fin:25 is the site.
+    TypeMap written;
+    if (!node.generic_args.empty()) {
+        if (auto* retStruct = funcType->return_type ? funcType->return_type->as<StructType>() : nullptr) {
+            if (node.generic_args.size() != retStruct->generic_args.size()) {
+                // The same shape of typo an implements block's header can make, and the
+                // same message: the call claims to be talking about this type's
+                // parameters, so a different number of them is a mistake about the type.
+                error(node, fmt::format("Generic count mismatch: '{}' declares {} parameter(s), "
+                                        "the call writes {}",
+                                        retStruct->name, retStruct->generic_args.size(),
+                                        node.generic_args.size()));
+            }
+            const size_t n = std::min(node.generic_args.size(), retStruct->generic_args.size());
+            for (size_t i = 0; i < n; ++i) {
+                auto t = resolveTypeOrError(node.generic_args[i].get());
+                // The sentinel is not bound: an undefined name in a turbofish is one
+                // diagnostic where it is written, and binding it would print `<error>`
+                // as a generic argument in every diagnostic about the result. Left
+                // unbound, the parameter is inferred as if nothing had been written.
+                if (t && !isErrorType(t)) written[retStruct->generic_args[i]->toString()] = t;
+            }
+        }
+    }
+
     // A generic callee is instantiated from what is written to it.
     //
     // `let ta2 <rptr<int>> = rptr(5);` (tests/samples/const.fin:80) was typed as the
@@ -682,7 +724,8 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
     // checkCallArguments in the order it always did.
     if (funcType->return_type && funcType->return_type->as<StructType>() &&
         mentionsGenericParam(funcType->return_type)) {
-        lastExprType = checkGenericCall(node, "Function", funcName, *funcType, node.args, nullptr);
+        lastExprType = checkGenericCall(node, "Function", funcName, *funcType, node.args,
+                                        nullptr, std::move(written));
         return;
     }
 

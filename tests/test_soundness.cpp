@@ -7932,3 +7932,131 @@ TEST(KnownDefect_EnumInference, APayloadlessMemberOfAGenericEnumIsTypedAsTheTemp
     EXPECT_NE(stripAnsi(r.err).find("expected 'Opt<int>', got 'Opt<T>'"), std::string::npos)
         << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// The generic arguments a call writes for itself.
+//
+// `Box::<int>()` says which Box it builds outright, and is the one spelling that does
+// not need to be inferred from anything. Nothing read it: FunctionCall::generic_args was
+// set by the parser (`Turbofish Call`, parser.y) and never looked at, so
+// `HashMap::<string, Data>()` (tests/samples/deeptest4.fin:11) was typed as the template
+// and every use of the result reported against a parameter -- `a["Hi"].integer` on 16
+// said `Type 'U' is not a struct`.
+//
+// Written arguments outrank the two sources inference reads. An annotation and an
+// argument each *imply* what a parameter is; a turbofish states it.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_WrittenGenericArguments, ACallsTurbofishSaysWhatItBuilds) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box() {} }\n"
+        "fun main() <noret> {\n"
+        "    let b <auto> = Box::<int>();\n"
+        "    let s <string> = b.v;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << "b.v proves T was int and not T\n" << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_WrittenGenericArguments, TwoOfThemAreBoundInOrder) {
+    // tests/samples/deeptest4.fin:11, `HashMap::<string, Data>()`.
+    const FincRun r = compile(
+        "struct Pair<K, V> { pub k <K>, pub v <V>, Pair() {} }\n"
+        "fun main() <noret> {\n"
+        "    let p <auto> = Pair::<string, int>();\n"
+        "    let a <int> = p.k;\n"
+        "    let b <string> = p.v;\n"
+        "}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("expected 'int', got 'string'"), std::string::npos) << err;
+    EXPECT_NE(err.find("expected 'string', got 'int'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 2u) << err;
+}
+
+TEST(Soundness_WrittenGenericArguments, TheArgumentsAreCheckedAgainstWhatWasWritten) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> { let b <auto> = Box::<int>(\"x\"); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_WrittenGenericArguments, WhatIsWrittenOutranksWhatIsInferred) {
+    // The argument says `int` and the turbofish says `string`; the turbofish is the one
+    // the programmer wrote about the type rather than about the value, so the mismatch
+    // is reported at the argument.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> { let b <auto> = Box::<string>(1); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_WrittenGenericArguments, WhatIsWrittenOutranksTheAnnotation) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box() {} }\n"
+        "fun main() <noret> { let b <Box<string>> = Box::<int>(); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'Box<string>', got 'Box<int>'"), std::string::npos)
+        << "the call is a Box<int> and the annotation is what disagrees with it\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_WrittenGenericArguments, TooFewOfThemIsReported) {
+    const FincRun r = compile(
+        "struct Pair<K, V> { pub k <K>, pub v <V>, Pair() {} }\n"
+        "fun main() <noret> { let p <auto> = Pair::<string>(); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Generic count mismatch: 'Pair' declares 2 parameter(s), the call writes 1"),
+              std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_WrittenGenericArguments, WritingThemOnANonGenericTypeIsReported) {
+    const FincRun r = compile(
+        "struct P { pub v <int>, P() {} }\n"
+        "fun main() <noret> { let p <auto> = P::<int>(); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Generic count mismatch: 'P' declares 0 parameter(s), the call writes 1"),
+              std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_WrittenGenericArguments, AnUnresolvedOneIsReportedOnceAndBindsNothing) {
+    // The sentinel must not become the generic argument: that would print `<error>` in
+    // every diagnostic about the result. Same rule AnUnresolvedAnnotationSeedsNothing has.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box() {} }\n"
+        "fun main() <noret> { let b <auto> = Box::<NoSuchType>(); }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("<error>"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_WrittenGenericArguments, ACallWithNoneOfThemStillInfers) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun main() <noret> {\n"
+        "    let b <auto> = Box(1);\n"
+        "    let s <string> = b.v;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_WrittenGenericArguments, AFreeFunctionsTurbofishBindsNothing) {
+    // `print_any::<User>(u)` (tests/samples/interfaces.fin:25) is the corpus site. A
+    // FunctionType carries parameter *types* and no parameter names, so there is nothing
+    // to pair the written argument with -- a struct has its `generic_args` in
+    // declaration order and a function has no equivalent. The declaration's
+    // `generic_params` would have to reach the type for this to be bindable.
+    //
+    // Quiet rather than wrong: the written argument is ignored, and the parameter is
+    // whatever the arguments say it is.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun wrap<T>(p: T) <Box<T>> { return Box(p); }\n"
+        "fun main() <noret> {\n"
+        "    let b <auto> = wrap::<string>(1);\n"
+        "    let s <string> = b.v;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << "T came from the argument; had the turbofish bound it, b.v would be a string\n"
+        << stripAnsi(r.err);
+}
