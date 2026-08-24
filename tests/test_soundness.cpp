@@ -9052,3 +9052,167 @@ TEST(Soundness_EnumMethodReceiver, AnEnumsSelfSpellingIsUnchangedToo) {
         "}\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// A single-member overwrite: `@implements X<...>::m = <lambda>`
+//
+// Two corpus sites, and they ask for two different things under one syntax.
+//
+// enums.fin:25 writes `@implements Result<T, E>::unwrap = fun(enum_: Result<T, E>)
+// <T> { ... }` on an enum that declares no member called `unwrap`, and then calls
+// `r.unwrap()` on 45 and 48. So the form *adds* a method, and it is a method: the
+// receiver is not passed, by the rule typing.fin:27 states for an enum
+// (Soundness_EnumMethodReceiver).
+//
+// stdlib/collection.fin:97 writes `@implements(pub) Collection<T>::push_back =
+// (self: &Self, other: T) <noret> => {}` -- and `push_back` is already declared, on
+// line 18, as a *field* of function type: `push_back <fn(&Self, T)=>noret> = null,`.
+// The lambda's shape is that field's type, `&Self` first parameter included. So on
+// that site the form supplies a value for a member that exists, and the comment calls
+// it a "Safe Single overwrite" -- safe being the check that the value fits what was
+// declared.
+//
+// One rule covers both: overwrite the member if the target has one of that name, add a
+// method if it does not. That is what the block form's own comment says of itself at
+// collection.fin:93, "overwrites or adds methods/operators", and the single-member form
+// is the same operation on one name.
+//
+// ImplementsBlock::overwrite_member and ::overwrite_value were built by the grammar
+// with a comment naming both sites and were read by nobody, so `unwrap` was parsed and
+// dropped and `r.unwrap()` reported `Method 'unwrap' not found in type 'Result'`.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// enums.fin:19-30, reduced: the enum, the `extern` that shortens the enumerator, and
+// the overwrite that adds `unwrap`.
+constexpr const char* kOverwriteEnum =
+    "enum Result<T, E> {\n"
+    "  Ok(T),\n"
+    "  Err(E)\n"
+    "}\n"
+    "extern Result::Ok as Ok;\n"
+    "@implements Result<T, E>::unwrap = fun(enum_: Result<T, E>) <T> {\n"
+    "  return enum_.0;\n"
+    "}\n";
+
+}  // namespace
+
+TEST(Soundness_MemberOverwrite, AnAbsentMemberIsAddedAsAMethod) {
+    const FincRun r = compile(std::string(kOverwriteEnum) +
+                              "fun main() <noret> {\n"
+                              "  let v <Result<int, string>> = Ok(10);\n"
+                              "  v.unwrap();\n"
+                              "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberOverwrite, TheReceiverIsNotAnArgumentOfTheAddedMethod) {
+    const FincRun r = compile(std::string(kOverwriteEnum) +
+                              "fun main() <noret> {\n"
+                              "  let v <Result<int, string>> = Ok(10);\n"
+                              "  v.unwrap(v);\n"
+                              "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expects 0 arguments, got 1"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberOverwrite, TheAddedMethodCarriesTheLambdasReturnType) {
+    // A real signature and not a name that resolves: `unwrap` returns the enum's `T`,
+    // which for a `Result<int, string>` is an `int`.
+    const FincRun r = compile(std::string(kOverwriteEnum) +
+                              "fun main() <noret> {\n"
+                              "  let v <Result<int, string>> = Ok(10);\n"
+                              "  let s <string> = v.unwrap();\n"
+                              "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string'"), std::string::npos)
+        << "the call is typed as the lambda's return type\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberOverwrite, TheLambdasBodyIsAnalysed) {
+    // The value is an expression in the block's scope, so it is walked there like any
+    // other. Registering the signature without walking the body would make the form a
+    // way to smuggle unchecked code past the analyzer.
+    const FincRun r = compile(
+        "enum E<T> { Ok(T) }\n"
+        "@implements E<T>::tag = fun(enum_: E<T>) <int> {\n"
+        "  return no_such_name;\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(stripAnsi(r.err).find("no_such_name"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberOverwrite, TheBlockScopeReachesTheOverwritesLambda) {
+    // `Self` and the target's own generic parameters are in scope for the value, as
+    // they are for a method in the block form. collection.fin:97 writes `&Self` in the
+    // lambda's parameter list, so this is not optional.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, }\n"
+        "@implements Box<T>::get = fun(self: &Self) <T> {\n"
+        "  return self.v;\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberOverwrite, TheArrowSpellingAddsAMethodToo) {
+    // collection.fin:97's spelling, `(...) <T> => { ... }`, on a name the target does
+    // not declare.
+    // The target carries its generic arguments because the grammar has no production
+    // without them -- `IDENTIFIER LT type_list GT DOUBLE_COLON IDENTIFIER` -- and both
+    // corpus sites are generic. A count that disagrees with the target's is the same
+    // typo the block form reports.
+    // The receiver comes in as a parameter rather than from a struct literal, because
+    // `Box<int>{v: 1}` does not parse yet and `Box{v: 1}` on a generic struct is a
+    // `Box<T>` -- neither of which this test is about.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, }\n"
+        "@implements(pub) Box<T>::twice = (self: &Self) <int> => { return 2; }\n"
+        "fun f(b: Box<int>) <int> { return b.twice(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberOverwrite, ASelfNamedReceiverIsNotAnArgumentEither) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, }\n"
+        "@implements(pub) Box<T>::twice = (self: &Self) <int> => { return 2; }\n"
+        "fun f(b: Box<int>) <int> { return b.twice(b); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expects 0 arguments, got 1"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberOverwrite, ADeclaredFieldIsOverwrittenAndNotShadowed) {
+    // collection.fin:18 and :97 together: the field's type is `fn(&Self, T)=>noret`,
+    // the lambda is `(self: &Self, other: T) <noret>`, and the receiver stays a
+    // parameter because a field of function type is a value and not a method.
+    const FincRun r = compile(
+        "struct Coll<T> {\n"
+        "  pub length <int> = 0,\n"
+        "  pub push_back <fn(&Self, T)=>noret> = null,\n"
+        "}\n"
+        "@implements(pub) Coll<T>::push_back = (self: &Self, other: T) <noret> => {}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberOverwrite, AValueThatDoesNotFitTheDeclaredMemberReports) {
+    // The "Safe" in collection.fin:97's "Safe Single overwrite": the member has a
+    // declared type and the value has to be one.
+    const FincRun r = compile(
+        "struct Coll<T> {\n"
+        "  pub push_back <fn(&Self, T)=>noret> = null,\n"
+        "}\n"
+        "@implements(pub) Coll<T>::push_back = (self: &Self) <int> => { return 1; }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(r.exitCode, 0) << "the value does not have the member's declared type";
+}
+
+TEST(Soundness_MemberOverwrite, AnUnknownTargetStillReports) {
+    // The form goes through the same target resolution as the block form, so a target
+    // that does not exist is one diagnostic and not a crash.
+    const FincRun r = compile(
+        "@implements NoSuchType<T>::m = fun(self: &Self) <int> { return 1; }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(stripAnsi(r.err).find("NoSuchType"), std::string::npos) << stripAnsi(r.err);
+}

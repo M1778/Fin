@@ -1246,6 +1246,75 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
         }
     }
 
+    // The single-member form: `@implements Result<T, E>::unwrap = fun(enum_: Result<T,
+    // E>) <T> { ... }` (enums.fin:25) and `@implements(pub) Collection<T>::push_back =
+    // (self: &Self, other: T) <noret> => {}` (stdlib/collection.fin:97).
+    // ImplementsBlock::overwrite_member and ::overwrite_value were built by the grammar
+    // -- with a comment naming both sites -- and read by nobody, so `unwrap` was parsed
+    // and dropped and `r.unwrap()` reported `Method 'unwrap' not found in type
+    // 'Result'` about a method written twenty lines above it.
+    //
+    // One rule, two behaviours, because the two sites ask for different things.
+    // collection.fin's `push_back` is already declared on line 18, as a *field* of
+    // function type -- `push_back <fn(&Self, T)=>noret> = null,` -- and the lambda's
+    // shape is that field's type, `&Self` first parameter included; the site's comment
+    // calls it a "Safe Single overwrite", and safe is the check that the value fits
+    // what was declared. enums.fin's `unwrap` is declared nowhere, and is called as a
+    // method. So: overwrite the member when the target has one of that name, add a
+    // method when it does not -- which is what the block form's own comment says of
+    // itself at collection.fin:93, "overwrites or adds methods/operators".
+    //
+    // Inside the scope opened above, so `Self` and the target's generic parameters
+    // reach the value. collection.fin:97 writes `&Self` in the parameter list, so that
+    // is not optional.
+    if (!node.overwrite_member.empty() && node.overwrite_value) {
+        node.overwrite_value->accept(*this);
+        auto valueType = lastExprType;
+        // A field wins over a method of the same name for the same reason it does at a
+        // member read: a field is what the declaration wrote, and the value has to be
+        // one of those. `checkType` and not a silent replacement -- a field's declared
+        // type is the authority and an overwrite does not get to change it.
+        if (auto fieldType = structType->getFieldType(node.overwrite_member)) {
+            // `Self` resolved to the struct in the lambda's parameter list and stayed a
+            // SelfType in the field's, so the two spellings of the same type did not
+            // compare equal: collection.fin:18's field is `fn(&Self, T)=>noret` and
+            // :97's value is `fn(&Collection<T>, T) -> void`. Substituted here rather
+            // than at the declaration because a field type keeps `Self` on purpose --
+            // it is what makes an inherited field mean the inheritor -- so the reader
+            // is where it has to be answered, and this reader knows the answer.
+            if (valueType) {
+                checkType(*node.overwrite_value, valueType,
+                          fieldType->substitute({}, structType));
+            }
+        } else if (auto* fn = valueType ? valueType->as<FunctionType>() : nullptr) {
+            // The receiver goes, by the same two rules buildMethodSignature applies to
+            // a written method: a first parameter named `self`, or -- on an enum -- a
+            // first parameter whose type is the enum (typing.fin:27). The names live on
+            // the lambda and not on its type, so they are read off the AST node.
+            //
+            // A parameter whose annotation did not resolve is not in `param_types` at
+            // all (visit(LambdaExpression&) pushes only what resolved), so the two lists
+            // can differ in length and the first entry of each need not be the same
+            // parameter. Then no receiver is dropped, and the arity a call is checked
+            // against is one too many -- next to the diagnostic about the annotation.
+            auto* lam = dynamic_cast<LambdaExpression*>(node.overwrite_value.get());
+            std::vector<std::shared_ptr<Type>> params = fn->param_types;
+            if (lam && lam->params.size() == params.size() && !params.empty() &&
+                (lam->params[0]->name == "self" ||
+                 (structType->is_enum && isReceiverOf(params[0], *structType)))) {
+                params.erase(params.begin());
+            }
+            structType->defineMethod(node.overwrite_member,
+                                     std::make_shared<FunctionType>(params, fn->return_type));
+            debugLog(fg(fmt::color::green), "      [Implements] Registered member '{}::{}' with {} params\n",
+                     node.target_type, node.overwrite_member, params.size());
+        }
+        // Null, or not a function: the value is a block-bodied lambda by the grammar
+        // (`overwrite_body` accepts nothing else), so the only way here is a lambda that
+        // failed to analyse -- which has already reported. A second diagnostic would be
+        // about the same mistake.
+    }
+
     for (auto& method : node.methods) {
         // The signature is resolved in a scope of the method's own, because a
         // generic method carries type parameters that exist only for the length of
