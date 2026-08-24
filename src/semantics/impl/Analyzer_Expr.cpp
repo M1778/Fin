@@ -1029,12 +1029,39 @@ void SemanticAnalyzer::visit(NewExpression& node) {
     for(auto& f : node.init_fields) f.second->accept(*this);
     
     auto allocatedType = resolveTypeFromAST(node.type.get());
-    // A PointerType over a null pointee is worse than no type at all: it is
-    // non-null, so every `if (!type) return;` downstream lets it through, and the
-    // first toString() -- checkType's own error message, usually -- dereferences
-    // the null. `new Nope{}` died in PointerType.cpp:6 that way. resolveTypeFromAST
-    // has already reported why it failed, so there is nothing to add here.
-    lastExprType = allocatedType ? std::make_shared<PointerType>(allocatedType) : nullptr;
+    if (!allocatedType) {
+        // A PointerType over a null pointee is worse than no type at all: it is
+        // non-null, so every `if (!type) return;` downstream lets it through, and the
+        // first toString() -- checkType's own error message, usually -- dereferences
+        // the null. `new Nope{}` died in PointerType.cpp:6 that way. resolveTypeFromAST
+        // has already reported why it failed, so there is nothing to add here.
+        lastExprType = nullptr;
+        return;
+    }
+
+    // An array allocation is a `[T]`, and not a pointer to one.
+    //
+    // Every other `new` is a pointer to what it allocated: `new Vec2::<float>{x: 3.0, y:
+    // 4.0}` is a `&Vec2<float>` (tests/samples/letssee.fin:58). An array is the exception
+    // because `[T]` already carries a length and an address -- there is nothing for the
+    // extra indirection to hold -- and the corpus states it at every site:
+    //
+    //     self._arr = new [T, amount]{};   stdlib/collection.fin:54, `_arr` is `[T]`
+    //     _arr: new [T, length]{}          :84, the same field through a literal
+    //     self.stream_length = _temp.length;  stdlib/stdio.fin:130, a length off it
+    //
+    // Not fixed-size either, whatever the extent looks like. `amount` is an `int`
+    // parameter and `nbytes + self.stream_length` (stdio.fin:124) is an expression, so
+    // the size is not part of the type -- and making it part of the type when the extent
+    // happens to be a literal would make `new [int, 3]` and `new [int, n]` different
+    // types for no reason the language draws anywhere else. An array *literal* is still
+    // fixed: it states its elements rather than an extent.
+    if (auto* arr = allocatedType->as<ArrayType>()) {
+        lastExprType = std::make_shared<ArrayType>(arr->element_type, false);
+        return;
+    }
+
+    lastExprType = std::make_shared<PointerType>(allocatedType);
 }
 
 void SemanticAnalyzer::visit(MemberAccess& node) {

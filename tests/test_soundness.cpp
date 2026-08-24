@@ -8060,3 +8060,139 @@ TEST(KnownDefect_WrittenGenericArguments, AFreeFunctionsTurbofishBindsNothing) {
         << "T came from the argument; had the turbofish bound it, b.v would be a string\n"
         << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// `new [T, n]` is a `[T]`.
+//
+// Every other `new` is a pointer to what it allocated -- `new Vec2::<float>{x: 3.0, y:
+// 4.0}` is a `&Vec2<float>` (tests/samples/letssee.fin:58). An array allocation is not,
+// and the corpus says so three ways in one file:
+//
+//   self._arr = new [T, amount]{};   stdlib/collection.fin:54, where `_arr` is `[T]`
+//   new [T, length]{}                :84, into the same field through a literal
+//   _temp.length                     stdlib/stdio.fin:130, read off the result
+//
+// and the extent settles what the element count is: `amount` is an `int` parameter and
+// `nbytes + self.stream_length` (stdio.fin:124) is an expression, so a *fixed*-size type
+// cannot describe either. `[T]` is the type that carries a runtime length, which is why
+// it is the type the samples declare their destinations with.
+//
+// What it was before: `&[T; fixed]`, a pointer to a fixed-size array, which is two
+// mismatches against `[T]` at once -- an extra level of indirection and a size it does
+// not have. Five corpus diagnostics.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_HeapArrays, AHeapArrayIsADynamicArray) {
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let n <int> = 4;\n"
+        "    let a <[int]> = new [int, n];\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_HeapArrays, TheBracedFormIsTheSameType) {
+    // tests/samples/stdlib/collection.fin:54 writes the braces and stdio.fin:124 does
+    // not; both spellings allocate the same thing.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let n <int> = 4;\n"
+        "    let a <[int]> = new [int, n]{};\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_HeapArrays, ItIsNotAPointer) {
+    // The distinction that was wrong, stated on its own: an array allocation is not
+    // indirected. `&[int]` is a pointer to a dynamic array and this is not one.
+    const FincRun r = compile(
+        "fun main() <noret> { let a <&[int]> = new [int, 4]; }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected '&[int]', got '[int]'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_HeapArrays, ItsExtentNeedNotBeConstant) {
+    // stdlib/stdio.fin:124, `new [char, nbytes + self.stream_length]`. Nothing about the
+    // type depends on the extent being known, which is the reason it is not fixed-size.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let n <int> = 4;\n"
+        "    let a <[int]> = new [int, n + 1];\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_HeapArrays, ItHasALength) {
+    // stdlib/stdio.fin:130, `self.stream_length = _temp.length;`.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let a <auto> = new [int, 4];\n"
+        "    let s <string> = a.length;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << "the length is an int, so the allocation is an array and not a pointer to one\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_HeapArrays, ItIsIndexableAndItsElementsAreTheElementType) {
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let a <auto> = new [int, 4];\n"
+        "    let s <string> = a[0];\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_HeapArrays, ItGoesIntoAFieldOfItsType) {
+    // tests/samples/stdlib/collection.fin:54 and :84, both spellings of reaching the
+    // field: through an assignment and through a struct literal.
+    const FincRun r = compile(
+        "struct C<T> {\n"
+        "    pub arr <[T]>,\n"
+        "    C(n: int) { self.arr = new [T, n]{}; }\n"
+        "}\n"
+        "struct D<T> {\n"
+        "    pub arr <[T]>,\n"
+        "    D(n: int) { return D{arr: new [T, n]{}}; }\n"
+        "}\n"
+        "fun main() <noret> { let c <C<int>> = C(4); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_HeapArrays, AllocatingAStructIsStillAPointer) {
+    // tests/samples/letssee.fin:58. The rule is about arrays and nothing else moves.
+    const FincRun r = compile(
+        "struct P { pub v <int>, }\n"
+        "fun main() <noret> { let p <&P> = new P{v: 1}; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_HeapArrays, AllocatingAPrimitiveIsStillAPointer) {
+    // `new int;` does not parse -- an allocation is written with arguments or with an
+    // extent -- so `new int(5)` is the primitive spelling. Whether it should be a `&int`
+    // or an `int` is an owner question the corpus does not settle; what this holds is
+    // that the array rule did not answer it by accident.
+    const FincRun r = compile(
+        "fun main() <noret> { let p <&int> = new int(5); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_HeapArrays, AnArrayLiteralIsStillFixedSize) {
+    // A literal states its elements, so its size is part of its type -- the rule
+    // Soundness_GenericInference.AFixedArrayInferredIntoAGenericArgumentDecaysThrough-
+    // TheAnnotation depends on. An allocation states an extent instead, which is why the
+    // two differ.
+    const FincRun r = compile(
+        "fun main() <noret> { let a <[int, 3]> = [1, 2, 3]; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_HeapArrays, AFixedAnnotationDoesNotAcceptAnAllocation) {
+    // The other direction of the decay, which has not changed: a dynamic source cannot
+    // promise the size a fixed-size target requires (src/types/ArrayType.cpp).
+    const FincRun r = compile(
+        "fun main() <noret> { let a <[int, 3]> = new [int, 3]; }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected '[int; fixed]', got '[int]'"), std::string::npos)
+        << stripAnsi(r.err);
+}

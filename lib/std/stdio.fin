@@ -43,9 +43,12 @@
 //     `expected 'int', got 'ulong'`, and so does `a[i]`. There is no widening or
 //     narrowing between the integer types at all, which is on the owner's ruling list;
 //     until it is settled a stream cannot be longer than an `int`.
-//   * Everywhere the draft writes `_temp.length` or `data.length`, this file carries the
-//     length itself. `.length` on an array reports `Type '&[char]' is not a struct` and
-//     on a string `Type 'string' is not a struct`; there is no length operator yet.
+//   * Where the draft writes `_temp.length` or `data.length`, this file carries the length
+//     itself. `.length` works on both an array and a string -- the claim that used to
+//     stand here was measured when these buffers were annotated `&[char]`, and a pointer
+//     to an array has no members. The lengths stay carried for a different reason: a
+//     `Stream`'s `stream_length` is how much content it holds, and `expand` deliberately
+//     allocates more than that, so the buffer's `.length` is not the stream's length.
 //   * The draft's loops run `for (i: int = 0; i >= _temp.length; i++)` -- `>=`, which
 //     never executes. Written `<` here. The draft is wrong about its own loops in three
 //     places and stdlib/collection.fin repeats it.
@@ -98,12 +101,12 @@ pub interface IStream {
   priv:
       stream_length <int>;
       pointer <int>;
-      stream <&[char]>;
+      stream <[char]>;
 
   pub:
     fun seek(offset: int) <bool>;
-    fun read(nbytes: int) <&[char]>;
-    fun read_all() <&[char]>;
+    fun read(nbytes: int) <[char]>;
+    fun read_all() <[char]>;
     fun expand(nbytes: int) <noret>;
 }
 
@@ -112,7 +115,7 @@ pub struct Stream : <IStream> {
     priv:
       stream_length <int>,
       pointer <int> = 0,
-      stream <&[char]>,
+      stream <[char]>,
 
     pub:
       fun seek(self: &Self, offset: int) <bool> {
@@ -125,11 +128,11 @@ pub struct Stream : <IStream> {
         }
 
       // Reads forward from the pointer and leaves it past what was read.
-      fun read(self: &Self, nbytes: int) <&[char]> {
+      fun read(self: &Self, nbytes: int) <[char]> {
           let want <int> = nbytes;
           if (want > self.stream_length) { want = self.stream_length; }
 
-          let _temp <&[char]> = new [char, want - self.pointer]{};
+          let _temp <[char]> = new [char, want - self.pointer]{};
           for (let i <int> = 0; i < want - self.pointer; i++) {
               _temp[i] = self.stream[i + self.pointer];
             }
@@ -138,10 +141,10 @@ pub struct Stream : <IStream> {
           return _temp;
         }
 
-      fun read_all(self: &Self) <&[char]> { return self.read(self.stream_length); }
+      fun read_all(self: &Self) <[char]> { return self.read(self.stream_length); }
 
       fun expand(self: &Self, nbytes: int) <noret> {
-          let _temp <&[char]> = new [char, nbytes + self.stream_length]{};
+          let _temp <[char]> = new [char, nbytes + self.stream_length]{};
           for (let i <int> = 0; i < self.stream_length; i++) {
               _temp[i] = self.stream[i];
             }
@@ -149,7 +152,7 @@ pub struct Stream : <IStream> {
           self.stream_length += nbytes;
         }
 
-      Stream(data: &[char], length: int) {
+      Stream(data: [char], length: int) {
           self.stream = data;
           self.stream_length = length;
           self.pointer = 0;

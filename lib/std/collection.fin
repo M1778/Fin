@@ -8,11 +8,11 @@
 //
 // Divergences from the draft, each because the compiler says so today:
 //
-//   _arr <[T]>            the draft's own `self._arr = new [T, amount]{}` does not
-//                         typecheck against it -- `new` yields a pointer, so the
-//                         allocation is `&[T; fixed]` and the field has to be
-//                         `<&[T]>`. The draft is wrong about its own field, not the
-//                         compiler.
+//   _arr <[T]>            no divergence any more. This entry used to read `<&[T]>`,
+//                         because `new [T, amount]{}` was typed `&[T; fixed]` and did
+//                         not fit the draft's own field. An array allocation is a `[T]`
+//                         now -- the draft was right, and this file's evidence is what
+//                         settled it (Soundness_HeapArrays).
 //   push_back = null      a nullable method slot nothing in the corpus calls, whose
 //                         only writer is the draft's `@implements(pub)
 //                         Collection<T>::push_back = ...` overwriter
@@ -46,7 +46,7 @@ pub struct Collection<T> : <Index, IndexAssign> {
     priv:
       length <int>,
       filled <int>,
-      _arr <&[T]>,
+      _arr <[T]>,
 
     pub:
       fun push(self: &Self, item: T) <noret> {
@@ -72,7 +72,7 @@ pub struct Collection<T> : <Index, IndexAssign> {
       }
 
     priv fun allocate(self: &Self, amount: int) <noret> {
-        let grown <&[T]> = new [T, amount]{};
+        let grown <[T]> = new [T, amount]{};
         for (let i <int> = 0; i < self.filled; i++) {
             grown[i] = self._arr[i];
           }
