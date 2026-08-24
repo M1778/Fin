@@ -10,7 +10,20 @@ void SemanticAnalyzer::visit(Block& node) {
 
 void SemanticAnalyzer::visit(ReturnStatement& node) {
     if (node.value) {
+        // The declared return type is a hint for the expression, which is what a
+        // declaration's annotation is: `return Err("File don't exists");` inside
+        // `static fun open(path: string) <IOResult<Stream>>`
+        // (tests/samples/stdlib/stdio.fin:154) says which `IOResult` is being built in
+        // the only place the function has to say it. Installed before the walk, because
+        // inference reads it while typing the expression, and cleared after, because it
+        // belongs to this expression and no other.
+        if (context.currentFuncReturnType && !isErrorType(context.currentFuncReturnType)) {
+            typeHintFor = node.value.get();
+            typeHint = context.currentFuncReturnType;
+        }
         node.value->accept(*this);
+        typeHintFor = nullptr;
+        typeHint = nullptr;
         // Check return type
         if (context.currentFuncReturnType) {
             checkType(*node.value, lastExprType, context.currentFuncReturnType);

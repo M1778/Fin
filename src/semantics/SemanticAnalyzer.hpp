@@ -219,6 +219,18 @@ private:
     void checkCallArity(ASTNode& node, const char* kind, const std::string& name,
                         const FunctionType& sig, size_t actual);
 
+    // The check for a call whose callee still mentions a generic parameter: walks the
+    // arguments, checks them against the parameters *as instantiated*, and returns the
+    // call's own type. Used in place of checkCallArguments, not alongside it.
+    //
+    // `owner` is the type the callee was reached through, whose instantiation becomes
+    // `Self`; null where the return type carries the whole answer. See the definition for
+    // what is read in which order.
+    std::shared_ptr<Type> checkGenericCall(ASTNode& node, const char* kind,
+                                           const std::string& name, FunctionType& sig,
+                                           std::vector<std::unique_ptr<Expression>>& args,
+                                           const std::shared_ptr<StructType>& owner);
+
     // The type an expression is about to be checked against, and the exact expression
     // node it belongs to.
     //
@@ -228,6 +240,20 @@ private:
     // `rptr([1,2,3,4])` (const.fin:98) has one whose type is a *fixed* array where the
     // annotation's is not. In all three the annotation on the left is the only thing
     // that says what the generic argument is.
+    //
+    // Written at three sites, which are the three places the corpus states what a value
+    // is about to become:
+    //
+    //   a declaration's annotation   `let r <Result<int, string>> = Ok(10);`
+    //                                (enums.fin:44) -- visit(VariableDeclaration&).
+    //   an assignment's target       `r = Err("Blame ME!");` (enums.fin:47) --
+    //                                visit(BinaryOp&).
+    //   a return's function          `return Err("File don't exists");` inside
+    //                                `<IOResult<Stream>>` (stdlib/stdio.fin:154) --
+    //                                visit(ReturnStatement&).
+    //
+    // Nothing distinguishes them once installed: each says "this expression is expected
+    // to be that type", which is the whole of what inference needs from them.
     //
     // Keyed on the node so it cannot leak inward: only the expression the annotation
     // actually applies to matches, and every subexpression has a different address. A

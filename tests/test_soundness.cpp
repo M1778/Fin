@@ -7718,3 +7718,217 @@ TEST(Soundness_GenericInference, AnUnresolvedAnnotationSeedsNothing) {
     EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
     EXPECT_EQ(stripAnsi(r.err).find("<error>"), std::string::npos) << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// Enum construction, and the two hint sites a `let` annotation is not.
+//
+// An enumerator is a constructor: `Ok(10)` builds a `Result`, its return type is the
+// thing being named, and the arguments written to it are therefore what say which
+// `Result`. Same rule as Soundness_GenericInference, so the same machinery -- what this
+// group adds is the two places the corpus asks the question from where no annotation is
+// in reach. `r = Err("Blame ME!");` (tests/samples/enums.fin:47) is an *assignment*, and
+// `return Err("File don't exists");` (tests/samples/stdlib/stdio.fin:154) is a *return*.
+// The left-hand side of the one and the enclosing function's declared return type of the
+// other say exactly what an annotation says, so they seed through the same channel.
+// ---------------------------------------------------------------------------
+
+// The generic enum these tests construct. `Opt<T>` has one parameter, so an argument
+// alone can say what T is; `Result<T, E>` has two and each member mentions only one, so
+// a construction of it *cannot* be complete without a hint -- which is the shape
+// enums.fin:44 and :47 are.
+static const char* const kOptDecl =
+    "enum Opt<T> {\n"
+    "    Some(T),\n"
+    "    Nothing\n"
+    "}\n";
+static const char* const kResultDecl =
+    "enum Res<T, E> {\n"
+    "    Ok(T),\n"
+    "    Err(E)\n"
+    "}\n";
+
+TEST(Soundness_EnumInference, AnEnumeratorCallInfersFromItsArgument) {
+    const FincRun r = compile(
+        std::string(kOptDecl) +
+        "fun main() <noret> { let o <Opt<int>> = Some(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, AnEnumeratorsPayloadIsCheckedAgainstWhatWasInferred) {
+    const FincRun r = compile(
+        std::string(kOptDecl) +
+        "fun main() <noret> {\n"
+        "    let o <Opt<int>> = Some(1);\n"
+        "    let s <string> = \"x\";\n"
+        "    o = Some(s);\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, AnAnnotationSaysWhatOneArgumentCannot) {
+    // tests/samples/enums.fin:44, `let r <Result<int, string>> = Ok(10);`. `Ok` mentions
+    // T and nothing mentions E, so the argument gets half of the answer and the
+    // annotation has to supply the other half. Reported before this as
+    // `expected 'Result<int, string>', got 'Result<T, E>'`.
+    const FincRun r = compile(
+        std::string(kResultDecl) +
+        "fun main() <noret> { let r <Res<int, string>> = Ok(10); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, AnAssignmentSeedsItsRightHandSide) {
+    // tests/samples/enums.fin:47, `r = Err("Blame ME!");`. There is no annotation on an
+    // assignment; the variable being assigned to is what says which `Result` this is.
+    const FincRun r = compile(
+        std::string(kResultDecl) +
+        "fun main() <noret> {\n"
+        "    let r <Res<int, string>> = Ok(10);\n"
+        "    r = Err(\"Blame ME!\");\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, AnAssignmentsSeedStillChecksWhatWasWritten) {
+    // The seed says what is expected; it does not accept whatever arrives. `Err(1)`
+    // against an `Res<int, string>` is an error at the argument.
+    const FincRun r = compile(
+        std::string(kResultDecl) +
+        "fun main() <noret> {\n"
+        "    let r <Res<int, string>> = Ok(10);\n"
+        "    r = Err(1);\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, AReturnSeedsFromTheEnclosingFunction) {
+    // tests/samples/stdlib/stdio.fin:154, `return Err("File don't exists");` inside
+    // `static fun open(path: string) <IOResult<Stream>>`. The declared return type is
+    // the only thing in reach that says which `IOResult` is being built.
+    const FincRun r = compile(
+        std::string(kResultDecl) +
+        "fun f() <Res<int, string>> { return Err(\"x\"); }\n"
+        "fun main() <noret> { let r <Res<int, string>> = f(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, AReturnsSeedStillChecksWhatWasWritten) {
+    const FincRun r = compile(
+        std::string(kResultDecl) +
+        "fun f() <Res<int, string>> { return Err(1); }\n"
+        "fun main() <noret> { let r <Res<int, string>> = f(); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, AReturnDoesNotSeedASubexpression) {
+    // The hint is keyed to the expression being returned, so an inner call is inferred
+    // from its own arguments and checked against the parameter it is passed to -- the
+    // same property AnAnnotationDoesNotReachASubexpression holds for a declaration.
+    const FincRun r = compile(
+        std::string(kOptDecl) +
+        "fun g(o: Opt<string>) <Opt<int>> { return Some(1); }\n"
+        "fun f() <Opt<int>> { return g(Some(1)); }\n"
+        "fun main() <noret> { let o <Opt<int>> = f(); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'Opt<string>', got 'Opt<int>'"), std::string::npos)
+        << "the argument was inferred from its own argument, not from the return type\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, AStaticEnumeratorCallInfersToo) {
+    // `Opt::Some(1)` and `Some(1)` are the same construction written two ways --
+    // `extern Result::Ok as Ok;` (enums.fin:19) exists precisely to turn one into the
+    // other -- so they cannot disagree about what they build.
+    const FincRun r = compile(
+        std::string(kOptDecl) +
+        "fun main() <noret> { let o <Opt<int>> = Opt::Some(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, AStaticEnumeratorCallsPayloadIsStillChecked) {
+    const FincRun r = compile(
+        std::string(kOptDecl) +
+        "fun main() <noret> { let o <Opt<int>> = Opt::Some(\"x\"); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, ArityIsStillCheckedAndReportedFirst) {
+    const FincRun r = compile(
+        std::string(kOptDecl) +
+        "fun main() <noret> { let o <Opt<int>> = Some(1, 2); }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("Function 'Some' expects 1 arguments, got 2"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << "the arity, and nothing after it\n" << err;
+}
+
+TEST(Soundness_EnumInference, ANonGenericEnumIsUnaffected) {
+    const FincRun r = compile(
+        "enum Color {\n"
+        "    RGB(int, int, int),\n"
+        "    Named(string)\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let c <Color> = Color::RGB(1, 2, 3);\n"
+        "    let d <Color> = Named(\"red\");\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, ANonGenericEnumsPayloadIsStillChecked) {
+    const FincRun r = compile(
+        "enum Color {\n"
+        "    RGB(int, int, int),\n"
+        "    Named(string)\n"
+        "}\n"
+        "fun main() <noret> { let d <Color> = Named(1); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, AGenericFreeFunctionInfersItsReturnFromItsArgument) {
+    // The rule as generalised: a callee whose return type still mentions a parameter is
+    // inferred from what was written to it. A constructor was the first such callee and
+    // an enumerator the second, but nothing about the rule is specific to either.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun wrap<T>(p: T) <Box<T>> { return Box(p); }\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = wrap(1);\n"
+        "    let s <string> = b.v;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << "wrap(1) is a Box<int>, so b.v is an int\n" << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumInference, AnAssignmentToANonGenericTargetIsUnaffected) {
+    // The assignment hint is installed on every plain assignment, so the ordinary case
+    // has to keep reporting exactly as it did: the check is still left-against-right.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let a <int> = 1;\n"
+        "    a = \"x\";\n"
+        "}\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_EnumInference, APayloadlessMemberOfAGenericEnumIsTypedAsTheTemplate) {
+    // `let q <Opt<int>> = Nothing;` reports `expected 'Opt<int>', got 'Opt<T>'`. A
+    // payloadless member read as a value is not a call, so there are no arguments to
+    // infer from and nothing walks it against the annotation -- the hint channel is
+    // read by the call sites only.
+    //
+    // No corpus sample writes it: the two generic enums in the corpus are enums.fin's
+    // `Result<T, E>` and stdlib/stdio.fin's `IOResult<T>`, and every member of both
+    // carries a payload. Fixing it means reading the hint in visit(Identifier&) and
+    // instantiating there, which is a fourth site for a shape nothing asks for yet.
+    const FincRun r = compile(
+        std::string(kOptDecl) +
+        "fun main() <noret> { let q <Opt<int>> = Nothing; }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'Opt<int>', got 'Opt<T>'"), std::string::npos)
+        << stripAnsi(r.err);
+}
