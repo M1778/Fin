@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -37,7 +38,10 @@
 // the smallest set of constructs that turns `finc hello.fin -o hello && ./hello`
 // -- the exit criterion docs/plan.md sets for wave 5 -- from a plan into a fact?
 // The answer is external declarations, top-level functions, the scalar types, one
-// kind of local, and the four control-flow shapes. Everything else refuses.
+// kind of local, and the four control-flow shapes. Everything else refused. Units
+// since have added to that set one construct at a time -- structs are the first --
+// and the list below is what has not been added yet, kept honest by the rule that
+// anything absent from it must refuse.
 //
 // Refusing is the load-bearing half. `runCodeGen` used to `return true` without
 // emitting anything, which meant `finc x.fin -o x` printed "Build Successful." and
@@ -51,10 +55,27 @@
 //
 // WHAT IS DELIBERATELY NOT HERE, and is a unit of its own rather than an omission:
 //
-//   * Aggregates. Structs, enums, arrays, prototypes, interfaces, and everything
-//     that reads a field. Layout is settled in two named moments (ADR 0015) and
-//     StructType still stores its fields in an unordered_map, so there is no field
-//     order to lower yet -- ordering them is the step that unblocks this.
+//   * The rest of the aggregates. Enums, arrays and indexing, prototypes, and
+//     interfaces. Structs *are* here as of this unit -- what unblocked them was
+//     giving StructType an ordered field list, because a struct with no field
+//     order has no offsets, and a field read at the wrong offset is still a
+//     well-typed int. Layout is settled in two named moments (ADR 0015) and the
+//     second of those, the byte offsets, is src/types/Layout.hpp's; this file
+//     hands the field list to LLVM in declaration order and lets LLVM place it,
+//     and Soundness_Codegen.AStructsLayoutMatchesWhatLLVMWouldChoose is the test
+//     that the two agree. Two consequences worth naming, because both are
+//     refusals rather than gaps in the lowering:
+//       - A struct crosses a Fin-to-Fin boundary as an LLVM aggregate, by value.
+//         It does not cross an `@define` boundary at all. The platform ABI decides
+//         per struct whether it arrives in registers, split across two, or behind
+//         a hidden pointer, and clang implements that classification itself rather
+//         than leaving it to LLVM -- so emitting the aggregate on an extern would
+//         link cleanly and pass garbage. The classifier is its own unit.
+//       - Methods, operators and constructors on a struct are not emitted, and
+//         every way of reaching one refuses at the call site. Nothing implicit
+//         calls them: a `P { a: 1 }` literal does not run a constructor. A
+//         destructor would run implicitly, which is why a struct that has one is
+//         refused whole rather than lowered as plain data with no call emitted.
 //   * Generics. Monomorphisation, and the erasure rule ADR 0002 carries forward
 //     from pyprototype (an erasure-marker constraint on any one parameter selects
 //     erasure; an erased generic is a raw pointer).
@@ -95,8 +116,10 @@ namespace {
 // depending on it, and a backend that guessed would compile `a / b` on unsigned
 // operands into a signed divide -- correct for every value the tests happen to
 // use and wrong at the top of the range. `isFloat` is here for the same reason.
+struct StructInfo;
+
 struct CgType {
-    enum class Kind { Void, Int, Float, Ptr };
+    enum class Kind { Void, Int, Float, Ptr, Struct };
     llvm::Type* llvmType = nullptr;
     Kind kind = Kind::Void;
     bool isSigned = true;
@@ -107,7 +130,48 @@ struct CgType {
     // variadic, where the callee reads a full int.
     bool isBool = false;
 
+    // Set for Kind::Struct and null otherwise: the field names, their order, and
+    // their types. A struct's identity in this file is this pointer, not its LLVM
+    // type -- two Fin structs with the same field types are the same
+    // llvm::StructType only by accident of LLVM's uniquing of *literal* structs,
+    // and these are named, so they are distinct. It points into Emitter::structs_,
+    // which is never rehashed after declareStructs finishes.
+    const StructInfo* structInfo = nullptr;
+
     bool isVoid() const { return kind == Kind::Void; }
+    bool isStruct() const { return kind == Kind::Struct; }
+};
+
+// One field, in declaration order. The order is the whole point: the layout pass
+// and LLVM both index by position, and the *written* order of a struct literal's
+// initialisers is the author's convenience and nothing else
+// (Soundness_Codegen.AStructLiteralFollowsDeclarationOrderNotWrittenOrder).
+struct StructField {
+    std::string name;
+    CgType type;
+};
+
+struct StructInfo {
+    std::string finName;
+    llvm::StructType* llvmType = nullptr;
+    std::vector<StructField> fields;
+    std::unordered_map<std::string, size_t> indexByName;
+    // False between the two passes of declareStructs: the name exists and the body
+    // does not. A field of an incomplete struct type has no size, so it refuses --
+    // which is also what stops a mutually recursive pair from reaching LLVM, where
+    // it would be an infinite size computation rather than an error.
+    bool complete = false;
+
+    // The index is looked up per struct, never in one table shared across struct
+    // types: `v` is field 1 of `A` and field 0 of `B`, and one table gives the same
+    // answer for both (Soundness_Codegen.TwoStructsWithTheSameFieldNameUseTheir-
+    // OwnOffsets).
+    bool find(const std::string& name, size_t& indexOut) const {
+        auto it = indexByName.find(name);
+        if (it == indexByName.end()) return false;
+        indexOut = it->second;
+        return true;
+    }
 };
 
 struct CgVal {
@@ -140,6 +204,13 @@ class TypeMapper {
 public:
     explicit TypeMapper(llvm::LLVMContext& ctx) : ctx_(ctx) {}
 
+    // The struct table is bound after construction because it lives in the Emitter
+    // and the Emitter constructs this. Until it is bound, and for a name that is
+    // not in it, a struct name maps to nothing and the caller refuses.
+    void bindStructs(const std::unordered_map<std::string, StructInfo>* structs) {
+        structs_ = structs;
+    }
+
     std::optional<CgType> map(const TypeNode* node) const {
         if (!node) return voidType();
 
@@ -155,7 +226,8 @@ public:
             dynamic_cast<const ArrayTypeNode*>(node)) {
             return std::nullopt;
         }
-        return byName(node->name);
+        if (auto scalar = byName(node->name)) return scalar;
+        return structByName(node->name);
     }
 
     // The widths come from src/types/Layout.hpp and are not repeated here.
@@ -201,6 +273,20 @@ public:
         return std::nullopt;
     }
 
+    // A name that is not a scalar may still be a struct. Checked second, so a
+    // struct called `int` could not shadow the scalar -- the analyzer rejects that
+    // name anyway, and the ordering means this file does not depend on it doing so.
+    std::optional<CgType> structByName(const std::string& name) const {
+        if (!structs_) return std::nullopt;
+        auto it = structs_->find(name);
+        if (it == structs_->end() || !it->second.complete) return std::nullopt;
+        CgType t;
+        t.kind = CgType::Kind::Struct;
+        t.llvmType = it->second.llvmType;
+        t.structInfo = &it->second;
+        return t;
+    }
+
     CgType voidType() const {
         CgType t;
         t.kind = CgType::Kind::Void;
@@ -226,6 +312,7 @@ public:
 
 private:
     llvm::LLVMContext& ctx_;
+    const std::unordered_map<std::string, StructInfo>* structs_ = nullptr;
 };
 
 // Decodes one Fin string or character literal into the bytes it denotes.
@@ -268,9 +355,14 @@ class Emitter : public Visitor {
 public:
     Emitter(DiagnosticEngine& diag, bool debug)
         : diag_(diag), debug_(debug), ctx_(), module_("fin", ctx_), builder_(ctx_),
-          types_(ctx_) {}
+          types_(ctx_) {
+        types_.bindStructs(&structs_);
+    }
 
     bool run(Program& program) {
+        // Before the functions, because a function's signature may name a struct.
+        declareStructs(program);
+        if (failed_) return false;
         declareTopLevel(program);
         if (failed_) return false;
         for (auto& stmt : program.statements) {
@@ -324,11 +416,130 @@ private:
     // Every top-level signature is declared before any body is emitted, for the
     // same reason the analyzer hoists them (6f48a89): a call may sit above its
     // declaration, and mutual recursion sits above both.
+    // Every struct the module declares, as a named llvm::StructType, in two passes
+    // so that a struct may name one declared above it.
+    //
+    // Two passes rather than one because a field of struct type needs that struct's
+    // LLVM type to exist, and one pass in source order would work only for the
+    // orders the analyzer happens to accept today. The names are created first and
+    // the bodies second, and a body that names a struct whose body is not set yet
+    // refuses -- see StructInfo::complete for why that refusal is the useful one.
+    //
+    // The refusals are eager: a struct this file cannot lower fails the build even
+    // if nothing uses it. That is the same rule the rest of the file follows and it
+    // is the safe direction -- a struct declaration that is quietly skipped is a
+    // type that later resolves to nothing, and "resolves to nothing" is how a field
+    // read turns into a read of some other field.
+    void declareStructs(Program& program) {
+        std::vector<StructDeclaration*> decls;
+        for (auto& stmt : program.statements) {
+            auto* s = dynamic_cast<StructDeclaration*>(stmt.get());
+            if (!s) continue;
+            if (!lowerableStruct(*s)) return;
+            if (s->is_forward_declaration && s->members.empty()) {
+                // `struct Stream;` (stdlib/stdio.fin:42) declares a name whose size
+                // nothing knows yet. Left unregistered, so a variable of it refuses
+                // rather than being given a size this file invented.
+                continue;
+            }
+            if (structs_.count(s->name)) {
+                unsupported(*s, fmt::format("a second declaration of struct '{}'", s->name));
+                return;
+            }
+            StructInfo info;
+            info.finName = s->name;
+            info.llvmType = llvm::StructType::create(ctx_, "struct." + s->name);
+            structs_[s->name] = info;
+            registered_.insert(s);
+            decls.push_back(s);
+        }
+
+        for (StructDeclaration* s : decls) {
+            StructInfo& info = structs_[s->name];
+            std::vector<llvm::Type*> members;
+            for (auto& m : s->members) {
+                if (m->default_value) {
+                    // The field default parses and nothing honours it. Zeroing the
+                    // field instead would be a value the program never wrote, so
+                    // this refuses until the pass that honours defaults exists --
+                    // Soundness_Codegen.AnOmittedFieldIsZeroed is the rule for a
+                    // field with no default, and changes when this does.
+                    unsupported(*m, fmt::format(
+                        "a default value for field '{}' of struct '{}'", m->name, s->name));
+                    return;
+                }
+                auto t = types_.map(m->type.get());
+                if (!t) { unsupportedType(*m, m->type.get(), "a struct field"); return; }
+                if (t->isVoid()) {
+                    unsupported(*m, fmt::format("a field of type 'void' in struct '{}'",
+                                                s->name));
+                    return;
+                }
+                if (info.indexByName.count(m->name)) {
+                    unsupported(*m, fmt::format("a second field '{}' in struct '{}'",
+                                                m->name, s->name));
+                    return;
+                }
+                info.indexByName[m->name] = info.fields.size();
+                info.fields.push_back(StructField{m->name, *t});
+                members.push_back(t->llvmType);
+            }
+            if (members.empty()) {
+                // A struct with no fields has no size to speak of and nothing in
+                // the corpus writes one. LLVM would give it size 0, C gives it 1,
+                // and picking either here would be inventing a rule.
+                unsupported(*s, fmt::format("an empty struct '{}'", s->name));
+                return;
+            }
+            // isPacked=false, which is the same choice src/types/Layout.hpp makes
+            // and what Soundness_Codegen.AStructsLayoutMatchesWhatLLVMWouldChoose
+            // compares against. A packed body here would agree with a padded layout
+            // pass on every field at offset 0 and on nothing else.
+            info.llvmType->setBody(members, /*isPacked=*/false);
+            info.complete = true;
+            debugLog("declared struct " + s->name);
+        }
+    }
+
+    // The struct shapes this file will not lower, each with the reason it cannot be
+    // guessed at. Returns false having already reported.
+    bool lowerableStruct(StructDeclaration& s) {
+        if (!s.generic_params.empty()) {
+            unsupported(s, fmt::format("a generic struct '{}'", s.name));
+            return false;
+        }
+        if (s.is_class) {
+            // Whether a `class` is a value like a struct or a reference is not
+            // settled, and the two lower differently at every assignment.
+            unsupported(s, fmt::format("a class '{}'", s.name));
+            return false;
+        }
+        if (s.destructor) {
+            // A destructor runs implicitly at the end of a scope. Lowering the
+            // struct as plain data and emitting no call is not an unimplemented
+            // feature, it is a program that silently does not free.
+            unsupported(*s.destructor, fmt::format("a destructor on struct '{}'", s.name));
+            return false;
+        }
+        if (!s.parents.empty()) {
+            unsupported(s, fmt::format("struct '{}' inheriting another type", s.name));
+            return false;
+        }
+        if (!s.attributes.empty()) {
+            // An attribute this file does not read may be one that changes the
+            // layout. Ignoring it is the failure mode that produces a working
+            // program with the wrong offsets.
+            unsupported(s, fmt::format("an attribute on struct '{}'", s.name));
+            return false;
+        }
+        return true;
+    }
+
     void declareTopLevel(Program& program) {
         for (auto& stmt : program.statements) {
             if (auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
                 declareFunction(*fn, fn->name, fn->name, fn->params, fn->return_type.get(),
-                                false);
+                                false, /*isExtern=*/false);
             } else if (auto* def = dynamic_cast<DefineDeclaration*>(stmt.get())) {
                 // `#[llvm_name="c_printf"]` renames the *symbol* and not the Fin
                 // name: stdlib/stdio.fin:11 declares `@define printf` under it, and
@@ -336,7 +547,8 @@ private:
                 // a C symbol whose spelling differs. The Fin name is still what a
                 // call site writes, so the two are tracked separately.
                 declareFunction(*def, def->name, symbolNameOf(*def), def->params,
-                                def->return_type.get(), def->is_vararg);
+                                def->return_type.get(), def->is_vararg,
+                                /*isExtern=*/true);
             }
             if (failed_) return;
         }
@@ -352,7 +564,7 @@ private:
     void declareFunction(ASTNode& node, const std::string& name,
                          const std::string& symbol,
                          const std::vector<std::unique_ptr<Parameter>>& params,
-                         const TypeNode* returnType, bool isVarArg) {
+                         const TypeNode* returnType, bool isVarArg, bool isExtern) {
         if (functions_.count(name)) return;  // first declaration wins, as the analyzer's does
 
         FnInfo info;
@@ -361,6 +573,19 @@ private:
         auto ret = types_.map(returnType);
         if (!ret) { unsupportedType(node, returnType, "a return"); return; }
         info.returnType = *ret;
+        // A struct crossing an `@define` boundary is refused in both directions.
+        //
+        // A Fin-to-Fin call passes a struct as an LLVM aggregate, and caller and
+        // callee agree because both are emitted here. A C function does not read it
+        // that way: the platform ABI decides per struct whether it arrives in
+        // registers, split across two, or as a hidden pointer, and clang implements
+        // that classification itself rather than leaving it to LLVM. Emitting the
+        // aggregate and calling it C-compatible would link cleanly and pass garbage.
+        // Settling it needs the ABI classifier, which is a unit of its own.
+        if (isExtern && info.returnType.isStruct()) {
+            unsupported(node, fmt::format("an extern '{}' returning a struct", name));
+            return;
+        }
 
         std::vector<llvm::Type*> llvmParams;
         for (auto& p : params) {
@@ -370,6 +595,10 @@ private:
             auto t = types_.map(p->type.get());
             if (!t) { unsupportedType(*p, p->type.get(), "a parameter"); return; }
             if (t->isVoid()) { unsupported(*p, "a parameter of type 'void'"); return; }
+            if (isExtern && t->isStruct()) {
+                unsupported(*p, fmt::format("a struct parameter on extern '{}'", name));
+                return;
+            }
             info.paramTypes.push_back(*t);
             llvmParams.push_back(t->llvmType);
         }
@@ -462,6 +691,49 @@ private:
         if (a.isBool && !b.isBool) return b;
         if (b.isBool && !a.isBool) return a;
         return a.bits >= b.bits ? a : b;
+    }
+
+    // ---- lvalues ----------------------------------------------------------
+
+    // Where a value lives, for the expressions that have a where.
+    struct Addr {
+        llvm::Value* ptr = nullptr;
+        CgType type;
+    };
+
+    // The address of an expression, or nullopt for one that has none.
+    //
+    // This is the half of struct support that everything else is built on: a field
+    // read is a load from here, a field write is a store to here, and `p.a += 1` is
+    // both against *one* address computed once. Computing it twice is the same
+    // answer for every expression this handles -- a local and a chain of field
+    // names, neither of which can have a side effect -- and that is exactly why the
+    // recursion stops where it does rather than reaching for a general lvalue.
+    //
+    // A refusal is not reported here. Not having an address is a normal answer:
+    // `make(5).a` is a field of a value that never had one, and reads through
+    // extractvalue instead.
+    std::optional<Addr> emitAddress(Expression& expr) {
+        if (auto* id = dynamic_cast<Identifier*>(&expr)) {
+            if (Local* local = findLocal(id->name)) return Addr{local->slot, local->type};
+            return std::nullopt;
+        }
+        if (auto* member = dynamic_cast<MemberAccess*>(&expr)) {
+            // `Type::name` is an enum member or a static, not a field of an object.
+            if (member->is_static) return std::nullopt;
+            auto base = emitAddress(*member->object);
+            if (!base) return std::nullopt;
+            if (!base->type.isStruct() || !base->type.structInfo) return std::nullopt;
+            size_t index = 0;
+            if (!base->type.structInfo->find(member->member, index)) return std::nullopt;
+            // CreateStructGEP indexes by field position, which is why the field
+            // order in StructInfo has to be the declaration's.
+            llvm::Value* ptr = builder_.CreateStructGEP(base->type.llvmType, base->ptr,
+                                                        (unsigned)index,
+                                                        member->member);
+            return Addr{ptr, base->type.structInfo->fields[index].type};
+        }
+        return std::nullopt;
     }
 
     // A condition is a truth value whatever it was written as.
@@ -852,6 +1124,17 @@ private:
     }
 
     CgVal emitArithmetic(ASTNode& node, ASTTokenKind op, CgVal lhs, CgVal rhs) {
+        // An aggregate operand is refused before anything else looks at it. Not for
+        // tidiness: commonType compares bit widths, a struct has none, so it would
+        // return one of the two and hand a struct to CreateAdd -- which is an
+        // assertion inside LLVM, reported as a compiler crash rather than as the
+        // unlowered operator it is. Whether `a == b` on two structs compares
+        // field-wise is a ruling nobody has made.
+        if (lhs.type.isStruct() || rhs.type.isStruct()) {
+            unsupported(node, "an operator on a struct");
+            return CgVal{};
+        }
+
         // A shift's operands are not a pair: the count is not widened to the value's
         // type, it is truncated or extended to it, and mixing them through
         // commonType would silently widen the value.
@@ -974,16 +1257,13 @@ private:
     }
 
     void emitAssignment(BinaryOp& node) {
-        auto* target = dynamic_cast<Identifier*>(node.left.get());
+        // One address, used by both halves of a compound assignment. An index or a
+        // dereference on the left still has none -- those are their own units -- but
+        // a local and any chain of field names off one now do.
+        auto target = emitAddress(*node.left);
+        if (failed_) return;
         if (!target) {
-            // A member, an index or a dereference on the left needs the aggregate
-            // work this slice does not have.
-            unsupported(node, "an assignment to anything but a local");
-            return;
-        }
-        Local* local = findLocal(target->name);
-        if (!local) {
-            unsupported(node, fmt::format("an assignment to '{}'", target->name));
+            unsupported(node, "an assignment to this target");
             return;
         }
 
@@ -1006,18 +1286,18 @@ private:
             };
             auto found = kUnderlying.find((int)node.op);
             if (found == kUnderlying.end()) { unsupported(node, "this assignment"); return; }
-            CgVal current{builder_.CreateLoad(local->type.llvmType, local->slot),
-                          local->type};
+            CgVal current{builder_.CreateLoad(target->type.llvmType, target->ptr),
+                          target->type};
             rhs = emitArithmetic(node, found->second, current, rhs);
             if (!rhs.ok()) return;
         }
 
-        llvm::Value* stored = convert(node, rhs, local->type);
+        llvm::Value* stored = convert(node, rhs, target->type);
         if (!stored) return;
-        builder_.CreateStore(stored, local->slot);
+        builder_.CreateStore(stored, target->ptr);
         // The assignment's value is the value stored, so `let a <int> = (b = 1);`
         // would work if the grammar admitted it.
-        value_ = CgVal{stored, local->type};
+        value_ = CgVal{stored, target->type};
     }
 
     void visit(UnaryOp& node) override {
@@ -1132,6 +1412,16 @@ private:
     // skipped this compiles and prints garbage, which is why
     // FloatsAreDoublesAtTheVarargBoundary is a run test and not an IR test.
     llvm::Value* promoteVararg(ASTNode& node, const CgVal& v) {
+        if (v.type.isStruct()) {
+            // `printf("%d", p)` for a struct `p` type-checks -- printf's parameter
+            // is `...` and the analyzer does not read the format string. Passing the
+            // aggregate would emit a call whose ABI is not the one C's va_arg reads,
+            // so the value printed would be arbitrary. Refused, because the default
+            // in this function is to pass the value through unchanged and that is
+            // the wrong default for an aggregate.
+            unsupported(node, "a struct passed to a C variadic");
+            return nullptr;
+        }
         if (v.type.kind == CgType::Kind::Float &&
             v.type.llvmType->isFloatTy()) {
             return builder_.CreateFPExt(v.value, llvm::Type::getDoubleTy(ctx_));
@@ -1199,7 +1489,21 @@ private:
     // what guarantees the list is complete: a node type added to FIN_NODE_LIST
     // without a case here does not compile.
 
-    void visit(StructDeclaration& node) override { unsupported(node, "a struct declaration"); }
+    void visit(StructDeclaration& node) override {
+        // declareStructs already lowered it, or already refused it. Reaching here
+        // for a declaration it never saw means the declaration is somewhere it does
+        // not scan -- inside a function body -- and a struct type whose name the
+        // backend does not know is not a struct this file can lower.
+        //
+        // Its methods, operators and constructors are deliberately not emitted:
+        // naming the symbol needs a mangling scheme, and every way of *reaching*
+        // one refuses at the call site instead (Soundness_Codegen.AMethodCallOn-
+        // AStructIsRefused). Nothing implicit calls them -- a `P { a: 1 }` literal
+        // does not run a constructor, and a destructor, which would run implicitly,
+        // is what lowerableStruct refuses on.
+        if (registered_.count(&node)) return;
+        unsupported(node, fmt::format("a declaration of struct '{}' here", node.name));
+    }
     void visit(InterfaceDeclaration& node) override { unsupported(node, "an interface declaration"); }
     void visit(EnumDeclaration& node) override { unsupported(node, "an enum declaration"); }
     void visit(ClassDeclaration& node) override { unsupported(node, "a class declaration"); }
@@ -1228,8 +1532,94 @@ private:
 
     void visit(MethodCall& node) override { unsupported(node, "a method call"); }
     void visit(StaticMethodCall& node) override { unsupported(node, "a '::' call"); }
-    void visit(MemberAccess& node) override { unsupported(node, "a member access"); }
-    void visit(StructInstantiation& node) override { unsupported(node, "a struct literal"); }
+    void visit(MemberAccess& node) override {
+        if (node.is_static) {
+            // `Colour::Red` names an enum member, and enums are not lowered.
+            unsupported(node, fmt::format("the static member '{}'", node.member));
+            return;
+        }
+        // The addressed path first: a GEP and a load of one field, rather than a
+        // load of the whole struct followed by an extract. Both are correct; this
+        // one does not copy the aggregate to read a byte of it.
+        if (auto addr = emitAddress(node)) {
+            value_ = CgVal{builder_.CreateLoad(addr->type.llvmType, addr->ptr, node.member),
+                           addr->type};
+            return;
+        }
+        if (failed_) return;
+
+        // No address: the object is a value, so the field comes out of the value.
+        // `make(5).a` is the shape -- a struct returned by a call is a real value
+        // with no home, and materialising a temporary just to GEP into it would be
+        // a copy for nothing.
+        CgVal object = emit(*node.object);
+        if (failed_) return;
+        if (!object.ok()) { unsupported(node, "this member's object"); return; }
+        if (!object.type.isStruct() || !object.type.structInfo) {
+            unsupported(node, fmt::format("the member '{}' of a non-struct", node.member));
+            return;
+        }
+        size_t index = 0;
+        if (!object.type.structInfo->find(node.member, index)) {
+            // The analyzer already rejects a field a struct does not have, so this
+            // is a disagreement between the two rather than a program error. It
+            // still refuses, because the alternative is reading field 0.
+            unsupported(node, fmt::format("the member '{}', which struct '{}' does not have",
+                                          node.member, object.type.structInfo->finName));
+            return;
+        }
+        value_ = CgVal{builder_.CreateExtractValue(object.value, {(unsigned)index},
+                                                   node.member),
+                       object.type.structInfo->fields[index].type};
+    }
+
+    void visit(StructInstantiation& node) override {
+        if (!node.generic_args.empty()) {
+            unsupported(node, fmt::format("a generic struct literal '{}'", node.struct_name));
+            return;
+        }
+        auto found = structs_.find(node.struct_name);
+        if (found == structs_.end() || !found->second.complete) {
+            unsupported(node, fmt::format("a literal of struct '{}'", node.struct_name));
+            return;
+        }
+        const StructInfo& info = found->second;
+
+        // Starts from all-zero, so a field the literal does not name is zero rather
+        // than whatever was in the slot. That is the same answer a local with no
+        // initialiser gets, and the reason a field carrying a *default* refuses in
+        // declareStructs instead of quietly getting this one.
+        llvm::Value* aggregate = llvm::Constant::getNullValue(info.llvmType);
+
+        // Walked in the order written, inserted at the index declared. The written
+        // order is not the stored order and this is the only place that could
+        // confuse them.
+        for (auto& entry : node.fields) {
+            size_t index = 0;
+            if (!info.find(entry.first, index)) {
+                unsupported(node, fmt::format("the field '{}', which struct '{}' does not have",
+                                              entry.first, node.struct_name));
+                return;
+            }
+            if (!entry.second) { unsupported(node, "a field with no value"); return; }
+            CgVal v = emit(*entry.second);
+            if (failed_) return;
+            if (!v.ok()) {
+                unsupported(node, fmt::format("the value for field '{}'", entry.first));
+                return;
+            }
+            llvm::Value* stored = convert(node, v, info.fields[index].type);
+            if (!stored) return;
+            aggregate = builder_.CreateInsertValue(aggregate, stored, {(unsigned)index},
+                                                   entry.first);
+        }
+
+        CgType type;
+        type.kind = CgType::Kind::Struct;
+        type.llvmType = info.llvmType;
+        type.structInfo = &found->second;
+        value_ = CgVal{aggregate, type};
+    }
     void visit(PrototypeLiteral& node) override { unsupported(node, "a prototype literal"); }
     void visit(ArrayLiteral& node) override { unsupported(node, "an array literal"); }
     void visit(ArrayAccess& node) override { unsupported(node, "an index expression"); }
@@ -1263,6 +1653,12 @@ private:
     TypeMapper types_;
 
     std::unordered_map<std::string, FnInfo> functions_;
+    // Keyed by Fin name. Never erased from or rehashed after declareStructs, because
+    // CgType::structInfo points into it.
+    std::unordered_map<std::string, StructInfo> structs_;
+    // Which StructDeclaration nodes declareStructs actually took, so that one it
+    // never saw is refused rather than assumed handled.
+    std::set<const StructDeclaration*> registered_;
     std::vector<std::unordered_map<std::string, Local>> scopes_;
     std::vector<LoopTargets> loops_;
     FnInfo* currentFn_ = nullptr;

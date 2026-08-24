@@ -366,12 +366,19 @@ BACKEND_TEST(Soundness_Codegen, AnEscapeIsLoweredOnce) {
 // ---------------------------------------------------------------------------
 
 BACKEND_TEST(Soundness_Codegen, AnUnloweredConstructIsRefused) {
-    // A struct is well-typed and cannot be lowered yet. The compile must fail and
-    // say so; the one outcome that must never happen is exit 0 with a binary whose
-    // behaviour does not match the program.
+    // A generic struct is well-typed and cannot be lowered: monomorphisation is a
+    // unit of its own, and the erasure rule it has to obey (ADR 0002) is not
+    // decided here. The compile must fail and say so; the one outcome that must
+    // never happen is exit 0 with a binary whose behaviour does not match the
+    // program.
+    //
+    // This used to use a plain struct, which is the better example of the rule
+    // right up until the rule stops applying -- structs lower as of this unit, so
+    // keeping it would have turned a passing refusal test into a passing test of
+    // nothing. The construct in a refusal test is a moving part.
     const Built b = build(
-        "struct S { pub v <int>, }\n"
-        "fun main() <noret> { let s <S> = S{v: 1}; }\n");
+        "struct Box<T> { pub v <T>, }\n"
+        "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
 }
@@ -424,6 +431,478 @@ BACKEND_TEST(Soundness_Codegen, ARejectedProgramProducesNoArtifact) {
 // ---------------------------------------------------------------------------
 // The layout table and the backend are the same table.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Structs.
+//
+// The layout pass (6b908c0) computes offsets and LLVM's own DataLayout agrees
+// with it, which settles where a field *is*. These settle that the emitted code
+// reads and writes it there -- a different question, and the one that produces a
+// program that runs and prints the wrong number rather than a program that fails
+// to build.
+//
+// Every test here prints, because a struct is the first construct in this
+// language whose lowering can be wrong in a way that type-checks: a field read at
+// the wrong offset is still a well-typed int. The value printed is chosen so that
+// reading the neighbouring field, or the same field of the other struct, gives a
+// different answer.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AStructFieldIsReadBack) {
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 3, b: 4 };\n"
+        "    printf(\"%d %d\\n\", p.a, p.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructFieldIsAssignedInPlace) {
+    // The write has to land in the slot the read comes from. Both fields are
+    // printed because writing `a` at `b`'s offset shows up as `b` changing.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 3, b: 4 };\n"
+        "    p.a = 10;\n"
+        "    printf(\"%d %d\\n\", p.a, p.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10 4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructFieldTakesACompoundAssignment) {
+    // `p.a += 5` reads and writes one place, and the address must be computed once
+    // for both halves -- not once for the load and again for the store, which is
+    // the same answer here and a different one as soon as the object expression
+    // has a side effect.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 10, b: 100 };\n"
+        "    p.a += 5;\n"
+        "    p.b -= 1;\n"
+        "    printf(\"%d %d\\n\", p.a, p.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "15 99\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructLiteralFollowsDeclarationOrderNotWrittenOrder) {
+    // The literal names its fields, so the order they are written in is the
+    // author's convenience and the order they are stored in is the declaration's.
+    // An emitter that walked the literal and stored to offset 0, 1, 2 in the order
+    // it read them would pass every other test in this file and fail this one.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int>, c <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { c: 3, a: 1, b: 2 };\n"
+        "    printf(\"%d %d %d\\n\", p.a, p.b, p.c);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructIsCopiedWhenAssigned) {
+    // A Fin struct is a value. `q = p` copies, so writing through `q` must not be
+    // visible through `p` -- the failure being one slot aliased by two names,
+    // which is what lowering a struct as a pointer would give.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 1, b: 2 };\n"
+        "    let q <P> = p;\n"
+        "    q.a = 99;\n"
+        "    printf(\"%d %d\\n\", p.a, q.a);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 99\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructIsPassedByValue) {
+    // The callee gets a copy: its write is not the caller's. Same rule as the
+    // assignment above, at the one boundary where getting it wrong is invisible
+    // inside either function.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun bump(p: P) <int> {\n"
+        "    p.a = 50;\n"
+        "    return p.a + p.b;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 1, b: 2 };\n"
+        "    let n <int> = bump(p);\n"
+        "    printf(\"%d %d\\n\", n, p.a);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "52 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructIsReturnedByValue) {
+    // A struct built in a callee's frame and returned has to survive the frame
+    // going away. Returning the address of the callee's alloca compiles, links,
+    // and reads freed stack.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun make(x: int) <P> { return P { a: x, b: x + 1 }; }\n"
+        "fun main() <noret> {\n"
+        "    let q <P> = make(5);\n"
+        "    printf(\"%d %d\\n\", q.a, q.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5 6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AReturnedStructSurvivesAnInterveningCall) {
+    // The same question as above, asked in the way that actually catches it: a
+    // second call reuses the stack the first one returned from, so a struct
+    // returned by address is intact right up until anything else runs.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun make(x: int) <P> { return P { a: x, b: x + 1 }; }\n"
+        "fun noise(x: int) <int> { let junk <P> = P { a: 777, b: 888 }; return junk.a + x; }\n"
+        "fun main() <noret> {\n"
+        "    let q <P> = make(5);\n"
+        "    let n <int> = noise(1);\n"
+        "    printf(\"%d %d %d\\n\", q.a, q.b, n);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5 6 778\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedStructFieldIsReadBack) {
+    // `o.i.v` is two GEPs, and the second one is relative to the first. Getting
+    // that wrong reads from the outer struct's base.
+    const Built b = build(std::string(kPrintf) +
+        "struct In { v <int>, w <int> }\n"
+        "struct Out { pad <int>, i <In>, tail <int> }\n"
+        "fun main() <noret> {\n"
+        "    let o <Out> = Out { pad: 9, i: In { v: 1, w: 2 }, tail: 8 };\n"
+        "    printf(\"%d %d %d %d\\n\", o.pad, o.i.v, o.i.w, o.tail);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9 1 2 8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedStructIsAssignedThrough) {
+    const Built b = build(std::string(kPrintf) +
+        "struct In { v <int>, w <int> }\n"
+        "struct Out { pad <int>, i <In>, tail <int> }\n"
+        "fun main() <noret> {\n"
+        "    let o <Out> = Out { pad: 9, i: In { v: 1, w: 2 }, tail: 8 };\n"
+        "    o.i.w = 20;\n"
+        "    printf(\"%d %d %d %d\\n\", o.pad, o.i.v, o.i.w, o.tail);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9 1 20 8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedStructIsCopiedWhole) {
+    // Assigning the inner struct out and writing to the copy: the original must
+    // not move. A whole-aggregate load and store, not a field-by-field one.
+    const Built b = build(std::string(kPrintf) +
+        "struct In { v <int>, w <int> }\n"
+        "struct Out { i <In> }\n"
+        "fun main() <noret> {\n"
+        "    let o <Out> = Out { i: In { v: 1, w: 2 } };\n"
+        "    let copy <In> = o.i;\n"
+        "    copy.v = 77;\n"
+        "    printf(\"%d %d\\n\", o.i.v, copy.v);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 77\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, EveryScalarFieldWidthRoundTrips) {
+    // One struct holding one field of each lowered width, all written and all read
+    // back. This is where a field whose *size* is right and whose *offset* is off
+    // by the padding shows up, because a narrow field followed by a wide one is
+    // exactly where the padding is.
+    //
+    // `d` is written through cast<double> because a bare float literal types as
+    // `float` and there is no implicit widening -- a booked gap, not a lowering
+    // question. printf reads %d for the narrow integers because a C variadic
+    // promotes them, which is the same boundary FloatsAreDoublesAtTheVarargBoundary
+    // covers.
+    const Built b = build(std::string(kPrintf) +
+        "struct M {\n"
+        "    c <char>,\n"
+        "    s <short>,\n"
+        "    i <int>,\n"
+        "    l <long>,\n"
+        "    f <float>,\n"
+        "    d <double>,\n"
+        "    str <string>,\n"
+        "    bo <bool>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let m <M> = M {\n"
+        "        c: 7, s: 300, i: 70000, l: 5000000000,\n"
+        "        f: 1.5, d: cast<double>(2.25), str: \"hi\", bo: true\n"
+        "    };\n"
+        "    printf(\"%d %d %d %ld %.2f %.2f %s %d\\n\",\n"
+        "           m.c, m.s, m.i, m.l, m.f, m.d, m.str, m.bo);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 300 70000 5000000000 1.50 2.25 hi 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APaddedStructKeepsItsFieldsApart) {
+    // char, long, char: the shape with padding both after the first field and at
+    // the end. Writing each field must not disturb the others, which is the
+    // observable form of "the offsets are the ones the layout pass computed".
+    const Built b = build(std::string(kPrintf) +
+        "struct Pad { a <char>, big <long>, z <char> }\n"
+        "fun main() <noret> {\n"
+        "    let p <Pad> = Pad { a: 1, big: 5000000000, z: 2 };\n"
+        "    p.big = 4000000000;\n"
+        "    printf(\"%d %ld %d\\n\", p.a, p.big, p.z);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 4000000000 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOmittedFieldIsZeroed) {
+    // The front end admits a literal that names some of the fields
+    // (`P { a: 1 }` with `b` unmentioned). The backend has to put *something*
+    // there, and zero is the same answer a local with no initialiser already
+    // gets -- undefined stack contents being the one answer that cannot be
+    // tested. A field default (`b <int> = 5`) parses and is not honoured
+    // anywhere yet; when it is, this expectation changes with it.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 1 };\n"
+        "    printf(\"%d %d\\n\", p.a, p.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructWithNoInitialiserIsZeroed) {
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P>;\n"
+        "    printf(\"%d %d\\n\", p.a, p.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoStructsWithTheSameFieldNameUseTheirOwnOffsets) {
+    // `v` is at offset 8 in A and offset 0 in B. A field index looked up by name
+    // in one table shared across struct types gives the same answer for both, and
+    // reads eight bytes past the start of a B.
+    const Built b = build(std::string(kPrintf) +
+        "struct A { pad <long>, v <int> }\n"
+        "struct B { v <int>, pad <long> }\n"
+        "fun main() <noret> {\n"
+        "    let a <A> = A { pad: 1, v: 2 };\n"
+        "    let bb <B> = B { v: 3, pad: 4 };\n"
+        "    printf(\"%d %d\\n\", a.v, bb.v);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 3\n") << b.why();
+}
+
+BACKEND_TEST(KnownDefect_Codegen, AStructTypeDoesNotHoist) {
+    // Functions hoist -- ACallAboveItsDeclarationLinks, and 6f48a89 for the front
+    // end's half. A struct *type* does not: the analyzer resolves a type name
+    // against what it has already seen, so a variable of a struct declared lower in
+    // the file is "Undefined type".
+    //
+    // The backend's half is done. declareStructs registers every struct in the
+    // module before any function is emitted, in two passes precisely so that
+    // declaration order does not decide, which is why this asserts a *front-end*
+    // refusal and not a codegen one. When type hoisting lands, this test fails,
+    // becomes Soundness_Codegen.AStructDeclaredBelowItsUseLowers, and asserts the
+    // program prints 42 -- which it already would.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 41, b: 1 };\n"
+        "    printf(\"%d\\n\", p.a + p.b);\n"
+        "}\n"
+        "struct P { a <int>, b <int> }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("Undefined type 'P'"), std::string::npos) << b.why();
+    // And specifically not a codegen refusal: if the front end starts accepting it,
+    // this must fail rather than quietly keep passing on a backend refusal.
+    EXPECT_EQ(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructIsAParameterAndAReturnTogether) {
+    // The shape a program actually writes: take one, return a different one.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point { x <int>, y <int> }\n"
+        "fun shift(p: Point, by: int) <Point> {\n"
+        "    return Point { x: p.x + by, y: p.y + by };\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point { x: 1, y: 2 };\n"
+        "    let q <Point> = shift(p, 10);\n"
+        "    printf(\"%d %d %d %d\\n\", p.x, p.y, q.x, q.y);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 11 12\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructRoundTripsThroughAConditional) {
+    // A struct assigned in one arm of an `if` and read after it: the slot has to
+    // be the same one on both paths, which is what allocating per-declaration
+    // rather than per-assignment gives.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun pick(n: int) <P> {\n"
+        "    let p <P> = P { a: 0, b: 0 };\n"
+        "    if (n > 0) { p = P { a: 1, b: 2 }; } else { p = P { a: 3, b: 4 }; }\n"
+        "    return p;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let hi <P> = pick(1);\n"
+        "    let lo <P> = pick(-1);\n"
+        "    printf(\"%d %d %d %d\\n\", hi.a, hi.b, lo.a, lo.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 3 4\n") << b.why();
+}
+
+// The refusals that stay refusals. A struct lowering that quietly accepted any of
+// these would be worse than one that refused them, because the front end has
+// already said the program is well-typed.
+
+BACKEND_TEST(Soundness_Codegen, AMethodCallOnAStructIsRefused) {
+    // A struct with methods lowers as data; calling one needs a name for the
+    // emitted symbol, and the mangling scheme needs finn's ABI story. Refused, not
+    // guessed -- and specifically not skipped, which would drop the call and leave
+    // the assignment reading an undefined value.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>\n"
+        "    pub fun get() <int> { return self.a; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 1 };\n"
+        "    let x <int> = p.get();\n"
+        "    printf(\"%d\\n\", x);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructPassedToACVariadicIsRefused) {
+    // printf's parameter is `...`, so the analyzer has nothing to check the
+    // argument against and accepts it. The aggregate the backend would pass is not
+    // what C's va_arg reads, so this is the one refusal in the struct set that
+    // stands between a program that builds and a program that prints nonsense.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 1 };\n"
+        "    printf(\"%d\\n\", p);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructOnAnExternBoundaryIsRefused) {
+    // A Fin-to-Fin call agrees with itself about how a struct is passed because
+    // both halves are emitted here. A C function does not: the platform ABI decides
+    // per struct whether it arrives in registers or behind a pointer, and that
+    // classification is clang's work, not LLVM's. Emitting the aggregate would link
+    // and pass garbage.
+    const Built b = build(
+        "struct P { a <int>, b <int> }\n"
+        "@define take(p: P) <noret>;\n"
+        "fun main() <noret> { let p <P> = P { a: 1, b: 2 }; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFieldDefaultIsRefusedRatherThanIgnored) {
+    // `b <int> = 5` parses and nothing honours it. Zeroing `b` would give the
+    // program a value it never wrote, and honouring it is a front-end unit that
+    // does not exist -- so it refuses. This is the boundary of
+    // AnOmittedFieldIsZeroed: zero is the answer for a field with no default.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> = 5 }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 1 };\n"
+        "    printf(\"%d %d\\n\", p.a, p.b);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnIncompleteStructIsRefused) {
+    // `struct S;` names a type whose size nothing knows (stdlib/stdio.fin:42 writes
+    // one). The analyzer admits a variable of it; the backend cannot allocate it and
+    // must not pick a size.
+    const Built b = build(
+        "struct S;\n"
+        "fun main() <noret> { let s <S>; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnEmptyStructIsRefused) {
+    // LLVM makes it size 0 and C makes it size 1. Picking one here would be
+    // inventing a rule the language has not made, and nothing in the corpus writes
+    // an empty struct.
+    const Built b = build(
+        "struct S { }\n"
+        "fun main() <noret> { let s <S>; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AClassIsRefused) {
+    // Whether a `class` is a value like a struct or a reference is not settled, and
+    // the two lower differently at every single assignment. The analyzer accepts the
+    // declaration, so the refusal has to be here.
+    const Built b = build(
+        "class C { a <int> }\n"
+        "fun main() <noret> { let c <C> = C { a: 1 }; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOperatorOnAStructIsRefused) {
+    // Whether `a == b` on two structs compares field-wise is a ruling nobody has
+    // made. It matters that this refuses rather than crashes: commonType compares
+    // bit widths, a struct has none, and handing the aggregate to CreateICmpEQ is an
+    // assertion inside LLVM -- which reads as a compiler crash rather than as the
+    // unlowered operator it is.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 1 };\n"
+        "    let q <P> = P { a: 1 };\n"
+        "    if (p == q) { printf(\"same\\n\"); }\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructAsAConditionIsRefused) {
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 1 };\n"
+        "    if (p) { printf(\"truthy\\n\"); }\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructIsRefused) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> { v <T> }\n"
+        "fun main() <noret> { printf(\"%d\\n\", 1); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
 
 // These two cannot use BACKEND_TEST: their bodies name llvm::DataLayout and
 // llvm::Type directly, and an OFF build has no LLVM headers to compile them
