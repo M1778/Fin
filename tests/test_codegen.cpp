@@ -1077,6 +1077,96 @@ BACKEND_TEST(Soundness_Codegen, AnEnumMemberValueThatIsNotConstantIsRefused) {
 }
 
 // ---------------------------------------------------------------------------
+// `sizeof`, which is a number the layout has already decided.
+//
+// The grammar takes a type and only a type -- `sizeof(1 + 1)` is a syntax error and
+// `sizeof(a)` parses as the type `a` -- so there is no expression to evaluate and no
+// question about evaluating one twice. The number comes from the module's own
+// DataLayout, which is the same table the emitted GEPs and allocas use, so a
+// `sizeof` can never disagree with the code that indexes the thing it measured.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, SizeofAScalarIsItsWidth) {
+    // The widths src/types/Layout.hpp declares: `int` 4 and `long` 8 because the
+    // corpus writes `%d` and `%ld`, `bool` a byte in storage though an i1 in a
+    // register, `char` 1.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d %d %d %d %d\\n\", sizeof(char), sizeof(bool), sizeof(int),\n"
+        "           sizeof(long), sizeof(float), sizeof(double));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 1 4 8 4 8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, SizeofAStringIsAPointer) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", sizeof(string));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, SizeofAStructIsItsLaidOutSizeAndNotItsFieldsAdded) {
+    // deeptest1.fin:35 is the corpus site (`sizeof(Vector2)`). `Padded` is here
+    // because a size that adds the fields up gets 9 and the answer is 16: the
+    // padding and the tail padding are both the layout's, not this expression's.
+    const Built b = build(std::string(kPrintf) +
+        "struct Pair { a <int>, b <int> }\n"
+        "struct Padded { a <char>, b <long> }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d\\n\", sizeof(Pair), sizeof(Padded));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "8 16\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, SizeofAFixedArrayIsItsElementsStride) {
+    // Not element size times count in general -- an array of a padded struct strides
+    // by the padded size -- which is why this asks LLVM rather than multiplying.
+    const Built b = build(std::string(kPrintf) +
+        "struct Padded { a <char>, b <long> }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d %d\\n\", sizeof([int, 4]), sizeof([Padded, 2]),\n"
+        "           sizeof([[int, 2], 3]));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "16 32 24\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, SizeofIsAConstantAndNotACall) {
+    // Usable where a constant is: as an array extent's neighbour, in arithmetic, and
+    // as an argument. If it were emitted as anything else this would still pass --
+    // what it guards is that it is an ordinary int value with no statement behind it.
+    const Built b = build(std::string(kPrintf) +
+        "fun twice(n: int) <int> { return n * 2; }\n"
+        "fun main() <noret> {\n"
+        "    let n <int> = sizeof(long) * 3 - 1;\n"
+        "    printf(\"%d %d\\n\", n, twice(sizeof(int)));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "23 8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, SizeofAVoidIsRefused) {
+    // The front end accepts it -- `void` is a type name and sizeof takes a type --
+    // so the backend is the first pass that has to answer, and 0 would be an answer
+    // to a question that has none.
+    const Built b = build("fun main() <noret> { let n <int> = sizeof(void); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("sizeof"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, SizeofATypeWithNoRepresentationIsRefused) {
+    // A dynamic `[T]`: how one is represented is undecided, so its size is the same
+    // undecided thing rather than a pointer's width guessed here.
+    const Built b = build("fun main() <noret> { let n <int> = sizeof([int]); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("sizeof"), std::string::npos) << b.why();
+}
+
+// ---------------------------------------------------------------------------
 // The layout table and the backend are the same table.
 // ---------------------------------------------------------------------------
 

@@ -2060,7 +2060,39 @@ private:
         unsupported(node, "this index expression");
     }
     void visit(NewExpression& node) override { unsupported(node, "'new'"); }
-    void visit(SizeofExpression& node) override { unsupported(node, "'sizeof'"); }
+    void visit(SizeofExpression& node) override {
+        // A type and only a type: `sizeof(1 + 1)` does not parse and `sizeof(a)`
+        // parses as the type `a` (the grammar has no expression form), so there is
+        // nothing here to evaluate -- and nothing that could be evaluated twice or
+        // for its side effects. The expr form is refused rather than guessed at,
+        // because the day it parses is the day it needs a rule about that.
+        if (!node.type_target) {
+            unsupported(node, "'sizeof' of an expression");
+            return;
+        }
+
+        auto type = types_.map(node.type_target.get());
+        if (!type || type->isVoid() || !type->llvmType || !type->llvmType->isSized()) {
+            // Named as `sizeof`'s own refusal and not as "a variable of type X": the
+            // program asked for a number, and what is missing is the representation
+            // that would have one. `void` lands here too -- it is a type name the
+            // front end accepts inside sizeof, and 0 would be an answer to a
+            // question that does not have one.
+            const std::string name = node.type_target->name.empty()
+                                         ? std::string("that type")
+                                         : "'" + node.type_target->name + "'";
+            unsupported(node, fmt::format("'sizeof' of {}", name));
+            return;
+        }
+
+        // The module's own DataLayout, which is set before any IR is emitted
+        // (generateObject) precisely so that this is the same table the GEPs and
+        // allocas around it use. A `sizeof` that disagreed with the code indexing
+        // the thing it measured would be the worst kind of wrong: it would run.
+        const uint64_t size = module_.getDataLayout().getTypeAllocSize(type->llvmType);
+        CgType intType = *types_.byName("int");
+        value_ = CgVal{llvm::ConstantInt::get(intType.llvmType, size, true), intType};
+    }
     void visit(LambdaExpression& node) override { unsupported(node, "a lambda"); }
     void visit(SuperExpression& node) override { unsupported(node, "'super'"); }
     void visit(TypeLiteralExpression& node) override { unsupported(node, "a type literal"); }
@@ -2119,21 +2151,11 @@ bool backendAvailable() { return true; }
 
 bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngine& diag,
                     int optLevel, bool debugCodegen) {
-    Emitter emitter(diag, debugCodegen);
-    if (!emitter.run(ast)) return false;
-
-    llvm::Module& module = emitter.module();
-
-    // Verified before anything is written. An invalid module that reaches the
-    // object writer is an assertion failure deep in LLVM, which reads as a
-    // compiler crash rather than as the compiler bug it is.
-    std::string verifyError;
-    llvm::raw_string_ostream verifyStream(verifyError);
-    if (llvm::verifyModule(module, &verifyStream)) {
-        diag.reportError("codegen: emitted invalid IR", verifyStream.str());
-        return false;
-    }
-
+    // The target comes first, before a single instruction is emitted, because the
+    // module's DataLayout is an *input* to emission and not a stamp applied to the
+    // result: `sizeof` folds to a number the layout decides, and a module laid out
+    // after the fact would answer it from LLVM's default layout -- which agrees with
+    // x86-64 by luck and with nothing else at all.
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
@@ -2159,8 +2181,22 @@ bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngin
         return false;
     }
 
+    Emitter emitter(diag, debugCodegen);
+    llvm::Module& module = emitter.module();
     module.setTargetTriple(triple);
     module.setDataLayout(machine->createDataLayout());
+
+    if (!emitter.run(ast)) return false;
+
+    // Verified before anything is written. An invalid module that reaches the
+    // object writer is an assertion failure deep in LLVM, which reads as a
+    // compiler crash rather than as the compiler bug it is.
+    std::string verifyError;
+    llvm::raw_string_ostream verifyStream(verifyError);
+    if (llvm::verifyModule(module, &verifyStream)) {
+        diag.reportError("codegen: emitted invalid IR", verifyStream.str());
+        return false;
+    }
 
     if (optLevel > 0) {
         // The IR-level pipeline, which is the half a TargetMachine's opt level does
