@@ -26,7 +26,8 @@ void CloneVisitor::visit(BinaryOp& node) {
 void CloneVisitor::visit(UnaryOp& node) {
     auto res = std::make_unique<UnaryOp>(
         node.op,
-        clone(node.operand.get())
+        clone(node.operand.get()),
+        node.is_postfix
     );
     res->setLoc(node.loc);
     result = std::move(res);

@@ -1300,12 +1300,57 @@ private:
         value_ = CgVal{stored, target->type};
     }
 
+    // `i++`, `++i`, `i--`, `--i`. An assignment that reads its own target, which is
+    // why it lives beside emitAssignment and shares its address path: one address,
+    // computed once, loaded and stored through.
+    //
+    // The only difference between the four spellings is which value the *expression*
+    // has -- the old one for postfix, the new one for prefix -- and until the AST
+    // recorded is_postfix there was no way to tell, which is why this used to refuse
+    // outright. In statement position they are the same instruction sequence, and
+    // every increment in the corpus is a statement or a `for` step, so nothing would
+    // have caught a guess.
+    void emitIncrement(UnaryOp& node) {
+        auto target = emitAddress(*node.operand);
+        if (failed_) return;
+        if (!target) { unsupported(node, "'++' on a target with no address"); return; }
+
+        const CgType& t = target->type;
+        if (t.isStruct()) { unsupported(node, "'++' on a struct"); return; }
+        if (t.isBool) { unsupported(node, "'++' on a bool"); return; }
+        if (t.kind == CgType::Kind::Ptr) {
+            // Whether this advances by one element or one byte is an owner ruling.
+            // Emitting either one would be an out-of-bounds access in the program that
+            // wanted the other, with nothing to report it.
+            unsupported(node, "'++' on a pointer");
+            return;
+        }
+        if (t.kind != CgType::Kind::Int && t.kind != CgType::Kind::Float) {
+            unsupported(node, "'++' on this type");
+            return;
+        }
+
+        llvm::Value* before = builder_.CreateLoad(t.llvmType, target->ptr);
+        const bool up = node.op == ASTTokenKind::INCREMENT;
+        llvm::Value* after = nullptr;
+        if (t.kind == CgType::Kind::Float) {
+            llvm::Value* one = llvm::ConstantFP::get(t.llvmType, 1.0);
+            after = up ? builder_.CreateFAdd(before, one) : builder_.CreateFSub(before, one);
+        } else {
+            llvm::Value* one = llvm::ConstantInt::get(t.llvmType, 1);
+            // nsw/nuw are deliberately not set. Whether signed overflow here is
+            // undefined is an owner ruling, and marking it nsw would let LLVM assume
+            // a loop counter cannot wrap -- a real transformation on a real program,
+            // decided by an omission rather than by anyone.
+            after = up ? builder_.CreateAdd(before, one) : builder_.CreateSub(before, one);
+        }
+        builder_.CreateStore(after, target->ptr);
+        value_ = CgVal{node.is_postfix ? before : after, t};
+    }
+
     void visit(UnaryOp& node) override {
         if (node.op == ASTTokenKind::INCREMENT || node.op == ASTTokenKind::DECREMENT) {
-            // Prefix and postfix are the same node here, so which value the
-            // expression has cannot be told apart. Refused rather than guessed;
-            // `i += 1` is what the corpus writes in a statement position.
-            unsupported(node, "'++' and '--'");
+            emitIncrement(node);
             return;
         }
         CgVal v = emit(*node.operand);

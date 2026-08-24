@@ -35,6 +35,49 @@ std::shared_ptr<StructType> getStructType(std::shared_ptr<Type> type, std::share
     return nullptr;
 }
 
+// Can a value be stored into this expression?
+//
+// Shared by assignment and by `++`/`--`, which is the point: `i = i + 1` and `i++`
+// are the same mutation, and they disagreed about what was allowed to be on the left
+// of it. Assignment checked; `++` did not check at all, so `5++` and `(a + b)++` were
+// accepted and the analyzer handed the backend an increment with nowhere to put the
+// result.
+//
+// A dereference is a target because `*p = 1` is one. An index is a target because
+// `array[i] = x` is one (arrays.fin:20). A call is not, and neither is any operator
+// other than `*` -- `(a + b)` names no storage, and a struct returned by value from
+// `make(5)` has nowhere for `make(5).a++` to write back to.
+bool isAssignableTarget(const Expression* expr) {
+    if (!expr) return false;
+    if (dynamic_cast<const Identifier*>(expr)) return true;
+    if (dynamic_cast<const MemberAccess*>(expr)) return true;
+    if (dynamic_cast<const ArrayAccess*>(expr)) return true;
+    if (auto* unary = dynamic_cast<const UnaryOp*>(expr)) {
+        return unary->op == ASTTokenKind::MULT;
+    }
+    return false;
+}
+
+// Is `++` meaningful on this type? Only where "add one" is.
+//
+// Integers and floats, and nothing else. Not a bool: there is no bool one greater
+// than `true`, and C++ removed `b++` for saying otherwise. Not a string, even though
+// `+` on two strings concatenates -- `s + 1` has a number on one side and no meaning.
+// Not a pointer: whether `p++` advances by one element or one byte is an owner ruling
+// nothing in the corpus needs, and guessing it wrong is a silent out-of-bounds rather
+// than a diagnostic.
+//
+// An unresolved or error type answers *true*, so that a name that already produced a
+// diagnostic does not produce a second one about its increment.
+bool isIncrementable(const TypePtr& type) {
+    if (!type || isErrorType(type)) return true;
+    auto* prim = dynamic_cast<const PrimitiveType*>(type.get());
+    if (!prim) return false;
+    const std::string& n = prim->name;
+    return n == "int" || n == "long" || n == "short" || n == "char" || n == "uint" ||
+           n == "ulong" || n == "ushort" || n == "float" || n == "double";
+}
+
 // `v.0`: is this member name a position rather than a name?
 //
 // The grammar makes the digits of `expression DOT INTEGER` the member name
@@ -327,15 +370,7 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
     }
 
     if (isAssignment) {
-        bool isLValue = false;
-        if (dynamic_cast<Identifier*>(node.left.get())) isLValue = true;
-        else if (dynamic_cast<MemberAccess*>(node.left.get())) isLValue = true;
-        else if (dynamic_cast<ArrayAccess*>(node.left.get())) isLValue = true;
-        else if (auto* unary = dynamic_cast<UnaryOp*>(node.left.get())) {
-            if (unary->op == ASTTokenKind::MULT) isLValue = true;
-        }
-        
-        if (!isLValue) error(node, "Invalid assignment target");
+        if (!isAssignableTarget(node.left.get())) error(node, "Invalid assignment target");
         
         if (auto* id = dynamic_cast<Identifier*>(node.left.get())) {
             auto* sym = currentScope->resolve(id->name);
@@ -416,7 +451,32 @@ void SemanticAnalyzer::visit(UnaryOp& node) {
     auto type = lastExprType;
     if (!type) return;
 
-    if (node.op == ASTTokenKind::AMPERSAND) {
+    if (node.op == ASTTokenKind::INCREMENT || node.op == ASTTokenKind::DECREMENT) {
+        // `i++` writes to `i`, so it is checked as the assignment it is. Before this
+        // the whole operator fell through to `lastExprType = type`: `const c <int> =
+        // 1; c++;` was accepted on the line after `c = 2;` was refused, the same
+        // mutation through two spellings with one of them unguarded.
+        const char* verb = node.op == ASTTokenKind::INCREMENT ? "increment" : "decrement";
+        if (!isAssignableTarget(node.operand.get())) {
+            error(node, fmt::format("Invalid {} target", verb));
+        } else if (auto* id = dynamic_cast<Identifier*>(node.operand.get())) {
+            // Only a named variable's mutability is checked, which is what assignment
+            // checks too: a member assignment is never mutability-checked, and that
+            // defect is booked rather than half-fixed here for one operator.
+            auto* sym = currentScope->resolve(id->name);
+            if (sym && !sym->is_mutable) {
+                error(node, fmt::format("Cannot {} immutable variable '{}'", verb, id->name));
+            }
+        }
+        if (!isIncrementable(type)) {
+            error(node, fmt::format("Cannot {} a value of type '{}'", verb, type->toString()));
+        }
+        // The type either way: `let n <int> = i++;` is an int, and reporting the
+        // operand's type after refusing the operator keeps one diagnostic to one
+        // mistake instead of cascading into the declaration it initialises.
+        lastExprType = type;
+    }
+    else if (node.op == ASTTokenKind::AMPERSAND) {
         lastExprType = std::make_shared<PointerType>(type);
     } 
     else if (node.op == ASTTokenKind::QUESTION) {

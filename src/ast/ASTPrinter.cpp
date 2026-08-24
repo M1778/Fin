@@ -485,7 +485,10 @@ void ASTPrinter::printUnary(const UnaryOp* node, std::string prefix, bool isLast
         case ASTTokenKind::DECREMENT: opStr = "--"; break;
         default: opStr = "?"; break;
     }
-    fmt::print("{}UnaryOp '{}'\n", prefix, opStr);
+    // Where the operator was written is part of what this node is, so the dump says
+    // so: a tree that prints `i++` and `++i` identically is a tree a reader cannot
+    // use to tell why the two behave differently.
+    fmt::print("{}UnaryOp '{}'{}\n", prefix, opStr, node->is_postfix ? " postfix" : "");
     printNode(node->operand.get(), prefix + "    ", true);
 }
 

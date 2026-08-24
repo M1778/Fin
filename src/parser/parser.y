@@ -2277,8 +2277,8 @@ expression:
         $$ = std::make_unique<fin::MethodCall>(std::move($1), $3, std::move($9), std::move($6));
         $$->setLoc(@$);
     }
-    | expression INCREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::INCREMENT, std::move($1)); $$->setLoc(@$); }
-    | expression DECREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::DECREMENT, std::move($1)); $$->setLoc(@$); }
+    | expression INCREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::INCREMENT, std::move($1), /*postfix=*/true); $$->setLoc(@$); }
+    | expression DECREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::DECREMENT, std::move($1), /*postfix=*/true); $$->setLoc(@$); }
     /* Postfix denullify: `make_A(-1)?` panics on null and yields the unwrapped
        value otherwise (tests/samples/nullifier.fin:31, :36, :40, :42 and
        undefined_behavior.fin:16). Chains, so `make_A(10)?.get_b()?` is two of
@@ -2286,7 +2286,7 @@ expression:
        ADR 0005 moved the conditional to `cond : then ? otherwise` -- with `?`
        leading, `x ? -1 : 2` and `x?` followed by a minus are indistinguishable
        without unbounded lookahead. */
-    | expression QUESTION %prec DENULLIFY { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::QUESTION, std::move($1)); $$->setLoc(@$); }
+    | expression QUESTION %prec DENULLIFY { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::QUESTION, std::move($1), /*postfix=*/true); $$->setLoc(@$); }
     | expression LBRACKET expression RBRACKET {
            $$ = std::make_unique<fin::ArrayAccess>(std::move($1), std::move($3));
            $$->setLoc(@$);
@@ -2529,9 +2529,9 @@ no_struct_expression:
         $$ = std::make_unique<fin::MethodCall>(std::move($1), $3, std::move($9), std::move($6));
         $$->setLoc(@$);
     }
-    | no_struct_expression INCREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::INCREMENT, std::move($1)); $$->setLoc(@$); }
-    | no_struct_expression DECREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::DECREMENT, std::move($1)); $$->setLoc(@$); }
-    | no_struct_expression QUESTION %prec DENULLIFY { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::QUESTION, std::move($1)); $$->setLoc(@$); }
+    | no_struct_expression INCREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::INCREMENT, std::move($1), /*postfix=*/true); $$->setLoc(@$); }
+    | no_struct_expression DECREMENT { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::DECREMENT, std::move($1), /*postfix=*/true); $$->setLoc(@$); }
+    | no_struct_expression QUESTION %prec DENULLIFY { $$ = std::make_unique<fin::UnaryOp>(fin::ASTTokenKind::QUESTION, std::move($1), /*postfix=*/true); $$->setLoc(@$); }
     | no_struct_expression LBRACKET expression RBRACKET {
            $$ = std::make_unique<fin::ArrayAccess>(std::move($1), std::move($3));
            $$->setLoc(@$);

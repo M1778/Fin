@@ -386,15 +386,24 @@ BACKEND_TEST(Soundness_Codegen, AnUnloweredConstructIsRefused) {
 BACKEND_TEST(Soundness_Codegen, ARefusalNamesTheLine) {
     // A refusal with no location is a refusal the reader has to go looking for,
     // and in a file of any size that is most of the cost of the error. The
-    // construct here is on line 3 rather than line 1 so that a location the
-    // backend simply left default would not pass by accident.
+    // construct here is below line 1 so that a location the backend simply left
+    // default would not pass by accident.
+    //
+    // It used to be `i++`, which is exactly the trap AnUnloweredConstructIsRefused
+    // warns about one screen above: `++` lowers now, so this test went from
+    // asserting a located refusal to asserting nothing, and it failed rather than
+    // passing vacuously only because it checks the exit code too. The construct is a
+    // generic struct for the same reason that one uses it -- monomorphisation is a
+    // unit of its own and the erasure rule it must obey (ADR 0002) is not decided
+    // here, so it is the furthest thing in this file from being lowered.
     const Built b = build(
         "fun main() <noret> {\n"
-        "    let i <int> = 0;\n"
-        "    i++;\n"
-        "}\n");
+        "    let i <int> = 1;\n"
+        "}\n"
+        "\n"
+        "struct Box<T> { pub v <T>, }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find(".fin:3:"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find(".fin:5:"), std::string::npos) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, WithoutDashOFincStillOnlyChecks) {
@@ -1078,3 +1087,158 @@ TEST(Soundness_Codegen, AStructsLayoutMatchesWhatLLVMWouldChoose) {
 }
 
 #endif  // FIN_TESTS_HAVE_BACKEND
+
+// ---------------------------------------------------------------------------
+// `++` and `--`.
+//
+// This operator was refused outright, and the reason was not the lowering: the AST
+// built the same node for `i++` and `++i`, so there was nothing to read to decide
+// which value the expression has. Soundness_OperatorPosition is the other half of
+// this unit -- `is_postfix` is a fact about the source now -- and these are the
+// tests that the fact is *used*, which is only visible when the value is read.
+//
+// Every increment in the corpus is a statement or a `for` step, where the two are
+// the same instruction sequence. So a wrong guess would have compiled all eight of
+// them correctly and been wrong on the first program that wrote `let n = i++;`.
+
+BACKEND_TEST(Soundness_Codegen, APostfixIncrementYieldsTheOldValue) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let i <int> = 5;\n"
+        "    let j <int> = i++;\n"
+        "    printf(\"%d %d\\n\", i, j);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "6 5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrefixIncrementYieldsTheNewValue) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let i <int> = 5;\n"
+        "    let j <int> = ++i;\n"
+        "    printf(\"%d %d\\n\", i, j);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "6 6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APostfixDecrementYieldsTheOldValue) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let i <int> = 5;\n"
+        "    let j <int> = i--;\n"
+        "    printf(\"%d %d\\n\", i, j);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "4 5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrefixDecrementYieldsTheNewValue) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let i <int> = 5;\n"
+        "    let j <int> = --i;\n"
+        "    printf(\"%d %d\\n\", i, j);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "4 4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnIncrementInStatementPositionAdvancesTheVariable) {
+    // The spelling the corpus uses eight times out of eight, in both positions,
+    // where the two must be indistinguishable.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let i <int> = 0;\n"
+        "    i++;\n"
+        "    ++i;\n"
+        "    i--;\n"
+        "    printf(\"%d\\n\", i);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AForLoopStepIncrements) {
+    // `for (i : int = 0; i <= 10; i++)` is loops.fin:8 -- the whole reason this
+    // operator blocks more of the corpus than its size suggests.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    for (i : int = 0; i < 4; i++) {\n"
+        "        printf(\"%d\", i);\n"
+        "    }\n"
+        "    printf(\"\\n\");\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "0123\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnIncrementOnAStructFieldWritesBack) {
+    // `self.length++` (stdlib/collection.fin:22) is the other shape the corpus
+    // writes, and it goes through the same address path a field assignment does --
+    // so the read and the write are one GEP rather than two.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 1, b: 2 };\n"
+        "    let old <int> = p.a++;\n"
+        "    p.b--;\n"
+        "    printf(\"%d %d %d\\n\", p.a, p.b, old);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "2 1 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnIncrementOnANestedFieldWritesBack) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Inner { v <int> }\n"
+        "struct Outer { i <Inner>, tail <int> }\n"
+        "fun main() <noret> {\n"
+        "    let o <Outer> = Outer { i: Inner { v: 7 }, tail: 8 };\n"
+        "    o.i.v++;\n"
+        "    printf(\"%d %d\\n\", o.i.v, o.tail);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "8 8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnIncrementOnAFloatAddsOne) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let f <float> = 1.5;\n"
+        "    f++;\n"
+        "    printf(\"%.2f\\n\", cast<double>(f));\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "2.50\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnIncrementReadsAndWritesOneAddress) {
+    // `i++` must not evaluate its target twice. There is no expression this backend
+    // admits as a target whose evaluation has a side effect, so the way to observe
+    // it is arithmetic: a second load between the load and the store would read a
+    // value the first increment had already written.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let i <int> = 0;\n"
+        "    let sum <int> = i++ + i++ + i++;\n"
+        "    printf(\"%d %d\\n\", sum, i);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "3 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnIncrementOnAPointerIsRefused) {
+    // Whether `p++` advances by one element or one byte is an owner ruling, and
+    // both lower cleanly -- the one that is wrong is an out-of-bounds read with
+    // nothing to report it. The analyzer refuses this first; the backend's guard is
+    // here so the answer does not depend on which layer runs.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let i <int> = 1;\n"
+        "    let p <&int> = &i;\n"
+        "    p++;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}

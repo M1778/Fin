@@ -9,6 +9,8 @@
 
 #include "Corpus.hpp"
 #include "Pipeline.hpp"
+#include "ast/CloneVisitor.hpp"
+#include "ast/StructuralWalk.hpp"
 #include "ast/decls/ClassDecl.hpp"
 #include "ast/decls/Program.hpp"
 #include "semantics/SemanticAnalyzer.hpp"
@@ -10229,4 +10231,224 @@ TEST(Soundness_EnumMemberValue, AMemberIsStillItsConstructorWhereAValueIsWanted)
         "}\n");
     const std::string err = stripAnsi(r.err);
     EXPECT_NE(err.find("got 'fn(T) -> Res<T, U>'"), std::string::npos) << err;
+}
+
+// ---------------------------------------------------------------------------
+// `++` and `--`: where the operator was written is a fact the AST records.
+//
+// The grammar spells these two operators on both sides of their operand
+// (parser.y:2215 and :2280 for `++`, and the `no_struct_expression` copies of each)
+// and built the *same node* for both, with nothing to tell them apart. In statement
+// position that costs nothing -- `i++;` and `++i;` do the same thing -- which is why
+// it went unnoticed: every one of the corpus's eight increments is a statement or a
+// `for` step. The moment one is read for its value the two differ, and a compiler
+// that cannot tell them apart cannot lower either: the backend refused `++`
+// altogether and said so ("Prefix and postfix are the same node here").
+//
+// So `is_postfix` is a fact about the source text, set wherever the grammar puts an
+// operator after its operand -- which includes `?`, whose position is not optional
+// but is still where it is. Nothing infers it from the operator, because the two
+// spellings of `++` are the same operator in two places rather than two operators.
+namespace {
+
+// The first UnaryOp anywhere under `node`, or null. Depth-first, and it does not
+// look past the first one it finds -- every test here writes exactly one.
+const fin::UnaryOp* firstUnary(const fin::ASTNode* node) {
+    if (!node) return nullptr;
+    if (auto* un = dynamic_cast<const fin::UnaryOp*>(node)) return un;
+    for (fin::ASTNode* child : fin::childrenOf(const_cast<fin::ASTNode&>(*node))) {
+        if (const fin::UnaryOp* found = firstUnary(child)) return found;
+    }
+    return nullptr;
+}
+
+// Parses `body` as the body of a `main`, and returns the one UnaryOp in it.
+const fin::UnaryOp* unaryIn(const std::string& body, fin::testing::ParseResult& keepAlive,
+                            fin::DiagnosticEngine& diag) {
+    keepAlive = parseSource("fun main() <noret> {\n" + body + "\n}\n", diag);
+    if (!keepAlive.parsed || !keepAlive.ast) return nullptr;
+    return firstUnary(keepAlive.ast.get());
+}
+
+}  // namespace
+
+TEST(Soundness_OperatorPosition, APostfixIncrementIsRecordedAsPostfix) {
+    fin::DiagnosticEngine diag("", "<test>");
+    fin::testing::ParseResult prog;
+    const fin::UnaryOp* un = unaryIn("let i <int> = 0;\ni++;", prog, diag);
+    ASSERT_NE(un, nullptr) << "no UnaryOp was built for `i++`";
+    EXPECT_EQ(un->op, fin::ASTTokenKind::INCREMENT);
+    EXPECT_TRUE(un->is_postfix)
+        << "`i++` was recorded as a prefix increment, so nothing downstream can "
+           "tell it from `++i` -- and the two have different values.";
+}
+
+TEST(Soundness_OperatorPosition, APrefixIncrementIsRecordedAsPrefix) {
+    fin::DiagnosticEngine diag("", "<test>");
+    fin::testing::ParseResult prog;
+    const fin::UnaryOp* un = unaryIn("let i <int> = 0;\n++i;", prog, diag);
+    ASSERT_NE(un, nullptr) << "no UnaryOp was built for `++i`";
+    EXPECT_EQ(un->op, fin::ASTTokenKind::INCREMENT);
+    EXPECT_FALSE(un->is_postfix);
+}
+
+TEST(Soundness_OperatorPosition, APostfixDecrementIsRecordedAsPostfix) {
+    fin::DiagnosticEngine diag("", "<test>");
+    fin::testing::ParseResult prog;
+    const fin::UnaryOp* un = unaryIn("let i <int> = 0;\ni--;", prog, diag);
+    ASSERT_NE(un, nullptr) << "no UnaryOp was built for `i--`";
+    EXPECT_EQ(un->op, fin::ASTTokenKind::DECREMENT);
+    EXPECT_TRUE(un->is_postfix);
+}
+
+TEST(Soundness_OperatorPosition, APrefixDecrementIsRecordedAsPrefix) {
+    fin::DiagnosticEngine diag("", "<test>");
+    fin::testing::ParseResult prog;
+    const fin::UnaryOp* un = unaryIn("let i <int> = 0;\n--i;", prog, diag);
+    ASSERT_NE(un, nullptr) << "no UnaryOp was built for `--i`";
+    EXPECT_EQ(un->op, fin::ASTTokenKind::DECREMENT);
+    EXPECT_FALSE(un->is_postfix);
+}
+
+TEST(Soundness_OperatorPosition, AnOrdinaryPrefixOperatorIsNotPostfix) {
+    // The flag is not about `++` specifically. `!`, `-`, `&` and `*` are prefix
+    // operators and must say so, or a reader has to know which operators the flag
+    // "means something for" -- which is exactly the ambiguity this replaces.
+    const char* const cases[] = {"let b <bool> = !true;", "let n <int> = -1;",
+                                 "let i <int> = 0;\nlet p <&int> = &i;"};
+    for (const char* body : cases) {
+        fin::DiagnosticEngine diag("", "<test>");
+        fin::testing::ParseResult prog;
+        const fin::UnaryOp* un = unaryIn(body, prog, diag);
+        ASSERT_NE(un, nullptr) << body;
+        EXPECT_FALSE(un->is_postfix) << body;
+    }
+}
+
+TEST(Soundness_OperatorPosition, ADenullifyIsRecordedAsPostfix) {
+    // `?` is only ever written after its operand, so its flag can never be read to
+    // decide anything -- and it is set truthfully anyway. The field means "the
+    // operator was written after its operand", which is true or false for every
+    // UnaryOp rather than meaningful for two of them.
+    fin::DiagnosticEngine diag("", "<test>");
+    fin::testing::ParseResult prog;
+    const fin::UnaryOp* un = unaryIn("let a? <int> = 1;\nlet b <int> = a?;", prog, diag);
+    ASSERT_NE(un, nullptr) << "no UnaryOp was built for `a?`";
+    EXPECT_EQ(un->op, fin::ASTTokenKind::QUESTION);
+    EXPECT_TRUE(un->is_postfix);
+}
+
+TEST(Soundness_OperatorPosition, CloningKeepsThePosition) {
+    // CloneVisitor is what macro expansion copies a body with, so a dropped flag
+    // here would turn `i++` into `++i` inside every expanded macro -- silently, and
+    // only for a macro that reads the value. CloneVisitor already drops a list of
+    // fields (booked in docs/plan.md); this one is not joining it.
+    fin::DiagnosticEngine diag("", "<test>");
+    fin::testing::ParseResult prog;
+    const fin::UnaryOp* un = unaryIn("let i <int> = 0;\ni++;", prog, diag);
+    ASSERT_NE(un, nullptr);
+    fin::CloneVisitor cloner;
+    std::unique_ptr<fin::UnaryOp> copy = cloner.clone(un);
+    ASSERT_NE(copy, nullptr);
+    EXPECT_EQ(copy->op, fin::ASTTokenKind::INCREMENT);
+    EXPECT_TRUE(copy->is_postfix) << "CloneVisitor dropped is_postfix";
+}
+
+// ---------------------------------------------------------------------------
+// `++` and `--` are checked like the assignment they are.
+//
+// `i++` writes to `i`. Nothing about that was checked: the analyzer's UnaryOp case
+// fell through to `lastExprType = type` for every operator it did not name, so
+// `const c <int> = 1; c++;` was accepted while `c = 2;` on the next line was
+// refused -- the same mutation through two spellings, one of them unguarded. `5++`
+// and `(a + b)++` were accepted too, and so was `s++` on a string.
+//
+// The rule adopted here is the one assignment already uses, because these operators
+// *are* an assignment: the target must be somewhere a value can be stored, and the
+// variable must be mutable. On top of that the operand must be a number, because
+// `++` means "add one" and there is nothing to add one to on a string or a bool.
+
+TEST(Soundness_Increment, IncrementingAnImmutableIsRefused) {
+    const auto r = compile("fun main() <noret> {\n    const c <int> = 1;\n    c++;\n}\n");
+    EXPECT_NE(r.exitCode, 0) << "`c++` on a const must be refused, exactly as `c = 2` is";
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("immutable"), std::string::npos) << err;
+    EXPECT_NE(err.find("'c'"), std::string::npos) << err;
+}
+
+TEST(Soundness_Increment, DecrementingAnImmutableIsRefused) {
+    const auto r = compile("fun main() <noret> {\n    const c <int> = 1;\n    c--;\n}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("immutable"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Increment, IncrementingALiteralIsRefused) {
+    const auto r = compile("fun main() <noret> {\n    5++;\n}\n");
+    EXPECT_NE(r.exitCode, 0) << "`5++` has nowhere to store the result";
+    EXPECT_NE(stripAnsi(r.err).find("target"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Increment, IncrementingAComputedValueIsRefused) {
+    const auto r = compile(
+        "fun main() <noret> {\n"
+        "    let a <int> = 1;\n"
+        "    let b <int> = 2;\n"
+        "    (a + b)++;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << "`(a + b)++` has nowhere to store the result";
+    EXPECT_NE(stripAnsi(r.err).find("target"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Increment, IncrementingAStringIsRefused) {
+    // `+` on two strings concatenates, so `s++` would have to mean `s + 1` with a
+    // number on one side -- which is not a program the corpus writes, and not one
+    // with an obvious meaning. Refused rather than lowered as pointer arithmetic on
+    // whatever a string turns out to be.
+    const auto r = compile("fun main() <noret> {\n    let s <string> = \"x\";\n    s++;\n}\n");
+    EXPECT_NE(r.exitCode, 0) << "`s++` on a string must be refused";
+    EXPECT_NE(stripAnsi(r.err).find("string"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Increment, IncrementingABoolIsRefused) {
+    const auto r = compile("fun main() <noret> {\n    let b <bool> = true;\n    b++;\n}\n");
+    EXPECT_NE(r.exitCode, 0) << "`b++` must be refused: there is no bool one greater than true";
+    EXPECT_NE(stripAnsi(r.err).find("bool"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Increment, IncrementingAStructIsRefused) {
+    const auto r = compile(
+        "struct P { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <P> = P { a: 1, b: 2 };\n"
+        "    p++;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << "`p++` on a struct must be refused";
+}
+
+TEST(Soundness_Increment, IncrementingAMutableLocalIsAccepted) {
+    // The other side of every refusal above: the eight increments the corpus
+    // actually writes are a loop variable and a struct field, and both must stay
+    // legal. A check that rejects those is worse than no check.
+    const auto r = compile(
+        "struct P { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let i <int> = 0;\n"
+        "    i++;\n"
+        "    --i;\n"
+        "    let f <float> = 1.5;\n"
+        "    f++;\n"
+        "    let p <P> = P { a: 1, b: 2 };\n"
+        "    p.a++;\n"
+        "    for (j: int = 0; j < 3; j++) { i++; }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Increment, AnIncrementHasTheTypeOfItsOperand) {
+    // `let n <int> = i++;` must type-check and `let s <string> = i++;` must not,
+    // which together say the expression is an `int` rather than untyped.
+    const auto ok = compile("fun main() <noret> {\n    let i <int> = 1;\n    let n <int> = i++;\n}\n");
+    EXPECT_EQ(ok.exitCode, 0) << stripAnsi(ok.err);
+    const auto bad = compile("fun main() <noret> {\n    let i <int> = 1;\n    let s <string> = i++;\n}\n");
+    EXPECT_NE(bad.exitCode, 0) << "`i++` is an int, so it must not initialise a string";
 }
