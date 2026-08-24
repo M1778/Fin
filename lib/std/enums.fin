@@ -24,7 +24,9 @@ pub type EnumType = any implements <Enum>;
 pub fun getkeyid(value: EnumType) <int>;
 
 // `keyidof(Ok)` -- the argument is an enum *member*, not a value of the enum, which
-// is what the `$enum_member` meta-type is for (Soundness_MetaTypes).
+// is what the `$enum_member` meta-type is for (Soundness_MetaTypes). These two lines
+// are what settled how a member reaches that parameter: the name is the member, and a
+// value of the enum is not (Soundness_EnumMemberValue).
 #[llvm_name="enums_keyidof"]
 pub fun keyidof(enum_member: $enum_member) <int>;
 

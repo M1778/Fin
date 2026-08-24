@@ -191,10 +191,49 @@ void SemanticAnalyzer::visit(Literal& node) {
     }
 }
 
+// Whether `name`, holding `t`, is an enumerator of the enum `t` points at.
+//
+// The two spellings a member's name can have are both accepted: a payloadless
+// member is typed as its enum, and a payloaded one as the constructor that builds
+// it (StructType::getEnumeratorValueType). Either way the enum is reachable, and
+// asking it whether it declares this name is what separates a member from a value
+// of the same type -- `let f <Flag> = On;` gives `f` exactly the type `On` has, and
+// only one of the two names is a member.
+static bool namesAnEnumerator(const std::string& name, const std::shared_ptr<Type>& t) {
+    if (!t) return false;
+    std::shared_ptr<StructType> owner;
+    if (auto* sig = t->as<FunctionType>())
+        owner = std::dynamic_pointer_cast<StructType>(sig->return_type);
+    else
+        owner = std::dynamic_pointer_cast<StructType>(t);
+    return owner && owner->is_enum && owner->getEnumerator(name) != nullptr;
+}
+
 void SemanticAnalyzer::visit(Identifier& node) {
     // 1. Try local scope
     Symbol* sym = currentScope->resolve(node.name);
     if (sym) {
+        // An enumerator's *name*, where a `$enum_member` is expected, is that member.
+        //
+        // lib/std/enums.fin:29 declares `keyidof(enum_member: $enum_member)` and says
+        // beside it what the argument is: "the argument is an enum *member*, not a
+        // value of the enum, which is what the `$enum_member` meta-type is for".
+        // tests/samples/stdlib/typing.fin calls it on 29, 37 and 43, and each was
+        // `expected '$enum_member', got 'fn(T) -> Result<T, U>'` -- a member named
+        // rather than called is its constructor, and a constructor is not a member.
+        //
+        // Read before the symbol's own type, unlike the `$type` rule below, because
+        // the name resolves either way: `Ok` is in the value scope. What is expected
+        // is still what decides, so `Ok` is its constructor everywhere else
+        // (Soundness_EnumMemberValue).
+        if (auto hint = hintFor(node)) {
+            if (auto* prim = hint->as<PrimitiveType>()) {
+                if (prim->name == "$enum_member" && namesAnEnumerator(node.name, sym->type)) {
+                    lastExprType = hint;
+                    return;
+                }
+            }
+        }
         lastExprType = sym->type;
         return;
     } 

@@ -9870,3 +9870,111 @@ TEST(Soundness_DeclarationOrder, AStructsMethodSeesAMethodBelowIt) {
         "fun main() <noret> { }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// An enumerator's *name*, written where a `$enum_member` is expected, is that
+// member.
+//
+// lib/std/enums.fin:29 declares `pub fun keyidof(enum_member: $enum_member)
+// <int>;` and says beside it what the argument is: "`keyidof(Ok)` -- the argument
+// is an enum *member*, not a value of the enum, which is what the `$enum_member`
+// meta-type is for". tests/samples/stdlib/typing.fin calls it three times, on 29,
+// 37 and 43, and each was `expected '$enum_member', got 'fn(T) -> Result<T, U>'`:
+// a payloaded member named rather than called is its constructor
+// (StructType::getEnumeratorValueType), and a constructor is not a member.
+//
+// The same shape as Soundness_TypeAsValue and the same mechanism: what is
+// expected decides how the name reads. The difference is that the name resolves
+// either way -- `Ok` is in the value scope -- so this is read *before* the
+// symbol's own type rather than after the lookup fails.
+//
+// Keyed on the name being an enumerator of the enum its own type points at, which
+// is what separates the two spellings that share a type. A payloadless member is
+// typed as its enum, so `A` and a variable holding an `A` are the same type and
+// only the name says which one is the member. "Not a value of the enum" is
+// exactly that distinction.
+//
+// `Result::Ok` -- a member named through its enum -- is not admitted here. No
+// corpus site writes one in this position; enums.fin:19 writes `Result::Ok` in an
+// `extern`, which is not a `$enum_member` argument.
+// ---------------------------------------------------------------------------
+
+static const char* const kKeyidof =
+    "enum Res<T, U> {\n"
+    "    Ok(T),\n"
+    "    Err(U)\n"
+    "}\n"
+    "enum Flag {\n"
+    "    On,\n"
+    "    Off\n"
+    "}\n"
+    "fun keyidof(enum_member: $enum_member) <int>;\n";
+
+TEST(Soundness_EnumMemberValue, APayloadedMembersNameIsAMember) {
+    const FincRun r = compile(
+        std::string(kKeyidof) +
+        "fun main() <noret> { const k <int> = keyidof(Ok); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMemberValue, APayloadlessMembersNameIsAMemberToo) {
+    const FincRun r = compile(
+        std::string(kKeyidof) +
+        "fun main() <noret> { const k <int> = keyidof(On); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMemberValue, TheCorpusLineTypeChecks) {
+    // stdlib/typing.fin:29, minus the parts of that file that are about something
+    // else: a keyid compared against the keyid of a member.
+    const FincRun r = compile(
+        std::string(kKeyidof) +
+        "fun getkeyid(value: any) <int>;\n"
+        "interface IResult { }\n"
+        "Res<T, U> implements <IResult> {\n"
+        "    pub fun unwrap(enum_ : Res<T, U>) <T> {\n"
+        "        if (getkeyid(enum_) == keyidof(Ok)) {\n"
+        "            return enum_.0;\n"
+        "          } else {\n"
+        "              blame enum_.0;\n"
+        "            }\n"
+        "      }\n"
+        "  }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMemberValue, AValueOfTheEnumIsNotAMember) {
+    // The distinction lib/std/enums.fin:26 draws. `f` holds a `Flag` and so does
+    // the name `On`; only the name is a member.
+    const FincRun r = compile(
+        std::string(kKeyidof) +
+        "fun main() <noret> {\n"
+        "  let f <Flag> = On;\n"
+        "  const k <int> = keyidof(f);\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected '$enum_member', got 'Flag'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMemberValue, AnOrdinaryNameIsNotAMember) {
+    const FincRun r = compile(
+        std::string(kKeyidof) +
+        "fun other() <int> { return 1; }\n"
+        "fun main() <noret> { const k <int> = keyidof(other); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected '$enum_member'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMemberValue, AMemberIsStillItsConstructorWhereAValueIsWanted) {
+    // The rule is contextual, so nothing else changed about what `Ok` means: called,
+    // it builds a value, and named where a value is wanted it is the constructor.
+    const FincRun r = compile(
+        std::string(kKeyidof) +
+        "fun main() <noret> {\n"
+        "  let r <Res<int, string>> = Ok(1);\n"
+        "  const bad <int> = Ok;\n"
+        "}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("got 'fn(T) -> Res<T, U>'"), std::string::npos) << err;
+}
