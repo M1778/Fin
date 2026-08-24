@@ -9814,39 +9814,153 @@ TEST(Soundness_SpecialCalls, ThePlainSpellingResolvesToo) {
 }
 
 // ---------------------------------------------------------------------------
-// Nothing at file scope is hoisted: a top-level declaration is visible only to
-// what comes after it.
+// A top-level function or `@special` is visible to the whole file, including
+// above its own declaration.
 //
-// visit(Program&) walks its statements in order and each declaration registers
-// itself when its turn comes, so two top-level functions cannot call each other
-// and a struct cannot be named above its declaration. Inside a struct the
-// members are registered before any body is walked, which is why a method may
-// call a method declared below it -- the file scope is the only place the rule
-// does not hold.
+// stdlib/memory.fin:14 is what asks for it: `@GET_MEMORY_LIMIT()` is called
+// inside `falloc` and declared on line 40. The corpus writes exactly one such
+// forward reference, and it writes no ordering rule anywhere, so the reading
+// that makes the sample compile is the one the samples ask for.
 //
-// stdlib/memory.fin:14 is the corpus site: `@GET_MEMORY_LIMIT()` inside `falloc`,
-// declared on line 40. It is the only one, which is why this is booked rather
-// than built -- the fix is a declaration pass over the top level, and the order
-// in which it would have to define types, then signatures, then bodies is its
-// own unit.
+// visit(Program&) now runs a quiet signature pre-pass before its in-order walk.
+// The pre-pass resolves each top-level function's and special's parameter and
+// return types and defines the name at file scope; the in-order walk then does
+// everything else, resolving the same TypeNodes and reporting on them. That is
+// exactly the guarantee QuietPass requires -- every resolution the quiet pass
+// makes is repeated by a reporting pass -- and it is why the pre-pass adds no
+// diagnostic of its own (ThePrePassAddsNoDiagnostic below).
+//
+// A signature that does not fully resolve yet is *skipped* rather than
+// registered with the sentinel. A parameter naming a struct declared further
+// down is the case that matters: the sentinel would make a call above the
+// declaration type-check against a signature nobody wrote, whereas skipping
+// leaves the honest "Undefined function or type". Types are not hoisted, so
+// that case stays a defect (AFunctionWhoseParameterIsDeclaredBelowIsNotHoisted)
+// and hoisting them is its own unit -- a type has to be *filled in* after its
+// name is registered, which a signature does not.
+//
+// Inside a struct the members were already all registered before any body was
+// walked (AStructsMethodSeesAMethodBelowIt); file scope was the only place the
+// rule did not hold for functions.
 // ---------------------------------------------------------------------------
 
-TEST(KnownDefect_DeclarationOrder, ATopLevelFunctionIsNotVisibleAboveItself) {
+TEST(Soundness_DeclarationOrder, ATopLevelFunctionIsVisibleAboveItself) {
     const FincRun r = compile(
         "fun main() <noret> { const x <int> = later(); }\n"
         "fun later() <int> { return 1; }\n");
-    EXPECT_NE(stripAnsi(r.err).find("Undefined function or type 'later'"), std::string::npos)
-        << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_DeclarationOrder, ATopLevelSpecialIsNotVisibleAboveItself) {
-    // stdlib/memory.fin:14's shape.
+TEST(Soundness_DeclarationOrder, ATopLevelSpecialIsVisibleAboveItself) {
+    // stdlib/memory.fin:14's shape, and the corpus site this unit is for.
     const FincRun r = compile(
         "fun falloc(size: int) <int> { return @LIMIT(); }\n"
         "@special LIMIT() <int> { return 1; }\n"
         "fun main() <noret> { }\n");
-    EXPECT_NE(stripAnsi(r.err).find("Undefined function or type 'LIMIT'"), std::string::npos)
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeclarationOrder, TwoTopLevelFunctionsCanCallEachOther) {
+    // Mutual recursion is unsatisfiable under any ordering of a single in-order
+    // walk, which is the argument that a pre-pass is the shape of the fix and not
+    // merely a convenience.
+    const FincRun r = compile(
+        "fun even(n: int) <bool> { if (n == 0) { return true; } return odd(n - 1); }\n"
+        "fun odd(n: int) <bool> { if (n == 0) { return false; } return even(n - 1); }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeclarationOrder, AHoistedCallYieldsItsReturnType) {
+    // The name resolving is not enough: what it resolves to has to be the
+    // signature that was written, or the call above is unchecked.
+    const FincRun r = compile(
+        "fun main() <noret> { const x <string> = later(); }\n"
+        "fun later() <int> { return 1; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("expected 'string', got 'int'"), std::string::npos) << err;
+}
+
+TEST(Soundness_DeclarationOrder, AHoistedCallChecksItsArgumentTypes) {
+    const FincRun r = compile(
+        "fun main() <noret> { const x <int> = later(\"s\"); }\n"
+        "fun later(n: int) <int> { return n; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("expected 'int', got 'string'"), std::string::npos) << err;
+}
+
+TEST(Soundness_DeclarationOrder, AHoistedCallChecksItsArgumentCount) {
+    const FincRun r = compile(
+        "fun main() <noret> { const x <int> = later(); }\n"
+        "fun later(n: int) <int> { return n; }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("expects 1 arguments"), std::string::npos) << err;
+}
+
+TEST(Soundness_DeclarationOrder, ThePrePassAddsNoDiagnostic) {
+    // The whole licence for QuietPass at this site. `NoSuchType` is resolved twice
+    // -- once quietly, once by the walk -- and reported once.
+    const FincRun r = compile(
+        "fun later(n: NoSuchType) <int> { return 1; }\n"
+        "fun main() <noret> { }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("Undefined type 'NoSuchType'"), std::string::npos) << err;
+}
+
+TEST(Soundness_DeclarationOrder, AnUndefinedFunctionIsStillUndefined) {
+    // The pre-pass registers what the file declares and nothing else.
+    const FincRun r = compile("fun main() <noret> { const x <int> = nope(); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined function or type 'nope'"), std::string::npos)
         << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeclarationOrder, AHoistedNameIsNotAType) {
+    // Registered as a value, in the value scope, exactly as the in-order walk
+    // registers it. A function's name in type position is still undefined.
+    const FincRun r = compile(
+        "fun main() <noret> { const x <later> = 1; }\n"
+        "fun later() <int> { return 1; }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'later'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeclarationOrder, ALocalStillWinsOverAHoistedFunction) {
+    // Hoisting changes when a file-scope name is defined, not which scope wins.
+    const FincRun r = compile(
+        "fun main() <noret> { const later <int> = 2; const x <int> = later; }\n"
+        "fun later() <int> { return 1; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_DeclarationOrder, AFunctionWhoseParameterIsDeclaredBelowIsNotHoisted) {
+    // The boundary the pre-pass draws, and why `AStructIsNotVisibleAboveItself`
+    // below is still a defect: `S` is not registered when the pre-pass reaches
+    // `take`, so `take`'s signature does not resolve and is skipped. Skipping is
+    // the deliberate half -- registering the sentinel instead would type-check
+    // the call above against a signature nobody wrote.
+    const FincRun r = compile(
+        "fun main() <noret> { const x <int> = take(S{v: 1}); }\n"
+        "fun take(s: S) <int> { return s.v; }\n"
+        "struct S { pub v <int>, }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined function or type 'take'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeclarationOrder, ANamespaceSiblingIsVisibleAboveItself) {
+    // Not a second decision, and worth writing down because it looks like one: a
+    // `namespace_block` is spliced into the enclosing statement list and its name
+    // discarded (parser.y:397), so its declarations *are* top-level statements and
+    // the pre-pass reaches them. When a namespace gets a node and a scope of its
+    // own -- which parser.y says is coming -- this stops being free and the pass
+    // has to descend into one deliberately.
+    const FincRun r = compile(
+        "namespace n {\n"
+        "  fun a() <int> { return b(); }\n"
+        "  fun b() <int> { return 1; }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
 TEST(KnownDefect_DeclarationOrder, AStructIsNotVisibleAboveItself) {

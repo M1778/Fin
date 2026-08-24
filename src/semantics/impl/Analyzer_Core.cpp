@@ -487,7 +487,71 @@ void SemanticAnalyzer::visit(PointerTypeNode& node) { resolveTypeFromAST(&node);
 void SemanticAnalyzer::visit(ArrayTypeNode& node) { resolveTypeFromAST(&node); }
 
 
+void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
+    QuietPass quiet(*this);
+
+    for (auto& stmt : node.statements) {
+        std::string name;
+        const std::vector<std::unique_ptr<Parameter>>* params = nullptr;
+        const std::vector<std::unique_ptr<GenericParam>>* generics = nullptr;
+        TypeNode* declaredReturn = nullptr;
+
+        if (auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
+            name = fn->name;
+            params = &fn->params;
+            generics = &fn->generic_params;
+            declaredReturn = fn->return_type.get();
+        } else if (auto* sp = dynamic_cast<SpecialDeclaration*>(stmt.get())) {
+            // A `@special` carries no generic parameters -- the grammar gives it none.
+            name = sp->name;
+            params = &sp->params;
+            declaredReturn = sp->return_type.get();
+        } else {
+            continue;
+        }
+
+        // A scope of its own, for the generics the signature may mention, discarded
+        // once the signature is built. The GenericTypes it declared survive inside the
+        // FunctionType, which is what visit(FunctionDeclaration&) does too.
+        enterScope();
+        if (generics) declareGenericParams(*generics);
+
+        bool resolved = true;
+        std::vector<std::shared_ptr<Type>> paramTypes;
+        for (auto& param : *params) {
+            auto type = resolveTypeFromAST(param->type.get());
+            if (!type || isErrorType(type)) { resolved = false; break; }
+            paramTypes.push_back(type);
+        }
+
+        std::shared_ptr<Type> retType;
+        if (resolved) {
+            // Null return_type means none was written, which is `void` -- the same
+            // reading as step 5 of visit(FunctionDeclaration&).
+            retType = declaredReturn ? resolveTypeFromAST(declaredReturn)
+                                     : currentScope->resolveType("void");
+            if (!retType || isErrorType(retType)) resolved = false;
+        }
+        exitScope();
+
+        if (!resolved) continue;
+
+        // Not `define` unconditionally: a name already bound at file scope was bound by
+        // something the pre-pass does not model -- an import, or a `const` above -- and
+        // overwriting it here would let a function declared at the bottom of the file
+        // silently take a name the top of the file already gave to something else. The
+        // in-order walk still overwrites when its turn comes, which is the behaviour
+        // that was already there.
+        if (currentScope->symbols.count(name)) continue;
+
+        currentScope->define({name, std::make_shared<FunctionType>(paramTypes, retType),
+                              false, true});
+        debugLog(fg(fmt::color::gray), "      [Hoist] Registered '{}' at file scope\n", name);
+    }
+}
+
 void SemanticAnalyzer::visit(Program& node) {
+    hoistTopLevelSignatures(node);
     for (auto& stmt : node.statements) {
         stmt->accept(*this);
     }

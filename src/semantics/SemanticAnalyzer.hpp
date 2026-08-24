@@ -399,6 +399,24 @@ private:
     // has not answered. KnownDefect_ParameterDefaults holds that half.
     void visitParameterDefaults(const std::vector<std::unique_ptr<Parameter>>& params);
     bool checkReturnPaths(Statement* node);
+
+    // Defines every top-level function's and `@special`'s name at file scope before
+    // visit(Program&) walks the file, so a call may sit above the declaration it
+    // names. stdlib/memory.fin:14 is the corpus site -- `@GET_MEMORY_LIMIT()` inside
+    // `falloc`, declared on line 40 -- and mutual recursion between two top-level
+    // functions is the shape no single in-order walk can satisfy at all.
+    //
+    // Quiet, and legal to be quiet for the reason QuietPass states: the in-order walk
+    // resolves the same TypeNodes and reports on them, so nothing is lost here.
+    //
+    // A signature that does not fully resolve is skipped rather than registered with
+    // the sentinel. The case is a parameter naming a struct declared further down --
+    // types are not hoisted -- and the sentinel would let a call above the declaration
+    // type-check against a signature nobody wrote. Skipping leaves the honest
+    // "Undefined function or type"; KnownDefect_DeclarationOrder holds that half.
+    //
+    // Top level only. A namespace body is its own scope and gets no pre-pass.
+    void hoistTopLevelSignatures(Program& node);
     
     template <typename... Args>
     void debugLog(const fmt::text_style& style, fmt::format_string<Args...> format, Args&&... args) {
