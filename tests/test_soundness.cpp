@@ -9710,3 +9710,163 @@ TEST(Soundness_TypeAsValue, AnOrdinaryArgumentIsUnaffected) {
         "}\n");
     EXPECT_EQ(errorCount(stripAnsi(r.err)), 2u) << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// A `@special` declaration registers its name, so `@f(...)` resolves.
+//
+// Three corpus sites call one and each was "Undefined function or type" about a
+// declaration written in the same file:
+//
+//     stdlib/enums.fin:18   `@getenumkeyid(value)`   declared on 12
+//     stdlib/types.fin:98   `@_resolve_type(v)`      declared on 90
+//     stdlib/memory.fin:14  `@GET_MEMORY_LIMIT()`    declared on 40
+//
+// `@name(args)` has parsed since the grammar grew it (parser.y:2228) into a
+// FunctionCall carrying `is_special`, and visit(SpecialDeclaration&) walked the
+// body and then defined nothing. The registration is FunctionDeclaration's step
+// 6 verbatim, down to registering a signature whose parts did not resolve: the
+// sentinel keeps the arity the program wrote, and not registering was never
+// kinder than a wrong arity -- it reported a function undefined that is defined.
+//
+// The name goes into the ordinary value scope, which is what makes the un-`@`ed
+// spelling `f(...)` resolve as well. No corpus sample writes that spelling for a
+// `@special` and none forbids it, so the distinction would have to be invented;
+// the same argument the `#[use(...)]` grant makes about which declarations may
+// carry it (Soundness_CompilerApi.APlainFunctionCanGrantItToo).
+//
+// memory.fin:14 stays open, and for a different reason: it calls its `@special`
+// thirty lines before the declaration. Nothing at file scope is hoisted --
+// KnownDefect_DeclarationOrder below -- so that site needs the order rule, not
+// this one.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_SpecialCalls, ASpecialIsCallableByItsAtSpelling) {
+    const FincRun r = compile(
+        "@special(pub) sp(v: int) <int> { return v; }\n"
+        "fun main() <noret> { const x <int> = @sp(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SpecialCalls, TheCorpusShapeResolves) {
+    // stdlib/types.fin:90 and :98, which are a `@special` and the `@`-call of it
+    // one declaration later.
+    const FincRun r = compile(
+        std::string(kTypesGrant) +
+        "@special _resolve_type(v: any) <$type> {\n"
+        "  let _type <$type> = compiler.types.ct_any(v);\n"
+        "  return _type;\n"
+        "}\n"
+        "pub fun resolve_type(v: any) <$type> { return @_resolve_type(v); }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SpecialCalls, ASpecialCallYieldsItsReturnType) {
+    const FincRun r = compile(
+        "@special(pub) sp(v: int) <int> { return v; }\n"
+        "fun main() <noret> { const x <string> = @sp(1); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_SpecialCalls, ASpecialCallChecksItsArgumentTypes) {
+    const FincRun r = compile(
+        "@special(pub) sp(v: int) <int> { return v; }\n"
+        "fun main() <noret> { const x <int> = @sp(\"s\"); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_SpecialCalls, ASpecialCallChecksItsArgumentCount) {
+    const FincRun r = compile(
+        "@special(pub) sp(v: int) <int> { return v; }\n"
+        "fun main() <noret> { const x <int> = @sp(1, 2); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expects 1 arguments, got 2"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_SpecialCalls, AnUnknownSpecialIsStillReported) {
+    const FincRun r = compile(
+        "fun main() <noret> { const x <int> = @nope(1); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined function or type 'nope'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_SpecialCalls, AnUnresolvedParameterStillLeavesTheArityRight) {
+    // The sentinel, not a dropped parameter: one diagnostic about the type nobody
+    // declared, and no second one claiming the special takes no arguments.
+    const FincRun r = compile(
+        "@special(pub) sp(v: NoSuchType) <int> { return 1; }\n"
+        "fun main() <noret> { const x <int> = @sp(1); }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("expects 0 arguments"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(Soundness_SpecialCalls, ThePlainSpellingResolvesToo) {
+    // The name is in the ordinary value scope, so `sp(1)` finds it. Written down
+    // because it is a consequence and not a decision: the corpus writes `@sp(1)`
+    // everywhere and forbids nothing, so there is no distinction to enforce.
+    const FincRun r = compile(
+        "@special(pub) sp(v: int) <int> { return v; }\n"
+        "fun main() <noret> { const x <int> = sp(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// Nothing at file scope is hoisted: a top-level declaration is visible only to
+// what comes after it.
+//
+// visit(Program&) walks its statements in order and each declaration registers
+// itself when its turn comes, so two top-level functions cannot call each other
+// and a struct cannot be named above its declaration. Inside a struct the
+// members are registered before any body is walked, which is why a method may
+// call a method declared below it -- the file scope is the only place the rule
+// does not hold.
+//
+// stdlib/memory.fin:14 is the corpus site: `@GET_MEMORY_LIMIT()` inside `falloc`,
+// declared on line 40. It is the only one, which is why this is booked rather
+// than built -- the fix is a declaration pass over the top level, and the order
+// in which it would have to define types, then signatures, then bodies is its
+// own unit.
+// ---------------------------------------------------------------------------
+
+TEST(KnownDefect_DeclarationOrder, ATopLevelFunctionIsNotVisibleAboveItself) {
+    const FincRun r = compile(
+        "fun main() <noret> { const x <int> = later(); }\n"
+        "fun later() <int> { return 1; }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined function or type 'later'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_DeclarationOrder, ATopLevelSpecialIsNotVisibleAboveItself) {
+    // stdlib/memory.fin:14's shape.
+    const FincRun r = compile(
+        "fun falloc(size: int) <int> { return @LIMIT(); }\n"
+        "@special LIMIT() <int> { return 1; }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined function or type 'LIMIT'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_DeclarationOrder, AStructIsNotVisibleAboveItself) {
+    const FincRun r = compile(
+        "fun make() <S> { return S{x: 1}; }\n"
+        "struct S { pub x <int>, }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'S'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_DeclarationOrder, AStructsMethodSeesAMethodBelowIt) {
+    // The half that does hold, and the reason the file-scope gap is a gap rather
+    // than a rule: a struct's members are all registered before any body runs.
+    const FincRun r = compile(
+        "struct A {\n"
+        "  pub v <int>,\n"
+        "  pub fun f() <int> { return self.g(); }\n"
+        "  pub fun g() <int> { return 1; }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}

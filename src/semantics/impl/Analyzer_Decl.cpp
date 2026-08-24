@@ -1043,13 +1043,45 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
     currentGrants.clear();
     applyUseAttributes(node, node.attributes);
 
+    std::vector<std::shared_ptr<Type>> paramTypes;
     for (auto& param : node.params) {
-         defineParameter(*param, resolveTypeOrError(param->type.get()));
+         auto type = resolveTypeOrError(param->type.get());
+         defineParameter(*param, type);
+         // The sentinel goes into the signature, for FunctionDeclaration's reason:
+         // dropping a parameter whose type did not resolve advertises an arity
+         // nobody wrote.
+         paramTypes.push_back(type);
     }
     visitParameterDefaults(node.params);
-    
-    if (node.return_type) resolveTypeFromAST(node.return_type.get());
-    
+
+    std::shared_ptr<Type> retType;
+    if (node.return_type) retType = resolveTypeFromAST(node.return_type.get());
+    if (!retType) retType = currentScope->resolveType("void");
+
+    // The name, in the enclosing scope, so that `@f(...)` resolves. Three corpus
+    // sites call a `@special` written in the same file -- stdlib/enums.fin:18,
+    // stdlib/types.fin:98, stdlib/memory.fin:14 -- and each was "Undefined function
+    // or type" about a declaration thirty lines away, because this walked the body
+    // and defined nothing. FunctionDeclaration's step 6, including registering a
+    // signature whose parts did not resolve.
+    //
+    // The ordinary value scope, which also makes the un-`@`ed `f(...)` resolve. The
+    // corpus writes `@f(...)` at all three sites and forbids nothing, so a rule that
+    // distinguished the two spellings would have to be invented here --
+    // Soundness_SpecialCalls.ThePlainSpellingResolvesToo says so out loud.
+    //
+    // Registered *before* the body is walked, so a `@special` may call itself; and
+    // into the parent scope rather than the body's, so it outlives the declaration.
+    // memory.fin:14 is still open, for the other reason: it calls thirty lines above
+    // the declaration and nothing at file scope is hoisted
+    // (KnownDefect_DeclarationOrder).
+    if (currentScope->parent) {
+        auto funcType = std::make_shared<FunctionType>(
+            paramTypes, retType ? retType : errorType());
+        currentScope->parent->define({node.name, funcType, false, true});
+        debugLog(fg(fmt::color::gray), "      [Register] Registered special '{}' in parent scope\n", node.name);
+    }
+
     if (node.body) node.body->accept(*this);
     
     exitScope();
