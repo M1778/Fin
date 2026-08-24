@@ -216,9 +216,19 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     debugLog(fg(fmt::color::cyan), "[INFO] Analyzing function '{}'\n", node.name);
     
     auto prevRet = context.currentFuncReturnType;
+    auto prevGrants = currentGrants;
     
     // 1. Enter Scope for the function body (to hold generics and params)
     enterScope();
+
+    // `#[use(compiler)]` and its component grants. Inside the scope, so the name it
+    // binds leaves with the function; `currentGrants` is saved above and restored
+    // below for the same reason. The corpus only ever writes the attribute on a
+    // `@special` and every one of the nine sites is one, but the grant is about the
+    // body and nothing distinguishes the two declarations here -- see
+    // Soundness_CompilerApi.APlainFunctionCanGrantItToo.
+    currentGrants.clear();
+    applyUseAttributes(node, node.attributes);
 
     // 2. Register Generics (e.g. <T>) and resolve their constraints
     declareGenericParams(node.generic_params);
@@ -314,6 +324,7 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
 
     exitScope();
     context.currentFuncReturnType = prevRet;
+    currentGrants = std::move(prevGrants);
 }
 
 void SemanticAnalyzer::visit(StructDeclaration& node) {
@@ -1022,7 +1033,16 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
     debugLog(fg(fmt::color::magenta), "[INFO] Analyzing special decl '{}'\n", node.name);
     // Similar to function but used for compile-time/macros
     
+    auto prevGrants = currentGrants;
     enterScope();
+
+    // The shape the corpus writes the compiler API in: all nine `#[use(compiler)]`
+    // sites are `@special` declarations (stdlib/memory.fin, types.fin, error.fin,
+    // enums.fin). See visit(FunctionDeclaration&) for why the name goes in the
+    // body's scope.
+    currentGrants.clear();
+    applyUseAttributes(node, node.attributes);
+
     for (auto& param : node.params) {
          defineParameter(*param, resolveTypeOrError(param->type.get()));
     }
@@ -1033,6 +1053,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
     if (node.body) node.body->accept(*this);
     
     exitScope();
+    currentGrants = std::move(prevGrants);
 }
 
 void SemanticAnalyzer::visit(ClassDeclaration& node) {

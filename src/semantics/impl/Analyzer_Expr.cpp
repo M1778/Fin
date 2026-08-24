@@ -792,6 +792,17 @@ void SemanticAnalyzer::visit(MethodCall& node) {
         return;
     }
 
+    // A call through the compiler API: `compiler.enums.resolve_id(value)`
+    // (stdlib/enums.fin:13), `compiler.structs.select_field::<int>(...)`
+    // (stdlib/types.fin:25), `compiler.components.gc.present()`. The whole of the
+    // resolution -- which layer, whether the grant is there, arity and arguments --
+    // is Analyzer_CompilerApi.cpp; this is the door.
+    if (auto* api = dynamic_cast<const CompilerApiType*>(objType.get())) {
+        lastExprType = resolveCompilerApi(node, *api, node.method_name,
+                                         &node.args, &node.generic_args);
+        return;
+    }
+
     auto structType = getStructType(objType, currentScope);
 
     if (!structType) {
@@ -1124,6 +1135,14 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
         }
         error(node, fmt::format("Namespace '{}' has no exported member '{}'", ns->name, node.member));
         lastExprType = nullptr;
+        return;
+    }
+
+    // The same door for a member that is read and not called: `compiler.enums.InBytes`
+    // (stdlib/memory.fin:32), and every intermediate step of a longer path --
+    // `compiler.types` and `compiler.components.gc` are both MemberAccess.
+    if (auto* api = dynamic_cast<const CompilerApiType*>(objType.get())) {
+        lastExprType = resolveCompilerApi(node, *api, node.member, nullptr, nullptr);
         return;
     }
 

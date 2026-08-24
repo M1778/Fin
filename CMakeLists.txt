@@ -121,6 +121,8 @@ add_library(fin_core STATIC
     src/ast/cloning/CloneTypes.cpp
 
     # Semantic Analysis
+    src/semantics/CompilerApi.cpp
+    src/semantics/impl/Analyzer_CompilerApi.cpp
     src/semantics/impl/Analyzer_Core.cpp
     src/semantics/impl/Analyzer_Decl.cpp
     src/semantics/impl/Analyzer_Stmt.cpp

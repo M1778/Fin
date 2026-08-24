@@ -5,6 +5,8 @@
 #include "../diagnostics/DiagnosticEngine.hpp"
 #include "Scope.hpp"
 #include "../types/Type.hpp"
+#include "../types/CompilerApiType.hpp"
+#include "CompilerApi.hpp"
 #include <vector>
 #include <string>
 #include <fmt/core.h>
@@ -162,6 +164,40 @@ private:
         const bool isConst = param.type && param.type->is_const;
         currentScope->define({param.name, type, !isConst, true});
     }
+
+    // ---- The compiler API (docs/compiler-api.md, ADR 0012) --------------------
+    //
+    // The components the *enclosing declaration* granted with
+    // `#[use(compiler.components.<name>)]`. Empty everywhere else, which is what
+    // makes a grant per-declaration: nothing about a granted `@special` reaches the
+    // one written under it.
+    std::vector<std::string> currentGrants;
+
+    // Reads `#[use(...)]` off a declaration's attributes: reports a malformed or
+    // misspelled grant, fills `currentGrants`, and defines `compiler` in the current
+    // scope when `#[use(compiler)]` is among them. Called from inside the
+    // declaration's own scope, so both the name and the grants leave with it.
+    //
+    // `attrs` is the declaration's attribute vector; there is no common base holding
+    // one (parser.y says so at its own attribute helper), so this takes the vector.
+    void applyUseAttributes(ASTNode& node,
+                            const std::vector<std::unique_ptr<Attribute>>& attrs);
+
+    // Resolves `compiler.<member>` / `compiler.components.<member>` /
+    // `compiler.<component>.<member>` for a *read*. `call` is the argument list when
+    // the member is being called and null when it is being read, which is the whole
+    // of the difference between an operation and a constant at the use site.
+    //
+    // Returns null having reported, or the member's type. `node` is the MemberAccess
+    // or MethodCall being resolved, for the diagnostic's location.
+    std::shared_ptr<Type> resolveCompilerApi(
+        ASTNode& node, const CompilerApiType& base, const std::string& member,
+        std::vector<std::unique_ptr<Expression>>* args,
+        std::vector<std::unique_ptr<TypeNode>>* generic_args);
+
+    // One member of the table, as a type. `R` is the turbofish argument.
+    std::shared_ptr<Type> compilerApiMemberType(const compilerapi::Member& m,
+                                                const std::shared_ptr<Type>& turbofish);
 
     // A `::`-separated path from an `extern X as Y;` or a `pub implements Y = X;`,
     // resolved as a symbol rather than as a type. Null when the path names no symbol,

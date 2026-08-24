@@ -9216,3 +9216,311 @@ TEST(Soundness_MemberOverwrite, AnUnknownTargetStillReports) {
         "fun main() <noret> { }\n");
     EXPECT_NE(stripAnsi(r.err).find("NoSuchType"), std::string::npos) << stripAnsi(r.err);
 }
+
+// ===========================================================================
+// The compiler API: `#[use(...)]`, the two namespaces, and the four Tier-1
+// components.
+//
+// Nine of the corpus's diagnostics were one word: `Undefined variable
+// 'compiler'`, in the four standard-library files that reach the compiler from
+// inside a `@special` (stdlib/memory.fin:31,32,33,41, stdlib/types.fin:25,84,91,
+// stdlib/error.fin:27, stdlib/enums.fin:13). Every one of those declarations
+// writes `#[use(compiler)]` above itself and nothing read the attribute, so the
+// name it grants was never bound.
+//
+// The shape is settled twice over and not by me. ADR 0012 splits the surface in
+// two: `compiler.components.<name>` is a **component reference** -- capability
+// negotiation, and nothing else -- while `compiler.<name>.<member>` is the *use*
+// of a component. docs/compiler-api.md §2.1 turns that into the rule enforced
+// here: the grant layer is readable by anyone who has `compiler` at all (asking
+// "do I have this component?" cannot itself require having it, or forward
+// compatibility is unimplementable), and the operations layer needs the matching
+// `#[use(compiler.components.<name>)]`.
+//
+// Two consequences worth naming, because both are load-bearing:
+//
+//   * `compiler.components.gc.present()` must *evaluate to false*, not fail to
+//     resolve. A compiler that refuses to answer questions about components it
+//     does not have cannot be forward-compatible with one that does
+//     (docs/compiler-api.md §2.1a).
+//
+//   * Enforcement means two corpus lines are wrong, and the design doc predicted
+//     both. `stdlib/memory.fin:27-28` grants `system` and reads
+//     `compiler.enums.InBytes`; `stdlib/types.fin:22-23` grants `types` and reads
+//     `compiler.structs.select_field`. §2.1b calls the first "genuine violations
+//     ... fixed by the header edit ADR 0012 predicts", and the second is the same
+//     shape. Booked in those files' notes, not fixed: the corpus is the
+//     specification and a missing grant line is a defect in the sample text.
+//
+// The member inventory is docs/compiler-api.md §2.4 -- the four components the
+// corpus names, with the thirteen corpus paths unchanged. It is a table and not a
+// set of hand-written cases, because the next component is a table row.
+// ===========================================================================
+
+// A `@special` with an attribute block above it and a body inside it, which is the
+// only shape the corpus writes the API in. `t` is a `$type` because three of the
+// four components take one.
+static std::string apiSpecial(const std::string& attrs, const std::string& body) {
+    return attrs + "@special(pub) probe( t: $type ) <int> {\n  " + body + "\n}\n"
+           "fun main() <noret> { }\n";
+}
+
+static const char* kUseCompiler = "#[use(compiler)]\n";
+
+TEST(Soundness_CompilerApi, TheNameIsNotBoundWithoutTheGrant) {
+    // The floor. `compiler` is not a builtin: a declaration that has not asked for
+    // it does not have it, which is what makes the attribute mean something.
+    const FincRun r = compile(apiSpecial("", "return compiler.types.cmp_types(t, t);"));
+    EXPECT_NE(stripAnsi(r.err).find("Undefined variable 'compiler'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, TheGrantBindsTheName) {
+    // stdlib/error.fin:24-27, spelled out: two attributes, then the call.
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n",
+        "return compiler.types.cmp_types(t, t);"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, TheGrantDoesNotReachTheNextDeclaration) {
+    // A grant is per-declaration. Leaking it would make the attribute a file-level
+    // switch, and then `#[use]` on the one function that needs it would silently
+    // arm every function under it.
+    const FincRun r = compile(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n"
+        "@special(pub) granted( t: $type ) <int> { return compiler.types.cmp_types(t, t); }\n"
+        "@special(pub) plain( t: $type ) <int> { return compiler.types.cmp_types(t, t); }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, AnOperationYieldsItsReturnType) {
+    // §2.4: `cmp_types(a: $type, b: $type) <int>`. error.fin:27 stores it in an
+    // `int` and :28 compares it against -1, so the return type is checked, not
+    // waved through as `auto`.
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n",
+        "const s <string> = compiler.types.cmp_types(t, t);\n  return 0;"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("int"), std::string::npos) << e;
+}
+
+TEST(Soundness_CompilerApi, AnOperationChecksItsArgumentCount) {
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n",
+        "return compiler.types.cmp_types(t);"));
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, AnOperationChecksItsArgumentTypes) {
+    // A `$type` argument is a compile-time type, not a number. If this were
+    // unchecked the API would be a hole in the type system rather than a part of it.
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n",
+        "return compiler.types.cmp_types(1, 2);"));
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, AnUnknownMemberOfAComponentReports) {
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n",
+        "return compiler.types.nosuchop(t);"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("nosuchop"), std::string::npos) << e;
+}
+
+TEST(Soundness_CompilerApi, AnUngrantedComponentReports) {
+    // ADR 0012 puts enforcement on the operations layer. This is the check that
+    // makes `#[use(compiler.components.<name>)]` carry information, and it is what
+    // stdlib/memory.fin:27-28 and stdlib/types.fin:22-23 fall foul of.
+    const FincRun r = compile(apiSpecial(
+        kUseCompiler, "return compiler.enums.resolve_id(t);"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("enums"), std::string::npos) << e;
+}
+
+TEST(Soundness_CompilerApi, AnUnknownComponentReports) {
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n",
+        "return compiler.nosuchcomp.f(t);"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("nosuchcomp"), std::string::npos) << e;
+}
+
+TEST(Soundness_CompilerApi, AGrantOfAnUnknownComponentReports) {
+    // The attribute itself is checked. A misspelled grant that was accepted in
+    // silence would report only at the use site, about the use.
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.tpyes)]\n",
+        "return 0;"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("tpyes"), std::string::npos) << e;
+}
+
+TEST(Soundness_CompilerApi, AConstantIsReadAsAValue) {
+    // `compiler.enums.InBytes`, memory.fin:32-33 and :41. Read, never called --
+    // §2.4 files it as a constant, grandfathered under `enums` because the corpus
+    // puts it there.
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.enums)]\n",
+        "const u <uint> = compiler.enums.InBytes;\n  return 0;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, AConstantHasItsOwnType) {
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.enums)]\n",
+        "const u <string> = compiler.enums.InBytes;\n  return 0;"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("uint"), std::string::npos) << e;
+}
+
+TEST(Soundness_CompilerApi, AConstantIsNotCallable) {
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.enums)]\n",
+        "return compiler.enums.InBytes();"));
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, TheGrantLayerNeedsNoComponentGrant) {
+    // ADR 0012's split, and the reason it is not symmetric: `compiler.components.X`
+    // is how you find out whether you may use X. Gating it on the X grant makes
+    // negotiation circular.
+    const FincRun r = compile(apiSpecial(
+        kUseCompiler,
+        "const b <bool> = compiler.components.types.present();\n  return 0;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, AnAbsentComponentIsStillAskable) {
+    // docs/compiler-api.md §2.1a, in one line: `present()` on a component this
+    // compiler does not have must *answer*, and the answer is false. A resolution
+    // failure here would make every forward-compatible library unwritable.
+    const FincRun r = compile(apiSpecial(
+        kUseCompiler,
+        "const b <bool> = compiler.components.gc.present();\n  return 0;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, AnAbsentComponentsOperationsAreNotReachable) {
+    // The other half of the same rule. Asking about `gc` is always legal; reaching
+    // through it is not, whatever the program grants.
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.gc)]\n",
+        "return compiler.gc.collect();"));
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, TheGrantLayerAnswersItsFourQuestions) {
+    // §2.1's table: present, version, granted, name. `granted()` is false here
+    // because nothing granted `types`, and that it can be *asked* without the grant
+    // is the point.
+    const FincRun r = compile(apiSpecial(
+        kUseCompiler,
+        "const v <int> = compiler.components.types.version();\n"
+        "  const g <bool> = compiler.components.types.granted();\n"
+        "  const n <string> = compiler.components.types.name();\n  return v;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, AComponentReferenceIsNotItsOperationsLayer) {
+    // ADR 0012: "Any third segment under `compiler.components` is an operation on a
+    // reference, never a component name." So the reference has exactly four
+    // operations and `cmp_types` is not one of them -- the two layers are different
+    // namespaces, which is the ADR's title.
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n",
+        "return compiler.components.types.cmp_types(t, t);"));
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, TurbofishNamesTheGenericOperationsResult) {
+    // `gettype::<T>()` -- types.fin:25, a turbofish and no value argument. §2.4
+    // returns `$struct`: the compiler's own type-info handle, not a `$type`.
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n",
+        "const s <$struct> = compiler.types.gettype::<int>();\n  return 0;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, AGenericOperationsResultIsItsTurbofishArgument) {
+    // `select_field::<R>(s, name) <?R>` is generic in its *result*. types.fin:25
+    // writes `::<int>` and denullifies with `?`, so without the `?` the type is
+    // `int?` and the mismatch names it.
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n"
+        "#[use(compiler.components.structs)]\n",
+        "const n <int> = compiler.structs.select_field::<int>("
+        "compiler.types.gettype::<int>(), \"TypeID\");\n  return 0;"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("int?"), std::string::npos) << e;
+}
+
+TEST(Soundness_CompilerApi, TheCorpusLineDenullifiesThatResult) {
+    // stdlib/types.fin:25 entire, with the grant it is missing. The `?` is why the
+    // declared `int` fits.
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n"
+        "#[use(compiler.components.structs)]\n",
+        "return compiler.structs.select_field::<int>("
+        "compiler.types.gettype::<int>(), \"TypeID\")?;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, EveryCorpusPathResolves) {
+    // The thirteen paths of docs/compiler-api.md §2.4, in one declaration that
+    // grants all four components. This is the test that the four stdlib files are
+    // asking for; they differ from it only in which grants they write.
+    const FincRun r = compile(
+        std::string(kUseCompiler) +
+        "#[use(compiler.components.types)]\n"
+        "#[use(compiler.components.structs)]\n"
+        "#[use(compiler.components.enums)]\n"
+        "#[use(compiler.components.system)]\n"
+        "@special(pub) every( t: $type, m: $enum_member, e: any ) <int> {\n"
+        "  const a <int>    = compiler.types.cmp_types(t, t);\n"
+        "  const b <$type>  = compiler.types.ct_any(e);\n"
+        "  const c <$struct> = compiler.types.gettype::<int>();\n"
+        "  const d <$type>  = compiler.types.typefrom_typeid(1);\n"
+        "  const f <int>    = compiler.structs.select_field::<int>(c, \"TypeID\")?;\n"
+        "  const g <int>    = compiler.enums.resolve_id(e);\n"
+        "  const h <int>    = compiler.enums.keyid_of(m);\n"
+        "  const i <uint>   = compiler.enums.InBytes;\n"
+        "  const j <string> = compiler.system.get_memorycard_model();\n"
+        "  const k <uint>   = compiler.system.get_total_memory(i);\n"
+        "  const l <uint>   = compiler.system.get_available_memory(i);\n"
+        "  return a;\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, APlainFunctionCanGrantItToo) {
+    // The corpus only ever writes `#[use(...)]` on a `@special`, and every one of
+    // the nine sites is one. Honoured on any declaration that carries attributes
+    // and has a body, because the grant is about the body and a rule that also
+    // asked what kind of declaration surrounds it would need corpus evidence for
+    // the distinction; there is none either way.
+    const FincRun r = compile(
+        std::string(kUseCompiler) + "#[use(compiler.components.types)]\n"
+        "pub fun probe( t: $type ) <int> { return compiler.types.cmp_types(t, t); }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, TheApiIsNotInScopeAtTopLevel) {
+    // `compiler` is granted into a body. There is no declaration to read the
+    // attribute off at file scope, so the name is not there.
+    const FincRun r = compile(
+        "fun main() <noret> { const x <int> = compiler.types.cmp_types(1, 1); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined variable 'compiler'"), std::string::npos)
+        << stripAnsi(r.err);
+}
