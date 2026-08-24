@@ -887,8 +887,16 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
     // parameter has not been told which type it is, and the arguments and the hint are
     // what tell it. Every other call is unaffected -- it goes through
     // checkCallArguments in the order it always did.
-    if (funcType->return_type && funcType->return_type->as<StructType>() &&
-        mentionsGenericParam(funcType->return_type)) {
+    //
+    // Which is why `as<StructType>()` is no longer part of the condition. It used to
+    // sit in front of mentionsGenericParam and narrow the rule back down to the case
+    // that motivated it, so `fun first<T>(a: [T]) <T>` was typed as `T`: an assignment
+    // off it said `expected 'int', got 'T'` and a member read said `Type 'T' is not a
+    // struct`, on programs with no mistake in them. A bare `T`, a `[T]` and a `&T` are
+    // return types in exactly the same sense a `Box<T>` is, and unifyGeneric already
+    // matched all three from the parameter side -- the gate was the only thing that
+    // had not been told. Soundness_GenericReturn.
+    if (funcType->return_type && mentionsGenericParam(funcType->return_type)) {
         lastExprType = checkGenericCall(node, "Function", funcName, *funcType, node.args,
                                         nullptr, std::move(written));
         return;

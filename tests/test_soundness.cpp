@@ -4117,28 +4117,49 @@ TEST(Soundness_GenericLambdas, TheFunSpellingAlsoHasItsTypeParametersInScope) {
 }
 
 // ---------------------------------------------------------------------------
-// A generic lambda is not instantiated at its call site.
+// A generic lambda is instantiated at its call site.
 //
-// With its type parameters now in scope, `<T>(m: T) <T> => m` has type
-// `fn(T) -> T`, and calling it with an int compares the argument against the
-// uninstantiated `T` instead of binding T to int. Named types get this right
-// through StructType::instantiate; a lambda's FunctionType has no equivalent
-// path, so the call is rejected.
+// With its type parameters in scope, `<T>(m: T) <T> => m` has type `fn(T) -> T`, and
+// calling it used to compare the argument against the uninstantiated `T` instead of
+// binding T to int -- named types got this right through StructType::instantiate and a
+// lambda's FunctionType had no equivalent path, so the call was rejected.
 //
-// Booked rather than fixed because inferring a lambda's type arguments from its
-// call is a distinct piece of work from getting its declaration in scope, and
-// the declaration is what lambdas.fin:69 writes.
+// It has one now, and it is the same one a free function uses: a lambda is resolved as
+// an ordinary variable whose type is a FunctionType, so widening the generic-call gate
+// off `return_type->as<StructType>()` (Soundness_GenericReturn) put every lambda whose
+// return type mentions a parameter on the inference path. No lambda-specific work was
+// needed, which is the evidence that the gate rather than the lambda was the defect.
 // ---------------------------------------------------------------------------
-TEST(KnownDefect_GenericLambdas, CallingOneDoesNotBindItsTypeParameters) {
+TEST(Soundness_GenericLambdas, CallingOneBindsItsTypeParameters) {
     const FincRun r = compile(
         "fun main() <int> { let c <auto> = <T>(m: T) <T> => m; return c(1); }");
-    EXPECT_NE(r.err.find("Type mismatch"), std::string::npos)
-        << "FIXED? A generic lambda now accepts an argument. Correct behaviour is that "
-           "`c(1)` binds T to int and yields int, the way a call to a generic function "
-           "does. Invert this into Soundness_GenericLambdas.\n"
-        << r.err;
-    EXPECT_NE(r.exitCode, 0)
-        << "FIXED? The call now compiles.\n" << r.err;
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericLambdas, TheBoundReturnIsUsableAsWhatItBecame) {
+    // Not just "the call compiles": `T` is not a struct, so a member read off an
+    // uninstantiated return is what proves the binding reached the type rather than
+    // only silencing the argument check.
+    const FincRun r = compile(
+        "struct P { pub v <int>, P(v: int) { self.v = v; } }\n"
+        "fun main() <int> {\n"
+        "    let c <auto> = <T>(m: T) <T> => m;\n"
+        "    let n <int> = c(P(7)).v;\n"
+        "    return n;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericLambdas, AWrongArgumentIsStillReported) {
+    const FincRun r = compile(
+        "fun main() <int> {\n"
+        "    let c <auto> = <T>(m: T) <T> => m;\n"
+        "    let s <string> = c(1);\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -8262,39 +8283,144 @@ TEST(KnownDefect_WrittenGenericArguments, AFreeFunctionsTurbofishBindsNothing) {
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_GenericReturn, OnlyAStructReturnIsInstantiated) {
-    // The gate on the generic-call path is `return_type->as<StructType>()`, so a callee
-    // whose return type mentions a parameter *without* being a struct is never
-    // instantiated: `fun first<T>(a: [T]) <T>` types its call as `T` and every use of
-    // the result reports against the template.
-    //
-    // Not the array work's doing -- it reproduces identically at the commit before it.
-    // The gate was written when a constructor was the only callee whose return type
-    // named the thing being called, and `mentionsGenericParam` (which the same
-    // condition already calls) is the check that generalises it; the struct test in
-    // front of it is what narrows it back down. Four return shapes are affected: a bare
-    // `T`, `[T]`, `&T`, and `T?`.
-    //
-    // Whoever widens the gate should invert this into
-    // Soundness_GenericReturn.ABareParameterReturnIsInstantiatedFromItsArguments and
-    // check all four -- the parameter-side unification for each already exists in
-    // unifyGeneric, so it is the gate and not the matching that is missing.
+// ---------------------------------------------------------------------------
+// A generic call is instantiated by what its return type says, not by what kind of
+// type the return type is.
+//
+// The gate on this path read `return_type->as<StructType>() &&
+// mentionsGenericParam(return_type)`, so `fun first<T>(a: [T]) <T>` was typed as `T`
+// and every use of the result reported against the template -- `Type 'T' is not a
+// struct` for a member, `expected 'int', got 'T'` for an assignment. Four return
+// shapes were affected: a bare `T`, `[T]`, `&T`, and a struct *containing* one.
+//
+// The struct test was an artifact of when the gate was written: a constructor was the
+// first callee whose return type names the thing being called, so "is a struct" and
+// "mentions a parameter" were true together and only one of them was the rule.
+// mentionsGenericParam -- already called on the same line -- is the whole condition,
+// and unifyGeneric already matched every shape from the parameter side. Nothing had
+// to be taught; the gate had to stop narrowing.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_GenericReturn, ABareParameterReturnIsInstantiatedFromItsArguments) {
     const FincRun r = compile(
         "fun first<T>(a: [T]) <T> { return a[0]; }\n"
         "fun main() <noret> { let n <int> = first([1, 2, 3, 4]); }\n");
-    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'T'"), std::string::npos)
-        << "instantiated, this would be `int` and the program would compile\n"
-        << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_GenericReturn, AnArrayReturnIsNotInstantiatedEither) {
-    // Same gate, and the shape that matters most to the array work: `[T]` is what a
-    // `sort`/`map`/`filter` in tests/samples/arrays.fin would return.
+TEST(Soundness_GenericReturn, AnArrayOfAParameterIsInstantiated) {
+    // The shape a `map`/`filter`/`sorted` returns, and the one tests/samples/arrays.fin
+    // is built around.
     const FincRun r = compile(
         "fun wrap<T>(p: T) <[T]> { return [p]; }\n"
         "fun main() <noret> { let a <[int]> = wrap(1); }\n");
-    EXPECT_NE(stripAnsi(r.err).find("expected '[int]', got '[T]'"), std::string::npos)
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericReturn, APointerToAParameterIsInstantiated) {
+    const FincRun r = compile(
+        "fun same<T>(p: &T) <&T> { return p; }\n"
+        "fun main() <noret> {\n"
+        "    let n <int> = 1;\n"
+        "    let q <&int> = same(&n);\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericReturn, TheInstantiatedReturnIsUsableAsWhatItBecame) {
+    // The reason this matters beyond the assignment check: an uninstantiated return is
+    // not a struct, so nothing can be read off it. `Type 'T' is not a struct` was the
+    // diagnostic, on a program with no mistake in it.
+    const FincRun r = compile(
+        "struct P { pub v <int>, P(v: int) { self.v = v; } }\n"
+        "fun same<T>(p: T) <T> { return p; }\n"
+        "fun main() <noret> { let n <int> = same(P(7)).v; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericReturn, AMismatchNamesTheInstantiationAndNotTheTemplate) {
+    // What the reader gets out of the fix even when the program *is* wrong: the old
+    // message named `T`, which says nothing about either side of the mismatch.
+    const FincRun r = compile(
+        "fun first<T>(a: [T]) <T> { return a[0]; }\n"
+        "fun main() <noret> { let s <string> = first([1, 2]); }\n");
+    // The hint outranks the arguments (see checkGenericCall), so T is `string` from the
+    // annotation and the *argument* is what disagrees -- which points at the mistake.
+    // The parameter is written `[T]`, so what it is checked against is `[string]`:
+    // both halves of the message are the instantiation and neither is `T`.
+    EXPECT_NE(stripAnsi(r.err).find("expected '[string]', got '[int, 2]'"), std::string::npos)
         << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("got 'T'"), std::string::npos)
+        << "no diagnostic may name the template\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericReturn, TheHintStillSeedsABareParameter) {
+    // tests/samples/const.fin:98's rule, now reachable for a return that is not a
+    // struct: read the arguments first and T is `[int, 4]`, which the annotation one
+    // character to the left rejects. Seeded from the hint, T is `[int]` and the fixed
+    // literal decays into it -- the rule `let a <[int]> = [1,2,3];` has always had.
+    const FincRun r = compile(
+        "fun same<T>(a: T) <T> { return a; }\n"
+        "fun main() <noret> { let arr <[int]> = same([1, 2, 3, 4]); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericReturn, AnArgumentIsCheckedAgainstTheInstantiatedParameter) {
+    // Widening the gate moved these calls off checkCallArguments, so the check the
+    // arguments used to get has to still happen -- first binding wins, so `T` is `int`
+    // and the second argument is the one reported.
+    const FincRun r = compile(
+        "fun pair<T>(a: T, b: T) <T> { return a; }\n"
+        "fun main() <noret> { let n <auto> = pair(1, \"x\"); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericReturn, ArityIsStillReportedAheadOfTheArguments) {
+    // checkGenericCall has to walk the arguments before it can check any of them, so
+    // arity is called explicitly first. Without that, `first([1], 2)` would report the
+    // extra argument as a type error against a parameter that does not exist.
+    const FincRun r = compile(
+        "fun first<T>(a: [T]) <T> { return a[0]; }\n"
+        "fun main() <noret> { let n <int> = first([1], 2); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Function 'first' expects 1 arguments, got 2"),
+              std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericReturn, AReturnThatNothingBindsIsStillTheParameter) {
+    // No argument mentions T and there is no annotation to seed it, so T stands for
+    // nothing and the call's type is the template. That is honest -- the program has
+    // not said which T it means -- and the point of the test is that it is a
+    // diagnostic rather than a crash on an unbound parameter.
+    const FincRun r = compile(
+        "fun make<T>() <T> { return blame; }\n"
+        "fun main() <noret> { let n <int> = make(); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericReturn, ANonGenericCalleeIsUnaffected) {
+    // The gate's whole job is to leave every other call on the path it was always on.
+    const FincRun r = compile(
+        "fun f(a: int) <int> { return a; }\n"
+        "fun main() <noret> { let s <string> = f(1); }\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericReturn, AStructReturnStillWorksTheWayItDid) {
+    // The case the narrow gate was written for, kept as a guard that widening it did
+    // not change the behaviour it already had.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun wrap<T>(p: T) <Box<T>> { return Box(p); }\n"
+        "fun main() <noret> {\n"
+        "    let b <auto> = wrap(1);\n"
+        "    let s <string> = b.v;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -8615,10 +8741,11 @@ TEST(Soundness_ArrayExtent, AGenericParameterStillDoesNotBindTheExtent) {
     // compares its generic arguments exactly, so the annotation one character to the
     // left would reject the very call it is annotating.
     //
-    // Written with a struct return rather than the shorter `fun first<T>(a: [T]) <T>`,
-    // because that shorter spelling proves nothing today -- a bare `T` return is not
-    // instantiated at all (KnownDefect_GenericReturn.OnlyAStructReturnIsInstantiated),
-    // so it would report `got 'T'` whatever the extent did.
+    // Written with a struct return, which is the corpus's own spelling. The shorter
+    // `fun first<T>(a: [T]) <T>` says the same thing now that a bare parameter return
+    // is instantiated too (Soundness_GenericReturn), but a struct is what compares its
+    // generic arguments *exactly*, so it is the spelling that would actually catch a
+    // bound extent rather than let it decay.
     const FincRun r = compile(
         "struct rptr<T> { pub value <T>, rptr(v: T) { self.value = v; } }\n"
         "fun main() <noret> { let arr <rptr<[int]>> = rptr([1, 2, 3, 4]); }\n");
