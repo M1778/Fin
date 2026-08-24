@@ -44,6 +44,16 @@ struct CompilerOptions {
     bool skipSemantics = false;
     bool skipCodegen = false;
 
+    // `-c`: stop at the object file and do not link. A third mode beside "check"
+    // and "build an executable", and the one a Fin file that is a library fits --
+    // ten corpus samples have no `main`, which is a diagnostic under `-o` and is
+    // simply not relevant here. It is also what a build system needs before it can
+    // compile several files and link them once.
+    //
+    // With `-o` the object goes exactly there; without one it is <stem>.o in the
+    // working directory, which is cc's rule.
+    bool compileOnly = false;
+
     int optLevel = 0;
 
     DiagnosticFormat diagFormat = DiagnosticFormat::Human;

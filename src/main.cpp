@@ -16,6 +16,7 @@ void printUsage(std::FILE* out) {
     fmt::print(out, "Usage: finc <file.fin> [options]\n");
     fmt::print(out, "Options:\n");
     fmt::print(out, "  -o <path>              Build an executable at <path>; without it finc only checks\n");
+    fmt::print(out, "  -c                     Compile to an object file and do not link\n");
     fmt::print(out, "  -O0, -O1, -O2, -O3     Optimisation level for a '-o' build (default -O0)\n");
     fmt::print(out, "  -I, --include <path>   Add a module search path\n");
     fmt::print(out, "  --fin-libs <paths>     Library search paths, '{}'-separated;\n", fin::kSearchPathSeparator);
@@ -135,6 +136,8 @@ int main(int argc, char** argv) {
             if (arg == "--debug-sema") { opts.debugSema = true;     continue; }
             if (arg == "--no-check")   { opts.skipSemantics = true; continue; }
             if (arg == "--debug-codegen") { opts.debugCodegen = true; continue; }
+
+            if (arg == "-c") { opts.compileOnly = true; continue; }
 
             // The levels are spelled out rather than parsed as a number, so that
             // `-O9` is a usage error instead of silently meaning -O3. Both fields

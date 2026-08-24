@@ -269,11 +269,11 @@ static bool hasEntryPoint(const Program& ast) {
 }
 
 bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag) {
-    // No `-o`, no artifact. `finc x.fin` is a check, and making it build would
-    // mean every diagnostic test and every corpus snapshot linked an executable
-    // -- and would turn "the backend cannot lower this yet" into a failure of a
-    // run that only asked about types.
-    if (!options.outputPathGiven) return true;
+    // No `-o` and no `-c`, no artifact. `finc x.fin` is a check, and making it
+    // build would mean every diagnostic test and every corpus snapshot linked an
+    // executable -- and would turn "the backend cannot lower this yet" into a
+    // failure of a run that only asked about types.
+    if (!options.outputPathGiven && !options.compileOnly) return true;
 
     // An executable needs an entry point, and this is the pass that knows one was
     // asked for. Checked here rather than after the object is emitted, because the
@@ -284,34 +284,53 @@ bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag) {
     // `main`" from inside its own crt file -- a C diagnostic about a C file, for a
     // Fin program, under a help line that blamed the C toolchain and suggested
     // FIN_CC. Five corpus samples reach it and none of them has a broken toolchain.
-    if (!hasEntryPoint(ast)) {
+    //
+    // `-c` is exempt because nothing is being linked: an object with no `main` is
+    // what a library compiles to, and demanding one there would put the diagnostic
+    // exactly where it is wrong.
+    if (!options.compileOnly && !hasEntryPoint(ast)) {
         diag.reportError("this program has no 'main'",
                          "'-o' builds an executable and an executable starts "
                          "somewhere: write 'fun main() <noret>'. A file that is a "
                          "library has nothing to build -- check it with 'finc "
-                         "<file>' and no '-o'");
+                         "<file>' and no '-o', or compile it to an object with "
+                         "'-c'");
         return false;
     }
+
+    // Where the object goes. Under `-c` it is the artifact, so it goes where the
+    // user said -- or, with no `-o`, beside nothing: <stem>.o in the working
+    // directory, which is cc's rule and what a Makefile already expects. Otherwise
+    // it is a temporary on the way to an executable.
+    const std::string objectPath =
+        options.compileOnly
+            ? (options.outputPathGiven
+                   ? options.outputPath
+                   : std::filesystem::path(options.inputFile).stem().string() + ".o")
+            : objectPathFor(options.outputPath);
 
     if (!backendAvailable()) {
         // The stub says this too, but saying it here means the message does not
         // depend on having reached a node the emitter refuses.
-        return generateObject(ast, options.outputPath, diag, options.optLevel,
+        return generateObject(ast, objectPath, diag, options.optLevel,
                               options.debugCodegen);
     }
 
-    const std::string objectPath = objectPathFor(options.outputPath);
     std::error_code ec;
 
     // Nothing from a previous build survives a failure of this one. A stale
     // executable left in place is a `./a.out` that runs yesterday's code and
-    // reports it as today's.
-    std::filesystem::remove(options.outputPath, ec);
+    // reports it as today's -- and a stale *object* is worse, because the link
+    // that picks it up succeeds.
+    std::filesystem::remove(options.compileOnly ? objectPath : options.outputPath, ec);
 
     if (!generateObject(ast, objectPath, diag, options.optLevel, options.debugCodegen)) {
         std::filesystem::remove(objectPath, ec);
         return false;
     }
+
+    // `-c` stops here: the object is the answer, and it is kept.
+    if (options.compileOnly) return true;
 
     bool linked = runLinker(objectPath, diag);
     std::filesystem::remove(objectPath, ec);

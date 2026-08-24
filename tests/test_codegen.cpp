@@ -189,6 +189,140 @@ BACKEND_TEST(Soundness_Codegen, AProgramWithNoMainSaysSoRatherThanFailingToLink)
     EXPECT_EQ(b.compileErr.find("FIN_CC"), std::string::npos) << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// `-c`, which is the other thing a backend is for: an object file and no link.
+//
+// finc had exactly two modes -- check, and build-an-executable -- and a Fin file
+// that is a library fits neither. Ten of the corpus's front-end-clean samples have
+// no `main` (macros.fin, stdlib/networking.fin, struct_methods.fin and the rest),
+// which under `-o` is now a diagnostic and under no flag at all is never handed to
+// the backend, so nothing measured whether their declarations lower. `-c` is the
+// mode that asks. It is also what a build system needs before it can compile two
+// files and link them once, which is the shape `finn` will want.
+//
+// The object's name follows cc: `-c -o <path>` puts it at <path>, and `-c` alone
+// puts <stem>.o in the working directory.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A compile that stops at the object. Returns the object's path (empty if the
+// compile failed) so a test can link it, size it, or check it is absent.
+struct Compiled {
+    int exitCode = -1;
+    std::string err;
+    fs::path object;
+
+    std::string why() const {
+        return "exit " + std::to_string(exitCode) + ", object " + object.string() + "\n" + err;
+    }
+};
+
+Compiled compileOnly(const std::string& code, const fs::path& objectPath = {}) {
+    Compiled c;
+    fs::path srcPath = uniqueTempPath("fin_c", ".fin");
+    {
+        std::ofstream f(srcPath, std::ios::binary);
+        f.write(code.data(), (std::streamsize)code.size());
+    }
+    std::vector<std::string> args{srcPath.string(), "-c"};
+    if (!objectPath.empty()) { args.push_back("-o"); args.push_back(objectPath.string()); }
+
+    const FincRun r = runFinc(args);
+    c.exitCode = r.exitCode;
+    c.err = stripAnsi(r.err);
+    c.object = objectPath.empty() ? fs::path(srcPath.stem().string() + ".o") : objectPath;
+
+    std::error_code ec;
+    fs::remove(srcPath, ec);
+    return c;
+}
+
+}  // namespace
+
+BACKEND_TEST(Soundness_Codegen, ACompileOnlyBuildEmitsAnObjectForALibrary) {
+    // No `main`, which under `-o` is a diagnostic and here is simply not relevant:
+    // nothing is being linked, so nothing needs an entry point.
+    const fs::path obj = uniqueTempPath("fin_obj", ".o");
+    const Compiled c = compileOnly(std::string(kPrintf) +
+        "fun twice(n: int) <int> { return n * 2; }\n", obj);
+    EXPECT_EQ(c.exitCode, 0) << c.why();
+    EXPECT_EQ(c.err.find("main"), std::string::npos) << c.why();
+    ASSERT_TRUE(fs::exists(obj)) << c.why();
+    EXPECT_GT(fs::file_size(obj), 0u) << c.why();
+    std::error_code ec;
+    fs::remove(obj, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, ACompileOnlyBuildNamesTheObjectAfterTheInput) {
+    // `-c` with no `-o`: <stem>.o in the working directory, which is cc's rule and
+    // the one a Makefile already assumes.
+    const Compiled c = compileOnly("fun twice(n: int) <int> { return n * 2; }\n");
+    EXPECT_EQ(c.exitCode, 0) << c.why();
+    ASSERT_TRUE(fs::exists(c.object)) << c.why();
+    EXPECT_GT(fs::file_size(c.object), 0u) << c.why();
+    std::error_code ec;
+    fs::remove(c.object, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoObjectsFromCompileOnlyLinkIntoAProgram) {
+    // The whole point, and the only test that proves the object is a real one: a
+    // library compiled alone, a main compiled alone, linked by cc, run. It also
+    // proves the names are what the other file thinks they are -- Fin does not
+    // mangle, so `twice` in one object is the `twice` the other one calls.
+    const fs::path libObj = uniqueTempPath("fin_lib", ".o");
+    const fs::path mainObj = uniqueTempPath("fin_main", ".o");
+    const fs::path exe = uniqueTempPath("fin_linked");
+
+    const Compiled lib = compileOnly("fun twice(n: int) <int> { return n * 2; }\n", libObj);
+    ASSERT_EQ(lib.exitCode, 0) << lib.why();
+    const Compiled mainPart = compileOnly(std::string(kPrintf) +
+        "@define twice(n: int) <int>;\n"
+        "fun main() <noret> { printf(\"%d\\n\", twice(21)); }\n", mainObj);
+    ASSERT_EQ(mainPart.exitCode, 0) << mainPart.why();
+
+    const char* fromEnv = std::getenv("FIN_CC");
+    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
+    const fs::path outPath = uniqueTempPath("fin_linked_out");
+    const std::string link = shellQuoteLocal(cc) + " " + shellQuoteLocal(libObj.string()) +
+                             " " + shellQuoteLocal(mainObj.string()) + " -o " +
+                             shellQuoteLocal(exe.string());
+    ASSERT_EQ(std::system(link.c_str()), 0) << link;
+
+    const std::string run = shellQuoteLocal(exe.string()) + " > " +
+                            shellQuoteLocal(outPath.string()) + " 2>&1";
+    std::system(run.c_str());
+    EXPECT_EQ(readWholeFile(outPath.string()), "42\n");
+
+    std::error_code ec;
+    for (const fs::path& p : {libObj, mainObj, exe, outPath}) fs::remove(p, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, ACompileOnlyBuildStillRefusesWhatItCannotLower) {
+    // `-c` is not a way around the refusals, and a failed compile leaves no object
+    // -- a stale one is a link that succeeds against yesterday's code.
+    const fs::path obj = uniqueTempPath("fin_obj_bad", ".o");
+    const Compiled c = compileOnly(
+        "struct Box<T> { v <T> }\n"
+        "fun make() <int> { return 1; }\n", obj);
+    EXPECT_NE(c.exitCode, 0) << c.why();
+    EXPECT_NE(c.err.find("codegen"), std::string::npos) << c.why();
+    EXPECT_FALSE(fs::exists(obj)) << c.why();
+    std::error_code ec;
+    fs::remove(obj, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, ACompileOnlyBuildOfABrokenProgramStopsAtTheDiagnostic) {
+    // The front end still runs first: `-c` reaches the backend only for a program
+    // that checked clean.
+    const fs::path obj = uniqueTempPath("fin_obj_sema", ".o");
+    const Compiled c = compileOnly("fun main() <noret> { let x <int> = \"no\"; }\n", obj);
+    EXPECT_NE(c.exitCode, 0) << c.why();
+    EXPECT_FALSE(fs::exists(obj)) << c.why();
+    std::error_code ec;
+    fs::remove(obj, ec);
+}
+
 BACKEND_TEST(Soundness_Codegen, ACheckWithNoOutputPathNeedsNoMain) {
     // `finc x.fin` is a check and not a build (Driver::runCodeGen's first line), so a
     // library -- which is what a corpus file with no main is -- still checks clean.
