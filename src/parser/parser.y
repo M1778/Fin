@@ -586,7 +586,17 @@ attribute_list:
 
 attribute:
     HASH LBRACKET attr_id EQUAL STRING_LITERAL RBRACKET {
-        $$ = std::make_unique<fin::Attribute>($3, $5);
+        /* The quotes come off here, as they do for an import path: STRING_LITERAL
+           carries them and every consumer of one strips them itself. This rule did
+           not, so `#[llvm_name="c_printf"]` asked the backend for a symbol spelled
+           with the quotes in it -- a name no linker can be given from the other side.
+           Found by the codegen test that links a renamed definition against an
+           `@define` of the same name. */
+        std::string val = $5;
+        if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
+            val = val.substr(1, val.size() - 2);
+        }
+        $$ = std::make_unique<fin::Attribute>($3, val);
         $$->setLoc(@$);
     }
     | HASH LBRACKET attr_id RBRACKET {

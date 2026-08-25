@@ -3681,3 +3681,106 @@ BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodIsRefusedAtItsTemplate) {
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("get"), std::string::npos) << b.why();
 }
+
+
+// ---------------------------------------------------------------------------
+// `#[llvm_name]` on a function, and the attributes nobody was reading
+//
+// The same sweep that found the dropped method bodies found two more places where an
+// attribute went nowhere. On an `@define` this file has always read `#[llvm_name]`,
+// because that is how the corpus binds an extern to a C symbol spelled differently
+// (stdlib/stdio.fin:11). On a `fun` it did not, and stdlib/memory.fin:8 writes
+// `#[llvm_name="dealloc"]` above `fun dealloc` -- a definition that was being emitted
+// under the Fin name while the attribute asked for another. Unlike the struct case
+// this one is load-bearing: a function's name *is* its symbol, and getting it wrong is
+// a link error at best and the wrong function at worst.
+//
+// An enum's attributes were not read either, and `#[llvm_name="Result"]`
+// (stdlib/typing.fin:24) has nothing to name here: an enum lowers to an integer, and
+// an integer type has no name to give. So that one is refused rather than honoured --
+// accepting it would be claiming to have done something.
+
+BACKEND_TEST(Soundness_Codegen, AFunctionsLlvmNameIsItsSymbol) {
+    // Proved across a link, which is the only place a symbol name is observable: the
+    // library defines `twice` under the name `fin_twice`, and the caller knows it only
+    // by that name. If the attribute were ignored the link would fail undefined.
+    const fs::path libObj = uniqueTempPath("fin_lib_rn", ".o");
+    const fs::path mainObj = uniqueTempPath("fin_main_rn", ".o");
+    const fs::path exe = uniqueTempPath("fin_linked_rn");
+
+    const Compiled lib = compileOnly(
+        "#[llvm_name=\"fin_twice\"]\n"
+        "fun twice(n: int) <int> { return n * 2; }\n", libObj);
+    ASSERT_EQ(lib.exitCode, 0) << lib.why();
+    const Compiled mainPart = compileOnly(std::string(kPrintf) +
+        "@define fin_twice(n: int) <int>;\n"
+        "fun main() <noret> { printf(\"%d\\n\", fin_twice(21)); }\n", mainObj);
+    ASSERT_EQ(mainPart.exitCode, 0) << mainPart.why();
+
+    const char* fromEnv = std::getenv("FIN_CC");
+    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
+    const fs::path outPath = uniqueTempPath("fin_linked_rn_out");
+    const std::string link = shellQuoteLocal(cc) + " " + shellQuoteLocal(libObj.string()) +
+                             " " + shellQuoteLocal(mainObj.string()) + " -o " +
+                             shellQuoteLocal(exe.string());
+    ASSERT_EQ(std::system(link.c_str()), 0) << link;
+
+    const std::string run = shellQuoteLocal(exe.string()) + " > " +
+                            shellQuoteLocal(outPath.string()) + " 2>&1";
+    std::system(run.c_str());
+    EXPECT_EQ(readWholeFile(outPath.string()), "42\n");
+
+    std::error_code ec;
+    for (const fs::path& p : {libObj, mainObj, exe, outPath}) fs::remove(p, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, ARenamedFunctionIsStillCalledByItsFinName) {
+    // The other half: `#[llvm_name]` renames the symbol and not the Fin name, exactly
+    // as it does on an `@define`. A call site inside the same module writes `twice`.
+    const Built b = build(std::string(kPrintf) +
+        "#[llvm_name=\"fin_twice\"]\n"
+        "fun twice(n: int) <int> { return n * 2; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", twice(4)); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAttributeThisFileDoesNotReadOnAFunctionIsRefused) {
+    // `#[export]` (stdlib/stdio.fin:23) says something about linkage this file does
+    // not implement, and `#[overwrite(printf)]` (stdlib/stdio.fin:35) says which of
+    // two definitions wins. Both were being dropped; neither is decoration.
+    const Built b = build(std::string(kPrintf) +
+        "#[export]\n"
+        "fun twice(n: int) <int> { return n * 2; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", twice(4)); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("export"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAttributeOnAnEnumIsRefused) {
+    // An enum is an integer here and an integer type has no name, so there is nothing
+    // for `#[llvm_name]` to rename -- honouring it would mean claiming to.
+    const Built b = build(std::string(kPrintf) +
+        "#[llvm_name=\"Result\"]\n"
+        "enum State { Alive = 1, Dead }\n"
+        "fun main() <noret> {\n"
+        "    let s <State> = Alive;\n"
+        "    printf(\"%d\\n\", cast<int>(s));\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("llvm_name"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnEnumWithNoAttributesStillLowers) {
+    // operators.fin:6-9 and the boundary from the other side.
+    const Built b = build(std::string(kPrintf) +
+        "enum State { Alive = 1, Dead }\n"
+        "fun main() <noret> {\n"
+        "    let s <State> = Dead;\n"
+        "    printf(\"%d\\n\", cast<int>(s));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2\n") << b.why();
+}

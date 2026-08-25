@@ -834,6 +834,17 @@ private:
                 unsupported(*e, fmt::format("a generic enum '{}'", e->name));
                 return;
             }
+            for (auto& attr : e->attributes) {
+                // Nothing here reads one, and one of them asks for something this
+                // file cannot give: `#[llvm_name="Result"]` (stdlib/typing.fin:24)
+                // renames a type, and an enum lowers to an integer -- an integer type
+                // has no name. `#[export]` (stdlib/stdio.fin:50) is about linkage,
+                // which an enum does not have either. Refused rather than dropped:
+                // accepting an attribute is claiming to have done what it asked.
+                unsupported(*e, fmt::format("the attribute '{}' on enum '{}'",
+                                            attr->name, e->name));
+                return;
+            }
 
             EnumInfo info;
             info.finName = e->name;
@@ -1403,7 +1414,15 @@ private:
     void declareTopLevel(Program& program) {
         for (auto& stmt : program.statements) {
             if (auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
-                declareFunction(*fn, fn->name, fn->name, fn->params, fn->return_type.get(),
+                // `#[llvm_name="dealloc"]` on a definition (stdlib/memory.fin:8), read
+                // the same way as on an `@define` -- and it matters more here. An
+                // extern's name is a promise about someone else's object file; a
+                // definition's name is the symbol this object publishes, so ignoring
+                // the attribute emits a function nobody can find under the name they
+                // were told to call. Every other attribute is refused below.
+                if (!attributesAreJustLlvmName(*fn, fn->attributes, "function")) return;
+                declareFunction(*fn, fn->name, symbolNameOf(fn->attributes, fn->name),
+                                fn->params, fn->return_type.get(),
                                 false, /*isExtern=*/false);
             } else if (auto* def = dynamic_cast<DefineDeclaration*>(stmt.get())) {
                 // `#[llvm_name="c_printf"]` renames the *symbol* and not the Fin
@@ -1411,7 +1430,9 @@ private:
                 // that is the only mechanism the corpus has for binding an extern to
                 // a C symbol whose spelling differs. The Fin name is still what a
                 // call site writes, so the two are tracked separately.
-                declareFunction(*def, def->name, symbolNameOf(*def), def->params,
+                if (!attributesAreJustLlvmName(*def, def->attributes, "'@define'")) return;
+                declareFunction(*def, def->name,
+                                symbolNameOf(def->attributes, def->name), def->params,
                                 def->return_type.get(), def->is_vararg,
                                 /*isExtern=*/true);
             }
@@ -1419,11 +1440,33 @@ private:
         }
     }
 
-    static std::string symbolNameOf(const DefineDeclaration& def) {
-        for (auto& attr : def.attributes) {
+    // The symbol a declaration publishes or calls: its `#[llvm_name]` if it has one
+    // in the valued form, otherwise its Fin name. Shared by `@define` and `fun`, which
+    // is the point -- the two sides of a rename have to agree on what the rename is.
+    static std::string symbolNameOf(
+            const std::vector<std::unique_ptr<Attribute>>& attributes,
+            const std::string& finName) {
+        for (auto& attr : attributes) {
             if (attr->name == "llvm_name" && !attr->is_flag) return attr->value_str;
         }
-        return def.name;
+        return finName;
+    }
+
+    // Every attribute on `node` is a valued `#[llvm_name]`, which is the one this file
+    // reads. Anything else is refused by name: an attribute this file cannot read may
+    // be the one that decides linkage (`#[export]`, stdlib/stdio.fin:23) or which of
+    // two definitions wins (`#[overwrite(printf)]`, :35), and dropping either produces
+    // a program that builds and is wrong. The flag form of `llvm_name` lands here too,
+    // because with no value it names nothing.
+    bool attributesAreJustLlvmName(ASTNode& node,
+            const std::vector<std::unique_ptr<Attribute>>& attributes,
+            const char* what) {
+        for (auto& attr : attributes) {
+            if (attr->name == "llvm_name" && !attr->is_flag) continue;
+            unsupported(node, fmt::format("the attribute '{}' on a {}", attr->name, what));
+            return false;
+        }
+        return true;
     }
 
     void declareFunction(ASTNode& node, const std::string& name,
