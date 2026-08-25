@@ -939,7 +939,7 @@ private:
             }
             StructInfo info;
             info.finName = s->name;
-            info.llvmType = llvm::StructType::create(ctx_, "struct." + s->name);
+            info.llvmType = llvm::StructType::create(ctx_, llvmNameOf(*s, s->name));
             structs_[s->name] = info;
             registered_.insert(s);
             decls.push_back(s);
@@ -984,7 +984,7 @@ private:
             // pass on every field at offset 0 and on nothing else.
             info.llvmType->setBody(members, /*isPacked=*/false);
             info.complete = true;
-            debugLog("declared struct " + s->name);
+            debugLog("declared struct " + s->name + llvmNameNote(*info.llvmType, s->name));
         }
     }
 
@@ -1008,14 +1008,58 @@ private:
             unsupported(s, fmt::format("struct '{}' inheriting another type", s.name));
             return false;
         }
-        if (!s.attributes.empty()) {
+        for (auto& attr : s.attributes) {
+            if (attr->name == "llvm_name" && !attr->is_flag) continue;  // read below
             // An attribute this file does not read may be one that changes the
             // layout. Ignoring it is the failure mode that produces a working
-            // program with the wrong offsets.
-            unsupported(s, fmt::format("an attribute on struct '{}'", s.name));
+            // program with the wrong offsets. `#[llvm_name]` in its flag form lands
+            // here too: with no value it names nothing, and treating it as absent
+            // would be a guess at what the writer meant.
+            unsupported(s, fmt::format("the attribute '{}' on struct '{}'",
+                                       attr->name, s.name));
             return false;
         }
         return true;
+    }
+
+    // What this struct is called in the IR.
+    //
+    // `#[llvm_name="general_point"]` (struct_methods.fin:5, letssee.fin:8,
+    // stdlib/error.fin:2, stdlib/types.fin:6), which the corpus glosses as "a rust
+    // like attribute for compile time codegen manipulation (for specific statements
+    // like struct declarations)". On an `@define` the same attribute binds a C symbol
+    // and is load-bearing; here it is not, and the difference is worth being explicit
+    // about. An llvm::StructType's name reaches no object file: LLVM compares struct
+    // types structurally, nothing refers to a type by name at link time, and two types
+    // asking for one name are uniqued (`vec2_f32`, `vec2_f32.0`) rather than merged.
+    // So honouring this cannot change what a program computes -- it changes what a
+    // person reading the IR sees, which is what the writer asked for.
+    //
+    // The default keeps the `struct.` prefix, which is only this file's convention for
+    // telling its own types apart in a dump. An `#[llvm_name]` replaces the whole name
+    // rather than being prefixed: the writer spelled the name they want to read.
+    //
+    // OWNER RULING NEEDED: on a *template*, one name has to cover every instantiation,
+    // so `#[llvm_name="vec2_f32"]` on `struct Vec2<T>` is either a name for the
+    // template (LLVM uniques the second `Vec2<char>` to `vec2_f32.0`) or a name for the
+    // one instantiation the writer had in mind. This file reads it as the template's,
+    // because that is the declaration it is written on. Nothing observable rides on it.
+    static std::string llvmNameOf(const StructDeclaration& s, const std::string& finName) {
+        for (auto& attr : s.attributes) {
+            if (attr->name == "llvm_name" && !attr->is_flag) return attr->value_str;
+        }
+        return "struct." + finName;
+    }
+
+    // The trace's account of a rename. Reads the name back off the type rather than
+    // off the attribute, because LLVM is the one that decides: the second
+    // instantiation of a renamed template gets `vec2_f32.0`, and a trace that printed
+    // the attribute would claim both were called the same thing.
+    static std::string llvmNameNote(const llvm::StructType& type,
+                                    const std::string& finName) {
+        const std::string actual = type.getName().str();
+        if (actual == "struct." + finName) return {};
+        return " as " + actual;
     }
 
     // The template shapes that are wrong however they are instantiated: the same
@@ -1109,7 +1153,7 @@ private:
 
         StructInfo info;
         info.finName = out;
-        info.llvmType = llvm::StructType::create(ctx_, "struct." + out);
+        info.llvmType = llvm::StructType::create(ctx_, llvmNameOf(tmpl, out));
         info.substitution = substitution;
         structs_[out] = info;
 
@@ -1151,7 +1195,7 @@ private:
         }
         live.llvmType->setBody(members, /*isPacked=*/false);
         live.complete = true;
-        debugLog("instantiated struct " + out);
+        debugLog("instantiated struct " + out + llvmNameNote(*live.llvmType, out));
         return true;
     }
 

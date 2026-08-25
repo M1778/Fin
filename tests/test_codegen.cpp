@@ -218,6 +218,26 @@ struct Compiled {
     }
 };
 
+// The backend's own account of what it lowered, which is the only way from out
+// here to see a name that never becomes a symbol. An llvm::StructType's name is
+// not in the object file at all -- LLVM types are structural, and the name is
+// there for the IR reader -- so a test that wants to check `#[llvm_name]` on a
+// struct has to ask the compiler what it called the type.
+std::string codegenTrace(const std::string& code) {
+    fs::path srcPath = uniqueTempPath("fin_tr", ".fin");
+    fs::path obj = uniqueTempPath("fin_tr", ".o");
+    {
+        std::ofstream f(srcPath, std::ios::binary);
+        f.write(code.data(), (std::streamsize)code.size());
+    }
+    const FincRun r = runFinc({srcPath.string(), "-c", "-o", obj.string(),
+                               "--debug-codegen"});
+    std::error_code ec;
+    fs::remove(srcPath, ec);
+    fs::remove(obj, ec);
+    return stripAnsi(r.err);
+}
+
 Compiled compileOnly(const std::string& code, const fs::path& objectPath = {}) {
     Compiled c;
     fs::path srcPath = uniqueTempPath("fin_c", ".fin");
@@ -3402,4 +3422,154 @@ BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodsAreStillRefusedAtTheCall) 
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("method"), std::string::npos) << b.why();
+}
+
+
+// ---------------------------------------------------------------------------
+// `#[llvm_name]` on a struct declaration
+//
+// struct_methods.fin:5 writes `#[llvm_name="general_point"]` above `struct Point<T>`
+// and calls it, in its own comment, "a rust like attribute for compile time codegen
+// manipulation (for specific statements like struct declarations)"; letssee.fin:8
+// writes `#[llvm_name="vec2_f32"]` above `struct Vec2<T>`. The same attribute already
+// works on an `@define`, where it binds a C symbol whose spelling differs from the Fin
+// name (stdlib/stdio.fin:11), and this file already reads it there.
+//
+// On a struct it names something with much less riding on it. An llvm::StructType's
+// name is metadata for whoever reads the IR: LLVM compares struct types structurally,
+// nothing in the object file refers to a type by name, and two types asking for one
+// name are uniqued by LLVM rather than merged. So honouring it cannot change what a
+// program computes -- which is what most of the tests below assert, because the risk
+// with a rename is not that it does too little but that it quietly does too much.
+//
+// Every other attribute stays refused, and for the reason the blanket refusal gave:
+// an attribute this file cannot read may be one that changes the layout, and ignoring
+// it is the failure mode that produces a working program with the wrong offsets.
+
+BACKEND_TEST(Soundness_Codegen, AStructsLlvmNameNamesTheLlvmType) {
+    const std::string trace = codegenTrace(
+        "#[llvm_name=\"general_point\"]\n"
+        "struct Point { x <int>, y <int> }\n"
+        "fun use(p: Point) <int> { return p.x; }\n");
+    EXPECT_NE(trace.find("general_point"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructWithNoLlvmNameKeepsItsFinName) {
+    // The other half of the previous test: the trace has to be able to tell the two
+    // apart, or asserting on it proves nothing.
+    const std::string trace = codegenTrace(
+        "struct Point { x <int>, y <int> }\n"
+        "fun use(p: Point) <int> { return p.x; }\n");
+    EXPECT_NE(trace.find("declared struct Point"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("general_point"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructsLlvmNameDoesNotChangeWhatItComputes) {
+    // struct_methods.fin's own struct, less the methods, which are a separate unit.
+    const Built b = build(std::string(kPrintf) +
+        "#[llvm_name=\"general_point\"]\n"
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    y <int> = 0\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 7 };\n"
+        "    p.y = 9;\n"
+        "    printf(\"%d %d %d\\n\", p.x, p.y, cast<int>(sizeof(Point)));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 9 8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructsLlvmNameIsNotASymbol) {
+    // Why the rename is safe to honour at all. If the name reached the object file
+    // the way an `@define`'s does, one name on a template with two instantiations
+    // would be a duplicate-symbol link error; it does not, so it cannot be.
+    const Built b = build(std::string(kPrintf) +
+        "#[llvm_name=\"printf\"]\n"
+        "struct S { v <int> }\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S{ v: 4 };\n"
+        "    printf(\"%d\\n\", s.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructsLlvmNameNamesEveryInstantiation) {
+    // letssee.fin:8's shape: one `#[llvm_name="vec2_f32"]` above a template that
+    // could be instantiated at anything. The attribute names the template, so both
+    // instantiations ask for it and LLVM uniques the second -- which is visible in
+    // the trace and is the reason the next test exists.
+    const std::string trace = codegenTrace(
+        "#[llvm_name=\"vec2_f32\"]\n"
+        "struct Vec2<T> { x <T>, y <T> }\n"
+        "fun use(a: Vec2<int>, b: Vec2<char>) <int> { return a.x; }\n");
+    EXPECT_NE(trace.find("vec2_f32"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("Vec2<int>"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("Vec2<char>"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoInstantiationsUnderOneLlvmNameKeepDistinctLayouts) {
+    // The rename is a name and nothing else. `Vec2<char>` is two bytes where
+    // `Vec2<int>` is eight whatever they are called, and a rename that collapsed
+    // them into one type would be a miscompile that a name check would not catch.
+    const Built b = build(std::string(kPrintf) +
+        "#[llvm_name=\"vec2_f32\"]\n"
+        "struct Vec2<T> { x <T>, y <T> }\n"
+        "fun main() <noret> {\n"
+        "    let a <Vec2<char>> = Vec2::<char>{ x: 'a', y: 'b' };\n"
+        "    let b <Vec2<int>> = Vec2::<int>{ x: 300, y: 400 };\n"
+        "    printf(\"%d %d %d %d %d\\n\", cast<int>(sizeof(Vec2<char>)),\n"
+        "           cast<int>(sizeof(Vec2<int>)), cast<int>(a.y), b.x, b.y);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 8 98 300 400\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAttributeThisFileDoesNotReadIsStillRefused) {
+    // stdlib/error.fin:3 writes `#[uncastable]`, and what it excludes is a cast --
+    // a rule about the type, not about its name. Honouring `llvm_name` must not turn
+    // the attribute check into "attributes are decoration".
+    const Built b = build(std::string(kPrintf) +
+        "#[uncastable]\n"
+        "struct S { v <int> }\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S{ v: 1 };\n"
+        "    printf(\"%d\\n\", s.v);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("uncastable"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnLlvmNameBesideAnUnreadAttributeIsStillRefused) {
+    // stdlib/error.fin:2-5 is exactly this: `#[llvm_name="Error"] #[uncastable]
+    // #[stderror] #[class]`. Reading one of the four is not permission to drop the
+    // other three.
+    const Built b = build(std::string(kPrintf) +
+        "#[llvm_name=\"Error\"]\n"
+        "#[uncastable]\n"
+        "struct S { v <int> }\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S{ v: 1 };\n"
+        "    printf(\"%d\\n\", s.v);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFlagFormLlvmNameIsRefused) {
+    // `#[llvm_name]` with no value names nothing. Treating it as absent would be a
+    // guess at what the writer meant, and the writer of the only three sites in the
+    // corpus always wrote a value.
+    const Built b = build(std::string(kPrintf) +
+        "#[llvm_name]\n"
+        "struct S { v <int> }\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S{ v: 1 };\n"
+        "    printf(\"%d\\n\", s.v);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
 }
