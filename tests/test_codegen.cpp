@@ -3784,3 +3784,69 @@ BACKEND_TEST(Soundness_Codegen, AnEnumWithNoAttributesStillLowers) {
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "2\n") << b.why();
 }
+
+
+// ---------------------------------------------------------------------------
+// The last two places an attribute went unread
+//
+// A global's attributes were already refused and a local's were not, which is the
+// wrong way round if either matters: variables.fin:27 writes `#[slaveof(z)]` on a
+// *local* and its own comment says the attribute "makes the lifetime of variable
+// declaration statement to the variable passed to slaveof" -- a rule about when the
+// storage dies, which is generated code. A global one is easier to reason about
+// (`#[slaveof($Fin)]`, :35, asks for what a global already does); the local is the one
+// that actually changes something, and it was the one being dropped.
+//
+// A struct member's were unread too. readonly.fin:19 writes `#[debug]` on a field, and
+// a field attribute is one edit away from being a field *offset* attribute.
+
+BACKEND_TEST(Soundness_Codegen, AnAttributeOnALocalIsRefused) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let z <int> = 1;\n"
+        "    #[slaveof(z)]\n"
+        "    let m <int> = 2;\n"
+        "    printf(\"%d\\n\", z + m);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("slaveof"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ALocalWithNoAttributesStillLowers) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let z <int> = 1;\n"
+        "    let m <int> = 2;\n"
+        "    printf(\"%d\\n\", z + m);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAttributeOnAStructMemberIsRefused) {
+    const Built b = build(std::string(kPrintf) +
+        "struct S {\n"
+        "    #[debug]\n"
+        "    v <int>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S{ v: 5 };\n"
+        "    printf(\"%d\\n\", s.v);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("debug"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAttributeOnAGenericStructsMemberIsRefusedAtTheTemplate) {
+    // At the declaration and not once per instantiation, for the reason the method
+    // refusal gives: it will not become lowerable at `Box<int>`.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    #[debug]\n"
+        "    val <T>\n"
+        "}\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("debug"), std::string::npos) << b.why();
+}

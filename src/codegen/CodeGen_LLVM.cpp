@@ -1045,6 +1045,17 @@ private:
             unsupported(*c, fmt::format("a constructor on struct '{}'", s.name));
             return false;
         }
+        for (auto& m : s.members) {
+            for (auto& attr : m->attributes) {
+                // readonly.fin:19 writes `#[debug]` on a field. Nothing here reads a
+                // field attribute, and a field attribute is one edit away from being
+                // one that moves the field -- which is the failure this file refuses
+                // an unread attribute to avoid everywhere else.
+                unsupported(*m, fmt::format("the attribute '{}' on field '{}' of "
+                                            "struct '{}'", attr->name, m->name, s.name));
+                return false;
+            }
+        }
         if (!s.parents.empty()) {
             unsupported(s, fmt::format("struct '{}' inheriting another type", s.name));
             return false;
@@ -1841,6 +1852,16 @@ private:
 
     void visit(VariableDeclaration& node) override {
         if (registeredGlobals_.count(&node)) return;  // declareGlobals did it
+        // A local's attributes, which a global's have always been refused and a local's
+        // were not. `#[slaveof(z)]` (variables.fin:27) says the storage lives as long
+        // as another variable does, and the sample's own comment is explicit that this
+        // is about lifetime -- so it is a rule about generated code, and dropping it
+        // produces a program that frees too early and runs anyway.
+        for (auto& attr : node.attributes) {
+            unsupported(node, fmt::format("the attribute '{}' on the variable '{}'",
+                                          attr->name, node.name));
+            return;
+        }
         if (!currentFn_) {
             unsupported(node, fmt::format("the variable '{}' declared here", node.name));
             return;
