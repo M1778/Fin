@@ -303,7 +303,7 @@ BACKEND_TEST(Soundness_Codegen, ACompileOnlyBuildStillRefusesWhatItCannotLower) 
     // -- a stale one is a link that succeeds against yesterday's code.
     const fs::path obj = uniqueTempPath("fin_obj_bad", ".o");
     const Compiled c = compileOnly(
-        "struct Box<T> { v <T> }\n"
+        "interface Drawable { fun draw(self: &Self) <noret>; }\n"
         "fun make() <int> { return 1; }\n", obj);
     EXPECT_NE(c.exitCode, 0) << c.why();
     EXPECT_NE(c.err.find("codegen"), std::string::npos) << c.why();
@@ -604,18 +604,20 @@ BACKEND_TEST(Soundness_Codegen, AnEscapeIsLoweredOnce) {
 // ---------------------------------------------------------------------------
 
 BACKEND_TEST(Soundness_Codegen, AnUnloweredConstructIsRefused) {
-    // A generic struct is well-typed and cannot be lowered: monomorphisation is a
-    // unit of its own, and the erasure rule it has to obey (ADR 0002) is not
-    // decided here. The compile must fail and say so; the one outcome that must
-    // never happen is exit 0 with a binary whose behaviour does not match the
-    // program.
+    // An interface declaration is well-typed and cannot be lowered: an interface
+    // reference is two words and the pointer map has three states (ADR 0019), and
+    // building the witness table that makes a dynamic call work is a unit of its own.
+    // The compile must fail and say so; the one outcome that must never happen is
+    // exit 0 with a binary whose behaviour does not match the program.
     //
-    // This used to use a plain struct, which is the better example of the rule
-    // right up until the rule stops applying -- structs lower as of this unit, so
-    // keeping it would have turned a passing refusal test into a passing test of
-    // nothing. The construct in a refusal test is a moving part.
+    // The construct in a refusal test is a moving part, and this one has now moved
+    // twice. It was a plain struct until structs lowered, then a generic struct until
+    // monomorphisation landed, and each time keeping it would have turned a passing
+    // refusal test into a passing test of nothing. Which is the argument for picking
+    // the construct that is furthest from being lowered rather than the one that
+    // reads best.
     const Built b = build(
-        "struct Box<T> { pub v <T>, }\n"
+        "interface Drawable { fun draw(self: &Self) <noret>; }\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
@@ -627,19 +629,19 @@ BACKEND_TEST(Soundness_Codegen, ARefusalNamesTheLine) {
     // construct here is below line 1 so that a location the backend simply left
     // default would not pass by accident.
     //
-    // It used to be `i++`, which is exactly the trap AnUnloweredConstructIsRefused
-    // warns about one screen above: `++` lowers now, so this test went from
-    // asserting a located refusal to asserting nothing, and it failed rather than
-    // passing vacuously only because it checks the exit code too. The construct is a
-    // generic struct for the same reason that one uses it -- monomorphisation is a
-    // unit of its own and the erasure rule it must obey (ADR 0002) is not decided
-    // here, so it is the furthest thing in this file from being lowered.
+    // It used to be `i++`, and then a generic struct, which is exactly the trap
+    // AnUnloweredConstructIsRefused warns about one screen above: each of those
+    // lowered in turn, and each time this test went from asserting a located refusal
+    // to asserting nothing -- failing rather than passing vacuously only because it
+    // checks the exit code too. The construct is an interface for the same reason
+    // that one uses it: a witness table is a unit of its own (ADR 0019), so it is the
+    // furthest thing in this file from being lowered.
     const Built b = build(
         "fun main() <noret> {\n"
         "    let i <int> = 1;\n"
         "}\n"
         "\n"
-        "struct Box<T> { pub v <T>, }\n");
+        "interface Drawable { fun draw(self: &Self) <noret>; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find(".fin:5:"), std::string::npos) << b.why();
 }
@@ -2169,9 +2171,17 @@ BACKEND_TEST(Soundness_Codegen, AStructAsAConditionIsRefused) {
     EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AGenericStructIsRefused) {
+// Was AGenericStructIsRefused, which asserted that `struct Box<T> { v <T> }` fails
+// the build on its own. It no longer does -- a template nobody instantiates lowers
+// to nothing, which is Soundness_Codegen.AGenericStructNobodyInstantiatesLowers-
+// ToNothing. Inverted rather than deleted, because the *declaration* is still where
+// some refusals belong: the ones that no type argument could fix. A `class` is a
+// value or a reference and Fin has not said which (lowerableStruct), and no `Box<T>`
+// at any T changes that, so it is refused where it is written rather than at each
+// use.
+BACKEND_TEST(Soundness_Codegen, AGenericClassIsRefusedAtItsDeclarationNotItsUse) {
     const Built b = build(std::string(kPrintf) +
-        "struct Box<T> { v <T> }\n"
+        "class Box<T> { v <T> }\n"
         "fun main() <noret> { printf(\"%d\\n\", 1); }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
@@ -3051,4 +3061,345 @@ BACKEND_TEST(Soundness_Codegen, APointerAsAConditionIsRefused) {
         "    if (p) { printf(\"y\\n\"); }\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// Generic structs.
+//
+// tests/samples/struct_methods.fin:6 names the strategy itself, in a comment
+// beside the declaration: "T is a generic and it will be a Monomorphization
+// Generic type because its the default generic type we use".
+//
+// ADR 0002 says the same thing from the other side -- it carries two lowering
+// decisions forward from pyprototype: "erasure is selected by the presence of an
+// erasure-marker constraint on any one parameter, and an erased generic is
+// represented as a raw pointer". A bare `<T>` carries no such constraint, so the
+// default is the other branch, and these tests are that branch: one distinct
+// type per distinct type argument, laid out as if the argument had been written
+// in place of the parameter.
+//
+// The uses come from the corpus:
+//
+//   `struct Box<T> { val <T> }` with `let b <Box<int>> = Box::<int>{ val: 100 };`
+//   (complex.fin:7,12) -- one parameter, one field, and a read of it.
+//
+//   `struct Result<T> { value <T>, is_error <bool> }` used at `Result<int>` and at
+//   `Result<Result<int>>` (functions.fin:5,16) -- an instantiation is itself a
+//   type argument, so the substitution has to nest.
+//
+//   `struct Vec2<T> { x <T> = 0, y <T> = 0 }` (letssee.fin:9-12) -- a parameter's
+//   defaults are written once and have to typecheck against whatever T became.
+//
+//   `struct M <T> {}` (blame_assert.fin:19) -- declared, never instantiated. A
+//   template nobody uses lowers to nothing at all, which is why the field checks
+//   move from the declaration to the instantiation.
+//
+// The hazard the tests below are aimed at is sharing: if two instantiations
+// collided in the table, `Box<bool>`'s field would be read at `Box<int>`'s width
+// and every one of these programs would still compile.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructIsMonomorphisedAtItsTypeArgument) {
+    // tests/samples/complex.fin:7-18, less the module alias.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 100 };\n"
+        "    if (b.val > 50) { printf(\"Big\\n\"); } else { printf(\"Small\\n\"); }\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "Big\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoInstantiationsOfOneGenericStructAreDistinctTypes) {
+    // The test the whole unit exists to pass. `Box<char>` holds one byte and
+    // `Box<long>` holds eight; if they shared a StructInfo the second store would
+    // write eight bytes into the first's slot, and nothing in the type checker
+    // would have anything to say about it. Printed together so a clobber shows up
+    // as a wrong number rather than as a crash that might be anything.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let small <Box<char>> = Box::<char>{ val: 'A' };\n"
+        "    let big <Box<long>> = Box::<long>{ val: 1234 };\n"
+        "    let flag <Box<bool>> = Box::<bool>{ val: true };\n"
+        "    printf(\"%d %ld %d\\n\", cast<int>(small.val), big.val,\n"
+        "           cast<int>(flag.val));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "65 1234 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, RepeatedUsesOfOneInstantiationAreOneType) {
+    // The other half of the same fact: `Box<int>` written three times is one type,
+    // not three. An assignment between two of them proves it -- distinct
+    // llvm::StructTypes with identical bodies would refuse the store, and two
+    // *named* struct types are always distinct in LLVM however alike their bodies.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun take(b: Box<int>) <int> { return b.val; }\n"
+        "fun main() <noret> {\n"
+        "    let a <Box<int>> = Box::<int>{ val: 7 };\n"
+        "    let c <Box<int>> = a;\n"
+        "    printf(\"%d %d\\n\", c.val, take(c));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructsFieldDefaultsRunAtEachInstantiation) {
+    // tests/samples/letssee.fin:9-12 (`struct Vec2<T> { x <T> = 0, y <T> = 0 }`).
+    // The default is one expression shared by every instantiation, so it is
+    // evaluated once per literal that omits the field and against that
+    // instantiation's field type.
+    const Built b = build(std::string(kPrintf) +
+        "struct Vec2<T> {\n"
+        "    x <T> = 0,\n"
+        "    y <T> = 0\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <Vec2<int>> = Vec2::<int>{ x: 3 };\n"
+        "    let b <Vec2<int>> = Vec2::<int>{};\n"
+        "    printf(\"%d %d %d %d\\n\", a.x, a.y, b.x, b.y);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 0 0 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructIsAnArgumentToItself) {
+    // tests/samples/functions.fin:16 (`let res <Result<Result<int>>>`). The
+    // substitution has to nest: instantiating `Result<Result<int>>` needs
+    // `Result<int>` to already be a type, and that one is discovered while mapping
+    // the outer one's arguments rather than at a declaration.
+    const Built b = build(std::string(kPrintf) +
+        "struct Result<T> {\n"
+        "    value <T>,\n"
+        "    is_error <bool>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let inner <Result<int>> = Result::<int>{ value: 42, is_error: false };\n"
+        "    let outer <Result<Result<int>>> =\n"
+        "        Result::<Result<int>>{ value: inner, is_error: false };\n"
+        "    printf(\"%d %d\\n\", outer.value.value,\n"
+        "           cast<int>(outer.value.is_error));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoTypeParametersBindInWrittenOrder) {
+    // `Pair<int, char>` and `Pair<char, int>` are different types, and the only
+    // thing that tells them apart is position. A substitution keyed by name but
+    // filled in the wrong order gives both the same layout and prints the same
+    // two numbers for both.
+    const Built b = build(std::string(kPrintf) +
+        "struct Pair<A, B> {\n"
+        "    first <A>,\n"
+        "    second <B>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Pair<int, char>> = Pair::<int, char>{ first: 300, second: 'z' };\n"
+        "    let q <Pair<char, int>> = Pair::<char, int>{ first: 'z', second: 300 };\n"
+        "    printf(\"%d %d %d %d\\n\", p.first, cast<int>(p.second),\n"
+        "           cast<int>(q.first), q.second);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "300 122 122 300\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ATypeParameterUnderAPointerIsSubstituted) {
+    // deeptest3.fin:78's `struct Node { next <&Node> = null }` written generically.
+    // Two things at once: the parameter is substituted through a decoration rather
+    // than as a whole field type, and the instantiation refers to itself, so it
+    // has to exist as an incomplete name before its own fields are mapped.
+    const Built b = build(std::string(kPrintf) +
+        "struct Node<T> {\n"
+        "    value <T>,\n"
+        "    next <&Node<T>> = null\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let tail <Node<int>> = Node::<int>{ value: 2 };\n"
+        "    let head <Node<int>> = Node::<int>{ value: 1, next: &tail };\n"
+        "    printf(\"%d %d\\n\", head.value, head.next.value);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ATypeParameterUnderAnArrayIsSubstituted) {
+    // The other decoration: `[T, 3]` becomes `[char, 3]`, which is three bytes and
+    // not three words. The trailing `guard` is there to be overwritten if the
+    // element width came from the parameter instead of the argument.
+    const Built b = build(std::string(kPrintf) +
+        "struct Buf<T> {\n"
+        "    items <[T, 3]>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Buf<char>> = Buf::<char>{ items: ['a', 'b', 'c'] };\n"
+        "    let guard <int> = 4321;\n"
+        "    printf(\"%d %d %d %d\\n\", cast<int>(b.items[0]),\n"
+        "           cast<int>(b.items[2]), sizeof(Buf<char>), guard);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "97 99 3 4321\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInstantiationCrossesAFunctionBoundaryBothWays) {
+    // A parameter and a return of the same instantiation, which is the shape
+    // functions.fin:13-17 uses. The types are written in three separate places
+    // here (the parameter, the return, the local) and all three have to resolve to
+    // the one type or the call will not typecheck in LLVM.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun bump(b: Box<int>) <Box<int>> {\n"
+        "    return Box::<int>{ val: b.val + 1 };\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <Box<int>> = Box::<int>{ val: 5 };\n"
+        "    let c <Box<int>> = bump(bump(a));\n"
+        "    printf(\"%d\\n\", c.val);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, SizeofAnInstantiationIsTheSubstitutedSize) {
+    // The layout question asked directly. `sizeof` reads the same DataLayout the
+    // allocation and the GEPs read, so an instantiation whose fields were mapped
+    // at the wrong width would disagree here first.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "}\n"
+        "struct Pair<A, B> {\n"
+        "    first <A>,\n"
+        "    second <B>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d %d %d\\n\", sizeof(Box<char>), sizeof(Box<int>),\n"
+        "           sizeof(Box<double>), sizeof(Pair<char, char>));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 4 8 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInstantiationIsWrittenThroughAPointer) {
+    // The pointer unit meeting this one: `&Box<int>` is a pointer to the
+    // instantiation, and `p.val = 9` GEPs through it into the substituted field.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 1 };\n"
+        "    let p <&Box<int>> = &b;\n"
+        "    p.val = 9;\n"
+        "    printf(\"%d %d\\n\", b.val, p.val);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9 9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInstantiationIsAnArrayElement) {
+    // `[Box<int>, 2]` needs the instantiation's size before the array's, so this
+    // is the ordering test: the element type has to be complete at the moment the
+    // array asks how wide it is.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let boxes <[Box<int>, 2]> = [Box::<int>{ val: 4 }, Box::<int>{ val: 6 }];\n"
+        "    printf(\"%d %d %d\\n\", boxes[0].val, boxes[1].val, boxes.length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4 6 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, NewOfAnInstantiationAllocatesTheSubstitutedSize) {
+    // `new Box::<T>{...}` allocates sizeof(the instantiation), not sizeof(the
+    // template) -- the template has no size at all. Two widths so a fixed size
+    // taken from the wrong one shows up.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <&Box<char>> = new Box::<char>{ val: 'Q' };\n"
+        "    let q <&Box<long>> = new Box::<long>{ val: 999999 };\n"
+        "    printf(\"%d %ld\\n\", cast<int>(p.val), q.val);\n"
+        "    delete p;\n"
+        "    delete q;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "81 999999\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructNobodyInstantiatesLowersToNothing) {
+    // tests/samples/blame_assert.fin:19 (`struct M <T> {}`). A template is not a
+    // type and has no layout, so there is nothing to emit and nothing to refuse --
+    // which is why the field checks belong at the instantiation. Note that this
+    // one is also empty: an instantiation of it would refuse (see the next test),
+    // and the declaration on its own still may not.
+    const Built b = build(std::string(kPrintf) +
+        "struct M <T> {}\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnEmptyGenericStructRefusesWhereItIsInstantiated) {
+    // The consequence of deferring: `struct M<T> {}` is fine until someone asks
+    // for `M<int>`, and then the empty-struct question (LLVM says size 0, C says
+    // 1, the corpus says nothing) has to be answered and is not.
+    const Built b = build(std::string(kPrintf) +
+        "struct M <T> {}\n"
+        "fun main() <noret> {\n"
+        "    let m <M<int>> = M::<int>{};\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInstantiationAtATypeThisFileCannotLowerIsRefused) {
+    // `Box<[int]>` is a fine template at a type argument with no representation
+    // yet: a dynamic `[T]` is the undecided one. The refusal has to name the
+    // argument rather than the template, because the template is not the problem
+    // and `Box<int>` right beside it still works.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<[int]>> = Box::<[int]>{ val: [1, 2] };\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodsAreStillRefusedAtTheCall) {
+    // struct_methods.fin and letssee.fin both hang methods off their generic
+    // structs, and a method call is a separate unit (name mangling, `self`, `Self`
+    // as a return type). Recorded here because monomorphising the *type* must not
+    // be mistaken for having monomorphised the methods: the type lowers, the call
+    // refuses, and a program that reads a field of one works today.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "    fun get(self: &Box<T>) <T> { return self.val; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 3 };\n"
+        "    printf(\"%d\\n\", b.get());\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("method"), std::string::npos) << b.why();
 }

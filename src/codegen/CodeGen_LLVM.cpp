@@ -26,6 +26,7 @@
 #include <fmt/core.h>
 
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -194,6 +195,27 @@ struct StructField {
     Expression* defaultValue = nullptr;
 };
 
+// What one type parameter became, for as long as a template's body is being
+// mapped: the representation, and the name to print.
+//
+// The display name is carried beside the representation and not derived from it,
+// because the representation is not unique -- a fieldless enum and an `int` are one
+// CgType here (enumByName returns byName("int")), and `Box<Colour>` and `Box<int>`
+// would otherwise be one instantiation under one name. They are still one *layout*,
+// which is why sharing would have been sound; they are two names because a
+// diagnostic that says `Box<int>` about a program that wrote `Box<Colour>` is a
+// diagnostic about a different program.
+struct TypeBinding {
+    CgType type;
+    std::string display;
+};
+
+// A template's parameters bound to one instantiation's arguments. A vector because
+// there are one or two of them and the order is the written order -- `Pair<A, B>`
+// binds by position, and a map keyed by name would still need the position to fill
+// it, so this holds both without a second structure.
+using Substitution = std::vector<std::pair<std::string, TypeBinding>>;
+
 struct StructInfo {
     std::string finName;
     llvm::StructType* llvmType = nullptr;
@@ -204,6 +226,13 @@ struct StructInfo {
     // which is also what stops a mutually recursive pair from reaching LLVM, where
     // it would be an infinite size computation rather than an error.
     bool complete = false;
+
+    // Non-empty for an instantiation of a generic template, and what it was
+    // instantiated at. Kept because a field's *default* may mention the parameter --
+    // `x <T> = cast<T>(0)` -- and the default runs at each literal that omits the
+    // field, which is somewhere else entirely and has no other way to know what T
+    // was there (buildStructValue pushes it back).
+    Substitution substitution;
 
     // The index is looked up per struct, never in one table shared across struct
     // types: `v` is field 1 of `A` and field 0 of `B`, and one table gives the same
@@ -281,10 +310,61 @@ public:
         enums_ = enums;
     }
 
+    // How a `Box<int>` becomes a struct that exists.
+    //
+    // The mapper is the one place that turns a written type into a representation,
+    // so it is where the demand for an instantiation appears -- and it cannot answer
+    // it, because building one means mapping fields, reporting refusals and writing
+    // to the struct table, all of which are the Emitter's. So the Emitter installs a
+    // callback: the mapper asks for the mangled name and gets it back registered, or
+    // gets nothing and refuses as it would for any name it does not know.
+    //
+    // A std::function rather than a back-pointer because this header order has the
+    // mapper defined before the Emitter, and the alternative is a forward
+    // declaration and an out-of-line definition for one call.
+    void bindInstantiator(std::function<bool(const TypeNode&, std::string&)> fn) {
+        instantiate_ = std::move(fn);
+    }
+
+    // The parameters currently in scope, or empty. Set for exactly as long as one
+    // template's body is being mapped, and restored after -- see
+    // Emitter::instantiateGeneric, which is the only caller, and the ScopedBinding
+    // it uses to guarantee the restore on the refusal paths too.
+    //
+    // Not a stack of substitutions, because it does not nest: mapping `Box<Box<int>>`
+    // maps the inner argument *before* the outer body is entered (the arguments are
+    // mapped to name the instantiation), so at any moment exactly one body is being
+    // mapped. `Node<T> { next <&Node<T>> }` is the case that looks like nesting and
+    // is not: the inner `Node<T>` resolves T from the same binding and finds its own
+    // name already registered.
+    void setBindings(const Substitution* bindings) { bindings_ = bindings; }
+    const Substitution* bindings() const { return bindings_; }
+
     // `allowIncomplete` admits a struct whose body is not set yet, and is passed
     // by exactly one caller: a pointer, for its immediate pointee. See mapPointer.
     std::optional<CgType> map(const TypeNode* node, bool allowIncomplete = false) const {
         if (!node) return voidType();
+
+        // A bare type parameter -- the `T` in `val <T>` -- becomes whatever this
+        // instantiation bound it to. First, because a template may name its parameter
+        // anything, including a name that is also a struct's: substituting has to beat
+        // resolving, or `struct Wrapper<Box> { v <Box> }` would silently use the
+        // struct called Box for a program that meant the parameter.
+        //
+        // Only when the node carries nothing else. `T` decorated -- `&T`, `[T, 3]` --
+        // arrives here as a Pointer- or ArrayTypeNode and reaches this same lookup
+        // through its pointee or element, so the decoration is applied to what T
+        // became rather than lost.
+        if (bindings_ && node->generics.empty() && node->pointer_depth == 0 &&
+            !node->is_array && !node->is_nullable && !node->is_prototype &&
+            node->implements_list.empty() && !node->array_size &&
+            !dynamic_cast<const FunctionTypeNode*>(node) &&
+            !dynamic_cast<const PointerTypeNode*>(node) &&
+            !dynamic_cast<const ArrayTypeNode*>(node)) {
+            for (const auto& binding : *bindings_) {
+                if (binding.first == node->name) return binding.second.type;
+            }
+        }
 
         // A nullable, a function type, a prototype or a generic argument list all
         // mean "not this slice" rather than "the base name" -- silently dropping the
@@ -309,10 +389,20 @@ public:
             return mapPointer(*ptr);
         }
         if (node->pointer_depth != 0 || node->is_array || node->is_nullable ||
-            node->is_prototype || !node->generics.empty() ||
-            !node->implements_list.empty() || node->array_size ||
+            node->is_prototype || !node->implements_list.empty() || node->array_size ||
             dynamic_cast<const FunctionTypeNode*>(node)) {
             return std::nullopt;
+        }
+        // `Box<int>` -- a generic argument list, which is the third decoration this
+        // slice lowers. It is not the base name with the arguments dropped: `Box<int>`
+        // and `Box<char>` are different types and `Box` alone is not a type at all,
+        // so the arguments are what is being asked about and the instantiation is
+        // named by all of them together.
+        if (!node->generics.empty()) {
+            if (!instantiate_) return std::nullopt;
+            std::string mangled;
+            if (!instantiate_(*node, mangled)) return std::nullopt;
+            return structByName(mangled, allowIncomplete);
         }
         if (auto scalar = byName(node->name)) return scalar;
         if (auto e = enumByName(node->name)) return e;
@@ -502,6 +592,8 @@ private:
     llvm::LLVMContext& ctx_;
     const std::unordered_map<std::string, StructInfo>* structs_ = nullptr;
     const std::unordered_map<std::string, EnumInfo>* enums_ = nullptr;
+    std::function<bool(const TypeNode&, std::string&)> instantiate_;
+    const Substitution* bindings_ = nullptr;
 };
 
 // Decodes one Fin string or character literal into the bytes it denotes.
@@ -540,6 +632,27 @@ std::string decodeLiteral(const std::string& lexeme) {
     return out;
 }
 
+// Binds a substitution into the mapper for one scope and restores what was there.
+//
+// An RAII holder and not a pair of calls, because instantiateGeneric has eight
+// early returns on refusal paths and every one of them has to restore -- a
+// substitution left installed would apply to the *next* type mapped, which is
+// somewhere else in the program entirely, and it would resolve rather than refuse.
+class ScopedBindings {
+public:
+    ScopedBindings(TypeMapper& types, const Substitution* bindings)
+        : types_(types), saved_(types.bindings()) {
+        types_.setBindings(bindings);
+    }
+    ~ScopedBindings() { types_.setBindings(saved_); }
+    ScopedBindings(const ScopedBindings&) = delete;
+    ScopedBindings& operator=(const ScopedBindings&) = delete;
+
+private:
+    TypeMapper& types_;
+    const Substitution* saved_;
+};
+
 class Emitter : public Visitor {
 public:
     Emitter(DiagnosticEngine& diag, bool debug)
@@ -547,6 +660,9 @@ public:
           types_(ctx_) {
         types_.bindStructs(&structs_);
         types_.bindEnums(&enums_);
+        types_.bindInstantiator([this](const TypeNode& node, std::string& out) {
+            return instantiateGeneric(node, out);
+        });
     }
 
     bool run(Program& program) {
@@ -611,6 +727,18 @@ private:
             return fixed ? fmt::format("[{}, {}]", inner, extent) : "[" + inner + "]";
         }
         std::string name = type->name.empty() ? std::string("?") : type->name;
+        // `Box<int>`, and recursively, so `Result<Result<int>>` reads back as itself.
+        // This is also what an instantiation's *key* is built from (mangledName), so
+        // the rendering being faithful is not only a diagnostic concern: two argument
+        // lists that rendered the same would share one layout.
+        if (!type->generics.empty()) {
+            name += "<";
+            for (size_t i = 0; i < type->generics.size(); ++i) {
+                if (i) name += ", ";
+                name += typeName(type->generics[i].get());
+            }
+            name += ">";
+        }
         if (type->is_array) name = "[" + name + "]";
         if (type->pointer_depth > 0) name = std::string(type->pointer_depth, '&') + name;
         return name;
@@ -776,6 +904,28 @@ private:
         for (auto& stmt : program.statements) {
             auto* s = dynamic_cast<StructDeclaration*>(stmt.get());
             if (!s) continue;
+            if (!s->generic_params.empty()) {
+                // A template, not a type. Recorded so that an instantiation can find
+                // it later and nothing is emitted for it now: it has no layout, no
+                // size and no LLVM type, and `struct M <T> {}` (blame_assert.fin:19)
+                // is a whole sample's worth of evidence that one nobody instantiates
+                // is not an error either.
+                //
+                // Deliberately *not* checked here, beyond the shapes below that are
+                // wrong however it is used. Whether its fields are lowerable depends
+                // on what it is instantiated at, so the check belongs where the
+                // arguments are known -- which is also why `struct M <T> {}` may be
+                // empty while `M<int>` may not.
+                if (!lowerableTemplate(*s)) return;
+                if (templates_.count(s->name)) {
+                    unsupported(*s, fmt::format("a second declaration of struct '{}'",
+                                                s->name));
+                    return;
+                }
+                templates_[s->name] = s;
+                registered_.insert(s);
+                continue;
+            }
             if (!lowerableStruct(*s)) return;
             if (s->is_forward_declaration && s->members.empty()) {
                 // `struct Stream;` (stdlib/stdio.fin:42) declares a name whose size
@@ -841,10 +991,6 @@ private:
     // The struct shapes this file will not lower, each with the reason it cannot be
     // guessed at. Returns false having already reported.
     bool lowerableStruct(StructDeclaration& s) {
-        if (!s.generic_params.empty()) {
-            unsupported(s, fmt::format("a generic struct '{}'", s.name));
-            return false;
-        }
         if (s.is_class) {
             // Whether a `class` is a value like a struct or a reference is not
             // settled, and the two lower differently at every assignment.
@@ -870,6 +1016,166 @@ private:
             return false;
         }
         return true;
+    }
+
+    // The template shapes that are wrong however they are instantiated: the same
+    // list as lowerableStruct's, less the ones that depend on the arguments (its
+    // fields, and whether it is empty). Checked at the declaration because a
+    // `class Box<T>` is not going to become lowerable at `Box<int>`, and a
+    // diagnostic at the declaration is where the reader can act on it.
+    bool lowerableTemplate(StructDeclaration& s) { return lowerableStruct(s); }
+
+    // `Box<int>` -- one instantiation of one template, built the first time it is
+    // asked for and then found.
+    //
+    // Monomorphisation, which is the strategy the corpus names: struct_methods.fin:6
+    // says "T is a generic and it will be a Monomorphization Generic type because
+    // its the default generic type we use", and ADR 0002 carries the same rule
+    // forward from pyprototype -- erasure is what an erasure-*marker* constraint
+    // selects, and a bare `<T>` has none. So each distinct argument list gets its own
+    // llvm::StructType, laid out as if the argument had been written in place of the
+    // parameter, and `Box<char>` is one byte where `Box<long>` is eight.
+    //
+    // Writes the mangled name to `out` and returns whether it registered (or found)
+    // a complete struct under it. Returns false having already reported.
+    //
+    // The three steps are ordered by what depends on what: the arguments have to be
+    // mapped before the name can be spelled, and the name has to be registered
+    // before the body is mapped -- `struct Node<T> { next <&Node<T>> }` asks for its
+    // own instantiation while its own fields are being mapped, and finds the
+    // incomplete name that step 2 put there.
+    bool instantiateGeneric(const TypeNode& node, std::string& out) {
+        auto found = templates_.find(node.name);
+        if (found == templates_.end()) {
+            // Not a template. Either a plain struct with arguments written on it,
+            // which the analyzer has already refused, or a generic the front end
+            // knows and this file does not -- an alias, an interface, an enum. Silent,
+            // because the mapper's caller reports it at the line, and it reports what
+            // the *use* was ("a variable of type 'Result<int>'") rather than guessing
+            // which of those it is.
+            return false;
+        }
+        StructDeclaration& tmpl = *found->second;
+
+        if (node.generics.size() != tmpl.generic_params.size()) {
+            // The analyzer says "Generic count mismatch" before this, so reaching here
+            // is the two passes disagreeing. Refused rather than padded with defaults:
+            // a missing argument has no representation to guess at.
+            unsupported(const_cast<TypeNode&>(node),
+                        fmt::format("'{}' with {} type argument(s) where it declares {}",
+                                    node.name, node.generics.size(),
+                                    tmpl.generic_params.size()));
+            return false;
+        }
+
+        // 1. The arguments, mapped in the *enclosing* scope. Cleared first, because an
+        //    argument is written at the use site and not inside the template -- when
+        //    `Node<T>`'s own body asks for `Node<T>`, the T in the argument list is
+        //    the enclosing template's T and has to resolve through the binding that is
+        //    already active. Which is exactly what leaving it in place does, so the
+        //    bindings are *not* cleared here; the comment records that this was
+        //    considered, because clearing them is the obvious move and it breaks the
+        //    self-referential case.
+        Substitution substitution;
+        for (size_t i = 0; i < node.generics.size(); ++i) {
+            const TypeNode* arg = node.generics[i].get();
+            auto mapped = arg ? types_.map(arg) : std::nullopt;
+            if (!mapped || mapped->isVoid() || !mapped->llvmType ||
+                !mapped->llvmType->isSized()) {
+                if (failed_) return false;  // a nested instantiation already reported
+                // Named as the argument and not as the template: `Box` is fine and
+                // `[int]` is the thing with no representation yet, and a reader who is
+                // told "a generic struct 'Box'" goes looking in the wrong place.
+                unsupportedType(const_cast<TypeNode&>(node), arg,
+                                fmt::format("'{}' at a type argument", node.name));
+                return false;
+            }
+            substitution.push_back(
+                {tmpl.generic_params[i]->name, TypeBinding{*mapped, typeName(arg)}});
+        }
+
+        // 2. The name. One name per distinct argument list, so asking twice finds the
+        //    first one -- which is what makes `Box<int>` assignable to `Box<int>`
+        //    (two named llvm::StructTypes with identical bodies are still two types).
+        out = mangledName(tmpl.name, substitution);
+        auto existing = structs_.find(out);
+        if (existing != structs_.end()) {
+            // Complete, or in the middle of being built (the self-referential case).
+            // Either way the name is registered and a pointer to it is legal; a
+            // *field* of an incomplete one refuses at the field, as it does for a
+            // non-generic struct.
+            return true;
+        }
+
+        StructInfo info;
+        info.finName = out;
+        info.llvmType = llvm::StructType::create(ctx_, "struct." + out);
+        info.substitution = substitution;
+        structs_[out] = info;
+
+        // 3. The body, with the parameters bound. Everything about this is the
+        //    non-generic path in declareStructs' second pass, with `types_.map` seeing
+        //    the substitution -- so a field of `T` is a field of what T became, and a
+        //    field of `&T` or `[T, 3]` is the decoration applied to it.
+        ScopedBindings bound(types_, &structs_[out].substitution);
+        std::vector<llvm::Type*> members;
+        StructInfo& live = structs_[out];
+        for (auto& m : tmpl.members) {
+            auto t = types_.map(m->type.get());
+            if (!t) {
+                if (!failed_) unsupportedType(*m, m->type.get(),
+                                              fmt::format("a field of '{}'", out));
+                return false;
+            }
+            if (t->isVoid()) {
+                unsupported(*m, fmt::format("a field of type 'void' in struct '{}'", out));
+                return false;
+            }
+            if (live.indexByName.count(m->name)) {
+                unsupported(*m, fmt::format("a second field '{}' in struct '{}'",
+                                            m->name, out));
+                return false;
+            }
+            live.indexByName[m->name] = live.fields.size();
+            live.fields.push_back(StructField{m->name, *t, m->default_value.get()});
+            members.push_back(t->llvmType);
+        }
+        if (members.empty()) {
+            // `M<int>` where `struct M <T> {}` (blame_assert.fin:19). The template was
+            // allowed to be empty and the instantiation is not, and that is the same
+            // rule the non-generic path has: LLVM says size 0, C says 1, and the
+            // corpus writes no empty struct that anyone instantiates.
+            unsupported(const_cast<TypeNode&>(node),
+                        fmt::format("an empty struct '{}'", out));
+            return false;
+        }
+        live.llvmType->setBody(members, /*isPacked=*/false);
+        live.complete = true;
+        debugLog("instantiated struct " + out);
+        return true;
+    }
+
+    // How an instantiation is spelled, in diagnostics and as the LLVM type's name.
+    //
+    // `Box<int>`, which is what the program wrote -- not a scheme with lengths and
+    // sigils. Nothing links against these names (a struct type name is debug
+    // information, and Fin does not mangle its functions either), so the only reader
+    // is a person reading a diagnostic or `--emit-llvm`, and the name they wrote is
+    // the one they can find.
+    //
+    // It is still a key, so it has to be injective in the arguments: two different
+    // argument lists must not spell the same name, or two instantiations would share
+    // a layout. The comma-separated display names give that as long as a display name
+    // is itself unambiguous, and they nest -- `Box<Box<int>>` contains the inner
+    // instantiation's own mangled name.
+    static std::string mangledName(const std::string& templateName,
+                                   const Substitution& substitution) {
+        std::string out = templateName + "<";
+        for (size_t i = 0; i < substitution.size(); ++i) {
+            if (i) out += ", ";
+            out += substitution[i].second.display;
+        }
+        return out + ">";
     }
 
     // Every module-scope variable, as an llvm::GlobalVariable with a constant
@@ -2453,11 +2759,43 @@ private:
     }
 
     void visit(StructInstantiation& node) override {
-        if (!node.generic_args.empty()) {
-            unsupported(node, fmt::format("a generic struct literal '{}'", node.struct_name));
-            return;
+        const std::string name = literalStructName(node, node.struct_name,
+                                                   node.generic_args);
+        if (name.empty()) return;  // already reported
+        value_ = buildStructValue(node, name, node.fields);
+    }
+
+    // Which struct a literal is a literal *of*: the written name, or -- for
+    // `Box::<int>{ val: 100 }` (complex.fin:12) -- the instantiation the turbofish
+    // names. Returns empty having already reported.
+    //
+    // The arguments are mapped through a synthetic TypeNode rather than by a second
+    // path into instantiateGeneric, so that `Box::<int>{...}` and `let b <Box<int>>`
+    // are one code path and cannot drift: the same mangled name, the same layout, the
+    // same refusals. It is synthetic because the parser hands the arguments over as a
+    // bare list on the expression, with no type node of their own.
+    //
+    // The nodes are *borrowed* into it and released before it dies -- a TypeNode owns
+    // its generics by unique_ptr and the AST owns these.
+    std::string literalStructName(
+        ASTNode& node, const std::string& writtenName,
+        const std::vector<std::unique_ptr<TypeNode>>& args) {
+        if (args.empty()) return writtenName;
+
+        TypeNode probe(writtenName);
+        probe.setLoc(node.loc);
+        for (auto& arg : args) probe.generics.emplace_back(arg.get());
+        std::string mangled;
+        const bool ok = instantiateGeneric(probe, mangled);
+        for (auto& borrowed : probe.generics) borrowed.release();
+        if (!ok) {
+            if (!failed_) {
+                unsupported(node, fmt::format("a literal of generic struct '{}'",
+                                              writtenName));
+            }
+            return {};
         }
-        value_ = buildStructValue(node, node.struct_name, node.fields);
+        return mangled;
     }
 
     // The value a struct literal denotes: the written fields at their declared
@@ -2773,10 +3111,22 @@ private:
     std::set<const EnumDeclaration*> registeredEnums_;
     // Keyed by Fin name. Never erased from or rehashed after declareStructs, because
     // CgType::structInfo points into it.
+    // A std::unordered_map because it does not move its values when it grows, and
+    // this file depends on that in two ways that a vector-backed map would break:
+    // CgType::structInfo points into it, and instantiateGeneric *inserts* into it
+    // while a function body is being emitted (a `Box<int>` first seen at a literal
+    // deep inside main). A rehash moves buckets and not elements, so every CgType
+    // already handed out stays valid.
     std::unordered_map<std::string, StructInfo> structs_;
     // Which StructDeclaration nodes declareStructs actually took, so that one it
     // never saw is refused rather than assumed handled.
     std::set<const StructDeclaration*> registered_;
+
+    // Every generic struct declaration, by name, borrowed from the AST -- which
+    // outlives the emitter (run() takes the Program by reference). Not in structs_,
+    // because a template is not a type: it has no llvm::StructType, no size, and a
+    // name that no `let` may be declared at. instantiateGeneric is the only reader.
+    std::unordered_map<std::string, StructDeclaration*> templates_;
     std::vector<std::unordered_map<std::string, Local>> scopes_;
 
     // Module-scope variables, and the declarations declareGlobals has already
