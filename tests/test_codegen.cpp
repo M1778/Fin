@@ -3405,12 +3405,17 @@ BACKEND_TEST(Soundness_Codegen, AnInstantiationAtATypeThisFileCannotLowerIsRefus
     EXPECT_NE(b.compileExit, 0) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodsAreStillRefusedAtTheCall) {
+BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodsAreRefusedWhereverTheyAppear) {
     // struct_methods.fin and letssee.fin both hang methods off their generic
     // structs, and a method call is a separate unit (name mangling, `self`, `Self`
-    // as a return type). Recorded here because monomorphising the *type* must not
-    // be mistaken for having monomorphised the methods: the type lowers, the call
-    // refuses, and a program that reads a field of one works today.
+    // as a return type). Recorded here because monomorphising the *type* must not be
+    // mistaken for having monomorphised the methods.
+    //
+    // The boundary has moved since this was written: the refusal used to come from
+    // the call and now comes from the declaration, because a method nobody calls was
+    // being dropped silently -- see AGenericStructsMethodIsRefusedAtItsTemplate. Kept
+    // as the call-site half of that pair, since a program that calls one must not
+    // start working by accident either.
     const Built b = build(std::string(kPrintf) +
         "struct Box<T> {\n"
         "    val <T>\n"
@@ -3572,4 +3577,107 @@ BACKEND_TEST(Soundness_Codegen, AFlagFormLlvmNameIsRefused) {
         "    printf(\"%d\\n\", s.v);\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+
+// ---------------------------------------------------------------------------
+// A struct's own functions are functions
+//
+// Found by the `#[llvm_name]` unit above, which stopped refusing struct_methods.fin
+// at line 5 -- and the sample then compiled clean to an object with no symbols in
+// it at all, for a source that declares four functions. operators.fin was the same:
+// two `operator` bodies, an object without them.
+//
+// Nothing miscomputed, because nothing can reach them: a method call is refused at
+// the call and an operator on a struct has no lowering either. But "unreachable
+// today" is the reasoning that produces a miscompile tomorrow, and this suite's rule
+// is the one at the top of the file -- a construct the backend cannot lower must be
+// refused, never skipped. A free function that is never called is still emitted; a
+// method that is never called was not, and the source gave no sign.
+//
+// So the refusal moves to the declaration, where the reader can act on it, and it
+// covers the three shapes that are function bodies: methods, operators and
+// constructors. The destructor was already refused there, for the stronger reason
+// that it also has to *run*.
+
+BACKEND_TEST(Soundness_Codegen, AStructsMethodIsRefusedAtItsDeclaration) {
+    // Never called, so the call-site refusal never fires. Before this the object
+    // simply did not contain `get`.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box {\n"
+        "    val <int>,\n"
+        "    fun get(self: &Box) <int> { return self.val; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box> = Box{ val: 3 };\n"
+        "    printf(\"%d\\n\", b.val);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("get"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructsOperatorIsRefusedAtItsDeclaration) {
+    // operators.fin:15-21 verbatim in shape: two operator bodies on a struct whose
+    // `main` never applies either of them.
+    const Built b = build(std::string(kPrintf) +
+        "struct MyInt {\n"
+        "    val <int>,\n"
+        "    operator -(other: <int>) <int> {\n"
+        "        return self.val + other;\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("operator"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructsConstructorIsRefusedAtItsDeclaration) {
+    // The literal path already refuses `new S(1)`, and that refusal is about the
+    // *call*. This is about the body: `constructor` is a function, and an object
+    // without it is a function the source declared and the object does not have.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    constructor(nx: int) { self.x = nx; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("constructor"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructWithNoFunctionsOfItsOwnStillLowers) {
+    // The boundary, from the other side. Refusing a declared function must not turn
+    // into refusing every struct: structs.fin's Vector3 has three fields and nothing
+    // else, and it is what most of this suite is built on. (Its fields are floats
+    // there; ints here, because `cast<int>` of a float is a separate gap.)
+    const Built b = build(std::string(kPrintf) +
+        "struct Vector3 { x <int>, y <int>, z <int> }\n"
+        "fun main() <noret> {\n"
+        "    let v <Vector3> = Vector3{ x: 1, y: 2, z: 4 };\n"
+        "    printf(\"%d\\n\", v.x + v.y + v.z);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodIsRefusedAtItsTemplate) {
+    // A template's functions are refused where the template is written, not once per
+    // instantiation: `class Box<T>` set that precedent, and the reason is the same --
+    // a method is not going to become lowerable at `Box<int>`, and one diagnostic at
+    // the declaration is what the reader can act on.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun get(self: &Box<T>) <T> { return self.val; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("get"), std::string::npos) << b.why();
 }

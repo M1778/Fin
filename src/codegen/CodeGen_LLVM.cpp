@@ -1004,6 +1004,36 @@ private:
             unsupported(*s.destructor, fmt::format("a destructor on struct '{}'", s.name));
             return false;
         }
+        // A struct's own functions are functions, and this file emits none of them.
+        //
+        // Refused at the declaration rather than at the call, which is where the
+        // refusal used to land. The difference is a struct whose method nobody calls:
+        // the call-site refusal never fires, the struct lowers as plain data, and the
+        // object file simply does not contain the function the source declared.
+        // struct_methods.fin is the whole of that sample -- four functions, an object
+        // with no symbols in it -- and operators.fin is two operator bodies that go
+        // the same way. Nothing miscomputes today because nothing can reach them, but
+        // a construct this file cannot lower has to be refused and not skipped, and a
+        // silently absent function body is a skip.
+        //
+        // Lowering them is a unit of its own and a large one: a method needs a name
+        // that a call site can find (Fin mangles nothing today), `self` as an injected
+        // first parameter, `Self` as a type in its own signature, and for a template
+        // one body per instantiation.
+        for (auto& m : s.methods) {
+            unsupported(*m, fmt::format("the method '{}' on struct '{}'", m->name, s.name));
+            return false;
+        }
+        for (auto& o : s.operators) {
+            // Spelled without the operator itself: `op` is a token kind here and this
+            // file has no speller for one. The line the caret lands on has it.
+            unsupported(*o, fmt::format("an operator on struct '{}'", s.name));
+            return false;
+        }
+        for (auto& c : s.constructors) {
+            unsupported(*c, fmt::format("a constructor on struct '{}'", s.name));
+            return false;
+        }
         if (!s.parents.empty()) {
             unsupported(s, fmt::format("struct '{}' inheriting another type", s.name));
             return false;
