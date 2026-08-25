@@ -152,9 +152,29 @@ struct CgType {
     std::shared_ptr<CgType> element;
     uint64_t extent = 0;
 
+    // Set for Kind::Ptr when this file knows what is at the other end, and null
+    // when it does not.
+    //
+    // LLVM has had one `ptr` since 15, so the pointee is not recoverable from the
+    // IR -- it is a fact this table carries or a fact nobody has. Everything a
+    // pointer can do needs it: the load `*p` emits, the GEP `p.field` emits, and
+    // the stride `p[i]` would emit are all the pointee's, and a pointer that had
+    // lost it would compile a one-byte `&char` read as a four-byte one.
+    //
+    // Null for the two pointers with nothing to say: a `string`, whose bytes are a
+    // library question (ADR 0003), and a bare `null`, which has no type until it
+    // reaches somewhere that has one. Both are still pointers -- they can be
+    // stored, passed and compared -- and neither may be dereferenced, so the null
+    // is what refuses rather than a rule invented here.
+    //
+    // A shared_ptr for the same reason `element` is one: `&&int` needs a CgType to
+    // contain one.
+    std::shared_ptr<CgType> pointee;
+
     bool isVoid() const { return kind == Kind::Void; }
     bool isStruct() const { return kind == Kind::Struct; }
     bool isArray() const { return kind == Kind::Array; }
+    bool isPointer() const { return kind == Kind::Ptr; }
     // What may not cross an `@define` boundary or a C variadic: the platform ABI
     // decides how each is passed and clang implements that classification, so
     // emitting the LLVM aggregate would link cleanly and pass garbage.
@@ -261,29 +281,78 @@ public:
         enums_ = enums;
     }
 
-    std::optional<CgType> map(const TypeNode* node) const {
+    // `allowIncomplete` admits a struct whose body is not set yet, and is passed
+    // by exactly one caller: a pointer, for its immediate pointee. See mapPointer.
+    std::optional<CgType> map(const TypeNode* node, bool allowIncomplete = false) const {
         if (!node) return voidType();
 
-        // A pointer, an array, a nullable, a function type, a prototype or a
-        // generic argument list all mean "not this slice" rather than "the base
-        // name" -- silently dropping the decoration is how `&int` would become
-        // `int` and start being copied by value.
-        // An array is the one decoration this slice does lower, and only when its
-        // extent is written and constant. See mapArray.
+        // A nullable, a function type, a prototype or a generic argument list all
+        // mean "not this slice" rather than "the base name" -- silently dropping the
+        // decoration is how `[int]` would become `int` and start being copied by
+        // value.
+        // An array is one of the two decorations this slice lowers, and only when
+        // its extent is written and constant. See mapArray.
         if (auto* arr = dynamic_cast<const ArrayTypeNode*>(node)) {
             if (node->pointer_depth != 0 || node->is_nullable) return std::nullopt;
             return mapArray(*arr);
         }
+        // A pointer is the other. `pointer_depth` is checked and never set: the
+        // parser builds a PointerTypeNode for every spelling of a pointer type
+        // (`&int`, `*int`, `&&int`) and leaves the counter at 0, so a non-zero one
+        // would be a second encoding of the same fact and this file would be
+        // reading the wrong one.
+        if (auto* ptr = dynamic_cast<const PointerTypeNode*>(node)) {
+            if (node->pointer_depth != 0 || node->is_array || node->is_nullable ||
+                node->array_size) {
+                return std::nullopt;
+            }
+            return mapPointer(*ptr);
+        }
         if (node->pointer_depth != 0 || node->is_array || node->is_nullable ||
             node->is_prototype || !node->generics.empty() ||
             !node->implements_list.empty() || node->array_size ||
-            dynamic_cast<const FunctionTypeNode*>(node) ||
-            dynamic_cast<const PointerTypeNode*>(node)) {
+            dynamic_cast<const FunctionTypeNode*>(node)) {
             return std::nullopt;
         }
         if (auto scalar = byName(node->name)) return scalar;
         if (auto e = enumByName(node->name)) return e;
-        return structByName(node->name);
+        return structByName(node->name, allowIncomplete);
+    }
+
+    // `&T` becomes one machine word, whatever T is, plus the pointee recorded
+    // beside it (CgType::pointee).
+    //
+    // The pointee is mapped with `allowIncomplete`, and that is the whole reason the
+    // flag exists: `struct Node { pub next <&Node> = null }` (deeptest3.fin:78) maps
+    // its own field during declareStructs' second pass, when `Node`'s llvm::StructType
+    // exists and its body does not. Pointing at a type whose size nobody knows yet is
+    // exactly what a pointer is for -- it is one word either way -- and the body is
+    // set before any function body is emitted, so every load through it happens after.
+    //
+    // A struct *field* of incomplete type still refuses, and so does an array of one,
+    // because those need the size. The flag stops here and is not passed on to
+    // anything but another pointer.
+    std::optional<CgType> mapPointer(const PointerTypeNode& node) const {
+        if (!node.pointee) return std::nullopt;
+        auto pointee = map(node.pointee.get(), /*allowIncomplete=*/true);
+        if (!pointee) return std::nullopt;
+        CgType t = pointerType();
+        t.pointee = std::make_shared<CgType>(*pointee);
+        return t;
+    }
+
+    // An address with nothing recorded about what is at it.
+    CgType pointerType() const {
+        CgType t;
+        t.kind = CgType::Kind::Ptr;
+        t.llvmType = llvm::PointerType::getUnqual(ctx_);
+        return t;
+    }
+
+    CgType pointerTo(const CgType& pointee) const {
+        CgType t = pointerType();
+        t.pointee = std::make_shared<CgType>(pointee);
+        return t;
     }
 
     // `[T, N]` becomes an LLVM [N x T]: N of the element, laid end to end, with LLVM
@@ -360,10 +429,13 @@ public:
                 // NUL-terminated bytes, which is what makes `printf("%s", s)`
                 // work. A length-carrying string is a library decision (ADR 0003)
                 // and a different representation.
-                CgType t;
-                t.kind = CgType::Kind::Ptr;
-                t.llvmType = llvm::PointerType::getUnqual(ctx_);
-                return t;
+                //
+                // No pointee, deliberately. `*s` on a string would be a char if the
+                // pointee were `char`, and whether a Fin string dereferences to its
+                // first byte is a question the corpus does not ask -- the analyzer
+                // refuses it ("Cannot dereference non-pointer type 'string'") and
+                // this agrees by having nothing to load.
+                return pointerType();
             }
         }
         return std::nullopt;
@@ -390,10 +462,12 @@ public:
         return byName("int");
     }
 
-    std::optional<CgType> structByName(const std::string& name) const {
+    std::optional<CgType> structByName(const std::string& name,
+                                       bool allowIncomplete = false) const {
         if (!structs_) return std::nullopt;
         auto it = structs_->find(name);
-        if (it == structs_->end() || !it->second.complete) return std::nullopt;
+        if (it == structs_->end()) return std::nullopt;
+        if (!it->second.complete && !allowIncomplete) return std::nullopt;
         CgType t;
         t.kind = CgType::Kind::Struct;
         t.llvmType = it->second.llvmType;
@@ -512,26 +586,34 @@ private:
     }
 
     void unsupportedType(ASTNode& node, const TypeNode* type, const std::string& role) {
-        std::string name = type ? type->name : std::string("<none>");
-        if (type && (type->pointer_depth || dynamic_cast<const PointerTypeNode*>(type)))
-            name = "&" + name;
+        unsupported(node, fmt::format("{} of type '{}'", role, typeName(type)));
+    }
+
+    // How a written type reads back in a diagnostic.
+    //
+    // Recursive, because the decorations nest and the node's own `name` is only the
+    // innermost part of one: an ArrayTypeNode leaves it empty, so `[int]` used to
+    // print as `[]`, and a PointerTypeNode sets it to the literal word "ptr", so
+    // `&[T]` used to print as `&ptr`. Neither names anything the program wrote.
+    //
+    // The extent is included when there is one, because "a variable of type '[int]'"
+    // and "of type '[int, 3]'" are refused for different reasons and only one of
+    // them is a decision waiting on a ruling.
+    std::string typeName(const TypeNode* type) const {
+        if (!type) return "<none>";
+        if (auto* ptr = dynamic_cast<const PointerTypeNode*>(type))
+            return "&" + typeName(ptr->pointee.get());
         if (auto* arr = dynamic_cast<const ArrayTypeNode*>(type)) {
-            // The element's name, not the node's own, which an ArrayTypeNode leaves
-            // empty: `[int]` used to print as `[array]`, naming nothing the program
-            // wrote. And the extent when there is one, because "a variable of type
-            // '[int]'" and "of type '[int, 3]'" are refused for different reasons and
-            // only one of them is a decision waiting on a ruling.
-            const std::string inner = arr->element_type ? arr->element_type->name
-                                                        : std::string("?");
+            const std::string inner = typeName(arr->element_type.get());
             uint64_t extent = 0;
             const bool fixed = arr->size &&
                                readConstant(*arr->size, extent) == ConstantRead::Ok;
-            name = fixed ? fmt::format("[{}, {}]", inner, extent)
-                         : "[" + inner + "]";
-        } else if (type && type->is_array) {
-            name = "[" + name + "]";
+            return fixed ? fmt::format("[{}, {}]", inner, extent) : "[" + inner + "]";
         }
-        unsupported(node, fmt::format("{} of type '{}'", role, name));
+        std::string name = type->name.empty() ? std::string("?") : type->name;
+        if (type->is_array) name = "[" + name + "]";
+        if (type->pointer_depth > 0) name = std::string(type->pointer_depth, '&') + name;
+        return name;
     }
 
     void debugLog(const std::string& text) {
@@ -1133,10 +1215,29 @@ private:
                 return Addr{global->second.var, global->second.type};
             return std::nullopt;
         }
+        if (auto* unary = dynamic_cast<UnaryOp*>(&expr)) {
+            // The address of `*p` is the value of `p`. That one line is what makes
+            // `*a = *b` (deeptest3.fin:10), `*p += 5`, `**pp = 500` (:134),
+            // `(*p).field` and `*h.p = 42` all work: each of them is an existing path
+            // -- assignment, compound assignment, increment, a field GEP -- against an
+            // address, and this is the address they were missing.
+            if (unary->op != ASTTokenKind::MULT || unary->is_postfix ||
+                !unary->operand) {
+                return std::nullopt;
+            }
+            CgVal p = emit(*unary->operand);
+            if (failed_ || !p.ok()) return std::nullopt;
+            if (!p.type.isPointer() || !p.type.pointee) return std::nullopt;
+            if (p.type.pointee->isVoid() || !p.type.pointee->llvmType ||
+                !p.type.pointee->llvmType->isSized()) {
+                return std::nullopt;
+            }
+            return Addr{p.value, *p.type.pointee};
+        }
         if (auto* member = dynamic_cast<MemberAccess*>(&expr)) {
             // `Type::name` is an enum member or a static, not a field of an object.
             if (member->is_static) return std::nullopt;
-            auto base = emitAddress(*member->object);
+            auto base = baseAddress(*member->object, CgType::Kind::Struct);
             if (!base) return std::nullopt;
             if (!base->type.isStruct() || !base->type.structInfo) return std::nullopt;
             size_t index = 0;
@@ -1154,7 +1255,16 @@ private:
             // extractvalue with a run-time index: LLVM's extractvalue takes constants
             // only. Returning nullopt sends it to visit(ArrayAccess&), which refuses
             // rather than materialising a temporary the program did not ask for.
-            auto base = emitAddress(*access->array);
+            // Through the array's address, or through a pointer to the array --
+            // deeptest3.fin:111 says `ptr_to_arr[0]` on a `<&[int, 3]>` is element 0
+            // of the array ("The compiler knows to dereference the base first"), and
+            // that is the same rule `.` follows one line up.
+            //
+            // Indexing a pointer to a *non-array* is not this, and baseAddress does not
+            // find a base for it: `p[i]` on an `&int` is pointer arithmetic, and whether
+            // a Fin pointer strides by an element or a byte is the ruling that also
+            // refuses `p++` (see emitIncrement).
+            auto base = baseAddress(*access->array, CgType::Kind::Array);
             if (!base) return std::nullopt;
             if (!base->type.isArray() || !base->type.element) return std::nullopt;
 
@@ -1184,6 +1294,32 @@ private:
         return std::nullopt;
     }
 
+    // The address of what `object` denotes, following one pointer if that is what it
+    // takes to get something of kind `want`.
+    //
+    // deeptest3.fin:39 -- "Access members via pointer (Fin automatically handles ->
+    // logic with .)" -- and :111 for the index. There is no `->` in Fin, so a `.` and
+    // a `[]` each have two bases to cope with, and the difference between them is one
+    // load: a struct's address is the struct, a pointer's address is where the pointer
+    // is *kept*, and the struct is at the pointer's value.
+    //
+    // Only through an address, never by emitting the object as a value. A struct that
+    // is a value has no home (`make(5).a` reads through extractvalue instead) and
+    // emitting it here would be emitting it twice, once for the address that failed
+    // and once for the value that worked.
+    std::optional<Addr> baseAddress(Expression& object, CgType::Kind want) {
+        auto direct = emitAddress(object);
+        if (!direct) return std::nullopt;
+        if (direct->type.kind == want) return direct;
+        if (direct->type.isPointer() && direct->type.pointee &&
+            direct->type.pointee->kind == want) {
+            llvm::Value* p = builder_.CreateLoad(direct->type.llvmType, direct->ptr,
+                                                 "deref");
+            return Addr{p, *direct->type.pointee};
+        }
+        return std::nullopt;
+    }
+
     // A condition is a truth value whatever it was written as.
     llvm::Value* asCondition(ASTNode& node, const CgVal& v) {
         if (!v.ok()) return nullptr;
@@ -1194,6 +1330,14 @@ private:
         if (v.type.kind == CgType::Kind::Float)
             return builder_.CreateFCmpONE(v.value,
                                           llvm::ConstantFP::get(v.type.llvmType, 0.0));
+        if (v.type.isPointer()) {
+            // `if (p)` needs "a pointer is true when it is not null" to be a rule of
+            // Fin, and Fin's nullability rules are the open ones. The corpus asks the
+            // question the other way every time -- `if (val_ptr == null)`
+            // (deeptest3.fin:64) -- which needs no rule and is lowered.
+            unsupported(node, "a pointer used as a condition");
+            return nullptr;
+        }
         unsupported(node, "this condition");
         return nullptr;
     }
@@ -1513,7 +1657,18 @@ private:
                 return;
             }
             case ASTTokenKind::KW_NULL:
-                unsupported(node, "'null'");
+                // One word of zeroes, and no pointee: `print_if_exists(null)`
+                // (deeptest3.fin:75) is a `null` with no declared type anywhere near
+                // it, so there is nothing here to be a pointer *to*. It does not need
+                // one -- convert() makes a pointer-to-pointer conversion a no-op
+                // because there is only one pointer type in the IR -- and it must not
+                // invent one, because `*null` would then have a width.
+                //
+                // A constant, so a global initialiser folds to it and emits no code
+                // (`let GP <&int> = null;`).
+                value_ = CgVal{llvm::ConstantPointerNull::get(
+                                   llvm::PointerType::getUnqual(ctx_)),
+                               types_.pointerType()};
                 return;
             case ASTTokenKind::M1778:
                 // ADR 0001: the word means "not implemented", so a build that
@@ -1600,6 +1755,30 @@ private:
         if (lhs.type.isStruct() || rhs.type.isStruct()) {
             unsupported(node, "an operator on a struct");
             return CgVal{};
+        }
+
+        // A pointer operand, for the same reason and with a narrower exit: equality
+        // against another pointer is two words compared, which needs no rule and is
+        // what deeptest3.fin:64 writes. Everything else does need one.
+        //
+        // `p + 1` never arrives -- the analyzer refuses it ("Type mismatch: expected
+        // '&int', got 'int'") -- but `p < q` does, and an ordering is a claim about
+        // which of two objects the allocator put first. commonType would hand both to
+        // CreateICmpSLT after picking one of the two zero-width types, which is an
+        // answer; refusing is not.
+        if (lhs.type.isPointer() || rhs.type.isPointer()) {
+            const bool comparison = op == ASTTokenKind::EQEQ || op == ASTTokenKind::NOTEQ;
+            if (!comparison || !lhs.type.isPointer() || !rhs.type.isPointer()) {
+                unsupported(node, "an operator on a pointer");
+                return CgVal{};
+            }
+            // No convert: there is one pointer type in the IR, so a `&int` and a bare
+            // `null` are already the same operand type.
+            CgType boolType = *types_.byName("bool");
+            llvm::Value* out = op == ASTTokenKind::EQEQ
+                                   ? builder_.CreateICmpEQ(lhs.value, rhs.value)
+                                   : builder_.CreateICmpNE(lhs.value, rhs.value);
+            return CgVal{out, boolType};
         }
 
         // A shift's operands are not a pair: the count is not widened to the value's
@@ -1815,11 +1994,32 @@ private:
         value_ = CgVal{node.is_postfix ? before : after, t};
     }
 
+    // `&x`. The address of a thing that has one, which is emitAddress' whole job --
+    // so this is four lines and every form the corpus writes (`&x`, `&numbers[1]`,
+    // `&my_array`, `&p`, `&G`, `&self.field`) comes from the one place that already
+    // knew how.
+    void emitAddressOf(UnaryOp& node) {
+        auto addr = emitAddress(*node.operand);
+        if (failed_) return;
+        if (!addr) {
+            // `&make()` and `&"Hello world"` (variables.fin:11). The value is real and
+            // has no home, so taking its address means putting it in a fresh slot --
+            // which answers "how long does that slot live, and what does the pointer
+            // mean afterwards" by picking one. Nothing in the corpus reads such a
+            // pointer, so nothing would catch the wrong pick.
+            unsupported(node, "the address of a value with no home");
+            return;
+        }
+        value_ = CgVal{addr->ptr, types_.pointerTo(addr->type)};
+    }
+
     void visit(UnaryOp& node) override {
         if (node.op == ASTTokenKind::INCREMENT || node.op == ASTTokenKind::DECREMENT) {
             emitIncrement(node);
             return;
         }
+        // Before the operand is emitted, because this one does not want its value.
+        if (node.op == ASTTokenKind::AMPERSAND) { emitAddressOf(node); return; }
         CgVal v = emit(*node.operand);
         if (failed_) return;
         if (!v.ok()) { unsupported(node, "this operand"); return; }
@@ -1852,6 +2052,26 @@ private:
             case ASTTokenKind::PLUS:
                 value_ = v;
                 return;
+            case ASTTokenKind::MULT: {
+                // `*p` as a value: the load. `*p` as a *target* never reaches here --
+                // emitAddress has its own branch for it, so `*p = 99` stores through
+                // the same pointer this would read through, and `*p += 5` does both
+                // against one address.
+                if (!v.type.isPointer()) break;
+                if (!v.type.pointee || v.type.pointee->isVoid() ||
+                    !v.type.pointee->llvmType || !v.type.pointee->llvmType->isSized()) {
+                    // A `string`, a bare `null`, or an `&void`. The width of the load
+                    // is the pointee's and there is no pointee, so there is no load to
+                    // emit -- and reading a byte because a byte is the smallest thing
+                    // it could be would be a guess with a result.
+                    unsupported(node, "a dereference of a pointer to no particular type");
+                    return;
+                }
+                value_ = CgVal{builder_.CreateLoad(v.type.pointee->llvmType, v.value,
+                                                   "deref"),
+                               *v.type.pointee};
+                return;
+            }
             default:
                 break;
         }
@@ -2051,7 +2271,55 @@ private:
     void visit(ImportModule& node) override { unsupported(node, "an import (the module loader did not consume it)"); }
 
     void visit(ForeachLoop& node) override { unsupported(node, "a 'foreach' loop"); }
-    void visit(DeleteStatement& node) override { unsupported(node, "'delete'"); }
+    // `delete p` returns the allocation. deeptest3.fin:44 says what it is:
+    // "(Calls destructor if defined, then frees memory)".
+    //
+    // No destructor call is emitted, and that is sound rather than pending: a struct
+    // with a destructor is refused outright at its declaration (lowerableStruct), so a
+    // `delete` reaching here provably has nothing to run. The day destructors lower is
+    // the day this line has to grow one, and ADR 0016 (destructors compose) is where
+    // the order comes from.
+    void visit(DeleteStatement& node) override {
+        if (!currentFn_) { unsupported(node, "'delete' outside a function"); return; }
+        if (!node.expr) { unsupported(node, "'delete' with no operand"); return; }
+        CgVal v = emit(*node.expr);
+        if (failed_) return;
+        if (!v.ok() || !v.type.isPointer()) {
+            // The analyzer already refuses `delete x` on a non-pointer ("Cannot delete
+            // non-pointer type 'int'"), so this is the two passes disagreeing rather
+            // than a program error -- and freeing a value read as an address is the one
+            // outcome worse than refusing.
+            unsupported(node, "'delete' of a non-pointer");
+            return;
+        }
+        llvm::FunctionCallee release = runtimeFn(
+            node, "free",
+            llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_),
+                                    {llvm::PointerType::getUnqual(ctx_)}, false));
+        if (!release) return;
+        builder_.CreateCall(release, {v.value});
+    }
+
+    // A libc entry point, declared on demand.
+    //
+    // A Fin program may have declared the same name itself -- deeptest2.fin:4 writes
+    // `@define free(ptr: &void) <noret>;`, which is this exact signature -- and one of
+    // *those* is the same symbol, so the declaration is shared rather than duplicated.
+    // A name already declared with a different signature refuses: calling through a
+    // FunctionCallee whose type disagrees with the callee's would link and pass its
+    // arguments in the wrong places.
+    llvm::FunctionCallee runtimeFn(ASTNode& node, const char* name,
+                                   llvm::FunctionType* type) {
+        if (auto* existing = module_.getFunction(name)) {
+            if (existing->getFunctionType() != type) {
+                unsupported(node, fmt::format("an allocation, because '{}' is declared "
+                                              "here with a different signature", name));
+                return llvm::FunctionCallee();
+            }
+            return llvm::FunctionCallee(type, existing);
+        }
+        return module_.getOrInsertFunction(name, type);
+    }
     void visit(TryCatch& node) override { unsupported(node, "'try'/'catch'"); }
     void visit(BlameStatement& node) override { unsupported(node, "'blame'"); }
 
@@ -2088,19 +2356,34 @@ private:
         // corpus sites compare one against an int. A dynamic `[T]` has no extent here
         // and never reaches this -- it refuses at the mapper, because its
         // representation is what decides where a run-time length lives.
+        // The object as a value, emitted at most once across everything below. Both
+        // `.length` and the ordinary field path may need one, and `get().length` on a
+        // struct would otherwise call `get()` to ask whether it is an array and again
+        // to read the field.
+        std::optional<CgVal> objectValue;
+
         if (node.member == "length" && !node.is_static && node.object) {
             // Through the address when there is one, so that reading the length does
             // not emit a load of the whole array. Either way the answer is the type's.
+            // A pointer to an array answers with the array's, which is the same rule
+            // `ptr_to_arr[0]` follows (deeptest3.fin:111).
             std::optional<CgType> arrayType;
-            if (auto addr = emitAddress(*node.object)) {
-                if (addr->type.isArray()) arrayType = addr->type;
-            }
-            if (!arrayType && !failed_) {
-                CgVal object = emit(*node.object);
-                if (failed_) return;
-                if (object.ok() && object.type.isArray()) arrayType = object.type;
+            if (auto addr = baseAddress(*node.object, CgType::Kind::Array)) {
+                arrayType = addr->type;
             }
             if (failed_) return;
+            if (!arrayType) {
+                objectValue = emit(*node.object);
+                if (failed_) return;
+                if (objectValue->ok()) {
+                    if (objectValue->type.isArray()) {
+                        arrayType = objectValue->type;
+                    } else if (objectValue->type.isPointer() && objectValue->type.pointee &&
+                               objectValue->type.pointee->isArray()) {
+                        arrayType = *objectValue->type.pointee;
+                    }
+                }
+            }
             if (arrayType) {
                 CgType i32 = types_.intType(32, true);
                 value_ = CgVal{llvm::ConstantInt::get(i32.llvmType, arrayType->extent, true),
@@ -2125,9 +2408,32 @@ private:
         // `make(5).a` is the shape -- a struct returned by a call is a real value
         // with no home, and materialising a temporary just to GEP into it would be
         // a copy for nothing.
-        CgVal object = emit(*node.object);
-        if (failed_) return;
+        if (!objectValue) {
+            objectValue = emit(*node.object);
+            if (failed_) return;
+        }
+        CgVal object = *objectValue;
         if (!object.ok()) { unsupported(node, "this member's object"); return; }
+        // A pointer that is a value rather than a variable: `make(3).hp` where `make`
+        // returns a `&P`. The value *is* the address, so this is the addressed path's
+        // GEP with one fewer load in front of it.
+        if (object.type.isPointer() && object.type.pointee &&
+            object.type.pointee->isStruct() && object.type.pointee->structInfo) {
+            const StructInfo* info = object.type.pointee->structInfo;
+            size_t index = 0;
+            if (!info->find(node.member, index)) {
+                unsupported(node, fmt::format("the member '{}', which struct '{}' does not have",
+                                              node.member, info->finName));
+                return;
+            }
+            llvm::Value* ptr = builder_.CreateStructGEP(object.type.pointee->llvmType,
+                                                        object.value, (unsigned)index,
+                                                        node.member);
+            value_ = CgVal{builder_.CreateLoad(info->fields[index].type.llvmType, ptr,
+                                               node.member),
+                           info->fields[index].type};
+            return;
+        }
         if (!object.type.isStruct() || !object.type.structInfo) {
             unsupported(node, fmt::format("the member '{}' of a non-struct", node.member));
             return;
@@ -2151,10 +2457,25 @@ private:
             unsupported(node, fmt::format("a generic struct literal '{}'", node.struct_name));
             return;
         }
-        auto found = structs_.find(node.struct_name);
+        value_ = buildStructValue(node, node.struct_name, node.fields);
+    }
+
+    // The value a struct literal denotes: the written fields at their declared
+    // positions, then the declared defaults for the fields the literal left out.
+    //
+    // Shared by `P{...}` and `new P{...}`, which differ in where the value ends up and
+    // in nothing else. A `new` that built its own would be a second place for the
+    // defaults to run, or to be forgotten -- and deeptest3.fin:85 (`new Node{value: 1}`,
+    // with `next` left to its `= null`) is a `new` that depends on them running.
+    //
+    // Returns an invalid CgVal having already reported.
+    CgVal buildStructValue(
+        ASTNode& node, const std::string& structName,
+        const std::vector<std::pair<std::string, std::unique_ptr<Expression>>>& literalFields) {
+        auto found = structs_.find(structName);
         if (found == structs_.end() || !found->second.complete) {
-            unsupported(node, fmt::format("a literal of struct '{}'", node.struct_name));
-            return;
+            unsupported(node, fmt::format("a literal of struct '{}'", structName));
+            return CgVal{};
         }
         const StructInfo& info = found->second;
 
@@ -2168,30 +2489,30 @@ private:
         // Walked in the order written, inserted at the index declared. The written
         // order is not the stored order and this is the only place that could
         // confuse them.
-        for (auto& entry : node.fields) {
+        for (auto& entry : literalFields) {
             size_t index = 0;
             if (!info.find(entry.first, index)) {
                 unsupported(node, fmt::format("the field '{}', which struct '{}' does not have",
-                                              entry.first, node.struct_name));
-                return;
+                                              entry.first, structName));
+                return CgVal{};
             }
-            if (!entry.second) { unsupported(node, "a field with no value"); return; }
+            if (!entry.second) { unsupported(node, "a field with no value"); return CgVal{}; }
             if (written[index]) {
                 unsupported(node, fmt::format("field '{}' written twice in one literal",
                                               entry.first));
-                return;
+                return CgVal{};
             }
             // The field's type is offered to its value, which is what makes an array
             // field's literal know what it is: `Row { cells: [7, 8, 9] }` has no other
             // source for the element type.
             CgVal v = emitAs(*entry.second, info.fields[index].type);
-            if (failed_) return;
+            if (failed_) return CgVal{};
             if (!v.ok()) {
                 unsupported(node, fmt::format("the value for field '{}'", entry.first));
-                return;
+                return CgVal{};
             }
             llvm::Value* stored = convert(node, v, info.fields[index].type);
-            if (!stored) return;
+            if (!stored) return CgVal{};
             aggregate = builder_.CreateInsertValue(aggregate, stored, {(unsigned)index},
                                                    entry.first);
             written[index] = true;
@@ -2212,15 +2533,15 @@ private:
             if (written[index] || !field.defaultValue) continue;
 
             CgVal v = emitDefault(*field.defaultValue, field.type);
-            if (failed_) return;
+            if (failed_) return CgVal{};
             if (!v.ok()) {
                 unsupported(*field.defaultValue,
                             fmt::format("the default value of field '{}' of struct '{}'",
-                                        field.name, node.struct_name));
-                return;
+                                        field.name, structName));
+                return CgVal{};
             }
             llvm::Value* stored = convert(*field.defaultValue, v, field.type);
-            if (!stored) return;
+            if (!stored) return CgVal{};
             aggregate = builder_.CreateInsertValue(aggregate, stored, {(unsigned)index},
                                                    field.name);
         }
@@ -2229,7 +2550,7 @@ private:
         type.kind = CgType::Kind::Struct;
         type.llvmType = info.llvmType;
         type.structInfo = &found->second;
-        value_ = CgVal{aggregate, type};
+        return CgVal{aggregate, type};
     }
     void visit(PrototypeLiteral& node) override { unsupported(node, "a prototype literal"); }
     void visit(ArrayLiteral& node) override {
@@ -2292,7 +2613,91 @@ private:
         // are their own units, and none of which may be read as "element 0".
         unsupported(node, "this index expression");
     }
-    void visit(NewExpression& node) override { unsupported(node, "'new'"); }
+    // `new T` allocates a T and yields an `&T`. Every spelling agrees on that --
+    // `new Player{...}` (deeptest3.fin:37), `new int(5)` (variables.fin:28), and
+    // `new int*`, whose parser comment spells the rule out: the stars describe the
+    // result, so the type written here is one pointer shallower than it.
+    //
+    // `malloc` and `free` are the allocator, which is a decision and not an
+    // implementation detail. ADR 0003: Fin has neither a garbage collector nor a
+    // borrow checker, and an ownership model, a reference-counted pointer or a
+    // collector is a *library* written against the compiler's components. A library
+    // like that needs a raw substrate underneath it to hand out and take back, and
+    // libc's allocator is the one every platform this targets already has -- the
+    // linker driver is `cc` (Driver::runLinker), so it is already linked. Nothing
+    // else in the corpus offers itself as one.
+    //
+    // The result is not null-checked. What a failed allocation does in Fin -- a raised
+    // value, a null the program must test, an abort -- is a language decision, and
+    // emitting a branch here would be making it; emitting none says "the pointer is
+    // whatever malloc returned", which is the same thing C says and is at least a
+    // rule someone else wrote down.
+    void visit(NewExpression& node) override {
+        if (!currentFn_) { unsupported(node, "'new' outside a function"); return; }
+
+        auto allocated = types_.map(node.type.get());
+        if (!allocated || allocated->isVoid() || !allocated->llvmType ||
+            !allocated->llvmType->isSized()) {
+            // Named as `new`'s own refusal: `new [char, n]` (stdlib/stdio.fin:112) asks
+            // for a run-time number of elements, which is the dynamic-array
+            // representation ruling and not a missing multiply.
+            unsupportedType(node, node.type.get(), "'new'");
+            return;
+        }
+
+        llvm::Value* initial = nullptr;
+        if (allocated->isStruct()) {
+            if (!node.args.empty()) {
+                // `new P(1, 2)` -- a constructor call. Which constructor is a question
+                // the analyzer does not answer yet either (it resolves `constructors[0]`
+                // and no more), so there is nothing here to lower.
+                unsupported(node, "'new' of a struct with constructor arguments");
+                return;
+            }
+            CgVal v = buildStructValue(node, allocated->structInfo->finName,
+                                       node.init_fields);
+            if (!v.ok()) return;  // buildStructValue reported
+            initial = v.value;
+        } else {
+            if (!node.init_fields.empty()) {
+                unsupported(node, "'new' of a non-struct with field initialisers");
+                return;
+            }
+            if (node.args.size() > 1) {
+                unsupported(node, "'new' with more than one initial value");
+                return;
+            }
+            if (node.args.empty() || !node.args.front()) {
+                // `new int*` (simple_pointers.fin:23): an allocation with nothing to
+                // put in it. Zeroed rather than left as whatever the allocator had,
+                // which is the answer a local with no initialiser gets here too --
+                // undefined contents is the one answer that cannot be tested.
+                initial = llvm::Constant::getNullValue(allocated->llvmType);
+            } else {
+                CgVal v = emitAs(*node.args.front(), *allocated);
+                if (failed_) return;
+                if (!v.ok()) { unsupported(node, "the initial value of a 'new'"); return; }
+                initial = convert(node, v, *allocated);
+                if (!initial) return;
+            }
+        }
+
+        // The size the module's own DataLayout gives, so the allocation, the GEPs into
+        // it and `sizeof` all read one table (see visit(SizeofExpression&)).
+        //
+        // malloc's alignment is max_align_t, which covers every type this file builds --
+        // an over-aligned one would need aligned_alloc, and Fin has no way to ask for
+        // one yet.
+        const uint64_t size = module_.getDataLayout().getTypeAllocSize(allocated->llvmType);
+        llvm::FunctionCallee alloc = runtimeFn(
+            node, "malloc",
+            llvm::FunctionType::get(llvm::PointerType::getUnqual(ctx_),
+                                    {llvm::Type::getInt64Ty(ctx_)}, false));
+        if (!alloc) return;
+        llvm::Value* raw = builder_.CreateCall(alloc, {builder_.getInt64(size)}, "new");
+        builder_.CreateStore(initial, raw);
+        value_ = CgVal{raw, types_.pointerTo(*allocated)};
+    }
     void visit(SizeofExpression& node) override {
         // A type and only a type: `sizeof(1 + 1)` does not parse and `sizeof(a)`
         // parses as the type `a` (the grammar has no expression form), so there is

@@ -2506,3 +2506,549 @@ BACKEND_TEST(Soundness_Codegen, AnIncrementOnAPointerIsRefused) {
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
 }
+
+// ---------------------------------------------------------------------------
+// Pointers.
+//
+// tests/samples/deeptest3.fin is the whole specification, and it is unusually
+// explicit for this corpus -- it states the rules in prose beside the code:
+//
+//   `&` takes an address (:23 `swap(&x, &y)`, :52 `&numbers[1]`, :109 `&my_array`,
+//   :126 `&p`), `*` reads or writes through one (:7 `let temp <int> = *a`, :10
+//   `*a = *b`, :134 `**pp = 500`), and a pointer compares against `null` (:64).
+//
+//   ":39 Access members via pointer (Fin automatically handles -> logic with .)"
+//   -- there is no `->` in Fin. `p.hp` on a `<&Player>` reads the field the
+//   pointer points at, and `head.next.value` (:98, with the sample's own note
+//   that C would write `head->next->value`) chains it.
+//
+//   ":111 In Fin, indexing a pointer to an array works just like indexing the
+//   array. The compiler knows to dereference the base first" -- `ptr_to_arr[0]`
+//   on a `<&[int, 3]>` is element 0 of the array, not of a pointer.
+//
+//   ":35 Allocate on Heap" / ":44 then frees memory" -- `new` and `delete`. Which
+//   is malloc and free: ADR 0003 says a memory *strategy* (ownership,
+//   refcounting, a collector) is a library written against the component API, and
+//   a library needs a substrate to be written against. This is the substrate, and
+//   nothing else in the corpus offers itself as one.
+//
+// A pointer is one machine word whatever it points at (LLVM has had one opaque
+// `ptr` since 15), so the pointee is a fact this file's own type table carries
+// rather than something recoverable from the IR. Every test below that reads
+// through a pointer is a test that it carried the right one: an `&char` that had
+// lost its pointee would load four bytes from a one-byte slot and still compile.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, APointerParameterIsWrittenThroughByTheCallee) {
+    // tests/samples/deeptest3.fin:5-26, the sample's first exercise: two `&int`
+    // parameters, three dereferences, and a caller that sees both writes.
+    const Built b = build(std::string(kPrintf) +
+        "fun swap(a: &int, b: &int) <noret> {\n"
+        "    let temp <int> = *a;\n"
+        "    *a = *b;\n"
+        "    *b = temp;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 10;\n"
+        "    let y <int> = 20;\n"
+        "    swap(&x, &y);\n"
+        "    printf(\"%d %d\\n\", x, y);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "20 10\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADereferenceReadsThroughAPointer) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 7;\n"
+        "    let p <&int> = &x;\n"
+        "    printf(\"%d\\n\", *p);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAssignmentThroughAPointerReachesTheOriginal) {
+    // The half of `*p` that is not a read. If `*p = 5` stored into a copy the
+    // program would run and print 1, which is why this is a separate test from the
+    // read: one address, two directions.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let p <&int> = &x;\n"
+        "    *p = 5;\n"
+        "    printf(\"%d\\n\", x);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ACompoundAssignmentThroughAPointerReadsAndWritesOneAddress) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 10;\n"
+        "    let p <&int> = &x;\n"
+        "    *p += 5;\n"
+        "    printf(\"%d\\n\", x);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "15\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TheAddressOfAnArrayElementPointsAtThatElement) {
+    // tests/samples/deeptest3.fin:48-60. `&numbers[1]` is the address of one
+    // element and not of the array: a pointer to the array would read 10 here, and
+    // the write at the end would land on element 0.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let numbers <[int, 3]> = [10, 20, 30];\n"
+        "    let ptr <&int> = &numbers[1];\n"
+        "    printf(\"%d\\n\", *ptr);\n"
+        "    *ptr = 99;\n"
+        "    printf(\"%d %d %d\\n\", numbers[0], numbers[1], numbers[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "20\n10 99 30\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APointerToAWholeArrayIsIndexedThroughIt) {
+    // tests/samples/deeptest3.fin:105-117 and its note at :111. Both halves: the
+    // index goes through the pointer to the element, and an explicit `*` gives the
+    // whole array back as a value that can be copied into an `[int, 3]`.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let my_array <[int, 3]> = [10, 20, 30];\n"
+        "    let ptr_to_arr <&[int, 3]> = &my_array;\n"
+        "    printf(\"%d %d\\n\", ptr_to_arr[0], ptr_to_arr[2]);\n"
+        "    let copy_of_arr <[int, 3]> = *ptr_to_arr;\n"
+        "    printf(\"%d\\n\", copy_of_arr[1]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10 30\n20\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWriteThroughAnArrayPointerReachesTheArray) {
+    // The copy at the end of the sample's version hides this: if `ptr_to_arr[0]`
+    // read through a *copy* of the array, everything above still prints the same
+    // numbers and this prints 10.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [10, 20, 30];\n"
+        "    let p <&[int, 3]> = &a;\n"
+        "    p[0] = 77;\n"
+        "    printf(\"%d %d\\n\", a[0], p[0]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "77 77\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APointerToAPointerIsDereferencedTwice) {
+    // tests/samples/deeptest3.fin:119-137, including the sample's note at :129
+    // that `<&(&int)>` is admitted as the same type as `<&&int>` -- so both
+    // spellings are declared here and both are dereferenced twice.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 10;\n"
+        "    let p <&int> = &x;\n"
+        "    let pp <&&int> = &p;\n"
+        "    let pp_3 <&(&int)> = &p;\n"
+        "    **pp = 500;\n"
+        "    printf(\"%d %d %d\\n\", x, **pp, **pp_3);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "500 500 500\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, NullComparesEqualToNullAndAnAddressDoesNot) {
+    // tests/samples/deeptest3.fin:62-76. `null` reaches the callee as an argument,
+    // which is the case that has no declared type at the literal to take a
+    // representation from -- it is one word of zeroes whatever it was going to
+    // point at.
+    const Built b = build(std::string(kPrintf) +
+        "fun print_if_exists(val_ptr: &int) <noret> {\n"
+        "    if (val_ptr == null) {\n"
+        "        printf(\"No value provided.\\n\");\n"
+        "    } else {\n"
+        "        printf(\"Value is: %d\\n\", *val_ptr);\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <int> = 500;\n"
+        "    print_if_exists(&a);\n"
+        "    print_if_exists(null);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "Value is: 500\nNo value provided.\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoPointersToTheSameObjectCompareEqual) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let y <int> = 1;\n"
+        "    let p <&int> = &x;\n"
+        "    let q <&int> = &x;\n"
+        "    let r <&int> = &y;\n"
+        "    if (p == q) { printf(\"same\\n\"); }\n"
+        "    if (p != r) { printf(\"different\\n\"); }\n"
+        "    if (p != null) { printf(\"live\\n\"); }\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    // `p != r` and not `x != y`: two objects with equal contents are two
+    // addresses, so a pointer comparison that compared pointees would print
+    // nothing here and be wrong in a way `p == q` cannot catch.
+    EXPECT_EQ(b.out, "same\ndifferent\nlive\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFieldIsReadAndWrittenThroughAPointerWithADot) {
+    // tests/samples/deeptest3.fin:34-46 and the note at :39: `.` on a pointer is
+    // what C spells `->`. The write comes first so that the read cannot be
+    // answered from the literal.
+    const Built b = build(std::string(kPrintf) +
+        "struct Player { pub hp <int>, pub score <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <&Player> = new Player{hp: 100, score: 0};\n"
+        "    p.score = 50;\n"
+        "    printf(\"Player HP: %d, Score: %d\\n\", p.hp, p.score);\n"
+        "    delete p;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "Player HP: 100, Score: 50\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFieldIsWrittenThroughAPointerToALocal) {
+    // The same rule with the pointee on the stack, so that the field write is
+    // observable through the *original* and not only through the pointer.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { pub a <int>, pub b <int> }\n"
+        "fun bump(q: &P) <noret> { q.a = q.a + 1; }\n"
+        "fun main() <noret> {\n"
+        "    let v <P> = P{a: 1, b: 2};\n"
+        "    bump(&v);\n"
+        "    printf(\"%d %d\\n\", v.a, v.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructIsCopiedOutOfAPointer) {
+    // `*p` on a pointer to a struct is the struct by value, so the copy does not
+    // change when the original does.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { pub a <int>, pub b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let v <P> = P{a: 1, b: 2};\n"
+        "    let p <&P> = &v;\n"
+        "    let copy <P> = *p;\n"
+        "    p.a = 9;\n"
+        "    printf(\"%d %d %d\\n\", v.a, copy.a, copy.b);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9 1 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AChainOfPointerFieldsReachesTheFarValue) {
+    // tests/samples/deeptest3.fin:83-103. `head.next.value` with both links on the
+    // heap: two auto-dereferences in one expression, and the sample's own note
+    // that C would need `head->next->value`.
+    const Built b = build(std::string(kPrintf) +
+        "struct Node { pub value <int>, pub next <&Node> = null }\n"
+        "fun main() <noret> {\n"
+        "    let head <&Node> = new Node{value: 1};\n"
+        "    let second <&Node> = new Node{value: 2};\n"
+        "    head.next = second;\n"
+        "    printf(\"Head: %d\\n\", head.value);\n"
+        "    printf(\"Next: %d\\n\", head.next.value);\n"
+        "    delete second;\n"
+        "    delete head;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "Head: 1\nNext: 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AThreeLinkChainReachesTheLastValue) {
+    // Two links is the shortest chain that can be wrong; three is the shortest
+    // that can be wrong in a way two cannot -- a `.next` that resolved against the
+    // first node rather than the one it was handed prints 2 here and 2 there.
+    const Built b = build(std::string(kPrintf) +
+        "struct Node { pub value <int>, pub next <&Node> = null }\n"
+        "fun main() <noret> {\n"
+        "    let c <&Node> = new Node{value: 3};\n"
+        "    let b <&Node> = new Node{value: 2};\n"
+        "    let a <&Node> = new Node{value: 1};\n"
+        "    b.next = c;\n"
+        "    a.next = b;\n"
+        "    printf(\"%d %d %d\\n\", a.value, a.next.value, a.next.next.value);\n"
+        "    delete c;\n"
+        "    delete b;\n"
+        "    delete a;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ASelfReferentialPointerFieldDefaultsToNull) {
+    // tests/samples/deeptest3.fin:78-81 (`pub next <&Node> = null // Default to
+    // null`). Two rules at once: a struct may hold a pointer to itself -- which is
+    // the case that needs the pointee's *body* not to exist yet when the field is
+    // mapped -- and the default is the null pointer.
+    const Built b = build(std::string(kPrintf) +
+        "struct Node { pub value <int>, pub next <&Node> = null }\n"
+        "fun main() <noret> {\n"
+        "    let n <Node> = Node{value: 7};\n"
+        "    if (n.next == null) { printf(\"null %d\\n\", n.value); } else { printf(\"set\\n\"); }\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "null 7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APointerFieldInAStructRoundTrips) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Holder { pub p <&int> }\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 41;\n"
+        "    let h <Holder> = Holder{p: &x};\n"
+        "    *h.p = 42;\n"
+        "    printf(\"%d %d\\n\", x, *h.p);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42 42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayOfPointersIsIndexedAndDereferenced) {
+    // `[&int, 2]` is two words, and each is a pointer to somewhere else. The
+    // element type being a pointer is what makes the stride a word rather than an
+    // int -- `*ps[1]` reading 1 would mean the stride was four bytes.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let y <int> = 2;\n"
+        "    let ps <[&int, 2]> = [&x, &y];\n"
+        "    *ps[1] = 20;\n"
+        "    printf(\"%d %d %d\\n\", *ps[0], *ps[1], y);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 20 20\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APointerToACharAddressesOneByte) {
+    // The pointee decides the width of the load and the store. An `&char` that had
+    // been read as an `&int` would write four bytes into a one-byte slot, which on
+    // this stack frame is the neighbouring variable -- so `keep` is here to be
+    // overwritten if that happens.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let keep <int> = 1234;\n"
+        "    let c <char> = 'A';\n"
+        "    let p <&char> = &c;\n"
+        "    *p = 'B';\n"
+        "    printf(\"%d %d %d\\n\", c, *p, keep);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "66 66 1234\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APointerToAFloatAddressesAFloat) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let f <float> = 1.5;\n"
+        "    let p <&float> = &f;\n"
+        "    *p = 2.5;\n"
+        "    printf(\"%.2f %.2f\\n\", f, *p);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2.50 2.50\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APointerToABoolAddressesABool) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let t <bool> = true;\n"
+        "    let p <&bool> = &t;\n"
+        "    *p = false;\n"
+        "    if (*p) { printf(\"yes\\n\"); } else { printf(\"no %d\\n\", t); }\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "no 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, NewOfAScalarStoresItsArgument) {
+    // tests/samples/variables.fin:28 (`let m <&int> = new int(5);`). `new int(5)`
+    // is an `&int` and not an `int`: the analyzer types it that way, and the
+    // declaration it is written into says so.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <&int> = new int(5);\n"
+        "    printf(\"%d\\n\", *p);\n"
+        "    *p = 6;\n"
+        "    printf(\"%d\\n\", *p);\n"
+        "    delete p;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, NewOfAStructRunsItsFieldDefaults) {
+    // `new` builds the same value a literal does, defaults included -- it is the
+    // same struct literal with a different home. A `new` that memset the
+    // allocation instead would print 0 for `hp`.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { pub hp <int> = 100, pub score <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <&P> = new P{score: 3};\n"
+        "    printf(\"%d %d\\n\", p.hp, p.score);\n"
+        "    delete p;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "100 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, NewOfAStructWithNothingWrittenIsZeroed) {
+    const Built b = build(std::string(kPrintf) +
+        "struct P { pub a <int>, pub b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <&P> = new P{};\n"
+        "    printf(\"%d %d\\n\", p.a, p.b);\n"
+        "    delete p;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    // Zero and not whatever malloc handed back: an allocation this file does not
+    // write is still a value the program can read, and `new P{}` says every field
+    // is defaulted rather than that none of them are.
+    EXPECT_EQ(b.out, "0 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, NewAndDeleteRoundTripManyTimes) {
+    // What `delete` actually has to get right is not observable in one iteration:
+    // a `free` of the wrong pointer, or of a pointer never returned by `malloc`,
+    // is a corrupted heap and glibc aborts on it. A thousand round trips also
+    // means a `delete` that freed nothing would have to be caught by the allocator
+    // rather than by the test, so the total is printed as well.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { pub a <int> }\n"
+        "fun main() <noret> {\n"
+        "    let total <int> = 0;\n"
+        "    for (let i <int> = 0; i < 1000; i++) {\n"
+        "        let p <&P> = new P{a: i};\n"
+        "        total = total + p.a;\n"
+        "        delete p;\n"
+        "    }\n"
+        "    printf(\"%d\\n\", total);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "499500\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APointerReturnedFromACallIsUsedByTheCaller) {
+    const Built b = build(std::string(kPrintf) +
+        "struct P { pub hp <int> }\n"
+        "fun make(h: int) <&P> { return new P{hp: h}; }\n"
+        "fun main() <noret> {\n"
+        "    let p <&P> = make(3);\n"
+        "    printf(\"%d\\n\", p.hp);\n"
+        "    delete p;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalsAddressCrossesAFunctionBoundary) {
+    // A global's home is in the object file rather than a frame, and everything
+    // downstream of an address treats the two alike -- which this checks by
+    // writing through the returned pointer and reading the global back by name.
+    const Built b = build(std::string(kPrintf) +
+        "let G <int> = 7;\n"
+        "fun get() <&int> { return &G; }\n"
+        "fun main() <noret> {\n"
+        "    let p <&int> = get();\n"
+        "    *p = 11;\n"
+        "    printf(\"%d %d\\n\", G, *get());\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "11 11\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalPointerHoldsAnAddressAcrossCalls) {
+    const Built b = build(std::string(kPrintf) +
+        "let G <int> = 7;\n"
+        "let GP <&int> = null;\n"
+        "fun point() <noret> { GP = &G; }\n"
+        "fun main() <noret> {\n"
+        "    if (GP == null) { printf(\"start null\\n\"); }\n"
+        "    point();\n"
+        "    *GP = 12;\n"
+        "    printf(\"%d\\n\", G);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "start null\n12\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, SizeofAPointerIsThePointerWidth) {
+    // One word whatever it points at, and the same word for a pointer to a
+    // pointer. Read from the module's own DataLayout like every other sizeof, so
+    // this is 8 because the target says so rather than because this file does.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d %d\\n\", sizeof(&int), sizeof(&&int), sizeof(&[int, 64]));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "8 8 8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TheAddressOfAValueWithNoHomeIsRefused) {
+    // `&make()` has nothing to take the address of. Putting the returned value in
+    // a fresh slot and pointing at that would compile and would answer a lifetime
+    // question nobody has asked -- how long the slot lives, and what the pointer
+    // means after that.
+    const Built b = build(std::string(kPrintf) +
+        "fun make() <int> { return 5; }\n"
+        "fun main() <noret> {\n"
+        "    let p <&int> = &make();\n"
+        "    printf(\"%d\\n\", *p);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("address"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TheAddressOfAStringLiteralIsRefused) {
+    // tests/samples/variables.fin:11 (`let Complex <&string> = &"Hello world";`).
+    // A `string` is already a pointer to bytes here, so `&"..."` is either that
+    // same pointer -- making `*Complex` a char and `&string` the same
+    // representation as `string` -- or the address of an anonymous cell holding
+    // it, making `*Complex` the string. Nothing in the corpus reads `Complex`, so
+    // both readings run, and picking one would be inventing the answer.
+    const Built b = build(std::string(kPrintf) +
+        "let Complex <&string> = &\"Hello world\";\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, IndexingAPointerToAScalarIsRefused) {
+    // `p[0]` on a `&int` is pointer arithmetic, and whether a pointer strides by
+    // an element or a byte is the same unmade ruling that refuses `p++`
+    // (AnIncrementOnAPointerIsRefused). A pointer to an *array* is not this case
+    // and is lowered: its extent is written down, so the index is into a known
+    // shape rather than off the end of an unknown one.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let p <&int> = &x;\n"
+        "    printf(\"%d\\n\", p[0]);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APointerAsAConditionIsRefused) {
+    // `if (p)` needs "a pointer is true when it is not null" to be a rule, and
+    // Fin's nullability rules are not settled -- the corpus writes `p == null`
+    // every time it asks the question (deeptest3.fin:64).
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let p <&int> = &x;\n"
+        "    if (p) { printf(\"y\\n\"); }\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
