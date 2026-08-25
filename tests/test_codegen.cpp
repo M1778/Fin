@@ -238,6 +238,19 @@ std::string codegenTrace(const std::string& code) {
     return stripAnsi(r.err);
 }
 
+// How many times `needle` appears in `haystack`. Used where the interesting fact is
+// a count and not a presence: a template instantiated twice at one type has to be
+// emitted *once*, and a test that only looked for the name would pass either way.
+size_t occurrences(const std::string& haystack, const std::string& needle) {
+    if (needle.empty()) return 0;
+    size_t n = 0;
+    for (size_t at = haystack.find(needle); at != std::string::npos;
+         at = haystack.find(needle, at + needle.size())) {
+        ++n;
+    }
+    return n;
+}
+
 Compiled compileOnly(const std::string& code, const fs::path& objectPath = {}) {
     Compiled c;
     fs::path srcPath = uniqueTempPath("fin_c", ".fin");
@@ -3849,4 +3862,351 @@ BACKEND_TEST(Soundness_Codegen, AnAttributeOnAGenericStructsMemberIsRefusedAtThe
         "fun main() <noret> { printf(\"ok\\n\"); }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("debug"), std::string::npos) << b.why();
+}
+
+// --- a generic function ------------------------------------------------------
+//
+// Monomorphisation, the same strategy the struct templates already use and for the
+// same stated reason: struct_methods.fin:6 calls `T` "a Monomorphization Generic
+// type because its the default generic type we use", and ADR 0002 carries
+// pyprototype's rule forward -- erasure is what an erasure-*marker* constraint
+// selects, and a bare `<T>` has none. So one body per distinct binding, laid out as
+// if the argument had been written in place of the parameter.
+//
+// What the corpus asks for:
+//
+//   `fun swap<T>(a: &T, b: &T) <noret>` called as `swap(&a, &b)` with no turbofish
+//   (simple_pointers.fin:5,18) -- the binding is inferred from the arguments, and
+//   through a pointer, so the parameter's written type is a decoration over `T`
+//   rather than `T` itself.
+//
+//   `fun normal_generics<T>(a: T) <T>` (generics_interfaces.fin:12), whose own
+//   comment says "Monomorphism" -- `T` in the return position, which is why the
+//   old refusal landed on the signature rather than on the body.
+//
+//   `fun using_erasure_generics<T: Castable, U: Castable>` (generics_interfaces.fin:8)
+//   -- the other branch, which ADR 0002 says is a raw pointer. Still refused, by
+//   name, because a monomorphised body for it would be a different program that
+//   happens to agree on these arguments.
+//
+// The binding is resolved *here* and not read off the analyzer, which is what makes
+// the turbofish work at all: a free function's turbofish binds nothing in
+// Analyzer_Expr (booked), so the backend that trusted it would instantiate at
+// whatever the argument happened to be.
+//
+// An instance is weak (linkonce_odr), not external. Two objects that each wrote the
+// template and each instantiated it at `int` publish one symbol between them, which
+// is the C++ template bargain: identical bodies, one copy, and the linker picks. An
+// external instance would make the second object a duplicate-symbol error.
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionNobodyCallsLowersToNothing) {
+    // The declaration is no longer where a generic function is refused, because a
+    // template is not code -- it is a recipe, and monomorphisation means no
+    // instantiation, no body. Inverted from the old signature refusal, which fired
+    // on generics_interfaces.fin's uncalled `normal_generics`.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "fun ident<T>(a: T) <T> { return a; }\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_EQ(trace.find("declared ident"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("not lowered yet"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionsTypeArgumentIsInferredFromItsArgument) {
+    const Built b = build(std::string(kPrintf) +
+        "fun ident<T>(a: T) <T> { return a; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", ident(5)); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionsTurbofishBindsItsTypeArgument) {
+    // Written, not inferred. Both spellings have to reach the same instance, and the
+    // written one has to work even though the analyzer's own turbofish binds nothing.
+    const Built b = build(std::string(kPrintf) +
+        "fun ident<T>(a: T) <T> { return a; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", ident::<int>(5)); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoBindingsOfOneGenericFunctionAreTwoFunctions) {
+    // The whole of monomorphisation in one test: `a + a` is an integer add in one
+    // instance and a float add in the other, and a backend that emitted one body
+    // would have to pick one of them and be wrong about the other.
+    const Built b = build(std::string(kPrintf) +
+        "fun twice<T>(a: T) <T> { return a + a; }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %f\\n\", twice(21), twice(1.5));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42 3.000000\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoBindingsAreTwoNamesInTheTrace) {
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "fun twice<T>(a: T) <T> { return a + a; }\n"
+        "fun main() <noret> { printf(\"%d %f\\n\", twice(21), twice(1.5)); }\n");
+    EXPECT_NE(trace.find("declared twice<int>"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("declared twice<double>"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, OneBindingCalledTwiceIsEmittedOnce) {
+    // The cache, which is what stops the second call from emitting a second body
+    // under a name LLVM would then have to unique -- and a uniqued second copy is a
+    // symbol nobody calls plus a program that is twice the size it should be.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "fun ident<T>(a: T) <T> { return a; }\n"
+        "fun main() <noret> { printf(\"%d %d\\n\", ident(3), ident(4)); }\n");
+    EXPECT_EQ(occurrences(trace, "declared ident<int>"), 1u) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionsPointerParameterSwapsThroughIt) {
+    // simple_pointers.fin:5,18, less the `delete &temp` on line 10 -- `delete` is a
+    // library call (ADR 0003) and not part of this. The binding is inferred through
+    // the decoration: the argument is a `&int` and `T` is the `int` inside it.
+    const Built b = build(std::string(kPrintf) +
+        "fun swap<T>(a: &T, b: &T) <noret> {\n"
+        "    let temp <T> = *b;\n"
+        "    *b = *a;\n"
+        "    *a = temp;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <int> = 10;\n"
+        "    let b <int> = 20;\n"
+        "    swap(&a, &b);\n"
+        "    printf(\"a = %d, b = %d\\n\", a, b);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "a = 20, b = 10\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionBindsThroughAGenericStruct) {
+    // `Box<T>` in a parameter position: the argument is a `Box<int>`, so `T` is what
+    // that instantiation bound its own parameter to. Read off the instantiation's
+    // substitution rather than re-derived, which is what keeps `Box<Colour>` from
+    // binding `T` to `int`.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun unbox<T>(b: Box<T>) <T> { return b.val; }\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 42 };\n"
+        "    printf(\"%d\\n\", unbox(b));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFunctionBindingSpellsAStructTheWayAWrittenOneDoes) {
+    // Why the instance is keyed on a Fin-style spelling of the representation and not
+    // on an LLVM one. A binding inferred from an argument cannot recover the written
+    // name, so it has to be re-derived -- and if it were derived as `i32`, the
+    // `Box<T>` inside the instance's body would instantiate a *second* `Box<i32>`
+    // with a layout identical to the `Box<int>` main already has. Two names for one
+    // layout is two structs that are not assignable to each other.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun rebox<T>(v: T) <int> {\n"
+        "    let b <Box<T>> = Box::<T>{ val: v };\n"
+        "    return 1;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let w <Box<int>> = Box::<int>{ val: 1 };\n"
+        "    printf(\"%d\\n\", rebox(w.val));\n"
+        "}\n");
+    EXPECT_EQ(occurrences(trace, "instantiated struct Box<int>"), 1u) << trace;
+    EXPECT_EQ(trace.find("Box<i32>"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionCanRecurse) {
+    // The instance has to be registered before its own body is emitted, or the
+    // recursive call inside it asks for an instantiation that is already in progress
+    // and starts a second one -- which does not terminate.
+    const Built b = build(std::string(kPrintf) +
+        "fun down<T>(n: T) <T> {\n"
+        "    if (n <= 0) { return n; }\n"
+        "    return down(n - 1);\n"
+        "}\n"
+        "fun main() <noret> { printf(\"%d\\n\", down(5)); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ARecursiveGenericFunctionIsEmittedOnce) {
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "fun down<T>(n: T) <T> {\n"
+        "    if (n <= 0) { return n; }\n"
+        "    return down(n - 1);\n"
+        "}\n"
+        "fun main() <noret> { printf(\"%d\\n\", down(5)); }\n");
+    EXPECT_EQ(occurrences(trace, "declared down<int>"), 1u) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionsInstanceIsOneSymbolAcrossTwoObjects) {
+    // The linkage decision, which is only observable across a link. Both objects
+    // wrote the template and both instantiated it at `int`; an external definition in
+    // each would be a duplicate-symbol error, and there is no third place to put the
+    // instance because neither object knows about the other.
+    const fs::path libObj = uniqueTempPath("fin_lib_gi", ".o");
+    const fs::path mainObj = uniqueTempPath("fin_main_gi", ".o");
+    const fs::path exe = uniqueTempPath("fin_linked_gi");
+
+    const Compiled lib = compileOnly(
+        "fun ident<T>(a: T) <T> { return a; }\n"
+        "fun libval() <int> { return ident(21); }\n", libObj);
+    ASSERT_EQ(lib.exitCode, 0) << lib.why();
+    const Compiled mainPart = compileOnly(std::string(kPrintf) +
+        "@define libval() <int>;\n"
+        "fun ident<T>(a: T) <T> { return a; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", ident(libval()) * 2); }\n", mainObj);
+    ASSERT_EQ(mainPart.exitCode, 0) << mainPart.why();
+
+    const char* fromEnv = std::getenv("FIN_CC");
+    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
+    const fs::path outPath = uniqueTempPath("fin_linked_gi_out");
+    const std::string link = shellQuoteLocal(cc) + " " + shellQuoteLocal(libObj.string()) +
+                             " " + shellQuoteLocal(mainObj.string()) + " -o " +
+                             shellQuoteLocal(exe.string());
+    ASSERT_EQ(std::system(link.c_str()), 0) << link;
+
+    const std::string run = shellQuoteLocal(exe.string()) + " > " +
+                            shellQuoteLocal(outPath.string()) + " 2>&1";
+    std::system(run.c_str());
+    EXPECT_EQ(readWholeFile(outPath.string()), "42\n");
+
+    std::error_code ec;
+    for (const fs::path& p : {libObj, mainObj, exe, outPath}) fs::remove(p, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, ATypeArgumentThatNoArgumentMentionsIsRefused) {
+    // `T` appears in no parameter, so there is nothing to infer it from. Refused
+    // naming the parameter, because the alternative is picking a type -- and a
+    // function instantiated at a type the program never named is a function the
+    // program did not write.
+    const Built b = build(std::string(kPrintf) +
+        "fun nothing<T>() <int> { return 1; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", nothing()); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("'T'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ATypeArgumentThatNoArgumentMentionsTakesATurbofish) {
+    // The other half: written, it is not inferred at all, so the same function is
+    // fine. This pair is why the turbofish is read here rather than treated as
+    // redundant with inference.
+    const Built b = build(std::string(kPrintf) +
+        "fun nothing<T>() <int> { return 1; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", nothing::<int>()); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnErasureMarkedGenericFunctionIsRefused) {
+    // generics_interfaces.fin:8. ADR 0002: an erasure-marker constraint on any one
+    // parameter selects erasure, and an erased generic is a raw pointer. That is a
+    // different representation, not a different spelling, so monomorphising it would
+    // compile and be a different program -- one that happens to agree here and
+    // disagree wherever the erased pointer is what the program is about.
+    const Built b = build(std::string(kPrintf) +
+        "fun erased<T: Castable>(a: T) <int> { return cast<int>(a); }\n"
+        "fun main() <noret> { printf(\"%d\\n\", erased(5)); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("Castable"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnErasureMarkedGenericStructIsRefused) {
+    // nullifier.fin:10's `struct maybe<T: Castable>`, which was being monomorphised
+    // silently -- the same rule as the function's, and the same reason. Refused at
+    // the declaration, because a marker is a property of the template rather than of
+    // one instantiation.
+    const Built b = build(std::string(kPrintf) +
+        "struct maybe<T: Castable> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("Castable"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AConstraintThatIsNotTheErasureMarkerStillMonomorphises) {
+    // A constraint set is a bound on what may be bound and not a representation
+    // (ADR 0018), so the backend gets a concrete type either way and the constraint is
+    // the analyzer's business. Refusing every constraint would have taken `sort<T:
+    // Number>` (arrays.fin:9) and `number2str<T: Number>` (types.fin:106) with it --
+    // written with `any` here because `type Number = int | float` is a type alias and
+    // those are a unit of their own, so the corpus's own spelling cannot reach the
+    // backend yet.
+    const Built b = build(std::string(kPrintf) +
+        "fun addup<T: any>(a: T) <T> { return a + a; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", addup(21)); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionsLlvmNameIsRefused) {
+    // Honoured on a struct template, refused on a function one, and the difference is
+    // the whole reason the struct rename was safe: a struct type's name reaches no
+    // object file, so two instantiations asking for one name are uniqued. A function's
+    // name *is* its symbol, so one name over two instances is either a duplicate
+    // symbol or a silent `foo.1` that nobody can call.
+    const Built b = build(std::string(kPrintf) +
+        "#[llvm_name=\"fin_ident\"]\n"
+        "fun ident<T>(a: T) <T> { return a; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", ident(5)); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("llvm_name"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnEnumBindingSharesTheIntegerInstance) {
+    // A fieldless enum *is* an `int` in this file, so `ident(Red)` and `ident(3)` are
+    // one instance -- which is the right answer for a function (the emitted code is
+    // identical) and deliberately not the one the struct table gives, where
+    // `Box<Colour>` and `Box<int>` are two names for one layout so that a diagnostic
+    // can say which the program wrote. The asymmetry is recorded here because it
+    // looks like an inconsistency and is not.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "enum Colour { Red = 1, Green }\n"
+        "fun ident<T>(a: T) <T> { return a; }\n"
+        "fun main() <noret> { printf(\"%d %d\\n\", ident(Red), ident(3)); }\n");
+    EXPECT_EQ(occurrences(trace, "declared ident<int>"), 1u) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionsBodyIsCheckedAtEachBinding) {
+    // A template whose body is only lowerable for *some* arguments refuses at the
+    // instantiation and not at the declaration, which is the opposite of where a
+    // method or an attribute refuses. `cast<int>` of a float is not lowered yet, so
+    // the `double` instance is the one that fails -- and it says so at the call.
+    const Built b = build(std::string(kPrintf) +
+        "fun asint<T>(a: T) <int> { return cast<int>(a); }\n"
+        "fun main() <noret> { printf(\"%d\\n\", asint(1.5)); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("conversion"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionInstantiatedAtAStructPassesItByValue) {
+    // A struct binding, which is the case where the instance's signature is not a
+    // scalar and the aggregate has to survive being a parameter. Fin-to-Fin, so the
+    // LLVM aggregate is the whole ABI and both sides are emitted here.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point { x <int>, y <int> }\n"
+        "fun first<T>(a: T) <T> { return a; }\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 3, y: 4 };\n"
+        "    let q <Point> = first(p);\n"
+        "    printf(\"%d %d\\n\", q.x, q.y);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 4\n") << b.why();
 }

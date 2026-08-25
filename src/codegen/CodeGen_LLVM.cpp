@@ -340,6 +340,33 @@ public:
     void setBindings(const Substitution* bindings) { bindings_ = bindings; }
     const Substitution* bindings() const { return bindings_; }
 
+    // The binding for a written type, when the node is an undecorated type-parameter
+    // name and a substitution is active -- and nullptr otherwise.
+    //
+    // Public because a *name* needs the same answer a representation does. Inside a
+    // template's body a written `T` reads back as "T", and an instantiation keyed on
+    // that is `Box<T>`: a struct keyed on the parameter's name rather than on what it
+    // was bound to, with a layout identical to the `Box<int>` the caller has and a
+    // different name, so the two are not assignable. See Emitter::spell.
+    const TypeBinding* boundBinding(const TypeNode* node) const {
+        if (!node || !bindings_) return nullptr;
+        // Only when the node carries nothing else. `T` decorated -- `&T`, `[T, 3]` --
+        // arrives as a Pointer- or ArrayTypeNode and reaches this same lookup through
+        // its pointee or element, so the decoration is applied to what T became rather
+        // than lost.
+        if (!node->generics.empty() || node->pointer_depth != 0 || node->is_array ||
+            node->is_nullable || node->is_prototype || !node->implements_list.empty() ||
+            node->array_size || dynamic_cast<const FunctionTypeNode*>(node) ||
+            dynamic_cast<const PointerTypeNode*>(node) ||
+            dynamic_cast<const ArrayTypeNode*>(node)) {
+            return nullptr;
+        }
+        for (const auto& binding : *bindings_) {
+            if (binding.first == node->name) return &binding.second;
+        }
+        return nullptr;
+    }
+
     // `allowIncomplete` admits a struct whose body is not set yet, and is passed
     // by exactly one caller: a pointer, for its immediate pointee. See mapPointer.
     std::optional<CgType> map(const TypeNode* node, bool allowIncomplete = false) const {
@@ -355,16 +382,7 @@ public:
         // arrives here as a Pointer- or ArrayTypeNode and reaches this same lookup
         // through its pointee or element, so the decoration is applied to what T
         // became rather than lost.
-        if (bindings_ && node->generics.empty() && node->pointer_depth == 0 &&
-            !node->is_array && !node->is_nullable && !node->is_prototype &&
-            node->implements_list.empty() && !node->array_size &&
-            !dynamic_cast<const FunctionTypeNode*>(node) &&
-            !dynamic_cast<const PointerTypeNode*>(node) &&
-            !dynamic_cast<const ArrayTypeNode*>(node)) {
-            for (const auto& binding : *bindings_) {
-                if (binding.first == node->name) return binding.second.type;
-            }
-        }
+        if (const TypeBinding* bound = boundBinding(node)) return bound->type;
 
         // A nullable, a function type, a prototype or a generic argument list all
         // mean "not this slice" rather than "the base name" -- silently dropping the
@@ -715,12 +733,28 @@ private:
     // The extent is included when there is one, because "a variable of type '[int]'"
     // and "of type '[int, 3]'" are refused for different reasons and only one of
     // them is a decision waiting on a ruling.
-    std::string typeName(const TypeNode* type) const {
+    std::string typeName(const TypeNode* type) const { return spell(type, false); }
+
+    // The same spelling with the active bindings applied, which is what an
+    // instantiation's *key* is built from.
+    //
+    // Two names for one written type, because the two readers want different things. A
+    // diagnostic wants what the program wrote -- "a parameter of type '&T'", under a
+    // caret pointing at the `&T` -- and a key wants what it became, or `Box<T>` inside
+    // `unbox<int>` would be a second struct with `Box<int>`'s layout and a different
+    // name. Both walk the same decorations, so they are one function with a flag rather
+    // than two that can drift.
+    std::string displayName(const TypeNode* type) const { return spell(type, true); }
+
+    std::string spell(const TypeNode* type, bool substituted) const {
         if (!type) return "<none>";
+        if (substituted) {
+            if (const TypeBinding* bound = types_.boundBinding(type)) return bound->display;
+        }
         if (auto* ptr = dynamic_cast<const PointerTypeNode*>(type))
-            return "&" + typeName(ptr->pointee.get());
+            return "&" + spell(ptr->pointee.get(), substituted);
         if (auto* arr = dynamic_cast<const ArrayTypeNode*>(type)) {
-            const std::string inner = typeName(arr->element_type.get());
+            const std::string inner = spell(arr->element_type.get(), substituted);
             uint64_t extent = 0;
             const bool fixed = arr->size &&
                                readConstant(*arr->size, extent) == ConstantRead::Ok;
@@ -735,7 +769,7 @@ private:
             name += "<";
             for (size_t i = 0; i < type->generics.size(); ++i) {
                 if (i) name += ", ";
-                name += typeName(type->generics[i].get());
+                name += spell(type->generics[i].get(), substituted);
             }
             name += ">";
         }
@@ -1119,7 +1153,41 @@ private:
     // fields, and whether it is empty). Checked at the declaration because a
     // `class Box<T>` is not going to become lowerable at `Box<int>`, and a
     // diagnostic at the declaration is where the reader can act on it.
-    bool lowerableTemplate(StructDeclaration& s) { return lowerableStruct(s); }
+    bool lowerableTemplate(StructDeclaration& s) {
+        if (!lowerableStruct(s)) return false;
+        return !hasErasureMarker(s, s.generic_params, "struct");
+    }
+
+    // `Castable` -- the erasure marker, and the reason it is refused rather than
+    // monomorphised. ADR 0002 carries two of pyprototype's lowering decisions forward
+    // deliberately: erasure is selected by the presence of an erasure-marker
+    // constraint on any one parameter, and an erased generic is represented as a raw
+    // pointer. That is a different representation and not a different spelling, so a
+    // monomorphised body for one is a *different program* -- it happens to agree
+    // wherever the argument is a scalar and disagrees wherever the erased pointer is
+    // what the code is about.
+    //
+    // One name, because one name is what the corpus writes:
+    // generics_interfaces.fin:8 (`<T: Castable, U: Castable>`), nullifier.fin:10,
+    // deeptest2.fin:13, lambdas.fin:69. The analyzer registers it as a type
+    // (Analyzer_Core.cpp:142, "Mock Castable") rather than the corpus declaring it,
+    // so there is nothing to read the marker-ness off except the name.
+    static bool isErasureMarker(const std::string& name) { return name == "Castable"; }
+
+    // Refused at the declaration and not at the instantiation, because a marker is a
+    // property of the template: `maybe<int>` is not going to stop being erased.
+    bool hasErasureMarker(ASTNode& node,
+                          const std::vector<std::unique_ptr<GenericParam>>& params,
+                          const char* what) {
+        for (auto& p : params) {
+            if (!p->constraint || !isErasureMarker(p->constraint->name)) continue;
+            unsupported(node,
+                        fmt::format("the erasure marker '{}' on '{}' of a generic {}",
+                                    p->constraint->name, p->name, what));
+            return true;
+        }
+        return false;
+    }
 
     // `Box<int>` -- one instantiation of one template, built the first time it is
     // asked for and then found.
@@ -1187,7 +1255,7 @@ private:
                 return false;
             }
             substitution.push_back(
-                {tmpl.generic_params[i]->name, TypeBinding{*mapped, typeName(arg)}});
+                {tmpl.generic_params[i]->name, TypeBinding{*mapped, displayName(arg)}});
         }
 
         // 2. The name. One name per distinct argument list, so asking twice finds the
@@ -1264,6 +1332,58 @@ private:
     // a layout. The comma-separated display names give that as long as a display name
     // is itself unambiguous, and they nest -- `Box<Box<int>>` contains the inner
     // instantiation's own mangled name.
+    // A representation spelled the way Fin would have written it.
+    //
+    // Needed because a binding inferred from an argument has no written spelling to
+    // carry: `ident(5)` names no type anywhere, and the instance still has to be keyed
+    // on something. Fin-style rather than LLVM-style, so that a `Box<T>` inside the
+    // instance's body spells the *same* instantiation a written `Box<int>` does -- key
+    // it as `i32` and the body would build a second `Box<i32>` with an identical layout
+    // and a different name, and two names for one layout are two types that are not
+    // assignable to each other.
+    //
+    // It is a key, so it has to stay injective in everything codegen distinguishes:
+    // width, signedness (`int` and `uint` are one i32 and must not be one instance),
+    // bool-ness, and a float against a double.
+    //
+    // A pointer with no pointee reads as `string`, which is what one nearly always is
+    // (the other is a bare `null`, which has no type until it reaches somewhere that
+    // has one). The two share a representation exactly, so sharing one instance is
+    // sound and only the name would be a small lie -- and the name of an instance is
+    // read by the trace and by nothing else.
+    static std::string cgDisplay(const CgType& t) {
+        switch (t.kind) {
+            case CgType::Kind::Void:
+                return "void";
+            case CgType::Kind::Int:
+                if (t.isBool) return "bool";
+                switch (t.bits) {
+                    case 8: return t.isSigned ? "char" : "byte";
+                    case 16: return t.isSigned ? "short" : "ushort";
+                    case 32: return t.isSigned ? "int" : "uint";
+                    case 64: return t.isSigned ? "long" : "ulong";
+                    default: break;
+                }
+                // No name in scalarByName's table has this width, so this cannot be
+                // spelled as a Fin type -- it is still a distinct key, which is what
+                // matters, and `int{7}` (bit-width annotations, a unit of its own) is
+                // where it would come from.
+                return fmt::format("{}{{{}}}", t.isSigned ? "int" : "uint", t.bits);
+            case CgType::Kind::Float:
+                return t.llvmType && t.llvmType->isFloatTy() ? "float" : "double";
+            case CgType::Kind::Ptr:
+                return t.pointee ? "&" + cgDisplay(*t.pointee) : "string";
+            case CgType::Kind::Struct:
+                // The instantiation's own mangled name for a generic one, so
+                // `Box<Colour>` stays `Box<Colour>`.
+                return t.structInfo ? t.structInfo->finName : "struct";
+            case CgType::Kind::Array:
+                return t.element ? fmt::format("[{}, {}]", cgDisplay(*t.element), t.extent)
+                                 : "[]";
+        }
+        return "?";
+    }
+
     static std::string mangledName(const std::string& templateName,
                                    const Substitution& substitution) {
         std::string out = templateName + "<";
@@ -1425,6 +1545,28 @@ private:
     void declareTopLevel(Program& program) {
         for (auto& stmt : program.statements) {
             if (auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
+                if (!fn->generic_params.empty()) {
+                    // A template, which has no signature to declare: `fun ident<T>(a: T)
+                    // <T>` names no LLVM type until a call says what T is. Registered
+                    // instead, and instantiated per distinct binding at the call.
+                    //
+                    // `#[llvm_name]` is refused here rather than honoured, and this is
+                    // the one place it differs from a struct template. A struct type's
+                    // name reaches no object file, so two instantiations asking for one
+                    // name are uniqued by LLVM and nothing observable changes. A
+                    // function's name *is* its symbol: one name over two instances is
+                    // either a duplicate definition or a silent `fin_ident.1` that
+                    // nobody can call.
+                    if (!fn->attributes.empty()) {
+                        unsupported(*fn,
+                                    fmt::format("the attribute '{}' on a generic function",
+                                                fn->attributes.front()->name));
+                        return;
+                    }
+                    if (hasErasureMarker(*fn, fn->generic_params, "function")) return;
+                    if (fn->body != nullptr) fnTemplates_[fn->name] = fn;
+                    continue;
+                }
                 // `#[llvm_name="dealloc"]` on a definition (stdlib/memory.fin:8), read
                 // the same way as on an `@define` -- and it matters more here. An
                 // extern's name is a promise about someone else's object file; a
@@ -1793,12 +1935,67 @@ private:
     void visit(FunctionDeclaration& node) override {
         if (node.body == nullptr) return;  // a declaration only; the prototype is enough
         if (!node.generic_params.empty()) {
-            unsupported(node, "a generic function");
+            // A template, and monomorphisation means a template is not code: one body
+            // per distinct binding, emitted where the binding is known. A template
+            // nobody calls emits nothing, which is why this is silent rather than a
+            // refusal -- it was a refusal, and it fired on generics_interfaces.fin's
+            // uncalled `normal_generics`.
             return;
         }
-        auto found = functions_.find(node.name);
+        emitBody(node, node.name);
+    }
+
+    // The emitter state one function body owns, saved and put back.
+    //
+    // An instantiation is emitted from the middle of a call, so the caller is mid-body:
+    // `builder_` points into a block that is still being filled, `currentFn_` is the
+    // caller's, and `scopes_` holds the caller's locals. The instance's body must see
+    // none of those -- a local called `temp` in the caller is not in scope inside the
+    // instance -- and every one of them has to be exactly as it was when the call
+    // resumes. A destructor rather than three assignments at the end, so that a refusal
+    // partway through the body cannot leave the caller's insert point in someone else's
+    // function.
+    class ScopedEmission {
+    public:
+        explicit ScopedEmission(Emitter& e)
+            : e_(e), block_(e.builder_.GetInsertBlock()),
+              point_(block_ ? e.builder_.GetInsertPoint() : llvm::BasicBlock::iterator()),
+              fn_(e.currentFn_), scopes_(std::move(e.scopes_)) {
+            e_.scopes_.clear();
+            e_.currentFn_ = nullptr;
+        }
+        ~ScopedEmission() {
+            e_.scopes_ = std::move(scopes_);
+            e_.currentFn_ = fn_;
+            if (block_) e_.builder_.SetInsertPoint(block_, point_);
+            else e_.builder_.ClearInsertionPoint();
+        }
+        ScopedEmission(const ScopedEmission&) = delete;
+        ScopedEmission& operator=(const ScopedEmission&) = delete;
+
+    private:
+        Emitter& e_;
+        llvm::BasicBlock* block_;
+        llvm::BasicBlock::iterator point_;
+        FnInfo* fn_;
+        std::vector<std::unordered_map<std::string, Local>> scopes_;
+    };
+
+    // One function's body, into the llvm::Function that `name` was declared under.
+    //
+    // Shared by the ordinary path and by an instantiation, which is the point: an
+    // instance is not a special kind of function, it is this function with the type
+    // parameters bound, so anything the ordinary path does for a body has to happen
+    // for an instance too or the two drift.
+    void emitBody(FunctionDeclaration& node, const std::string& name) {
+        auto found = functions_.find(name);
         if (found == functions_.end()) return;  // the refusal was already reported
         const FnInfo info = found->second;
+
+        // An instantiation is emitted from the middle of a call, so the caller's
+        // half-built block, its FnInfo and its scopes are all live and have to come
+        // back. The ordinary path enters with all three empty, where this is a no-op.
+        ScopedEmission resume(*this);
 
         auto* entry = llvm::BasicBlock::Create(ctx_, "entry", info.fn);
         builder_.SetInsertPoint(entry);
@@ -1844,8 +2041,233 @@ private:
         if (llvm::verifyFunction(*info.fn, &llvm::errs())) {
             failed_ = true;
             diag_.reportError(node.loc,
-                              fmt::format("codegen: emitted invalid IR for '{}'", node.name));
+                              fmt::format("codegen: emitted invalid IR for '{}'", name));
         }
+    }
+
+    // `ident<int>` -- one instantiation of one function template, built the first time
+    // it is asked for and then found.
+    //
+    // The same three steps as instantiateGeneric's, ordered for the same reason: the
+    // bindings have to exist before the signature can be built, and the signature has
+    // to be registered before the body is emitted -- `return down(n - 1)` asks for the
+    // instantiation it is inside, and finds the name step 2 put there rather than
+    // starting a second one that never ends.
+    bool instantiateFunction(FunctionDeclaration& tmpl, const Substitution& substitution,
+                             const std::string& key) {
+        // 1. The bindings, stored before anything is emitted. The TypeMapper holds a
+        //    pointer to them for the whole of the signature and the body, and a body
+        //    may instantiate further templates into this same map -- which is why the
+        //    storage is a member and not a local, and why a node-based map.
+        fnInstances_[key] = substitution;
+        ScopedBindings bound(types_, &fnInstances_[key]);
+
+        // 2. The signature, under the mangled name. `T` in a parameter or return
+        //    position resolves through the bindings, so this is the ordinary path with
+        //    the parameters substituted -- including every refusal it has, which is how
+        //    an instance whose signature cannot be lowered says so at the call.
+        declareFunction(tmpl, key, key, tmpl.params, tmpl.return_type.get(),
+                        /*isVarArg=*/false, /*isExtern=*/false);
+        auto found = functions_.find(key);
+        if (found == functions_.end()) return false;  // declareFunction reported
+
+        // Weak, not external. Two objects that each wrote this template and each
+        // instantiated it at the same arguments both publish this symbol, and there is
+        // no third place to put it -- neither object knows the other exists. So the C++
+        // template bargain: identical bodies, one copy kept, the linker picks. An
+        // external definition in each would make the second a duplicate-symbol error,
+        // which is a link failure for a program that is correct.
+        found->second.fn->setLinkage(llvm::GlobalValue::LinkOnceODRLinkage);
+
+        // 3. The body, with the parameters bound.
+        emitBody(tmpl, key);
+        return !failed_;
+    }
+
+    // One parameter's written type against the argument's actual one, binding whatever
+    // type parameters the written type mentions.
+    //
+    // Structural and one-directional: the written type is the pattern, the CgType is the
+    // fact. A bare `T` binds. `&T` requires a pointer and recurses on what it points at,
+    // which is what simple_pointers.fin:18 needs -- `swap(&a, &b)` passes a `&int` and
+    // `T` is the `int` inside it. `[T, 3]` recurses on the element. `Box<T>` requires
+    // that struct and reads `T` off the *instantiation's own* substitution, so
+    // `Box<Colour>` binds T to Colour rather than to the `int` the two share.
+    //
+    // Nothing is checked here. A written `int` against an argument that is a double is
+    // the analyzer's business, and the conversion at the call does the widening it
+    // permits. First binding wins where a parameter appears twice, which is what the
+    // non-generic path does with a declared type: `same<T>(a: T, b: T)` called at
+    // (int, double) instantiates at int and converts the second argument.
+    void unifyBinding(const TypeNode* pattern, const TypeBinding& actual,
+                      const std::vector<std::unique_ptr<GenericParam>>& params,
+                      Substitution& out) {
+        if (!pattern) return;
+        if (auto* ptr = dynamic_cast<const PointerTypeNode*>(pattern)) {
+            if (!actual.type.isPointer() || !actual.type.pointee) return;
+            const CgType& inner = *actual.type.pointee;
+            unifyBinding(ptr->pointee.get(), TypeBinding{inner, cgDisplay(inner)}, params,
+                         out);
+            return;
+        }
+        if (auto* arr = dynamic_cast<const ArrayTypeNode*>(pattern)) {
+            if (!actual.type.isArray() || !actual.type.element) return;
+            const CgType& inner = *actual.type.element;
+            unifyBinding(arr->element_type.get(), TypeBinding{inner, cgDisplay(inner)},
+                         params, out);
+            return;
+        }
+        if (!pattern->generics.empty()) {
+            // The argument is an instantiation and already knows what its own parameters
+            // became, so the inner binding is read off it rather than re-derived -- and
+            // that carries the display the struct was instantiated under, which is the
+            // one a diagnostic and the instance's key both want.
+            const StructInfo* info = actual.type.structInfo;
+            if (!info || info->substitution.size() != pattern->generics.size()) return;
+            for (size_t i = 0; i < pattern->generics.size(); ++i) {
+                unifyBinding(pattern->generics[i].get(), info->substitution[i].second,
+                             params, out);
+            }
+            return;
+        }
+        // An undecorated name: a type parameter's, or a concrete type's. Decorated with
+        // anything this file does not lower (`T?`, a prototype, an `implements` list) it
+        // binds nothing, and the caller then refuses for the parameter that stayed
+        // unbound -- which names the thing that is actually missing.
+        if (pattern->pointer_depth != 0 || pattern->is_array || pattern->is_nullable ||
+            pattern->is_prototype || !pattern->implements_list.empty() ||
+            pattern->array_size || dynamic_cast<const FunctionTypeNode*>(pattern)) {
+            return;
+        }
+        for (auto& p : params) {
+            if (p->name != pattern->name) continue;
+            for (auto& already : out) {
+                if (already.first == p->name) return;
+            }
+            out.push_back({p->name, actual});
+            return;
+        }
+    }
+
+    // A call to a generic function: resolve the bindings, instantiate, call.
+    //
+    // The bindings are resolved *here* rather than read off the analyzer, and that is
+    // what makes the turbofish work at all -- a free function's turbofish binds nothing
+    // in Analyzer_Expr (booked), so a backend that trusted the analyzer's answer would
+    // instantiate `ident::<long>(5)` at int.
+    void emitGenericCall(FunctionCall& node, FunctionDeclaration& tmpl) {
+        for (auto& p : tmpl.params) {
+            if (!p->is_vararg) continue;
+            // No corpus site, and nothing to infer from: a `...` position has no
+            // declared type for a binding to unify against.
+            unsupported(*p, fmt::format("'...' on the generic function '{}'", tmpl.name));
+            return;
+        }
+        if (node.args.size() != tmpl.params.size()) {
+            // The analyzer already checked arity; reaching here is the two passes
+            // disagreeing, so it says so rather than padding.
+            unsupported(node,
+                        fmt::format("a call to '{}' with {} argument(s) where it declares {}",
+                                    tmpl.name, node.args.size(), tmpl.params.size()));
+            return;
+        }
+
+        Substitution bindings;
+        if (!node.generic_args.empty()) {
+            // Written. Mapped in the caller's scope, exactly as a struct's type
+            // arguments are -- so a `T` written inside another instance resolves through
+            // the binding that is already active.
+            if (node.generic_args.size() != tmpl.generic_params.size()) {
+                unsupported(node,
+                            fmt::format("a call to '{}' with {} type argument(s) where it "
+                                        "declares {}", tmpl.name, node.generic_args.size(),
+                                        tmpl.generic_params.size()));
+                return;
+            }
+            for (size_t i = 0; i < node.generic_args.size(); ++i) {
+                const TypeNode* arg = node.generic_args[i].get();
+                auto mapped = arg ? types_.map(arg) : std::nullopt;
+                if (!mapped || mapped->isVoid() || !mapped->llvmType ||
+                    !mapped->llvmType->isSized()) {
+                    if (failed_) return;  // a nested instantiation already reported
+                    unsupportedType(node, arg,
+                                    fmt::format("'{}' at a type argument", tmpl.name));
+                    return;
+                }
+                bindings.push_back({tmpl.generic_params[i]->name,
+                                    TypeBinding{*mapped, displayName(arg)}});
+            }
+        }
+
+        // The arguments, emitted before the instantiation exists. They have no
+        // parameter type to be offered, because the parameter's type is what is being
+        // inferred *from* them -- so an argument that cannot be typed on its own (an
+        // array literal written at a call site) refuses here, and would need the
+        // turbofish to fix the binding first. No corpus site writes one.
+        //
+        // Emitted into the caller's block, which the instantiation below leaves exactly
+        // as it found it -- see ScopedEmission.
+        std::vector<CgVal> values;
+        values.reserve(node.args.size());
+        for (auto& arg : node.args) {
+            CgVal a = emit(*arg);
+            if (failed_) return;
+            if (!a.ok()) { unsupported(node, "this argument"); return; }
+            values.push_back(a);
+        }
+
+        if (node.generic_args.empty()) {
+            for (size_t i = 0; i < values.size(); ++i) {
+                unifyBinding(tmpl.params[i]->type.get(),
+                             TypeBinding{values[i].type, cgDisplay(values[i].type)},
+                             tmpl.generic_params, bindings);
+            }
+        }
+
+        // In declaration order, whatever order inference found them in: the key is built
+        // from this list, and `f<A, B>(b: B, a: A)` would otherwise be two names for one
+        // instantiation depending on which call site reached it first.
+        Substitution ordered;
+        for (auto& p : tmpl.generic_params) {
+            bool found = false;
+            for (auto& b : bindings) {
+                if (b.first != p->name) continue;
+                ordered.push_back(b);
+                found = true;
+                break;
+            }
+            if (found) continue;
+            // Nothing to infer it from -- `fun nothing<T>() <int>` mentions T in no
+            // parameter. Refused naming the parameter, because the alternative is
+            // picking a type, and a function instantiated at a type the program never
+            // named is a function the program did not write. `nothing::<int>()` is how
+            // this one is called.
+            unsupported(node, fmt::format("a call to '{}' whose type argument '{}' no "
+                                          "argument mentions", tmpl.name, p->name));
+            return;
+        }
+
+        const std::string key = mangledName(tmpl.name, ordered);
+        if (!functions_.count(key) && !instantiateFunction(tmpl, ordered, key)) return;
+        auto instance = functions_.find(key);
+        if (instance == functions_.end()) return;  // already reported
+        const FnInfo& info = instance->second;
+        if (info.paramTypes.size() != values.size()) {
+            unsupported(node, fmt::format("a call to '{}' with too few arguments", tmpl.name));
+            return;
+        }
+
+        std::vector<llvm::Value*> args;
+        args.reserve(values.size());
+        for (size_t i = 0; i < values.size(); ++i) {
+            llvm::Value* converted = convert(node, values[i], info.paramTypes[i]);
+            if (!converted) return;
+            args.push_back(converted);
+        }
+        auto* call = builder_.CreateCall(info.fn, args);
+        // A void call is a statement, not a value: `value_` staying empty is what makes
+        // `let x <int> = voidcall();` refuse rather than store a token.
+        value_ = info.returnType.isVoid() ? CgVal{} : CgVal{call, info.returnType};
     }
 
     void visit(DefineDeclaration& node) override { (void)node; }  // prototype only
@@ -2530,15 +2952,26 @@ private:
             unsupported(node, fmt::format("the compile-time call '@{}'", node.name));
             return;
         }
-        if (!node.generic_args.empty()) {
-            unsupported(node, "a call with explicit generic arguments");
-            return;
-        }
         // A local of function type shadows nothing today -- a function value is not
         // lowered -- but checking locals first is the order the analyzer uses and
         // the order that stays correct when they are.
         if (findLocal(node.name)) {
             unsupported(node, fmt::format("a call through the variable '{}'", node.name));
+            return;
+        }
+        // Before the ordinary lookup, because a template is deliberately not in
+        // functions_: it has no signature until this call says what its parameters are.
+        auto tmpl = fnTemplates_.find(node.name);
+        if (tmpl != fnTemplates_.end()) {
+            emitGenericCall(node, *tmpl->second);
+            return;
+        }
+        if (!node.generic_args.empty()) {
+            // A turbofish on something that declares no type parameters. Read by
+            // emitGenericCall for a template and by nobody here, so it is refused rather
+            // than dropped -- a written type argument that changed nothing would be a
+            // silent disagreement with whatever the writer expected it to change.
+            unsupported(node, "a call with explicit generic arguments");
             return;
         }
         auto found = functions_.find(node.name);
@@ -3265,6 +3698,19 @@ private:
     // because a template is not a type: it has no llvm::StructType, no size, and a
     // name that no `let` may be declared at. instantiateGeneric is the only reader.
     std::unordered_map<std::string, StructDeclaration*> templates_;
+
+    // Every generic function declaration, by name, borrowed from the AST for the same
+    // reason the struct templates are. Not in functions_, because a template has no
+    // signature: `fun ident<T>(a: T) <T>` names no LLVM type until something calls it,
+    // and a call site is the only place the argument is known.
+    std::unordered_map<std::string, FunctionDeclaration*> fnTemplates_;
+
+    // One instantiation's bindings, by the instance's mangled name, kept alive for as
+    // long as the emitter is. The TypeMapper holds a *pointer* to the substitution
+    // while the instance's body is emitted, and a body may instantiate further
+    // templates, so the storage cannot be a local. A node-based map, so a reference
+    // handed to ScopedBindings survives every later insertion.
+    std::unordered_map<std::string, Substitution> fnInstances_;
     std::vector<std::unordered_map<std::string, Local>> scopes_;
 
     // Module-scope variables, and the declarations declareGlobals has already
