@@ -234,6 +234,29 @@ struct StructInfo {
     // was there (buildStructValue pushes it back).
     Substitution substitution;
 
+    // The declaration this was built from, borrowed from the AST -- the template's
+    // for an instantiation. Kept for the methods: a call site that does not find
+    // `Point<int>.set_x` has to say *why*, and "the generic method 'set_x'" is only
+    // readable off the declaration. Also what the third pass of declareStructs and
+    // instantiateGeneric walk to declare the methods in the first place.
+    const StructDeclaration* decl = nullptr;
+
+    // What the mapper is handed while one of this struct's method bodies is emitted:
+    // this struct's own substitution, plus `Self`, plus the template's bare name.
+    //
+    // Three spellings of one type, because struct_methods.fin writes all three --
+    // `self: &Self` at :10, `<&Self>` at :18, `<&Point>` at :21 with the comment
+    // "using &Point instead of &Self is correct too" -- and a binding is the only way
+    // they can be one type rather than one type and two refusals. Bindings and not a
+    // name lookup, because for an instantiation the answer is `Box<int>` and the
+    // written name is `Box`, which resolves to nothing at all (a template is not a
+    // type).
+    //
+    // Built once, when the struct is complete, and pointed at from there on: the
+    // mapper holds a pointer to it, and a method body may instantiate further
+    // templates, so it cannot be a local.
+    Substitution methodBindings;
+
     // The index is looked up per struct, never in one table shared across struct
     // types: `v` is field 1 of `A` and field 0 of `B`, and one table gives the same
     // answer for both (Soundness_Codegen.TwoStructsWithTheSameFieldNameUseTheir-
@@ -290,6 +313,10 @@ struct FnInfo {
     // different (a process status) and its LLVM signature is C's rather than
     // what Fin wrote.
     bool isMain = false;
+    // Parameter 0 is a receiver the source never wrote. Read by emitCallArgs, to know
+    // which parameter the first written argument lands on, and by emitBody, to know
+    // which argument is `self`.
+    bool hasReceiver = false;
 };
 
 // The one place that maps a written type name to a representation. Returns
@@ -699,10 +726,22 @@ public:
         // refused. Before the bodies, because every body may read every global.
         declareGlobals(program);
         if (failed_) return false;
+        // The methods of the structs written at module scope. After the globals, so a
+        // method body may read one; before the statements, so the emitted order matches
+        // the written order for a reader of `--emit-llvm`.
+        drainPendingBodies();
+        if (failed_) return false;
         for (auto& stmt : program.statements) {
             if (failed_) break;
             stmt->accept(*this);
         }
+        if (failed_) return false;
+        // The methods of the instantiations the statements asked for. A call site
+        // reaches `Box<int>.get` as a declaration and this is what puts a body in it,
+        // which is why it is after the loop and not inside it: emitting a body from the
+        // middle of another body would work (ScopedEmission exists for exactly that)
+        // and this way the queue is drained once, at a point with no live insert point.
+        drainPendingBodies();
         return !failed_;
     }
 
@@ -985,6 +1024,7 @@ private:
             StructInfo info;
             info.finName = s->name;
             info.llvmType = llvm::StructType::create(ctx_, llvmNameOf(*s, s->name));
+            info.decl = s;
             structs_[s->name] = info;
             registered_.insert(s);
             decls.push_back(s);
@@ -1031,6 +1071,154 @@ private:
             info.complete = true;
             debugLog("declared struct " + s->name + llvmNameNote(*info.llvmType, s->name));
         }
+
+        // A third pass, for the methods, after every body above is set.
+        //
+        // Third and not folded into the second because a method's signature may name
+        // any struct in the program -- `fun neighbour() <&Other>` where `Other` is
+        // declared below this one -- and a signature is mapped without
+        // `allowIncomplete`. Declaring the fields first is what makes the order the
+        // source wrote its structs in stop mattering, which is the same reason the
+        // second pass is separate from the first.
+        for (StructDeclaration* s : decls) {
+            StructInfo& info = structs_[s->name];
+            bindMethodTypes(info);
+            ScopedBindings bound(types_, &info.methodBindings);
+            if (!declareStructMethods(info)) return;
+        }
+    }
+
+    // `Struct.method`, and `Box<int>.method` for an instantiation.
+    //
+    // The least mangling that keeps two structs' `get` apart, and `.` is a legal
+    // character in an ELF symbol. It is also already this file's convention: a generic
+    // function instance publishes `ident<int>`, brackets and all, on the grounds that
+    // the only reader of a Fin symbol name is a person reading `nm` output. A method
+    // has the same two readers and the same answer.
+    static std::string methodKey(const std::string& structName, const std::string& method) {
+        return structName + "." + method;
+    }
+
+    // What the mapper is handed while one of this struct's methods is declared or
+    // emitted. See StructInfo::methodBindings for why it is a binding and not a lookup.
+    void bindMethodTypes(StructInfo& info) {
+        info.methodBindings = info.substitution;
+        // allowIncomplete, because this runs for an instantiation from inside
+        // instantiateGeneric -- where the body has just been set but nothing has
+        // published it yet. For the non-generic path the struct is complete either way.
+        auto self = types_.structByName(info.finName, /*allowIncomplete=*/true);
+        if (!self) return;  // an unregistered struct has no methods to declare
+        info.methodBindings.push_back({"Self", TypeBinding{*self, info.finName}});
+        // `Box` written inside `Box<T>`'s own method means this instantiation.
+        // struct_methods.fin:21 writes the non-generic form of exactly this (`<&Point>`
+        // where `<&Self>` would do) and calls it correct, and for a template the bare
+        // name is not merely equivalent -- it resolves to nothing at all, because a
+        // template is not a type. Skipped when the two spellings are the same word, so
+        // a concrete struct keeps going through ordinary name resolution.
+        if (info.decl && info.decl->name != info.finName) {
+            info.methodBindings.push_back(
+                {info.decl->name, TypeBinding{*self, info.finName}});
+        }
+    }
+
+    // The prototypes for one struct's methods, and a queued job per body.
+    //
+    // Call with `methodBindings` active. Returns false having already reported.
+    bool declareStructMethods(StructInfo& info) {
+        if (!info.decl) return true;
+        auto self = types_.structByName(info.finName, /*allowIncomplete=*/true);
+        if (!self) return true;
+        CgType receiver = types_.pointerTo(*self);
+
+        for (auto& m : info.decl->methods) {
+            // A method generic is one layer further than this unit goes: two
+            // substitutions at once, the struct's and the call's. Not declared, so a
+            // call to it refuses at the call site with a name to blame rather than
+            // linking against a symbol that was never defined -- and *not* refused
+            // here, because struct_methods.fin declares `set_x<T>` and never calls it,
+            // and a declaration nobody instantiates has no signature to lower.
+            if (!m->generic_params.empty()) continue;
+            // Likewise a method with no body. `@define` writes prototypes at module
+            // scope, not inside a struct, so this is a shape the corpus does not have;
+            // declaring one would publish a symbol that nothing defines, and the
+            // failure would land on the linker rather than on the line.
+            if (!m->body) continue;
+
+            // A written `self` is the receiver, so it has to *be* the receiver: `&Self`,
+            // `&Point`, `&Point<T>` -- three spellings of one pointer. `self: Point` is
+            // a copy, and this file passes a pointer, so accepting it would mean a
+            // method whose signature says by-value and whose body assigns through a
+            // pointer into the caller's object. `self: int` is not the struct at all.
+            // Checked here and not in lowerableMethods because the receiver's type is
+            // only known once the struct is complete -- and for a template, only once
+            // it is instantiated.
+            if (!m->is_static && !m->params.empty() && m->params[0]->name == "self" &&
+                m->params[0]->type) {
+                auto written = types_.map(m->params[0]->type.get(), /*allowIncomplete=*/true);
+                const bool matches = written && written->isPointer() && written->pointee &&
+                                     written->pointee->llvmType == self->llvmType;
+                if (!matches) {
+                    if (failed_) return false;
+                    unsupported(*m->params[0],
+                                fmt::format("a 'self' of type '{}' on struct '{}', which "
+                                            "is not a pointer to it",
+                                            typeName(m->params[0]->type.get()), info.finName));
+                    return false;
+                }
+            }
+
+            const std::string key = methodKey(info.finName, m->name);
+            // A static method takes no receiver -- struct_methods.fin:8 calls
+            // `Point::make(1, 2)` with nobody to be `self`. Everything else does, and
+            // it is a *pointer*: `set_x` at :16 assigns to `self.x`, and a by-value
+            // receiver would make that a store into a copy that is discarded at the
+            // return. That is not an unimplemented feature, it is a program that
+            // silently does not assign.
+            declareFunction(*m, key, key, m->params, m->return_type.get(),
+                            /*isVarArg=*/false, /*isExtern=*/false,
+                            m->is_static ? nullptr : &receiver);
+            auto declared = functions_.find(key);
+            if (declared == functions_.end()) return false;  // declareFunction reported
+
+            // Weak, for the reason a generic function instance is weak: two objects
+            // that each declare this struct both publish this symbol and neither knows
+            // the other exists, so identical definitions and let the linker keep one.
+            // A method is not a template, but a struct declaration reaches an object
+            // file the same way a template does -- through a header everyone includes.
+            declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+
+            // The body is deferred, not emitted here. Two reasons, and either alone
+            // would be enough: a method may call a free function whose prototype
+            // declareTopLevel has not created yet (declareStructs runs first), and a
+            // method of an *instantiation* is declared from the middle of another
+            // function's body, where emitting straight away would mean nesting two
+            // insert points for no reason.
+            pendingBodies_.push_back(PendingBody{m.get(), key, &info.methodBindings});
+        }
+        return true;
+    }
+
+    // A method body waiting for the point in run() where everything it can name
+    // exists. `bindings` points into a StructInfo, which outlives this.
+    struct PendingBody {
+        FunctionDeclaration* fn;
+        std::string key;
+        const Substitution* bindings;
+    };
+
+    // Emits every queued body, including the ones queued while emitting them.
+    void drainPendingBodies() {
+        // By index and re-reading size(), because emitting a body may instantiate a
+        // template -- which declares that instantiation's own methods onto the end of
+        // this same queue. By value, because that push may reallocate.
+        for (size_t i = 0; i < pendingBodies_.size(); ++i) {
+            PendingBody job = pendingBodies_[i];
+            ScopedBindings bound(types_, job.bindings);
+            emitBody(*job.fn, job.key);
+        }
+        // Cleared, because run() drains more than once and a second entry block on a
+        // function that already has one is invalid IR rather than a duplicate.
+        pendingBodies_.clear();
     }
 
     // The struct shapes this file will not lower, each with the reason it cannot be
@@ -1049,26 +1237,7 @@ private:
             unsupported(*s.destructor, fmt::format("a destructor on struct '{}'", s.name));
             return false;
         }
-        // A struct's own functions are functions, and this file emits none of them.
-        //
-        // Refused at the declaration rather than at the call, which is where the
-        // refusal used to land. The difference is a struct whose method nobody calls:
-        // the call-site refusal never fires, the struct lowers as plain data, and the
-        // object file simply does not contain the function the source declared.
-        // struct_methods.fin is the whole of that sample -- four functions, an object
-        // with no symbols in it -- and operators.fin is two operator bodies that go
-        // the same way. Nothing miscomputes today because nothing can reach them, but
-        // a construct this file cannot lower has to be refused and not skipped, and a
-        // silently absent function body is a skip.
-        //
-        // Lowering them is a unit of its own and a large one: a method needs a name
-        // that a call site can find (Fin mangles nothing today), `self` as an injected
-        // first parameter, `Self` as a type in its own signature, and for a template
-        // one body per instantiation.
-        for (auto& m : s.methods) {
-            unsupported(*m, fmt::format("the method '{}' on struct '{}'", m->name, s.name));
-            return false;
-        }
+        if (!lowerableMethods(s)) return false;
         for (auto& o : s.operators) {
             // Spelled without the operator itself: `op` is a token kind here and this
             // file has no speller for one. The line the caret lands on has it.
@@ -1104,6 +1273,76 @@ private:
             unsupported(s, fmt::format("the attribute '{}' on struct '{}'",
                                        attr->name, s.name));
             return false;
+        }
+        return true;
+    }
+
+    // The method shapes that are wrong however the struct is used, checked where the
+    // struct is written.
+    //
+    // Only those. A method's *body* is checked where it is emitted, which for a
+    // template is once per instantiation -- the same split a generic free function
+    // has, and for the same reason: `cast<T>(x)` may be lowerable at one binding and
+    // not at another, so refusing it at the declaration would refuse a program that
+    // works.
+    bool lowerableMethods(StructDeclaration& s) {
+        std::set<std::string> seen;
+        for (auto& m : s.methods) {
+            // An attribute this file does not read may be the one that decides
+            // linkage (`#[export]`) or which of two definitions wins
+            // (`#[overwrite]`), and a method is a symbol like any other.
+            if (!attributesAreJustLlvmName(*m, m->attributes, "method")) return false;
+            for (auto& attr : m->attributes) {
+                // The valued form is what attributesAreJustLlvmName lets through, and
+                // a method may not have it: an instantiation's method is emitted once
+                // per binding, and one name over two of them is either a duplicate
+                // definition or a silent `general_point.1` that nobody can call. This
+                // is the generic-function rule (declareTopLevel) applied one level in.
+                unsupported(*m, fmt::format("the attribute '{}' on the method '{}' of "
+                                            "struct '{}'", attr->name, m->name, s.name));
+                return false;
+            }
+            if (!seen.insert(m->name).second) {
+                // Two methods of one name would be two definitions of one symbol, and
+                // declareFunction keeps the first -- so the second body would silently
+                // not be the one that runs. Overload resolution is the analyzer's
+                // (`constructors[0]` is the state of it), and until it exists there is
+                // no way to tell which the call meant.
+                unsupported(*m, fmt::format("a second method '{}' on struct '{}'",
+                                            m->name, s.name));
+                return false;
+            }
+            for (auto& param : m->params) {
+                if (!param->is_vararg) continue;
+                // `...` on a Fin definition needs va_start, which is a library
+                // question (ADR 0003), and on a method it is not written anywhere in
+                // the corpus.
+                unsupported(*param, fmt::format("'...' on the method '{}' of struct '{}'",
+                                                m->name, s.name));
+                return false;
+            }
+            if (m->is_static && !m->params.empty() && m->params[0]->name == "self") {
+                // A static method has no receiver, and the analyzer drops a parameter
+                // called `self` wherever it appears (buildMethodSignature). So this
+                // parameter exists for the caller and not for the callee, or the other
+                // way round, depending on which pass you ask -- and either way the
+                // arguments after it land one place out.
+                unsupported(*m->params[0],
+                            fmt::format("a 'self' parameter on the static method '{}' of "
+                                        "struct '{}'", m->name, s.name));
+                return false;
+            }
+            for (size_t i = 0; i < m->params.size(); ++i) {
+                if (m->params[i]->name != "self" || i == 0) continue;
+                // The receiver is parameter 0 or it is injected. A `self` written
+                // second is not a receiver the analyzer dropped from the signature
+                // (buildMethodSignature drops it wherever it is), so lowering it as
+                // one would shift every argument by a place.
+                unsupported(*m->params[i],
+                            fmt::format("a 'self' parameter in position {} of method "
+                                        "'{}' on struct '{}'", i + 1, m->name, s.name));
+                return false;
+            }
         }
         return true;
     }
@@ -1316,7 +1555,21 @@ private:
         live.llvmType->setBody(members, /*isPacked=*/false);
         live.complete = true;
         debugLog("instantiated struct " + out + llvmNameNote(*live.llvmType, out));
-        return true;
+
+        // 4. The methods, once per instantiation and only for the instantiations the
+        //    program asks for. This is what makes struct_methods.fin compile with a
+        //    `Point<T>` in it and nothing in the object file for it: a method on a
+        //    template is a template, and a template with no arguments has no
+        //    signature to lower. It is also why `Box<int>.get` and `Box<char>.get` are
+        //    two functions -- they are two bodies over two representations, the same
+        //    as a generic free function's instances.
+        live.decl = &tmpl;
+        bindMethodTypes(live);
+        // Nested inside `bound` above, and replacing it for the duration: a method
+        // signature needs `Self` and the template's bare name as well as `T`, and
+        // methodBindings is the substitution plus those two.
+        ScopedBindings methodScope(types_, &live.methodBindings);
+        return declareStructMethods(live);
     }
 
     // How an instantiation is spelled, in diagnostics and as the LLVM type's name.
@@ -1625,11 +1878,13 @@ private:
     void declareFunction(ASTNode& node, const std::string& name,
                          const std::string& symbol,
                          const std::vector<std::unique_ptr<Parameter>>& params,
-                         const TypeNode* returnType, bool isVarArg, bool isExtern) {
+                         const TypeNode* returnType, bool isVarArg, bool isExtern,
+                         const CgType* receiver = nullptr) {
         if (functions_.count(name)) return;  // first declaration wins, as the analyzer's does
 
         FnInfo info;
         info.isVarArg = isVarArg;
+        info.hasReceiver = (receiver != nullptr);
 
         auto ret = types_.map(returnType);
         if (!ret) { unsupportedType(node, returnType, "a return"); return; }
@@ -1651,10 +1906,24 @@ private:
         }
 
         std::vector<llvm::Type*> llvmParams;
+        // The receiver goes in front of what the source wrote, and the source does not
+        // write it at the call either -- see emitCallArgs, which starts the caller's
+        // arguments at parameter 1 for exactly this reason.
+        if (receiver) {
+            info.paramTypes.push_back(*receiver);
+            llvmParams.push_back(receiver->llvmType);
+        }
         for (auto& p : params) {
             // `...` in `@define printf(fmt: string, ...)` is a Parameter with the
             // vararg flag and no type of its own.
             if (p->is_vararg) { info.isVarArg = true; continue; }
+            // A *written* `self` is the receiver that was already pushed, not a second
+            // parameter. The analyzer drops it from the signature for the same reason
+            // (buildMethodSignature: "The receiver is not a parameter of the call"), so
+            // keeping it here would make this file and the analyzer disagree about
+            // arity -- and struct_methods.fin writes it both ways, `self: &Self` at :10
+            // and nothing at :16, and calls both the same.
+            if (receiver && p->name == "self") continue;
             auto t = types_.map(p->type.get());
             if (!t) { unsupportedType(*p, p->type.get(), "a parameter"); return; }
             if (t->isVoid()) { unsupported(*p, "a parameter of type 'void'"); return; }
@@ -2003,11 +2272,24 @@ private:
         currentFn_ = &found->second;
         pushScope();
 
+        // The receiver, which the source may not have written and which is a
+        // parameter all the same. It gets a slot like any other, so `self.x = v` is the
+        // ordinary store-through-a-pointer that emitAddress already knows how to do,
+        // and so a method may rebind `self` -- a pointer parameter is assignable.
+        size_t index = 0;
+        if (info.hasReceiver && !info.paramTypes.empty()) {
+            auto* slot = builder_.CreateAlloca(info.paramTypes[0].llvmType, nullptr, "self");
+            builder_.CreateStore(info.fn->getArg(0), slot);
+            scopes_.back()["self"] = Local{slot, info.paramTypes[0]};
+            index = 1;
+        }
+
         // Each parameter gets a stack slot, because a parameter is assignable in
         // Fin and an argument register is not.
-        size_t index = 0;
         for (auto& p : node.params) {
             if (p->is_vararg) continue;
+            // Written or injected, `self` is the slot above and not a second one.
+            if (info.hasReceiver && p->name == "self") continue;
             if (index >= info.paramTypes.size()) break;
             auto* slot = builder_.CreateAlloca(info.paramTypes[index].llvmType, nullptr,
                                                p->name);
@@ -2982,19 +3264,37 @@ private:
         const FnInfo& info = found->second;
 
         std::vector<llvm::Value*> args;
-        for (size_t i = 0; i < node.args.size(); ++i) {
+        if (!emitCallArgs(node, info, node.name, node.args, args)) return;
+        emitCall(info, args);
+    }
+
+    // The arguments of a call, each offered the type of the parameter it lands on.
+    //
+    // `args` is in/out and may arrive non-empty: a method's receiver is parameter 0 and
+    // the call site does not write it, so written argument i lands on parameter i+1.
+    // That offset is the whole difference between a method call and a free call here,
+    // which is why they share this rather than each keeping a copy of the conversion
+    // rules -- a vararg promotion that existed in one and not the other would be a
+    // silent ABI difference between two spellings of a call.
+    //
+    // Returns false having already reported.
+    bool emitCallArgs(ASTNode& node, const FnInfo& info, const std::string& name,
+                      const std::vector<std::unique_ptr<Expression>>& argNodes,
+                      std::vector<llvm::Value*>& args) {
+        const size_t offset = args.size();
+        for (size_t i = 0; i < argNodes.size(); ++i) {
+            const size_t p = offset + i;
             // The parameter's type is offered to the argument, which is how an array
             // literal written at a call site knows what it is. A vararg position has
             // no declared type to offer, and an array literal there refuses.
-            CgVal a = i < info.paramTypes.size()
-                          ? emitAs(*node.args[i], info.paramTypes[i])
-                          : emit(*node.args[i]);
-            if (failed_) return;
-            if (!a.ok()) { unsupported(node, "this argument"); return; }
+            CgVal a = p < info.paramTypes.size() ? emitAs(*argNodes[i], info.paramTypes[p])
+                                                : emit(*argNodes[i]);
+            if (failed_) return false;
+            if (!a.ok()) { unsupported(node, "this argument"); return false; }
 
-            if (i < info.paramTypes.size()) {
-                llvm::Value* converted = convert(node, a, info.paramTypes[i]);
-                if (!converted) return;
+            if (p < info.paramTypes.size()) {
+                llvm::Value* converted = convert(node, a, info.paramTypes[p]);
+                if (!converted) return false;
                 args.push_back(converted);
                 continue;
             }
@@ -3002,23 +3302,59 @@ private:
                 // The analyzer already checked arity; this is a backend
                 // inconsistency rather than a program error, so it says so.
                 unsupported(node, fmt::format("a call to '{}' with too many arguments",
-                                              node.name));
-                return;
+                                              name));
+                return false;
             }
             llvm::Value* promoted = promoteVararg(node, a);
-            if (!promoted) return;
+            if (!promoted) return false;
             args.push_back(promoted);
         }
         if (args.size() < info.paramTypes.size()) {
-            unsupported(node, fmt::format("a call to '{}' with too few arguments", node.name));
-            return;
+            unsupported(node, fmt::format("a call to '{}' with too few arguments", name));
+            return false;
         }
+        return true;
+    }
 
+    // The call itself, and what it leaves in `value_`.
+    void emitCall(const FnInfo& info, const std::vector<llvm::Value*>& args) {
         auto* call = builder_.CreateCall(info.fn, args);
-        value_ = info.returnType.isVoid() ? CgVal{} : CgVal{call, info.returnType};
         // A void call is a statement, not a value. `value_` staying empty is what
         // makes `let x <int> = voidcall();` refuse rather than store a token.
-        if (info.returnType.isVoid()) value_ = CgVal{};
+        value_ = info.returnType.isVoid() ? CgVal{} : CgVal{call, info.returnType};
+    }
+
+    // The declaration behind a method name, for the sole purpose of saying why a call
+    // to it did not find a function. Null for a name this struct does not declare.
+    static const FunctionDeclaration* findMethod(const StructInfo& info,
+                                                 const std::string& name) {
+        if (!info.decl) return nullptr;
+        for (auto& m : info.decl->methods)
+            if (m->name == name) return m.get();
+        return nullptr;
+    }
+
+    // Why `Struct.method` is not in functions_. Always reports.
+    //
+    // Separate from the lookup because the answer is never "it cannot be lowered" on
+    // its own: declareStructMethods deliberately declares nothing for a generic or a
+    // bodiless method, so a reader who is only told "not lowered yet" would go looking
+    // for a missing feature instead of at the declaration two lines up.
+    void reportMissingMethod(ASTNode& node, const StructInfo& info,
+                             const std::string& method) {
+        const FunctionDeclaration* decl = findMethod(info, method);
+        if (decl && !decl->generic_params.empty()) {
+            unsupported(node, fmt::format("a call to the generic method '{}' on struct '{}'",
+                                          method, info.finName));
+            return;
+        }
+        if (decl && !decl->body) {
+            unsupported(node, fmt::format("a call to the bodiless method '{}' on struct '{}'",
+                                          method, info.finName));
+            return;
+        }
+        unsupported(node, fmt::format("a call to the method '{}' on struct '{}'", method,
+                                      info.finName));
     }
 
     // The C variadic convention, which is not the Fin one: a float is passed as a
@@ -3110,12 +3446,12 @@ private:
         // not scan -- inside a function body -- and a struct type whose name the
         // backend does not know is not a struct this file can lower.
         //
-        // Its methods, operators and constructors are deliberately not emitted:
-        // naming the symbol needs a mangling scheme, and every way of *reaching*
-        // one refuses at the call site instead (Soundness_Codegen.AMethodCallOn-
-        // AStructIsRefused). Nothing implicit calls them -- a `P { a: 1 }` literal
-        // does not run a constructor, and a destructor, which would run implicitly,
-        // is what lowerableStruct refuses on.
+        // Its *methods* were declared and queued by declareStructs (a concrete
+        // struct's) or by instantiateGeneric (an instantiation's), and nothing is left
+        // to do for them here. Its operators and constructors are still refused at the
+        // declaration, by lowerableStruct: an operator is reached by writing `a + b`,
+        // which does not name it, so there is no call site to refuse at -- and a
+        // constructor runs implicitly, which is the same objection a destructor gets.
         if (registered_.count(&node)) return;
         unsupported(node, fmt::format("a declaration of struct '{}' here", node.name));
     }
@@ -3200,8 +3536,106 @@ private:
     void visit(TryCatch& node) override { unsupported(node, "'try'/'catch'"); }
     void visit(BlameStatement& node) override { unsupported(node, "'blame'"); }
 
-    void visit(MethodCall& node) override { unsupported(node, "a method call"); }
-    void visit(StaticMethodCall& node) override { unsupported(node, "a '::' call"); }
+    // `p.get()`, and `q.get()` where q is a `&Point`.
+    void visit(MethodCall& node) override {
+        if (!node.generic_args.empty()) {
+            // A turbofish on the *method* rather than on the struct. Read by nobody
+            // here, because a generic method is not declared at all, so it is refused
+            // rather than dropped.
+            unsupported(node, fmt::format("a call to the method '{}' with explicit "
+                                          "generic arguments", node.method_name));
+            return;
+        }
+        // The receiver is an address, and the same address a field access would take:
+        // `p.get()` on a value, `q.get()` on a `&Point` with one load in between,
+        // `o.inner.get()` on a field. One primitive for all three, which is what keeps
+        // "Fin automatically handles -> logic with ." true of a call as well as of a
+        // field (deeptest3.fin:39).
+        auto receiver = baseAddress(*node.object, CgType::Kind::Struct);
+        if (failed_) return;
+        if (!receiver) {
+            // `Point::make(1).get()`. The struct is a value with no home, so there is
+            // no pointer to pass -- and a method takes a pointer because it may assign
+            // through it. Copying to a temporary would work for a method that only
+            // reads, and would silently discard the assignment of one that does not,
+            // and this file cannot tell the two apart (whether a read-only method
+            // should accept a temporary is an owner ruling). Refused the same way
+            // `make()[0]` is refused: consistently, and at the receiver.
+            unsupported(node, fmt::format("the receiver of a call to the method '{}' on "
+                                          "a value with no address", node.method_name));
+            return;
+        }
+        if (!receiver->type.structInfo) {
+            unsupported(node, fmt::format("a call to the method '{}' on this receiver",
+                                          node.method_name));
+            return;
+        }
+        const StructInfo& owner = *receiver->type.structInfo;
+
+        auto found = functions_.find(methodKey(owner.finName, node.method_name));
+        if (found == functions_.end()) {
+            reportMissingMethod(node, owner, node.method_name);
+            return;
+        }
+        const FnInfo& info = found->second;
+        if (!info.hasReceiver) {
+            // A static method reached through a value. It has no `self` to be given
+            // and the analyzer decides whether the spelling is legal at all; lowering
+            // it here would mean silently dropping the receiver the source wrote.
+            unsupported(node, fmt::format("a call to the static method '{}' through a "
+                                          "value", node.method_name));
+            return;
+        }
+
+        std::vector<llvm::Value*> args{receiver->ptr};
+        if (!emitCallArgs(node, info, node.method_name, node.args, args)) return;
+        emitCall(info, args);
+    }
+
+    // `Point::make(1, 2)` (struct_methods.fin:8), and `Box::<int>::zero()` where the
+    // type arguments are on the *type* and not on the method.
+    void visit(StaticMethodCall& node) override {
+        if (!node.generic_args.empty()) {
+            unsupported(node, fmt::format("a '::' call to '{}' with explicit generic "
+                                          "arguments", node.method_name));
+            return;
+        }
+        // Through the mapper, so `Box::<int>::zero()` instantiates `Box<int>` on the way
+        // -- including its methods, which is what puts `Box<int>.zero` in functions_ for
+        // the lookup below to find. A bare `Box` written inside `Box<T>`'s own method
+        // reaches its own instantiation through the same call, by the binding.
+        auto target = types_.map(node.target_type.get());
+        if (!target) {
+            if (!failed_) unsupportedType(node, node.target_type.get(), "a '::' call on");
+            return;
+        }
+        if (!target->isStruct() || !target->structInfo) {
+            // An enum, or a scalar. `Colour::Red` is a member access and not this, and
+            // a `::` call on anything but a struct is a shape the corpus does not have.
+            unsupported(node, fmt::format("a '::' call to '{}' on type '{}'",
+                                          node.method_name, typeName(node.target_type.get())));
+            return;
+        }
+        const StructInfo& owner = *target->structInfo;
+
+        auto found = functions_.find(methodKey(owner.finName, node.method_name));
+        if (found == functions_.end()) {
+            reportMissingMethod(node, owner, node.method_name);
+            return;
+        }
+        const FnInfo& info = found->second;
+        if (info.hasReceiver) {
+            // An instance method reached through the type. There is no receiver to
+            // pass and inventing one would be inventing an object.
+            unsupported(node, fmt::format("a '::' call to the instance method '{}' on "
+                                          "struct '{}'", node.method_name, owner.finName));
+            return;
+        }
+
+        std::vector<llvm::Value*> args;
+        if (!emitCallArgs(node, info, node.method_name, node.args, args)) return;
+        emitCall(info, args);
+    }
     void visit(MemberAccess& node) override {
         if (node.is_static) {
             // `MyEnum::B` -- the same member the bare `B` names and the same constant,
@@ -3711,6 +4145,11 @@ private:
     // templates, so the storage cannot be a local. A node-based map, so a reference
     // handed to ScopedBindings survives every later insertion.
     std::unordered_map<std::string, Substitution> fnInstances_;
+
+    // Method bodies whose prototypes exist and whose bodies have not been emitted yet.
+    // Drained by run(), and appended to while being drained. See PendingBody.
+    std::vector<PendingBody> pendingBodies_;
+
     std::vector<std::unordered_map<std::string, Local>> scopes_;
 
     // Module-scope variables, and the declarations declareGlobals has already

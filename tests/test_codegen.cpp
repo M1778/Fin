@@ -1870,11 +1870,11 @@ BACKEND_TEST(Soundness_Codegen, AStructRoundTripsThroughAConditional) {
 // these would be worse than one that refused them, because the front end has
 // already said the program is well-typed.
 
-BACKEND_TEST(Soundness_Codegen, AMethodCallOnAStructIsRefused) {
-    // A struct with methods lowers as data; calling one needs a name for the
-    // emitted symbol, and the mangling scheme needs finn's ABI story. Refused, not
-    // guessed -- and specifically not skipped, which would drop the call and leave
-    // the assignment reading an undefined value.
+BACKEND_TEST(Soundness_Codegen, AMethodCallOnAStructCallsIt) {
+    // Was AMethodCallOnAStructIsRefused, inverted by the method unit at the bottom
+    // of this file. `pub fun get()` writes no `self` and reads one, which is the
+    // injected receiver -- struct_methods.fin:10 says the compiler supplies it
+    // either way.
     const Built b = build(std::string(kPrintf) +
         "struct P { a <int>\n"
         "    pub fun get() <int> { return self.a; }\n"
@@ -1884,8 +1884,9 @@ BACKEND_TEST(Soundness_Codegen, AMethodCallOnAStructIsRefused) {
         "    let x <int> = p.get();\n"
         "    printf(\"%d\\n\", x);\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AStructPassedToACVariadicIsRefused) {
@@ -3418,17 +3419,12 @@ BACKEND_TEST(Soundness_Codegen, AnInstantiationAtATypeThisFileCannotLowerIsRefus
     EXPECT_NE(b.compileExit, 0) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodsAreRefusedWhereverTheyAppear) {
-    // struct_methods.fin and letssee.fin both hang methods off their generic
-    // structs, and a method call is a separate unit (name mangling, `self`, `Self`
-    // as a return type). Recorded here because monomorphising the *type* must not be
-    // mistaken for having monomorphised the methods.
-    //
-    // The boundary has moved since this was written: the refusal used to come from
-    // the call and now comes from the declaration, because a method nobody calls was
-    // being dropped silently -- see AGenericStructsMethodIsRefusedAtItsTemplate. Kept
-    // as the call-site half of that pair, since a program that calls one must not
-    // start working by accident either.
+BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodIsCalledOnAnInstantiation) {
+    // Was AGenericStructsMethodsAreRefusedWhereverTheyAppear, which said in its own
+    // comment that monomorphising the *type* must not be mistaken for having
+    // monomorphised the methods. It is not mistaken for it any more: the instance's
+    // methods are emitted where the instance is built, with T bound to what the
+    // instance bound it to.
     const Built b = build(std::string(kPrintf) +
         "struct Box<T> {\n"
         "    val <T>\n"
@@ -3438,8 +3434,9 @@ BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodsAreRefusedWhereverTheyAppe
         "    let b <Box<int>> = Box::<int>{ val: 3 };\n"
         "    printf(\"%d\\n\", b.get());\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("method"), std::string::npos) << b.why();
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
 }
 
 
@@ -3613,9 +3610,14 @@ BACKEND_TEST(Soundness_Codegen, AFlagFormLlvmNameIsRefused) {
 // constructors. The destructor was already refused there, for the stronger reason
 // that it also has to *run*.
 
-BACKEND_TEST(Soundness_Codegen, AStructsMethodIsRefusedAtItsDeclaration) {
-    // Never called, so the call-site refusal never fires. Before this the object
-    // simply did not contain `get`.
+BACKEND_TEST(Soundness_Codegen, AStructsMethodIsEmittedEvenIfNobodyCallsIt) {
+    // Was AStructsMethodIsRefusedAtItsDeclaration, and the reason it was a refusal
+    // is the reason it is now this test: the object used not to contain `get` at
+    // all, for a source that declares it. A free function nobody calls is still
+    // emitted, and a method is a function.
+    //
+    // `self: &Box` rather than `&Self`, because both spellings are the receiver and
+    // struct_methods.fin:10 says so in as many words.
     const Built b = build(std::string(kPrintf) +
         "struct Box {\n"
         "    val <int>,\n"
@@ -3625,8 +3627,14 @@ BACKEND_TEST(Soundness_Codegen, AStructsMethodIsRefusedAtItsDeclaration) {
         "    let b <Box> = Box{ val: 3 };\n"
         "    printf(\"%d\\n\", b.val);\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("get"), std::string::npos) << b.why();
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
+    EXPECT_NE(codegenTrace(std::string(kPrintf) +
+        "struct Box {\n"
+        "    val <int>,\n"
+        "    fun get(self: &Box) <int> { return self.val; }\n"
+        "}\n").find("declared Box.get"), std::string::npos);
 }
 
 BACKEND_TEST(Soundness_Codegen, AStructsOperatorIsRefusedAtItsDeclaration) {
@@ -3678,11 +3686,13 @@ BACKEND_TEST(Soundness_Codegen, AStructWithNoFunctionsOfItsOwnStillLowers) {
     EXPECT_EQ(b.out, "7\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodIsRefusedAtItsTemplate) {
-    // A template's functions are refused where the template is written, not once per
-    // instantiation: `class Box<T>` set that precedent, and the reason is the same --
-    // a method is not going to become lowerable at `Box<int>`, and one diagnostic at
-    // the declaration is what the reader can act on.
+BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodNobodyInstantiatesEmitsNothing) {
+    // Was AGenericStructsMethodIsRefusedAtItsTemplate. A template's method is not a
+    // skipped function, it is a function that does not exist yet: `fun get(self:
+    // &Box<T>) <T>` has no LLVM signature until something says what T is, exactly as
+    // a generic free function has none. So nothing is emitted and nothing is
+    // refused -- which is also what makes struct_methods.fin, a whole sample of
+    // methods on an uninstantiated `Point<T>`, compile.
     const Built b = build(std::string(kPrintf) +
         "struct Box<T> {\n"
         "    val <T>,\n"
@@ -3691,8 +3701,16 @@ BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodIsRefusedAtItsTemplate) {
         "fun main() <noret> {\n"
         "    printf(\"ok\\n\");\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("get"), std::string::npos) << b.why();
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+    // And specifically nothing, rather than one instance under the template's name.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun get(self: &Box<T>) <T> { return self.val; }\n"
+        "}\n");
+    EXPECT_EQ(trace.find("declared Box"), std::string::npos) << trace;
 }
 
 
@@ -4209,4 +4227,526 @@ BACKEND_TEST(Soundness_Codegen, AGenericFunctionInstantiatedAtAStructPassesItByV
     ASSERT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "3 4\n") << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// A struct method
+//
+// tests/samples/struct_methods.fin is the whole of the specification, and it is
+// four functions in one struct:
+//
+//   fun print_point(self: &Self) <noret>      -- the receiver written out
+//   fun set_x<U>(new_x: U) <noret>            -- the receiver injected, plus a
+//                                                method generic of its own
+//   pub static fun default_point() <&Self>    -- no receiver, `Self` as a type
+//   pub static fun default_point2() <&Point>  -- the same thing spelled with the
+//                                                template's own name
+//
+// with :10's note settling the receiver: "the first parameter will be injected by
+// compiler and it will be the struct itself (it has to be from its own type which
+// can be specified with `Self` type or just {ClassName}) [NOTE: if the declared
+// function doesn't have the static keyword and it doesn't specify the first argument
+// as self compiler still automatically injects the self to the block of that
+// function]".
+//
+// Four decisions, each of which some test below is the reason for.
+//
+// 1. The symbol is `Struct.method`, and for an instantiation `Struct<args>.method`.
+//    Fin mangles nothing -- a free function publishes the name it was written with --
+//    so this is the least mangling that keeps two structs' `get` apart, and a `.` is
+//    a legal ELF symbol character. It is also already this file's convention: a
+//    generic function instance publishes `ident<int>`, brackets and all.
+//
+// 2. The receiver is a pointer, always. `set_x` assigns to `self.x`, and a receiver
+//    passed by value would make that method a no-op on a copy -- a silently
+//    ineffective assignment, which is the failure this suite exists to refuse. So an
+//    injected `self` is `&Self`, and a *written* one must be a pointer to its own
+//    struct (`&Self`, or `&Point<T>`, or `&Box` -- all the same type) or it refuses.
+//
+// 3. `Self` is a binding and not a name lookup. Inside a method the mapper is handed
+//    `Self -> this struct`, and for a template also `Point -> this instantiation`,
+//    which is what makes :18's `<&Self>` and :21's `<&Point>` two spellings of one
+//    type rather than one type and one refusal.
+//
+// 4. A method on a template is a template. It has no signature until the struct is
+//    instantiated, so the instance's methods are emitted where the instance is
+//    built, and a `Point<T>` nobody instantiates emits nothing at all. That is what
+//    lets struct_methods.fin -- which has no `main` and instantiates nothing --
+//    compile, and it is the same rule a generic free function follows.
+//
+// A method *generic* (`set_x<U>`) is one layer further: two substitutions, the
+// struct's and the call's. Registered but not lowered, so a call to one refuses and
+// a declaration nobody calls is not a refusal -- exactly as for the struct template
+// that holds it.
+
+BACKEND_TEST(Soundness_Codegen, AMethodWithAWrittenSelfIsCalledThroughIt) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    fun get(self: &Self) <int> { return self.x; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 7 };\n"
+        "    printf(\"%d\\n\", p.get());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodWithNoWrittenSelfStillHasOne) {
+    // struct_methods.fin:14's spelling. The body names `self` and the parameter list
+    // does not, and the analyzer defines it in the body's scope
+    // (Analyzer_Decl.cpp's "[Magic] Injected implicit 'self'"); the backend has to
+    // supply the same thing as an argument.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    fun get() <int> { return self.x; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 7 };\n"
+        "    printf(\"%d\\n\", p.get());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInjectedSelfIsAReferenceSoAMethodCanAssignThroughIt) {
+    // The reason the receiver is a pointer and not a copy. struct_methods.fin:15 is
+    // `self.x = cast<T>(new_x);` inside a method that writes no `self`, and if the
+    // injected receiver were by value that line would assign to a copy the caller
+    // never sees -- a method that does nothing, with nothing in the source saying so.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    fun bump() <noret> { self.x = self.x + 1; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 7 };\n"
+        "    p.bump();\n"
+        "    printf(\"%d\\n\", p.x);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodsOwnArgumentsFollowTheReceiver) {
+    // The receiver is argument 0 and is not one of the arguments the call site
+    // writes, which is also what the analyzer's signature says (buildMethodSignature
+    // drops a written `self`). Two parameters, so an off-by-one in either direction
+    // shows up as a wrong number rather than as a crash.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    fun combine(a: int, b: int) <int> { return self.x * 100 + a * 10 + b; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 1 };\n"
+        "    printf(\"%d\\n\", p.combine(2, 3));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "123\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodCallsAnotherMethodThroughSelf) {
+    // `self` inside a method is a `&Point`, so `self.bump()` is the pointer-receiver
+    // case one line down applied to the receiver itself.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    fun bump() <noret> { self.x = self.x + 1; }\n"
+        "    fun twice() <noret> { self.bump(); self.bump(); }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 7 };\n"
+        "    p.twice();\n"
+        "    printf(\"%d\\n\", p.x);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodCallOnAPointerDerefsTheReceiverFirst) {
+    // deeptest3.fin:39 -- "Access members via pointer (Fin automatically handles ->
+    // logic with .)" -- and a method call is a `.`. The mutation is what proves the
+    // receiver is the original and not a copy made to call through.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    fun bump() <noret> { self.x = self.x + 1; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 7 };\n"
+        "    let q <&Point> = &p;\n"
+        "    q.bump();\n"
+        "    printf(\"%d\\n\", p.x);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodCallOnAFieldUsesThatFieldsAddress) {
+    // The receiver is an expression and not only a variable: `o.inner.bump()` has to
+    // mutate the field in place, and the GEP that reaches it is the one `.` already
+    // builds.
+    const Built b = build(std::string(kPrintf) +
+        "struct Inner { v <int>, fun bump() <noret> { self.v = self.v + 1; } }\n"
+        "struct Outer { inner <Inner> }\n"
+        "fun main() <noret> {\n"
+        "    let o <Outer> = Outer{ inner: Inner{ v: 1 } };\n"
+        "    o.inner.bump();\n"
+        "    printf(\"%d\\n\", o.inner.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodOnAValueWithNoHomeIsRefused) {
+    // A struct returned by a call is a value with no address, and the receiver is a
+    // pointer. Materialising a temporary to point at it would compile and then throw
+    // away anything the method assigned -- so it is refused, which is the same answer
+    // `make()[0]` gets for the same reason.
+    //
+    // OWNER RULING NEEDED: whether `Point::make(1).get()` should copy to a temporary
+    // for a method that only reads. Answering it needs a notion of a method that
+    // does not mutate, and Fin has no such marker yet.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    pub static fun make(v: int) <Point> { return Point{ x: v }; }\n"
+        "    fun get(self: &Self) <int> { return self.x; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", Point::make(1).get());\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("receiver"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoStructsWithTheSameMethodNameKeepTheirOwn) {
+    // The reason the symbol carries the struct. One name for both would be a
+    // duplicate definition at best and the wrong body at worst.
+    const Built b = build(std::string(kPrintf) +
+        "struct A { v <int>, fun get() <int> { return self.v; } }\n"
+        "struct B { v <int>, fun get() <int> { return self.v * 10; } }\n"
+        "fun main() <noret> {\n"
+        "    let a <A> = A{ v: 1 };\n"
+        "    let b <B> = B{ v: 2 };\n"
+        "    printf(\"%d %d\\n\", a.get(), b.get());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 20\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodCanCallAFreeFunctionDeclaredAfterIt) {
+    // Ordering. Method bodies are emitted after every top-level prototype exists,
+    // not while the struct table is being built -- a body emitted too early would
+    // find no `helper` and refuse a call the program is entitled to make.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    fun doubled() <int> { return helper(self.x); }\n"
+        "}\n"
+        "fun helper(n: int) <int> { return n * 2; }\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 21 };\n"
+        "    printf(\"%d\\n\", p.doubled());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodCanRecurse) {
+    // The prototype has to be in the table before the body is emitted, which is the
+    // same ordering an instantiated generic function needs and for the same reason.
+    const Built b = build(std::string(kPrintf) +
+        "struct Counter {\n"
+        "    n <int>,\n"
+        "    fun down(k: int) <int> { if (k <= 0) { return self.n; } return self.down(k - 1); }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let c <Counter> = Counter{ n: 5 };\n"
+        "    printf(\"%d\\n\", c.down(3));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStaticMethodIsCalledOnTheTypeAndTakesNoReceiver) {
+    // `pub static fun` -- struct_methods.fin:18,21. There is no object to pass, and
+    // the call is written on the type.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    pub static fun make(v: int) <Point> { return Point{ x: v }; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point::make(2);\n"
+        "    printf(\"%d\\n\", p.x);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStaticMethodReturningSelfByReferenceAllocates) {
+    // struct_methods.fin:18-19 exactly: `pub static fun default_point() <&Self>`
+    // returning `new Self{x: 0}`, with the comment "we must return by reference since
+    // we are allocating in memory with `new`". Two uses of the `Self` binding in one
+    // declaration -- the return type and the type being allocated.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    y <int> = 4,\n"
+        "    pub static fun origin() <&Self> { return new Self{ x: 5 }; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <&Point> = Point::origin();\n"
+        "    printf(\"%d %d\\n\", p.x, p.y);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5 4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TheStructsOwnNameMeansTheSameAsSelf) {
+    // struct_methods.fin:21-22's `default_point2`, whose whole point is that
+    // "&Point instead of &Self is correct too". Both spellings in one struct, so
+    // they have to agree about the type.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    pub static fun a() <&Self> { return new Self{ x: 1 }; }\n"
+        "    pub static fun b() <&Point> { return new Point{ x: 2 }; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <&Point> = Point::a();\n"
+        "    let q <&Point> = Point::b();\n"
+        "    printf(\"%d %d\\n\", p.x, q.x);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStaticMethodDoesNotTakeAnInjectedSelf) {
+    // The other half of :10's note: the injection is for a method *without* the
+    // static keyword. A static method that named `self` would be a front-end
+    // question; what this checks is that the signature has no hidden first
+    // parameter, which a wrong argument count would expose.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    pub static fun two() <int> { return 2; }\n"
+        "    fun get() <int> { return self.x; }\n"
+        "}\n"
+        "fun use() <int> { return Point::two(); }\n");
+    EXPECT_NE(trace.find("declared Point.two"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("declared Point.get"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodsAttributeIsRefused) {
+    // `#[export]` parses on a method and nothing here reads it. The same rule every
+    // other attribute site in this file follows: an attribute that might decide
+    // linkage or which of two definitions wins is refused rather than dropped.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    #[export] fun get(self: &Self) <int> { return self.x; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 1 };\n"
+        "    printf(\"%d\\n\", p.get());\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("export"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWrittenSelfThatIsNotAPointerToItsStructIsRefused) {
+    // The receiver's representation is one thing, so a written `self` has to be that
+    // thing. `self: Self` is a copy, and a method that assigned through it would
+    // silently discard the assignment; `self: int` is not the struct at all.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    fun get(self: Point) <int> { return self.x; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 1 };\n"
+        "    printf(\"%d\\n\", p.get());\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("self"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodIsEmittedOncePerInstantiation) {
+    // Two instantiations are two structs, so they are two methods -- and each is
+    // emitted with the substitution its own instance was built from, which is what
+    // makes `self.val` an i32 in one and an i8 in the other.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun get(self: &Self) <T> { return self.val; }\n"
+        "}\n"
+        "fun use() <int> {\n"
+        "    let a <Box<int>> = Box::<int>{ val: 1 };\n"
+        "    let b <Box<char>> = Box::<char>{ val: 'x' };\n"
+        "    return a.get();\n"
+        "}\n");
+    EXPECT_EQ(occurrences(trace, "declared Box<int>.get"), 1u) << trace;
+    EXPECT_EQ(occurrences(trace, "declared Box<char>.get"), 1u) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodAssignsThroughItsInstantiation) {
+    // The struct's own substitution has to be live while the body is emitted: `v` is
+    // a `T`, and T is whatever this instance bound it to.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun get(self: &Self) <T> { return self.val; }\n"
+        "    fun set(v: T) <noret> { self.val = v; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 3 };\n"
+        "    b.set(9);\n"
+        "    printf(\"%d\\n\", b.get());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructsBareNameInAMethodIsItsOwnInstantiation) {
+    // struct_methods.fin:21's spelling, inside a template: `<&Box>` and `new Box`
+    // with no arguments written, both meaning this instantiation. Keyed on the
+    // instance and not on the template, or `new Box` would build a second struct
+    // named `Box<T>` with `Box<int>`'s layout -- which is the bug the generic
+    // function unit found and named AFunctionBindingSpellsAStructTheWayAWrittenOneDoes.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    pub static fun zero() <&Box> { return new Box{ val: 0 }; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let z <&Box<int>> = Box::<int>::zero();\n"
+        "    printf(\"%d\\n\", z.val);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodOnTwoInstantiationsKeepsThemApart) {
+    // The strongest form of the same claim: one template, two instances, and the
+    // answers have to come from the right layout. `char` and `int` differ in width,
+    // so a body emitted under the wrong substitution reads the wrong number of bytes.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun get(self: &Self) <T> { return self.val; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <Box<int>> = Box::<int>{ val: 300 };\n"
+        "    let b <Box<char>> = Box::<char>{ val: 'x' };\n"
+        "    printf(\"%d %c\\n\", a.get(), b.get());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "300 x\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericMethodIsRefusedAtItsCall) {
+    // `fun set_x<U>(new_x: U)` -- struct_methods.fin:14. Two substitutions at once,
+    // the struct's and the call's, which is a unit of its own. Refused at the call
+    // rather than at the declaration, because a template is not code and the
+    // declaration in the sample is never called.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun set_x<U>(new_x: U) <noret> { self.val = new_x; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 1 };\n"
+        "    b.set_x(5);\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("set_x"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericMethodNobodyCallsIsNotRefused) {
+    // The other side of the pair, and struct_methods.fin's own shape: the method
+    // generic is declared, the struct is instantiated, and nothing calls it. A
+    // declaration that emits nothing is not a skipped body -- there is no body to
+    // emit until a call says what U is.
+    const Compiled c = compileOnly(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun set_x<U>(new_x: U) <noret> { self.val = new_x; }\n"
+        "    fun get(self: &Self) <T> { return self.val; }\n"
+        "}\n"
+        "fun use() <int> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 1 };\n"
+        "    return b.get();\n"
+        "}\n");
+    EXPECT_EQ(c.exitCode, 0) << c.why();
+    // Named after the input's stem, in the working directory, because no -o was given.
+    std::error_code ec;
+    fs::remove(c.object, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructMethodIsOneSymbolAcrossTwoObjects) {
+    // Two objects that each declare the struct and each use the method both publish
+    // `Point.get`, and there is no third place to put it -- the same bargain a
+    // generic function instance strikes (AGenericFunctionsInstanceIsOneSymbolAcross-
+    // TwoObjects). An external definition in each would make the link fail for a
+    // program that is correct, which is why a method is emitted linkonce_odr.
+    const std::string decl =
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    fun get(self: &Self) <int> { return self.x; }\n"
+        "}\n";
+    const fs::path libObj = uniqueTempPath("fin_lib_sm", ".o");
+    const fs::path mainObj = uniqueTempPath("fin_main_sm", ".o");
+    const fs::path exe = uniqueTempPath("fin_linked_sm");
+    const fs::path outPath = uniqueTempPath("fin_linked_sm_out");
+
+    const Compiled lib = compileOnly(decl +
+        "fun side() <int> {\n"
+        "    let p <Point> = Point{ x: 20 };\n"
+        "    return p.get();\n"
+        "}\n", libObj);
+    ASSERT_EQ(lib.exitCode, 0) << lib.why();
+    const Compiled mainPart = compileOnly(std::string(kPrintf) + decl +
+        "@define side() <int>;\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{ x: 22 };\n"
+        "    printf(\"%d\\n\", p.get() + side());\n"
+        "}\n", mainObj);
+    ASSERT_EQ(mainPart.exitCode, 0) << mainPart.why();
+
+    const char* fromEnv = std::getenv("FIN_CC");
+    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
+    const std::string link = shellQuoteLocal(cc) + " " + shellQuoteLocal(libObj.string()) +
+                             " " + shellQuoteLocal(mainObj.string()) + " -o " +
+                             shellQuoteLocal(exe.string());
+    ASSERT_EQ(std::system(link.c_str()), 0) << link;
+
+    const std::string run = shellQuoteLocal(exe.string()) + " > " +
+                            shellQuoteLocal(outPath.string()) + " 2>&1";
+    std::system(run.c_str());
+    EXPECT_EQ(readWholeFile(outPath.string()), "42\n");
+
+    std::error_code ec;
+    for (const fs::path& q : {libObj, mainObj, exe, outPath}) fs::remove(q, ec);
 }
