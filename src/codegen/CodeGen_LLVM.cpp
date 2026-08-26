@@ -1099,6 +1099,82 @@ private:
         return structName + "." + method;
     }
 
+    // `V.operator+` -- an operator's method name, and the reason this file needs a
+    // speller at all.
+    //
+    // An OperatorDeclaration carries an ASTTokenKind, not the text the writer typed, so
+    // there is nothing to concatenate until a token is turned back into characters.
+    // Every use of one wants that: the symbol, the trace line, and the diagnostic --
+    // which before this could only say "an operator on struct 'V'" and leave the reader
+    // to find which of two operators it meant.
+    //
+    // Spelled the way the source spells it, which is why ``-` and `-` are two
+    // strings rather than one: UNARY_MINUS and MINUS are different declarations on one
+    // struct (`operator `-` is negation, `operator -` is subtraction) and one
+    // spelling for both would make them one symbol and silently keep the first.
+    static const char* spellOperator(ASTTokenKind op) {
+        switch (op) {
+            case ASTTokenKind::PLUS:            return "+";
+            case ASTTokenKind::MINUS:           return "-";
+            case ASTTokenKind::MULT:            return "*";
+            case ASTTokenKind::DIV:             return "/";
+            case ASTTokenKind::MOD:             return "%";
+            case ASTTokenKind::EQEQ:            return "==";
+            case ASTTokenKind::NOTEQ:           return "!=";
+            case ASTTokenKind::LT:              return "<";
+            case ASTTokenKind::GT:              return ">";
+            case ASTTokenKind::LTEQ:            return "<=";
+            case ASTTokenKind::GTEQ:            return ">=";
+            case ASTTokenKind::AMPERSAND:       return "&";
+            case ASTTokenKind::AND:             return "&&";
+            case ASTTokenKind::PIPE:            return "|";
+            case ASTTokenKind::OR:              return "||";
+            case ASTTokenKind::CARET:           return "^";
+            case ASTTokenKind::SHIFTLEFT:       return "<<";
+            case ASTTokenKind::SHIFTRIGHT:      return ">>";
+            case ASTTokenKind::NOT:             return "!";
+            case ASTTokenKind::TILDE:           return "~";
+            case ASTTokenKind::EQUAL:           return "=";
+            case ASTTokenKind::PLUSEQUAL:       return "+=";
+            case ASTTokenKind::MINUSEQUAL:      return "-=";
+            case ASTTokenKind::MULTEQUAL:       return "*=";
+            case ASTTokenKind::DIVEQUAL:        return "/=";
+            case ASTTokenKind::MODEQUAL:        return "%=";
+            case ASTTokenKind::AMPERSANDEQUAL:  return "&=";
+            case ASTTokenKind::PIPEEQUAL:       return "|=";
+            case ASTTokenKind::SHIFTLEFTEQUAL:  return "<<=";
+            case ASTTokenKind::SHIFTRIGHTEQUAL: return ">>=";
+            case ASTTokenKind::INCREMENT:       return "++";
+            case ASTTokenKind::DECREMENT:       return "--";
+            case ASTTokenKind::INDEX:           return "[]";
+            case ASTTokenKind::INDEX_ASSIGN:    return "[]=";
+            case ASTTokenKind::DEREF:           return "`*";
+            case ASTTokenKind::UNARY_MINUS:     return "`-";
+            // VARIADIC_CALL is `operator (...args)` (stdlib/operators.fin), which is a
+            // call and not a token anyone writes between two operands. Left unspelled
+            // so that declaring one refuses by name instead of publishing `V.operator?`.
+            default:                            return "";
+        }
+    }
+
+    // The name an operator is declared and looked up under. `operator` is a keyword, so
+    // no Fin method can collide with one of these.
+    static std::string operatorKey(const std::string& structName, ASTTokenKind op) {
+        return methodKey(structName, std::string("operator") + spellOperator(op));
+    }
+
+    // The declaration behind an operator token, or null for one this struct does not
+    // declare. The counterpart of findMethod, and read for the same two reasons: to
+    // know whether a struct has one at all, and to say why the one it has was not
+    // declared.
+    static const OperatorDeclaration* findOperator(const StructInfo& info,
+                                                  ASTTokenKind op) {
+        if (!info.decl) return nullptr;
+        for (auto& o : info.decl->operators)
+            if (o->op == op) return o.get();
+        return nullptr;
+    }
+
     // What the mapper is handed while one of this struct's methods is declared or
     // emitted. See StructInfo::methodBindings for why it is a binding and not a lookup.
     void bindMethodTypes(StructInfo& info) {
@@ -1193,17 +1269,55 @@ private:
             // method of an *instantiation* is declared from the middle of another
             // function's body, where emitting straight away would mean nesting two
             // insert points for no reason.
-            pendingBodies_.push_back(PendingBody{m.get(), key, &info.methodBindings});
+            pendingBodies_.push_back(PendingBody{m.get(), &m->params, m->body.get(), key,
+                                                 &info.methodBindings});
+        }
+
+        // The operators, on the same terms. An operator is a method with a spelled name:
+        // the receiver is the same pointer, the body is deferred to the same queue, the
+        // linkage is weak for the same reason, and an instantiation gets its own copy
+        // because this runs once per instantiation. What differs is where it is *reached*
+        // from -- visit(BinaryOp&) rather than a written name -- and nothing about that
+        // is decided here.
+        for (auto& o : info.decl->operators) {
+            // A generic operator: two substitutions at once, the struct's and the
+            // operator's, which is one layer further than this unit goes. Not declared
+            // and not refused, because operators.fin:15 declares `operator + : <T>` and
+            // applies it nowhere -- the sample is `//@ ok` with it in.
+            if (!o->generic_params.empty()) continue;
+            // An operator with no body is one bound by `implements`
+            // (hashmap.fin:50-51): the function it forwards to is written in the cast,
+            // and reading that cast is a feature of its own. Declaring the operator
+            // anyway would publish a symbol nothing defines and move the failure to the
+            // linker.
+            if (!o->body) continue;
+
+            const std::string key = operatorKey(info.finName, o->op);
+            declareFunction(*o, key, key, o->params, o->return_type.get(),
+                            /*isVarArg=*/false, /*isExtern=*/false, &receiver);
+            auto declared = functions_.find(key);
+            if (declared == functions_.end()) return false;  // declareFunction reported
+            declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+            pendingBodies_.push_back(PendingBody{o.get(), &o->params, o->body.get(), key,
+                                                &info.methodBindings});
         }
         return true;
     }
 
-    // A method body waiting for the point in run() where everything it can name
-    // exists. `bindings` points into a StructInfo, which outlives this.
+    // A method or operator body waiting for the point in run() where everything it can
+    // name exists. `bindings` points into a StructInfo, which outlives this.
+    //
+    // The parts of a declaration rather than the declaration, because a
+    // FunctionDeclaration and an OperatorDeclaration are two unrelated classes with the
+    // same three members -- params, body, loc -- and emitting a body needs exactly
+    // those. A common base class for the two would be the tidier answer and is a change
+    // to the AST, which this unit is not.
     struct PendingBody {
-        FunctionDeclaration* fn;
+        ASTNode* node = nullptr;
+        const std::vector<std::unique_ptr<Parameter>>* params = nullptr;
+        Block* body = nullptr;
         std::string key;
-        const Substitution* bindings;
+        const Substitution* bindings = nullptr;
     };
 
     // Emits every queued body, including the ones queued while emitting them.
@@ -1214,7 +1328,7 @@ private:
         for (size_t i = 0; i < pendingBodies_.size(); ++i) {
             PendingBody job = pendingBodies_[i];
             ScopedBindings bound(types_, job.bindings);
-            emitBody(*job.fn, job.key);
+            emitBody(*job.node, *job.params, *job.body, job.key);
         }
         // Cleared, because run() drains more than once and a second entry block on a
         // function that already has one is invalid IR rather than a duplicate.
@@ -1238,12 +1352,7 @@ private:
             return false;
         }
         if (!lowerableMethods(s)) return false;
-        for (auto& o : s.operators) {
-            // Spelled without the operator itself: `op` is a token kind here and this
-            // file has no speller for one. The line the caret lands on has it.
-            unsupported(*o, fmt::format("an operator on struct '{}'", s.name));
-            return false;
-        }
+        if (!lowerableOperators(s)) return false;
         for (auto& c : s.constructors) {
             unsupported(*c, fmt::format("a constructor on struct '{}'", s.name));
             return false;
@@ -1341,6 +1450,57 @@ private:
                 unsupported(*m->params[i],
                             fmt::format("a 'self' parameter in position {} of method "
                                         "'{}' on struct '{}'", i + 1, m->name, s.name));
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The operator shapes that are wrong however the struct is used, checked where the
+    // struct is written. lowerableMethods' counterpart, and the same split: an
+    // operator's *body* is checked where it is emitted, once per instantiation.
+    bool lowerableOperators(StructDeclaration& s) {
+        std::set<std::string> seen;
+        for (auto& o : s.operators) {
+            const std::string spelling = spellOperator(o->op);
+            if (spelling.empty()) {
+                // A token this file cannot turn back into characters has no symbol to
+                // be declared under and no name to appear in a diagnostic, and picking
+                // one would put a symbol in the object file that no reader can trace to
+                // a line. `operator (...args)` is the one the corpus has.
+                unsupported(*o, fmt::format("an operator on struct '{}' whose token has "
+                                            "no spelling", s.name));
+                return false;
+            }
+            if (!seen.insert(spelling).second) {
+                // Two operators of one token are two definitions of one symbol, and
+                // declareFunction keeps the first -- so the second body would silently
+                // not be the one that runs. Which of the two a use meant is overload
+                // resolution, and the analyzer has none for an operator (it does not
+                // even check the arity), so there is nothing to pick with.
+                unsupported(*o, fmt::format("a second operator '{}' on struct '{}'",
+                                            spelling, s.name));
+                return false;
+            }
+            if (!o->params.empty() && o->params[0]->name == "self") {
+                // A method's written `self` *is* the receiver, because
+                // buildMethodSignature drops a parameter of that name wherever it
+                // appears. Nothing drops this one: the analyzer's
+                // visit(OperatorDeclaration&) defines `self` as the struct
+                // unconditionally and then defines every written parameter too, so a
+                // written `self` here is an ordinary operand hidden behind the injected
+                // receiver -- two things of one name that disagree about the arity.
+                unsupported(*o->params[0],
+                            fmt::format("a 'self' parameter on the operator '{}' of "
+                                        "struct '{}'", spelling, s.name));
+                return false;
+            }
+            for (auto& param : o->params) {
+                if (!param->is_vararg) continue;
+                // `...` needs va_start, which is a library question (ADR 0003), and an
+                // operator with one is not written anywhere in the corpus.
+                unsupported(*param, fmt::format("'...' on the operator '{}' of struct "
+                                                "'{}'", spelling, s.name));
                 return false;
             }
         }
@@ -2257,6 +2417,13 @@ private:
     // parameters bound, so anything the ordinary path does for a body has to happen
     // for an instance too or the two drift.
     void emitBody(FunctionDeclaration& node, const std::string& name) {
+        emitBody(node, node.params, *node.body, name);
+    }
+
+    // The same, for a declaration that is not a FunctionDeclaration. See PendingBody
+    // for why an operator arrives as three pieces rather than as a node.
+    void emitBody(ASTNode& node, const std::vector<std::unique_ptr<Parameter>>& params,
+                  Block& body, const std::string& name) {
         auto found = functions_.find(name);
         if (found == functions_.end()) return;  // the refusal was already reported
         const FnInfo info = found->second;
@@ -2286,7 +2453,7 @@ private:
 
         // Each parameter gets a stack slot, because a parameter is assignable in
         // Fin and an argument register is not.
-        for (auto& p : node.params) {
+        for (auto& p : params) {
             if (p->is_vararg) continue;
             // Written or injected, `self` is the slot above and not a second one.
             if (info.hasReceiver && p->name == "self") continue;
@@ -2298,7 +2465,7 @@ private:
             ++index;
         }
 
-        node.body->accept(*this);
+        body.accept(*this);
 
         // The implicit tail. A Fin function that falls off the end returns nothing,
         // except `main`, which owes the shell a status.
@@ -2887,10 +3054,74 @@ private:
 
         CgVal lhs = emit(*node.left);
         if (failed_) return;
+
+        // A declared operator, if the left operand is a struct.
+        //
+        // The left operand and not either one: `v + 1` looks on V, and `1 + v` does not
+        // look at all -- the analyzer refuses that outright ("Type mismatch: expected
+        // 'int', got 'V'"), so there is no second rule to write here.
+        //
+        // Gated on the operand's type rather than on the program having declared an
+        // operator with this token, which is the stronger of the two guarantees and the
+        // cheaper: a scalar `1 + 2` reaches the same code it reached before this
+        // existed, in a program that declares operators as much as in one that does not.
+        // (It is also why the operand is emitted *before* the lookup -- the ordinary
+        // path needs that value, and computing an address first for every `+` in the
+        // program would emit a dead one for each.)
+        if (lhs.type.isStruct()) { emitStructOperator(node, lhs); return; }
+
         CgVal rhs = emit(*node.right);
         if (failed_) return;
         if (!lhs.ok() || !rhs.ok()) { unsupported(node, "this operand"); return; }
         value_ = emitArithmetic(node, node.op, lhs, rhs);
+    }
+
+    // `v1 + v2` -- a call to `V.operator+` with the left operand as the receiver.
+    //
+    // Never falls back: a struct on the left of an operator is either a declared
+    // operator or a refusal, because the built-in path has nothing to do with a struct
+    // (commonType compares bit widths and a struct has none) and inventing a field-wise
+    // meaning for `==` is a ruling nobody has made.
+    void emitStructOperator(BinaryOp& node, const CgVal& lhs) {
+        const StructInfo* owner = lhs.type.structInfo;
+        const std::string spelling = spellOperator(node.op);
+        if (!owner || spelling.empty()) {
+            // An anonymous struct type, or a token with no spelling. Neither can be
+            // looked up, and the old wording is still the right one.
+            unsupported(node, "an operator on a struct");
+            return;
+        }
+        if (!findOperator(*owner, node.op)) {
+            unsupported(node, fmt::format("an undeclared operator '{}' on struct '{}'",
+                                          spelling, owner->finName));
+            return;
+        }
+        const std::string key = operatorKey(owner->finName, node.op);
+        auto found = functions_.find(key);
+        if (found == functions_.end()) {
+            reportMissingOperator(node, *owner, node.op);
+            return;
+        }
+        const FnInfo& info = found->second;
+
+        // The receiver is the left operand's *address*, and not the value emitted a
+        // moment ago. `operator +` may assign through `self` -- and one in the corpus
+        // reads `self.val`, which is a load through the same pointer -- so a receiver
+        // spilled to a temporary would be a program whose operator silently writes into
+        // a copy. That is also why a left operand with no address refuses instead:
+        // `make() + v` has nothing to be `self`, and materialising one would be
+        // inventing the object.
+        auto receiver = baseAddress(*node.left, CgType::Kind::Struct);
+        if (failed_) return;
+        if (!receiver) {
+            unsupported(node, fmt::format("an operator '{}' on a left operand with no "
+                                          "address", spelling));
+            return;
+        }
+
+        std::vector<llvm::Value*> args{receiver->ptr};
+        if (!emitCallArgs(node, info, key, {node.right.get()}, args)) return;
+        emitCall(info, args);
     }
 
     CgVal emitArithmetic(ASTNode& node, ASTTokenKind op, CgVal lhs, CgVal rhs) {
@@ -3264,7 +3495,7 @@ private:
         const FnInfo& info = found->second;
 
         std::vector<llvm::Value*> args;
-        if (!emitCallArgs(node, info, node.name, node.args, args)) return;
+        if (!emitCallArgs(node, info, node.name, argList(node.args), args)) return;
         emitCall(info, args);
     }
 
@@ -3279,7 +3510,7 @@ private:
     //
     // Returns false having already reported.
     bool emitCallArgs(ASTNode& node, const FnInfo& info, const std::string& name,
-                      const std::vector<std::unique_ptr<Expression>>& argNodes,
+                      const std::vector<Expression*>& argNodes,
                       std::vector<llvm::Value*>& args) {
         const size_t offset = args.size();
         for (size_t i = 0; i < argNodes.size(); ++i) {
@@ -3314,6 +3545,19 @@ private:
             return false;
         }
         return true;
+    }
+
+    // A written argument list as plain pointers, so that emitCallArgs can be shared by
+    // a call (whose arguments are a vector) and by an operator (whose one operand is a
+    // member of the BinaryOp). The alternative was a second copy of the conversion and
+    // vararg rules, which is the kind of duplication that becomes an ABI difference
+    // between two spellings of a call.
+    static std::vector<Expression*> argList(
+        const std::vector<std::unique_ptr<Expression>>& args) {
+        std::vector<Expression*> out;
+        out.reserve(args.size());
+        for (auto& a : args) out.push_back(a.get());
+        return out;
     }
 
     // The call itself, and what it leaves in `value_`.
@@ -3354,6 +3598,27 @@ private:
             return;
         }
         unsupported(node, fmt::format("a call to the method '{}' on struct '{}'", method,
+                                      info.finName));
+    }
+
+    // Why `Struct.operator+` is not in functions_, given that the struct declares one.
+    // Always reports. reportMissingMethod's counterpart, for the same reason: the two
+    // shapes declareStructMethods deliberately skips are shapes a reader has to be sent
+    // back to the declaration for, not told about as a missing feature.
+    void reportMissingOperator(ASTNode& node, const StructInfo& info, ASTTokenKind op) {
+        const OperatorDeclaration* decl = findOperator(info, op);
+        const std::string spelling = spellOperator(op);
+        if (decl && !decl->generic_params.empty()) {
+            unsupported(node, fmt::format("the generic operator '{}' on struct '{}'",
+                                          spelling, info.finName));
+            return;
+        }
+        if (decl && !decl->body) {
+            unsupported(node, fmt::format("an operator '{}' bound by 'implements' on "
+                                          "struct '{}'", spelling, info.finName));
+            return;
+        }
+        unsupported(node, fmt::format("the operator '{}' on struct '{}'", spelling,
                                       info.finName));
     }
 
@@ -3588,7 +3853,7 @@ private:
         }
 
         std::vector<llvm::Value*> args{receiver->ptr};
-        if (!emitCallArgs(node, info, node.method_name, node.args, args)) return;
+        if (!emitCallArgs(node, info, node.method_name, argList(node.args), args)) return;
         emitCall(info, args);
     }
 
@@ -3606,7 +3871,22 @@ private:
         // reaches its own instantiation through the same call, by the binding.
         auto target = types_.map(node.target_type.get());
         if (!target) {
-            if (!failed_) unsupportedType(node, node.target_type.get(), "a '::' call on");
+            if (failed_) return;
+            // A template written with no arguments -- `Vec2::make(1, 2)` on a
+            // `struct Vec2<T>` (letssee.fin:26). The mapper cannot map it because there
+            // is nothing to lay out until T is known, and inferring T from the arguments
+            // is the same inference a free call needs and does not have. Named
+            // specifically because "of type 'Vec2'" on its own reads as an unknown type
+            // rather than as a template missing its arguments.
+            if (node.target_type && templates_.count(node.target_type->name) &&
+                node.target_type->generics.empty()) {
+                unsupported(node, fmt::format("a '::' call to '{}' on the generic struct "
+                                              "'{}' with no type arguments",
+                                              node.method_name,
+                                              node.target_type->name));
+                return;
+            }
+            unsupportedType(node, node.target_type.get(), "a '::' call on a target");
             return;
         }
         if (!target->isStruct() || !target->structInfo) {
@@ -3633,7 +3913,7 @@ private:
         }
 
         std::vector<llvm::Value*> args;
-        if (!emitCallArgs(node, info, node.method_name, node.args, args)) return;
+        if (!emitCallArgs(node, info, node.method_name, argList(node.args), args)) return;
         emitCall(info, args);
     }
     void visit(MemberAccess& node) override {

@@ -3637,9 +3637,12 @@ BACKEND_TEST(Soundness_Codegen, AStructsMethodIsEmittedEvenIfNobodyCallsIt) {
         "}\n").find("declared Box.get"), std::string::npos);
 }
 
-BACKEND_TEST(Soundness_Codegen, AStructsOperatorIsRefusedAtItsDeclaration) {
-    // operators.fin:15-21 verbatim in shape: two operator bodies on a struct whose
-    // `main` never applies either of them.
+BACKEND_TEST(Soundness_Codegen, AStructsOperatorIsEmittedEvenIfNobodyWritesIt) {
+    // operators.fin:19-21 verbatim in shape: an operator body on a struct whose `main`
+    // never applies it. The same rule a method gets -- the object file contains the
+    // functions the source declared, whether or not anything reaches them -- and here
+    // it is the whole of what the normative sample asks for, because operators.fin's
+    // `main` only prints an enum.
     const Built b = build(std::string(kPrintf) +
         "struct MyInt {\n"
         "    val <int>,\n"
@@ -3650,8 +3653,13 @@ BACKEND_TEST(Soundness_Codegen, AStructsOperatorIsRefusedAtItsDeclaration) {
         "fun main() <noret> {\n"
         "    printf(\"ok\\n\");\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("operator"), std::string::npos) << b.why();
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+    EXPECT_NE(codegenTrace(std::string(kPrintf) +
+        "struct MyInt {\n"
+        "    val <int>,\n"
+        "    operator -(other: <int>) <int> { return self.val + other; }\n"
+        "}\n").find("declared MyInt.operator-"), std::string::npos);
 }
 
 BACKEND_TEST(Soundness_Codegen, AStructsConstructorIsRefusedAtItsDeclaration) {
@@ -4749,4 +4757,375 @@ BACKEND_TEST(Soundness_Codegen, AStructMethodIsOneSymbolAcrossTwoObjects) {
 
     std::error_code ec;
     for (const fs::path& q : {libObj, mainObj, exe, outPath}) fs::remove(q, ec);
+}
+
+// --- A struct operator ------------------------------------------------------
+//
+// tests/samples/operators.fin is the normative sample and it declares two operators
+// and applies neither:
+//
+//     struct MyInt {
+//         val <int>,
+//         // Operator with Generic
+//         operator + : <T>(other: <T>) <int> {
+//             return self.val + cast<int>(other);
+//         }
+//         // Normal Operator
+//         operator -(other: <int>) <int> {
+//             return self.val + other;
+//         }
+//     }
+//
+// tests/samples/deeptest1.fin:11 is where one is applied:
+//
+//     pub operator + (other: Vector2) <Vector2> {
+//         return Vector2 { x: self.x + other.x, y: self.y + other.y };
+//     }
+//     ...
+//     let v3 <Vector2> = v1 + v2; // Should resolve to Vector2
+//
+// An operator is a method with two differences, and everything else about it -- the
+// receiver, the deferred body, one instance per instantiation, linkonce_odr -- is the
+// method unit's and is not re-tested here.
+//
+// 1. Its name is spelled from its token. `Struct.operator+`, because an
+//    OperatorDeclaration carries an ASTTokenKind and not a string, so the backend needs
+//    a speller either way -- the diagnostic it used to emit could not name the operator
+//    it was refusing.
+//
+// 2. It is reached by writing it and not by naming it. Which means the *left* operand
+//    decides: `v + 1` looks on V and `1 + v` does not look at all (the analyzer refuses
+//    that one outright -- "Type mismatch: expected 'int', got 'V'" -- so there is
+//    nothing here to decide). And it means the lookup has to happen without disturbing
+//    `1 + 2`, which is why it is gated on the program having declared an operator with
+//    that token at all: a program with no struct operator in it emits exactly the IR it
+//    emitted before this unit existed.
+//
+// A generic operator, and one bound by `implements`, are declared and lowered by
+// nobody -- the same two exemptions a method has, for the same two reasons -- so
+// applying one refuses and declaring one is not a refusal. operators.fin declares a
+// generic operator, and hashmap.fin:50 (`operator[] implements cast<fn(Self, T)>(__get)`)
+// is the other.
+
+BACKEND_TEST(Soundness_Codegen, AStructsOperatorIsCalledByWritingIt) {
+    // deeptest1.fin:11-16 and :31 in shape: the operator returns the struct by value,
+    // which is the ordinary Fin-to-Fin aggregate return.
+    const Built b = build(std::string(kPrintf) +
+        "struct Vector2 {\n"
+        "    x <int>,\n"
+        "    y <int> = 10,\n"
+        "    pub operator + (other: Vector2) <Vector2> {\n"
+        "        return Vector2{ x: self.x + other.x, y: self.y + other.y };\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let v1 <Vector2> = Vector2 { x: 1, y: 2 };\n"
+        "    let v2 <Vector2> = Vector2 { x: 3, y: 4 };\n"
+        "    let v3 <Vector2> = v1 + v2;\n"
+        "    printf(\"%d %d\\n\", v3.x, v3.y);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "4 6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOperatorsSymbolIsSpelledFromItsToken) {
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "struct V {\n"
+        "    x <int>,\n"
+        "    pub operator + (o: V) <int> { return self.x + o.x; }\n"
+        "    pub operator - (o: V) <int> { return self.x - o.x; }\n"
+        "    pub operator == (o: V) <bool> { return self.x == o.x; }\n"
+        "    pub operator < (o: V) <bool> { return self.x < o.x; }\n"
+        "}\n");
+    EXPECT_NE(trace.find("declared V.operator+"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("declared V.operator-"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("declared V.operator=="), std::string::npos) << trace;
+    EXPECT_NE(trace.find("declared V.operator<"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOperatorReadsTheLeftOperandThroughItsReceiver) {
+    // The receiver is a pointer, as a method's is, so `self.x` is a load through it
+    // rather than a field of a copy. Written as a mutating operator on purpose: if the
+    // receiver were a copy, this would print the operand unchanged and nothing would
+    // say so.
+    const Built b = build(std::string(kPrintf) +
+        "struct V {\n"
+        "    x <int>,\n"
+        "    pub operator + (o: int) <int> { self.x = self.x + o; return self.x; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let v <V> = V{ x: 1 };\n"
+        "    let a <int> = v + 4;\n"
+        "    printf(\"%d %d\\n\", a, v.x);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "5 5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOperatorTakesItsOtherOperandByValue) {
+    // `other: Vector2` is a struct parameter, which between two Fin functions is an
+    // LLVM aggregate passed by value -- the same as any other struct parameter, and
+    // deliberately not the C ABI's answer (declareFunction refuses that across an
+    // `@define` boundary).
+    const Built b = build(std::string(kPrintf) +
+        "struct V {\n"
+        "    a <int>,\n"
+        "    b <int>,\n"
+        "    pub operator + (o: V) <int> { return self.a * 1000 + o.a * 100 + o.b; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <V> = V{ a: 1, b: 2 };\n"
+        "    let q <V> = V{ a: 3, b: 4 };\n"
+        "    printf(\"%d\\n\", p + q);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "1304\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AComparisonOperatorReturningBoolDrivesAnIf) {
+    const Built b = build(std::string(kPrintf) +
+        "struct V {\n"
+        "    x <int>,\n"
+        "    pub operator == (o: V) <bool> { return self.x == o.x; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <V> = V{ x: 1 };\n"
+        "    let b <V> = V{ x: 1 };\n"
+        "    let c <V> = V{ x: 2 };\n"
+        "    if (a == b) { printf(\"same\\n\"); }\n"
+        "    if (a == c) { printf(\"wrong\\n\"); } else { printf(\"different\\n\"); }\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "same\ndifferent\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoStructsWithTheSameOperatorKeepTheirOwn) {
+    const Built b = build(std::string(kPrintf) +
+        "struct V { x <int>, pub operator + (o: V) <int> { return self.x + o.x; } }\n"
+        "struct W { y <int>, pub operator + (o: W) <int> { return self.y * o.y; } }\n"
+        "fun main() <noret> {\n"
+        "    let a <V> = V{ x: 3 };\n"
+        "    let b <V> = V{ x: 4 };\n"
+        "    let c <W> = W{ y: 3 };\n"
+        "    let d <W> = W{ y: 4 };\n"
+        "    printf(\"%d %d\\n\", a + b, c + d);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "7 12\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOperatorIsFoundThroughAFieldsAddress) {
+    // The receiver comes from baseAddress, so every base a field access copes with a
+    // written operator copes with too: a field, and a pointer with one load in between.
+    const Built b = build(std::string(kPrintf) +
+        "struct V { x <int>, pub operator + (o: V) <int> { return self.x + o.x; } }\n"
+        "struct Outer { inner <V> }\n"
+        "fun main() <noret> {\n"
+        "    let v <V> = V{ x: 10 };\n"
+        "    let o <Outer> = Outer{ inner: V{ x: 5 } };\n"
+        "    let p <&V> = &v;\n"
+        "    printf(\"%d %d\\n\", o.inner + v, *p + o.inner);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "15 15\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOperatorOnAValueWithNoHomeIsRefused) {
+    // `make() + v`. The same refusal a method call on a temporary gets, and the same
+    // reason: the receiver is a pointer because an operator may assign through it, a
+    // value returned by a call has no address, and copying it to a temporary would make
+    // a mutating operator silently mutate the copy.
+    const Built b = build(std::string(kPrintf) +
+        "struct V { x <int>, pub operator + (o: V) <int> { return self.x + o.x; } }\n"
+        "fun make() <V> { return V{ x: 7 }; }\n"
+        "fun main() <noret> {\n"
+        "    let v <V> = V{ x: 1 };\n"
+        "    printf(\"%d\\n\", make() + v);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("left operand"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOperatorOnAGenericStructIsEmittedPerInstantiation) {
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    pub operator + (o: Box<T>) <T> { return self.val + o.val; }\n"
+        "}\n"
+        "fun use() <int> {\n"
+        "    let a <Box<int>> = Box::<int>{ val: 1 };\n"
+        "    let b <Box<int>> = Box::<int>{ val: 2 };\n"
+        "    let c <Box<long>> = Box::<long>{ val: 3 };\n"
+        "    let d <Box<long>> = Box::<long>{ val: 4 };\n"
+        "    return cast<int>(a + b) + cast<int>(c + d);\n"
+        "}\n");
+    EXPECT_EQ(occurrences(trace, "declared Box<int>.operator+"), 1u) << trace;
+    EXPECT_EQ(occurrences(trace, "declared Box<long>.operator+"), 1u) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructsOperatorRunsAtItsOwnInstantiation) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    pub operator + (o: Box<T>) <T> { return self.val + o.val; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <Box<int>> = Box::<int>{ val: 20 };\n"
+        "    let b <Box<int>> = Box::<int>{ val: 22 };\n"
+        "    printf(\"%d\\n\", a + b);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructWithNoOperatorForThatTokenStillRefuses) {
+    // The struct declares `+` and the program writes `-`. Nothing is found, and the
+    // built-in path is where the refusal comes from -- an arithmetic operator on a
+    // struct, which is what it always said.
+    const Built b = build(std::string(kPrintf) +
+        "struct V { x <int>, pub operator + (o: V) <int> { return self.x + o.x; } }\n"
+        "fun main() <noret> {\n"
+        "    let a <V> = V{ x: 1 };\n"
+        "    let b <V> = V{ x: 2 };\n"
+        "    printf(\"%d\\n\", a - b);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("operator"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AProgramWithAStructOperatorStillAddsItsIntegers) {
+    // The lookup is gated on the token, and a scalar operand never reaches it. Cheap to
+    // state and the thing most worth stating: an overload resolution that leaked into
+    // `1 + 2` would be a wrong answer rather than a refusal.
+    const Built b = build(std::string(kPrintf) +
+        "struct V { x <int>, pub operator + (o: V) <int> { return 999; } }\n"
+        "fun main() <noret> {\n"
+        "    let n <int> = 1 + 2;\n"
+        "    let f <float> = 1.5 + 2.5;\n"
+        "    if (f > 4.0) { printf(\"%d big\\n\", n); } else { printf(\"%d small\\n\", n); }\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "3 small\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericOperatorNobodyWritesIsNotARefusal) {
+    // operators.fin:15-17. Two substitutions at once -- the struct's and the
+    // operator's -- is the method-generic unit, and this is the half of it the
+    // normative sample needs: the declaration is not a refusal, because there is no
+    // body to lower until something says what T is.
+    const Built b = build(std::string(kPrintf) +
+        "struct MyInt {\n"
+        "    val <int>,\n"
+        "    operator + : <T>(other: <T>) <int> {\n"
+        "        return self.val + cast<int>(other);\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericOperatorIsRefusedWhereItIsWritten) {
+    const Built b = build(std::string(kPrintf) +
+        "struct MyInt {\n"
+        "    val <int>,\n"
+        "    operator + : <T>(other: <T>) <int> {\n"
+        "        return self.val + cast<int>(other);\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let m <MyInt> = MyInt{ val: 1 };\n"
+        "    printf(\"%d\\n\", m + 2);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("generic"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("+"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOperatorBoundByImplementsIsNotDeclared) {
+    // hashmap.fin:50 -- `operator[] implements cast<fn(Self, T)>(__get)`. No body, so
+    // there is nothing to emit and nothing is emitted; the binding it describes is a
+    // feature of its own, and writing the operator is what refuses.
+    const Compiled c = compileOnly(std::string(kPrintf) +
+        "@define __get(v: int) <int>;\n"
+        "struct V {\n"
+        "    x <int>,\n"
+        "    pub operator[] implements cast<fn(int)>(__get);\n"
+        "}\n"
+        "fun use() <int> { return 1; }\n");
+    EXPECT_EQ(c.exitCode, 0) << c.why();
+    EXPECT_EQ(codegenTrace(std::string(kPrintf) +
+        "@define __get(v: int) <int>;\n"
+        "struct V {\n"
+        "    x <int>,\n"
+        "    pub operator[] implements cast<fn(int)>(__get);\n"
+        "}\n").find("V.operator["), std::string::npos);
+    std::error_code ec;
+    fs::remove(c.object, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, ASecondOperatorForOneTokenIsRefused) {
+    // Two definitions of one symbol, and declareFunction keeps the first -- so the
+    // second body would silently not be the one that runs. Which of the two a use
+    // meant is overload resolution, and the analyzer does not have it yet
+    // (KnownDefect: "operators have no arity check").
+    const Built b = build(std::string(kPrintf) +
+        "struct V {\n"
+        "    x <int>,\n"
+        "    pub operator + (o: V) <int> { return 1; }\n"
+        "    pub operator + (o: int) <int> { return 2; }\n"
+        "}\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("second operator"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOperatorWithAWrittenSelfIsRefused) {
+    // visit(OperatorDeclaration&) in the analyzer defines `self` unconditionally and
+    // keeps every written parameter, so a written `self` here is an ordinary parameter
+    // shadowed by the injected receiver -- two things of one name, disagreeing about
+    // arity. A method's written `self` is a receiver because buildMethodSignature drops
+    // it; nothing drops this one.
+    const Built b = build(std::string(kPrintf) +
+        "struct V {\n"
+        "    x <int>,\n"
+        "    pub operator + (self: &Self, o: V) <int> { return self.x + o.x; }\n"
+        "}\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("self"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOperatorWithTheWrongArityIsRefusedWhereItIsWritten) {
+    // `operator +` taking two operands beside the receiver. There is no second right
+    // operand in `v + 1` to fill it, and the analyzer has no arity check for an
+    // operator (a booked defect), so this is where it lands.
+    const Built b = build(std::string(kPrintf) +
+        "struct V {\n"
+        "    x <int>,\n"
+        "    pub operator + (a: int, b: int) <int> { return a + b; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let v <V> = V{ x: 1 };\n"
+        "    printf(\"%d\\n\", v + 1);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("too few arguments"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ACompoundAssignmentToAStructIsStillRefused) {
+    // `a += b` is not this path -- visit(BinaryOp&) sends the whole EQUAL family to
+    // emitAssignment before any operator lookup happens. Whether `+=` should compose
+    // the declared `+` with a store, or want an `operator +=` of its own, is a ruling
+    // nobody has made; until then writing it refuses rather than picking one.
+    const Built b = build(std::string(kPrintf) +
+        "struct V { x <int>, pub operator + (o: V) <V> { return V{ x: self.x + o.x }; } }\n"
+        "fun main() <noret> {\n"
+        "    let a <V> = V{ x: 1 };\n"
+        "    let b <V> = V{ x: 2 };\n"
+        "    a += b;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
 }
