@@ -35,11 +35,13 @@ endif()
 # platforms 22 is missing on is a measurement, not an assumption, so CI owes it
 # afresh; none of the six combinations may be allowed to go quiet over it.
 #
-# The pin was 18 and is 22 (ADR 0010, amended 2026-08-27).  The reason is not a
-# preference: LLVM 18 cannot be obtained on the machine this compiler is now
-# developed and verified on, and a pin that names a version nobody can install is
-# enforced only by everyone turning the backend off -- which is how 285 codegen
-# tests came to skip in silence.
+# The pin was 18 and is 22 (ADR 0010, amended 2026-08-27).  The reason is the ADR's
+# own criterion -- it chose 18 because 18 was what the build was verified against
+# -- and what this machine verifies is 22.1.8.  Not because 18 is unobtainable:
+# Artix packages `llvm18` 18.1.8-2, so that claim would be false.  What is true is
+# that 18 is not installed, that a second LLVM under a versioned prefix has to be
+# pointed at with LLVM_DIR by hand, and that the 18 pin's actual effect here was
+# FIN_WITH_LLVM=OFF with 285 codegen tests skipping in silence.
 set(FIN_LLVM_MAJOR 22 CACHE STRING
     "The single LLVM major version finc is built against (ADR 0010)")
 option(FIN_WITH_LLVM
