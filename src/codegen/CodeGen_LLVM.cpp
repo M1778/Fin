@@ -3092,7 +3092,8 @@ private:
             unsupported(node, "an operator on a struct");
             return;
         }
-        if (!findOperator(*owner, node.op)) {
+        const OperatorDeclaration* declared = findOperator(*owner, node.op);
+        if (!declared) {
             unsupported(node, fmt::format("an undeclared operator '{}' on struct '{}'",
                                           spelling, owner->finName));
             return;
@@ -3100,6 +3101,14 @@ private:
         const std::string key = operatorKey(owner->finName, node.op);
         auto found = functions_.find(key);
         if (found == functions_.end()) {
+            // A generic operator with a body is not missing, it is uninstantiated --
+            // declareStructMethods declares nothing for it because there is no signature
+            // until something says what `T` is, and writing the operator is that
+            // something. One bound by `implements` has no body and still refuses.
+            if (!declared->generic_params.empty() && declared->body) {
+                emitGenericOperator(node, *owner, *declared);
+                return;
+            }
             reportMissingOperator(node, *owner, node.op);
             return;
         }
@@ -3123,6 +3132,44 @@ private:
         std::vector<llvm::Value*> args{receiver->ptr};
         if (!emitCallArgs(node, info, key, {node.right.get()}, args)) return;
         emitCall(info, args);
+    }
+
+    // `m + 2` where the struct declares `operator + : <T>(other: <T>)` --
+    // operators.fin:15. The operator half of the generic-method unit: the struct's
+    // bindings come from the left operand, the operator's own come from the right, and
+    // the composition is the same one a written method call goes through.
+    void emitGenericOperator(BinaryOp& node, const StructInfo& owner,
+                             const OperatorDeclaration& tmpl) {
+        // The receiver is the left operand's *address*, for the reason the non-generic
+        // path says: an operator may assign through `self`, and this one reads `self.val`
+        // through the same pointer, so a receiver spilled to a temporary would be an
+        // operator that writes into a copy.
+        auto receiver = baseAddress(*node.left, CgType::Kind::Struct);
+        if (failed_) return;
+        if (!receiver) {
+            unsupported(node, fmt::format("an operator '{}' on a left operand with no "
+                                          "address", spellOperator(node.op)));
+            return;
+        }
+        // The right operand, emitted before the instance exists, because its type is
+        // what the instantiation is inferred from -- and after the left's address, so
+        // that a generic operator evaluates its two sides in the order they are written.
+        CgVal rhs = emit(*node.right);
+        if (failed_) return;
+        if (!rhs.ok()) { unsupported(node, "this operand"); return; }
+        const std::vector<CgVal> values{rhs};
+
+        // `MyInt.operator+<int>`, which is operatorKey's name with the operator's own
+        // substitution appended -- the same shape as `Box<int>.set_x<int>`, because an
+        // operator is a method with a spelled name and its instances need telling apart
+        // on exactly the same terms.
+        const std::string name = std::string("operator") + spellOperator(node.op);
+        const std::string key = instantiateGenericMethod(
+            node, owner, types_.pointerTo(receiver->type),
+            const_cast<OperatorDeclaration&>(tmpl), name, tmpl.generic_params,
+            tmpl.params, *tmpl.body, values);
+        if (key.empty()) return;  // already reported
+        emitInstanceCall(node, key, receiver->ptr, values);
     }
 
     CgVal emitArithmetic(ASTNode& node, ASTTokenKind op, CgVal lhs, CgVal rhs) {
@@ -3623,6 +3670,186 @@ private:
                                       info.finName));
     }
 
+    // One instance of a generic method or operator: its own type parameters inferred
+    // from the argument values, composed onto the struct's, declared under a key that
+    // names both substitutions, and its body queued.
+    //
+    // This is the layer declareStructMethods deliberately stops short of, and the reason
+    // it has to be here rather than there is that a method template has no signature
+    // until a call says what its parameters are -- the same reason a generic *function*
+    // is instantiated at its call and not at its declaration. What is new is that there
+    // are now two substitutions live at once: the struct's, which the receiver fixed,
+    // and the method's, which the arguments fix.
+    //
+    // Shared by the method and the operator because the two differ in exactly three
+    // things -- where the receiver comes from, how the arguments are spelled, and the
+    // name -- and in none of the composition. An operator arrives as its pieces for the
+    // reason PendingBody does: an OperatorDeclaration and a FunctionDeclaration are
+    // unrelated classes with the same three members.
+    //
+    // Returns the key, or an empty string having already reported.
+    std::string instantiateGenericMethod(
+            ASTNode& node, const StructInfo& owner, const CgType& receiver,
+            ASTNode& decl, const std::string& name,
+            const std::vector<std::unique_ptr<GenericParam>>& genericParams,
+            const std::vector<std::unique_ptr<Parameter>>& params, Block& body,
+            const std::vector<CgVal>& values) {
+        // The written parameters, without the receiver. A written `self` is the
+        // receiver and not an argument -- declareFunction drops it from the signature
+        // for exactly this reason -- so it must not be unified against argument 0
+        // either, or `set_x(5)` would try to bind `U` from the struct's own pointer.
+        std::vector<const Parameter*> written;
+        for (auto& p : params) {
+            if (p->is_vararg) {
+                // No corpus site, and nothing to infer from: a `...` position has no
+                // declared type for a binding to unify against.
+                unsupported(*p, fmt::format("'...' on the generic method '{}' of struct "
+                                            "'{}'", name, owner.finName));
+                return {};
+            }
+            if (p->name == "self") continue;
+            written.push_back(p.get());
+        }
+        if (written.size() != values.size()) {
+            // The analyzer already checked arity; reaching here is the two passes
+            // disagreeing, so it says so rather than padding.
+            unsupported(node, fmt::format("a call to '{}' on struct '{}' with {} "
+                                          "argument(s) where it declares {}",
+                                          name, owner.finName, values.size(),
+                                          written.size()));
+            return {};
+        }
+
+        // The inference, off the argument values rather than off the analyzer -- the
+        // same one-directional unification a generic free call uses, and for the same
+        // reason: a turbofish binds nothing in Analyzer_Expr (booked), so an answer read
+        // from there would be wrong for the one call that spells its arguments out.
+        Substitution inferred;
+        for (size_t i = 0; i < values.size(); ++i) {
+            unifyBinding(written[i]->type.get(),
+                         TypeBinding{values[i].type, cgDisplay(values[i].type)},
+                         genericParams, inferred);
+        }
+
+        // In declaration order, whatever order inference found them in, because the key
+        // is built from this list: `set<A, B>(b: B, a: A)` would otherwise be two names
+        // for one instance depending on which call site reached it first.
+        Substitution ordered;
+        for (auto& p : genericParams) {
+            bool found = false;
+            for (auto& b : inferred) {
+                if (b.first != p->name) continue;
+                ordered.push_back(b);
+                found = true;
+                break;
+            }
+            if (found) continue;
+            // Nothing to infer it from. Refused naming the parameter, because the
+            // alternative is picking a type, and a method instantiated at a type the
+            // program never named is a method the program did not write. A turbofish on
+            // a method is how this one would be spelled and is refused in visit(Method-
+            // Call&), so there is no second way in.
+            unsupported(node, fmt::format("a call to '{}' on struct '{}' whose type "
+                                          "argument '{}' no argument mentions",
+                                          name, owner.finName, p->name));
+            return {};
+        }
+
+        // A method type parameter that reuses a name the struct already bound is
+        // refused, and this is the one refusal in this unit that is not about a missing
+        // feature. TypeMapper::boundBinding returns the *first* match in the list, and
+        // the composition below appends -- so `fun set<T>(v: T)` on a `Box<T>` would
+        // silently resolve its own `T` to the struct's and instantiate at the field's
+        // type, whatever the argument was. Shadowing would be the other answer and it
+        // is not this file's to choose: struct_methods.fin:14 says of `set_x<U>` that
+        // "its separated from the struct generic itself so it cant have the same name
+        // as `T`", which is the corpus ruling that the collision is not written.
+        // `Self` and the template's bare name are in that list too, on the same terms.
+        for (auto& m : ordered) {
+            for (auto& already : owner.methodBindings) {
+                if (already.first != m.first) continue;
+                unsupported(node,
+                            fmt::format("a call to '{}' on struct '{}' whose type "
+                                        "parameter '{}' the struct already binds",
+                                        name, owner.finName, m.first));
+                return {};
+            }
+        }
+
+        // `Box<int>.set_x<int>` -- both substitutions in the name, because both are
+        // needed to tell two instances apart and either alone would collide. Asking
+        // twice finds the first, which is what makes two calls at the same arguments one
+        // symbol rather than a second definition of it.
+        const std::string key = methodKey(owner.finName, mangledName(name, ordered));
+        if (functions_.count(key)) return key;
+
+        // Composed *onto* the struct's, not replacing them: the body says `self.val`
+        // and `new_x` in the same statement, so `T` and `U` have to resolve at the same
+        // time. Stored before anything is emitted, because the mapper holds a pointer to
+        // it for the whole of the signature and the body -- and in a node-based map, so
+        // that pointer survives the further instantiations a body may add.
+        Substitution composed = owner.methodBindings;
+        composed.insert(composed.end(), ordered.begin(), ordered.end());
+        fnInstances_[key] = composed;
+        ScopedBindings bound(types_, &fnInstances_[key]);
+
+        declareFunction(decl, key, key, params, returnTypeOf(decl), /*isVarArg=*/false,
+                        /*isExtern=*/false, &receiver);
+        auto declared = functions_.find(key);
+        if (declared == functions_.end()) return {};  // declareFunction reported
+
+        // Weak, for the reason every method and every generic instance in this file is
+        // weak: two objects that each declare this struct and each make this call both
+        // publish this symbol and neither knows the other exists, so identical
+        // definitions and let the linker keep one.
+        declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+
+        // Deferred to the same queue a non-generic method's body goes on, and for the
+        // stronger of that queue's two reasons: this runs from the middle of the
+        // caller's body, where emitting straight away would mean nesting two insert
+        // points. run() drains after the statement loop, and drainPendingBodies re-reads
+        // size() -- so an instance asked for while emitting another instance is emitted
+        // too.
+        pendingBodies_.push_back(
+            PendingBody{&decl, &params, &body, key, &fnInstances_[key]});
+        return key;
+    }
+
+    // The return type of a method or an operator declaration, which is the one piece
+    // instantiateGenericMethod cannot take apart for itself: its `decl` is an ASTNode,
+    // because the two classes it may be share no base that has a return type.
+    static const TypeNode* returnTypeOf(ASTNode& decl) {
+        if (auto* f = dynamic_cast<FunctionDeclaration*>(&decl)) return f->return_type.get();
+        if (auto* o = dynamic_cast<OperatorDeclaration*>(&decl)) return o->return_type.get();
+        return nullptr;
+    }
+
+    // The already-emitted arguments of a generic method call, converted to the instance's
+    // parameter types and called.
+    //
+    // Not emitCallArgs, and that is the point: the arguments were emitted *before* the
+    // instance existed, because their types are what the instantiation was inferred
+    // from. Emitting them again here would evaluate `f()` in `b.set(f())` twice, which
+    // is a wrong program rather than a missing feature.
+    void emitInstanceCall(ASTNode& node, const std::string& key, llvm::Value* receiver,
+                          const std::vector<CgVal>& values) {
+        auto instance = functions_.find(key);
+        if (instance == functions_.end()) return;  // already reported
+        const FnInfo info = instance->second;
+        if (info.paramTypes.size() != values.size() + 1) {
+            unsupported(node, fmt::format("a call to '{}' with too few arguments", key));
+            return;
+        }
+        std::vector<llvm::Value*> args{receiver};
+        args.reserve(values.size() + 1);
+        for (size_t i = 0; i < values.size(); ++i) {
+            llvm::Value* converted = convert(node, values[i], info.paramTypes[i + 1]);
+            if (!converted) return;
+            args.push_back(converted);
+        }
+        emitCall(info, args);
+    }
+
     // The C variadic convention, which is not the Fin one: a float is passed as a
     // double and anything narrower than an int is passed as an int. A backend that
     // skipped this compiles and prints garbage, which is why
@@ -3840,6 +4067,15 @@ private:
 
         auto found = functions_.find(methodKey(owner.finName, node.method_name));
         if (found == functions_.end()) {
+            // A generic method with a body is not missing, it is uninstantiated: nothing
+            // was declared for it because a template has no signature until a call says
+            // what its parameters are, and this is that call. A generic method with *no*
+            // body still refuses below -- there would be nothing to emit.
+            const FunctionDeclaration* tmpl = findMethod(owner, node.method_name);
+            if (tmpl && !tmpl->generic_params.empty() && tmpl->body) {
+                emitGenericMethodCall(node, owner, *receiver, *tmpl);
+                return;
+            }
             reportMissingMethod(node, owner, node.method_name);
             return;
         }
@@ -3856,6 +4092,41 @@ private:
         std::vector<llvm::Value*> args{receiver->ptr};
         if (!emitCallArgs(node, info, node.method_name, argList(node.args), args)) return;
         emitCall(info, args);
+    }
+
+    // `b.set_x(5)` where `set_x` is `fun set_x<U>(new_x: U)` -- struct_methods.fin:14.
+    void emitGenericMethodCall(MethodCall& node, const StructInfo& owner,
+                               const Addr& receiver, const FunctionDeclaration& tmpl) {
+        if (tmpl.is_static) {
+            // A generic static method has no receiver to fix the struct's half of the
+            // substitution, and it is reached through visit(StaticMethodCall&) rather
+            // than here -- so arriving here at all is a spelling the analyzer let
+            // through and this path cannot serve.
+            unsupported(node, fmt::format("a call to the generic static method '{}' on "
+                                          "struct '{}' through a value",
+                                          tmpl.name, owner.finName));
+            return;
+        }
+        // The arguments, emitted before the instance exists, because the parameter's
+        // type is what is being inferred *from* them. So an argument that cannot be
+        // typed on its own -- an array literal written at a call site -- refuses here
+        // rather than being offered a type, which is the same bargain emitGenericCall
+        // strikes and for the same reason.
+        std::vector<CgVal> values;
+        values.reserve(node.args.size());
+        for (auto& arg : node.args) {
+            CgVal a = emit(*arg);
+            if (failed_) return;
+            if (!a.ok()) { unsupported(node, "this argument"); return; }
+            values.push_back(a);
+        }
+
+        const CgType param = types_.pointerTo(receiver.type);
+        const std::string key = instantiateGenericMethod(
+            node, owner, param, const_cast<FunctionDeclaration&>(tmpl), tmpl.name,
+            tmpl.generic_params, tmpl.params, *tmpl.body, values);
+        if (key.empty()) return;  // already reported
+        emitInstanceCall(node, key, receiver.ptr, values);
     }
 
     // `Point::make(1, 2)` (struct_methods.fin:8), and `Box::<int>::zero()` where the

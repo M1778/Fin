@@ -198,8 +198,8 @@ variables.fin             the address of a value with no home
 
 Recommended order — cheapest first, and each one unblocks the next:
 
-1. **Generic methods** (two substitutions at once: the struct's and the call's). The one layer
-   `declareStructMethods` deliberately stops short of. Smallest step from where the code is now.
+1. ~~**Generic methods**~~ — **done.** Instantiated at the call site, both substitutions
+   composed, keyed `Struct<args>.method<margs>`, `linkonce_odr`. See below and the commit.
 2. **Constructors and `new S(args)`.** `lowerableStruct` still refuses `s.constructors`.
    Note the booked defect: **constructor overloads are not resolved — only `constructors[0]`.**
 3. **Struct inheritance** — `readonly.fin`, `stdlib/hashmap.fin`. Two samples.
@@ -219,16 +219,23 @@ Recommended order — cheapest first, and each one unblocks the next:
 9. After the corpus: the struct ABI classifier, `blame`/`try`/`catch`, the payload-carrying
    tagged-union enum, bit-width annotations (`int{64}`).
 
-### Design already settled for the generic-methods unit
+### The generic-methods unit — landed, and what it did not do
 
-A generic method is currently `continue`d in `declareStructMethods` and refused at the call by
-`reportMissingMethod` ("a call to the generic method 'x' on struct 'Y'"). The unit is: at the
-call site, infer the method's own type parameters from the arguments (the machinery exists — see
-the parameter-matching helper `instantiateFunction` uses), compose them **onto** the struct's
-`methodBindings` rather than replacing them, key the instance
-`Struct<args>.method<margs>`, `linkonce_odr` it, and queue the body on `pendingBodies_` with the
-composed substitution. `operators.fin`'s `operator + : <T>(other: <T>)` is the operator half of
-exactly the same unit and should land in the same commit or the one after.
+Both halves are in: `instantiateGenericMethod` infers the method's own type parameters from the
+argument values, composes them **onto** the struct's `methodBindings`, keys the instance
+`Box<int>.set_x<int>` (and `MyInt.operator+<char>`), emits it `linkonce_odr` and queues the body on
+`pendingBodies_`. A method type parameter that reuses a name the struct already binds is **refused**,
+because `TypeMapper::boundBinding` returns the first match and the corpus rules the shape out
+(`struct_methods.fin:14`: "it's separated from the struct generic itself so it cant have the same
+name as `T`").
+
+**It unblocks no sample, and that was foreseeable.** `struct_methods.fin` and `operators.fin` were
+already codegen-clean — they *declare* a generic method and a generic operator and never reach one —
+so the refusal this unit removed was at a use site the corpus does not write. The 17-item list above
+is unchanged, refusal for refusal. What the unit bought is the corollary in §1 coming good: a
+construct left undeclared and refused at the use site now works at the use site, and the machinery
+(two live substitutions, an instance keyed on both) is what constructors, `::`-call inference and
+interfaces each need next.
 
 ## 7. Booked, not to be fixed
 

@@ -4679,23 +4679,30 @@ BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodOnTwoInstantiationsKeepsThe
     EXPECT_EQ(b.out, "300 x\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AGenericMethodIsRefusedAtItsCall) {
+BACKEND_TEST(Soundness_Codegen, AGenericMethodIsInstantiatedAtItsCall) {
     // `fun set_x<U>(new_x: U)` -- struct_methods.fin:14. Two substitutions at once,
-    // the struct's and the call's, which is a unit of its own. Refused at the call
-    // rather than at the declaration, because a template is not code and the
-    // declaration in the sample is never called.
+    // the struct's and the call's, which is what makes this its own unit: `T` comes
+    // from the receiver's instantiation and `U` from the argument, and the body needs
+    // both bound at the same time. This test was AGenericMethodIsRefusedAtItsCall and
+    // asserted the refusal; the boundary moved, so it is inverted rather than deleted.
+    //
+    // The value is printed rather than an "ok", because the refusal it replaces could
+    // only be wrong in one way and a lowering can be wrong in two: `self.val = new_x`
+    // has to reach the field `T` laid out for and take the value `U` was inferred as.
     const Built b = build(std::string(kPrintf) +
         "struct Box<T> {\n"
         "    val <T>,\n"
         "    fun set_x<U>(new_x: U) <noret> { self.val = new_x; }\n"
+        "    fun get(self: &Self) <T> { return self.val; }\n"
         "}\n"
         "fun main() <noret> {\n"
         "    let b <Box<int>> = Box::<int>{ val: 1 };\n"
         "    b.set_x(5);\n"
-        "    printf(\"ok\\n\");\n"
+        "    printf(\"%d\\n\", b.get());\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("set_x"), std::string::npos) << b.why();
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AGenericMethodNobodyCallsIsNotRefused) {
@@ -4717,6 +4724,236 @@ BACKEND_TEST(Soundness_Codegen, AGenericMethodNobodyCallsIsNotRefused) {
     // Named after the input's stem, in the working directory, because no -o was given.
     std::error_code ec;
     fs::remove(c.object, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericMethodsTwoSubstitutionsAreBothLive) {
+    // The claim the whole unit rests on, with a wrong answer rather than a refusal as
+    // its failure mode. `T` is char and `U` is int, so they cannot be confused for each
+    // other: `cast<T>(new_x)` needs the struct's binding and `new_x` needs the method's,
+    // in one statement. A composition that *replaced* the struct's bindings with the
+    // method's would store four bytes into a one-byte field, and the sample this is
+    // taken from -- struct_methods.fin:14, `self.x = cast<T>(new_x);` -- is written that
+    // way precisely because the two are different types.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun set_x<U>(new_x: U) <noret> { self.val = cast<T>(new_x); }\n"
+        "    fun get(self: &Self) <T> { return self.val; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<char>> = Box::<char>{ val: 'a' };\n"
+        "    b.set_x(98);\n"
+        "    printf(\"%c\\n\", b.get());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "b\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericMethodsArgumentIsEvaluatedOnce) {
+    // The instance is inferred *from* the argument's type, so the argument has to be
+    // emitted before the function it will be passed to exists -- and then converted
+    // rather than emitted a second time. An implementation that reached for the shared
+    // emitCallArgs after instantiating would evaluate this argument twice, which is not
+    // a missing feature but a program that counts to two where it was written to count
+    // to one. Observable only through a side effect, which is why the counter is a
+    // module-scope `let` and not a local.
+    const Built b = build(std::string(kPrintf) +
+        "let calls <int> = 0;\n"
+        "fun next() <int> { calls = calls + 1; return 41; }\n"
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun set_x<U>(new_x: U) <noret> { self.val = new_x; }\n"
+        "    fun get(self: &Self) <T> { return self.val; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 0 };\n"
+        "    b.set_x(next());\n"
+        "    printf(\"%d %d\\n\", b.get(), calls);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "41 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, OneGenericMethodAtTwoTypesIsTwoInstances) {
+    // One struct instantiation, one method template, two calls at different argument
+    // types. The key carries *both* substitutions -- `Box<int>.echo<char>` and
+    // `Box<int>.echo<int>` -- and a key that carried only the struct's would make the
+    // second call find the first instance and truncate.
+    //
+    // The narrow call comes *first*, and that ordering is the whole test. With the wide
+    // one first, reusing its instance for a char argument widens and then prints through
+    // `%c`, which round-trips: the wrong instance gives the right characters and the
+    // test cannot fail. Narrow first, reuse means 300 arrives as 44.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun echo<U>(v: U) <U> { return v; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 1 };\n"
+        "    printf(\"%c %d\\n\", b.echo('z'), b.echo(300));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "z 300\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericMethodsInstanceIsNamedForBothSubstitutions) {
+    // `Box<int>.set_x<int>`, and the name is the assertion. It is the least mangling
+    // that keeps the instances apart -- the struct's arguments and the method's, in the
+    // order they were declared -- and it is what this file already does for a generic
+    // free function (`ident<int>`) and for a method (`Box<int>.get`), on the same
+    // grounds: the only reader of a Fin symbol is a person reading `nm` output.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun set_x<U>(new_x: U) <noret> { self.val = new_x; }\n"
+        "}\n"
+        "fun use() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 1 };\n"
+        "    b.set_x(5);\n"
+        "}\n");
+    EXPECT_NE(trace.find("declared Box<int>.set_x<int>"), std::string::npos) << trace;
+    // And once, not twice: asking for the same instance a second time has to find the
+    // first rather than start a second definition of it.
+    EXPECT_EQ(occurrences(trace, "declared Box<int>.set_x<int>"), 1u) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericMethodIsOneSymbolAcrossTwoObjects) {
+    // The same bargain AStructMethodIsOneSymbolAcrossTwoObjects strikes, one layer
+    // further along: two objects that each declare the struct and each make this call
+    // both publish `Box<int>.set_x<int>`, and neither knows the other exists. An
+    // external definition in each would make the link fail for a program that is
+    // correct, which is why the instance is emitted linkonce_odr.
+    const std::string decl =
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun set_x<U>(new_x: U) <noret> { self.val = new_x; }\n"
+        "    fun get(self: &Self) <T> { return self.val; }\n"
+        "}\n";
+    const fs::path libObj = uniqueTempPath("fin_lib_gm", ".o");
+    const fs::path mainObj = uniqueTempPath("fin_main_gm", ".o");
+    const fs::path exe = uniqueTempPath("fin_linked_gm");
+    const fs::path outPath = uniqueTempPath("fin_linked_gm_out");
+
+    const Compiled lib = compileOnly(decl +
+        "fun side() <int> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 0 };\n"
+        "    b.set_x(20);\n"
+        "    return b.get();\n"
+        "}\n", libObj);
+    ASSERT_EQ(lib.exitCode, 0) << lib.why();
+    const Compiled mainPart = compileOnly(std::string(kPrintf) + decl +
+        "@define side() <int>;\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 0 };\n"
+        "    b.set_x(22);\n"
+        "    printf(\"%d\\n\", b.get() + side());\n"
+        "}\n", mainObj);
+    ASSERT_EQ(mainPart.exitCode, 0) << mainPart.why();
+
+    const char* fromEnv = std::getenv("FIN_CC");
+    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
+    const std::string link = shellQuoteLocal(cc) + " " + shellQuoteLocal(libObj.string()) +
+                             " " + shellQuoteLocal(mainObj.string()) + " -o " +
+                             shellQuoteLocal(exe.string());
+    ASSERT_EQ(std::system(link.c_str()), 0) << link;
+
+    const std::string run = shellQuoteLocal(exe.string()) + " > " +
+                            shellQuoteLocal(outPath.string()) + " 2>&1";
+    std::system(run.c_str());
+    EXPECT_EQ(readWholeFile(outPath.string()), "42\n");
+
+    std::error_code ec;
+    for (const fs::path& q : {libObj, mainObj, exe, outPath}) fs::remove(q, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericMethodOnAPlainStructNeedsNoStructArguments) {
+    // A method template on a struct that is not one. The composition still happens --
+    // `Self` is in the struct's bindings whether or not it has type arguments -- and the
+    // instance is named for the method's substitution alone, because that is all there
+    // is. The struct's half being empty must not be the same code path as it being
+    // absent.
+    const Built b = build(std::string(kPrintf) +
+        "struct Holder {\n"
+        "    n <int>,\n"
+        "    fun keep<U>(v: U) <U> { return v; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let h <Holder> = Holder{ n: 1 };\n"
+        "    printf(\"%d\\n\", h.keep(9));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodTypeParameterThatShadowsTheStructsIsRefused) {
+    // The one refusal in this unit that is not a missing feature. TypeMapper::bound-
+    // Binding returns the *first* match in the substitution list and the composition
+    // appends, so a method `<T>` on a `Box<T>` would silently resolve to the struct's T
+    // and instantiate at the field's type whatever the argument was -- a wrong answer,
+    // and the only shape in this unit that could produce one. Shadowing is the other
+    // possible answer and is not the backend's to choose: struct_methods.fin:14 says of
+    // `set_x<U>` that "its separated from the struct generic itself so it cant have the
+    // same name as `T`", which is the corpus ruling that this shape is not written.
+    // `Box<char>` and an int argument, so that dropping the check is a *wrong answer*
+    // and not a coincidence: the struct's T wins, `echo` becomes char-to-char, and 300
+    // arrives as 44.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun echo<T>(v: T) <T> { return v; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<char>> = Box::<char>{ val: 'a' };\n"
+        "    printf(\"%d\\n\", b.echo(300));\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("echo"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("'T'"), std::string::npos) << b.why();
+    EXPECT_EQ(b.out, "") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericMethodsUnmentionedTypeParameterIsRefused) {
+    // Nothing to infer `U` from: no parameter mentions it. Refused naming the parameter,
+    // because the alternative is picking a type -- and a method instantiated at a type
+    // the program never named is a method the program did not write. The same refusal a
+    // generic free function gets (`fun nothing<T>() <int>`), and the turbofish that
+    // would fix it is refused a few lines earlier, so there is no second way in.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun blank<U>() <int> { return 1; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 1 };\n"
+        "    printf(\"%d\\n\", b.blank());\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("blank"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("'U'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ATurbofishOnAMethodCallIsStillRefused) {
+    // `b.set_x::<int>(5)` -- the type arguments written rather than inferred. Refused,
+    // and not because it is hard: a free function's turbofish binds nothing in
+    // Analyzer_Expr (booked), so the backend reads its own, and no corpus site writes
+    // one on a *method*. Inference is what every site there does have, so the untested
+    // half is the half that is refused rather than the half that is guessed at.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    fun set_x<U>(new_x: U) <noret> { self.val = new_x; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ val: 1 };\n"
+        "    b.set_x::<int>(5);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("set_x"), std::string::npos) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AStructMethodIsOneSymbolAcrossTwoObjects) {
@@ -5033,7 +5270,11 @@ BACKEND_TEST(Soundness_Codegen, AGenericOperatorNobodyWritesIsNotARefusal) {
     EXPECT_EQ(b.out, "ok\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AGenericOperatorIsRefusedWhereItIsWritten) {
+BACKEND_TEST(Soundness_Codegen, AGenericOperatorIsInstantiatedWhereItIsWritten) {
+    // operators.fin:15-17 verbatim in shape. The operator half of the generic-method
+    // unit: `T` comes from the right operand and the struct's bindings come from the
+    // left, and writing the operator is the call that fixes both. This test was
+    // AGenericOperatorIsRefusedWhereItIsWritten; the boundary moved, so it is inverted.
     const Built b = build(std::string(kPrintf) +
         "struct MyInt {\n"
         "    val <int>,\n"
@@ -5045,9 +5286,36 @@ BACKEND_TEST(Soundness_Codegen, AGenericOperatorIsRefusedWhereItIsWritten) {
         "    let m <MyInt> = MyInt{ val: 1 };\n"
         "    printf(\"%d\\n\", m + 2);\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("generic"), std::string::npos) << b.why();
-    EXPECT_NE(b.compileErr.find("+"), std::string::npos) << b.why();
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, OneGenericOperatorAtTwoTypesIsTwoInstances) {
+    // `MyInt.operator+<char>` and `MyInt.operator+<int>` are two instances of one
+    // declaration, keyed the way a generic method's are -- operatorKey's name with the
+    // operator's own substitution appended. An operator is a method with a spelled name
+    // and its instances need telling apart on exactly the same terms.
+    //
+    // The char operand first, for the reason OneGenericMethodAtTwoTypesIsTwoInstances
+    // gives: reusing a wider instance for a narrower operand is invisible, and reusing a
+    // narrower one for 300 is not.
+    const Built b = build(std::string(kPrintf) +
+        "struct MyInt {\n"
+        "    val <int>,\n"
+        "    operator + : <T>(other: <T>) <int> {\n"
+        "        return self.val + cast<int>(other);\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let m <MyInt> = MyInt{ val: 1 };\n"
+        "    printf(\"%d %d\\n\", m + 'A', m + 300);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    // 'A' is 65, so 66; and 301 could not have come from the char instance, which would
+    // have truncated 300 to 44 and answered 45.
+    EXPECT_EQ(b.out, "66 301\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AnOperatorBoundByImplementsIsNotDeclared) {
