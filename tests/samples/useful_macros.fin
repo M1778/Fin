@@ -1,5 +1,7 @@
 //@ normative
-//@ unimplemented "`map!{ ... }` at 5:35 -- \"Undefined macro 'map!'\"; the brace and bracket macro-call forms parse now on both sides of an `=`, and nothing defines `map!`, `coll!` or `format!`"
+//@ unimplemented "Three diagnostics, all of them one missing feature. `map!{ ... }` at 7:35 -- \"Undefined macro 'map!'\"; the brace and bracket macro-call forms parse now on both sides of an `=`, and nothing defines `map!`, `coll!` or `format!` -- `coll![1,2,3,4,5]` on 12 and `format!(\"{}\", b[2])` on 14 report the same way. The two imports on 3 and 4 are a repair. The file used `HashMap<string, int>` on 7 and `Collection<int>` on 12 with no import at all and reported \"Undefined type\" for both, and both names are declared `pub` in the shipped library -- `pub struct HashMap<T, U>` at lib/std/hashmap.fin:45 and `pub struct Collection<T>` at lib/std/collection.fin:47 -- so the two names were the file's omission and not a gap in the compiler. The spelling is the corpus's own: prototype_test.fin:3-4 writes these two lines verbatim for these two types, and importing.fin:14, deeptest4.fin:3 and stdlib/hashmap.fin:4 write them one at a time. The count fell from five to three and nothing new appeared -- neither library reports a diagnostic of its own through the import, which is worth recording because a blind import does not always behave that way"
+import { HashMap } from hashmap::std;
+import { Collection } from collection::std;
 
 fun main() <noret> {
    let a <HashMap<string, int>> = map!{
