@@ -1,5 +1,8 @@
 #include "TypeNode.hpp"
 #include "../Visitor.hpp"
+// For the out-of-line FunctionTypeNode destructor: its `generic_params` holds
+// GenericParams, which TypeNode.hpp can only forward-declare.
+#include "GenericParam.hpp"
 
 namespace fin {
 
@@ -8,6 +11,7 @@ void TypeNode::accept(Visitor& v) { v.visit(*this); }
 
 FunctionTypeNode::FunctionTypeNode(std::vector<std::unique_ptr<TypeNode>> params, std::unique_ptr<TypeNode> ret)
     : TypeNode("fn"), param_types(std::move(params)), return_type(std::move(ret)) {}
+FunctionTypeNode::~FunctionTypeNode() = default;
 void FunctionTypeNode::accept(Visitor& v) { v.visit(*this); }
 
 PointerTypeNode::PointerTypeNode(std::unique_ptr<TypeNode> p) 

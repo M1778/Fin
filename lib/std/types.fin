@@ -1,0 +1,51 @@
+// Type names and the compile-time type resolver.
+//
+// tests/samples/stdlib/types.fin is the specification. What is left out of this copy
+// is everything that needs the compiler API -- `@special` bodies calling
+// `compiler.types.*`, `TypeInfo` with its `_static_string` field, `typeid`, `tftid`
+// -- because `#[use(compiler)]` binds no name yet and every one of them would be a
+// diagnostic inside a library that eleven samples import.
+//
+// `resolve_type` and `resolve_arr_type` keep their signatures and have no body. That
+// is not a stub: nothing in the language produces a `$type` *value* -- the four
+// meta-types resolve in every type position (Soundness_MetaTypes) and no expression
+// has one as its type -- so these two are compiler intrinsics, and the declaration
+// without a body (parser.y:471) is how the library names one. A placeholder body
+// would report `expected '$type', got 'any'` on its own return statement.
+namespace std {
+
+#[export] %{
+pub type i32 = int;
+pub type i64 = int{64};
+pub type u32 = uint;
+pub type u64 = uint{64};
+pub type f32 = float;
+pub type f64 = double;
+
+pub type Number = int | uint | float | short | long | ushort | ulong | double;
+}%
+
+#[export]
+pub type array<T> = [T];
+
+// `Any` and `Any<...>` both mean "checked at runtime, not here", which is what the
+// registered `any` is (Soundness_DynamicTypes). The draft writes them as two aliases
+// with `#[anytype]`/`#[RT]` attributes; the attributes have no reader yet.
+#[export]
+pub type Any = any;
+
+#[export]
+pub type nullptr = any;
+
+#[export]
+pub fun resolve_type(v: any) <$type>;
+
+#[export]
+pub fun resolve_arr_type(arr: [any]) <$type>;
+
+#[export]
+pub fun number2str<T: Number>(number: T) <string> {
+    return "0";
+}
+
+}

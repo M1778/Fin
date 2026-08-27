@@ -1,0 +1,104 @@
+// The associative array.
+//
+// tests/samples/stdlib/hashmap.fin is the specification: two parallel Collections, a
+// linear scan for the key, and the index operators on top. It is a linear-probe map
+// with no hashing, which is what the draft says it is; the name is the interface, not
+// a promise about the algorithm.
+//
+// Four samples name it. `deeptest4.fin:11` writes `HashMap::<string, Data>()`, so the
+// no-argument constructor is load-bearing; `macro_definitions.fin:25` writes `new
+// HashMap::<string, int>{}`, so the empty literal has to stand on its own too.
+//
+// Divergences from the draft, each because the compiler says so today:
+//
+//   keys <Collection<T>>      `new Collection::<T>{}` is a pointer, so the fields
+//   values <Collection<U>>    are `<&Collection<T>>`. Same correction the draft's own
+//                             `_arr` needed in collection.fin.
+//   operator[] implements     the `implements cast<fn(Self, T)>(__get)` form parses
+//     cast<fn(Self, T)>       (parser.y:939) but its expression is read by nobody, so
+//     (__get)                 an operator declared that way would be registered with
+//                             no signature. The operators are written out instead and
+//                             forward to `__get`/`__set`, which is what the copy was
+//                             for.
+//   self.values[i] = value    an index expression never consults `operator []=`
+//                             (KnownDefect_IndexOperator.AnIndexExpressionNever-
+//                             ConsultsOperatorBracket), so the library calls
+//                             `__set` directly rather than emit a diagnostic of its
+//                             own into every importer.
+//   return -1 from `<U>`      the draft returns an int out of a function returning
+//                             the value type. A missing key is an assertion here.
+//
+// The draft's `__set` pushes the key and never the value, which would desync the two
+// Collections on the first insert. Both are pushed below.
+#[stdimport] %{
+import { Collection } from collection::std;
+import { Error } from error::std;
+import { Index, IndexAssign } from operators::std;
+}%
+
+namespace std {
+
+#[export]
+pub struct HashMapError : <Error> {}
+
+#[export]
+pub struct HashMap<T, U> : <Index, IndexAssign> {
+    priv:
+      keys <&Collection<T>>,
+      values <&Collection<U>>,
+
+    pub:
+      fun get_index(self: &Self, other: T) <int> {
+        for (let i <int> = 0; i < self.keys.len(); i++) {
+            if (self.keys.get(i) == other) {
+                return i;
+              }
+          }
+        return -1;
+      }
+
+      fun exists(self: &Self, other: T) <bool> {
+        return self.get_index(other) >= 0;
+      }
+
+      fun len(self: &Self) <int> {
+        return self.keys.len();
+      }
+
+    pub fun __set(self: &Self, key: T, value: U) <noret> {
+        let idx <int> = self.get_index(key);
+        if (idx < 0) {
+            self.keys.push(key);
+            self.values.push(value);
+            return;
+          }
+        self.values.__set(idx, value);
+      }
+
+    pub fun __get(self: &Self, other: T) <U> {
+        let idx <int> = self.get_index(other);
+        blame idx >= 0, "key not found";
+        return self.values.get(idx);
+      }
+
+    pub operator [](key: <T>) <U> {
+        return self.__get(key);
+      }
+
+    pub operator []=(key: <T>, value: <U>) <noret> {
+        self.__set(key, value);
+      }
+
+    // `HashMap::from_prototype({ "a" : 10, "b" : 20 })` in prototype_test.fin:27.
+    // Empty for the same reason Collection::from_prototype is: nothing can walk a
+    // prototype yet.
+    pub static fun from_prototype(prtp: {T, U}) <Self> {
+        return HashMap{keys: new Collection::<T>{}, values: new Collection::<U>{}};
+      }
+
+    HashMap() {
+        return new HashMap{keys: new Collection::<T>{}, values: new Collection::<U>{}};
+      }
+  }
+
+}

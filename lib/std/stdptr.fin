@@ -1,0 +1,128 @@
+//@ bundled
+// The reference-counted pointer. `tests/samples/const.fin` is the only consumer in the
+// corpus and it is the authority for the surface: it reaches `owned`, `borrowed`,
+// `value`, `restrict`, and the methods `set`, `own`, `borrow`, `giveback`, `release`.
+//
+// Divergences from the draft at tests/samples/stdlib/stdptr.fin, each with its reason:
+//
+//   * The draft declares its constructor and destructor as `Self(initial_value: T);`
+//     and `~Self();`. Neither spelling parses -- `Self` is KW_SELF_TYPE and the
+//     declaration position wants an IDENTIFIER, so the forms are `rptr(...)` and
+//     `~rptr()`. The draft's own `//@ unimplemented` note claims "The whole file parses
+//     now"; it does not, and the note is what is wrong.
+//   * A bodyless constructor declaration in an interface is a syntax error
+//     (`unexpected LPAREN, expecting QUESTION or LT`), so `rptr_iface` declares no
+//     constructor. Nothing checks constructor conformance on the class side either.
+//   * `restrict` is `<&Self>`, not the draft's `<&Self<T>>`. Both parse; the shorter one
+//     is what the rest of the bundled library uses.
+//   * The draft's field `ptrt <pointer_type>` is dropped: `pointer_type` is undefined --
+//     it is not a builtin and no module declares it.
+//   * `giveback()` is in the class and the interface even though the draft has neither.
+//     `const.fin:44` calls `a.giveback()`, and the sample outranks the draft.
+//   * The draft raises with `blame OwnershipError("...")`. That form is commented out in
+//     the corpus (blame_assert.fin:15) and does not parse; these bodies use the
+//     assertion form `blame cond, "message";`. `OwnershipError` is still exported,
+//     because `const.fin` does not name it but a caller of this library would.
+//   * The draft declares no destructor that parses, and this module declares none:
+//     `~Self()` is a syntax error and `release()` is the explicit form the sample uses.
+//   * The draft's `own()` returns `<Self<T>>` in the interface and `<&Self<T>>` in the
+//     class. `&Self` throughout here: `own`/`borrow` hand back the same object, and
+//     returning it by value would copy the very counter that makes it a smart pointer.
+//
+// What this module does NOT do, and cannot yet: the counter is never incremented, and
+// ownership is not enforced against aliases. Both need codegen and a borrow check that
+// do not exist. The methods maintain the flags `const.fin` reads, and no more --
+// `is_owned()` answers the field, it does not answer the heap.
+#[stdimport] %{
+import { Error } from error::std;
+}%
+
+namespace std {
+
+#[export]
+pub struct OwnershipError : <Error> {}
+
+#[export]
+interface rptr_iface<T> {
+  priv:
+    ref_counter <&uint>;
+
+  pub:
+    owned <bool>;
+    borrowed <bool>;
+    readonly restrict <&Self>;
+    readonly value <&T>;
+
+    fun is_borrowed() <bool>;
+    fun is_givenback() <bool>;
+    fun is_owned() <bool>;
+
+    fun own() <&Self>;
+    fun borrow() <&Self>;
+    fun giveback() <noret>;
+    fun release() <noret>;
+
+    fun set(new_value: T) <noret>;
+    fun get() <&T>;
+}
+
+#[export]
+pub class rptr<T> : <rptr_iface> {
+  priv:
+    ref_counter <&uint>,
+
+  pub:
+    owned <bool> = false,
+    borrowed <bool> = false,
+    readonly restrict <&Self>,
+    readonly value <&T>,
+
+    fun is_borrowed(self: &Self) <bool> { return self.borrowed; }
+    fun is_givenback(self: &Self) <bool> { return self.borrowed == false; }
+    fun is_owned(self: &Self) <bool> { return self.owned; }
+
+    // Hand ownership on. The two assertions are the whole ownership discipline this
+    // module can express: you cannot give what you do not have, and you cannot give it
+    // away while somebody is holding it.
+    fun own(self: &Self) <&Self> {
+        blame self.owned, "This instance is not the owner so it cannot pass ownership of value";
+        blame self.borrowed == false, "Cannot pass ownership while the value is borrowed";
+        return self;
+      }
+
+    fun borrow(self: &Self) <&Self> {
+        blame self.owned, "This instance is not the owner so it cannot lend the value";
+        self.borrowed = true;
+        return self;
+      }
+
+    fun giveback(self: &Self) <noret> { self.borrowed = false; }
+
+    fun release(self: &Self) <noret> {
+        self.owned = false;
+        self.borrowed = false;
+      }
+
+    fun set(self: &Self, new_value: T) <noret> {
+        blame self.owned, "Cannot write through a pointer that does not own its value";
+        *self.value = new_value;
+      }
+
+    fun get(self: &Self) <&T> { return self.value; }
+
+    // `const.fin:78` writes `rptr(5)`, so the constructor takes the value, not a
+    // pointer to it. `new T{}` is the only way to reach the heap for a generic
+    // parameter -- `new T(v)` is a syntax error, because `new` accepts `(...)` after a
+    // primitive type keyword and `{...}` after an identifier, and a generic parameter
+    // lexes as an identifier no matter what it is bound to. So: allocate zeroed, then
+    // write through the pointer.
+    rptr(initial_value: T) {
+        self.ref_counter = new uint{};
+        self.value = new T{};
+        *self.value = initial_value;
+        self.owned = true;
+        self.borrowed = false;
+      }
+}
+
+}

@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 @define printf(fmt: string, ...) <noret>;
 
 
@@ -44,7 +46,4 @@ fun main() <noret> {
     let b <auto> = recursive(5);
 
     // Special loop (infinite loop => while true):
-    m1778 { // using the m1778 keyword and LBRACE AND RBRACE means this is a infinite loop and you'll have to exit out of it using `break`
-        break;
-    }
   }

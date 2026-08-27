@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "line 20's `temp = array[i]` -- \"expected 'int', got 'T'\". A sample typo rather than a gap: `let temp <int>` on 15 was meant to be `<T>`, the element type of the `&[T]` being sorted, and every other line of this file reads `T` where it means an element. Booked, not fixed -- the sample is the specification and correcting its text would be writing the spec rather than reading it (ADR 0008). The two diagnostics this note used to carry are both gone. `array.length` at 12:9 resolves, including through the `&[T]` it is written on. And line 29's `let b <[uint]> = [7, 3, 4];` no longer reports `expected '[uint]', got '[int, 3]'`: an array literal is offered its annotation's element type and checks each element against it, so the same non-negative integer constants that have always been `uint` on their own are `uint` here too (Soundness_ArrayLiteralElements)."
 
 type ArrayType<T> = [T]; // simple generic array type
 type IntArray = [int]; // array of integers
@@ -11,7 +13,7 @@ fun sort<T: Number>(array: &[T]) <noret> { // sorts an array of numbers (passed 
         return;
       }
 
-    let temp: int;
+    let temp <int>;
     for (i:int = 0; i < array.length - 1; i++) {
         for (j:int = 0; j < array.length - 1; j++) {
             if (array[i] > array[j]) {

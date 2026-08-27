@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "line 5 writes the conditional in C order inside a #cdef body; ADR 0005 deleted the C order, and a #cdef body is spliced into Fin and parsed as Fin, so MAX(x, y) at line 23 expands to a syntax error"
 @define printf(fmt: <string>, ...) <noret>;
 #cdef CONST_NUM 100
 #cdef MAX(a, b) ((a) > (b) ? (a) : (b))

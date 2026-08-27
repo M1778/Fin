@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 fun main() <void> {
     // Type with expression-based annotation
     let x <int{64}> = 10;

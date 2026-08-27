@@ -1,3 +1,9 @@
+// SCRATCH, NOT A SAMPLE. This file is not part of the specification: it is
+// referenced by nothing, it is missing a terminator on line 3, and the type
+// form `<fn() int>` appears nowhere else in the corpus. It carries no `//@`
+// expectation because the harness excludes it by an explicit rule
+// (tests/Corpus.cpp, kScratchFinFiles) rather than by a glob that happens to
+// miss it. See ADR 0008.
 let print <fn() int>
 fun main() <noret> {
     print();

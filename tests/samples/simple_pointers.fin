@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`**x = new int(10);` at 24:11 -- \"Type mismatch: expected 'int', got '&int'\". `new int*` parses now, with the stars counting the pointer levels of the result, which is what lines 27-29 require; line 24 additionally needs a `new int(10)` to be assignable to an `int` lvalue"
 @define printf(fmt: string, ...) <noret>;
 
 fun swap<T>(a: &T, b:  &T) <noret> {

@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 import { Error } from error::std;
 
 @define printf(fmt: string, ...) <noret>;

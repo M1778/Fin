@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 fun main() <noret> {
     let x <int> = 10;
     let y <float> = 20.5;

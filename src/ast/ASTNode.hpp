@@ -1,6 +1,7 @@
 #pragma once
 
 // Master AST Include
+#include "NodeKind.hpp"
 #include "nodes/ASTNode.hpp"
 #include "nodes/Parameter.hpp"
 

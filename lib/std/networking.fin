@@ -1,0 +1,16 @@
+//@ bundled
+// tests/samples/stdlib/networking.fin is the specification, and it says, in full:
+// "NOT IMPLEMENTED YET". So does this. The module exists because two imports in the
+// corpus name it -- `importing.fin:5` takes the whole module and `:6` takes it as
+// `net` -- and an import of a module that is not there is a hard error, so an empty
+// module is the difference between measuring the import and measuring nothing.
+//
+// It lives under lib/std even though `import networking;` writes no `::std` selector.
+// That is not a claim that networking is a std module: nothing checks the selector at
+// all, which is booked as KnownDefect_BundledStdlib.TheNamespaceSelectorInAnImportIsNotChecked.
+// When the selector starts being checked, a non-std module moves up to lib/.
+//
+// `importing.fin:5` says the whole-module form "allows to be used like
+// networking.invoke()". There is nothing to invoke yet.
+namespace std {
+}

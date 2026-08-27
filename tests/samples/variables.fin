@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 
 // --- Global variables (module scope)
 // Constants (cannot be reassigned + MUST HAVE A CLEAR TYPE AT COMPILE TIME)
@@ -34,6 +36,6 @@ fun main() <noret> {
     const invincible <&int> = new int(1778); // this will last until the exit of the program
 
     // Special variables (no type annotation needed):
-    m1778 kilo = 19; // m1778 keyword will determine the type of the variable AT COMPILE TIME and if it cannot determine the type it will raise an error cursing at you
+    let kilo <auto> = 19; // m1778 keyword will determine the type of the variable AT COMPILE TIME and if it cannot determine the type it will raise an error cursing at you
     // m1778 keyword has different weird usages which tells us how weird the creator is
   }

@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`type Output = Any<...>;` on line 6 -- \"Undefined type 'Any'\", and that is now the only diagnostic in the file, down from twenty-seven. `any` is registered (Soundness_DynamicTypes) and an alias whose target fails still defines its name, so the twenty-six operator requirements that name `Output` are no longer each charged for it. `Any` is deliberately still undefined: `stdlib/types.fin:69` declares `pub type Any = any;` inside `#[export]`, so it is a library name and this file imports nothing. Whether a `pub` declaration elsewhere in `namespace std` is ambient to a sibling file is an owner ruling (docs/plan.md, Rulings owed: namespace semantics). The diagnostic renders at 6:15, where `Any` is written"
 namespace std { // std namespace
 namespace ops { // std::ops namespace
 #[export] %{

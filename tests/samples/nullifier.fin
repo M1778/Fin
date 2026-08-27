@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`let _? <int> = make_A()` at 39:20 -- \"Type mismatch: expected 'int?', got 'A?'\", and that is now the only diagnostic in the file. Nullability itself is implemented (Soundness_Nullability): `?` on a declaration, member, parameter and `fun?` return all produce a NullableType, postfix `?` denullifies, a nullable parameter is optional at the call site, and `= null` is a permitted initialiser. `any` is a registered type now (Soundness_DynamicTypes), so lines 12, 34 and 36 are clean -- including `let mibombo? <any> = null;`, which line 36 says should not be: the sample requires a diagnostic there \"since type any cannot be null\" but not which of the two constructs is at fault, so KnownDefect_Nullability.DenullifyingANullableAnyIsNotAnError books it against the ruling. Line 39 is an owner ruling too: this file writes `<int>` for a function returning `<A>`, and whether that is a slip for `<A>` or `_` suppresses the check is not decidable from the corpus"
 struct A {
     pub b? <int>, // using '?' makes its default value null and it might not exists (equavelant to `b <int> = null,`)
 

@@ -35,4 +35,21 @@ void CloneVisitor::visit(ArrayTypeNode& node) {
     res->setLoc(node.loc); result = std::move(res);
 }
 
+void CloneVisitor::visit(Attribute& node) {
+    // Attribute has two constructors -- flag form and key=value form -- and
+    // is_flag is what says which one this node came from.
+    auto res = node.is_flag ? std::make_unique<Attribute>(node.name, true)
+                            : std::make_unique<Attribute>(node.name, node.value_str);
+    res->is_flag = node.is_flag;
+    res->value_str = node.value_str;
+    res->setLoc(node.loc);
+    result = std::move(res);
+}
+
+void CloneVisitor::visit(GenericParam& node) {
+    auto res = std::make_unique<GenericParam>(node.name, clone(node.constraint.get()));
+    res->setLoc(node.loc);
+    result = std::move(res);
+}
+
 }

@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 #[stdimport]
 import { resolve_type } from types::std;
 

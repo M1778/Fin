@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 // Better examples exists in stdlib
 
 interface GetVal<T> {

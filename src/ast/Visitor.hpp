@@ -22,6 +22,8 @@ class ImplementsBlock;
 class ClassDeclaration;
 class Parameter;
 class StructMember;
+class Attribute;
+class GenericParam;
 
 class Block;
 class ReturnStatement;
@@ -46,6 +48,7 @@ class MacroCall;
 class MacroInvocation;
 class QuoteExpression;
 class CastExpression;
+class TypeLiteralExpression;
 class NewExpression;
 class MemberAccess;
 class StructInstantiation;
@@ -90,6 +93,23 @@ public:
     virtual void visit(Parameter& node) = 0;     
     virtual void visit(StructMember& node) = 0;   
 
+    // Attribute and GenericParam are ASTNodes and are cloned like every other
+    // node, but they had no overload here at all -- so their `accept` bodies were
+    // empty, `CloneVisitor::clone` returned null for them, and cloning a generic
+    // declaration replaced its attributes and generic parameters with a vector of
+    // the right length full of nulls (ADR 0004).  This is the root: dispatch, not
+    // a special case in CloneVisitor.
+    //
+    // These two are the only non-pure methods on Visitor.  The other 55 are pure
+    // because exhaustiveness is what Visitor is *for*; these two are not, because
+    // promoting them would force an override into SemanticAnalyzer,
+    // MacroExpander and SubstitutionVisitor, none of which reads attributes and
+    // two of which are another agent's files.  A consumer that must be
+    // exhaustive over attributes overrides them; the compiler will not insist.
+    // Promoting them later is a three-line change.
+    virtual void visit(Attribute& node) { (void)node; }
+    virtual void visit(GenericParam& node) { (void)node; }
+
     // Statements
     virtual void visit(Block& node) = 0;
     virtual void visit(ReturnStatement& node) = 0;
@@ -116,6 +136,7 @@ public:
     virtual void visit(MacroInvocation& node) = 0;
     virtual void visit(QuoteExpression& node) = 0;
     virtual void visit(CastExpression& node) = 0;
+    virtual void visit(TypeLiteralExpression& node) = 0;
     virtual void visit(NewExpression& node) = 0;
     virtual void visit(MemberAccess& node) = 0;
     virtual void visit(StructInstantiation& node) = 0;

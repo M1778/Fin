@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 import { HashMap } from hashmap::std;
 
 struct Data {

@@ -1,0 +1,113 @@
+// The operator interfaces.
+//
+// tests/samples/stdlib/operators.fin is the specification: thirty interfaces, one per
+// overloadable operator, each requiring the operator and returning `Output`. Its own
+// `//@ unimplemented` note explains why `type Output = Any<...>;` does not resolve --
+// `Any` lives in types.fin and that file imports nothing -- so this copy spells
+// `Output` as `any`, which is registered (Soundness_DynamicTypes) and is what
+// `Any<...>` means: a value whose type is checked at runtime rather than here.
+//
+// `Addable` is not in the draft and is in the corpus: tests/samples/lambdas.fin:3
+// imports it from here and line 71 uses it as a generic bound on a lambda that adds
+// its two parameters. It is `Add` under the name the corpus uses.
+namespace std {
+namespace ops {
+
+pub type Output = any;
+
+pub interface Equal {
+   pub operator ==(other: any) <Output>;
+}
+pub interface NotEqual {
+   pub operator !=(other: any) <Output>;
+}
+pub interface GreaterThan {
+   pub operator >(other: any) <Output>;
+}
+pub interface LessThan {
+   pub operator <(other: any) <Output>;
+}
+pub interface GreaterThanEqual {
+   pub operator >=(other: any) <Output>;
+}
+pub interface LessThanEqual {
+   pub operator <=(other: any) <Output>;
+}
+pub interface Add {
+   pub operator +(rhs: any) <Output>;
+}
+pub interface Addable {
+   pub operator +(rhs: any) <Output>;
+}
+pub interface AddAssign {
+   pub operator +=(rhs: any) <Output>;
+}
+pub interface Sub {
+   pub operator -(rhs: any) <Output>;
+}
+pub interface SubAssign {
+   pub operator -=(rhs: any) <Output>;
+}
+pub interface Mul {
+   pub operator *(rhs: any) <Output>;
+}
+pub interface MulAssign {
+   pub operator *=(rhs: any) <Output>;
+}
+pub interface Div {
+   pub operator /(rhs: any) <Output>;
+}
+pub interface DivAssign {
+   pub operator /=(rhs: any) <Output>;
+}
+pub interface Mod {
+   pub operator %(rhs: any) <Output>;
+}
+pub interface ModAssign {
+   pub operator %=(rhs: any) <Output>;
+}
+pub interface BitAnd {
+   pub operator &(rhs: any) <Output>;
+}
+pub interface BitAndAssign {
+   pub operator &=(rhs: any) <Output>;
+}
+pub interface BitOr {
+   pub operator |(rhs: any) <Output>;
+}
+pub interface BitOrAssign {
+   pub operator |=(rhs: any) <Output>;
+}
+pub interface ShiftLeft {
+   pub operator <<(rhs: any) <Output>;
+}
+pub interface ShiftLeftAssign {
+   pub operator <<=(rhs: any) <Output>;
+}
+pub interface ShiftRight {
+   pub operator >>(rhs: any) <Output>;
+}
+pub interface ShiftRightAssign {
+   pub operator >>=(rhs: any) <Output>;
+}
+pub interface Unary {
+   pub operator `-() <Output>;
+}
+pub interface Not {
+   pub operator !() <Output>;
+}
+pub interface Index {
+   pub operator [](idx: any) <Output>;
+}
+pub interface IndexAssign {
+   pub operator []=(idx: any) <Output>;
+}
+pub interface Deref {
+   pub operator `*() <Output>;
+}
+pub interface FnCall {
+   pub operator (...args: <[any]>) <Output>;
+}
+
+}
+}

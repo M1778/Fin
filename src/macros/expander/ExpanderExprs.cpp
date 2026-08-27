@@ -147,6 +147,11 @@ void MacroExpander::visit(MethodCall& node) {
         if (expandedExpression) { arg = std::move(expandedExpression); expandedExpression = nullptr; }
     }
 }
+void MacroExpander::visit(TypeLiteralExpression& node) {
+    // A macro invocation inside an anonymous type's body expands, for the same
+    // reason it does inside a named one.
+    node.decl->accept(*this);
+}
 void MacroExpander::visit(CastExpression& node) {
     node.expr->accept(*this);
     if (expandedExpression) { node.expr = std::move(expandedExpression); expandedExpression = nullptr; }

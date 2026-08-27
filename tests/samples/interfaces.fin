@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "`Undefined function or type 'printf'` at 18:5 -- printf lives in the standard library, which is on no search path (src/driver/SearchPaths.hpp:107). The method call on the bounded type parameter `T` at :17 resolves now: a generic parameter's bound is stored on its GenericType and getStructType consults it, so `item.to_string()` finds Printable's method. This sample reported `Type 'T' does not have methods` before that"
 // 1. Define an Interface
 interface Printable {
     pub fun to_string() <string>;

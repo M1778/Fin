@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "The interface literal parses and analyses now -- `return interface { ... }` at 20:16 was \"unexpected KW_INTERFACE\" and is a TypeLiteralExpression typed `$interface`, in both the multi-line form on line 20 and the one-line form on line 26, and a member default (`pub picked_first <bool> = true;`) is now parsed *and* type-checked. What is left is line 24 and nothing else: it closes the literal with a bare `}` where line 26 -- the other branch of this same function -- writes `};`. Every other brace-terminated return in the corpus writes the semicolon too (deeptest1.fin:15, letssee.fin:22, :29, :52), so it is five spellings to one and line 24 is a typo in this sample rather than a semicolon-optional rule. Not edited here, because the sample is the specification; asserted from the other side in Soundness_TypeLiterals.AReturnedTypeLiteralStillNeedsItsSemicolon, and one `;` on line 24 is the whole of what this file needs to reach ok"
 
 
 fun compatible(iface: $interface, struct_: $struct) <bool> {

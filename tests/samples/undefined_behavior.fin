@@ -1,3 +1,5 @@
+//@ normative
+//@ error 3:1 "Function 'add' is missing a return statement on some paths"
 fun add() <int> { // this function won't compile and compiler will return an error
     if (0){
         return 1;

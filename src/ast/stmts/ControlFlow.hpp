@@ -27,6 +27,11 @@ class WhileLoop : public Statement {
 public:
     std::unique_ptr<Expression> condition;
     std::unique_ptr<Block> body;
+    // `do { ... } while (c);` rather than `while (c) { ... }`. The two forms
+    // share every field and differ only in whether the first pass tests the
+    // condition, so this is a bit and not a class: a DoWhileLoop would need an
+    // `accept` override in src/ast/Visitor.hpp, which wave 2 does not own.
+    bool is_do_while = false;
     WhileLoop(std::unique_ptr<Expression> c, std::unique_ptr<Block> b);
     void accept(Visitor& v) override;
 };
@@ -47,6 +52,10 @@ public:
     std::unique_ptr<TypeNode> var_type;
     std::unique_ptr<Expression> iterable;
     std::unique_ptr<Block> body;
+    // The optional index binding of `foreach (idx <int>, element <int> in a)`
+    // (tests/samples/loops.fin:19). Empty name means the one-binding form.
+    std::string index_name;
+    std::unique_ptr<TypeNode> index_type;
     ForeachLoop(std::string n, std::unique_ptr<TypeNode> t, std::unique_ptr<Expression> i, std::unique_ptr<Block> b);
     void accept(Visitor& v) override;
 };

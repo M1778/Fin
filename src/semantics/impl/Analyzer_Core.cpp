@@ -1,9 +1,102 @@
 #include "../SemanticAnalyzer.hpp"
 #include "../../types/TypeImpl.hpp"
+#include "../../utils/IntegerConstant.hpp"
 #include <fmt/core.h>
 #include <fmt/color.h>
 
 namespace fin {
+
+namespace {
+
+// integerConstant and readConstant used to be defined here. They moved to
+// src/utils/IntegerConstant.hpp when the backend started lowering fixed arrays,
+// because both passes read the *same* constants and have to agree about them:
+// this file decides `[int, 5]`'s extent and whether `a[7]` is inside it, and the
+// backend decides how many elements to allocate and which one a GEP lands on. Two
+// readers that agree today are two readers that disagree after one edit, and the
+// disagreement is a program that compiles and indexes past its own array.
+//
+// The local alias keeps this file's call sites reading as they did.
+using ExtentRead = ConstantRead;
+constexpr auto readExtent = readConstant;
+
+// The three unsigned types Analyzer_Core registers. `char` is not among them:
+// whether it is signed is undecided, so it accepts a negative constant rather
+// than having this function invent the answer.
+bool isUnsignedIntegerName(const std::string& n) {
+    return n == "uint" || n == "ulong" || n == "ushort";
+}
+
+bool isSignedIntegerName(const std::string& n) {
+    return n == "int" || n == "long" || n == "short" || n == "char";
+}
+
+bool isFloatingName(const std::string& n) {
+    return n == "float" || n == "double";
+}
+
+// `Self<T>` written inside a declaration of `X<T>` names the type being declared,
+// not an instantiation of it: the arguments repeat the parameters the header
+// declared three characters earlier. stdlib/stdptr.fin writes it four times inside
+// `interface rptr_iface<T>` -- on 16, 22, 23 and 32 -- and every one reported
+// `Generic count mismatch`.
+//
+// Answering "yes" here means the caller hands back the type it already resolved,
+// which for an interface is the live interface rather than a copy of it. That
+// matters more than it looks: the copy would be taken at the line `Self<T>` is
+// written on, so `readonly restrict <&Self<T>>;` on 16 -- before any method is
+// registered -- would have produced an interface with no methods, and every call
+// through that member would have reported `has no member`.
+// Soundness_SelfGenerics.SelfWithTheEnclosingParametersIsTheInterfaceItself.
+//
+// By position and by name, and only for a bare parameter name: `Self<B, A>` inside
+// `IPair<A, B>` and `Self<int>` inside `Box<T>` are genuine instantiations and fall
+// through to the general path. `&Self<T>` reaches here as the inner node, so the
+// pointer_depth guard is about `Self<&T>`, which names something else again.
+bool selfNamesEnclosingType(const TypeNode* node, const TypePtr& resolved) {
+    if (!node || node->name != "Self" || !resolved) return false;
+
+    // In a struct or class `Self` is a SelfType wrapping the struct; in an interface
+    // it is the interface's own StructType (Analyzer_Decl.cpp:276 and :553).
+    const std::vector<TypePtr>* params = nullptr;
+    if (auto* self = resolved->as<SelfType>()) {
+        if (auto s = std::dynamic_pointer_cast<StructType>(self->originalStruct))
+            params = &s->generic_args;
+    } else if (auto* st = resolved->as<StructType>()) {
+        params = &st->generic_args;
+    }
+    if (!params || params->size() != node->generics.size() || params->empty()) return false;
+
+    for (size_t i = 0; i < params->size(); ++i) {
+        const TypeNode* written = node->generics[i].get();
+        if (!written || !(*params)[i]) return false;
+        if (!written->generics.empty() || written->pointer_depth != 0 ||
+            written->is_array || written->is_nullable) return false;
+        if (written->name != (*params)[i]->toString()) return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool SemanticAnalyzer::constantFitsType(const ASTNode& node, const Type& target) {
+    bool negative = false;
+    if (!integerConstant(node, negative)) return false;
+
+    const auto* prim = target.as<PrimitiveType>();
+    if (!prim) return false;
+
+    // The magnitude is not checked, and that is a decision rather than an
+    // oversight: Fin has not said how wide `short` or `char` is, and the `{N}`
+    // annotation that would say is erased by resolveTypeFromAST before anything
+    // can read it. A range check today would be inventing the widths.
+    // KnownDefect_IntegerWidths.AConstantTooLargeForItsTargetIsAccepted records
+    // the hole and is where the check goes when the widths become real.
+    if (isFloatingName(prim->name)) return true;
+    if (isSignedIntegerName(prim->name)) return true;
+    if (isUnsignedIntegerName(prim->name)) return !negative;
+    return false;  // bool, string, void, auto and every named type: unchanged
+}
 
 SemanticAnalyzer::SemanticAnalyzer(DiagnosticEngine& d, bool debug) 
     : diag(d), debugMode(debug) {
@@ -30,8 +123,49 @@ SemanticAnalyzer::SemanticAnalyzer(DiagnosticEngine& d, bool debug)
     currentScope->defineType("ulong", std::make_shared<PrimitiveType>("ulong"));
     currentScope->defineType("ushort", std::make_shared<PrimitiveType>("ushort"));
     
+    // The two dynamic types. Builtins because the corpus uses them in files with no
+    // imports at all -- `nullifier.fin:34` and `literal_struct.fin:4` write `any`,
+    // `prototype_test.fin:40` writes `object` -- and two names rather than one alias
+    // because the corpus distinguishes them: `any` is compile-time erasure
+    // (stdlib/types.fin:97), `object` is a runtime box (prototype_test.fin:40). See
+    // DynamicType.hpp for why that difference is not yet observable.
+    //
+    // `Any` is *not* registered here. `stdlib/types.fin:69` declares `pub type Any =
+    // any;` behind `#[export]`, which makes it a library alias; handing it out with
+    // the builtin would compile programs here that a real standard library rejects.
+    // Soundness_DynamicTypes.AnUnknownTypeNameIsStillUndefined forbids it, along with
+    // `Object` and `AnyType`, which are nobody's spelling.
+    currentScope->defineType("any", std::make_shared<DynamicType>("any"));
+    currentScope->defineType("object", std::make_shared<DynamicType>("object"));
+
     // Mock Castable
     currentScope->defineType("Castable", std::make_shared<StructType>("Castable"));
+
+    // Compile-time reflection meta-types. A value of one of these *is* a type
+    // (or an enum member), which is why the corpus writes them in type position:
+    // `fun cast<_Type: $type>(...)` with the comment "$type == literal type"
+    // (stdlib/types.fin:33), `tftid(tid: uint) <$type>` "returns a type from
+    // typeid" (:83), `keyidof(enum_member: $enum_member)` with the example
+    // `keyidof(Ok)` (stdlib/enums.fin:22), and `compatible(iface: $interface,
+    // struct_: $struct)` (literal_interface.fin:5).
+    //
+    // Four names, listed rather than matched on the `$` prefix. The grammar
+    // accepts *any* `$name` as a type (parser.y:1783, `DOLLAR IDENTIFIER`), so a
+    // prefix rule would turn every misspelling into a silently accepted type;
+    // Soundness_MetaTypes.AnUnknownDollarNameIsStillUndefined forbids exactly that.
+    //
+    // PrimitiveType and not a new Type subclass, because PrimitiveType's
+    // assignability is name equality plus the one int->float rule
+    // (PrimitiveType.cpp:10-14), which gives these the behaviour they need today:
+    // a `$type` is accepted where `$type` is asked for and nowhere else. What a
+    // `$type` value can *do* -- be compared, be instantiated, be passed to
+    // `compiler.types.*` -- is wave 4 and is not decided by registering the name.
+    // Nothing treats "is a PrimitiveType" as "is a number": the numeric
+    // predicates above are explicit allowlists.
+    currentScope->defineType("$type", std::make_shared<PrimitiveType>("$type"));
+    currentScope->defineType("$struct", std::make_shared<PrimitiveType>("$struct"));
+    currentScope->defineType("$interface", std::make_shared<PrimitiveType>("$interface"));
+    currentScope->defineType("$enum_member", std::make_shared<PrimitiveType>("$enum_member"));
 }
 
 SemanticAnalyzer::~SemanticAnalyzer() {}
@@ -49,43 +183,133 @@ void SemanticAnalyzer::exitScope() {
     }
 }
 
+// Returns nullptr when the type cannot be resolved, having already reported why.
+//
+// A composite branch must propagate a child's nullptr rather than wrapping it,
+// because no part of the type layer is prepared for a null child: PointerType,
+// ArrayType, FunctionType and PrototypeType all dereference theirs in
+// toString(), which is the first thing any caller asks. Returning a non-null
+// composite over a failed child also defeats every caller's `if (!type)` guard,
+// so the failure travels silently until something crashes on it.
+//
+// Children are all resolved before the failure is returned, so that a type
+// naming two undefined types reports both rather than only the first.
+// tests/samples/nullifier.fin is the specification. parser.y sets `is_nullable`
+// on a TypeNode in twenty places -- every nullable spelling the language has:
+// `let x? <T>`, six struct-member forms, `n?: T`, and the return type node under
+// `fun?` -- and until this wave nothing in src/semantics/ or src/types/ ever read
+// it. Reading it here, once, is what gives all twenty a meaning, and it is why
+// `fun?` needed no change of its own: the grammar already marks the return type.
+std::shared_ptr<Type> SemanticAnalyzer::resolveTypeOrError(TypeNode* node) {
+    auto t = resolveTypeFromAST(node);
+    if (t) return t;
+    // resolveTypeUnwrapped has already reported the cause. The sentinel's whole
+    // job is to stop it being reported again, once per use of the declaration.
+    //
+    // Safe to substitute unconditionally because the grammar admits no untyped
+    // declaration: `fun f(self)` is a syntax error ("expecting COLON"), and a
+    // member without `<T>` likewise. A null here therefore always means a type
+    // was written and failed to resolve, never that none was written. If the
+    // grammar ever gains an inferred parameter, this must not paper over it --
+    // `auto` is the spelling for that and it resolves to a real type.
+    return errorType();
+}
+
 std::shared_ptr<Type> SemanticAnalyzer::resolveTypeFromAST(TypeNode* node) {
+    auto resolved = resolveTypeUnwrapped(node);
+    // `!resolved` first: a null node resolves to null and has no flag to read.
+    if (!resolved || !node->is_nullable) return resolved;
+    return std::make_shared<NullableType>(resolved);
+}
+
+std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
     if (!node) return nullptr;
     
     // 1. Pointer Type
     if (auto* ptrNode = dynamic_cast<PointerTypeNode*>(node)) {
         auto inner = resolveTypeFromAST(ptrNode->pointee.get());
+        if (!inner) return nullptr;
         return std::make_shared<PointerType>(inner);
     }
 
-    // 2. Array Type (FIXED: Validate Size)
+    // 2. Array Type. The extent is resolved into the type, not just validated.
+    //
+    // `[int, 4]` and `[int, 8]` were one type before this: the size was analysed
+    // for its own diagnostics and the *value* went nowhere, so ArrayType had a
+    // `fixed` flag and no number. That is why the layout pass refused every array
+    // rather than only the dynamic ones -- any size it reported would have been a
+    // guess, and a guessed size is a struct that is silently the wrong shape.
+    //
+    // Which makes a non-constant extent a refusal rather than a fallback. Storing
+    // it as "fixed, size unknown" would be the same defect in a new spelling, and
+    // silently demoting it to `[int]` would give the writer a type they did not
+    // ask for. `new [T, n]` is the spelling for a run-time count of elements, and
+    // visit(NewExpression) keeps it out of this path for exactly that reason.
     if (auto* arrNode = dynamic_cast<ArrayTypeNode*>(node)) {
         auto inner = resolveTypeFromAST(arrNode->element_type.get());
-        bool fixed = (arrNode->size != nullptr);
-        
-        if (fixed) {
-            // Analyze the size expression
+        std::optional<uint64_t> extent;
+
+        if (arrNode->size) {
             arrNode->size->accept(*this);
-            
+
             // Ensure it evaluates to an integer
             auto intType = currentScope->resolveType("int");
+            bool integral = true;
             if (lastExprType) {
                 if (!checkType(*arrNode->size, lastExprType, intType)) {
                     error(*arrNode->size, "Array size must be an integer");
+                    integral = false;
+                }
+            }
+
+            // Only when the type check agreed, so that a `[int, "x"]` gets the one
+            // diagnostic about its type and not a second about its constness.
+            if (integral) {
+                uint64_t count = 0;
+                switch (readExtent(*arrNode->size, count)) {
+                    case ExtentRead::Ok:
+                        extent = count;
+                        break;
+                    case ExtentRead::Negative:
+                        error(*arrNode->size, "An array's size cannot be negative");
+                        break;
+                    case ExtentRead::TooLarge:
+                        error(*arrNode->size, "An array's size is too large to represent");
+                        break;
+                    case ExtentRead::NotConstant:
+                        error(*arrNode->size,
+                              "An array's size must be a constant integer; `new [T, n]` "
+                              "allocates a run-time number of elements");
+                        break;
                 }
             }
         }
-        
-        return std::make_shared<ArrayType>(inner, fixed);
+
+        // After the size check, so that `[NoSuchType, wrongsize]` reports both.
+        if (!inner) return nullptr;
+        return std::make_shared<ArrayType>(inner, extent);
     }
 
     // 3. Function Type
     if (auto* fnNode = dynamic_cast<FunctionTypeNode*>(node)) {
+        // `fn<T: Castable>(m: T) -> T` (lambdas.fin:69) declares T for the
+        // parameter and return types that follow, so those are resolved in a
+        // scope that has it, the way visit(LambdaExpression&) does for the value
+        // side of that same line. A non-generic fn type enters an empty scope,
+        // which changes nothing about how its types resolve.
+        enterScope();
+        declareGenericParams(fnNode->generic_params);
+
         std::vector<std::shared_ptr<Type>> pTypes;
+        bool resolved = true;
         for(auto& p : fnNode->param_types) {
             pTypes.push_back(resolveTypeFromAST(p.get()));
+            if (!pTypes.back()) resolved = false;
         }
         auto rType = resolveTypeFromAST(fnNode->return_type.get());
+        exitScope();
+
+        if (!rType || !resolved) return nullptr;
         return std::make_shared<FunctionType>(pTypes, rType);
     }
 
@@ -104,6 +328,7 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeFromAST(TypeNode* node) {
             valueType = resolveTypeFromAST(node->generics[1].get());
         }
         
+        if (!keyType || !valueType) return nullptr;
         return std::make_shared<PrototypeType>(keyType, valueType);
     }
 
@@ -114,13 +339,15 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeFromAST(TypeNode* node) {
     }
     
     // 5. Generics
-    if (!node->generics.empty()) {
+    if (!node->generics.empty() && !selfNamesEnclosingType(node, type)) {
         std::vector<std::shared_ptr<Type>> args;
         auto structDef = std::dynamic_pointer_cast<StructType>(type);
+        bool argsResolved = true;
         
         for(size_t i = 0; i < node->generics.size(); ++i) {
             auto argType = resolveTypeFromAST(node->generics[i].get());
             args.push_back(argType);
+            if (!argType) { argsResolved = false; continue; }
             
             if (structDef && i < structDef->generic_args.size()) {
                 auto genParam = std::dynamic_pointer_cast<GenericType>(structDef->generic_args[i]);
@@ -130,10 +357,31 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeFromAST(TypeNode* node) {
             }
         }
         
+        // Every argument was resolved first, so all the undefined ones are
+        // reported; a constrained parameter given an unresolved argument is not
+        // additionally reported as violating its constraint, since there is no
+        // type there to have violated it.
+        if (!argsResolved) return nullptr;
+        
         if (structDef) {
              auto instantiated = structDef->instantiate(args);
              if (instantiated) type = instantiated;
              else error(*node, "Generic count mismatch");
+        } else if (auto* dyn = type->as<DynamicType>()) {
+             // `any<int>` is still an `any`. The fabrication below would have made it
+             // a struct named `any`, which rejected every value it was written to
+             // accept and answered member access with `Struct 'any' has no member` --
+             // the same fiction visit(TypeDefinition&) used to produce, at the site
+             // that the corpus actually reaches: stdlib/types.fin:74 declares
+             // `type Any<...> = any implements <...>;` and the library uses `Any<...>`
+             // as a generic bound, so every use went through here.
+             //
+             // The arguments are dropped rather than recorded, because there is
+             // nothing yet that could read them and a field nobody reads is a claim
+             // that the bound is honoured. Whether `any<int>` should narrow at all is
+             // an owner ruling -- KnownDefect_DynamicTypes
+             // .GenericArgumentsOnADynamicTypeAreNotConstraints books the state.
+             (void)dyn;
         } else {
              type = std::make_shared<StructType>(node->name, args);
         }
@@ -146,6 +394,37 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeFromAST(TypeNode* node) {
     }
 
     return type;
+}
+
+void SemanticAnalyzer::declareGenericParams(
+        const std::vector<std::unique_ptr<GenericParam>>& params,
+        std::vector<std::shared_ptr<Type>>* collect) {
+    // Pass 1: every name, so a constraint can name a sibling parameter or the
+    // parameter it constrains.
+    std::vector<std::shared_ptr<GenericType>> made;
+    made.reserve(params.size());
+    for (auto& gen : params) {
+        auto genType = std::make_shared<GenericType>(gen->name);
+        currentScope->defineType(gen->name, genType);
+        made.push_back(genType);
+        if (collect) collect->push_back(genType);
+    }
+
+    // Pass 2: the constraints. resolveTypeFromAST reports an unresolved one, which
+    // is the whole difference at the function, interface and operator sites --
+    // they never called it. The resolved constraint is then attached to the
+    // GenericType rather than logged and dropped, which is what makes
+    // checkConstraint (below) reachable: nothing in src/ assigned that field, so
+    // its `if (genParam->constraint)` guard was permanently false and every
+    // constraint in the language was decorative.
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (!params[i]->constraint) continue;
+        auto resolved = resolveTypeFromAST(params[i]->constraint.get());
+        if (!resolved) continue;  // already reported; leave the parameter unconstrained
+        made[i]->constraint = resolved;
+        debugLog(fg(fmt::color::gray), "      [Constraint] Generic '{}' : '{}'\n",
+                 params[i]->name, resolved->toString());
+    }
 }
 
 bool SemanticAnalyzer::checkConstraint(TypeNode* typeNode, std::shared_ptr<Type> actualType, std::shared_ptr<Type> constraint) {
@@ -164,20 +443,60 @@ bool SemanticAnalyzer::checkConstraint(TypeNode* typeNode, std::shared_ptr<Type>
 }
 
 void SemanticAnalyzer::error(ASTNode& node, const std::string& msg) {
+    // A quiet pre-pass reports nothing and, just as importantly, does not set
+    // hasError: an exit code that says the program failed with no diagnostic printed
+    // is the one outcome worse than a duplicate. See SemanticAnalyzer::QuietPass for
+    // why silence is sound at the two sites that use it.
+    if (quietDepth) return;
     diag.reportError(node.loc, msg);
     hasError = true;
 }
 
 bool SemanticAnalyzer::checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected) {
     if (!actual || !expected) return false;
+
+    // Nothing to compare once the analyser has already failed to type one side. The
+    // annotation that failed is the real diagnostic; a mismatch here would be a second
+    // one, naming a type the program never wrote. isErrorType rather than a plain
+    // as<ErrorType>() because `&NoSuchType` and `[NoSuchType]` reach here wrapped.
+    if (isErrorType(actual) || isErrorType(expected)) return true;
     
     if (!actual->isAssignableTo(*expected)) {
+        if (constantFitsType(node, *expected)) return true;
         error(node, fmt::format("Type mismatch: expected '{}', got '{}'", expected->toString(), actual->toString()));
         return false;
     }
     return true;
 }
 
+// A declaration may be initialised to `null` whatever its declared type is.
+//
+// nullifier.fin:4 calls `b? <int>` "equavelant to `b <int> = null,`", which reads
+// two ways: either `= null` makes the declaration nullable, or `null` is simply a
+// permitted "absent" initialiser. Two normative samples settle it. deeptest4.fin:6
+// writes `integer <int> = null` and line 16 then compares `a["Hi"].integer` with
+// `10`; stdlib/error.fin:11 writes `err_code: int = null` and line 14 passes
+// `err_code` straight into an `<int>` field. Neither denullifies. Under the first
+// reading both would have to, so the second is the reading the corpus supports:
+// the initialiser is permitted and the declared type is unchanged.
+//
+// Deliberately not folded into checkType, which is also the *assignment* check:
+// `let x <int> = null;` is legal and `x = null;` on the next line is not.
+bool SemanticAnalyzer::checkInitializer(ASTNode& node, std::shared_ptr<Type> actual,
+                                       std::shared_ptr<Type> expected) {
+    if (isNullLiteral(actual)) return true;
+    return checkType(node, actual, expected);
+}
+
+void SemanticAnalyzer::visitParameterDefaults(const std::vector<std::unique_ptr<Parameter>>& params) {
+    for (auto& param : params) {
+        if (param->default_value) param->default_value->accept(*this);
+    }
+}
+
+// Unreachable, and left in place because the Visitor interface requires it: no
+// parameter loop dispatches to it, they all walk `param->type` directly. Logic
+// added here will not run -- see visitParameterDefaults.
 void SemanticAnalyzer::visit(Parameter& node) {
     resolveTypeFromAST(node.type.get());
     if (node.default_value) node.default_value->accept(*this);
@@ -192,7 +511,71 @@ void SemanticAnalyzer::visit(PointerTypeNode& node) { resolveTypeFromAST(&node);
 void SemanticAnalyzer::visit(ArrayTypeNode& node) { resolveTypeFromAST(&node); }
 
 
+void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
+    QuietPass quiet(*this);
+
+    for (auto& stmt : node.statements) {
+        std::string name;
+        const std::vector<std::unique_ptr<Parameter>>* params = nullptr;
+        const std::vector<std::unique_ptr<GenericParam>>* generics = nullptr;
+        TypeNode* declaredReturn = nullptr;
+
+        if (auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
+            name = fn->name;
+            params = &fn->params;
+            generics = &fn->generic_params;
+            declaredReturn = fn->return_type.get();
+        } else if (auto* sp = dynamic_cast<SpecialDeclaration*>(stmt.get())) {
+            // A `@special` carries no generic parameters -- the grammar gives it none.
+            name = sp->name;
+            params = &sp->params;
+            declaredReturn = sp->return_type.get();
+        } else {
+            continue;
+        }
+
+        // A scope of its own, for the generics the signature may mention, discarded
+        // once the signature is built. The GenericTypes it declared survive inside the
+        // FunctionType, which is what visit(FunctionDeclaration&) does too.
+        enterScope();
+        if (generics) declareGenericParams(*generics);
+
+        bool resolved = true;
+        std::vector<std::shared_ptr<Type>> paramTypes;
+        for (auto& param : *params) {
+            auto type = resolveTypeFromAST(param->type.get());
+            if (!type || isErrorType(type)) { resolved = false; break; }
+            paramTypes.push_back(type);
+        }
+
+        std::shared_ptr<Type> retType;
+        if (resolved) {
+            // Null return_type means none was written, which is `void` -- the same
+            // reading as step 5 of visit(FunctionDeclaration&).
+            retType = declaredReturn ? resolveTypeFromAST(declaredReturn)
+                                     : currentScope->resolveType("void");
+            if (!retType || isErrorType(retType)) resolved = false;
+        }
+        exitScope();
+
+        if (!resolved) continue;
+
+        // Not `define` unconditionally: a name already bound at file scope was bound by
+        // something the pre-pass does not model -- an import, or a `const` above -- and
+        // overwriting it here would let a function declared at the bottom of the file
+        // silently take a name the top of the file already gave to something else. The
+        // in-order walk still overwrites when its turn comes, which is the behaviour
+        // that was already there.
+        if (currentScope->symbols.count(name)) continue;
+
+        currentScope->define({name, std::make_shared<FunctionType>(paramTypes, retType),
+                              false, true});
+        debugLog(fg(fmt::color::gray), "      [Hoist] Registered '{}' at file scope\n", name);
+    }
+}
+
 void SemanticAnalyzer::visit(Program& node) {
+    hoistTopLevelSignatures(node);
     for (auto& stmt : node.statements) {
         stmt->accept(*this);
     }

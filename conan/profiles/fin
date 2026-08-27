@@ -1,0 +1,23 @@
+# The committed Conan profile for building finc (ADR 0010).
+#
+# Usage:
+#   conan profile detect --force          # once, to learn the local compiler
+#   conan install . -pr:a=conan/profiles/fin --build=missing
+#
+# It layers on top of the detected `default` profile so the compiler and its
+# version stay whatever the machine actually has, and overrides only what the
+# project requires.
+include(default)
+
+[settings]
+# finc is C++20. The Conan default from `conan profile detect` is gnu17, which
+# does not compile this tree. The `&:` scope applies this to *this* project
+# only, deliberately: it is not scoped that way for tidiness but because
+# compiler.cppstd is part of every dependency's package_id, so an unscoped
+# gnu20 asks ConanCenter for binaries that were never built and turns every
+# dependency into a from-source build.
+{% if platform.system() == "Windows" %}
+&:compiler.cppstd=20
+{% else %}
+&:compiler.cppstd=gnu20
+{% endif %}

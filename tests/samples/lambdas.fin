@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 import { Addable } from operators::std;
 
 @define printf(fmt: string, ...) <noret>;

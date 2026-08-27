@@ -1,3 +1,5 @@
+//@ normative
+//@ unimplemented "The import resolves, the whole file parses, and `Self<T>` inside `interface rptr_iface<T>` resolves now -- an interface records its generic parameters on its type, and `Self<T>` written with the enclosing parameters is the enclosing type. Three are left. `pointer_type` on 40 is a type declared in no corpus file (see enums.fin's note: the prelude question). `own` on 52 is reported for missing a return, and correctly as the sample is written: its two raises are both inside an `if`, so the fall-through path reaches the end of a function returning `&Self<T>`. `rptr does not implement rptr_iface` on 37 follows the two constructor requirements on 31 and 32, which the class does not declare -- and a constructor requirement is now checked by parameter list rather than being unsatisfiable by construction, so this one is about the class and not about the check"
 #[stdimport]
 import { Error } from error::std;
 

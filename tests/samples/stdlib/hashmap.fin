@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 #[stdimport] %{
 import { Collection } from collection::std;
 import { Error } from error::std;

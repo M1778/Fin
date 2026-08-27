@@ -141,6 +141,13 @@ void SubstitutionVisitor::visit(MethodCall& node) {
         if(replacementExpr) { arg = std::move(replacementExpr); replacementExpr = nullptr; }
     }
 }
+void SubstitutionVisitor::visit(TypeLiteralExpression& node) {
+    // Into the body: a macro parameter used inside an anonymous type's method is
+    // substituted like one used anywhere else. `replacementExpr` is not consulted
+    // afterwards because a declaration is not an expression and cannot be replaced
+    // by one.
+    node.decl->accept(*this);
+}
 void SubstitutionVisitor::visit(CastExpression& node) {
     node.expr->accept(*this);
     if(replacementExpr) { node.expr = std::move(replacementExpr); replacementExpr = nullptr; }

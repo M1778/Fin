@@ -1,0 +1,45 @@
+// `Result` and the interface it implements.
+//
+// tests/samples/stdlib/typing.fin is the specification. This copy keeps the enum, the
+// interface and the implements block; what it drops is the `ErrorLike` union bound on
+// `Result`'s second generic parameter, because the draft spells it
+// `string | any implements <Error>` and this file would then have to import `Error`
+// from a module that imports nothing back -- a cycle the loader has no rule for yet.
+// The bound is a hint, not a constraint the corpus depends on.
+//
+// The draft's `Result<T, U> implements <IResult> { ... }` block is dropped for a
+// second reason, and one reason only: `keyidof(Ok)`, which every one of its three
+// bodies guards on, reports `expected '$enum_member', got 'fn(T) -> Result<T, U>'` --
+// a payloaded member named rather than called is its constructor, and whether that
+// satisfies the `$enum_member` meta-type is an owner ruling stdlib/typing.fin's note
+// records as undecided.
+//
+// The two reasons that used to stand here are gone. An enum *can* be the target of an
+// implements block, and the block declares its target's generic parameters, so every
+// `T` and `U` in the bodies' own signatures resolves; and the bodies' `enum_.0` reads
+// too -- positional payload access is slot N of whichever member the value holds
+// (Soundness_PositionalMembers), and raising one is the raise form of `blame` rather
+// than the assert form (Soundness_Blame.RaisingAValueOfErasedTypeIsAccepted). What is
+// left is one expression, so `IResult` is declared and unimplemented here, exactly as
+// far as the compiler goes.
+#[stdimport] %{
+import { getkeyid, keyidof } from enums::std;
+}%
+
+namespace std {
+
+#[llvm_name="Result"]
+pub enum Result <T, U> {
+    Ok(T),
+    Err(U),
+}
+
+#[export]
+pub interface IResult<T, U> {
+    pub:
+      fun unwrap(enum_ : Result<T, U>) <T>;
+      fun expect(enum_ : Result<T, U>) <noret>;
+      fun select(enum_ : Result<T, U>, callback : fn(T) -> void) <noret>;
+}
+
+}

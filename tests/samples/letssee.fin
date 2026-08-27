@@ -1,3 +1,5 @@
+//@ normative
+//@ ok
 @define printf(fmt: string, ...) <noret>;
 @define sin(f: float) <float>;
 @define cos(f: float) <float>;

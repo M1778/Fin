@@ -1,0 +1,165 @@
+//@ bundled
+// Output, the `Printable` contract, and the byte stream.
+//
+// tests/samples/stdlib/stdio.fin is the specification. `extern_as.fin:3` is the only
+// consumer and it takes the whole module (`import stdio::std as stdio;`), so no single
+// name here is load-bearing for the corpus -- but `printf` is called by twenty-odd
+// samples, and it is undefined without this file: there is no builtin printf in the
+// compiler (`grep printf src/semantics` finds nothing). Whether a sample has to import
+// stdio to call printf is an owner ruling; today it does.
+//
+// Divergences from the draft, each with its reason:
+//
+//   * The draft declares `@define printf` under `#[llvm_name="c_printf"]` and then
+//     re-exports it as `pub implements c_printf = printf;`. That alias form resolves its
+//     right-hand side as a *type*, so it reports `Undefined type 'printf'`. The
+//     `@define` is exported directly instead and the alias is dropped.
+//   * The draft's `printf` is a second, generic, `#[overwrite(printf)]` definition whose
+//     body calls `format!(fmt, ...objects)`. `format!` is not a registered macro
+//     (`Undefined macro 'format!'`) and nothing reads `#[overwrite]`, so the variadic
+//     C-style `printf` is the only one here.
+//   * `print`/`println` are bound `<X: Printable>`, not the draft's `<X: Any<Printable>>`.
+//     Both parse, but the bound written through the alias loses the interface: the body
+//     then reports `Type 'X' does not have methods`, while the plain bound resolves
+//     `format_str` fine. So `Any` is not imported at all here, and the draft's first
+//     import is dropped.
+//   * `IOResult`'s generic parameter loses the draft's `Strict<Stream>` bound: `Strict`
+//     is undefined -- no module declares it and it is not a builtin classifier.
+//   * The draft's `IOResult<T> implements <IResult> { ... }` block is dropped for one
+//     reason, which is the draft's own: `keyidof(Ok)` in all three bodies reports
+//     `expected '$enum_member', got 'fn(...)'`, the undecided ruling
+//     stdlib/typing.fin's note records. Two reasons that used to stand here are gone --
+//     an enum can be the target of an implements block, and `enum_.0` reads as a
+//     positional payload access (Soundness_PositionalMembers), a `blame` of one
+//     included (Soundness_Blame.RaisingAValueOfErasedTypeIsAccepted). `IResult` is
+//     therefore still not imported, and the draft's third import goes with it.
+//   * `IStream` declares no constructor: a bodyless `Self(data: [char]);` in an
+//     interface is a syntax error twice over -- `Self` is not an IDENTIFIER in that
+//     position, and a constructor declaration without a body does not parse at all.
+//   * `Stream::read`'s `nbytes: ulong = -1` sentinel is gone. A default parameter value
+//     parses but is not honoured -- calling `f()` on `fun f(n: int = 5)` reports
+//     `expects 1 arguments, got 0` -- so a defaulted parameter is a required parameter
+//     wearing a default, and `read_all` is a separate method instead.
+//   * The draft types every length, offset and pointer `ulong`. They are `int` here:
+//     `ulong` is accepted as an array size or an index nowhere -- `new [char, n]` with
+//     an `ulong` n reports `Array size must be an integer` *and*
+//     `expected 'int', got 'ulong'`, and so does `a[i]`. There is no widening or
+//     narrowing between the integer types at all, which is on the owner's ruling list;
+//     until it is settled a stream cannot be longer than an `int`.
+//   * Where the draft writes `_temp.length` or `data.length`, this file carries the length
+//     itself. `.length` works on both an array and a string -- the claim that used to
+//     stand here was measured when these buffers were annotated `&[char]`, and a pointer
+//     to an array has no members. The lengths stay carried for a different reason: a
+//     `Stream`'s `stream_length` is how much content it holds, and `expand` deliberately
+//     allocates more than that, so the buffer's `.length` is not the stream's length.
+//   * The draft's loops run `for (i: int = 0; i >= _temp.length; i++)` -- `>=`, which
+//     never executes. Written `<` here. The draft is wrong about its own loops in three
+//     places and stdlib/collection.fin repeats it.
+//   * `File`/`FileIO` are dropped whole: `PathLike` is undefined, `Err(...)`/`OK(...)`
+//     as free enum constructors do not resolve, and `File::exists` returns through
+//     `path.length == 10 : true ? false` -- the corpus ternary, whose operand order is
+//     an open owner ruling (preprocessor.fin:23 is blocked on the same thing).
+#[stdimport] %{
+import { Error } from error::std;
+}%
+
+namespace std {
+
+// The C library's printf, by its own name. Variadic, and no format checking: the
+// `...` in a `@define` accepts anything.
+#[llvm_name="printf"]
+#[export]
+@define printf(fmt: string, ...) <noret>;
+
+#[export]
+pub interface Printable {
+    pub fun format_str() <string>;
+}
+
+#[export]
+pub fun print<X: Printable>(object: X) <noret> {
+    printf(object.format_str());
+  }
+
+#[export]
+pub fun println<X: Printable>(object: X) <noret> {
+    printf("%s\n", object.format_str());
+  }
+
+#[export]
+pub struct IOError : <Error> {}
+
+// Forward declaration, so `IOResult<Stream>` can be written before `Stream` is.
+#[future]
+struct Stream;
+
+#[export]
+pub enum IOResult<T> {
+    pub Err <IOError>,
+    pub Ok <T>,
+  }
+
+#[export]
+pub interface IStream {
+  priv:
+      stream_length <int>;
+      pointer <int>;
+      stream <[char]>;
+
+  pub:
+    fun seek(offset: int) <bool>;
+    fun read(nbytes: int) <[char]>;
+    fun read_all() <[char]>;
+    fun expand(nbytes: int) <noret>;
+}
+
+#[export]
+pub struct Stream : <IStream> {
+    priv:
+      stream_length <int>,
+      pointer <int> = 0,
+      stream <[char]>,
+
+    pub:
+      fun seek(self: &Self, offset: int) <bool> {
+          if (offset > self.stream_length) {
+              return false;
+            } else {
+              self.pointer = offset;
+              return true;
+            }
+        }
+
+      // Reads forward from the pointer and leaves it past what was read.
+      fun read(self: &Self, nbytes: int) <[char]> {
+          let want <int> = nbytes;
+          if (want > self.stream_length) { want = self.stream_length; }
+
+          let _temp <[char]> = new [char, want - self.pointer]{};
+          for (let i <int> = 0; i < want - self.pointer; i++) {
+              _temp[i] = self.stream[i + self.pointer];
+            }
+
+          self.pointer += want;
+          return _temp;
+        }
+
+      fun read_all(self: &Self) <[char]> { return self.read(self.stream_length); }
+
+      fun expand(self: &Self, nbytes: int) <noret> {
+          let _temp <[char]> = new [char, nbytes + self.stream_length]{};
+          for (let i <int> = 0; i < self.stream_length; i++) {
+              _temp[i] = self.stream[i];
+            }
+          self.stream = _temp;
+          self.stream_length += nbytes;
+        }
+
+      Stream(data: [char], length: int) {
+          self.stream = data;
+          self.stream_length = length;
+          self.pointer = 0;
+        }
+}
+
+}
