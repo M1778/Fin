@@ -1,5 +1,5 @@
 //@ aspirational
-//@ unimplemented "`format!(...)` at 26:16 -- \"Undefined macro 'format!'\"; nothing defines a formatting macro and there is no prelude. The constructor member-initialiser list on line 40 parses now"
+//@ unimplemented "`format!(...)` at 26:16 -- \"Undefined macro 'format!'\"; no file in the corpus or lib/std defines a formatting macro. \"There is no prelude\" was the wrong reason to give: the prelude question was about names reached without an import, it has since been split in two and answered (see tests/samples/enums.fin's note), and neither half touches this line, because ambience cannot make visible a macro nobody wrote and `#[global]` marks declarations rather than creating them. `format!` waits on the `@macro` declaration form instead, which the owner ruled on 2026-08-27 is to be designed before any code -- the same gap error.fin:19, stdio.fin:36 and useful_macros.fin:14 report. The constructor member-initialiser list on line 40 parses now"
 @define printf(fmt: string, ...) <noret>;
 @define free(ptr: &void ) <noret>;
 
