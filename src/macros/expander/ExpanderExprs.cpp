@@ -58,6 +58,27 @@ void MacroExpander::visit(MacroInvocation& node) {
     }
     
     // 3. Find quote
+    //
+    // Guarded, because a macro does not always have a body. MacroDecl.cpp's two
+    // constructors are disjoint: the parameter form takes a `Block` and the rules form
+    // takes `rules` and leaves `body` null. Reaching `def->body->statements` with one of
+    // those dereferenced null, so `macro f { () => { 1; } }` invoked as `f!()` did not
+    // refuse -- it crashed, exit 139, which is not one of the four codes ADR 0009 gives
+    // finc, so a caller reading the status saw neither success nor a diagnostic.
+    // Declaring one and never calling it was always fine, which is why this sat on the
+    // invocation path alone and no sample found it.
+    //
+    // Refused rather than skipped. Returning quietly would drop the call and leave the
+    // program a statement short, which is the miscompile this compiler refuses
+    // everywhere else. What the rules form should eventually *mean* is a separate
+    // question and is not decided here.
+    if (!def->body) {
+        diag.reportError(node.loc,
+            fmt::format("Macro '{}' is declared in the rules form, which is not expanded yet",
+                        node.name));
+        return;
+    }
+
     QuoteExpression* quote = nullptr;
     for (auto& stmt : def->body->statements) {
         if (auto* ret = dynamic_cast<ReturnStatement*>(stmt.get())) {

@@ -107,6 +107,24 @@ TEST(MacroExpander, RejectsAMacroWhoseBodyDoesNotReturnAQuote) {
     EXPECT_NE(e.firstMessage.find("quote"), std::string::npos) << e.firstMessage;
 }
 
+TEST(MacroExpander, InvokingARulesFormMacroIsRefusedRatherThanCrashing) {
+    // `macro f { () => { ... } }` is the rules form. MacroDecl.cpp's two constructors are
+    // disjoint -- the rules one sets `rules` and leaves `body` null -- and the expander
+    // read `def->body->statements` with no guard, so invoking one dereferenced null and
+    // finc exited 139. That is not one of the four codes ADR 0009 gives it, so a script
+    // checking the status learned neither that the build succeeded nor that it was
+    // rejected. Declaring one and never calling it was always fine, which is why the
+    // corpus never found this: no sample calls a rules-form macro.
+    //
+    // The assertion is that it *refuses*. Expanding to nothing would drop the call.
+    auto e = expand(
+        "macro f { () => { 1; } }\n"
+        "fun main() <noret> { f!(); }\n");
+    ASSERT_TRUE(e.parsed);
+    EXPECT_TRUE(e.errors);
+    EXPECT_NE(e.firstMessage.find("rules form"), std::string::npos) << e.firstMessage;
+}
+
 TEST(MacroExpander, SubstitutesTheArgumentIntoTheExpansion) {
     // The expander clones the quote body and runs SubstitutionVisitor over it.
     // If the parameter name survives into the expansion, the argument was never
