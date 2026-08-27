@@ -66,6 +66,31 @@ if(FIN_WITH_LLVM)
             "${FIN_LLVM_MAJOR}. Found ${LLVM_PACKAGE_VERSION} at "
             "${LLVM_DIR}.")
     endif()
+    # The pinned major is necessary and not sufficient.  What
+    # `target_link_libraries(fin_core PUBLIC LLVM)` below links is the
+    # *monolithic* libLLVM, exported by LLVMExports.cmake as the target
+    # `LLVM`, and that target exists only in a build configured with
+    # LLVM_BUILD_LLVM_DYLIB -- which LLVM refuses to do under MSVC at any
+    # version: llvm/CMakeLists.txt sets CAN_BUILD_LLVM_DYLIB OFF when MSVC, and
+    # llvm/tools/llvm-shlib/CMakeLists.txt raises "Generating libLLVM is not
+    # supported on MSVC".  So on Windows find_package succeeds, the check above
+    # passes, and the *link* then fails for want of LLVM.lib -- a message that
+    # says nothing about why, several minutes later, in another tool's output.
+    #
+    # Say it here instead.  This is not a fallback and does not pick a second
+    # link strategy: whether to link the component static libraries via
+    # llvm_map_components_to_libnames on that platform is an open ruling
+    # (docs/HANDOFF.md §8), and guessing it is how a build acquires a
+    # configuration nobody has ever run.
+    if(NOT TARGET LLVM)
+        message(FATAL_ERROR
+            "LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR} does not export the "
+            "monolithic `LLVM` target that fin_core links.  It was built without "
+            "LLVM_BUILD_LLVM_DYLIB, which LLVM does not allow under MSVC at any "
+            "version -- so this is not a version mismatch and a different major "
+            "will not help.  Linking LLVM's component libraries instead is an "
+            "open ruling; see section 8 of docs/HANDOFF.md.")
+    endif()
     message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
 else()
     message(STATUS "LLVM not linked (FIN_WITH_LLVM=OFF); pin is LLVM ${FIN_LLVM_MAJOR}")

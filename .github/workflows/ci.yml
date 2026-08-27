@@ -4,9 +4,23 @@
 # the enforcement mechanism for the single-version rule, so a job that only
 # compiles is not enough: it has to run the suite too.
 #
+# Until 2026-08-27 that first line was a claim this file did nothing to support.
+# LLVM appeared nowhere below it: no job installed one, and none passed
+# -DFIN_WITH_LLVM or -DFIN_LLVM_MAJOR.  `option(FIN_WITH_LLVM ... ON)` and
+# `find_package(LLVM REQUIRED CONFIG)` therefore decided the matter, with two
+# possible outcomes and neither of them the pin -- either the runner image's own
+# LLVM was found and the accident became the rule, or nothing was found and every
+# job died at CMakeLists.txt's FATAL_ERROR.  So: install the pinned major
+# explicitly, per platform, from a source that names the version; pass the pin on
+# the command line rather than inheriting a default a later edit can move; and
+# read the cache back afterwards, because "I passed the flag" and "this build has
+# a backend" are two different claims.
+#
 # build.sh mirrors these steps for a local run.  When you change one, change the
 # other; the build-script job at the end runs build.sh itself, so a build.sh that
-# has drifted into not working is a red mark of its own.
+# has drifted into not working is a red mark of its own.  That job is why
+# build.sh's WITH_LLVM default mattered: it was OFF, so the one job whose purpose
+# was "build.sh runs as committed" was the one job that built no backend.
 name: CI
 
 on:
@@ -27,6 +41,16 @@ defaults:
 
 env:
   FIN_BUILD_TYPE: Release
+  # ADR 0010's pin, named here and not left to CMakeLists.txt's default.  A
+  # matrix that enforces whatever the default happens to be enforces nothing,
+  # which is the manager's point and the reason this is a literal.  A literal can
+  # drift from the repo it is meant to be enforcing, so the first step of every
+  # job below fails the job if this number and CMakeLists.txt's disagree.
+  FIN_LLVM_MAJOR: '22'
+  # The concrete release the Windows jobs fetch.  Only the *major* is pinned;
+  # LLVM publishes no Windows package keyed on the major alone, so a patch level
+  # has to be named somewhere.  Checked against FIN_LLVM_MAJOR in the same step.
+  FIN_LLVM_VERSION: '22.1.8'
   # winflexbison ships bison 3.8.2 and flex 2.6.4 as win_bison.exe/win_flex.exe,
   # which is what CMake's FindBISON/FindFLEX already look for.  Pinned by digest
   # rather than installed from a package manager so that every Windows job in
@@ -74,6 +98,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: The pin in this file is the pin in CMakeLists.txt
+        run: |
+          want="$(sed -n 's/^set(FIN_LLVM_MAJOR \([0-9][0-9]*\) CACHE STRING.*/\1/p' CMakeLists.txt)"
+          if [ -z "$want" ]; then
+            echo "::error::could not read FIN_LLVM_MAJOR out of CMakeLists.txt"
+            exit 1
+          fi
+          if [ "$want" != "$FIN_LLVM_MAJOR" ]; then
+            echo "::error::ci.yml pins LLVM $FIN_LLVM_MAJOR, CMakeLists.txt pins $want"
+            exit 1
+          fi
+          case "$FIN_LLVM_VERSION" in
+            "$FIN_LLVM_MAJOR".*) ;;
+            *) echo "::error::FIN_LLVM_VERSION=$FIN_LLVM_VERSION is not an LLVM $FIN_LLVM_MAJOR release"
+               exit 1 ;;
+          esac
+          echo "LLVM pin $FIN_LLVM_MAJOR; Windows artefact $FIN_LLVM_VERSION"
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -120,11 +162,85 @@ jobs:
           Expand-Archive -Path winflexbison.zip -DestinationPath $dest -Force
           Add-Content -Path $env:GITHUB_PATH -Value $dest
 
+      - name: Install LLVM ${{ env.FIN_LLVM_MAJOR }} (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # apt.llvm.org and not the runner image's LLVM.  The image ships
+          # whatever majors it ships and puts none of them where
+          # find_package(LLVM CONFIG) looks; "whatever the runner happens to
+          # have" is precisely the accident ADR 0010 exists to stop.  The repo
+          # publishes amd64 and arm64 for noble, which covers both Linux rows.
+          #
+          # llvm-N-dev is the package that matters: it carries
+          # lib/cmake/llvm/LLVMConfig.cmake and depends on libllvmN, the
+          # monolithic libLLVM.so that CMakeLists.txt links as the `LLVM` target.
+          # The clang-N metapackages llvm.sh would also drag in are not needed --
+          # finc calls into LLVM as a library, it does not shell out to clang.
+          codename="$(lsb_release -cs)"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/$codename/ llvm-toolchain-$codename-$FIN_LLVM_MAJOR main" \
+            | sudo tee "/etc/apt/sources.list.d/llvm-$FIN_LLVM_MAJOR.list"
+          sudo apt-get update
+          sudo apt-get install -y "llvm-$FIN_LLVM_MAJOR-dev"
+          echo "LLVM_DIR=$(llvm-config-$FIN_LLVM_MAJOR --cmakedir)" >> "$GITHUB_ENV"
+
+      - name: Install LLVM ${{ env.FIN_LLVM_MAJOR }} (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # llvm@N and not llvm.  `brew install llvm` is whatever major Homebrew
+          # currently calls current, which is the same accident by another route
+          # and would silently move the pin the day LLVM ${{ env.FIN_LLVM_MAJOR }} stops being
+          # newest.  Keg-only, like bison and flex above, so its cmake directory
+          # is not under a default prefix and has to be handed over by hand.
+          #
+          # Unverified for the macos-15-intel row, and worth knowing before you
+          # read a red X there as a compiler bug.  LLVM publishes no macOS x86_64
+          # asset at all, and llvm@22's bottle list has no Intel `sequoia` entry
+          # -- only `sonoma`, plus `cellar: :any` -- while `cmake`'s does have
+          # one.  So that row rides on Homebrew's fall-back to an older-tag
+          # bottle.  If it holds, this step is a no-op difference from the arm64
+          # row; if it does not, brew builds LLVM from source and the job times
+          # out rather than failing cleanly.  `brew info --json=v2 llvm@22` on an
+          # Intel Sequoia runner is what settles it, and nothing here can.
+          brew install "llvm@$FIN_LLVM_MAJOR"
+          prefix="$(brew --prefix "llvm@$FIN_LLVM_MAJOR")"
+          echo "LLVM_DIR=$prefix/lib/cmake/llvm" >> "$GITHUB_ENV"
+
+      - name: Install LLVM ${{ env.FIN_LLVM_MAJOR }} (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          # The clang+llvm-*-pc-windows-msvc tarball, not LLVM-*.exe.  The
+          # installer is built with LLVM_INSTALL_TOOLCHAIN_ONLY=ON
+          # (llvm/utils/release/build_llvm_release.bat), so it ships no headers,
+          # no libraries and no lib/cmake/llvm at all -- find_package(LLVM CONFIG)
+          # cannot see it.  The tarball is the same build re-installed with that
+          # flag OFF, and the release script proves llvm-config runs in it.
+          case "${{ matrix.conan_arch }}" in
+            x86_64) tar_arch=x86_64 ;;
+            armv8)  tar_arch=aarch64 ;;
+            *) echo "::error::no LLVM tarball mapping for ${{ matrix.conan_arch }}"; exit 1 ;;
+          esac
+          name="clang+llvm-$FIN_LLVM_VERSION-$tar_arch-pc-windows-msvc"
+          url="https://github.com/llvm/llvm-project/releases/download/llvmorg-$FIN_LLVM_VERSION/$name.tar.xz"
+          curl -fL --retry 3 --retry-all-errors -o llvm.tar.xz "$url"
+          dest="$RUNNER_TEMP/llvm"
+          mkdir -p "$dest"
+          tar -xf llvm.tar.xz -C "$dest" --strip-components=1
+          "$dest/bin/llvm-config.exe" --version
+          echo "LLVM_DIR=$(cygpath -m "$dest")/lib/cmake/llvm" >> "$GITHUB_ENV"
+
       - name: Report generator versions
         run: |
           cmake --version
           if command -v bison >/dev/null; then bison --version | head -1; else win_bison --version | head -1; fi
           if command -v flex  >/dev/null; then flex  --version | head -1; else win_flex  --version | head -1; fi
+          # Which LLVM this job is about to build against, in its own words.
+          echo "LLVM_DIR=$LLVM_DIR"
+          test -f "$LLVM_DIR/LLVMConfig.cmake" || {
+            echo "::error::$LLVM_DIR/LLVMConfig.cmake does not exist"; exit 1; }
+          sed -n 's/^set(LLVM_PACKAGE_VERSION \(.*\))$/LLVM_PACKAGE_VERSION \1/p' \
+            "$LLVM_DIR/LLVMConfig.cmake"
 
       - name: Cache Conan packages
         uses: actions/cache@v4
@@ -165,14 +281,41 @@ jobs:
 
       - name: Configure
         run: |
+          # FIN_WITH_LLVM and FIN_LLVM_MAJOR are both passed even though
+          # CMakeLists.txt defaults to the same values.  The point is that the
+          # matrix names what it enforces: an edit to either default then changes
+          # the local build without silently changing what CI proves.
           args=(-S . -B build
                 -G "${{ matrix.generator }}"
                 -DCMAKE_TOOLCHAIN_FILE="$FIN_TOOLCHAIN"
-                -DCMAKE_BUILD_TYPE="$FIN_BUILD_TYPE")
+                -DCMAKE_BUILD_TYPE="$FIN_BUILD_TYPE"
+                -DFIN_WITH_LLVM=ON
+                -DFIN_LLVM_MAJOR="$FIN_LLVM_MAJOR"
+                -DLLVM_DIR="$LLVM_DIR")
           if [ -n "${{ matrix.vs_platform }}" ]; then
             args+=(-A "${{ matrix.vs_platform }}")
           fi
           cmake "${args[@]}"
+
+      - name: This build has the pinned backend in it
+        run: |
+          # Asking for a flag and getting it are different things: a reconfigure
+          # keeps cache entries it was not told to change, and the build that
+          # started this unit had FIN_WITH_LLVM:BOOL=OFF in a cache nobody read
+          # while the suite read 961 passed / 1 failed / 285 skipped (ad795f7),
+          # none of which mentioned a backend.  So read it back.
+          cache=build/CMakeCache.txt
+          got_llvm="$(sed -n 's/^FIN_WITH_LLVM:BOOL=//p' "$cache")"
+          got_major="$(sed -n 's/^FIN_LLVM_MAJOR:STRING=//p' "$cache")"
+          echo "FIN_WITH_LLVM=$got_llvm FIN_LLVM_MAJOR=$got_major"
+          if [ "$got_llvm" != "ON" ]; then
+            echo "::error::$cache says FIN_WITH_LLVM=${got_llvm:-<unset>}; this job would have tested a compiler with no backend"
+            exit 1
+          fi
+          if [ "$got_major" != "$FIN_LLVM_MAJOR" ]; then
+            echo "::error::$cache says FIN_LLVM_MAJOR=${got_major:-<unset>}, expected $FIN_LLVM_MAJOR"
+            exit 1
+          fi
 
       - name: Build
         run: cmake --build build --config "$FIN_BUILD_TYPE" --parallel
@@ -182,7 +325,67 @@ jobs:
         # to fail is the harness's business to declare (an aspirational sample
         # carries an `unimplemented` expectation); silencing ctest here would
         # make the matrix prove nothing, which is the thing ADR 0010 is against.
-        run: ctest --test-dir build --build-config "$FIN_BUILD_TYPE" --output-on-failure
+        #
+        # --no-tests=error because an empty test set is a harness failure, not a
+        # pass: gtest_discover_tests enumerates by running the binary, so a
+        # binary that cannot start registers nothing and ctest would otherwise
+        # call that success.
+        run: |
+          set -o pipefail
+          ctest --test-dir build --build-config "$FIN_BUILD_TYPE" \
+                --output-on-failure --no-tests=error 2>&1 \
+            | tee "$RUNNER_TEMP/ctest.log"
+
+      - name: No codegen test went quiet
+        # Runs even when Test failed, which is the case it exists for.  A
+        # backend-off build does not merely skip: MachineContract
+        # .DashOProducesTheNamedExecutable is not behind BACKEND_TEST and fails,
+        # so ctest exits 8, so a step without this condition would be skipped and
+        # the job's only visible complaint would be a broken `-o`.
+        if: ${{ !cancelled() }}
+        run: |
+          log="$RUNNER_TEMP/ctest.log"
+          if [ ! -f "$log" ]; then
+            echo "no $log; Test did not get as far as running ctest"
+            exit 0
+          fi
+
+          # Not a grep for BACKEND_TEST's skip reason ("built with
+          # FIN_WITH_LLVM=OFF", tests/test_codegen.cpp:137), which is what this
+          # check said first and which cannot work: --output-on-failure prints
+          # the output of *failing* tests, a skip is not a failure, and
+          # gtest_discover_tests marks these Skipped via SKIP_REGULAR_EXPRESSION
+          # so ctest reports "100% tests passed" and never echoes the reason.
+          # Verified against a two-test CTest project before being written here.
+          #
+          # What ctest does print is a trailing block naming every test that did
+          # not run, so that is what is read.  295 tests are behind that macro,
+          # all of them in a suite ending _Codegen (290 Soundness_Codegen, 3
+          # KnownDefect_Codegen, plus 2 written out longhand because their bodies
+          # name llvm::DataLayout), so one skipped test from those suites means
+          # this job built a compiler with no backend.  Measured locally on such
+          # a build: 961 passed, 295 skipped, 1 failed of 1257.  This step is not
+          # what turns that job red -- the 1 failure does that on its own -- it is
+          # what makes the reason legible, and what still bites on the day that
+          # last un-macro'd test starts skipping too.
+          #
+          # Deliberately keyed on those suites rather than on "nothing skipped at
+          # all".  Two module tests skip for honest reasons about the filesystem
+          # they are running on -- Soundness_ModuleDiagnostics
+          # .AnUnreadableModuleIsNotReportedAsAMissingExport (chmod) and
+          # Soundness_ModuleIdentity.AModuleReachedThroughASymlinkIsNotASecond-
+          # Module -- and both are expected to skip on Windows.  A check that had
+          # to be relaxed on its first contact with a runner is not a check.
+          skips="$(sed -n '/The following tests did not run:/,$p' "$log" || true)"
+          if [ -n "$skips" ]; then
+            echo "Tests that did not run:"
+            echo "$skips"
+          fi
+          quiet="$(printf '%s' "$skips" | grep -cE '[A-Za-z_]+_Codegen\.' || true)"
+          if [ "${quiet:-0}" -gt 0 ]; then
+            echo "::error::$quiet codegen tests did not run; this build has no backend"
+            exit 1
+          fi
 
       - name: finc --version
         # An exit criterion in its own right: `finn` reads this to check the
@@ -212,6 +415,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: The pin in this file is the pin in CMakeLists.txt
+        run: |
+          want="$(sed -n 's/^set(FIN_LLVM_MAJOR \([0-9][0-9]*\) CACHE STRING.*/\1/p' CMakeLists.txt)"
+          if [ "$want" != "$FIN_LLVM_MAJOR" ]; then
+            echo "::error::ci.yml pins LLVM $FIN_LLVM_MAJOR, CMakeLists.txt pins ${want:-<unreadable>}"
+            exit 1
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -220,5 +430,28 @@ jobs:
           python -m pip install "conan>=2.4,<3" ninja
           sudo apt-get update
           sudo apt-get install -y bison flex
+      - name: Install LLVM ${{ env.FIN_LLVM_MAJOR }}
+        run: |
+          # The same source as the matrix's Linux rows, for the same reason.
+          # build.sh finds this itself, through llvm-config's --cmakedir; it does
+          # not need LLVM_DIR handed to it, and deliberately does not read the
+          # pin from this file -- it reads it from CMakeLists.txt, so the two
+          # cannot disagree about which LLVM "as committed" means.
+          codename="$(lsb_release -cs)"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/$codename/ llvm-toolchain-$codename-$FIN_LLVM_MAJOR main" \
+            | sudo tee "/etc/apt/sources.list.d/llvm-$FIN_LLVM_MAJOR.list"
+          sudo apt-get update
+          sudo apt-get install -y "llvm-$FIN_LLVM_MAJOR-dev"
       - name: ./build.sh --release
+        # No --with-llvm.  The backend is build.sh's default now, and this job is
+        # the one that proves it: if that default ever goes back to OFF, the
+        # script's own cache readback fails here rather than 295 tests skipping
+        # quietly.
         run: ./build.sh --release
+      - name: This build has the pinned backend in it
+        run: |
+          got="$(sed -n 's/^FIN_WITH_LLVM:BOOL=//p' build/CMakeCache.txt)"
+          echo "FIN_WITH_LLVM=$got"
+          [ "$got" = ON ] || { echo "::error::build.sh produced a build with FIN_WITH_LLVM=${got:-<unset>}"; exit 1; }

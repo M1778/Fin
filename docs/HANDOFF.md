@@ -15,7 +15,7 @@ record and each one states the rule it implemented and why.
 
 ## 1. What the project is
 
-`finc` is a C++20 compiler for **Fin**, a systems language. LLVM 18 backend.
+`finc` is a C++20 compiler for **Fin**, a systems language. LLVM 22 backend (ADR 0010, amended 2026-08-27).
 
 **There is no prose specification. `tests/samples/*.fin` IS the specification** — 50 samples.
 Authority is per-expectation, in the `//@` comment at the top of each sample (ADR 0008,
@@ -135,7 +135,10 @@ n=0; for f in $(find tests/samples -name '*.fin' | sort); do
 - **`finc` has no `--check` flag.** Real flags: `-o`, `-c`, `-O0..-O3`, `-I/--include`,
   `--fin-libs`, `--diagnostics=`, `--color=`, `--debug-ast`, `--debug-sema`, `--debug-codegen`,
   `--no-check`, `--version`, `--help`.
-- LLVM 18.1.3 at `/usr/lib/llvm-18`. `nproc` = 6.
+- LLVM 22.1.8 at the default prefix: `llvm-config --cmakedir` is `/usr/lib/cmake/llvm`, and
+  `find_package(LLVM CONFIG)` finds it with no `LLVM_DIR` passed. There is no `llvm-config-22`.
+  `nproc` = **16**. (Both figures were 18.1.3-at-`/usr/lib/llvm-18` and 6 until 2026-08-27; they
+  described a different machine.)
 - `ExitCode`: Success 0, Diagnostics 1, Usage 2, Internal 3 (ADR 0009).
 - Temp files: `$CLAUDE_JOB_DIR/tmp`.
 - **`std::unordered_map` is node-based**, which is load-bearing: `StructInfo&` / `FnInfo&`
@@ -273,9 +276,38 @@ literal; `let s <module.Type>`; `Box<int>()` in a call; `new int;`; an empty `im
 narrowly, for a struct-typed left operand of an operator (one dead aggregate load; `-O1` removes
 it). A flat pointer map for a very large fixed array is a size problem.
 
+**`conanfile.py`'s LLVM block still says 18 — booked by ruling, 2026-08-27.** The docstring
+(lines 12–14) and the `requirements()` comment (lines 48–67) say "a single LLVM major -- 18", quote
+`conan search llvm-core` finding no 18, claim "Nothing in src/ includes an LLVM header yet … so the
+pin buys nothing today", and count the cost as "three of its six platforms". All four are now false:
+the pin is 22, `src/codegen/CodeGen_LLVM.cpp` includes LLVM headers and links the `LLVM` target, and
+the ConanCenter gap is five of six platforms, not three. It is left alone deliberately, and the
+reason is that **none of it is a build input**: the whole block is comments, `requirements()` asks
+for `fmt/10.2.1` and `gtest/1.14.0` and nothing else, and no LLVM package is ever resolved through
+Conan. A stale comment there cannot break a build or move a version. Where the LLVM decision *is*
+executable is `CMakeLists.txt` (`FIN_LLVM_MAJOR`, checked against what `find_package` found) and
+`.github/workflows/ci.yml` (installed per platform, passed on the command line, read back out of the
+cache) — and both were corrected. `conanfile.py` is left as a witness to how the 18 pin was reasoned
+about, for the same reason ADR 0010 was amended in place rather than rewritten.
+
 **Other:** `parser.y` carries the whole `new` production block twice; display-width-aware caret
 placement; the stale `foreach` comment in `parser.y`; the stdlib track has no ordered plan yet;
-CI green on six platform/arch combos.
+CI green on six platform/arch combos — no run has ever been observed from here. As of 2026-08-27
+`ci.yml` does install the pinned LLVM per platform and does pass `-DFIN_LLVM_MAJOR` explicitly, so
+the six rows are now claims the file tries to make rather than claims it merely asserts. **None of
+the six has been run**; what follows is what each was checked against offline, and what would
+actually settle it:
+
+| Row (runner) | State | What would settle it |
+| --- | --- | --- |
+| `linux-x86_64` (`ubuntu-24.04`), `linux-arm64` (`ubuntu-24.04-arm`) | expected to link | checked offline: the `llvm-22-dev` deb from apt.llvm.org carries `LLVMConfig.cmake` (`LLVM_VERSION_MAJOR 22`, `LLVM_LINK_LLVM_DYLIB ON`) and `LLVMExports.cmake` has `add_library(LLVM SHARED IMPORTED)`; apt.llvm.org publishes `llvm-toolchain-noble-22` for both `amd64` and `arm64` |
+| `macos-arm64` (`macos-15`) | expected to link | Homebrew `llvm@22` is 22.1.8 and sets `LLVM_LINK_LLVM_DYLIB=ON`, so the same `LLVM` target exists |
+| `macos-x86_64` (`macos-15-intel`) | **unverified** | `brew info --json=v2 llvm@22` on an Intel Sequoia runner. LLVM publishes no macOS x86_64 asset at all and `llvm@22` lists no Intel `sequoia` bottle (only `sonoma`, plus `cellar: :any`) while `cmake` does list one — so this row rides on Homebrew's older-tag fall-back, and if that misses, brew builds LLVM from source and the job times out instead of failing cleanly |
+| `windows-x86_64` (`windows-2022`), `windows-arm64` (`windows-11-arm`) | **cannot link** | nothing available here — see §8. `find_package(LLVM CONFIG)` succeeds against the official tarball and the major check passes; then `LLVM.lib` does not exist, because LLVM will not build the monolithic library under MSVC at any version |
+
+The local run is the only measured one: `./build.sh --release` on a clean checkout of this tree
+gives `FIN_WITH_LLVM:BOOL=ON`, `FIN_LLVM_MAJOR:STRING=22`, LLVM 22.1.8 from `/usr/lib/cmake/llvm`,
+and 1257 / 0 failed / 0 skipped.
 
 ## 8. Owner rulings queued
 
@@ -283,6 +315,39 @@ CI green on six platform/arch combos.
 where marked:
 
 - **The representation of a dynamic `[T]`** — *blocks `arrays_enums.fin`.*
+- **How `fin_core` links LLVM on Windows** — *blocks `windows-x86_64` and `windows-arm64`.*
+  `CMakeLists.txt` links the monolithic libLLVM (`target_link_libraries(fin_core PUBLIC LLVM)`),
+  which LLVM cannot build under MSVC at **any** version: `llvm/CMakeLists.txt` sets
+  `CAN_BUILD_LLVM_DYLIB` OFF when `MSVC` (lines 907–910 at `llvmorg-22.1.8`) and
+  `llvm/tools/llvm-shlib/CMakeLists.txt` raises `"Generating libLLVM is not supported on MSVC"`. So
+  the official `clang+llvm-22.1.8-*-pc-windows-msvc` tarball does satisfy
+  `find_package(LLVM CONFIG)` and does pass the major check — and then the link fails for want of
+  `LLVM.lib`. The alternative is `llvm_map_components_to_libnames` and the component static
+  libraries, i.e. a second link strategy for one platform, which is a decision and not a fix. Not a
+  version problem: it would read identically at 18.
+- **What the no-backend diagnostic should name as the required LLVM** — *not blocking.*
+  `src/codegen/CodeGen_Stub.cpp:30` prints `= help: configure with -DFIN_WITH_LLVM=ON and an
+  LLVM 18 development install` — a string compiled into `finc` and shown to users, still naming 18
+  after the pin moved to 22, so it sends a reader to install the one version `CMakeLists.txt` will
+  then reject with a `FATAL_ERROR`. Deliberately **not** fixed with the `conanfile.py` ruling of
+  2026-08-27 (§7): that one turned on the LLVM-18 text there being comments and not a build input,
+  and this text is the other side of that line. What is owed is not the number but the mechanism —
+  spell `22` in the stub, or have CMake pass `FIN_LLVM_MAJOR` in as a compile definition. The stub
+  is compiled exactly when `FIN_WITH_LLVM=OFF`, and on that path `find_package(LLVM)` never runs,
+  so nothing has checked that `FIN_LLVM_MAJOR` means anything at all. No test asserts the string
+  (`grep "development install" tests/` is empty), so nothing currently holds it to either answer.
+- **Whether the checker-only build is required to pass its suite** — *not blocking.*
+  ADR 0010 keeps `FIN_WITH_LLVM=OFF` so a platform that cannot get LLVM still gets a checker, but
+  measured on 2026-08-27 that configuration is **not** green: `./build.sh --release --no-llvm` gives
+  1257 tests, 961 passed, 295 skipped, **1 failed** — `MachineContract
+  .DashOProducesTheNamedExecutable` (`tests/test_cli.cpp:182`), which asserts `-o` writes an
+  executable and is the one backend-dependent test not behind `BACKEND_TEST`. ctest then exits 8.
+  Either that test belongs behind the macro (and the checker-only build is a supported, green
+  configuration), or the OFF path is a build nobody is meant to run the suite on and should say so.
+  Left as measured, because fixing it silently would remove the only thing that currently turns a
+  backend-off CI job red — and note that this failure is why the "no codegen test went quiet" step
+  in `ci.yml` carries `if: ${{ !cancelled() }}`: without it the step never runs on the very build it
+  exists to diagnose.
 - The tagged union's layout; whether `p++` advances by element or byte; the four nullability
   edges; what `&"Hello world"` means as a `&string`; `#[slaveof(...)]` lifetimes; struct `==`;
   whether a `class` is a value or a reference; the size of an empty struct; which passes `-O`
