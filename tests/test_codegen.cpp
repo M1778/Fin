@@ -1119,10 +1119,12 @@ BACKEND_TEST(Soundness_Codegen, AnArrayIsReturnedByValue) {
 }
 
 BACKEND_TEST(Soundness_Codegen, AZeroLengthArrayLowers) {
-    // `[T, 0]` is a legal type of zero bytes, following the empty-struct precedent
-    // -- and unlike an empty struct it is not refused, because it has an element
-    // type and therefore a stride. Nothing may index it, which the front end
-    // enforces (Soundness_ArrayBounds.AZeroLengthArrayHasNoElementZero).
+    // `[T, 0]` is a legal type of zero bytes, and it is genuinely zero where an
+    // empty struct is one byte: an empty struct spends its byte so that two of its
+    // values cannot share an address, and `[T, 0]` needs no such byte because it
+    // has an element type and therefore a stride to distinguish by. Nothing may
+    // index it, which the front end enforces
+    // (Soundness_ArrayBounds.AZeroLengthArrayHasNoElementZero).
     const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
         "    let a <[int, 0]> = [];\n"
@@ -2332,15 +2334,34 @@ BACKEND_TEST(Soundness_Codegen, AnIncompleteStructIsRefused) {
     EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AnEmptyStructIsRefused) {
-    // LLVM makes it size 0 and C makes it size 1. Picking one here would be
-    // inventing a rule the language has not made, and nothing in the corpus writes
-    // an empty struct.
-    const Built b = build(
+BACKEND_TEST(Soundness_Codegen, AnEmptyStructIsOneByteSoItsValuesHaveDistinctAddresses) {
+    // Was AnEmptyStructIsRefused, which said the choice between LLVM's zero bytes and
+    // C's one byte was a rule the language had not made. It has been made, and it is
+    // C's -- so this test now asserts the consequence that decided it rather than the
+    // refusal.
+    //
+    // The consequence is object identity. At zero bytes nothing stops two separately
+    // declared values from being placed at one address, and `&a != &b` then reads
+    // false for two variables the program has every reason to believe are two. One
+    // byte is what C spends to make that impossible, C++ inherits it, and finc is a
+    // C++ program that interops with C++ -- so an empty Fin struct crossing that
+    // boundary has to be the size the other side already believes it is.
+    //
+    // Asserting the addresses rather than a `size_of`: the byte exists for the sake of
+    // distinctness, and distinctness is the thing a reader of this test needs to see
+    // held. A size assertion would pass just as well on a padding byte introduced for
+    // some unrelated reason.
+    const Built b = build(std::string(kPrintf) +
         "struct S { }\n"
-        "fun main() <noret> { let s <S>; }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+        "fun main() <noret> {\n"
+        "    let a <S>;\n"
+        "    let b <S>;\n"
+        "    let pa <&S> = &a;\n"
+        "    let pb <&S> = &b;\n"
+        "    if (pa != pb) { printf(\"distinct\\n\"); } else { printf(\"same\\n\"); }\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "distinct\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AClassIsRefused) {
@@ -3563,8 +3584,9 @@ BACKEND_TEST(Soundness_Codegen, AGenericStructNobodyInstantiatesLowersToNothing)
     // tests/samples/blame_assert.fin:19 (`struct M <T> {}`). A template is not a
     // type and has no layout, so there is nothing to emit and nothing to refuse --
     // which is why the field checks belong at the instantiation. Note that this
-    // one is also empty: an instantiation of it would refuse (see the next test),
-    // and the declaration on its own still may not.
+    // one is also empty, and the two facts are independent: `M<int>` gets a byte
+    // (see the next test) and this declaration still emits nothing, because what
+    // is deferred here is the layout and not the emptiness.
     const Built b = build(std::string(kPrintf) +
         "struct M <T> {}\n"
         "fun main() <noret> { printf(\"ok\\n\"); }\n");
@@ -3572,17 +3594,20 @@ BACKEND_TEST(Soundness_Codegen, AGenericStructNobodyInstantiatesLowersToNothing)
     EXPECT_EQ(b.out, "ok\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AnEmptyGenericStructRefusesWhereItIsInstantiated) {
-    // The consequence of deferring: `struct M<T> {}` is fine until someone asks
-    // for `M<int>`, and then the empty-struct question (LLVM says size 0, C says
-    // 1, the corpus says nothing) has to be answered and is not.
+BACKEND_TEST(Soundness_Codegen, AnEmptyGenericStructLowersWhereItIsInstantiated) {
+    // Was AnEmptyGenericStructRefusesWhereItIsInstantiated. The deferral it described
+    // is still the right shape -- `struct M<T> {}` has no layout until an argument is
+    // named, which is why the test above it still passes with nothing emitted for the
+    // template -- but the question the instantiation used to run into is answered now,
+    // so `M<int>` gets the same one byte a non-generic empty struct gets.
     const Built b = build(std::string(kPrintf) +
         "struct M <T> {}\n"
         "fun main() <noret> {\n"
         "    let m <M<int>> = M::<int>{};\n"
         "    printf(\"ok\\n\");\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AnInstantiationAtATypeThisFileCannotLowerIsRefused) {

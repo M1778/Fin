@@ -1126,11 +1126,26 @@ private:
                 members.push_back(t->llvmType);
             }
             if (members.empty()) {
-                // A struct with no fields has no size to speak of and nothing in
-                // the corpus writes one. LLVM would give it size 0, C gives it 1,
-                // and picking either here would be inventing a rule.
-                unsupported(*s, fmt::format("an empty struct '{}'", s->name));
-                return;
+                // One byte, which is C's answer and not LLVM's.
+                //
+                // The choice was open and is now settled, and the deciding argument is
+                // not aesthetics: LLVM's `{}` is zero bytes, so two distinct values of
+                // an empty struct can be given the same address, and `&a != &b` then
+                // reads false for two variables the program declared separately. C
+                // gives an empty struct one byte precisely so that cannot happen, C++
+                // inherits it, and finc is written in C++ and interoperates with it --
+                // an empty Fin struct crossing into a C++ translation unit has to have
+                // the size that side already believes it has. A surprise about object
+                // identity surfaces very far from its cause, so the byte is cheaper.
+                //
+                // The byte is padding and not a field: `fields` and `indexByName` stay
+                // empty, so `m.anything` still refuses as an unknown member rather than
+                // reaching a member the compiler invented. Nothing needs to be added to
+                // the literal path either, because a literal starts from
+                // `Constant::getNullValue` of the whole type and inserts one value per
+                // *declared* field -- zero of them here -- so `M {}` is `{ i8 0 }`
+                // without a special case.
+                members.push_back(llvm::Type::getInt8Ty(ctx_));
             }
             // isPacked=false, which is the same choice src/types/Layout.hpp makes
             // and what Soundness_Codegen.AStructsLayoutMatchesWhatLLVMWouldChoose
@@ -1773,13 +1788,13 @@ private:
             members.push_back(t->llvmType);
         }
         if (members.empty()) {
-            // `M<int>` where `struct M <T> {}` (blame_assert.fin:19). The template was
-            // allowed to be empty and the instantiation is not, and that is the same
-            // rule the non-generic path has: LLVM says size 0, C says 1, and the
-            // corpus writes no empty struct that anyone instantiates.
-            unsupported(const_cast<TypeNode&>(node),
-                        fmt::format("an empty struct '{}'", out));
-            return false;
+            // `M<int>` where `struct M <T> {}` (blame_assert.fin:19), and the same one
+            // byte the non-generic path above lays down for the same reason. The two
+            // sites stay separate because the template's own emptiness is not a
+            // decision -- a template has no layout at all until someone names an
+            // argument -- but once `M<int>` is asked for it is a struct like any other
+            // and has to answer with a size.
+            members.push_back(llvm::Type::getInt8Ty(ctx_));
         }
         live.llvmType->setBody(members, /*isPacked=*/false);
         live.complete = true;
