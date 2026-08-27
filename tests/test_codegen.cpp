@@ -684,6 +684,178 @@ BACKEND_TEST(Soundness_Codegen, ARefusalNamesTheLine) {
     EXPECT_NE(b.compileErr.find(".fin:5:"), std::string::npos) << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// Every refusal, not just the first.
+//
+// `finc -c` used to stop at the first construct it could not lower, which made a
+// per-sample refusal a depth-1 probe: all 16 refused corpus samples reported exactly
+// one refusal each, so the chain behind each one was invisible and a queue ordered by
+// "what does this sample refuse" was ordered by an artefact of the walk. The front end
+// has never worked that way -- stdlib/stdio.fin reports 23 diagnostics at once.
+//
+// This is additive to diagnostics and cannot change what is emitted, because the
+// compile already fails and no object is written either way. It is emphatically not
+// permission to continue *past* a construct as though it lowered: `failed_` still
+// stops the unit it was raised in, and the only thing that changes is where the walk
+// is allowed to pick up again.
+//
+// Where it may pick up again is the one design decision here, and it is answered by
+// what consumes what. run() is a pipeline of phases -- enums, structs, signatures,
+// globals, method bodies, then the top-level statements -- and a later phase reads
+// what an earlier one built. Siblings *within* a phase do not: one struct's
+// declaration is not an input to the next struct's, and one function's body is not an
+// input to another's. So the walk resumes across siblings inside a phase and still
+// halts between phases, which makes a cascade impossible by construction rather than
+// by a filter applied afterwards.
+
+BACKEND_TEST(Soundness_Codegen, TwoIndependentUnloweredDeclarationsAreBothReported) {
+    // The whole point, at the coarsest grain that has it: a class declaration and a
+    // `foreach` in a different function share nothing, so reporting one and stopping
+    // hides a whole unit of work from anyone reading the output.
+    const Built b = build(
+        "class A { v <int> }\n"
+        "fun f() <noret> { let a <[int, 3]> = [1,2,3]; foreach (e <int> in a) { } }\n"
+        "fun main() <noret> { let i <int> = 1; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
+    EXPECT_NE(b.compileErr.find("a class declaration"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("'foreach' loop"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoUnloweredFunctionBodiesAreBothReported) {
+    // One body is not an input to another, so each reports its own first refusal.
+    // Both constructs are statements rather than declarations, so what is being crossed
+    // here is a function boundary and not just a top-level one.
+    const Built b = build(
+        "fun f() <noret> { let a <[int, 3]> = [1,2,3]; foreach (e <int> in a) { } }\n"
+        "fun g(v: int) <noret> { blame v > 0, \"positive\"; }\n"
+        "fun main() <noret> { let i <int> = 1; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
+    EXPECT_NE(b.compileErr.find("'foreach' loop"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("'blame'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, CollectingRefusalsStillWritesNoObject) {
+    // The founding rule is unchanged and this is the assertion that says so. Reporting
+    // more is only worth anything if "the compile failed" still means "there is no
+    // artifact": a stale or partial object is a link against code that was refused.
+    const fs::path obj = uniqueTempPath("fin_obj_multi", ".o");
+    const Compiled c = compileOnly(
+        "class A { v <int> }\n"
+        "fun f() <noret> { let a <[int, 3]> = [1,2,3]; foreach (e <int> in a) { } }\n"
+        "fun main() <noret> { let i <int> = 1; }\n", obj);
+    EXPECT_NE(c.exitCode, 0) << c.why();
+    EXPECT_EQ(occurrences(c.err, "codegen: "), 2u) << c.why();
+    EXPECT_FALSE(fs::exists(obj)) << c.why();
+    std::error_code ec;
+    fs::remove(obj, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, EachCollectedRefusalStillNamesItsOwnLine) {
+    // A list of refusals is only usable if each one still points at its own construct.
+    // The two here are eight lines apart, so a location that was reused or left default
+    // would show up as the same line twice.
+    const Built b = build(
+        "class A { v <int> }\n"
+        "\n"
+        "fun f() <noret> {\n"
+        "    let a <[int, 3]> = [1,2,3];\n"
+        "    foreach (e <int> in a) { }\n"
+        "}\n"
+        "\n"
+        "fun main() <noret> { let i <int> = 1; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find(".fin:1:"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find(".fin:5:"), std::string::npos) << b.why();
+}
+
+// Statements inside one body, which is where the corpus actually keeps its chains: a
+// declaration boundary is too coarse to see past, because a sample writes most of its
+// program inside `main`. Two statements in a row are not independent the way two
+// function bodies are -- the second may read what the first declared -- so this is the
+// boundary where a cascade is possible and has to be ruled out rather than assumed
+// away.
+//
+// The rule is narrow and it is about names. The only thing a refused statement can
+// leave for a later one to trip over is a name with no storage behind it: a refused
+// `foreach`, a refused `blame` or a refused expression declares nothing. So a refused
+// variable declaration poisons its name, a read of a poisoned name stops that statement
+// without reporting anything, and every other refusal in the block is its own finding.
+// A suppressed statement is not silently accepted -- it is not lowered either, and the
+// compile still fails -- it is simply not reported as a separate discovery, because it
+// is not one.
+
+BACKEND_TEST(Soundness_Codegen, TwoIndependentUnloweredStatementsInOneBodyAreBothReported) {
+    // Neither statement reads anything the other declares, so both are findings.
+    // `[int, 3]` is a fixed extent and lowers, which is what keeps this case free of
+    // any poisoned name and separates it from the test below.
+    const Built b = build(
+        "fun f(v: int) <noret> {\n"
+        "    let a <[int, 3]> = [1,2,3];\n"
+        "    foreach (e <int> in a) { }\n"
+        "    blame v > 0, \"positive\";\n"
+        "}\n"
+        "fun main() <noret> { let i <int> = 1; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
+    EXPECT_NE(b.compileErr.find("'foreach' loop"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("'blame'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ARefusedDeclarationDoesNotCascadeIntoItsReaders) {
+    // The failure mode this whole mechanism has to avoid. `<[int]>` is refused, so `a`
+    // has no storage; the two statements after it read `a` and would each refuse for
+    // want of a name -- three refusals, of which two describe no work. One refusal, and
+    // it is the real one.
+    const Built b = build(
+        "fun f() <noret> {\n"
+        "    let a <[int]> = [1,2,3];\n"
+        "    let b <int> = a[0];\n"
+        "    let c <int> = a[1];\n"
+        "}\n"
+        "fun main() <noret> { let i <int> = 1; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 1u) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type '[int]'"), std::string::npos) << b.why();
+    EXPECT_EQ(b.compileErr.find("the name 'a'"), std::string::npos)
+        << "a reader of the refused name was reported as a finding of its own\n" << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, SuppressingACascadeDoesNotSuppressAnUnrelatedRefusal) {
+    // The other half, and the one that says the suppression is targeted rather than a
+    // dressed-up stop: `a[0]` reads the poisoned name and is not reported, while the
+    // `blame` two lines later shares nothing with it and is.
+    const Built b = build(
+        "fun f(v: int) <noret> {\n"
+        "    let a <[int]> = [1,2,3];\n"
+        "    let b <int> = a[0];\n"
+        "    blame v > 0, \"positive\";\n"
+        "}\n"
+        "fun main() <noret> { let i <int> = 1; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type '[int]'"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("'blame'"), std::string::npos) << b.why();
+    EXPECT_EQ(b.compileErr.find("the name 'a'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, WhatWasNotExaminedIsSaidInTheTrace) {
+    // Suppression makes the list of refusals a lower bound, and a lower bound that does
+    // not say so is a number someone will plan against. It is said on the trace rather
+    // than in the diagnostics because a suppressed statement is not a diagnostic --
+    // reporting it as one is the noise this mechanism exists to avoid -- and
+    // `--debug-codegen` is the channel that already exists for what the backend did.
+    const std::string trace = codegenTrace(
+        "fun f() <noret> {\n"
+        "    let a <[int]> = [1,2,3];\n"
+        "    let b <int> = a[0];\n"
+        "}\n"
+        "fun main() <noret> { let i <int> = 1; }\n");
+    EXPECT_NE(trace.find("not examined"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("'a'"), std::string::npos) << trace;
+}
+
 BACKEND_TEST(Soundness_Codegen, WithoutDashOFincStillOnlyChecks) {
     // Every other suite here, and tests/tools/corpus_snapshot.sh, invoke `finc F`
     // for its diagnostics. That invocation must stay a check: no artifact, and no

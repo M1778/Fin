@@ -732,18 +732,32 @@ public:
         // the written order for a reader of `--emit-llvm`.
         drainPendingBodies();
         if (failed_) return false;
+        // The resume point. One top-level statement is not an input to the next -- a
+        // function's body is not built out of the body beside it -- so a refusal in one
+        // is no reason to stop looking at the others, and stopping is what made a
+        // per-sample refusal count a depth-1 probe. Clearing the transient flag here is
+        // safe without any further reset because ScopedEmission already puts the
+        // emitter back: its destructor restores the insert point, `currentFn_` and
+        // `scopes_` however the body was left, which is the property its own comment
+        // was written for.
+        //
+        // Between phases the walk still halts, and that is the other half of the
+        // design: `declareStructs` reads what `declareEnums` built, so a struct refused
+        // for want of an enum would be an invented refusal. Siblings inside a phase
+        // consume nothing from each other, so they are exactly the boundary that can be
+        // crossed.
         for (auto& stmt : program.statements) {
-            if (failed_) break;
             stmt->accept(*this);
+            failed_ = false;
         }
-        if (failed_) return false;
+        if (everFailed_) return false;
         // The methods of the instantiations the statements asked for. A call site
         // reaches `Box<int>.get` as a declaration and this is what puts a body in it,
         // which is why it is after the loop and not inside it: emitting a body from the
         // middle of another body would work (ScopedEmission exists for exactly that)
         // and this way the queue is drained once, at a point with no live insert point.
         drainPendingBodies();
-        return !failed_;
+        return !everFailed_;
     }
 
     llvm::Module& module() { return module_; }
@@ -753,9 +767,18 @@ private:
 
     // The single exit from "this cannot be lowered". One wording, one place, so a
     // refusal always names the construct and always carries a location.
+    // The guard stays, and it is what keeps a collected list of refusals honest: within
+    // one unit the first refusal is the useful one, and every later call while `failed_`
+    // is still set is a consequence of it rather than a finding of its own. Refusing
+    // `[int]` leaves the variable with no storage, so the statement that reads it next
+    // would refuse too -- and reporting that would send a reader after work that does
+    // not exist. Suppression by construction, not by filtering afterwards: a second
+    // refusal is only ever reported once the walk has reached a point where nothing it
+    // sees can depend on the first.
     void unsupported(ASTNode& node, const std::string& what) {
-        if (failed_) return;  // the first refusal is the useful one
+        if (failed_) return;  // within this unit, the first refusal is the useful one
         failed_ = true;
+        everFailed_ = true;
         diag_.reportError(node.loc, fmt::format("codegen: {} is not lowered yet", what));
     }
 
@@ -877,10 +900,55 @@ private:
     void pushScope() { scopes_.emplace_back(); }
     void popScope() { scopes_.pop_back(); }
 
+    // The names this body refused a declaration for, so that a later statement reading
+    // one is not reported as a discovery of its own.
+    //
+    // Nothing here is a lookup table: a poisoned name has no storage, and that is the
+    // whole of what it means. `let a <[int]> = ...` is refused before any slot is
+    // registered -- visit(VariableDeclaration) writes into scopes_ on its last line --
+    // so `a` is simply absent afterwards, and `a[0]` on the next line then refuses as
+    // "this index expression". That message is false: indexing an array this file *can*
+    // lower is lowered (Soundness_Codegen.SuppressingACascadeDoesNotSuppressAnUnrelated-
+    // Refusal's fixed-extent sibling compiles), so the index expression was never the
+    // problem -- the missing base was. Reporting it would send a reader to implement
+    // work that does not exist.
+    //
+    // A vector rather than a set because a body refuses one or two names at most, and
+    // because this file deliberately does not include <unordered_set>.
+    std::vector<std::string> poisoned_;
+
+    bool isPoisoned(const std::string& name) const {
+        for (auto& p : poisoned_) if (p == name) return true;
+        return false;
+    }
+
+    // Called at the resume point for a declaration that did not finish. Its name is
+    // poisoned whether or not the refusal was reported, because a statement suppressed
+    // here leaves exactly the same hole as the one that was reported.
+    void poison(const std::string& name) {
+        if (!isPoisoned(name)) poisoned_.push_back(name);
+    }
+
     Local* findLocal(const std::string& name) {
         for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
             auto found = it->find(name);
             if (found != it->end()) return &found->second;
+        }
+        // Checked only after the scopes miss, which is what keeps the suppression from
+        // reaching further than the hole: a declaration that registered its slot and
+        // then failed for some later reason is found above and behaves normally.
+        //
+        // `failed_` without a report. Every caller of this and of emitAddress already
+        // unwinds on `failed_` before reaching its own categorical refusal, so one flag
+        // set here stops the statement through the paths that already exist -- and the
+        // statement is *stopped*, not accepted. It is not lowered, the compile still
+        // fails, and what was not examined is said on the trace below.
+        if (isPoisoned(name)) {
+            if (!failed_) {
+                debugLog(fmt::format("not examined: a statement reading '{}', whose "
+                                     "declaration was refused above", name));
+            }
+            failed_ = true;
         }
         return nullptr;
     }
@@ -2213,6 +2281,10 @@ private:
     std::optional<Addr> emitAddress(Expression& expr) {
         if (auto* id = dynamic_cast<Identifier*>(&expr)) {
             if (Local* local = findLocal(id->name)) return Addr{local->slot, local->type};
+            // Before the globals, because a poisoned local shadows one exactly as a
+            // live local does: answering with the global's address would lower a read
+            // of the wrong variable.
+            if (failed_) return std::nullopt;
             // A global has an address for the same reasons a local does, and being one
             // is the whole of what makes `Counter = Counter + 1` and `Cells[1] = 42`
             // work at module scope: everything past this point is the same code.
@@ -2390,12 +2462,15 @@ private:
         explicit ScopedEmission(Emitter& e)
             : e_(e), block_(e.builder_.GetInsertBlock()),
               point_(block_ ? e.builder_.GetInsertPoint() : llvm::BasicBlock::iterator()),
-              fn_(e.currentFn_), scopes_(std::move(e.scopes_)) {
+              fn_(e.currentFn_), scopes_(std::move(e.scopes_)),
+              poisoned_(std::move(e.poisoned_)) {
             e_.scopes_.clear();
+            e_.poisoned_.clear();
             e_.currentFn_ = nullptr;
         }
         ~ScopedEmission() {
             e_.scopes_ = std::move(scopes_);
+            e_.poisoned_ = std::move(poisoned_);
             e_.currentFn_ = fn_;
             if (block_) e_.builder_.SetInsertPoint(block_, point_);
             else e_.builder_.ClearInsertionPoint();
@@ -2409,6 +2484,7 @@ private:
         llvm::BasicBlock::iterator point_;
         FnInfo* fn_;
         std::vector<std::unordered_map<std::string, Local>> scopes_;
+        std::vector<std::string> poisoned_;
     };
 
     // One function's body, into the llvm::Function that `name` was declared under.
@@ -2488,8 +2564,15 @@ private:
         popScope();
         currentFn_ = nullptr;
 
+        // Not verified once anything has been refused. A body that resumed past a
+        // refusal is deliberately incomplete -- a statement that produced no value
+        // emitted no instructions -- so the verifier would report that incompleteness
+        // as invalid IR, which is the invented follow-on refusal in its loudest form.
+        // Nothing is lost by not asking: no object is written when everFailed_ is set.
+        if (everFailed_) return;
         if (llvm::verifyFunction(*info.fn, &llvm::errs())) {
             failed_ = true;
+            everFailed_ = true;
             diag_.reportError(node.loc,
                               fmt::format("codegen: emitted invalid IR for '{}'", name));
         }
@@ -2783,12 +2866,20 @@ private:
     void visit(Block& node) override {
         pushScope();
         for (auto& stmt : node.statements) {
-            if (failed_) break;
             // Everything after a `return` in the same block is dead. Emitting into
             // a terminated block is an LLVM error, and inventing a fresh block for
             // code the program cannot reach would only hide it.
             if (terminated()) break;
             stmt->accept(*this);
+            if (failed_) {
+                // The next statement is its own finding. The only thing this one can
+                // have left behind for it to trip over is a name with no storage: a
+                // refused `foreach`, `blame` or expression declares nothing at all.
+                if (auto* var = dynamic_cast<VariableDeclaration*>(stmt.get())) {
+                    poison(var->name);
+                }
+                failed_ = false;
+            }
         }
         popScope();
     }
@@ -3003,6 +3094,7 @@ private:
                            local->type};
             return;
         }
+        if (failed_) return;  // a name refused above; see findLocal
         // Then the globals, which are the same kind of thing as a local with a
         // different home -- and after them for the same reason: a local of the name
         // shadows one (ALocalOutranksAGlobalOfTheSameName).
@@ -3520,6 +3612,7 @@ private:
             unsupported(node, fmt::format("a call through the variable '{}'", node.name));
             return;
         }
+        if (failed_) return;  // a name refused above; see findLocal
         // Before the ordinary lookup, because a template is deliberately not in
         // functions_: it has no signature until this call says what its parameters are.
         auto tmpl = fnTemplates_.find(node.name);
@@ -4742,7 +4835,21 @@ private:
 
     DiagnosticEngine& diag_;
     bool debug_ = false;
+    // Two flags, because "the compile failed" and "the unit in hand cannot be
+    // finished" are different facts and one bool was doing both jobs.
+    //
+    // `failed_` is the transient one and keeps the meaning every check in this file
+    // already gives it: stop unwinding this construct, there is no value to carry on
+    // with. It is what makes "refused, never skipped" hold -- nothing downstream of a
+    // refusal is treated as though it lowered. It is cleared at a resume point, and
+    // only there.
+    //
+    // `everFailed_` is sticky and is the one the driver reads. Once a refusal is
+    // reported this stays set for the rest of the run, so no path can clear its way
+    // back to a successful compile and no object is ever written for a program that
+    // was refused.
     bool failed_ = false;
+    bool everFailed_ = false;
 
     llvm::LLVMContext ctx_;
     llvm::Module module_;
