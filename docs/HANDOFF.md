@@ -314,7 +314,27 @@ and 1257 / 0 failed / 0 skipped.
 `docs/plan.md` §"Rulings owed" (line 2967) is the canonical list. Added since, and **blocking**
 where marked:
 
-- **The representation of a dynamic `[T]`** — *blocks `arrays_enums.fin`.*
+- ~~**The representation of a dynamic `[T]`**~~ — **RULED 2026-08-27, and the corpus
+  ruled it.** The owner declined to choose between a fat pointer and a growable vector and
+  ruled that ADR 0008 applies. It does, and it answers: **`[T]` is `{ptr, len}` — a
+  length-carrying handle to heap memory, with no capacity field.** It carries its length
+  (`.length` is read off one at `stdlib/stdio.fin:114`, `:130`, `:135` and `arrays.fin:12`
+  through an `&[T]`; stdio's own note argues it — "a `new [char, n]` is a `[char]`, not a
+  pointer to a fixed-size one … `_temp.length` reads a length off the allocation, which a
+  pointer does not have"). It owns heap memory, so **it needs an allocator**: every one is
+  born from `new [T, n]` with a *runtime* extent (`stdio.fin:112`) and freed by `delete`
+  (`stdlib/collection.fin:46` frees what `:54` allocated — "one buffer at both ends"). And
+  it takes **no capacity field**, because nothing in the corpus grows a `[T]` in place: the
+  only three growth sites are `Collection<T>` methods (`stdlib/hashmap.fin:37`
+  `self.keys.push`, where `:16` declares `priv keys <Collection<T>>`, and
+  `macro_definitions.fin:16` `temp.add`, where `:15` declares `new Collection::<int>{}`),
+  and `Collection` *wraps* `_arr <[T]>` and grows it in Fin code by allocating a fresh
+  buffer and copying. Growth is built **on** `[T]`, not **into** it. It is also passed by
+  value (`const.fin:61`) and by reference (`arrays.fin:11`), returned (`stdio.fin:87`,
+  `stdlib/prototypes.fin:10`), stored in fields (`collection.fin:16`, `stdio.fin:83`/`:98`,
+  `deeptest2.fin:111`), and used as a generic argument (`const.fin:98` `rptr<[int]>`).
+  Blocks `arrays_enums.fin` and `deeptest1.fin`, but **not** the top of the queue: both
+  carry suppressed statements that `fn` parameters and struct inheritance do not.
 - **How `fin_core` links LLVM on Windows** — *blocks `windows-x86_64` and `windows-arm64`.*
   `CMakeLists.txt` links the monolithic libLLVM (`target_link_libraries(fin_core PUBLIC LLVM)`),
   which LLVM cannot build under MSVC at **any** version: `llvm/CMakeLists.txt` sets
@@ -325,32 +345,36 @@ where marked:
   `LLVM.lib`. The alternative is `llvm_map_components_to_libnames` and the component static
   libraries, i.e. a second link strategy for one platform, which is a decision and not a fix. Not a
   version problem: it would read identically at 18.
-- **What the no-backend diagnostic should name as the required LLVM** — *not blocking.*
-  `src/codegen/CodeGen_Stub.cpp:30` prints `= help: configure with -DFIN_WITH_LLVM=ON and an
-  LLVM 18 development install` — a string compiled into `finc` and shown to users, still naming 18
-  after the pin moved to 22, so it sends a reader to install the one version `CMakeLists.txt` will
-  then reject with a `FATAL_ERROR`. Deliberately **not** fixed with the `conanfile.py` ruling of
-  2026-08-27 (§7): that one turned on the LLVM-18 text there being comments and not a build input,
-  and this text is the other side of that line. What is owed is not the number but the mechanism —
-  spell `22` in the stub, or have CMake pass `FIN_LLVM_MAJOR` in as a compile definition. The stub
-  is compiled exactly when `FIN_WITH_LLVM=OFF`, and on that path `find_package(LLVM)` never runs,
-  so nothing has checked that `FIN_LLVM_MAJOR` means anything at all. No test asserts the string
-  (`grep "development install" tests/` is empty), so nothing currently holds it to either answer.
-- **Whether the checker-only build is required to pass its suite** — *not blocking.*
-  ADR 0010 keeps `FIN_WITH_LLVM=OFF` so a platform that cannot get LLVM still gets a checker, but
-  measured on 2026-08-27 that configuration is **not** green: `./build.sh --release --no-llvm` gives
-  1257 tests, 961 passed, 295 skipped, **1 failed** — `MachineContract
-  .DashOProducesTheNamedExecutable` (`tests/test_cli.cpp:182`), which asserts `-o` writes an
-  executable and is the one backend-dependent test not behind `BACKEND_TEST`. ctest then exits 8.
-  Either that test belongs behind the macro (and the checker-only build is a supported, green
-  configuration), or the OFF path is a build nobody is meant to run the suite on and should say so.
-  Left as measured, because fixing it silently would remove the only thing that currently turns a
-  backend-off CI job red — and note that this failure is why the "no codegen test went quiet" step
-  in `ci.yml` carries `if: ${{ !cancelled() }}`: without it the step never runs on the very build it
-  exists to diagnose.
+- ~~**What the no-backend diagnostic should name as the required LLVM**~~ — **CLOSED, and
+  this entry was stale when written.** `src/codegen/CodeGen_Stub.cpp:37` says "an LLVM **22**
+  development install", not 18, and the mechanism the entry asked for exists: the major is
+  spelled in the stub deliberately (that file is compiled exactly when `FIN_WITH_LLVM=OFF`,
+  and on that path `find_package(LLVM)` never runs, so a `FIN_LLVM_MAJOR` compile definition
+  would be a number nothing had checked against anything). What holds it in step with ADR
+  0010 is `Soundness_Codegen.TheNoBackendHelpNamesThePinnedLlvmMajor`
+  (`tests/test_codegen.cpp:5718`), which reads the major out of `CMakeLists.txt` and the
+  string out of the stub, and is **not** a `BACKEND_TEST`, so it runs in either build. The
+  entry's `grep "development install" tests/` is empty claim is false — it matches
+  `test_codegen.cpp:5711` and `:5737`.
+- ~~**Whether the checker-only build is required to pass its suite**~~ — **RULED
+  2026-08-27: it must be green, and it now is.** `FIN_WITH_LLVM=OFF` measures **1291 tests,
+  0 failed, 320 skipped**, ctest exit 0. The single failure was
+  `MachineContract.DashOProducesTheNamedExecutable`, which asks for an executable in a build
+  with nothing to produce one. Fixed in `25d6a0c` by splitting the assertion into the half
+  each configuration owes rather than relaxing it: ON keeps what it had, and OFF gets
+  `MachineContract.DashOWithoutABackendRefusesAndWritesNothing`, asserting the load-bearing
+  half — `CodeGen_Stub.cpp` returns false rather than doing nothing precisely because
+  `return true` would make `finc x.fin -o x` exit 0 having written no file. Deliberately
+  **not** a `BACKEND_TEST`: that macro skips, and a skip is the quiet this ruling rejected;
+  both configurations assert and neither is excused. **Caveat for anyone re-measuring:** finc
+  finds its bundled stdlib at `<exe dir>/../lib/std` (`src/driver/SearchPaths.hpp:108`), so a
+  build directory *outside* the repository fails 13 module and corpus tests for want of
+  `lib/std` and **none of those failures is about the backend**. Symlink the repo's `lib`
+  beside the build directory. `ci.yml`'s `if: ${{ !cancelled() }}` on the "no codegen test
+  went quiet" step is now belt-and-braces rather than load-bearing.
 - The tagged union's layout; whether `p++` advances by element or byte; the four nullability
   edges; what `&"Hello world"` means as a `&string`; `#[slaveof(...)]` lifetimes; struct `==`;
-  whether a `class` is a value or a reference; the size of an empty struct; which passes `-O`
+  whether a `class` is a value or a reference; which passes `-O`
   runs; namespaces; `pub` export; macros in imports; `Any<Printable>`; `cast<auto>`; variance;
   interface-member defaults; integer conversions; `GET_MEMORY_LIMIT`.
 - On a **template**, whether `#[llvm_name="vec2_f32"]` names the template or one instantiation
@@ -363,6 +387,13 @@ where marked:
   `Soundness_Codegen.ACompoundAssignmentToAStructIsStillRefused`).
 - `macro_rule`'s `LPAREN STRING_LITERAL RPAREN` keeps the quotes in `MacroRule::pattern`.
 - A bare `null` binding a generic parameter is keyed and displayed as `string`.
+
+- ~~**The size of an empty struct**~~ — **RULED 2026-08-27: one byte.** It matches C++,
+  which finc is written in and interoperates with, so two distinct empty-struct values get
+  distinct addresses and `&a != &b` holds. LLVM's zero-size `{}` was rejected precisely
+  because it lets two empty-struct values share an address, and that surprise surfaces far
+  from its cause. Unblocks `blame_assert.fin` (`an empty struct 'M<int>'`), which has no
+  suppressed statements behind it.
 
 ## 9. Documentation still owed
 
