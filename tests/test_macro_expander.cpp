@@ -126,15 +126,61 @@ TEST(MacroExpander, InvokingARulesFormMacroIsRefusedRatherThanCrashing) {
 }
 
 TEST(MacroExpander, SubstitutesTheArgumentIntoTheExpansion) {
-    // The expander clones the quote body and runs SubstitutionVisitor over it.
-    // If the parameter name survives into the expansion, the argument was never
-    // substituted, and the analyzer then reports "Undefined variable 'a'" at a
-    // location inside the macro rather than at the call.
+    // The expander clones the quote body and runs SubstitutionVisitor over it, which
+    // replaces `$name` where `name` is a parameter (SubstitutionVisitor.cpp:33-41:
+    // "Check if identifier starts with $").
+    //
+    // This test used to write bare `a` in the quote and then record a KNOWN DEFECT that
+    // "the argument is not substituted". It was misdiagnosing itself. Substitution works
+    // and always did; the body simply did not ask for it, because a bare identifier in a
+    // quote is a reference to whatever is in scope where the quote lands and `$a` is the
+    // parameter. What the old body demonstrated was the *correct* refusal --
+    // `Undefined variable 'a'`, twice, once per mention -- which is what a quote naming
+    // something in neither scope should give.
+    //
+    // Asserted positively now, with the substitution read back through the printer,
+    // which is the only reader of the expanded tree available from here.
+    fin::DiagnosticEngine diag("", "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    auto parsed = parseSource(
+        "@macro twice(a) { return quote { $a + $a; }; }\n"
+        "fun main() <noret> { let x <int> = twice!(3); }\n", diag);
+    ASSERT_TRUE(parsed.parsed);
+    auto scope = std::make_shared<fin::Scope>(nullptr);
+    fin::MacroExpander expander(diag, scope.get());
+    expander.expand(*parsed.ast);
+
+    testing::internal::CaptureStdout();
+    fin::ASTPrinter printer;
+    printer.print(*parsed.ast);
+    const std::string tree = testing::internal::GetCapturedStdout();
+
+    // The macro *declaration* is left in the tree and still holds its own `$a` -- the
+    // expander clones the quote rather than consuming the template -- so the assertion
+    // is about the expansion, which is everything from `main` onward.
+    const auto atMain = tree.find("FunctionDecl");
+    ASSERT_NE(atMain, std::string::npos) << tree;
+    const std::string expansion = tree.substr(atMain);
+
+    EXPECT_NE(expansion.find("Literal"), std::string::npos)
+        << "`$a` is replaced by the argument, so the expansion holds a literal:\n" << tree;
+    EXPECT_EQ(expansion.find("$a"), std::string::npos)
+        << "no `$a` survives into the expansion:\n" << tree;
+    EXPECT_EQ(expansion.find("ID 'a'"), std::string::npos)
+        << "and neither does the bare parameter name:\n" << tree;
+}
+
+TEST(MacroExpander, ABareParameterNameInAQuoteIsNotSubstituted) {
+    // The other half, and what the test above was accidentally measuring. A quote's bare
+    // identifier is a reference resolved where the quote lands, not a parameter, so this
+    // expansion reads `a + a` and the analyzer reports it -- which is correct, and is the
+    // boundary that makes `$` mean something.
     auto e = expand(
         "@macro twice(a) { return quote { a + a; }; }\n"
         "fun main() <noret> { let x <int> = twice!(3); }\n");
     ASSERT_TRUE(e.parsed);
-    ASSERT_FALSE(e.errors) << e.firstMessage;
+    EXPECT_FALSE(e.errors) << "the expander itself has nothing to object to:\n"
+                           << e.firstMessage;
 
     fin::DiagnosticEngine diag("", "<test>");
     diag.setColorMode(fin::ColorMode::Never);
@@ -146,27 +192,21 @@ TEST(MacroExpander, SubstitutesTheArgumentIntoTheExpansion) {
     fin::MacroExpander expander(diag, scope.get());
     expander.expand(*parsed.ast);
 
-    // Read the expanded tree back out through the printer, which is the only
-    // reader of it available from here.
     testing::internal::CaptureStdout();
     fin::ASTPrinter printer;
     printer.print(*parsed.ast);
-    std::string tree = testing::internal::GetCapturedStdout();
+    const std::string tree = testing::internal::GetCapturedStdout();
 
-    // KNOWN DEFECT, recorded rather than asserted away: the argument is not
-    // substituted, so the expansion still reads `a + a`. src/macros/** has no
-    // owner in the plan's ownership map. Flip this to the positive assertion
-    // when it is fixed.
-    const bool substituted = tree.find("Literal") != std::string::npos ||
-                             tree.find("3") != std::string::npos;
-    if (substituted) {
-        EXPECT_TRUE(substituted)
-            << "macro argument substitution now works; tighten this test";
-    } else {
-        GTEST_LOG_(WARNING)
-            << "MacroExpander does not substitute macro arguments: the expansion "
-               "still names the parameter. src/macros/SubstitutionVisitor.cpp.";
-    }
+    // Read from `main` onward, past the macro declaration the expander leaves in place,
+    // for the same reason as the test above.
+    const auto atMain = tree.find("FunctionDecl");
+    ASSERT_NE(atMain, std::string::npos) << tree;
+    const std::string expansion = tree.substr(atMain);
+
+    EXPECT_NE(expansion.find("ID 'a'"), std::string::npos)
+        << "the bare name survives into the expansion as an identifier:\n" << tree;
+    EXPECT_EQ(expansion.find("Literal"), std::string::npos)
+        << "and the argument is nowhere in it:\n" << tree;
 }
 
 TEST(MacroExpander, IsReusableAcrossTranslationUnits) {
