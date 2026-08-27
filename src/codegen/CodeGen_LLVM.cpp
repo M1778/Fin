@@ -3948,7 +3948,64 @@ private:
         if (registered_.count(&node)) return;
         unsupported(node, fmt::format("a declaration of struct '{}' here", node.name));
     }
-    void visit(InterfaceDeclaration& node) override { unsupported(node, "an interface declaration"); }
+    // An interface emits nothing, and nothing is the whole of its lowering.
+    //
+    // This is the one place in this file where "emitted nothing" is not the skip the
+    // founding rule forbids, so the distinction is worth stating. That rule is about
+    // a statement with *runtime meaning*: an assignment or a call that is dropped
+    // still had an effect the program was entitled to, and dropping it silently is a
+    // miscompile. An interface declaration has no such effect to lose. It allocates
+    // no storage -- an interface is never the type of a variable or a field here --
+    // it defines no symbol, and each of its members is a *requirement* on some other
+    // type rather than code of its own. So there is no third state between "emitted
+    // nothing" and "lowered completely"; they are the same state.
+    //
+    // Which is why the members are inspected rather than assumed empty. A body
+    // written inside an interface *is* code, and emitting nothing for the declaration
+    // that holds it would discard it -- the miscompile, not the harmless nothing. Who
+    // inherits a default is an open ruling (section 8 of docs/HANDOFF.md,
+    // "interface-member defaults"), and a construct waiting on a ruling is refused
+    // where it is written, not guessed at.
+    //
+    // Today the grammar only admits one of these forms: a method body parses, an
+    // operator body does not (`expecting SEMICOLON`), and no destructor spelling
+    // inside an interface parses at all. The rest of the check is here because it
+    // costs one condition each and a grammar that widens should not widen this
+    // silently.
+    void visit(InterfaceDeclaration& node) override {
+        for (auto& m : node.methods) {
+            if (m && m->body) {
+                unsupported(*m, fmt::format("a body on interface method '{}'", m->name));
+                return;
+            }
+        }
+        for (auto& o : node.operators) {
+            if (o && (o->body || o->implements_expr || o->implements_type)) {
+                unsupported(*o, fmt::format("an implemented operator in interface '{}'", node.name));
+                return;
+            }
+        }
+        for (auto& c : node.constructors) {
+            if (c) {
+                unsupported(*c, fmt::format("a constructor in interface '{}'", node.name));
+                return;
+            }
+        }
+        if (node.destructor) {
+            unsupported(*node.destructor, fmt::format("a destructor in interface '{}'", node.name));
+            return;
+        }
+        // A member's *default* is an expression, and which implementor evaluates it is
+        // the same unmade ruling as a default body. The type it declares needs nothing:
+        // no layout is computed for an interface, so an unlowerable member type here is
+        // not an error either.
+        for (auto& m : node.members) {
+            if (m && m->default_value) {
+                unsupported(*m, fmt::format("a default on interface field '{}'", m->name));
+                return;
+            }
+        }
+    }
     void visit(EnumDeclaration& node) override {
         // Registered above and emits nothing: an enum's members are constants folded
         // into their uses, so there is no symbol and no storage. One declareEnums never
@@ -3963,7 +4020,46 @@ private:
     void visit(ConstructorDeclaration& node) override { unsupported(node, "a constructor"); }
     void visit(DestructorDeclaration& node) override { unsupported(node, "a destructor"); }
     void visit(SpecialDeclaration& node) override { unsupported(node, "a '@special' declaration"); }
-    void visit(TypeDefinition& node) override { unsupported(node, "a type alias"); }
+    // Six statements wear this one node (src/ast/decls/TypeDef.hpp): a type alias
+    // `type Integer = int;`, a union alias `type Number = int | uint;`, the erasure
+    // marker `type Any<...> = any implements <...>`, a symbol resolution
+    // `pub implements c_printf = printf;` (stdlib/stdio.fin:15), an extern alias
+    // `extern myns::myfunc as myfunc;` (extern_as.fin:19) and a wildcard extern
+    // `extern * from a_namespace;` (extern_as.fin:32, :39). All six bind a name, and a
+    // name is not something this file emits -- so all six are lowered as nothing.
+    //
+    // Emitting nothing is not the skip the founding rule forbids, and the node's shape
+    // is the proof rather than the claim. A TypeDefinition holds a name, generic
+    // parameters, TypeNodes and flags: no Block, no Expression, no Statement child.
+    // There is no statement inside it that emitting nothing could drop, so "emitted
+    // nothing" and "lowered completely" are one state here instead of two that look
+    // alike from outside. Contrast visit(InterfaceDeclaration&) above, which has
+    // refusals precisely because an interface method *can* carry a body; and compare
+    // visit(EnumDeclaration&), which emits nothing for exactly this reason.
+    //
+    // What the name means is settled before here: Soundness_ExternAlias
+    // (tests/test_soundness.cpp) fixes that an extern alias carries its target's type,
+    // that an alias of a type is still a type, and that a wildcard extern is a no-op
+    // because a namespace's contents are already spliced into the enclosing statement
+    // list. So a *declaration* never needs the alias table. A *use* of a renaming
+    // alias does, and this backend resolves names literally -- `shortname()` for
+    // `myns::realname` reaches no function, `myglobv_diffname` reaches no global,
+    // `<Integer>` reaches no type. Each of those refuses at its own use site, in
+    // visitCall, in the identifier path and in the type mapper respectively, which is
+    // why nothing needs refusing here to keep the boundary visible. Three
+    // KnownDefect_Codegen tests hold that boundary; if resolution lands before codegen
+    // they invert.
+    //
+    // The attributes are the exception, because an attribute is a demand and not a
+    // name. `#[llvm_name]` is honoured on a struct and on a function, so discarding one
+    // on an alias would be a naming request silently dropped -- the same reasoning that
+    // refuses an attribute on a global above.
+    void visit(TypeDefinition& node) override {
+        if (!node.attributes.empty()) {
+            unsupported(node, fmt::format("an attribute on the alias '{}'", node.name));
+            return;
+        }
+    }
     void visit(StructMember& node) override { unsupported(node, "a struct member"); }
     void visit(Parameter& node) override { unsupported(node, "a parameter"); }
 

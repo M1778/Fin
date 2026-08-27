@@ -337,7 +337,7 @@ BACKEND_TEST(Soundness_Codegen, ACompileOnlyBuildStillRefusesWhatItCannotLower) 
     // -- a stale one is a link that succeeds against yesterday's code.
     const fs::path obj = uniqueTempPath("fin_obj_bad", ".o");
     const Compiled c = compileOnly(
-        "interface Drawable { fun draw(self: &Self) <noret>; }\n"
+        "class MyClass { v <int> }\n"
         "fun make() <int> { return 1; }\n", obj);
     EXPECT_NE(c.exitCode, 0) << c.why();
     EXPECT_NE(c.err.find("codegen"), std::string::npos) << c.why();
@@ -638,20 +638,24 @@ BACKEND_TEST(Soundness_Codegen, AnEscapeIsLoweredOnce) {
 // ---------------------------------------------------------------------------
 
 BACKEND_TEST(Soundness_Codegen, AnUnloweredConstructIsRefused) {
-    // An interface declaration is well-typed and cannot be lowered: an interface
-    // reference is two words and the pointer map has three states (ADR 0019), and
-    // building the witness table that makes a dynamic call work is a unit of its own.
-    // The compile must fail and say so; the one outcome that must never happen is
-    // exit 0 with a binary whose behaviour does not match the program.
+    // A class declaration is well-typed and cannot be lowered: a class is a struct
+    // plus inheritance plus a vtable plus `super` plus a destructor -- stdlib/stdptr.fin:37
+    // writes `pub class rptr<T>: <rptr_iface>`, which is all five at once -- and each of
+    // those is a unit of its own. The compile must fail and say so; the one outcome that
+    // must never happen is exit 0 with a binary whose behaviour does not match the
+    // program.
     //
     // The construct in a refusal test is a moving part, and this one has now moved
-    // twice. It was a plain struct until structs lowered, then a generic struct until
-    // monomorphisation landed, and each time keeping it would have turned a passing
-    // refusal test into a passing test of nothing. Which is the argument for picking
-    // the construct that is furthest from being lowered rather than the one that
-    // reads best.
+    // three times. It was a plain struct until structs lowered, a generic struct until
+    // monomorphisation landed, and an interface until an interface declaration became
+    // nothing to emit -- and each time keeping it would have turned a passing refusal
+    // test into a passing test of nothing. Which is the argument for picking the
+    // construct that is furthest from being lowered rather than the one that reads
+    // best. A class is that construct today for a reason worth writing down: no
+    // sample's first refusal is a class, so lowering one unblocks nothing, and nothing
+    // that unblocks nothing reaches the front of a queue ordered by yield.
     const Built b = build(
-        "interface Drawable { fun draw(self: &Self) <noret>; }\n"
+        "class MyClass { v <int> }\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
@@ -663,19 +667,19 @@ BACKEND_TEST(Soundness_Codegen, ARefusalNamesTheLine) {
     // construct here is below line 1 so that a location the backend simply left
     // default would not pass by accident.
     //
-    // It used to be `i++`, and then a generic struct, which is exactly the trap
-    // AnUnloweredConstructIsRefused warns about one screen above: each of those
-    // lowered in turn, and each time this test went from asserting a located refusal
-    // to asserting nothing -- failing rather than passing vacuously only because it
-    // checks the exit code too. The construct is an interface for the same reason
-    // that one uses it: a witness table is a unit of its own (ADR 0019), so it is the
-    // furthest thing in this file from being lowered.
+    // It used to be `i++`, then a generic struct, then an interface, which is exactly
+    // the trap AnUnloweredConstructIsRefused warns about one screen above: each of
+    // those lowered in turn, and each time this test went from asserting a located
+    // refusal to asserting nothing -- failing rather than passing vacuously only
+    // because it checks the exit code too. The construct is a class for the same
+    // reason that one uses it: a class is a struct, inheritance, a vtable and a
+    // destructor at once, so it is the furthest thing in this file from being lowered.
     const Built b = build(
         "fun main() <noret> {\n"
         "    let i <int> = 1;\n"
         "}\n"
         "\n"
-        "interface Drawable { fun draw(self: &Self) <noret>; }\n");
+        "class MyClass { v <int> }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find(".fin:5:"), std::string::npos) << b.why();
 }
@@ -5402,4 +5406,361 @@ BACKEND_TEST(Soundness_Codegen, ACompoundAssignmentToAStructIsStillRefused) {
         "    a += b;\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// An interface declaration.
+// ---------------------------------------------------------------------------
+// The whole of an interface's lowering is to emit nothing, and that is *not* the
+// skip the rule at the top of this file forbids. The rule is about dropping a
+// statement that has runtime meaning: a discarded assignment or call changes what
+// the program computes, and does so invisibly. An interface declaration names a
+// requirement other types have to satisfy -- no storage is allocated for it, no
+// symbol is defined by it, and none of its members is code -- so "emitted
+// nothing" and "lowered completely" are the same state, and there is no third
+// state in which something was lost. The corpus's two are deeptest1.fin:20 and
+// implements_block.fin:5.
+//
+// What does have runtime meaning is a *body* written inside one. A default method
+// is code, and whether an implementor inherits it is an open ruling (§8 of
+// docs/HANDOFF.md, "interface-member defaults"), so a body is refused where it is
+// written rather than dropped on the way past. That is the line these tests draw:
+// the last one is the half that still bites if the first change is ever widened
+// into "an interface is always nothing".
+
+BACKEND_TEST(Soundness_Codegen, AnInterfaceDeclarationIsLoweredAsNothing) {
+    // deeptest1.fin:20-22, and the program beside it still runs: the point is not
+    // that the interface produced something but that it stopped the compile from
+    // producing anything.
+    const Built b = build(std::string(kPrintf) +
+        "interface Printable {\n"
+        "    pub fun to_string() <string>;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", 7);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInterfacesMethodIsNotDeclaredAsAFunction) {
+    // The other half: "emitted nothing" is a claim about the module, not just about
+    // the exit code. A bodiless method that reached declareFunctions would become a
+    // declaration with no definition, and the link would fail at the first caller --
+    // so the trace has to show it was never declared at all.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "interface Printable {\n"
+        "    pub fun to_string() <string>;\n"
+        "}\n"
+        "fun main() <noret> { printf(\"%d\\n\", 7); }\n");
+    EXPECT_EQ(trace.find("not lowered yet"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("to_string"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("Printable"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericInterfaceIsLoweredAsNothingToo) {
+    // implements_block.fin:5-7. A generic interface has no instantiation to key on
+    // and nothing to instantiate, so the type parameter changes nothing about the
+    // answer -- which is worth its own test, because every other generic declaration
+    // in this file reaches instantiateGeneric and this one must not.
+    const Built b = build(std::string(kPrintf) +
+        "interface GetVal<T> {\n"
+        "    pub fun get_val() <T>;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", 7);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInterfaceOperatorSignatureIsLoweredAsNothing) {
+    // implements_block.fin:19-21. An `operator +` with no body is a requirement like
+    // any other member; the grammar will not accept a body on one (`expecting
+    // SEMICOLON`), so a signature is the only form there is.
+    const Built b = build(std::string(kPrintf) +
+        "interface Addable<T> {\n"
+        "    pub operator + (other: <T>) <T>;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", 7);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInterfaceFieldIsLoweredAsNothing) {
+    // A field in an interface is a requirement on an implementor's layout, not
+    // storage of its own -- an interface is never the type of a variable here, so
+    // there is nothing whose size or offset this could decide. No corpus sample
+    // writes one; the grammar accepts it, so it gets an answer rather than a crash.
+    const Built b = build(std::string(kPrintf) +
+        "interface HasField {\n"
+        "    x <int>;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", 7);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInterfaceMethodWithABodyIsRefused) {
+    // The line. `{ return 3; }` inside an interface is code, and emitting nothing
+    // for the declaration that holds it would discard it -- which is the miscompile
+    // the founding rule names, not the harmless nothing above. Refused where it is
+    // written, and it stays refused until §8's "interface-member defaults" ruling
+    // says who inherits it.
+    const Built b = build(std::string(kPrintf) +
+        "interface Greeter {\n"
+        "    pub fun hello() <int> { return 3; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", 7);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("hello"), std::string::npos) << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// The no-backend diagnostic names the pin.
+// ---------------------------------------------------------------------------
+// Not a BACKEND_TEST, and deliberately: the string this checks lives in
+// CodeGen_Stub.cpp, which is compiled *only* when FIN_WITH_LLVM=OFF, so a test
+// that needed a backend could never reach the build where it matters. It reads
+// the two files instead, which works in either configuration.
+//
+// The defect it closes: the help said "an LLVM 18 development install" after ADR
+// 0010's pin moved to 22, so it sent a reader to install the one version
+// CMakeLists.txt then rejects with a FATAL_ERROR. The number is spelled in the
+// stub rather than passed in as a compile definition, because on that path
+// find_package(LLVM) never ran -- FIN_LLVM_MAJOR would be a number nothing had
+// checked -- so this test is what keeps the two in step.
+
+TEST(Soundness_Codegen, TheNoBackendHelpNamesThePinnedLlvmMajor) {
+    const fs::path repo = fs::path(FIN_TESTS_DIR).parent_path();
+    const std::string cmake = readWholeFile((repo / "CMakeLists.txt").string());
+    const std::string stub =
+        readWholeFile((repo / "src" / "codegen" / "CodeGen_Stub.cpp").string());
+
+    // A file that did not open reads as empty, and an empty haystack would make
+    // every find() below vacuously agree. Assert the reads first.
+    ASSERT_FALSE(cmake.empty()) << "could not read " << (repo / "CMakeLists.txt");
+    ASSERT_FALSE(stub.empty()) << "could not read CodeGen_Stub.cpp under " << repo;
+
+    const std::string key = "set(FIN_LLVM_MAJOR ";
+    const size_t at = cmake.find(key);
+    ASSERT_NE(at, std::string::npos) << "CMakeLists.txt no longer pins FIN_LLVM_MAJOR";
+    size_t p = at + key.size();
+    std::string major;
+    while (p < cmake.size() && cmake[p] >= '0' && cmake[p] <= '9') major += cmake[p++];
+    ASSERT_FALSE(major.empty()) << "FIN_LLVM_MAJOR is pinned to something that is not a number";
+
+    const std::string want = "an LLVM " + major + " development install";
+    EXPECT_NE(stub.find(want), std::string::npos)
+        << "CMakeLists.txt pins LLVM " << major
+        << " but CodeGen_Stub.cpp's help does not say \"" << want << "\"";
+}
+
+
+// ---------------------------------------------------------------------------
+// Type aliases, extern aliases and symbol resolution: a declaration that binds a
+// name and nothing else.
+//
+// `TypeDefinition` is six statements wearing one node (src/ast/decls/TypeDef.hpp):
+// a real alias `type Integer = int;`, a union alias `type Number = int | uint;`,
+// the erasure marker `type Any<...> = any implements <...>`, a symbol resolution
+// `pub implements c_printf = printf;` (stdlib/stdio.fin:15), an extern alias
+// `extern myns::myfunc as myfunc;` (extern_as.fin:19) and a wildcard extern
+// `extern * from a_namespace;` (extern_as.fin:32, :39). All six reach this backend
+// through one visitor, and all six are lowered as nothing.
+//
+// Emitting nothing here is not the skip the founding rule forbids, and the node's
+// own shape is the proof. A `TypeDefinition` holds a name, generic parameters,
+// `TypeNode`s, and flags -- no `Block`, no `Expression`, no `Statement` child.
+// There is no statement inside it that could be dropped, so "emitted nothing" and
+// "lowered completely" are the same state rather than two states that look alike.
+// Compare `InterfaceDeclaration` just above, which *can* hold a method `body`: that
+// is why the interface visitor has refusals and this one needs none. The precedent
+// is `visit(EnumDeclaration&)`, which emits nothing for the same reason -- a name
+// with no storage and no symbol behind it.
+//
+// What the statement does bind, the analyzer binds: Soundness_ExternAlias in
+// tests/test_soundness.cpp settles that an extern alias carries its target's type,
+// that an alias of a type is still a type, and that a wildcard extern is a no-op
+// because the names are already in scope. The backend therefore never needs the
+// alias table to lower a *declaration*. Where it does need it is a *use* of the new
+// name, and the tests below fix that boundary in place: this backend resolves names
+// literally, so a renaming alias's new name is refused at the use site. Refused, and
+// visibly so -- which is the difference between a boundary and a miscompile.
+
+BACKEND_TEST(Soundness_Codegen, ATypeAliasDeclarationIsLoweredAsNothing) {
+    const std::string code = std::string(kPrintf) +
+        "type Integer = int;\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n";
+    const Built b = build(code);
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+
+    // Nothing was emitted *for the alias*, which is a stronger claim than "it
+    // compiled": the trace names every function and global the backend declares, so
+    // an alias that had quietly become a symbol would appear here by name.
+    const std::string trace = codegenTrace(code);
+    EXPECT_EQ(trace.find("not lowered yet"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("Integer"), std::string::npos)
+        << "the alias became something the backend declared\n" << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AUnionAliasDeclarationIsLoweredAsNothing) {
+    // `type Number = int | uint | float | ...` -- arrays.fin:9, stdlib/types.fin:53,
+    // stdlib/typing.fin:10. The alternatives live in `union_members` and the first in
+    // `aliased_type`; neither is a statement, so neither is dropped by emitting
+    // nothing. A *use* of `Number` as a type is refused, which the boundary tests
+    // below record.
+    const Built b = build(std::string(kPrintf) +
+        "type Number = int | uint;\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TheErasureMarkerAliasDeclarationIsLoweredAsNothing) {
+    // `type Any<...> = any implements <...>` sets `has_implements`. Whether `any` is
+    // erased or monomorphised is a queued ruling and this test does not decide it: the
+    // declaration is lowered as nothing either way, because either answer is about
+    // what a *use* of the name means.
+    const Built b = build(std::string(kPrintf) +
+        "type Any1 = any implements <int>;\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ASymbolResolutionDeclarationIsLoweredAsNothing) {
+    // `pub implements c_printf = printf;` -- stdlib/stdio.fin:15. The sides are
+    // swapped relative to an extern alias but the node is the same and so is the
+    // lowering.
+    const Built b = build(std::string(kPrintf) +
+        "pub implements c_printf = printf;\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnExternAliasIntoANamespaceDeclaresNoSecondSymbol) {
+    // extern_as.fin:19 -- `extern myns::myfunc as myfunc;`, whose stated purpose is
+    // "now we can just access `myns::myfunc` by using `myfunc()` only". The namespace's
+    // contents are spliced into the enclosing statement list by the parser, so the
+    // function is declared under its own name and the alias adds nothing: one
+    // declaration, not two, and no forwarding stub.
+    const std::string code = std::string(kPrintf) +
+        "namespace myns { pub fun myfunc() <int> { return 4; } }\n"
+        "extern myns::myfunc as myfunc;\n"
+        "fun main() <noret> { printf(\"%d\\n\", myfunc()); }\n";
+    const Built b = build(code);
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4\n") << b.why();
+
+    const std::string trace = codegenTrace(code);
+    EXPECT_EQ(occurrences(trace, "declared myfunc"), 1u)
+        << "the alias should add no second declaration\n" << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AWildcardExternFromANamespaceIsLoweredAsNothing) {
+    // extern_as.fin:32 -- `extern * from a_namespace;`. Nothing to emit for the same
+    // reason the analyzer has nothing to bind: the names are already in scope.
+    const Built b = build(std::string(kPrintf) +
+        "namespace a_namespace { pub fun a() <int> { return 2; } pub fun b() <int> { return 4; } }\n"
+        "extern * from a_namespace;\n"
+        "fun main() <noret> { printf(\"%d\\n\", a() + b()); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWildcardExternFromAnEnumIsLoweredAsNothing) {
+    // extern_as.fin:39-43 -- `extern * from MyEnum;` and then `let a <MyEnum> = A;`.
+    // An enum's members are already constants folded into their uses, so the wildcard
+    // asks for what the file already has.
+    const Built b = build(std::string(kPrintf) +
+        "enum MyEnum { A, B, C }\n"
+        "extern * from MyEnum;\n"
+        "fun main() <noret> { let a <MyEnum> = A; printf(\"%d\\n\", a); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAttributeOnATypeAliasIsRefused) {
+    // The rule every other declaration site in this file follows: an attribute the
+    // backend does not read may be one that changes what is emitted, and ignoring it
+    // is how a program that compiles ends up meaning something else. `#[llvm_name]` is
+    // honoured on a struct and on a function, so on an alias it is a naming request
+    // that would be silently discarded -- refuse instead. This is also the one part of
+    // a `TypeDefinition` that could carry a demand rather than a name.
+    const Built b = build(std::string(kPrintf) +
+        "#[llvm_name=\"renamed\"]\n"
+        "type Integer = int;\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("attribute"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("Integer"), std::string::npos) << b.why();
+}
+
+// The boundary. A renaming alias binds a name in the analyzer (Soundness_ExternAlias)
+// that this backend looks up literally, so the *use* of the new name is where the
+// missing resolution shows. Each of these is a refusal and not a wrong answer, which
+// is the only property the founding rule asks of an unfinished feature. If alias
+// resolution lands before codegen -- the analyzer already has the binding to do it
+// with -- these three invert and are renamed rather than relaxed.
+
+BACKEND_TEST(KnownDefect_Codegen, ARenamingExternAliasIsRefusedWhereTheNewNameIsCalled) {
+    const std::string code = std::string(kPrintf) +
+        "namespace myns { pub fun realname() <int> { return 4; } }\n"
+        "extern myns::realname as shortname;\n"
+        "fun main() <noret> { printf(\"%d\\n\", shortname()); }\n";
+    const Built b = build(code);
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a call to 'shortname'"), std::string::npos) << b.why();
+
+    // Where it refused matters as much as that it refused: the target was declared, so
+    // the declaration was lowered and the use is what stopped. A refusal at the
+    // `extern` line would mean the declaration itself was the unlowered thing.
+    const std::string trace = codegenTrace(code);
+    EXPECT_NE(trace.find("declared realname"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(KnownDefect_Codegen, AnAliasedTypeIsRefusedWhereItNamesAVariable) {
+    // extern_as.fin:23 -- `extern int as Integer;` -- and `type Integer = int;` land
+    // here identically, which is the point of both spellings sharing a node. The
+    // analyzer accepts `let x <Integer>` (Soundness_ExternAlias.AnExternAliasOfATypeIsStillAType);
+    // the backend's type mapper does not consult the alias table.
+    const Built b = build(std::string(kPrintf) +
+        "type Integer = int;\n"
+        "fun main() <noret> { let x <Integer> = 5; printf(\"%d\\n\", x); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type 'Integer'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(KnownDefect_Codegen, AnAliasedGlobalIsRefusedWhereTheNewNameIsRead) {
+    // extern_as.fin:9 -- "myglobv_diffname is a new name for `myglobv` but they are the
+    // same variable just different names". Same variable, and this backend has no
+    // second name for it.
+    const Built b = build(std::string(kPrintf) +
+        "const myglobv <int> = 10;\n"
+        "extern myglobv as myglobv_diffname;\n"
+        "fun main() <noret> { printf(\"%d\\n\", myglobv_diffname); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("'myglobv_diffname'"), std::string::npos) << b.why();
 }
