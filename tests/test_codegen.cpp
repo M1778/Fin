@@ -726,14 +726,22 @@ BACKEND_TEST(Soundness_Codegen, TwoUnloweredFunctionBodiesAreBothReported) {
     // One body is not an input to another, so each reports its own first refusal.
     // Both constructs are statements rather than declarations, so what is being crossed
     // here is a function boundary and not just a top-level one.
+    //
+    // `m1778` is the second statement, and it used to be a `blame`. `blame`'s assert
+    // form lowers now, so it stopped being a refusal at all and this test went green for
+    // the wrong reason -- it was counting two and finding one. `m1778` replaces it
+    // because it is the same *shape* of refusal, which is what this test is actually
+    // about: an expression statement that declares no name, so nothing after it can be a
+    // cascade. ADR 0001 fixes its meaning ("not implemented"), so it is a construct that
+    // will never stop being refused, which makes it a stabler probe than any feature.
     const Built b = build(
         "fun f() <noret> { let a <[int, 3]> = [1,2,3]; foreach (e <int> in a) { } }\n"
-        "fun g(v: int) <noret> { blame v > 0, \"positive\"; }\n"
+        "fun g(v: int) <noret> { m1778; }\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
     EXPECT_NE(b.compileErr.find("'foreach' loop"), std::string::npos) << b.why();
-    EXPECT_NE(b.compileErr.find("'blame'"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("'m1778'"), std::string::npos) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, CollectingRefusalsStillWritesNoObject) {
@@ -779,7 +787,7 @@ BACKEND_TEST(Soundness_Codegen, EachCollectedRefusalStillNamesItsOwnLine) {
 //
 // The rule is narrow and it is about names. The only thing a refused statement can
 // leave for a later one to trip over is a name with no storage behind it: a refused
-// `foreach`, a refused `blame` or a refused expression declares nothing. So a refused
+// `foreach`, a refused `m1778` or a refused expression declares nothing. So a refused
 // variable declaration poisons its name, a read of a poisoned name stops that statement
 // without reporting anything, and every other refusal in the block is its own finding.
 // A suppressed statement is not silently accepted -- it is not lowered either, and the
@@ -790,17 +798,20 @@ BACKEND_TEST(Soundness_Codegen, TwoIndependentUnloweredStatementsInOneBodyAreBot
     // Neither statement reads anything the other declares, so both are findings.
     // `[int, 3]` is a fixed extent and lowers, which is what keeps this case free of
     // any poisoned name and separates it from the test below.
+    //
+    // `m1778` was a `blame` until `blame`'s assert form lowered; see
+    // TwoUnloweredFunctionBodiesAreBothReported for why it is the replacement.
     const Built b = build(
         "fun f(v: int) <noret> {\n"
         "    let a <[int, 3]> = [1,2,3];\n"
         "    foreach (e <int> in a) { }\n"
-        "    blame v > 0, \"positive\";\n"
+        "    m1778;\n"
         "}\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
     EXPECT_NE(b.compileErr.find("'foreach' loop"), std::string::npos) << b.why();
-    EXPECT_NE(b.compileErr.find("'blame'"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("'m1778'"), std::string::npos) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, ARefusedDeclarationDoesNotCascadeIntoItsReaders) {
@@ -825,18 +836,24 @@ BACKEND_TEST(Soundness_Codegen, ARefusedDeclarationDoesNotCascadeIntoItsReaders)
 BACKEND_TEST(Soundness_Codegen, SuppressingACascadeDoesNotSuppressAnUnrelatedRefusal) {
     // The other half, and the one that says the suppression is targeted rather than a
     // dressed-up stop: `a[0]` reads the poisoned name and is not reported, while the
-    // `blame` two lines later shares nothing with it and is.
+    // `m1778` two lines later shares nothing with it and is.
+    //
+    // `m1778` was a `blame` until `blame`'s assert form lowered; see
+    // TwoUnloweredFunctionBodiesAreBothReported for why it is the replacement. Note that
+    // the substitution keeps this test's argument intact rather than weakening it -- what
+    // it needs from the third statement is only that it refuses and reads no name, which
+    // is exactly what `blame v > 0` supplied.
     const Built b = build(
         "fun f(v: int) <noret> {\n"
         "    let a <[int]> = [1,2,3];\n"
         "    let b <int> = a[0];\n"
-        "    blame v > 0, \"positive\";\n"
+        "    m1778;\n"
         "}\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
     EXPECT_NE(b.compileErr.find("a variable of type '[int]'"), std::string::npos) << b.why();
-    EXPECT_NE(b.compileErr.find("'blame'"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("'m1778'"), std::string::npos) << b.why();
     EXPECT_EQ(b.compileErr.find("the name 'a'"), std::string::npos) << b.why();
 }
 
@@ -6245,4 +6262,228 @@ BACKEND_TEST(Soundness_Codegen, AFunctionValueSurvivesAStructFieldRoundTrip) {
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// `blame`, the assert form.
+//
+// One keyword, two statements, told apart by the operand's type and by nothing else
+// because they are written identically (SemanticAnalyzer::visit(BlameStatement&)):
+// `blame val > 0` asserts, `blame CollectionError("...")` raises. That split is what
+// let the assert form land on its own, and the corpus is what made the split worth
+// making -- every `blame` in a sample this backend gets as far as is an assert.
+// blame_assert.fin:5 and :8, arrays.fin:34, deeptest4.fin:16 and :17,
+// readonly.fin:56. The four raises are all in samples the front end stops first.
+//
+// A failed assert prints where it failed and aborts: `fprintf` to stderr then
+// `abort()`, no runtime and no unwinding. `llvm.trap` was rejected because it
+// discards the message, and blame_assert.fin:5 wrote "Value must be positive"
+// deliberately.
+//
+// Deliberately not catchable. `abort` unwinds nothing, so a `blame` inside a `try`
+// would leave the `catch` unreached -- and nothing in the corpus puts one there:
+// readonly.fin's `try` wraps `a.v1 = 5` and its `blame` at :56 is outside it. A
+// mechanism for an unevidenced case would be a mechanism nothing checks.
+//
+// One caveat these tests are explicit about: the file half of the location reads
+// `<input>` under the test harness and under finc today, because nothing hands the
+// backend the source path -- a node's `loc` carries a null filename (the lexer
+// initialises every one that way), the AST has no path field, and DiagnosticEngine
+// keeps its copy private. `generateObject` now takes a `sourceName` and defaults it
+// to DiagnosticEngine's own `<input>`; one line in the driver would pass the real
+// path, and that line is not in this lane. So these tests assert the part that is
+// this file's to get right -- the line number, the wording, the message, the exit --
+// and AFailedBlameNamesAFileAndALine pins the shape of the whole thing so the day the
+// driver passes a path is a day this test goes red rather than a day nobody notices.
+
+BACKEND_TEST(Soundness_Codegen, APassingBlameCostsTheProgramNothing) {
+    // The ordinary case, and the one that must not print: an assertion that holds is a
+    // branch not taken. Worth asserting on its own because the failing path is emitted
+    // into the same function, so a mistake in the condition's sense -- swapping the two
+    // successors of the CondBr -- would abort every correct program instead.
+    const Built b = build(std::string(kPrintf) +
+        "fun check(val: int) <void> {\n"
+        "    blame val > 0, \"Value must be positive\";\n"
+        "    blame val < 100;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    check(10);\n"
+        "    printf(\"survived\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "survived\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFailedBlameWithAMessagePrintsItAndAborts) {
+    // tests/samples/blame_assert.fin:5 verbatim, with an argument that fails it. The
+    // message is the whole reason this lowering is not `llvm.trap`: the text the author
+    // wrote is the only part of a failed assertion that says *why*.
+    const Built b = build(
+        "fun check(val: int) <void> {\n"
+        "    blame val > 0, \"Value must be positive\";\n"
+        "}\n"
+        "fun main() <void> { check(-5); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_NE(b.runExit, 0) << b.why();
+    EXPECT_NE(b.out.find(":2: assertion failed: Value must be positive"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFailedBlameWithNoMessageStillSaysWhere) {
+    // blame_assert.fin:8's form. No message, so no `: why` -- and the line still has to
+    // be there, because "assertion failed" with no location is the diagnostic that sends
+    // a reader to grep their own program.
+    const Built b = build(
+        "fun check(val: int) <void> {\n"
+        "    blame val < 100;\n"
+        "}\n"
+        "fun main() <void> { check(500); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_NE(b.runExit, 0) << b.why();
+    EXPECT_NE(b.out.find(":2: assertion failed\n"), std::string::npos) << b.why();
+    // Not the message form with an empty message: `assertion failed: ` with nothing
+    // after the colon would be a format string chosen by accident.
+    EXPECT_EQ(b.out.find("assertion failed:"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFailedBlameNamesAFileAndALine) {
+    // The shape of the location, pinned whole. Today the file half is `<input>` because
+    // nothing passes the backend a source path (see this section's note); the day the
+    // driver passes one, this assertion is what notices, and its replacement is the
+    // sample's own name rather than a new guess.
+    const Built b = build(
+        "fun main() <void> {\n"
+        "    let n <int> = 0;\n"
+        "    blame n > 0, \"n must be positive\";\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_NE(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "<input>:3: assertion failed: n must be positive\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFailedBlameGoesToStderrAndNotToStdout) {
+    // Where it goes is part of the contract: a program's stdout is its output and a
+    // failed assertion is not output. The harness merges the two streams, so this test
+    // separates them itself -- redirecting stdout to /dev/null and keeping stderr is the
+    // only way to tell "printed to stderr" from "printed at all".
+    const fs::path src = uniqueTempPath("fin_blame_stderr", ".fin");
+    const fs::path exe = uniqueTempPath("fin_blame_stderr_exe");
+    {
+        std::ofstream f(src, std::ios::binary);
+        const std::string code =
+            "fun main() <void> {\n"
+            "    let n <int> = 0;\n"
+            "    blame n > 0, \"to stderr\";\n"
+            "}\n";
+        f.write(code.data(), (std::streamsize)code.size());
+    }
+    const FincRun c = runFinc({src.string(), "-o", exe.string()});
+    ASSERT_EQ(c.exitCode, 0) << stripAnsi(c.err);
+    ASSERT_TRUE(fs::exists(exe));
+
+    const fs::path outOnly = uniqueTempPath("fin_blame_out");
+    const fs::path errOnly = uniqueTempPath("fin_blame_err");
+    const std::string cmd = shellQuoteLocal(exe.string()) + " > " +
+                            shellQuoteLocal(outOnly.string()) + " 2> " +
+                            shellQuoteLocal(errOnly.string());
+    std::system(cmd.c_str());
+    const std::string onOut = readWholeFile(outOnly.string());
+    const std::string onErr = readWholeFile(errOnly.string());
+
+    EXPECT_EQ(onOut, "") << "a failed assertion reached stdout:\n" << onOut;
+    EXPECT_NE(onErr.find("assertion failed: to stderr"), std::string::npos) << onErr;
+
+    std::error_code ec;
+    fs::remove(src, ec);
+    fs::remove(exe, ec);
+    fs::remove(outOnly, ec);
+    fs::remove(errOnly, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, ABlamesMessageIsNotUsedAsAFormatString) {
+    // The mistake that would look right on every message in the corpus. Passing the
+    // message *as* printf's format makes a `%d` in it read a vararg nobody passed, which
+    // prints a stack word and can fault. `"%s"` with the message as an argument is why
+    // this is safe, and a message full of specifiers is the only test that can tell the
+    // two apart.
+    const Built b = build(
+        "fun main() <void> {\n"
+        "    let n <int> = 0;\n"
+        "    blame n > 0, \"%d %s %n literal\";\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_NE(b.runExit, 0) << b.why();
+    EXPECT_NE(b.out.find("assertion failed: %d %s %n literal"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABlamedMessageIsEvaluatedOnlyOnTheFailingPath) {
+    // The reason the message is emitted inside the failing block rather than beside the
+    // condition. The analyzer requires the message to be a `string`, not a *literal*, so
+    // it may be a call -- and evaluating it where the condition is would run its side
+    // effects on every pass of an assertion that never fires. A loop makes the
+    // difference observable: `why()` prints, so emitting it eagerly would print three
+    // times for a program whose assertion always holds.
+    const Built b = build(std::string(kPrintf) +
+        "fun why() <string> {\n"
+        "    printf(\"evaluated\\n\");\n"
+        "    return \"reason\";\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    for (let i <int> = 0; i < 3; i++) {\n"
+        "        blame i < 100, why();\n"
+        "    }\n"
+        "    printf(\"done\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "done\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABlameRaisingAValueIsRefused) {
+    // The other half of the keyword, and still refused: a raised value needs a runtime
+    // shape nobody has ruled on. Refused *as a raise* and not as "this condition",
+    // because the two forms are written identically and a reader told "condition" would
+    // go looking for a comparison they never wrote.
+    const Built b = build(
+        "struct MyError { code <int> }\n"
+        "fun main() <void> {\n"
+        "    blame MyError { code: 1 };\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("'blame' raising a value"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABlameSharesADeclarationOfAbortWithTheProgramsOwn) {
+    // `abort` and `fprintf` go through runtimeFn, which is what `new` and `delete`
+    // already use for `malloc` and `free`: a Fin program that declared the same libc
+    // entry point itself shares the declaration instead of colliding with it. A
+    // *conflicting* declaration refuses rather than calling through a mismatched
+    // signature, which would link and put the arguments in the wrong places.
+    const Built b = build(
+        "@define abort(code: int) <noret>;\n"
+        "fun main() <void> {\n"
+        "    let n <int> = 5;\n"
+        "    blame n > 0;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("'abort' is declared here with a different signature"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABlameAbortsRatherThanFallingThroughToLaterCode) {
+    // The failing block ends in `unreachable` and not in a branch to the surviving one.
+    // A branch would tell every later pass that execution continues past a failed
+    // assertion, and the observable consequence of getting it wrong is exactly this: the
+    // statement after the `blame` runs.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let n <int> = 0;\n"
+        "    blame n > 0, \"stop here\";\n"
+        "    printf(\"REACHED\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_NE(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out.find("REACHED"), std::string::npos) << b.why();
 }

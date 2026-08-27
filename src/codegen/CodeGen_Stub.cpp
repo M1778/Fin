@@ -27,11 +27,16 @@ namespace fin {
 bool backendAvailable() { return false; }
 
 bool generateObject(Program& ast, const std::string& objectPath,
-                    DiagnosticEngine& diag, int optLevel, bool debugCodegen) {
+                    DiagnosticEngine& diag, int optLevel, bool debugCodegen,
+                    const std::string& sourceName) {
     (void)ast;
     (void)objectPath;
     (void)optLevel;
     (void)debugCodegen;
+    // Unread here for the same reason the rest is: this build emits nothing, so it
+    // has nothing to put a source name into. Named in the signature all the same,
+    // because the two definitions of one declaration have to agree.
+    (void)sourceName;
     diag.reportError(
         "codegen: this finc was built without a backend",
         "configure with -DFIN_WITH_LLVM=ON and an LLVM 22 development install; "

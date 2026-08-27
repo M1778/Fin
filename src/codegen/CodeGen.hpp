@@ -33,8 +33,28 @@ class DiagnosticEngine;
 // `objectPath` is written only on success; on failure any partial file is
 // removed, because a stale object left behind by a failed build is a link that
 // succeeds against yesterday's code.
+//
+// `sourceName` is the path the program was read from, and it is here because a
+// failed `blame` prints it: `blame_assert.fin:5: assertion failed: ...` is a
+// location a person can act on and `:5` alone is not. It is *not* recoverable from
+// anything this function already receives, which is why it is a parameter --
+//
+//   * a node's `loc` cannot carry it: the lexer initialises every location with
+//     `loc.initialize(nullptr, 1, 1)` (src/lexer/lexer.l:38, :88), so
+//     `position::filename` is null for every node in the tree;
+//   * `Program` and the AST have no path field at all;
+//   * DiagnosticEngine has one and keeps it private, with no accessor;
+//   * `objectPath` is the output and not the input -- under `-c -o /tmp/x.o` it
+//     shares neither stem nor directory with the source.
+//
+// Defaulted to `<input>`, which is DiagnosticEngine's own default filename and so
+// already the tree's spelling for "the path is not known here". That keeps every
+// existing caller compiling and makes the degraded output honest rather than
+// invented: a driver that has the path passes it, and one that does not says so in
+// the words the rest of the compiler already uses.
 bool generateObject(Program& ast, const std::string& objectPath,
-                    DiagnosticEngine& diag, int optLevel, bool debugCodegen);
+                    DiagnosticEngine& diag, int optLevel, bool debugCodegen,
+                    const std::string& sourceName = "<input>");
 
 // False in a build configured with FIN_WITH_LLVM=OFF, where generateObject
 // always refuses. Separate from the call so the driver can say "this build has

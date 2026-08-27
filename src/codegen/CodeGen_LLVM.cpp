@@ -82,11 +82,20 @@
 //   * Generics. Monomorphisation, and the erasure rule ADR 0002 carries forward
 //     from pyprototype (an erasure-marker constraint on any one parameter selects
 //     erasure; an erased generic is a raw pointer).
-//   * `blame`, `try`/`catch`, and raising. The runtime shape of a raised value is
-//     not settled and there is no runtime to put it in.
-//   * Lambdas and function values. `functions.fin` passes a function by name into
-//     a `fn(int, int) => int` parameter, which needs a decision about whether a
-//     Fin function value is a bare pointer or a closure pair.
+//   * `try`/`catch`, and `blame`'s *raise* form. The runtime shape of a raised
+//     value is not settled and there is no runtime to put it in. `blame`'s assert
+//     form is lowered -- it prints where it failed and aborts -- and the split is
+//     what let it land alone: the two forms are one keyword told apart by the
+//     operand's type, and every `blame` the corpus reaches this file with is an
+//     assert. Deliberately not catchable: `abort` unwinds nothing, so a `blame`
+//     inside a `try` would leave the `catch` unreached, and nothing in the corpus
+//     writes one there.
+//   * A *generic* lambda and a generic function used as a value. Ordinary function
+//     values and lambdas are lowered -- a Fin function value is a bare code pointer,
+//     and a lambda that captures an enclosing local is refused rather than lowered,
+//     which is what makes that representation sound. What is still missing for the
+//     generic ones is not a representation but the code: a template has no address
+//     until something says which instantiation is meant.
 //   * The compiler API and `@special`. Wave 4 executes those at compile time; a
 //     `@special` reaching codegen means the interpreter did not consume it.
 //
@@ -775,9 +784,9 @@ private:
 
 class Emitter : public Visitor {
 public:
-    Emitter(DiagnosticEngine& diag, bool debug)
-        : diag_(diag), debug_(debug), ctx_(), module_("fin", ctx_), builder_(ctx_),
-          types_(ctx_) {
+    Emitter(DiagnosticEngine& diag, bool debug, std::string sourceName)
+        : diag_(diag), debug_(debug), sourceName_(std::move(sourceName)), ctx_(),
+          module_("fin", ctx_), builder_(ctx_), types_(ctx_) {
         types_.bindStructs(&structs_);
         types_.bindEnums(&enums_);
         types_.bindInstantiator([this](const TypeNode& node, std::string& out) {
@@ -3125,7 +3134,7 @@ private:
             if (failed_) {
                 // The next statement is its own finding. The only thing this one can
                 // have left behind for it to trip over is a name with no storage: a
-                // refused `foreach`, `blame` or expression declares nothing at all.
+                // refused `foreach`, `m1778` or expression declares nothing at all.
                 if (auto* var = dynamic_cast<VariableDeclaration*>(stmt.get())) {
                     poison(var->name);
                 }
@@ -4558,7 +4567,8 @@ private:
         llvm::FunctionCallee release = runtimeFn(
             node, "free",
             llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_),
-                                    {llvm::PointerType::getUnqual(ctx_)}, false));
+                                    {llvm::PointerType::getUnqual(ctx_)}, false),
+            "a deallocation");
         if (!release) return;
         builder_.CreateCall(release, {v.value});
     }
@@ -4571,12 +4581,16 @@ private:
     // A name already declared with a different signature refuses: calling through a
     // FunctionCallee whose type disagrees with the callee's would link and pass its
     // arguments in the wrong places.
+    //
+    // `what` names the construct that wanted it, because the refusal is read by someone
+    // looking at their own `@define` and not at this file: "an allocation" and "a
+    // 'blame'" send them to different lines of their own program.
     llvm::FunctionCallee runtimeFn(ASTNode& node, const char* name,
-                                   llvm::FunctionType* type) {
+                                   llvm::FunctionType* type, const char* what) {
         if (auto* existing = module_.getFunction(name)) {
             if (existing->getFunctionType() != type) {
-                unsupported(node, fmt::format("an allocation, because '{}' is declared "
-                                              "here with a different signature", name));
+                unsupported(node, fmt::format("{}, because '{}' is declared "
+                                              "here with a different signature", what, name));
                 return llvm::FunctionCallee();
             }
             return llvm::FunctionCallee(type, existing);
@@ -4584,7 +4598,136 @@ private:
         return module_.getOrInsertFunction(name, type);
     }
     void visit(TryCatch& node) override { unsupported(node, "'try'/'catch'"); }
-    void visit(BlameStatement& node) override { unsupported(node, "'blame'"); }
+
+    // `blame c` and `blame c, "why"` -- the assert form, which prints where it failed
+    // and aborts.
+    //
+    // One keyword, two statements, told apart by the operand's type and by nothing else
+    // because they are written identically (SemanticAnalyzer::visit(BlameStatement&)).
+    // `blame val > 0` asserts and `blame CollectionError("...")` raises. Only the assert
+    // form is lowered here: a raise needs the runtime shape of a raised value, which is
+    // unsettled, and every raise in the corpus is in a sample the front end stops before
+    // this file sees it. So the raise form refuses, by that name.
+    //
+    // Not catchable, and that is a decision rather than an omission: `abort()` unwinds
+    // nothing, so a `blame` inside a `try` would leave the `catch` unreached. Nothing in
+    // the corpus asks -- readonly.fin's `try` wraps `a.v1 = 5` and its `blame` at :56 is
+    // outside it -- so catchability would be a mechanism built on no evidence, and the
+    // whole point of `try` is that something can reach the handler.
+    //
+    // `fprintf` and `abort`, on the same footing as the `malloc` and `free` that `new`
+    // and `delete` already declare on demand: libc entry points, declared through
+    // runtimeFn so that a Fin program which declared one itself shares the declaration
+    // instead of colliding with it. `llvm.trap` was rejected because it discards the
+    // message, and the corpus wrote "Value must be positive" deliberately.
+    void visit(BlameStatement& node) override {
+        if (!currentFn_) { unsupported(node, "'blame' outside a function"); return; }
+        if (!node.condition) {
+            // `blame;` with no operand. The grammar does not produce one, so this is the
+            // parser and this file disagreeing rather than a program error -- and a
+            // `blame` that checked nothing would be a statement that silently never
+            // fires.
+            unsupported(node, "'blame' with no condition");
+            return;
+        }
+
+        CgVal cond = emit(*node.condition);
+        if (failed_) return;
+        if (!cond.ok()) { unsupported(node, "this blamed expression"); return; }
+        if (cond.type.isStruct() || cond.type.isArray()) {
+            // The raise form. Named as a raise and not as "this condition", because the
+            // two are one keyword and a reader told "condition" would go looking for a
+            // comparison they did not write.
+            unsupported(node, "'blame' raising a value");
+            return;
+        }
+        llvm::Value* test = asCondition(node, cond);
+        if (!test) return;
+
+        auto* failBB = llvm::BasicBlock::Create(ctx_, "blame.fail", currentFn_->fn);
+        auto* okBB = llvm::BasicBlock::Create(ctx_, "blame.ok", currentFn_->fn);
+        // The failing edge is the cold one, and saying so is free: the branch weight is
+        // what stops an assertion from displacing the code it guards.
+        builder_.CreateCondBr(test, okBB, failBB);
+
+        builder_.SetInsertPoint(failBB);
+        if (!emitBlameReport(node)) return;
+        builder_.SetInsertPoint(okBB);
+    }
+
+    // The failing path: print, then abort. Returns false having already reported.
+    //
+    // The message is emitted *here*, inside the failing block, and not beside the
+    // condition. It is an expression -- the analyzer only requires it to be a `string`,
+    // not a literal -- so evaluating it where the condition is would run its side
+    // effects on every pass of an assertion that never fires.
+    //
+    // `"%s"` for the message rather than the message as the format string. They look
+    // equivalent for every message in the corpus and are not: a message containing `%d`
+    // used as a format would read a vararg the caller never passed. The one place this
+    // file builds a printf call for a string it did not write is the one place that
+    // matters.
+    bool emitBlameReport(BlameStatement& node) {
+        llvm::Type* ptrTy = llvm::PointerType::getUnqual(ctx_);
+        llvm::Type* i32Ty = llvm::Type::getInt32Ty(ctx_);
+
+        llvm::Value* message = nullptr;
+        if (node.message) {
+            CgVal m = emit(*node.message);
+            if (failed_) return false;
+            if (!m.ok() || !m.type.isPointer()) {
+                // The analyzer checks the message against `string`, so a non-pointer
+                // here is the two passes disagreeing -- and handing an integer to
+                // `%s` would read it as an address.
+                unsupported(node, "this blame message");
+                return false;
+            }
+            message = m.value;
+        }
+
+        // `stderr` is an external `FILE*`, which is what it is on every libc this
+        // compiler has a target for. Declared as one machine word with no pointee,
+        // because nothing here looks inside it -- it is loaded and passed straight on.
+        llvm::GlobalVariable* errStream = module_.getGlobalVariable("stderr");
+        if (!errStream) {
+            errStream = new llvm::GlobalVariable(
+                module_, ptrTy, /*isConstant=*/false,
+                llvm::GlobalValue::ExternalLinkage, /*Initializer=*/nullptr, "stderr");
+        }
+
+        llvm::FunctionCallee report = runtimeFn(
+            node, "fprintf",
+            llvm::FunctionType::get(i32Ty, {ptrTy, ptrTy}, /*isVarArg=*/true),
+            "a 'blame'");
+        if (!report) return false;
+        llvm::FunctionCallee stop = runtimeFn(
+            node, "abort", llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_), false),
+            "a 'blame'");
+        if (!stop) return false;
+
+        // The location, which is the whole reason a failed assertion is worth more than
+        // a bare abort: `blame_assert.fin:5` is where to look, and the line is a
+        // compile-time constant so it costs an immediate rather than a lookup.
+        llvm::Value* file = builder_.CreateGlobalString(sourceName_);
+        llvm::Value* line = llvm::ConstantInt::get(i32Ty, node.loc.begin.line);
+
+        llvm::Value* stream = builder_.CreateLoad(ptrTy, errStream, "stderr");
+        if (message) {
+            llvm::Value* format =
+                builder_.CreateGlobalString("%s:%d: assertion failed: %s\n");
+            builder_.CreateCall(report, {stream, format, file, line, message});
+        } else {
+            llvm::Value* format = builder_.CreateGlobalString("%s:%d: assertion failed\n");
+            builder_.CreateCall(report, {stream, format, file, line});
+        }
+        builder_.CreateCall(stop, {});
+        // `abort` does not return, and the block has to be terminated or the function is
+        // invalid IR. `unreachable` rather than a branch to the surviving block, because
+        // a branch would tell every later pass that execution continues past a failed
+        // assertion.
+        builder_.CreateUnreachable();
+        return true;
+    }
 
     // `p.get()`, and `q.get()` where q is a `&Point`.
     void visit(MethodCall& node) override {
@@ -5144,7 +5287,8 @@ private:
         llvm::FunctionCallee alloc = runtimeFn(
             node, "malloc",
             llvm::FunctionType::get(llvm::PointerType::getUnqual(ctx_),
-                                    {llvm::Type::getInt64Ty(ctx_)}, false));
+                                    {llvm::Type::getInt64Ty(ctx_)}, false),
+            "an allocation");
         if (!alloc) return;
         llvm::Value* raw = builder_.CreateCall(alloc, {builder_.getInt64(size)}, "new");
         builder_.CreateStore(initial, raw);
@@ -5274,6 +5418,12 @@ private:
 
     DiagnosticEngine& diag_;
     bool debug_ = false;
+    // The path the program was read from, for the one thing in emitted code that names
+    // it: a failed `blame` prints `<file>:<line>: assertion failed`. Held as a string
+    // rather than read from a node's location because a node's location has no filename
+    // -- the lexer initialises every one with a null one (see CodeGen.hpp on why this is
+    // a parameter of generateObject and not recoverable from anything else it gets).
+    std::string sourceName_;
     // Two flags, because "the compile failed" and "the unit in hand cannot be
     // finished" are different facts and one bool was doing both jobs.
     //
@@ -5360,7 +5510,7 @@ private:
 bool backendAvailable() { return true; }
 
 bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngine& diag,
-                    int optLevel, bool debugCodegen) {
+                    int optLevel, bool debugCodegen, const std::string& sourceName) {
     // The target comes first, before a single instruction is emitted, because the
     // module's DataLayout is an *input* to emission and not a stamp applied to the
     // result: `sizeof` folds to a number the layout decides, and a module laid out
@@ -5399,10 +5549,14 @@ bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngin
         return false;
     }
 
-    Emitter emitter(diag, debugCodegen);
+    Emitter emitter(diag, debugCodegen, sourceName);
     llvm::Module& module = emitter.module();
     module.setTargetTriple(triple);
     module.setDataLayout(machine->createDataLayout());
+    // What a failed `blame` prints, and what a debugger reads to find the source. The
+    // module's own name stays "fin": that is its identity, and the file it came from is
+    // a different fact.
+    module.setSourceFileName(sourceName);
 
     if (!emitter.run(ast)) return false;
 
