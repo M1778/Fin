@@ -30,10 +30,25 @@ Every contributor's build acquires a dependency on a specific LLVM, obtained thr
 rather than through whatever the system has. That is slower to set up than `apt install llvm-dev` and
 it is the property that makes the build reproducible.
 
-Release archives must be named with **both** OS and architecture. `finn`'s `download.rs:62-65`
-currently matches assets by OS substring alone, so an arm64 user silently receives an x86_64 build —
-a bug that exists today and that the naming scheme has to make impossible rather than merely
-discouraged.
+Release archives must be named with **both** OS and architecture. When this was written `finn`
+matched assets by OS substring alone, so an arm64 user silently received an x86_64 build — a bug that
+the naming scheme had to make impossible rather than merely discouraged.
+
+**Satisfied, 2026-08-27.** `finn`'s `0dc1015` ("name release assets by architecture, publish their
+checksums, and keep docs off the user's PATH") names the assets by architecture and publishes their
+sums, and the selection is now an exact match rather than a loose one:
+`finn/src/commands/download.rs:157` reads `entry.targets.get(utils::TARGET)`, where `utils::TARGET`
+is `env!("FINN_TARGET")` — the triple that `finn` itself was built for (`finn/src/utils.rs:17`). There
+is no substring to match loosely against, and a target with no archive is an error listing the keys
+that do exist rather than a silent wrong pick.
+
+Two corrections to the sentence above, and the second is this ADR's own subject. The citation was
+`download.rs:62-65`; there is no `download.rs` at `finn`'s root and never was — the file is
+`src/commands/download.rs`, and the logic is at `:157`. And the mechanism was described as OS
+substring matching, which is not what an exact-triple lookup is. **The cited lines drifted as the
+file grew, so the citation would have passed a plausibility check while pointing at the wrong
+statement** — exactly the decay this ADR exists to catch, in this ADR's own text. A citation is a
+pointer and not a measurement, so it is corrected in place rather than left standing beside a note.
 
 CI becomes load-bearing before there is much to test. The suite it runs is four hand-written unit
 tests and an auto-discovered corpus where 39 of 50 files fail, so the matrix will start out proving
