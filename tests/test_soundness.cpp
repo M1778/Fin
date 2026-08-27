@@ -10001,6 +10001,97 @@ TEST(Soundness_MemberOverwrite, AnUnknownTargetStillReports) {
 }
 
 // ===========================================================================
+// A method of the enclosing struct, named rather than called.
+//
+// `tests/samples/stdlib/collection.fin:76` writes
+// `pub getitem <fn(Self, int) => T> = __get,` and :77 the same for `__set`, both
+// naming methods that same struct declares at :61 and :68. The names resolved to
+// nothing -- `Undefined variable '__get'` -- because a member default is analysed
+// with the struct as context but only fields were looked up in it. The comment
+// beside :76 says what the reference is for, "points to __get instead of copying
+// it", against the commented `implements cast<auto>(__get)` at :79 "which copies
+// the function instead of just pointing to it".
+//
+// Resolution is all that is claimed. The registered method type is receiver-less,
+// because `a.__get(i)` passes the receiver implicitly, while the corpus's field
+// types name a receiver -- so the two still disagree, which the KnownDefect below
+// books.
+// ===========================================================================
+
+TEST(Soundness_MemberReference, AMethodOfTheEnclosingStructResolvesToItsType) {
+    // Written against the type the method is registered with, so a clean compile is
+    // the assertion that the name resolved *and* what it resolved to.
+    const FincRun r = compile(
+        "struct Coll {\n"
+        "  pub getitem <fn(int) => int> = __get,\n"
+        "  pub fun __get(self: &Self, index: int) <int> { return index; }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberReference, AMethodDeclaredAfterTheDefaultIsStillFound) {
+    // collection.fin's own order: the defaults are on :76 and :77 and the methods are
+    // above them, but nothing about a member default depends on that -- signatures are
+    // registered for the whole struct before any default is walked. Asserted because
+    // the opposite would make the fix depend on declaration order inside a struct.
+    const FincRun r = compile(
+        "struct Coll {\n"
+        "  pub setitem <fn(int, int) => noret> = __set,\n"
+        "  pub fun __set(self: &Self, index: int, value: int) <noret> { }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberReference, ANameThatIsNeitherAFieldNorAMethodStillReports) {
+    // The boundary. A member default resolves fields, then methods, and then reports --
+    // so a misspelled method name is still named, rather than becoming a silent null.
+    const FincRun r = compile(
+        "struct Coll {\n"
+        "  pub getitem <fn(int) => int> = __gett,\n"
+        "  pub fun __get(self: &Self, index: int) <int> { return index; }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined variable '__gett'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_MemberReference, AMethodReferenceDoesNotCarryItsReceiver) {
+    // collection.fin:76 and :77 as the corpus writes them. The field type names the
+    // receiver and the registered method type does not, so the reference resolves and
+    // then fails to fit -- two diagnostics that changed identity rather than going
+    // away, from `Undefined variable '__get'` to a disagreement about the signature.
+    //
+    // Booked and not fixed because the corpus does not say which side is the mistake.
+    // The receiver slot of a function *type* is spelled `Self` four times
+    // (stdlib/collection.fin:76, :77, stdlib/hashmap.fin:50, :51) and `&Self` once
+    // (stdlib/collection.fin:18), while every method the corpus declares takes
+    // `self: &Self` and no method anywhere declares `self: Self`. So a fix needs two
+    // answers that are not here: whether a method reference prepends its receiver, and
+    // whether a `Self` in that slot matches a `&Self` receiver -- the second being the
+    // pointer-reads-as-pointee question `tests/samples/const.fin:82,84,89,102` raises
+    // and cannot answer on its own either.
+    const FincRun r = compile(
+        "struct Coll {\n"
+        "  pub getitem <fn(Self, int) => int> = __get,\n"
+        "  pub fun __get(self: &Self, index: int) <int> { return index; }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(r.exitCode, 0)
+        << "GOOD NEWS: a method reference fits a field type that names the receiver.\n"
+           "Invert this test -- the program should compile clean -- and rename it to\n"
+           "Soundness_MemberReference.AMethodReferenceCarriesItsReceiver.\n"
+        << stripAnsi(r.err);
+
+    // The name is not what is reported any more. This half is what stops the test from
+    // passing for the old reason if the resolution above is ever lost.
+    EXPECT_EQ(stripAnsi(r.err).find("Undefined variable"), std::string::npos)
+        << "the method name resolves; only its signature disagrees\n"
+        << stripAnsi(r.err);
+}
+
+// ===========================================================================
 // The compiler API: `#[use(...)]`, the two namespaces, and the four Tier-1
 // components.
 //

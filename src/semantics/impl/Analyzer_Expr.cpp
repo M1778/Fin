@@ -361,6 +361,46 @@ void SemanticAnalyzer::visit(Identifier& node) {
                 lastExprType = fieldType;
                 return;
             }
+
+            // A method of the enclosing struct, named rather than called, is a value
+            // of its own function type.
+            //
+            // tests/samples/stdlib/collection.fin:76 writes
+            // `pub getitem <fn(Self, int) => T> = __get,` and :77
+            // `pub setitem <fn(Self, int, T) => void> = __set,`, where `__get` and
+            // `__set` are that same struct's methods, declared at :61 and :68. The
+            // comment beside :76 says what the reference is for -- "points to __get
+            // instead of copying it" -- and the commented pair at :79-80 names the
+            // operation it is being contrasted with, `implements cast<auto>(__get)`,
+            // "which copies the function instead of just pointing to it". So the name
+            // is a reference to the function, and both diagnostics here were
+            // `Undefined variable` about a method the file declares fifteen lines
+            // earlier.
+            //
+            // Beside the field lookup and not before it, because a field of the same
+            // name is the nearer member: the two share one namespace on the struct and
+            // a field is what `self.name` means when both exist. Beside it rather than
+            // at the end of this function, because both are the same implicit-`self`
+            // step -- what differs is only which of the struct's two member tables the
+            // name is in.
+            //
+            // What this fixes is a *scope* question and nothing more. The type handed
+            // back is the method's as registered, which is receiver-less, because
+            // `a.__get(i)` passes the receiver implicitly. The corpus's field types
+            // name a receiver instead -- `fn(&Self, T)` at :18, `fn(Self, int)` at :76
+            // and :77, `cast<fn(Self, T)>` at stdlib/hashmap.fin:50 and :51 -- so both
+            // sites still report, now as a disagreement about the signature rather
+            // than about the name. Whether a method reference carries its receiver as
+            // a first parameter, and whether a `Self` written in that slot matches a
+            // `self: &Self` receiver, is a language question this pass does not
+            // answer: the corpus spells that slot `Self` four times and `&Self` once
+            // while every method it declares takes `self: &Self`, and no line here
+            // says which of the two is the mistake.
+            // Soundness_MemberReference.AMethodOfTheEnclosingStructResolvesToItsType.
+            if (auto methodType = st->getMethodType(node.name)) {
+                lastExprType = methodType;
+                return;
+            }
         }
     }
     
