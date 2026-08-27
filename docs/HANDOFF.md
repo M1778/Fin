@@ -376,7 +376,7 @@ where marked:
   edges; what `&"Hello world"` means as a `&string`; `#[slaveof(...)]` lifetimes; struct `==`;
   whether a `class` is a value or a reference; which passes `-O`
   runs; namespaces; `pub` export; macros in imports; `Any<Printable>`; `cast<auto>`; variance;
-  interface-member defaults; integer conversions; `GET_MEMORY_LIMIT`.
+  interface-member defaults; `GET_MEMORY_LIMIT`.
 - On a **template**, whether `#[llvm_name="vec2_f32"]` names the template or one instantiation
   (the code reads it as the template's; nothing observable rides on it — see the comment on
   `llvmNameOf`).
@@ -394,6 +394,59 @@ where marked:
   because it lets two empty-struct values share an address, and that surprise surfaces far
   from its cause. Unblocks `blame_assert.fin` (`an empty struct 'M<int>'`), which has no
   suppressed statements behind it.
+
+- ~~**Whether an unimported `pub` name in `namespace std` resolves (the "prelude question")**~~ —
+  **RULED 2026-08-27, and the question was two questions.** The invention half (`printf` is
+  declared in 18 samples, used bare in exactly two, and is no builtin — `grep printf
+  src/semantics` finds nothing) is answered by a **new attribute, `#[global]`**: a declaration
+  marked `#[global]` is visible to every file in the compiler session with no import, opt-in per
+  declaration, and **usable only inside the `std` namespace**. The owner's intent, quoted: "very
+  good for having a std/io lib but then only making the printf function global for beginners but
+  everything else". So `printf` in `lib/std/stdio.fin` is marked and **nothing else is**.
+  `#[global]` written outside `namespace std` must be **refused, not ignored** — a silently
+  ignored attribute is the same class of fault as a silently dropped statement. The ambience half
+  is answered **no**: `Any` (`lib/std/types.fin:35`), `Enum` (`lib/std/enums.fin:17`),
+  `getkeyid`/`keyidof` (`lib/std/enums.fin:24,31`) are all declared `pub` inside `#[export]` and
+  all stay import-only. Note `getkeyid`/`keyidof` were never refusals; and
+  `literal_struct.fin:30` is a third category, declaring `printf` gated inside
+  `if (!@defined("printf"))`. `#[global]` appears nowhere in the tree — `.fin`, `.cpp`, `.hpp`,
+  `.y`, `.l` and `docs/` all checked — so it is invention by instruction, the one case where
+  inventing is correct. **Every corpus note that books something as "the prelude question" is now
+  wrong in one of two ways and should say which half it means.** → ADR 0021.
+
+- ~~**Integer conversions**~~ — **RULED 2026-08-27: implicit widening where no value is lost.**
+  `int`→`ulong`, `int`→`long`, `ushort`→`int` are allowed; `ulong`→`int` is refused. The corpus is
+  the evidence and the owner accepted it: `stdlib/stdio.fin` writes `ulong` lengths against `int`
+  indices across eleven sites between `:110` and `:135` with **no cast anywhere**, and a language
+  intending explicit conversion would have shown casts at those sites. Widths come from
+  `src/types/Layout.hpp`, the compiler's single scalar table — a second list is how two answers
+  come apart. Expected to clear 5 of `stdlib/stdio.fin`'s 19 diagnostics with no sample edit. →
+  ADR 0022.
+
+- ~~**The `@macro` declaration form**~~ — **RULED 2026-08-27: design it now.** Chosen over
+  keeping `format!`/`map!`/`coll!`/`magic_add!` refused and over declaring `format!` alone.
+  `tests/samples/macro_definitions.fin` is the only file that declares an `@macro` and it sits
+  entirely inside a `/* [WIP] … (NOT DECIDED YET) */` block — the corpus saying in its own words
+  that the form is undecided, which is also why that sample measures OBJECT_CLEAN. **ADR 0020
+  already exists** on macro hygiene ("injected identifiers are fresh and only qualified paths are
+  spelled") and this builds on it rather than replacing it. `format!` has 6 sites and may belong
+  as a builtin rather than a declared macro; `importing.fin:23`'s `macros.magic_add!` raises
+  whether a macro exports across a module boundary. Expected: 8 diagnostics, 3 samples. →
+  **ADR 0023, design and plan only, no code.**
+
+- ~~**What a `$type` value can do (wave 4)**~~ — **RULED 2026-08-27: open it properly.** Chosen
+  over the narrow two-case fix, so the boundary at `src/semantics/impl/Analyzer_Core.cpp:161-163`
+  is being **replaced rather than crossed** — it was drawn deliberately and says in as many words
+  that comparison, instantiation and passing to `compiler.types.*` are wave 4. Two pieces of
+  evidence for the narrow version survive as inputs: `implements` **is** already registered at
+  `src/semantics/CompilerApi.cpp:32` matching `docs/compiler-api.md:490` and nothing binds
+  `@implements` to it, and that same doc line asserts a `$struct` is accepted where a `$type` is
+  asked (only argument *order* is checked). A third: `compatible` is a plain `fun` rather than a
+  `@special`, so a `#[use(...)]` grant is not expressible there — evidence that a builtin
+  `@`-special is not grant-gated. Also owed: why `implements` is registered when `defined`
+  (`docs/compiler-api.md:643`) and `Alloc`/`Free` (`:668-669`) are declared and not registered,
+  since all three are the same shape. Affects `literal_interface.fin` (flips),
+  `stdlib/types.fin:26:74` and `literal_struct.fin:5:27`. → **ADR 0024, design and plan only.**
 
 ## 9. Documentation still owed
 
