@@ -461,7 +461,40 @@ bool SemanticAnalyzer::checkType(ASTNode& node, std::shared_ptr<Type> actual, st
     // one, naming a type the program never wrote. isErrorType rather than a plain
     // as<ErrorType>() because `&NoSuchType` and `[NoSuchType]` reach here wrapped.
     if (isErrorType(actual) || isErrorType(expected)) return true;
-    
+
+    // A negative constant is not an unsigned value, whatever the widths say.
+    //
+    // Read before assignability and not after, because ADR 0022's widening makes
+    // `int` -> `ulong` succeed and `constantFitsType` below only ever runs when
+    // assignability has already failed. Without this, widening would smuggle in
+    // `let x <ulong> = -1;` -- which is the one thing
+    // Soundness_IntegerConstants.ANegativeConstantIsNotUnsigned exists to catch. That
+    // test names this exact mistake ("a fix that admits `int` to `uint` wholesale
+    // passes every test above and this one is the only thing that catches it") and
+    // says the check must read the AST, because `-1` is a UnaryOp over a Literal and
+    // so a syntactic question with an exact answer.
+    //
+    // The widening ruling did not settle this one. tests/samples/stdlib/stdio.fin:109
+    // writes `fun read(nbytes: ulong = -1)` and :110 tests `nbytes == -1`, the C idiom
+    // for "the maximum", so a normative sample does ask for wraparound -- and that is
+    // the open ruling the Soundness test names, with the two outcomes it lists: invert
+    // the test and drop the `!negative` in constantFitsType, or stdio.fin gains a
+    // ratified edit. Widening must not decide it as a side effect, so :110 stays
+    // refused exactly as it was before ADR 0022, and what widening clears in that file
+    // is :130 and :135 -- `int` to `ulong` with no constant in sight.
+    {
+        bool negative = false;
+        if (integerConstant(node, negative) && negative) {
+            if (const auto* prim = expected->as<PrimitiveType>()) {
+                if (isUnsignedIntegerName(prim->name)) {
+                    error(node, fmt::format("Type mismatch: expected '{}', got '{}'",
+                                            expected->toString(), actual->toString()));
+                    return false;
+                }
+            }
+        }
+    }
+
     if (!actual->isAssignableTo(*expected)) {
         if (constantFitsType(node, *expected)) return true;
         error(node, fmt::format("Type mismatch: expected '{}', got '{}'", expected->toString(), actual->toString()));

@@ -4423,6 +4423,140 @@ TEST(Soundness_IntegerConstants, ANegativeConstantIsNotUnsigned) {
     }
 }
 
+// ===========================================================================
+// Implicit integer widening (ADR 0022).
+//
+// tests/samples/stdlib/stdio.fin is the site. It declares `stream_length <ulong>`
+// and `pointer <ulong>` (:81, :82, :96, :97) and surrounds them with `int` lengths
+// and `int` loop indices, then writes not one cast: `self.stream_length =
+// _temp.length` on :130 and `= data.length` on :135 hand an `int` to a `ulong`.
+// Five diagnostics in that file were this one gap, and the ruling is that an
+// integer converts implicitly to a wider integer wherever no value is lost.
+//
+// Widths come from src/types/Layout.hpp, which is the compiler's only table of
+// them. Two lists is how two answers come apart, so the rule reads that one.
+// ===========================================================================
+
+TEST(Soundness_IntegerWidening, AnIntegerReachesAWiderOne) {
+    // Both directions of sign, which is the ruling as given: `ushort` -> `int` loses
+    // nothing, and `int` -> `ulong`/`long` is what the corpus writes.
+    for (const char* pair : {"int|long", "int|ulong", "ushort|int", "char|int",
+                             "short|long", "uint|ulong", "short|int"}) {
+        const std::string s = pair;
+        const auto bar = s.find('|');
+        const std::string from = s.substr(0, bar), to = s.substr(bar + 1);
+        const std::string code =
+            "fun main() <noret> { let a <" + from + "> = 1; let b <" + to + "> = a; }\n";
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << from << " widens to " << to << ":\n" << code << r.err;
+    }
+}
+
+TEST(Soundness_IntegerWidening, ANarrowerTargetIsStillRefused) {
+    // The half that must reject, and the reason the rule is a width comparison rather
+    // than "integers are interchangeable". `ulong` -> `int` is the pair the corpus's
+    // own remaining diagnostics stand on (stdlib/stdio.fin:115, :126).
+    for (const char* pair : {"long|int", "ulong|int", "int|short", "int|char",
+                             "ulong|uint", "long|ushort"}) {
+        const std::string s = pair;
+        const auto bar = s.find('|');
+        const std::string from = s.substr(0, bar), to = s.substr(bar + 1);
+        const std::string code =
+            "fun main() <noret> { let a <" + from + "> = 1; let b <" + to + "> = a; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << from << " must not narrow to " << to << ":\n" << code;
+        EXPECT_NE(stripAnsi(r.err).find("expected '" + to + "', got '" + from + "'"),
+                  std::string::npos)
+            << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidening, AnEqualWidthSignChangeIsNotAWidening) {
+    // Reinterpreting a sign is not a conversion that loses nothing, and no corpus line
+    // writes one. Both directions, so neither is admitted by accident.
+    for (const char* pair : {"int|uint", "uint|int", "short|ushort", "ushort|short",
+                             "long|ulong", "ulong|long"}) {
+        const std::string s = pair;
+        const auto bar = s.find('|');
+        const std::string from = s.substr(0, bar), to = s.substr(bar + 1);
+        const std::string code =
+            "fun main() <noret> { let a <" + from + "> = 1; let b <" + to + "> = a; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << from << " must not reach " << to << ":\n" << code;
+    }
+}
+
+TEST(Soundness_IntegerWidening, TheTablesAliasSpellingsAreNotTypeNamesYet) {
+    // Layout.hpp pairs each width with an alias -- `int8`, `uint8`, `int16`, `int32`,
+    // `uint64`, `byte` -- and its header says they are there "so that lib/std's
+    // `i64`/`u64`/`size_t` resolve to a width rather than to a second table". None of
+    // those six is a *type name*: the analyzer's constructor registers `int`, `uint`,
+    // `short`, `ushort`, `long`, `ulong`, `char`, `bool`, `float`, `double`, `string`
+    // and no alias, so no program can write one.
+    //
+    // The corpus reaches 64 bits a different way, through Fin-level aliases over a
+    // width annotation: `pub type i64 = int{64};` (lib/std/types.fin:19,
+    // stdlib/types.fin:46), `pub type u64 = uint{64};` (:21, :49) and
+    // `type size_t = uint{64};` (stdlib/memory.fin:8). So the table's aliases and the
+    // corpus's spellings do not meet, and this test is what stops that going unnoticed
+    // -- it is pinned here rather than left implicit because the equal-width branch of
+    // the widening rule exists precisely for two names of one scalar, and nothing in
+    // source can reach it until these resolve.
+    //
+    // Not a claim that they *should* stay undefined. It is a claim about which of the
+    // two spellings is live today, and the moment one is registered this test says so
+    // by failing.
+    for (const char* t : {"int8", "uint8", "int16", "uint16", "int32", "uint32",
+                          "int64", "uint64", "byte"}) {
+        const std::string code =
+            std::string("fun main() <noret> { let a <") + t + "> = 1; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0)
+            << "`" << t << "` is a width in Layout.hpp and not a type name; if it is one "
+               "now, the equal-width branch of the widening rule is reachable and this "
+               "test should assert that instead:\n"
+            << code;
+    }
+}
+
+TEST(Soundness_IntegerWidening, WideningDoesNotReachBoolOrFloatOrString) {
+    // ScalarKind keeps these out on its own -- a bool is its own kind and one bit, a
+    // float is its own kind -- and this is the assertion that the rule stayed a rule
+    // about integers. `int` -> `float` is legal and stays legal, by the separate line
+    // above it in PrimitiveType::isAssignableTo that the corpus's arithmetic needs.
+    for (const char* code : {"fun main() <noret> { let a <int> = 1; let b <bool> = a; }\n",
+                             "fun main() <noret> { let a <bool> = true; let b <int> = a; }\n",
+                             "fun main() <noret> { let a <int> = 1; let b <string> = a; }\n",
+                             "fun main() <noret> { let a <double> = 1.0; let b <long> = a; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << "widening is about integers only:\n" << code;
+    }
+    const FincRun toFloat =
+        compile("fun main() <noret> { let a <int> = 1; let b <float> = a; }\n");
+    EXPECT_EQ(toFloat.exitCode, 0) << "int -> float is unchanged:\n" << toFloat.err;
+}
+
+TEST(Soundness_IntegerWidening, WideningDoesNotAdmitANegativeConstantToAnUnsignedTarget) {
+    // The interaction that had to be got right, and the reason checkType reads the
+    // constant before it asks about assignability. Widening makes `int` -> `ulong`
+    // succeed, and constantFitsType -- which holds the `!negative` rule -- runs only
+    // when assignability fails, so ordering is the whole of it. Held from the other
+    // side by Soundness_IntegerConstants.ANegativeConstantIsNotUnsigned, which is the
+    // test that predicted this exact mistake.
+    for (const char* t : {"uint", "ulong", "ushort"}) {
+        const std::string code =
+            std::string("fun main() <noret> { let x <") + t + "> = -1; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0)
+            << "a negative constant is not an unsigned value, widening or not:\n" << code;
+    }
+    // And a *variable* of signed type still widens, so the guard is about constants and
+    // did not quietly revoke the rule.
+    const FincRun viaVar =
+        compile("fun main() <noret> { let a <int> = 1; let b <ulong> = a; }\n");
+    EXPECT_EQ(viaVar.exitCode, 0) << viaVar.err;
+}
+
 TEST(Soundness_IntegerConstants, AConstantIsStillNotABoolOrAString) {
     // The rule is about integer and floating targets and nothing else. Without this,
     // "the context decides" is indistinguishable from "the check was deleted".
@@ -4574,19 +4708,51 @@ TEST(Soundness_BuiltinMembers, AStringHasALengthOfTypeInt) {
 }
 
 TEST(Soundness_BuiltinMembers, ALengthIsAnIntAndNotAnotherIntegerWidth) {
-    // The test that makes the width a decision instead of an accident. With no
-    // conversion between integer types, `let n <ulong> = a.length;` is rejected if and
-    // only if `.length` is not itself a `ulong` -- so this failing means the width
-    // moved, and the four corpus sites that compare a length against an `int` moved
-    // with it. If a ruling widens it, that ruling owns this test and the samples.
-    for (const char* code : {"fun main() <noret> { let a <[int]> = [1]; let n <ulong> = a.length; }\n",
-                             "fun main() <noret> { let s <string> = \"a\"; let n <ulong> = s.length; }\n"}) {
-        const FincRun r = compile(code);
-        EXPECT_EQ(r.exitCode, 1) << "`.length` is an int, so a ulong target must be "
-                                    "rejected while no integer conversion exists:\n"
-                                 << code << r.err;
-        EXPECT_NE(stripAnsi(r.err).find("expected 'ulong', got 'int'"), std::string::npos)
-            << code << stripAnsi(r.err);
+    // The test that makes the width a decision instead of an accident. It used to pin
+    // the width by handing `.length` to a `ulong` and requiring a refusal, which worked
+    // only while no conversion between integer types existed. ADR 0022 introduced one,
+    // and this test's own note said that ruling would own it: "If a ruling widens it,
+    // that ruling owns this test and the samples."
+    //
+    // Same claim, mechanism rebuilt on the new rule. Widening accepts a wider target
+    // and refuses a narrower one, so a width is pinned from both sides at once:
+    // `.length` reaches an `int`, which it could not if it were a `long`, and does not
+    // reach a `short`, which it would if it were a `short` or narrower. That is 32 bits
+    // exactly. The sign is pinned by `uint` -- equal width, opposite sign, which
+    // widening deliberately does not admit -- so `.length` is `int` and not `uint`.
+    for (const char* subject : {"fun main() <noret> { let a <[int]> = [1]; let n <%T%> = a.length; }\n",
+                                "fun main() <noret> { let s <string> = \"a\"; let n <%T%> = s.length; }\n"}) {
+        const std::string tmpl = subject;
+        const auto with = [&tmpl](const std::string& t) {
+            std::string out = tmpl;
+            const auto at = out.find("%T%");
+            out.replace(at, 3, t);
+            return out;
+        };
+
+        // Reaches an `int`: it is no wider than 32 bits.
+        const FincRun toInt = compile(with("int"));
+        EXPECT_EQ(toInt.exitCode, 0) << "`.length` is an int:\n" << with("int") << toInt.err;
+
+        // Reaches a `long`: widening, and the assertion that the two directions differ.
+        const FincRun toLong = compile(with("long"));
+        EXPECT_EQ(toLong.exitCode, 0) << "an int widens to a long:\n" << with("long") << toLong.err;
+
+        // Does not reach a `short`: it is no narrower than 32 bits.
+        const FincRun toShort = compile(with("short"));
+        EXPECT_NE(toShort.exitCode, 0)
+            << "`.length` is an int, so a short target narrows and must be refused:\n"
+            << with("short");
+        EXPECT_NE(stripAnsi(toShort.err).find("expected 'short', got 'int'"), std::string::npos)
+            << with("short") << stripAnsi(toShort.err);
+
+        // Does not reach a `uint`: same width, opposite sign, which is not a widening.
+        const FincRun toUint = compile(with("uint"));
+        EXPECT_NE(toUint.exitCode, 0)
+            << "`.length` is signed, so a uint target must be refused:\n"
+            << with("uint");
+        EXPECT_NE(stripAnsi(toUint.err).find("expected 'uint', got 'int'"), std::string::npos)
+            << with("uint") << stripAnsi(toUint.err);
     }
 }
 
