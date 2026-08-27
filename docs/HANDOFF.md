@@ -448,6 +448,62 @@ where marked:
   since all three are the same shape. Affects `literal_interface.fin` (flips),
   `stdlib/types.fin:26:74` and `literal_struct.fin:5:27`. → **ADR 0024, design and plan only.**
 
+- ~~**What a failed `blame` does at run time**~~ — **RULED 2026-08-27: print and abort.** The
+  location and message go to stderr, then `abort` with a non-zero status —
+  `blame_assert.fin:5: assertion failed: Value must be positive`, and without the optional
+  string, `blame_assert.fin:8: assertion failed`. `fprintf` + `abort`, no runtime and no
+  unwinding. `llvm.trap` was rejected because it discards a message the corpus wrote on
+  purpose. **What made this rulable is that this entry's own blocker was about the wrong half
+  of the feature:** it read "the runtime shape of a raised value is not settled and there is no
+  runtime", but **every `blame` in the codegen-refused corpus is the *assert* form** — a
+  boolean condition with an optional string (`blame_assert.fin:5,:8`, `deeptest4.fin:16,:17`,
+  `arrays.fin:34`, `readonly.fin:56`). The raise form appears only in samples already blocked
+  in the front end (`stdlib/collection.fin:63,:70`, `stdlib/typing.fin:32,:38`), and
+  `blame_assert.fin:15`'s raise form is commented out. Catchability was rejected for want of a
+  witness: **no assert-form `blame` sits inside a `try`** — `readonly.fin`'s `try/catch` wraps
+  `a.v1 = 5` and its `blame` at `:56` is outside it. Unblocks 5 refusals across
+  `blame_assert.fin`, `deeptest4.fin` and `arrays.fin`, and is far smaller than `[T]`, which
+  drags in the allocator.
+
+- ~~**Struct inheritance layout**~~ — **RULED 2026-08-27: the parent's fields splice in at
+  offset 0**, the child's follow, so a pointer to the child is a valid pointer to the parent.
+  `src/types/Layout.cpp:439-440` already reads a base and starts the child's offset at the
+  parent's size, so the type layer already half-implements it. **Deliberately queued behind
+  `blame` anyway**, on measurement: permitting inheritance clears **zero** samples, because
+  `readonly.fin` then needs a class declaration, `try`/`catch` and `blame`, and
+  `stdlib/hashmap.fin` then needs a constructor on a struct. Parent *methods* are **not** ruled
+  — report rather than invent.
+
+- ~~**`format!`'s visibility**~~ — **RULED 2026-08-27: marked `#[global]`, alongside `printf`.**
+  ADR 0023 ruled `format!` a compiler builtin rather than a declared macro, because
+  `stdlib/stdio.fin:36` makes the format string a *runtime parameter*. Its visibility was the
+  one joint that ADR could not settle: `deeptest2.fin` and `stdlib/error.fin` import nothing at
+  all, so the name must resolve bare. Making the macro namespace ambient was the alternative
+  and was rejected — it would put `format!`'s signature in two places, and one mechanism beats
+  two. **This supersedes ADR 0021's "mark `printf` and nothing else"**: the marked set is
+  `printf` and `format!`. Note `src/semantics/Scope.hpp:32,46` keeps macros in a separate
+  namespace from symbols, so `#[global]` must span both; if it cannot sensibly, that is a
+  finding to report rather than force.
+
+### A warning about this section itself
+
+Two entries here were wrong in a way that cost real work, and both failures were the same
+shape: **the entry described a state the tree had already left.**
+
+`docs/HANDOFF.md` listed *the size of an empty struct* among the unresolved rulings while
+`Soundness_Layout.AnEmptyStructHasNoBytes` had already decided it, in a test carrying an
+argument. The question was put to the owner as open, was ruled the other way, and the two
+passes then disagreed about a size until `191a59a` — which is a miscompile, not a
+discrepancy. **Check whether a test already rules on a question before calling it open.**
+
+The no-backend LLVM-major entry asserted that `grep "development install" tests/` is empty
+and that the stub still said 18. Neither was true when it was written: the stub said 22 and
+two lines of `test_codegen.cpp` matched. **Re-take a citation rather than trusting the entry
+that carries it.**
+
+A third, smaller: `blame` was booked as blocked on the runtime shape of a raised value, which
+is true of the raise form and true of no sample that was actually blocked by it.
+
 ## 9. Documentation still owed
 
 Write the prelude ruling into `const.fin`, `interfaces.fin`, `enums.fin`, `useful_macros.fin`,
