@@ -4557,6 +4557,143 @@ TEST(Soundness_IntegerWidening, WideningDoesNotAdmitANegativeConstantToAnUnsigne
     EXPECT_EQ(viaVar.exitCode, 0) << viaVar.err;
 }
 
+TEST(Soundness_IntegerWidening, AComparisonHappensInTheWiderInteger) {
+    // tests/samples/stdlib/stdio.fin:126 writes `i < self.stream_length` with `i` an
+    // `int` and `stream_length` a `ulong` (:96), and no cast. The comparison branch used
+    // to treat the left operand as the expectation, which its own note called a separate
+    // question; ADR 0022 answers it for integers. Both orders, because a comparison is
+    // symmetric and a rule that depended on which side was written first would be wrong
+    // in exactly the way the constant rule beside it already guards against.
+    for (const char* op : {"<", ">", "<=", ">=", "==", "!="}) {
+        for (const char* order : {"a %OP% b", "b %OP% a"}) {
+            std::string expr = order;
+            expr.replace(expr.find("%OP%"), 4, op);
+            const std::string code =
+                "fun main() <noret> { let a <int> = 1; let b <ulong> = 2;\n"
+                "  let c <bool> = " + expr + "; }\n";
+            const FincRun r = compile(code);
+            EXPECT_EQ(r.exitCode, 0) << code << r.err;
+        }
+    }
+}
+
+TEST(Soundness_IntegerWidening, ArithmeticOnTwoWidthsYieldsTheWider) {
+    // tests/samples/stdlib/stdio.fin:115 writes `self.stream[i+self.pointer]` with `i`
+    // an `int` and `pointer` a `ulong`. The sum is the `ulong`, which is what makes the
+    // subscript legal; the `+` itself used to be the diagnostic.
+    //
+    // The result is read back through an annotation rather than asserted about
+    // internals: `<ulong>` accepts it and `<int>` does not, which pins the sum's type
+    // from both sides. Both operand orders, because the wider must not depend on which
+    // was written first.
+    for (const char* expr : {"a + b", "b + a", "a - b", "a * b", "b / a"}) {
+        const std::string wide =
+            std::string("fun main() <noret> { let a <int> = 4; let b <ulong> = 2;\n"
+                        "  let c <ulong> = ") + expr + "; }\n";
+        const FincRun ok = compile(wide);
+        EXPECT_EQ(ok.exitCode, 0) << wide << ok.err;
+
+        const std::string narrow =
+            std::string("fun main() <noret> { let a <int> = 4; let b <ulong> = 2;\n"
+                        "  let c <int> = ") + expr + "; }\n";
+        const FincRun bad = compile(narrow);
+        EXPECT_NE(bad.exitCode, 0) << "the sum is the wider type, so an int target "
+                                      "narrows:\n" << narrow;
+        EXPECT_NE(stripAnsi(bad.err).find("expected 'int', got 'ulong'"), std::string::npos)
+            << narrow << stripAnsi(bad.err);
+    }
+}
+
+TEST(Soundness_IntegerWidening, AComparisonDoesNotAdmitANegativeConstantToAnUnsigned) {
+    // tests/samples/stdlib/stdio.fin:110 writes `nbytes == -1` on a `ulong`. Whether a
+    // negative constant is a legal unsigned value is the ruling
+    // Soundness_IntegerConstants.ANegativeConstantIsNotUnsigned holds open, and it has
+    // to be answered the same way in a comparison as in a declaration -- checkType
+    // refuses `let x <ulong> = -1`, so this must refuse too, or the compiler disagrees
+    // with itself about one line. Both orders and both operator families.
+    for (const char* expr : {"n == -1", "-1 == n", "n > -1", "-1 < n", "n + -1"}) {
+        const std::string code =
+            std::string("fun main() <noret> { let n <ulong> = 1;\n"
+                        "  let c <auto> = ") + expr + "; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0)
+            << "a negative constant is not an unsigned value here either:\n" << code;
+    }
+    // A signed target takes it, so the guard is about the unsigned side and not about
+    // negative constants in general.
+    const FincRun signedOk =
+        compile("fun main() <noret> { let n <long> = 1; let c <bool> = n == -1; }\n");
+    EXPECT_EQ(signedOk.exitCode, 0) << signedOk.err;
+}
+
+// ===========================================================================
+// A subscript may be any integer (ADR 0022).
+//
+// The same rule an allocation's extent already follows (7f899dd) and from the same
+// table. tests/samples/stdlib/stdio.fin allocates `new [char, nbytes - self.pointer]`
+// with a `ulong` extent on :112 and indexes the result with a `ulong` on :115, so
+// refusing one while accepting the other would be the compiler disagreeing with
+// itself about one buffer.
+// ===========================================================================
+
+TEST(Soundness_IntegerIndex, AnIndexMayBeAnyIntegerType) {
+    for (const char* t : {"int", "uint", "long", "ulong", "short", "ushort", "char"}) {
+        const std::string code =
+            std::string("fun main() <noret> { let a <[int]> = [1, 2, 3];\n"
+                        "  let i <") + t + "> = 1; let v <int> = a[i]; }\n";
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << "an index may be a " << t << ":\n" << code << r.err;
+    }
+}
+
+TEST(Soundness_IntegerIndex, ANonIntegerIndexIsRefusedOnce) {
+    // One fault, one diagnostic. The predicate reports on its own and the caller does
+    // not also check the type, which is the shape 7f899dd fixed for the extent.
+    for (const char* pair : {"string|\"x\"", "bool|true", "float|1.0"}) {
+        const std::string s = pair;
+        const auto bar = s.find('|');
+        const std::string t = s.substr(0, bar), v = s.substr(bar + 1);
+        const std::string code =
+            "fun main() <noret> { let a <[int]> = [1, 2, 3];\n"
+            "  let i <" + t + "> = " + v + "; let v2 <int> = a[i]; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << code;
+        const std::string err = stripAnsi(r.err);
+        EXPECT_NE(err.find("An index must be an integer, not '" + t + "'"), std::string::npos)
+            << code << err;
+        // Counted, so a second message about the same subscript would fail here.
+        size_t n = 0;
+        for (size_t at = err.find("An index must be"); at != std::string::npos;
+             at = err.find("An index must be", at + 1)) ++n;
+        EXPECT_EQ(n, 1u) << "one fault, one diagnostic:\n" << code << err;
+    }
+}
+
+TEST(Soundness_IntegerIndex, AnUnresolvedIndexDoesNotCascade) {
+    // The name is the diagnostic; the subscript adds nothing to it.
+    const FincRun r = compile(
+        "fun main() <noret> { let a <[int]> = [1]; let v <int> = a[nosuchvar]; }\n");
+    EXPECT_NE(r.exitCode, 0);
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("Undefined variable 'nosuchvar'"), std::string::npos) << err;
+    EXPECT_EQ(err.find("An index must be an integer"), std::string::npos)
+        << "an index that already failed to type is not reported twice:\n" << err;
+}
+
+TEST(Soundness_IntegerIndex, AConstantIndexIsStillBoundsChecked) {
+    // The predicate's return value is what lets checkIndexInBounds run, so the bounds
+    // check has to still fire -- both halves of it.
+    const FincRun past = compile("fun main() <noret> { let a <[int, 2]> = [1, 2];\n"
+                                 "  let v <int> = a[5]; }\n");
+    EXPECT_NE(past.exitCode, 0);
+    EXPECT_NE(stripAnsi(past.err).find("out of bounds"), std::string::npos) << stripAnsi(past.err);
+
+    const FincRun neg = compile("fun main() <noret> { let a <[int, 2]> = [1, 2];\n"
+                                "  let v <int> = a[-1]; }\n");
+    EXPECT_NE(neg.exitCode, 0);
+    EXPECT_NE(stripAnsi(neg.err).find("cannot be negative"), std::string::npos) << stripAnsi(neg.err);
+}
+
 TEST(Soundness_IntegerConstants, AConstantIsStillNotABoolOrAString) {
     // The rule is about integer and floating targets and nothing else. Without this,
     // "the context decides" is indistinguishable from "the check was deleted".
@@ -6842,15 +6979,20 @@ TEST(Soundness_PrototypeAccess, ANestedPrototypeIsIndexedTwice) {
 
 TEST(Soundness_PrototypeAccess, AnArrayIsStillNotAPrototype) {
     // The regression guard on the other side: adding a prototype branch must not make
-    // arrays take arbitrary subscripts. `.length` is an int (Soundness_BuiltinMembers)
-    // and so is an array index.
+    // arrays take arbitrary subscripts.
+    //
+    // The claim is unchanged and the wording of the refusal is not. It used to read
+    // `expected 'int', got 'string'`, because an index was checked against `int` by
+    // checkType; ADR 0022 made an index any integer, so the check is its own predicate
+    // and names what it wanted. A string is still not one of them.
     const FincRun r = compile(
         "fun main() <noret> {\n"
         "  let a <[int]> = [1, 2, 3];\n"
         "  let bad <int> = a[\"x\"];\n"
         "}\n");
     EXPECT_EQ(r.exitCode, 1) << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+    EXPECT_NE(stripAnsi(r.err).find("An index must be an integer, not 'string'"),
+              std::string::npos)
         << stripAnsi(r.err);
 }
 

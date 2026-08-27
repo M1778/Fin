@@ -348,6 +348,11 @@ private:
     }
     bool checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected);
 
+    // A subscript may be any integer, on the same rule and from the same table as an
+    // allocation's extent. Returns true when the index is acceptable -- or already
+    // failed to type -- which is also the caller's signal to run the bounds check.
+    bool checkIntegerIndex(ASTNode& node, const std::shared_ptr<Type>& idxType);
+
     // Whether a constant subscript is inside a known extent. Both halves of that are
     // the rule: a run-time index and a dynamic array are both normal, and neither is
     // a thing this can answer. See the definition in Analyzer_Expr.cpp.

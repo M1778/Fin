@@ -71,7 +71,8 @@ bool isAssignableTarget(const Expression* expr) {
 //
 // An unresolved or error type answers *true*, so that a name that already produced a
 // diagnostic does not produce a second one about its increment.
-// Is this type an integer -- any integer -- and so usable as an allocation's extent?
+// Is this type an integer -- any integer -- and so usable as an allocation's extent
+// or as a subscript?
 //
 // The names come from types/Layout.hpp rather than from a list written here, because
 // that header says why not: it is the compiler's one scalar table, and the widths and
@@ -83,15 +84,64 @@ bool isAssignableTarget(const Expression* expr) {
 // `char` answers true, following isSignedIntegerName in Analyzer_Core.cpp, which also
 // counts it. `bool` answers false: the table gives it its own kind, and one bit of
 // value is not a count. No corpus line writes either as an extent.
-bool isIntegerExtentType(const TypePtr& type) {
+//
+// Named for neither caller. It was `isIntegerExtentType` while an allocation's extent
+// was the only place that asked; a subscript asks the same question, and one predicate
+// answering both is the point of the single table.
+bool isAnyIntegerType(const TypePtr& type) {
     auto* prim = dynamic_cast<const PrimitiveType*>(type.get());
     if (!prim) return false;
     const auto info = scalarByName(prim->name);
     return info && info->kind == ScalarKind::Int;
 }
 
-bool isIncrementable(const TypePtr& type) {
-    if (!type || isErrorType(type)) return true;
+// The wider of two integer types, or null when they are not two integers, or when
+// they are the same width with opposite signs -- which neither direction of
+// assignability admits and which therefore has no wider.
+//
+// One function for all three operator families, because "the result is the wider of
+// the two" is one rule and the corpus writes it in each: arithmetic at
+// tests/samples/stdlib/stdio.fin:115 (`i+self.pointer`, an `int` and a `ulong`), a
+// comparison at :126 (`i < self.stream_length`), and an assignment at :130 and :135,
+// which PrimitiveType::isAssignableTo already carries. Asking assignability rather
+// than comparing `bits` keeps that single answer: widening is defined in one place
+// and read here.
+TypePtr widerInteger(const TypePtr& a, const TypePtr& b) {
+    if (!a || !b) return nullptr;
+    if (!isAnyIntegerType(a) || !isAnyIntegerType(b)) return nullptr;
+    if (a->isAssignableTo(*b)) return b;
+    if (b->isAssignableTo(*a)) return a;
+    return nullptr;
+}
+
+bool isUnsignedInteger(const TypePtr& t) {
+    auto* prim = dynamic_cast<const PrimitiveType*>(t.get());
+    if (!prim) return false;
+    const auto info = scalarByName(prim->name);
+    return info && info->kind == ScalarKind::Int && !info->isSigned;
+}
+
+// Is one side a negative constant and the other an unsigned integer?
+//
+// The guard that keeps the widening escapes below from settling an open ruling by
+// accident. `nbytes == -1` at tests/samples/stdlib/stdio.fin:110 is exactly this
+// shape, and whether a negative constant is a legal unsigned value is the question
+// Soundness_IntegerConstants.ANegativeConstantIsNotUnsigned holds open -- it has to
+// be answered the same way in `let x <ulong> = -1` and in `x == -1`, and checkType
+// already refuses the first. Without this, widening `int` -> `ulong` would make the
+// comparison legal while the declaration stayed illegal, which is the compiler
+// disagreeing with itself about one line of one file.
+// Soundness_IntegerWidening.AComparisonDoesNotAdmitANegativeConstantToAnUnsigned.
+bool negativeConstantAgainstUnsigned(const ASTNode& l, const TypePtr& lt,
+                                     const ASTNode& r, const TypePtr& rt) {
+    bool neg = false;
+    if (integerConstant(r, neg) && neg && isUnsignedInteger(lt)) return true;
+    neg = false;
+    if (integerConstant(l, neg) && neg && isUnsignedInteger(rt)) return true;
+    return false;
+}
+
+bool isIncrementable(const TypePtr& type) {    if (!type || isErrorType(type)) return true;
     auto* prim = dynamic_cast<const PrimitiveType*>(type.get());
     if (!prim) return false;
     const std::string& n = prim->name;
@@ -320,6 +370,33 @@ static bool namesAnEnumerator(const std::string& name, const std::shared_ptr<Typ
     return owner && owner->is_enum && owner->getEnumerator(name) != nullptr;
 }
 
+// A subscript may be any integer, and is refused exactly once.
+//
+// The same rule an allocation's extent already follows (7f899dd), for the same reason
+// and from the same table. tests/samples/stdlib/stdio.fin:115 writes
+// `_temp[i+self.pointer]` where `i` is an `int` and `pointer` is a `ulong` (:82, :97),
+// so the subscript is a `ulong`; it was refused as `expected 'int', got 'ulong'`, which
+// is the narrowing direction ADR 0022 keeps refused. But an index is not an assignment:
+// nothing is being stored into an `int`, and the file that allocates
+// `new [char, nbytes - self.pointer]` with a `ulong` extent (:112) indexes the result
+// with a `ulong` on the next line. Refusing one while accepting the other would be the
+// compiler disagreeing with itself about one buffer.
+//
+// Which integer it is does not change what the subscript means, so no width is
+// preferred here and none is reported. `char` counts, `bool` does not; isAnyIntegerType
+// carries both answers and reads types/Layout.hpp for them.
+//
+// Returns true for an index that already failed to type, so `a[nosuchvar]` stays one
+// diagnostic about the name -- and true is also what lets the bounds check run, which
+// is why the caller reads it.
+// Soundness_IntegerIndex.AnIndexMayBeAnyIntegerType, .ANonIntegerIndexIsRefusedOnce.
+bool SemanticAnalyzer::checkIntegerIndex(ASTNode& node, const std::shared_ptr<Type>& idxType) {
+    if (!idxType || isErrorType(idxType)) return true;
+    if (isAnyIntegerType(idxType)) return true;
+    error(node, fmt::format("An index must be an integer, not '{}'", idxType->toString()));
+    return false;
+}
+
 void SemanticAnalyzer::visit(Identifier& node) {
     // 1. Try local scope
     Symbol* sym = currentScope->resolve(node.name);
@@ -538,12 +615,54 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         const bool nullComparison = (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ)
                                     && (isNullLiteral(leftType) || isNullLiteral(rightType));
 
+        // Two integers are comparable when either widens to the other. Analyzer_Expr's
+        // note above says this was unfinished -- "Whether two differently-typed
+        // variables may be compared at all is a separate question" -- and ADR 0022
+        // answers it for integers. tests/samples/stdlib/stdio.fin:126 writes
+        // `i < self.stream_length` with `i` an `int` and `stream_length` a `ulong`
+        // (:96), and :110 writes `nbytes > self.stream_length` with both `ulong`: the
+        // same file compares across the pair and within it, and writes no cast at
+        // either.
+        //
+        // Integers only, so nothing is decided about an `int` against a `float`, for
+        // which the corpus writes no site.
         if (!nullComparison &&
             !constantFitsType(*node.right, *leftType) &&
-            !constantFitsType(*node.left, *rightType)) {
+            !constantFitsType(*node.left, *rightType) &&
+            !(widerInteger(leftType, rightType) &&
+              !negativeConstantAgainstUnsigned(*node.left, leftType,
+                                               *node.right, rightType))) {
             checkType(*node.right, rightType, leftType);
         }
         lastExprType = currentScope->resolveType("bool");
+        return;
+    }
+
+    // Arithmetic on two integers of different widths yields the wider of the two.
+    //
+    // tests/samples/stdlib/stdio.fin:115 writes `self.stream[i+self.pointer]` with `i`
+    // an `int` and `pointer` a `ulong` (:82, :97), so the sum is a `ulong` and the
+    // subscript it feeds is one -- which checkIntegerIndex accepts. Without this the
+    // `+` itself was the diagnostic, `expected 'int', got 'ulong'`, reported about an
+    // addition the file writes with no cast.
+    //
+    // The wider and not the left operand, which is what the fall-through below would
+    // give. `i + n` and `n + i` are the same sum, and making the result depend on which
+    // was written first would be the one thing a width rule must not do.
+    //
+    // Guarded on the negative-constant question exactly as the comparison above is, and
+    // for the same reason: `n - 1` on a `ulong` must not become legal here while
+    // `let x <ulong> = -1` stays refused. When the guard trips, the check runs on the
+    // *operand* rather than falling through to the one below it -- checkType reads the
+    // constant off the node it is handed, and the node below is the whole BinaryOp,
+    // which is not a constant and would let `n + -1` through on widening alone.
+    if (const auto wider = widerInteger(leftType, rightType)) {
+        if (!negativeConstantAgainstUnsigned(*node.left, leftType, *node.right, rightType)) {
+            lastExprType = wider;
+            return;
+        }
+        checkType(*node.right, rightType, leftType);
+        lastExprType = nullptr;
         return;
     }
 
@@ -553,7 +672,6 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         lastExprType = leftType;
     }
 }
-
 void SemanticAnalyzer::visit(UnaryOp& node) {
     node.operand->accept(*this);
     auto type = lastExprType;
@@ -1216,7 +1334,7 @@ void SemanticAnalyzer::visit(ArrayAccess& node) {
         if (dynamic_cast<const ArrayType*>(ptrToArray->pointee.get())) {
             arrExprType = ptrToArray->pointee;
         } else {
-            checkType(*node.index, idxType, intType);
+            checkIntegerIndex(*node.index, idxType);
             lastExprType = ptrToArray->pointee;
             return;
         }
@@ -1239,7 +1357,7 @@ void SemanticAnalyzer::visit(ArrayAccess& node) {
     if (auto* arrType = dynamic_cast<const ArrayType*>(arrExprType.get())) {
         // Only when the type check agreed, so that `a["x"]` gets the one diagnostic
         // about its type and not a second about a number it does not have.
-        if (checkType(*node.index, idxType, intType)) checkIndexInBounds(node, *arrType);
+        if (checkIntegerIndex(*node.index, idxType)) checkIndexInBounds(node, *arrType);
         lastExprType = arrType->element_type;
     } else if (isErrorType(arrExprType)) {
         lastExprType = errorType();  // see the note at the method-call site
@@ -1410,7 +1528,7 @@ void SemanticAnalyzer::visit(NewExpression& node) {
         if (arrNode->size) {
             arrNode->size->accept(*this);
             if (lastExprType && !isErrorType(lastExprType) &&
-                !isIntegerExtentType(lastExprType)) {
+                !isAnyIntegerType(lastExprType)) {
                 error(*arrNode->size,
                       fmt::format("An allocation's size must be an integer, not '{}'",
                                   lastExprType->toString()));
