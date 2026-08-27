@@ -122,7 +122,7 @@ namespace {
 struct StructInfo;
 
 struct CgType {
-    enum class Kind { Void, Int, Float, Ptr, Struct, Array };
+    enum class Kind { Void, Int, Float, Ptr, Struct, Array, Fn };
     llvm::Type* llvmType = nullptr;
     Kind kind = Kind::Void;
     bool isSigned = true;
@@ -173,10 +173,31 @@ struct CgType {
     // contain one.
     std::shared_ptr<CgType> pointee;
 
+    // Set for Kind::Fn and null otherwise: what the function value's signature is.
+    //
+    // A Fin function value is a bare code pointer -- see visit(LambdaExpression&) for
+    // why the corpus settles that and not a closure pair -- so its llvmType is the same
+    // `ptr` every other pointer is, and the signature is not recoverable from it. An
+    // indirect call needs it: `CreateCall` on a pointer callee takes the
+    // llvm::FunctionType explicitly, and getting it wrong reads argument registers the
+    // caller never set. So it is carried here or it is nowhere.
+    //
+    // `result` and `params` are the Fin-level types and `llvmSignature` is what the
+    // call instruction wants. Both, rather than one derived from the other: the LLVM
+    // signature has lost which of two same-width integers was signed, and a conversion
+    // at a call site through this pointer needs that.
+    //
+    // shared_ptr for the reason `element` and `pointee` are: `fn() -> fn() -> int`
+    // needs a CgType to contain one.
+    std::shared_ptr<CgType> result;
+    std::vector<std::shared_ptr<CgType>> params;
+    llvm::FunctionType* llvmSignature = nullptr;
+
     bool isVoid() const { return kind == Kind::Void; }
     bool isStruct() const { return kind == Kind::Struct; }
     bool isArray() const { return kind == Kind::Array; }
     bool isPointer() const { return kind == Kind::Ptr; }
+    bool isFn() const { return kind == Kind::Fn; }
     // What may not cross an `@define` boundary or a C variadic: the platform ABI
     // decides how each is passed and clang implements that classification, so
     // emitting the LLVM aggregate would link cleanly and pass garbage.
@@ -412,17 +433,16 @@ public:
         // became rather than lost.
         if (const TypeBinding* bound = boundBinding(node)) return bound->type;
 
-        // A nullable, a function type, a prototype or a generic argument list all
-        // mean "not this slice" rather than "the base name" -- silently dropping the
-        // decoration is how `[int]` would become `int` and start being copied by
-        // value.
-        // An array is one of the two decorations this slice lowers, and only when
+        // A nullable, a prototype or an erasure constraint all mean "not this slice"
+        // rather than "the base name" -- silently dropping the decoration is how
+        // `[int]` would become `int` and start being copied by value.
+        // An array is one of the three decorations this slice lowers, and only when
         // its extent is written and constant. See mapArray.
         if (auto* arr = dynamic_cast<const ArrayTypeNode*>(node)) {
             if (node->pointer_depth != 0 || node->is_nullable) return std::nullopt;
             return mapArray(*arr);
         }
-        // A pointer is the other. `pointer_depth` is checked and never set: the
+        // A pointer is the second. `pointer_depth` is checked and never set: the
         // parser builds a PointerTypeNode for every spelling of a pointer type
         // (`&int`, `*int`, `&&int`) and leaves the counter at 0, so a non-zero one
         // would be a second encoding of the same fact and this file would be
@@ -434,9 +454,17 @@ public:
             }
             return mapPointer(*ptr);
         }
+        // A function type is the third decoration this slice lowers. Before the
+        // catch-all below, which used to reject every FunctionTypeNode outright.
+        if (auto* fn = dynamic_cast<const FunctionTypeNode*>(node)) {
+            if (node->pointer_depth != 0 || node->is_array || node->is_nullable ||
+                node->array_size) {
+                return std::nullopt;
+            }
+            return mapFunction(*fn);
+        }
         if (node->pointer_depth != 0 || node->is_array || node->is_nullable ||
-            node->is_prototype || !node->implements_list.empty() || node->array_size ||
-            dynamic_cast<const FunctionTypeNode*>(node)) {
+            node->is_prototype || !node->implements_list.empty() || node->array_size) {
             return std::nullopt;
         }
         // `Box<int>` -- a generic argument list, which is the third decoration this
@@ -482,6 +510,52 @@ public:
         CgType t;
         t.kind = CgType::Kind::Ptr;
         t.llvmType = llvm::PointerType::getUnqual(ctx_);
+        return t;
+    }
+
+    // `fn(int, int) -> int` becomes one machine word -- a bare code pointer -- with the
+    // signature recorded beside it (CgType::result, ::params, ::llvmSignature).
+    //
+    // A bare pointer and not a closure pair, and the corpus is what settles it rather
+    // than a preference: every one of the thirteen lambdas the samples write reads
+    // nothing but its own parameters (and, at lambdas.fin:58, the global `printf`, which
+    // is a symbol and not a capture). Nothing in the corpus closes over a local, so the
+    // second word of a pair would be a word every function value carried for no reader,
+    // and it would have to be threaded through every `fn` field, parameter and return.
+    // A lambda that does read an enclosing local is refused by name rather than
+    // lowered -- see enclosingNames_ -- so the day one appears is the day the pair has
+    // to be designed, and this shape does not quietly compile it wrong in the meantime.
+    //
+    // `fn<T: Castable>(m: T) -> T` (lambdas.fin:69) refuses here. A generic function
+    // type has no signature until someone names the arguments, and a value of it is a
+    // pointer to code that has not been emitted -- monomorphisation has nothing to key
+    // on. That is a decision about generic function values, not a gap in this mapping.
+    std::optional<CgType> mapFunction(const FunctionTypeNode& node) const {
+        if (!node.generic_params.empty() || !node.generics.empty()) return std::nullopt;
+        auto ret = map(node.return_type.get());
+        if (!ret) return std::nullopt;
+
+        CgType t;
+        t.kind = CgType::Kind::Fn;
+        // The same `ptr` every other pointer is: LLVM has had one since 15, and a
+        // function pointer was never a distinct type in the IR anyway.
+        t.llvmType = llvm::PointerType::getUnqual(ctx_);
+        t.result = std::make_shared<CgType>(*ret);
+
+        std::vector<llvm::Type*> llvmParams;
+        for (auto& p : node.param_types) {
+            auto mapped = map(p.get());
+            if (!mapped) return std::nullopt;
+            // `fn(void)` is not a nullary function, it is a parameter with no
+            // representation. Refused rather than dropped, because dropping it would
+            // make `fn(void) -> int` and `fn() -> int` the same type.
+            if (mapped->isVoid()) return std::nullopt;
+            t.params.push_back(std::make_shared<CgType>(*mapped));
+            llvmParams.push_back(mapped->llvmType);
+        }
+        // No vararg form: a `fn` type has no syntax for `...`, so a variadic function
+        // has no type here to be a value of. visit(Identifier&) refuses one by name.
+        t.llvmSignature = llvm::FunctionType::get(ret->llvmType, llvmParams, false);
         return t;
     }
 
@@ -816,6 +890,20 @@ private:
         }
         if (auto* ptr = dynamic_cast<const PointerTypeNode*>(type))
             return "&" + spell(ptr->pointee.get(), substituted);
+        // `fn(int, int) -> int`, and recursively. The node's own `name` is the bare word
+        // "fn", so without this every function type in every refusal read as "of type
+        // 'fn'" -- which does not distinguish the generic one this file refuses from the
+        // plain one it lowers, and those refuse for entirely different reasons.
+        if (auto* fn = dynamic_cast<const FunctionTypeNode*>(type)) {
+            std::string out = "fn";
+            if (!fn->generic_params.empty()) out += "<...>";
+            out += "(";
+            for (size_t i = 0; i < fn->param_types.size(); ++i) {
+                if (i) out += ", ";
+                out += spell(fn->param_types[i].get(), substituted);
+            }
+            return out + ") -> " + spell(fn->return_type.get(), substituted);
+        }
         if (auto* arr = dynamic_cast<const ArrayTypeNode*>(type)) {
             const std::string inner = spell(arr->element_type.get(), substituted);
             uint64_t extent = 0;
@@ -916,6 +1004,23 @@ private:
     // A vector rather than a set because a body refuses one or two names at most, and
     // because this file deliberately does not include <unordered_set>.
     std::vector<std::string> poisoned_;
+
+    // The names that were in scope where the lambda now being emitted was written.
+    // Empty except while a lambda body is being emitted, which is what makes the check
+    // that reads it cost nothing for every other body.
+    //
+    // A list of names and not the scopes themselves, deliberately: a capture is refused,
+    // so nothing here is ever used to *reach* the enclosing storage. If this held slots
+    // it would be one edit away from loading one, and loading one is the miscompile --
+    // the frame is gone by the time the pointer is called. See refuseIfCapture.
+    //
+    // A vector for the same two reasons poisoned_ is one.
+    std::vector<std::string> enclosingNames_;
+
+    // The counter behind `fin.lambda.<n>`. Monotonic, so no two lambdas in one module
+    // can collide, and the spelling is one a Fin program cannot write -- the lexer has
+    // no `.` in an identifier.
+    unsigned lambdas_ = 0;
 
     bool isPoisoned(const std::string& name) const {
         for (auto& p : poisoned_) if (p == name) return true;
@@ -2217,12 +2322,90 @@ private:
         return value_;
     }
 
+    // Whether two function values may stand in for each other, which with opaque
+    // pointers nothing in the IR can answer.
+    //
+    // Structural and not by identity: a `fn(int) -> int` mapped at a parameter and one
+    // mapped at a variable are two CgTypes built from two TypeNodes, and they are the
+    // same type. Signedness is compared along with width because `int` and `uint` are
+    // both i32 and a call that swapped them would pick the wrong extension for every
+    // argument it widened.
+    static bool sameSignature(const CgType& a, const CgType& b) {
+        if (!a.isFn() || !b.isFn() || !a.result || !b.result) return false;
+        if (a.params.size() != b.params.size()) return false;
+        if (!sameType(*a.result, *b.result)) return false;
+        for (size_t i = 0; i < a.params.size(); ++i) {
+            if (!a.params[i] || !b.params[i]) return false;
+            if (!sameType(*a.params[i], *b.params[i])) return false;
+        }
+        return true;
+    }
+
+    // Type equality for the one question sameSignature asks. Deliberately shallow
+    // outside Fn: a struct's identity in this file is its StructInfo pointer and an
+    // array's is its element and extent, both of which the llvm::Type already
+    // distinguishes, so llvmType is the whole comparison for them. A pointer's pointee
+    // is *not* compared, matching the rest of the file -- `&int` and `&char` are one
+    // `ptr` everywhere else here, and making a function signature stricter than an
+    // assignment would refuse programs the rest of this file accepts.
+    static bool sameType(const CgType& a, const CgType& b) {
+        if (a.kind != b.kind) return false;
+        if (a.isFn()) return sameSignature(a, b);
+        if (a.kind == CgType::Kind::Int)
+            return a.bits == b.bits && a.isSigned == b.isSigned && a.isBool == b.isBool;
+        return a.llvmType == b.llvmType;
+    }
+
+    // How a CgType reads in a diagnostic, for the refusals that have no TypeNode to
+    // spell. Only the shapes that reach one: a conversion involving a function type is
+    // the single caller, and everything else on either side of it is named by kind
+    // rather than in full, because "a conversion from 'fn(int) -> int' to a struct" says
+    // what went wrong and a full struct spelling would not say more.
+    std::string describe(const CgType& t) const {
+        switch (t.kind) {
+            case CgType::Kind::Void:   return "void";
+            case CgType::Kind::Struct: return "a struct";
+            case CgType::Kind::Array:  return "an array";
+            case CgType::Kind::Ptr:    return "a pointer";
+            case CgType::Kind::Int:    return t.isBool ? "bool" : "an integer";
+            case CgType::Kind::Float:  return "a float";
+            case CgType::Kind::Fn:     break;
+        }
+        std::string out = "fn(";
+        for (size_t i = 0; i < t.params.size(); ++i) {
+            if (i) out += ", ";
+            out += t.params[i] ? describe(*t.params[i]) : "?";
+        }
+        return out + ") -> " + (t.result ? describe(*t.result) : "?");
+    }
+
     // Widens or narrows a value to `target` when the analyzer has already ruled the
     // program well-typed. It converts and never checks: `int` into `long`, an
     // integer constant into a float parameter. A pair it cannot convert is a gap in
     // this slice, not a type error, so it refuses rather than emitting a bitcast.
     llvm::Value* convert(ASTNode& node, const CgVal& from, const CgType& to) {
         if (!from.ok()) return nullptr;
+        // Before the identity shortcut below, and that is the whole point of putting it
+        // here. Every function value is a `ptr`, so `from.type.llvmType ==
+        // to.llvmType` is true for *any* pair of them -- and for a `&int` against an
+        // `fn` too. Left to that line, `fn(int) -> int` would be accepted where
+        // `fn(int, int) -> int` was wanted, and the indirect call through it would read
+        // an argument register the caller never set. Nothing later would notice,
+        // because there is nothing later to notice with.
+        if (from.type.isFn() || to.isFn()) {
+            // `null` into a function slot is a null function pointer, which is a value
+            // a function type has (stdlib/collection.fin:18 writes one as a field
+            // default). Recognised by the constant rather than by the type, because a
+            // bare `null` is a Ptr with no pointee and so is a `string`.
+            if (to.isFn() && llvm::isa<llvm::ConstantPointerNull>(from.value))
+                return from.value;
+            if (!from.type.isFn() || !to.isFn() || !sameSignature(from.type, to)) {
+                unsupported(node, fmt::format("a conversion from '{}' to '{}'",
+                                              describe(from.type), describe(to)));
+                return nullptr;
+            }
+            return from.value;
+        }
         if (from.type.llvmType == to.llvmType) return from.value;
 
         if (from.type.kind == CgType::Kind::Int && to.kind == CgType::Kind::Int) {
@@ -2306,6 +2489,13 @@ private:
             auto global = globals_.find(id->name);
             if (global != globals_.end())
                 return Addr{global->second.var, global->second.type};
+            // A name from the enclosing body, reached for its *address* -- which is what
+            // `x = 1` inside a lambda is. Refused here as well as in visit(Identifier&)
+            // because the two paths never meet: a read goes through the visitor and an
+            // assignment target comes here, and only reporting the read would leave a
+            // write to a captured local falling through to "this assignment target",
+            // which names the wrong thing.
+            if (refuseIfCapture(*id, id->name)) return std::nullopt;
             return std::nullopt;
         }
         if (auto* unary = dynamic_cast<UnaryOp*>(&expr)) {
@@ -2516,6 +2706,20 @@ private:
     // for why an operator arrives as three pieces rather than as a node.
     void emitBody(ASTNode& node, const std::vector<std::unique_ptr<Parameter>>& params,
                   Block& body, const std::string& name) {
+        emitBodyOf(node, params, &body, nullptr, name);
+    }
+
+    // A lambda's body, which is either a Block like every other body or a single
+    // expression whose value is the return. Exactly one of `block` and `value` is set.
+    //
+    // The expression form goes through the same prologue rather than a second copy of
+    // it, because everything before the body -- the ScopedEmission, the entry block, a
+    // stack slot per parameter, the implicit tail -- is what makes a body a body, and a
+    // lambda whose parameters were not given slots would be a lambda that could not
+    // assign to one. `(x: int) <int> => x - 3` differs from `fun (x: int) <int> { return
+    // x - 3; }` in exactly one place and this is it.
+    void emitBodyOf(ASTNode& node, const std::vector<std::unique_ptr<Parameter>>& params,
+                    Block* block, Expression* value, const std::string& name) {
         auto found = functions_.find(name);
         if (found == functions_.end()) return;  // the refusal was already reported
         const FnInfo info = found->second;
@@ -2557,7 +2761,11 @@ private:
             ++index;
         }
 
-        body.accept(*this);
+        if (block) {
+            block->accept(*this);
+        } else if (value) {
+            emitValueBody(*value, info);
+        }
 
         // The implicit tail. A Fin function that falls off the end returns nothing,
         // except `main`, which owes the shell a status.
@@ -2591,6 +2799,34 @@ private:
             diag_.reportError(node.loc,
                               fmt::format("codegen: emitted invalid IR for '{}'", name));
         }
+    }
+
+    // The single expression that is an arrow lambda's whole body.
+    //
+    // `(x: int) <int> => x - 3` returns its expression and `(msg: string) <void> =>
+    // printf(...)` evaluates it and returns nothing, and the return type is what tells
+    // them apart -- there is no second syntax. The void case is why this cannot simply
+    // always return: `printf` here is declared `<noret>`, so there is no value to hand
+    // back, and CreateRet of a void call is invalid IR.
+    //
+    // Deliberately not routed through visit(ReturnStatement&): that one has `main`'s
+    // status-code rewrite in it, and a lambda is never main.
+    void emitValueBody(Expression& value, const FnInfo& info) {
+        if (info.returnType.isVoid()) {
+            emit(value);
+            if (failed_) return;
+            builder_.CreateRetVoid();
+            return;
+        }
+        CgVal v = emitAs(value, info.returnType);
+        if (failed_) return;
+        if (!v.ok()) {
+            unsupported(value, "this lambda's body expression");
+            return;
+        }
+        llvm::Value* out = convert(value, v, info.returnType);
+        if (!out) return;
+        builder_.CreateRet(out);
     }
 
     // `ident<int>` -- one instantiation of one function template, built the first time
@@ -3128,14 +3364,79 @@ private:
             value_ = enumConstant(member->second.value);
             return;
         }
-        // A function named as a value needs a decision about what a Fin function
-        // value *is* (a bare pointer, or a closure pair), so it refuses rather
-        // than picking one.
-        if (functions_.count(node.name)) {
-            unsupported(node, fmt::format("the function '{}' used as a value", node.name));
+        // A function named as a value. An llvm::Function *is* a pointer constant, so
+        // there is nothing to emit -- the decision this used to refuse for (a bare
+        // pointer, or a closure pair) is settled at TypeMapper::mapFunction, and a named
+        // function captures nothing by construction.
+        auto fn = functions_.find(node.name);
+        if (fn != functions_.end()) {
+            std::optional<CgType> type = fnValueType(fn->second);
+            if (!type) {
+                // A variadic or `main`. Both have a signature no `fn` type can spell:
+                // `fn` has no `...`, and `main`'s LLVM signature is C's whatever Fin
+                // wrote, so a value of it would advertise a Fin type the code does not
+                // have. Refused rather than given the Fin type it is not.
+                unsupported(node, fmt::format("the function '{}' used as a value", node.name));
+                return;
+            }
+            value_ = CgVal{fn->second.fn, *type};
             return;
         }
+        // A template used as a value, which is not the same refusal: what is missing is
+        // not the representation but the code. `ident<int>` and `ident<char>` are two
+        // functions and a bare `ident` names neither, so there is no address to take
+        // until something says which instantiation is meant.
+        if (fnTemplates_.count(node.name)) {
+            unsupported(node, fmt::format("the generic function '{}' used as a value",
+                                         node.name));
+            return;
+        }
+        if (refuseIfCapture(node, node.name)) return;
         unsupported(node, fmt::format("the name '{}'", node.name));
+    }
+
+    // The `fn` type of an existing function, or nothing when it has none to have.
+    //
+    // Built from FnInfo rather than from the declaration's TypeNodes, because this has
+    // to be the signature the *emitted* function actually has: declareFunction is what
+    // decides that, and it rewrites `main` and folds a receiver into parameter 0.
+    std::optional<CgType> fnValueType(const FnInfo& info) const {
+        if (info.isVarArg || info.isMain || !info.fn) return std::nullopt;
+        CgType t;
+        t.kind = CgType::Kind::Fn;
+        // Through the mapper rather than `PointerType::getUnqual(ctx_)`: this method is
+        // const, Emitter owns its LLVMContext by value, and TypeMapper holds it by
+        // reference -- so the mapper is the one that can still hand out a type here.
+        t.llvmType = types_.pointerType().llvmType;
+        t.result = std::make_shared<CgType>(info.returnType);
+        for (const CgType& p : info.paramTypes) t.params.push_back(std::make_shared<CgType>(p));
+        // The function's own type, so a call through the value is the call the callee
+        // was compiled to answer -- not one rebuilt from the Fin types, which would
+        // disagree about `main` and about a receiver.
+        t.llvmSignature = info.fn->getFunctionType();
+        return t;
+    }
+
+    // Whether `name` is a local of the function this lambda was written inside, which
+    // makes reading it a capture. Reports and returns true when it is.
+    //
+    // Checked only after every other way of resolving a name has missed, so that a
+    // lambda's own parameter, a global, an enumerator and a function all still win --
+    // a lambda reading `printf` (lambdas.fin:58) is reading a symbol and not closing
+    // over anything.
+    //
+    // Named as a capture rather than as an unknown name because the two send a reader
+    // to different places: "the name 'x'" reads as a front-end bug, and this is a
+    // deliberate boundary. A bare code pointer has nowhere to put `x`, so lowering it
+    // would have to either read the enclosing frame after it is gone or silently pass
+    // a different value.
+    bool refuseIfCapture(ASTNode& node, const std::string& name) {
+        for (const auto& n : enclosingNames_) {
+            if (n != name) continue;
+            unsupported(node, fmt::format("a lambda capturing '{}'", name));
+            return true;
+        }
+        return false;
     }
 
     void visit(BinaryOp& node) override {
@@ -3620,14 +3921,35 @@ private:
             unsupported(node, fmt::format("the compile-time call '@{}'", node.name));
             return;
         }
-        // A local of function type shadows nothing today -- a function value is not
-        // lowered -- but checking locals first is the order the analyzer uses and
-        // the order that stays correct when they are.
-        if (findLocal(node.name)) {
-            unsupported(node, fmt::format("a call through the variable '{}'", node.name));
+        // A local of function type, which shadows a function of the same name -- and
+        // checked first for that reason, which is also the order the analyzer uses.
+        if (Local* local = findLocal(node.name)) {
+            if (!local->type.isFn()) {
+                unsupported(node, fmt::format("a call through the variable '{}' of "
+                                              "non-function type", node.name));
+                return;
+            }
+            llvm::Value* callee = builder_.CreateLoad(local->type.llvmType, local->slot,
+                                                      node.name);
+            emitIndirectCall(node, local->type, callee, node.name, argList(node.args));
             return;
         }
         if (failed_) return;  // a name refused above; see findLocal
+        // A global of function type, for the same reason and in the same order the
+        // identifier path uses: a local of the name shadows one.
+        auto globalFn = globals_.find(node.name);
+        if (globalFn != globals_.end()) {
+            if (!globalFn->second.type.isFn()) {
+                unsupported(node, fmt::format("a call through the global '{}' of "
+                                              "non-function type", node.name));
+                return;
+            }
+            llvm::Value* callee = builder_.CreateLoad(globalFn->second.type.llvmType,
+                                                      globalFn->second.var, node.name);
+            emitIndirectCall(node, globalFn->second.type, callee, node.name,
+                             argList(node.args));
+            return;
+        }
         // Before the ordinary lookup, because a template is deliberately not in
         // functions_: it has no signature until this call says what its parameters are.
         auto tmpl = fnTemplates_.find(node.name);
@@ -3722,6 +4044,37 @@ private:
         // A void call is a statement, not a value. `value_` staying empty is what
         // makes `let x <int> = voidcall();` refuse rather than store a token.
         value_ = info.returnType.isVoid() ? CgVal{} : CgVal{call, info.returnType};
+    }
+
+    // A call through a function value, given the pointer to call and the type that says
+    // what is at the other end.
+    //
+    // The arguments go through emitCallArgs and not through a second copy of the
+    // conversion rules, which is the reason for the synthetic FnInfo below: an argument
+    // widened one way at a direct call and another way here would be a silent ABI
+    // difference between `add(1, 2)` and `f(1, 2)` for one `f = add`. The FnInfo has no
+    // `fn` -- there is no llvm::Function to name, that is the whole point of an indirect
+    // call -- so it is built for the arguments and discarded, and the call is emitted
+    // from `llvmSignature` instead.
+    void emitIndirectCall(ASTNode& node, const CgType& fnType, llvm::Value* callee,
+                          const std::string& name,
+                          const std::vector<Expression*>& argNodes) {
+        if (!fnType.llvmSignature || !fnType.result) {
+            // A Fn CgType with no signature is this file disagreeing with itself:
+            // mapFunction sets both or returns nothing at all.
+            unsupported(node, fmt::format("a call through '{}' with no signature", name));
+            return;
+        }
+        FnInfo synthetic;
+        synthetic.returnType = *fnType.result;
+        for (const auto& p : fnType.params) synthetic.paramTypes.push_back(*p);
+
+        std::vector<llvm::Value*> args;
+        if (!emitCallArgs(node, synthetic, name, argNodes, args)) return;
+
+        auto* call = builder_.CreateCall(fnType.llvmSignature, callee, args);
+        value_ = synthetic.returnType.isVoid() ? CgVal{}
+                                               : CgVal{call, synthetic.returnType};
     }
 
     // The declaration behind a method name, for the sole purpose of saying why a call
@@ -4830,7 +5183,78 @@ private:
         CgType intType = *types_.byName("int");
         value_ = CgVal{llvm::ConstantInt::get(intType.llvmType, size, true), intType};
     }
-    void visit(LambdaExpression& node) override { unsupported(node, "a lambda"); }
+    // An anonymous function, emitted as a real llvm::Function and named by its pointer.
+    //
+    // A bare code pointer, which the corpus settles rather than a preference: all
+    // thirteen lambdas in the samples read nothing but their own parameters. The one
+    // that looks like an exception, `(msg: string) <void> => printf("Log: %s\n", msg)`
+    // at lambdas.fin:58, reads a symbol and not a variable. So there is nothing for a
+    // second word of a closure pair to hold, and adding one would put it in every `fn`
+    // field, parameter and return in the language for no reader.
+    //
+    // A capture is refused rather than lowered, and that is what keeps this shape from
+    // being a guess: `enclosingNames_` holds the names that were in scope where the
+    // lambda was written, so a body reading one is refused *as a capture* instead of
+    // silently reading a frame that is about to be gone. The day the corpus writes one
+    // is the day the pair has to be designed, and nothing before then compiles wrong.
+    //
+    // `functions_.count(name)` cannot collide: the name is generated from a counter
+    // that only ever goes up, and `fin.lambda.` is not a spelling a Fin program can
+    // write -- the lexer has no `.` in an identifier.
+    void visit(LambdaExpression& node) override {
+        if (!currentFn_) {
+            // A lambda at module scope has no enclosing body, so there is no answer to
+            // what its captures would be and no insert point to resume to.
+            unsupported(node, "a lambda outside a function");
+            return;
+        }
+        if (!node.generic_params.empty()) {
+            // `<T: Castable>(m: T) <T> => m` (lambdas.fin:69). A generic lambda is a
+            // template, and a template is not code -- there is no address to take until
+            // something says which instantiation is meant. A named generic function has
+            // the same property and refuses the same way in visit(Identifier&); the
+            // difference is only that this one has no name to instantiate under.
+            unsupported(node, "a generic lambda");
+            return;
+        }
+        if (!node.body && !node.expression_body) {
+            unsupported(node, "a lambda with no body");
+            return;
+        }
+
+        const std::string name = fmt::format("fin.lambda.{}", lambdas_++);
+        // Declared exactly the way a top-level function is, so a lambda's parameters get
+        // the same refusals a function's do -- an aggregate on an extern, a `void`
+        // parameter, a return type with no representation. `isExtern` is false and there
+        // is no receiver: a lambda is neither.
+        declareFunction(node, name, name, node.params, node.return_type.get(),
+                        /*isVarArg=*/false, /*isExtern=*/false);
+        auto declared = functions_.find(name);
+        if (declared == functions_.end()) return;  // declareFunction already reported
+        // Internal, because nothing outside this object file can name it. Set here
+        // rather than threaded through declareFunction as a flag, since this is the only
+        // caller that wants it and the linkage is the only thing that differs.
+        declared->second.fn->setLinkage(llvm::Function::InternalLinkage);
+
+        // The names visible *here*, snapshotted before emitBodyOf's ScopedEmission moves
+        // the scopes out of reach. Saved and restored around the body so that a lambda
+        // inside a lambda sees the outer lambda's parameters as its own enclosing names
+        // and not the outermost function's.
+        std::vector<std::string> enclosing;
+        for (const auto& scope : scopes_)
+            for (const auto& entry : scope) enclosing.push_back(entry.first);
+        enclosing.swap(enclosingNames_);
+        emitBodyOf(node, node.params, node.body.get(), node.expression_body.get(), name);
+        enclosing.swap(enclosingNames_);
+        if (failed_) return;
+
+        std::optional<CgType> type = fnValueType(declared->second);
+        if (!type) {
+            unsupported(node, "this lambda used as a value");
+            return;
+        }
+        value_ = CgVal{declared->second.fn, *type};
+    }
     void visit(SuperExpression& node) override { unsupported(node, "'super'"); }
     void visit(TypeLiteralExpression& node) override { unsupported(node, "a type literal"); }
 

@@ -5961,3 +5961,288 @@ BACKEND_TEST(KnownDefect_Codegen, AnAliasedGlobalIsRefusedWhereTheNewNameIsRead)
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("'myglobv_diffname'"), std::string::npos) << b.why();
 }
+
+// ---------------------------------------------------------------------------
+// Function values and lambdas.
+//
+// A Fin function value is a bare code pointer. That was the open decision this unit
+// closed, and the corpus is what closed it rather than a preference: all thirteen
+// lambdas in tests/samples read nothing but their own parameters, and the one that
+// looks like an exception (lambdas.fin:58, `(msg: string) <void> => printf("Log:
+// %s\n", msg)`) reads a symbol and not a variable. Nothing closes over a local, so
+// the second word of a closure pair would be a word every `fn` field, parameter and
+// return carried for no reader.
+//
+// The tests below come in two halves and the second half is the one that makes the
+// first half safe. A bare pointer is only a sound representation for as long as a
+// capture is *refused*, because a captured local lives in a frame that is gone by
+// the time the pointer is called -- so ALambdaCapturingALocalIsRefused and its
+// assignment sibling are not edge cases, they are the boundary this shape sits
+// behind. The same goes for the signature checks: with opaque pointers every `fn` is
+// `ptr`, so nothing in the IR distinguishes `fn(int) -> int` from `fn(int, int) ->
+// int`, and if convert() did not compare signatures itself the mismatch would emit a
+// call that reads an argument register the caller never set.
+
+BACKEND_TEST(Soundness_Codegen, ANamedFunctionIsPassedAsAFunctionParameter) {
+    // tests/samples/functions.fin Case A. An llvm::Function is already a pointer
+    // constant, so passing one by name emits nothing at all -- which is why this was
+    // the cheapest half of the unit and still needed the `fn` parameter type to exist
+    // before it could land.
+    const Built b = build(std::string(kPrintf) +
+        "fun compute(a: int, b: int, operation: fn(int, int) => int) <int> {\n"
+        "    return operation(a, b);\n"
+        "}\n"
+        "fun add(x: int, y: int) <int> { return x + y; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", compute(10, 20, add)); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "30\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFunctionValueInAVariableIsCalledThroughIt) {
+    // functions.fin Case B. The call is indirect: there is no llvm::Function to name,
+    // so the callee is a loaded pointer and the llvm::FunctionType comes from the
+    // variable's own CgType. Getting that type from anywhere else is how an indirect
+    // call reads the wrong registers.
+    const Built b = build(std::string(kPrintf) +
+        "fun add(x: int, y: int) <int> { return x + y; }\n"
+        "fun main() <noret> {\n"
+        "    let my_op <fn(int, int) => int> = add;\n"
+        "    printf(\"%d\\n\", my_op(5, 5));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrowLambdaWithABlockBodyIsCalled) {
+    // functions.fin Case C, which the sample's own comment calls a closure and which
+    // captures nothing -- the distinction the refusal further down enforces.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let my_op <auto> = (a: int, b: int) <int> => { return a + b; };\n"
+        "    printf(\"%d\\n\", my_op(1, 2));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAnonymousFunctionIsWrittenInsideACallsArguments) {
+    // functions.fin Case D. The lambda is emitted as a whole function from the middle
+    // of another function's body, which is what ScopedEmission already existed for --
+    // an instantiation does the same thing -- so the caller's half-built block, its
+    // FnInfo and its locals all have to come back afterwards.
+    const Built b = build(std::string(kPrintf) +
+        "fun compute(a: int, b: int, operation: fn(int, int) => int) <int> {\n"
+        "    return operation(a, b);\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let res <int> = compute(100, 50, fun (a: int, b: int) <int> {\n"
+        "        return a - b;\n"
+        "    });\n"
+        "    printf(\"%d\\n\", res);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "50\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrowLambdaWithAnExpressionBodyReturnsIt) {
+    // lambdas.fin Case 3. The expression form goes through the same prologue every
+    // other body gets -- an entry block, a stack slot per parameter -- and differs in
+    // exactly one place: the body is a value to return rather than a Block to walk.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let f3 <fn(int) -> int> = (x: int) <int> => x - 3;\n"
+        "    printf(\"%d\\n\", f3(10));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AVoidLambdaWithAnExpressionBodyEvaluatesItAndReturnsNothing) {
+    // lambdas.fin Case 6, and the reason the expression form cannot simply always
+    // return: `printf` is declared `<noret>` here, so there is no value to hand back
+    // and `CreateRet` of a void call is invalid IR. The return type is what tells the
+    // two apart, because there is no second syntax.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let logger <auto> = (msg: string) <void> => printf(\"Log: %s\\n\", msg);\n"
+        "    logger(\"Hello Lambda\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "Log: Hello Lambda\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ALambdaReadsAGlobalSymbolWithoutCapturingIt) {
+    // The distinction the capture refusal turns on, asserted rather than assumed:
+    // lambdas.fin:58 reads `printf` from inside a lambda and that is a symbol, not a
+    // frame slot. A capture check that fired on every free name would refuse this, and
+    // it is the single most common shape a lambda in the corpus has.
+    const Built b = build(std::string(kPrintf) +
+        "const BASE <int> = 100;\n"
+        "fun main() <noret> {\n"
+        "    let f <fn(int) -> int> = (x: int) <int> => x + BASE;\n"
+        "    printf(\"%d\\n\", f(5));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "105\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFunctionReturnsALambdaAndTheCallerCallsIt) {
+    // lambdas.fin's `get_adder` and its Case 7. A bare pointer is what makes this work
+    // at all: the lambda outlives the call that produced it, and there is no frame to
+    // outlive because it captured nothing.
+    const Built b = build(std::string(kPrintf) +
+        "fun get_adder() <fn(int, int) -> int> {\n"
+        "    return (a: int, b: int) <int> => a + b;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let adder <auto> = get_adder();\n"
+        "    printf(\"%d\\n\", adder(10, 20));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "30\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ALambdaCapturingALocalIsRefused) {
+    // The boundary the bare-pointer representation sits behind. `outer` lives in
+    // main's frame and the lambda is a pointer with nowhere to put it, so lowering
+    // this would either read a frame that is gone or silently pass some other value.
+    // Refused by name, so a reader is sent to the decision (a closure pair) rather
+    // than to a front-end bug: "the name 'outer'" would have read as the latter.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let outer <int> = 7;\n"
+        "    let f <fn(int) -> int> = (x: int) <int> => x + outer;\n"
+        "    printf(\"%d\\n\", f(1));\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a lambda capturing 'outer'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ALambdaAssigningToACapturedLocalIsRefused) {
+    // The same boundary reached through the other path, which is why the check lives in
+    // two places: a read goes through visit(Identifier&) and an assignment target goes
+    // through emitAddress, and the two never meet. Refusing only the read would leave a
+    // write falling through to "this assignment target", which names the wrong thing.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let outer <int> = 7;\n"
+        "    let f <fn(int) -> int> = (x: int) <int> => { outer = x; return x; };\n"
+        "    printf(\"%d\\n\", f(1));\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a lambda capturing 'outer'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericLambdaIsRefused) {
+    // lambdas.fin:69 and :71. A generic lambda is a template and a template is not
+    // code, so there is no address to take until something says which instantiation is
+    // meant -- and nothing here does, because neither of the corpus's two is ever
+    // called. Separate from the erasure question its `Castable` also raises: this
+    // refuses for want of a monomorphisation key, not for want of erasure.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let g <auto> = fun <T>(m: T) <T> { return m; };\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a generic lambda"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionUsedAsAValueIsRefused) {
+    // The named form of the same gap, and refused with a different message on purpose:
+    // what is missing is not the representation but the code. `ident<int>` and
+    // `ident<char>` are two functions and a bare `ident` names neither.
+    //
+    // `<auto>` and not `<fn(int) -> int>`, which is what this test asked for first: the
+    // analyzer rejects the annotated form outright ("expected 'fn(int) -> int', got
+    // 'fn(T) -> T'"), so codegen never saw it and the assertion could not have held.
+    // The annotation is what has to go for the backend's boundary to be reachable at
+    // all -- a refusal nothing can reach is not a boundary.
+    const Built b = build(std::string(kPrintf) +
+        "fun ident<T>(v: T) <T> { return v; }\n"
+        "fun main() <noret> {\n"
+        "    let f <auto> = ident;\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("the generic function 'ident' used as a value"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AVariadicFunctionUsedAsAValueIsRefused) {
+    // `printf` has a signature no `fn` type can spell -- there is no `...` in the
+    // grammar of one -- so a value of it would have to advertise a type the code does
+    // not have. Refused rather than given the non-variadic type it is not, which would
+    // put every argument past the first in the wrong place.
+    //
+    // `<auto>` for the same reason as the test above: with an annotation the analyzer
+    // reports the mismatch and the backend is never asked.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let f <auto> = printf;\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("the function 'printf' used as a value"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFunctionValueOfTheWrongSignatureDoesNotCompile) {
+    // The trap opaque pointers set, and this test is honest about which pass springs it.
+    // Every `fn` is `ptr`, so convert()'s identity shortcut -- "same llvmType, no cast
+    // needed" -- is true for *any* pair of function values, and left to it this would
+    // compile a two-argument callee into a one-argument call and read a register nobody
+    // set. So the signature comparison sits in front of that shortcut.
+    //
+    // Today the analyzer is what rejects this, and it rejects every shape the backend's
+    // guard could otherwise be reached through: annotated, inferred-then-reassigned, and
+    // through a struct field were all tried and all reported "Type mismatch: expected
+    // 'fn(int) -> int', got 'fn(int, int) -> int'" before codegen ran. The backend's
+    // guard is therefore unreachable-by-construction rather than exercised here, and it
+    // is kept anyway on this file's standing rule: a construct the backend cannot lower
+    // is refused *here*, whatever anything upstream also happens to say. What this test
+    // pins is the property that actually matters -- the program does not build -- so
+    // that a loosening on either side of the boundary is caught by somebody.
+    const Built b = build(std::string(kPrintf) +
+        "fun add(x: int, y: int) <int> { return x + y; }\n"
+        "fun main() <noret> {\n"
+        "    let f <fn(int) -> int> = add;\n"
+        "    printf(\"%d\\n\", f(1));\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionTypeIsRefusedAndNamedInFull) {
+    // lambdas.fin:69's annotation, `fn<T: Castable>(m: T) -> T`. Two things are being
+    // asserted: that it refuses, and that the refusal spells the type out. A
+    // FunctionTypeNode's own `name` is the bare word "fn", so before the speller learned
+    // this shape every function type in every refusal read as "of type 'fn'" -- which
+    // does not distinguish the generic one this file refuses from the plain one it
+    // lowers, and those refuse for entirely different reasons.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let g <fn<T>(m: T) -> T>;\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("fn<...>(T) -> T"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFunctionValueSurvivesAStructFieldRoundTrip) {
+    // A `fn` field, which stdlib/collection.fin:18 and :76 write and which this unit
+    // makes representable. Worth its own test because a field is where a function value
+    // stops being a register and becomes bytes at an offset: the store, the load and the
+    // indirect call all have to agree about which pointer it is.
+    const Built b = build(std::string(kPrintf) +
+        "struct Ops {\n"
+        "    apply <fn(int) -> int>\n"
+        "}\n"
+        "fun twice(v: int) <int> { return v * 2; }\n"
+        "fun main() <noret> {\n"
+        "    let o <Ops> = Ops { apply: twice };\n"
+        "    let f <fn(int) -> int> = o.apply;\n"
+        "    printf(\"%d\\n\", f(21));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
