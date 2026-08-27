@@ -40,6 +40,8 @@ public:
 
     // --- Visitor Implementation ---
     void visit(Program& node) override;
+    // Erases every import that bound everything it named. See its definition.
+    void dropConsumedImports(Program& node);
     void visit(VariableDeclaration& node) override;
     void visit(FunctionDeclaration& node) override;
     void visit(StructDeclaration& node) override;

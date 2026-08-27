@@ -790,11 +790,13 @@ void SemanticAnalyzer::visit(ImportModule& node) {
             if (!currentScope->resolve(kv.first)) currentScope->define(kv.second);
         for (const auto& kv : moduleScope->types)
             if (!currentScope->resolveType(kv.first)) currentScope->defineType(kv.first, kv.second);
+        node.consumed = true;
         return;
     }
 
     // Case 1: Specific Imports: import { A, B } from "lib"
     if (!node.targets.empty()) {
+        bool allBound = true;
         for (const auto& target : node.targets) {
             bool found = false;
             if (auto* sym = moduleScope->resolve(target)) {
@@ -806,7 +808,13 @@ void SemanticAnalyzer::visit(ImportModule& node) {
                 found = true;
             }
             if (!found) error(node, "Module '" + node.source + "' does not export '" + target + "'");
+            allBound = allBound && found;
         }
+        // One name it could not find leaves the whole statement standing. The
+        // diagnostic above already stops the build, so nothing downstream sees it --
+        // but if that ever changes, an import that half-bound must look like the
+        // unfinished thing it is rather than like one that did its job.
+        node.consumed = allBound;
         return;
     }
 
@@ -826,6 +834,7 @@ void SemanticAnalyzer::visit(ImportModule& node) {
     // This allows 'alias.member' to work via MemberAccess
     currentScope->define({alias, nsType, false, true});
     
+    node.consumed = true;
     debugLog(fg(fmt::color::blue), "      [Import] Module '{}' bound to namespace '{}'\n", node.source, alias);
 }
 

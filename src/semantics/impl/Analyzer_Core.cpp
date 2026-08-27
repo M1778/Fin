@@ -1,6 +1,7 @@
 #include "../SemanticAnalyzer.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../../utils/IntegerConstant.hpp"
+#include <algorithm>
 #include <fmt/core.h>
 #include <fmt/color.h>
 
@@ -579,6 +580,25 @@ void SemanticAnalyzer::visit(Program& node) {
     for (auto& stmt : node.statements) {
         stmt->accept(*this);
     }
+    dropConsumedImports(node);
+}
+
+// The last thing the front end does to the tree, and the reason it is a separate
+// sweep rather than part of the walk above: erasing from `node.statements` while
+// iterating it invalidates the iterator, and `visit(ImportModule&)` is reached
+// through `accept` and has no handle on the vector holding it anyway.
+//
+// Only the root Program matters -- a module's own AST lives in the loader's
+// `astStorage` and never reaches the backend -- but this runs for both, because a
+// consumed import is spent in a module for exactly the same reason.
+void SemanticAnalyzer::dropConsumedImports(Program& node) {
+    node.statements.erase(
+        std::remove_if(node.statements.begin(), node.statements.end(),
+                       [](const std::unique_ptr<Statement>& stmt) {
+                           auto* imp = dynamic_cast<ImportModule*>(stmt.get());
+                           return imp && imp->consumed;
+                       }),
+        node.statements.end());
 }
 
 void SemanticAnalyzer::visit(TypeNode& node) { resolveTypeFromAST(&node); }

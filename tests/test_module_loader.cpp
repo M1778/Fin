@@ -5,9 +5,12 @@
 #include <string>
 
 #include "Corpus.hpp"
+#include "Pipeline.hpp"
 #include "ast/decls/Program.hpp"
+#include "ast/stmts/Import.hpp"
 #include "diagnostics/DiagnosticEngine.hpp"
 #include "semantics/Scope.hpp"
+#include "semantics/SemanticAnalyzer.hpp"
 #include "utils/ModuleLoader.hpp"
 
 namespace fs = std::filesystem;
@@ -185,4 +188,126 @@ TEST(ModuleLoader, InheritsTheCallersDiagnosticFormat) {
     loader.addSearchPath(d.path());
     loader.loadModule("broken", true);
     EXPECT_TRUE(diag.hasErrors());
+}
+
+// --- Consuming the import ---------------------------------------------------
+//
+// An import is a compile-time name-binding directive with no runtime meaning: the
+// loader reads the module, the analyzer copies the names it asks for into this
+// scope, and after that the statement has said everything it has to say. The
+// backend agreed and said so -- `an import (the module loader did not consume it)
+// is not lowered yet` -- so the front end has to be the one that takes it out of
+// the tree. It only does so for an import that was fully consumed; one that named
+// a module or a symbol that does not exist stays in the tree behind its own
+// diagnostic, because a construct the compiler could not handle is refused and
+// never quietly dropped.
+
+namespace {
+
+int countImports(const fin::Program& program) {
+    int n = 0;
+    for (const auto& stmt : program.statements)
+        if (dynamic_cast<const fin::ImportModule*>(stmt.get())) ++n;
+    return n;
+}
+
+// Parse `code`, then analyse it with a loader pointed at `dir`. Returns the
+// number of ImportModule statements the analyzer left behind.
+struct ImportAnalysis {
+    bool parsed = false;
+    int importsBefore = 0;
+    int importsAfter = 0;
+    int errorCount = 0;
+};
+
+ImportAnalysis analyzeWithLoader(const std::string& code, const std::string& dir) {
+    ImportAnalysis r;
+    fin::DiagnosticEngine diag("", "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+
+    auto parsed = fin::testing::parseSource(code, diag);
+    r.parsed = parsed.parsed;
+    if (!r.parsed) return r;
+    r.importsBefore = countImports(*parsed.ast);
+
+    fin::ModuleLoader loader(dir);
+    loader.setDiagnostics(&diag);
+    loader.addSearchPath(dir);
+
+    fin::SemanticAnalyzer analyzer(diag, false);
+    analyzer.setModuleLoader(&loader);
+    analyzer.visit(*parsed.ast);
+
+    r.importsAfter = countImports(*parsed.ast);
+    r.errorCount = diag.getErrorCount();
+    return r;
+}
+
+} // namespace
+
+TEST(ModuleLoader, ANamedImportIsConsumedAndLeavesTheTree) {
+    TempModuleDir d;
+    d.write("lib.fin", "pub fun helper() <noret> {}\n");
+
+    auto r = analyzeWithLoader("import { helper } from lib;\n"
+                               "fun main() <noret> { helper(); }\n",
+                               d.path());
+    ASSERT_TRUE(r.parsed);
+    EXPECT_EQ(r.importsBefore, 1);
+    EXPECT_EQ(r.errorCount, 0);
+    EXPECT_EQ(r.importsAfter, 0)
+        << "a consumed import must not survive into the backend";
+}
+
+TEST(ModuleLoader, ANamespaceImportIsConsumedAndLeavesTheTree) {
+    TempModuleDir d;
+    d.write("lib.fin", "pub fun helper() <noret> {}\n");
+
+    auto r = analyzeWithLoader("import lib as l;\n"
+                               "fun main() <noret> {}\n",
+                               d.path());
+    ASSERT_TRUE(r.parsed);
+    EXPECT_EQ(r.importsBefore, 1);
+    EXPECT_EQ(r.errorCount, 0);
+    EXPECT_EQ(r.importsAfter, 0);
+}
+
+TEST(ModuleLoader, AStarImportIsConsumedAndLeavesTheTree) {
+    TempModuleDir d;
+    d.write("lib.fin", "pub fun helper() <noret> {}\n");
+
+    auto r = analyzeWithLoader("import * from lib;\n"
+                               "fun main() <noret> { helper(); }\n",
+                               d.path());
+    ASSERT_TRUE(r.parsed);
+    EXPECT_EQ(r.importsBefore, 1);
+    EXPECT_EQ(r.errorCount, 0);
+    EXPECT_EQ(r.importsAfter, 0);
+}
+
+TEST(ModuleLoader, AnImportOfAMissingModuleIsNotConsumed) {
+    TempModuleDir d;
+
+    auto r = analyzeWithLoader("import { helper } from no_such_module;\n"
+                               "fun main() <noret> {}\n",
+                               d.path());
+    ASSERT_TRUE(r.parsed);
+    EXPECT_EQ(r.importsBefore, 1);
+    EXPECT_GT(r.errorCount, 0);
+    EXPECT_EQ(r.importsAfter, 1)
+        << "an import that resolved nothing is refused, not dropped";
+}
+
+TEST(ModuleLoader, AnImportOfASymbolTheModuleDoesNotExportIsNotConsumed) {
+    TempModuleDir d;
+    d.write("lib.fin", "pub fun helper() <noret> {}\n");
+
+    auto r = analyzeWithLoader("import { absent } from lib;\n"
+                               "fun main() <noret> {}\n",
+                               d.path());
+    ASSERT_TRUE(r.parsed);
+    EXPECT_EQ(r.importsBefore, 1);
+    EXPECT_GT(r.errorCount, 0);
+    EXPECT_EQ(r.importsAfter, 1)
+        << "one unexported name leaves the whole import in the tree";
 }
