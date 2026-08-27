@@ -466,6 +466,23 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
     }
 
     out.size = alignUp(offset, out.align);
+
+    // A struct with nothing in it still occupies a byte, so that two of its values have
+    // distinct addresses and `&a != &b` holds. The owner ruled this on 2026-08-27, and it
+    // reverses what Soundness_Layout used to assert here -- that reasoning is preserved in
+    // the renamed test rather than deleted, because it was argued and not merely assumed.
+    //
+    // This must agree with the backend or nothing else it says is worth reading. Codegen
+    // lays down an i8 padding member for an empty struct, so a size of 0 here would mean
+    // the two passes disagreed on the offset of every field following an empty-struct
+    // member -- this pass placing the next field where the backend had already put a byte.
+    // The old comment named exactly that obligation: "the backend is what has to agree
+    // with this number". The number moved, so this side moves with it.
+    //
+    // Written as a floor on the total rather than a special case for a fieldless struct,
+    // because that is the property being defended: no complete value has no address. A
+    // floor also cannot be missed by a shape nobody thought to enumerate.
+    if (out.size == 0) out.size = 1;
     // Rounded up to the type's own alignment so that `block + headerBytes` is
     // correctly aligned for the object -- three pointer words ahead of a
     // 16-aligned type is 24 bytes, and 24 is not a multiple of 16.

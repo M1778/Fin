@@ -181,18 +181,48 @@ TEST(Soundness_Layout, ReorderingTheFieldsChangesTheSize) {
     EXPECT_EQ(must(e.layoutOf(tight)).size, 16u);
 }
 
-TEST(Soundness_Layout, AnEmptyStructHasNoBytes) {
-    // Ruled here, and the reason is recorded rather than borrowed: C++ gives an
-    // empty class one byte so that two objects have distinct addresses, and Fin
-    // has no rule that requires that of a struct. LLVM's `{}` is zero-sized, the
-    // backend is what has to agree with this number, so zero it is -- a pad byte
-    // would be a byte this compiler invented.
+TEST(Soundness_Layout, AnEmptyStructIsOneByteSoItsValuesHaveDistinctAddresses) {
+    // Inverted and renamed, not relaxed. What stood here ruled the other way, and its
+    // reasoning is kept because it was argued: "C++ gives an empty class one byte so that
+    // two objects have distinct addresses, and Fin has no rule that requires that of a
+    // struct. LLVM's `{}` is zero-sized, the backend is what has to agree with this
+    // number, so zero it is -- a pad byte would be a byte this compiler invented."
+    //
+    // The owner ruled one byte on 2026-08-27 and supplied the rule that was said to be
+    // missing: two distinct empty-struct values must not share an address. So the pad byte
+    // is no longer invented, it is required, and the old argument's own closing clause is
+    // what forces this side to move -- the backend now lays down an i8 for an empty
+    // struct, and this pass is the one that had to agree with it.
+    //
+    // Left at zero, the two passes disagreed on the offset of every field placed after an
+    // empty-struct member, which is a miscompile rather than a discrepancy: this pass
+    // would put the next field where the backend had already written a byte.
     auto t = typeFromSource("struct S { }\n", "S");
     ASSERT_TRUE(t != nullptr);
     LayoutEngine e;
     auto layout = must(e.layoutOf(t));
-    EXPECT_EQ(layout.size, 0u);
+    EXPECT_EQ(layout.size, 1u);
     EXPECT_EQ(layout.align, 1u);
+}
+
+TEST(Soundness_Layout, AFieldAfterAnEmptyStructMemberDoesNotOverlapIt) {
+    // The consequence that made the disagreement worth fixing rather than booking. If an
+    // empty struct occupied nothing, `b` would sit at offset 0 -- on top of the byte the
+    // backend had already placed for `a`.
+    auto t = typeFromSource(
+        "struct E { }\n"
+        "struct S { pub a <E>, pub b <char>, }\n",
+        "S");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto layout = must(e.layoutOf(t));
+    const auto* a = layout.field("a");
+    const auto* b = layout.field("b");
+    ASSERT_TRUE(a != nullptr);
+    ASSERT_TRUE(b != nullptr);
+    EXPECT_EQ(a->offset, 0u);
+    EXPECT_EQ(b->offset, 1u) << "b must not share a byte with the empty struct before it";
+    EXPECT_EQ(layout.size, 2u);
 }
 
 TEST(Soundness_Layout, ANestedStructIsEmbeddedByValueAtItsOwnAlignment) {
