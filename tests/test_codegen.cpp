@@ -20,6 +20,7 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
+#include <llvm/TargetParser/Triple.h>
 #endif
 
 // Wave 5, from the first artifact onwards.
@@ -2251,14 +2252,19 @@ TEST(Soundness_Codegen, TheLayoutTableAgreesWithLLVM) {
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
 
-    const std::string triple = llvm::sys::getDefaultTargetTriple();
+    // A parsed `llvm::Triple`, for the reason generateObject uses one: from LLVM 21
+    // these three entry points take the triple and not the string it came from. The
+    // string is kept for the failure message, which has to name the target a reader
+    // would recognise.
+    const llvm::Triple triple(llvm::sys::getDefaultTargetTriple());
+    const std::string tripleName = triple.str();
     std::string lookupError;
     const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, lookupError);
     ASSERT_NE(target, nullptr) << lookupError;
     llvm::TargetOptions options;
     std::unique_ptr<llvm::TargetMachine> machine(target->createTargetMachine(
         triple, "generic", "", options, llvm::Reloc::PIC_));
-    ASSERT_NE(machine, nullptr) << "no TargetMachine for " << triple;
+    ASSERT_NE(machine, nullptr) << "no TargetMachine for " << tripleName;
     const llvm::DataLayout dataLayout = machine->createDataLayout();
 
     llvm::LLVMContext ctx;
@@ -2314,7 +2320,7 @@ TEST(Soundness_Codegen, AStructsLayoutMatchesWhatLLVMWouldChoose) {
     // build exactly these LLVM struct types and GEP into them by field index.
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
-    const std::string triple = llvm::sys::getDefaultTargetTriple();
+    const llvm::Triple triple(llvm::sys::getDefaultTargetTriple());
     std::string lookupError;
     const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, lookupError);
     ASSERT_NE(target, nullptr) << lookupError;

@@ -30,10 +30,17 @@ endif()
 # OFF the build still succeeds and finc still checks: src/codegen/CodeGen_Stub.cpp
 # takes the module's place and every `-o` refuses with "this build has no
 # backend", which is a diagnostic and not a silently empty artifact.  That is the
-# configuration for a platform where LLVM 18 cannot be had -- ConanCenter
-# publishes no LLVM 18 for Linux armv8, macOS x86_64 or Windows armv8, and none
-# of the six CI combinations may be allowed to go quiet over it.
-set(FIN_LLVM_MAJOR 18 CACHE STRING
+# configuration for a platform where the pinned major cannot be had -- ConanCenter
+# published no LLVM 18 for Linux armv8, macOS x86_64 or Windows armv8, and which
+# platforms 22 is missing on is a measurement, not an assumption, so CI owes it
+# afresh; none of the six combinations may be allowed to go quiet over it.
+#
+# The pin was 18 and is 22 (ADR 0010, amended 2026-08-27).  The reason is not a
+# preference: LLVM 18 cannot be obtained on the machine this compiler is now
+# developed and verified on, and a pin that names a version nobody can install is
+# enforced only by everyone turning the backend off -- which is how 285 codegen
+# tests came to skip in silence.
+set(FIN_LLVM_MAJOR 22 CACHE STRING
     "The single LLVM major version finc is built against (ADR 0010)")
 option(FIN_WITH_LLVM
     "Find and link LLVM ${FIN_LLVM_MAJOR}. Required from wave 5 (codegen)." ON)
@@ -45,8 +52,8 @@ find_package(fmt CONFIG REQUIRED)
 
 if(FIN_WITH_LLVM)
     # No version argument, deliberately.  LLVMConfigVersion.cmake compares
-    # major.minor, so asking for `18` leaves PACKAGE_FIND_VERSION_MINOR empty and
-    # LLVM 18.1.3 is *rejected* as incompatible with 18 -- which is the opposite
+    # major.minor, so asking for `22` leaves PACKAGE_FIND_VERSION_MINOR empty and
+    # LLVM 22.1.8 is *rejected* as incompatible with 22 -- which is the opposite
     # of what the pin means.  The check below is the pin, and it is the honest
     # place for it: it compares the major that ADR 0010 names against the major
     # that was found, and it says which one it found and where.

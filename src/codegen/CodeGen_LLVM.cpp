@@ -21,6 +21,7 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Host.h>
+#include <llvm/TargetParser/Triple.h>
 
 #include <fmt/color.h>
 #include <fmt/core.h>
@@ -2968,7 +2969,7 @@ private:
             }
             case ASTTokenKind::STRING_LITERAL: {
                 CgType t = *types_.byName("string");
-                value_ = CgVal{builder_.CreateGlobalStringPtr(decodeLiteral(node.value)), t};
+                value_ = CgVal{builder_.CreateGlobalString(decodeLiteral(node.value)), t};
                 return;
             }
             case ASTTokenKind::KW_NULL:
@@ -4456,11 +4457,19 @@ bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngin
     llvm::InitializeNativeTargetAsmPrinter();
     llvm::InitializeNativeTargetAsmParser();
 
-    const std::string triple = llvm::sys::getDefaultTargetTriple();
+    // A `llvm::Triple` and not the string it was parsed from: LLVM 21 moved
+    // createTargetMachine and Module::setTargetTriple from a triple *string* to a
+    // parsed triple, and ADR 0010 pins exactly one major, so the pinned major's
+    // spelling is the only one that has to compile -- a version fork here would be
+    // the "two compilers wearing one version number" the ADR exists to stop.  The
+    // string is kept alongside it for the diagnostics, which name the triple in the
+    // form a person recognises.
+    const llvm::Triple triple(llvm::sys::getDefaultTargetTriple());
+    const std::string tripleName = triple.str();
     std::string lookupError;
     const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, lookupError);
     if (!target) {
-        diag.reportError("codegen: no LLVM target for " + triple, lookupError);
+        diag.reportError("codegen: no LLVM target for " + tripleName, lookupError);
         return false;
     }
 
@@ -4473,7 +4482,7 @@ bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngin
     std::unique_ptr<llvm::TargetMachine> machine(target->createTargetMachine(
         triple, "generic", "", options, llvm::Reloc::PIC_, std::nullopt, codeGenLevel));
     if (!machine) {
-        diag.reportError("codegen: could not create a target machine for " + triple);
+        diag.reportError("codegen: could not create a target machine for " + tripleName);
         return false;
     }
 

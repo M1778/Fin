@@ -2,7 +2,15 @@
 #include "../SubstitutionVisitor.hpp"
 #include "../../ast/CloneVisitor.hpp"
 #include "../../types/NamespaceType.hpp"
-#include <fmt/core.h>
+// <fmt/format.h> and not <fmt/core.h>, because fmt::format is used below and this
+// is the header that declares it.  From fmt 11 core.h carries only the base API
+// and fmt::format is behind FMT_DEPRECATED_HEAVY_CORE, so `#include <fmt/core.h>`
+// plus `fmt::format` is `'format' is not a member of 'fmt'` -- measured against the
+// system fmt 12.2.0, clean against the conanfile's fmt 10.2.1, and format.h is
+// correct against both.  Every other caller in this tree reaches fmt::format
+// through <fmt/color.h>, which includes format.h; this translation unit had no such
+// include, so it is the one that a non-Conan configure breaks on.
+#include <fmt/format.h>
 
 namespace fin {
 
