@@ -35,7 +35,7 @@ The interpreter needs a value model that spans Fin values and compiler-side obje
 ## The line has been widened, and this corrects a measurement rather than conceding a principle
 
 The line recorded here was measured off the interpreter's reachable closure in the standard library as
-it stands, and the corpus demands more than that closure does. `literal_interface.fin:4` is
+it stands, and the corpus demands more than that closure does. `literal_interface.fin:6` is
 `if (@implements(struct_, iface) == true)`; `:17` is `if (option == IFaceOptions::First)` returning an
 anonymous `interface { ... }` literal from either arm; `literal_struct.fin:27` is
 `if (!@defined("printf"))` guarding an `@define`. So `if`/`else`, unary `!`, and calls into `@special`s

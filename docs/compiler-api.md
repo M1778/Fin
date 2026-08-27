@@ -37,7 +37,7 @@ wiring job.
 
 | Thing the design needs | Measured state |
 | --- | --- |
-| Turbofish on a dotted path — `compiler.structs.select_field::<int>(...)` | **Syntax error** at the `::`. `parser.y:1416` accepts turbofish only after a bare `IDENTIFIER`. This is `types.fin:23`, and it is **not in wave 2's list in `docs/plan.md`.** |
+| Turbofish on a dotted path — `compiler.structs.select_field::<int>(...)` | **Syntax error** at the `::`. `parser.y:1416` accepts turbofish only after a bare `IDENTIFIER`. This is `types.fin:26`, and it is **not in wave 2's list in `docs/plan.md`.** |
 | `$struct`, `$interface`, `$enum_member` as types | Only `$type` has a production (`parser.y:961`). `$struct` is `unexpected KW_STRUCT, expecting KW_TYPE`. |
 | `$type` as a resolvable analyzer type | `Undefined type '$type'`. Parses, never registered. |
 | `@f(...)` as an expression | **Syntax error**, `unexpected AT`. `AT` appears in four grammar places, all declaration headers. So no `@special` can be called at all. |
@@ -458,7 +458,7 @@ Two possible surfaces for `MetaType`'s agreed minimum (`name`, `typeid`, `size`,
 - **(A) member access on the value** — `t.name`, `t.size`, `t.fields`.
 - **(B) component operations** — `compiler.types.name_of(t)`, `compiler.layout.size_of(t)`.
 
-The corpus does **(B)**: `types.fin:23` reads a field of a compiler-side object with
+The corpus does **(B)**: `types.fin:26` reads a field of a compiler-side object with
 `compiler.structs.select_field::<int>(compiler.types.gettype::<T>(), "TypeID")` — by string, through
 a component. The one counter-example is `enums.fin:21`, `enum_member._keyid`.
 
@@ -481,13 +481,13 @@ comparison, kind.
 | Operation | Signature | Effect | Line | Note |
 | --- | --- | --- | --- | --- |
 | `cmp_types` | `(a: $type, b: $type) <int>` | read-only | — | **Corpus** `error.fin:25`. Returns `-1` for unequal; `error.fin:26` compares against `-1`. |
-| `ct_any` | `(v: any) <$type>` | read-only | — | **Corpus** `types.fin:89`. The compile-time type of a value. Diagnostic if `v` is a runtime-typed `Any`. |
-| `gettype` | `::<T>() <$struct>` | read-only | — | **Corpus** `types.fin:23`. Turbofish, no value argument. Returns the compiler's own `TypeInfo`-shaped struct handle. |
-| `typefrom_typeid` | `(tid: uint) <$type>` | read-only | — | **Corpus** `types.fin:82`. Diagnostic if `tid` names no type. |
-| `typeid_of` | `(t: $type) <uint>` | read-only | — | The inverse. `types.fin:23` gets it the long way round via `select_field`. |
+| `ct_any` | `(v: any) <$type>` | read-only | — | **Corpus** `types.fin:92`. The compile-time type of a value. Diagnostic if `v` is a runtime-typed `Any`. |
+| `gettype` | `::<T>() <$struct>` | read-only | — | **Corpus** `types.fin:26`. Turbofish, no value argument. Returns the compiler's own `TypeInfo`-shaped struct handle. |
+| `typefrom_typeid` | `(tid: uint) <$type>` | read-only | — | **Corpus** `types.fin:85`. Diagnostic if `tid` names no type. |
+| `typeid_of` | `(t: $type) <uint>` | read-only | — | The inverse. `types.fin:26` gets it the long way round via `select_field`. |
 | `name_of` | `(t: $type) <string>` | read-only | — | `MetaType.name`. |
 | `kind_of` | `(t: $type) <int>` | read-only | — | `MetaType.kind`, valued from `compiler.types.Kind*` (§2.1b). |
-| `implements` | `(t: $type, i: $interface) <bool>` | read-only | — | `MetaType.implements`. Backs `@implements` (`literal_interface.fin:4`). Argument order is checked because `$struct` and `$interface` are distinct types. |
+| `implements` | `(t: $type, i: $interface) <bool>` | read-only | — | `MetaType.implements`. Backs `@implements` (`literal_interface.fin:6`). Argument order is checked because `$struct` and `$interface` are distinct types. |
 | `is_comptime_type` | `(t: $type) <bool>` | read-only | — | False for `Any`/`Any<...>`/`nullptr`, the `#[RT]` types in `types.fin:66,71,75`. This is what makes `ct_any`'s diagnostic expressible. |
 | `typeid_quote` | `(t: $type) <quote>` | read-only | `P` | Projection: the typeid as literal syntax, for splicing. |
 
@@ -496,7 +496,7 @@ interface.
 
 | Operation | Signature | Effect | Line | Note |
 | --- | --- | --- | --- | --- |
-| `select_field` | `::<R>(s: $struct, name: string) <?R>` | read-only | — | **Corpus** `types.fin:23`. Nullable return, denullified at the call site with `?`. Note it is generic in the *result* type. |
+| `select_field` | `::<R>(s: $struct, name: string) <?R>` | read-only | — | **Corpus** `types.fin:26`. Nullable return, denullified at the call site with `?`. Note it is generic in the *result* type. |
 | `has_field` | `(s: $struct, name: string) <bool>` | read-only | — | The check that makes `select_field`'s denullify safe. |
 | `field_count` | `(s: $struct) <int>` | read-only | — | |
 | `field_type` | `(s: $struct, name: string) <?$type>` | read-only | — | |
@@ -1190,7 +1190,7 @@ made. **Steps 1–4 are prerequisites that are not the compiler API at all** —
 
 | # | Step | Why it is here | Blocked on |
 | --- | --- | --- | --- |
-| 1 | **Turbofish on a dotted path** — `compiler.structs.select_field::<int>(...)` | `parser.y:1416` accepts turbofish only after a bare `IDENTIFIER`, so `types.fin:23` is a **syntax error today**. It is **missing from wave 2's list in `docs/plan.md`** and wave 4 cannot proceed without it. | nothing — pure grammar |
+| 1 | **Turbofish on a dotted path** — `compiler.structs.select_field::<int>(...)` | `parser.y:1416` accepts turbofish only after a bare `IDENTIFIER`, so `types.fin:26` is a **syntax error today**. It is **missing from wave 2's list in `docs/plan.md`** and wave 4 cannot proceed without it. | nothing — pure grammar |
 | 2 | **`@f(...)` as an expression** | `AT` appears in four grammar places, all declaration headers, so **no `@special` can be called at all**. `@CortexCollectorInit()` — the motivating one-liner — is unparseable. | nothing — pure grammar |
 | 3 | **The other three meta-types** — `$struct`, `$interface`, `$enum_member` | Only `$type` has a production (`parser.y:961`). All four are distinct types per `CONTEXT.md`, and `gettype` returns `$struct`. | nothing — pure grammar |
 | 4 | **Register the meta-types in the analyzer** | `$type` parses and resolves to nothing: `Undefined type '$type'`. | 3 |

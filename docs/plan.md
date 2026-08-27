@@ -1363,7 +1363,7 @@ what the corpus contains.
 **Turbofish on a dotted path**, which this plan had missed and which is a hard blocker rather than a
 singleton. Every turbofish production in the grammar begins with a bare `IDENTIFIER` —
 `parser.y:1202`, `:1213`, `:1360`, `:1388`, `:1416` — so `foo::<T>()` and `mod::<T>::bar()` parse and
-`a.b.c::<T>()` does not. That makes `types.fin:23` a syntax error, and `types.fin:23` is `typeid`, the
+`a.b.c::<T>()` does not. That makes `types.fin:26` a syntax error, and `types.fin:26` is `typeid`, the
 function everything else in the standard library is built on. It needs the missing construct twice in
 one expression, on both `compiler.structs.select_field::<int>` and `compiler.types.gettype::<T>`, with a
 postfix denullify on the result. Nothing in wave 4 is testable until this parses, so it is wave 2 work
@@ -1372,7 +1372,7 @@ and not compiler-API work.
 **Additional grammar work the standard library needs**, found by auditing it against the C++ rather
 than against the corpus. Groups B, C and D get all thirteen stdlib files past line 2; they do not get
 any file to the *end*. Also required: union type aliases (`type X = A | B | C` — there is no `PIPE`
-production inside a type, which kills `Number` in `types.fin:51` and `ErrorLike` in `typing.fin:8`);
+production inside a type, which kills `Number` in `types.fin:54` and `ErrorLike` in `typing.fin:8`);
 enum payloads, generics and typed members (`EnumDeclaration` at `src/ast/decls/StructDecl.hpp:66-74`
 holds `vector<pair<string, Expression>>` and has no field that *could* hold a type, which deletes
 rather than degrades `Result<T,U>` and `IOResult<T>`); the three absent `implements` forms
@@ -1487,7 +1487,7 @@ The stdlib agent has delivered it, and it is far smaller than this wave was scop
 `@special` bodies exist across the standard library — `types.fin:22 typeid`, `types.fin:81 tftid`,
 `types.fin:88 _resolve_type`, `error.fin:24 is_error_type`, `enums.fin:10 getenumkeyid`,
 `memory.fin:38 GET_MEMORY_LIMIT`, `memory.fin:27 mem_info` — and their transitive closure is **exactly
-one interpreted Fin function**: `std::number2str` at `types.fin:106`. Three further functions
+one interpreted Fin function**: `std::number2str` at `types.fin:109`. Three further functions
 (`enums.fin:15 getkeyid`, `types.fin:95 resolve_type`, `memory.fin:11 falloc`) sit on the boundary and
 fold to constants rather than needing interpretation.
 
@@ -1510,7 +1510,7 @@ violate it, which is a fair estimate of how often it will be got wrong. And **an
 called from a `@special` body**: `pyprototype/stdlib/builtins.fin:78` has `@special panic` calling
 `printf`, which would make compile-time behaviour depend on the host's libc.
 
-`number2str` is `<T: Number>` over the union alias at `types.fin:51`, so it cannot be instantiated
+`number2str` is `<T: Number>` over the union alias at `types.fin:54`, so it cannot be instantiated
 until union type aliases parse (wave 2) and until `compiler.system.get_total_memory`'s return type is
 pinned. Its body is currently the placeholder `return "10";`. The entire compile-time story therefore
 rests on one function that has never been written — which is good news for this wave's size and worth
@@ -1523,7 +1523,7 @@ above as a soundness defect, so the two are one piece of work.
 
 **The measurement was not the whole line, and ADR 0006 has been amended.** Five statement forms and no
 control flow is what the *standard library's* reachable closure needs; the corpus needs more.
-`literal_interface.fin:4` is `if (@implements(struct_, iface) == true)`, `:17` is
+`literal_interface.fin:6` is `if (@implements(struct_, iface) == true)`, `:17` is
 `if (option == IFaceOptions::First)` returning an anonymous `interface { ... }` literal from either arm,
 and `literal_struct.fin:27` is `if (!@defined("printf"))` guarding an `@define`. So this wave admits
 `if`/`else`, unary `!`, comparison, calls to `@special` functions, and quote-and-splice — and refuses
@@ -1562,7 +1562,7 @@ should not have to grant the enums component to do it. And a meta-type is opaque
 operations rather than off the value, because member access is unreachable by grant enforcement and would
 put the layout surface outside the mechanism built to govern it; so `keyidof` (`enums.fin:20-22`) becomes a
 `@special` reaching `compiler.enums.keyid_of` plus a plain wrapper, which is the idiom the two functions
-directly above it already use. Also here: the two `geykeyid` typos at `stdio.fin:63` and `typing.fin:35`.
+directly above it already use. Also here: the two `geykeyid` typos at `stdio.fin:65` and `typing.fin:37`.
 
 A misspelled component name is a hard error, not a silent false. `present()` has to answer false for an
 absent component or capability negotiation is impossible, which makes
@@ -1721,7 +1721,7 @@ feature with no specification to build against. The corpus's actual discriminant
 over a mechanism that does not exist: `EnumDeclaration` (`src/ast/decls/StructDecl.hpp:66-74`) holds
 `vector<pair<string, Expression>>` with no field capable of holding a payload type. It also needs
 `$enum_member` to exist first, since `keyidof` takes one and a `match` arm *is* an enum member. The
-sharpest argument against landing it early: `stdio.fin:63` and `typing.fin:35` both call **`geykeyid`**,
+sharpest argument against landing it early: `stdio.fin:65` and `typing.fin:37` both call **`geykeyid`**,
 a typo in two files that nobody has caught because nothing runs. Exhaustiveness checking would hide
 that entire class of defect behind nicer syntax instead of exposing it. Both typos are in the approved
 sample edits.

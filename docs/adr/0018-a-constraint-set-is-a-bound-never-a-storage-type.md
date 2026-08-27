@@ -5,8 +5,8 @@ bound is expected. It is not a type a value can have. `let x <Number>;` and `fun
 diagnostics at the point of use, naming the declaration.
 
 The corpus already agrees, so this rule convicts nothing. Three constraint sets exist — `arrays.fin:7`,
-`types.fin:51`, `typing.fin:8` — and every use of one is a bound: `sort<T: Number>` (`arrays.fin:9`),
-`number2str<T: Number>` (`types.fin:106`), `Result<T, U: ErrorLike>` (`typing.fin:12`). Across fifty samples,
+`types.fin:54`, `typing.fin:8` — and every use of one is a bound: `sort<T: Number>` (`arrays.fin:9`),
+`number2str<T: Number>` (`types.fin:109`), `Result<T, U: ErrorLike>` (`typing.fin:12`). Across fifty samples,
 zero uses as a storage type.
 
 ## Why not let it be an untagged sum
@@ -38,8 +38,8 @@ pub type EnumType = any implements Enum;          // enums.fin:4
 @special(priv) getenumkeyid(value: EnumType) <int> // enums.fin:10 — a parameter
 ```
 
-`type nullptr = any implements <&void>;` (`types.fin:76`) and `type Any<...> = any implements <...>;`
-(`types.fin:72`) have the same shape. So the distinction is **not** how many members the set has. `any
+`type nullptr = any implements <&void>;` (`types.fin:79`) and `type Any<...> = any implements <...>;`
+(`types.fin:75`) have the same shape. So the distinction is **not** how many members the set has. `any
 implements <X>` is an erased type carrying a bound, and an erased type has a representation (ADR 0019);
 `A | B` has none. The diagnostic therefore fires on the **alternation form** only, and `EnumType` remains a
 perfectly good parameter type.
