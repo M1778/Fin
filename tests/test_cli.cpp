@@ -169,6 +169,7 @@ TEST(MachineContract, TheBaselineArgvReproducerNoLongerCompilesTheWrongFile) {
         << "the operand of -o must not become the input file";
 }
 
+#ifdef FIN_TESTS_HAVE_BACKEND
 TEST(MachineContract, DashOProducesTheNamedExecutable) {
     // This test used to be DashOIsAcceptedAndIgnored, and asserted the opposite:
     // `-o` was stored and never honoured because runCodeGen returned true without
@@ -184,6 +185,38 @@ TEST(MachineContract, DashOProducesTheNamedExecutable) {
     std::error_code ec;
     fs::remove(target, ec);
 }
+#else
+// The same contract, for the build that has no backend to honour it with.
+//
+// ADR 0010 keeps FIN_WITH_LLVM=OFF as a checker for the platforms that cannot get
+// LLVM 22, and the assertion above cannot hold there: nothing in that build can
+// produce the file. It ran anyway and failed, which made `ctest` exit 8 on a
+// configuration CMakeLists.txt offers -- and a suite that is expected to be red is
+// exactly where a second, real failure hides.
+//
+// This is not that assertion relaxed, it is its other half. What an OFF build owes
+// is the refusal, and the refusal is the load-bearing part: CodeGen_Stub.cpp says
+// why it returns false rather than doing nothing, which is that `return true` would
+// make `finc x.fin -o x` exit 0 having written no file, so a script that checks the
+// status would go on to run an artifact that is not there. So both halves are
+// checked here -- the file is absent, and the status says the file is absent.
+//
+// Not a BACKEND_TEST: that macro skips, and a skip is the quiet this was ruled
+// against. Both configurations assert, neither is excused.
+TEST(MachineContract, DashOWithoutABackendRefusesAndWritesNothing) {
+    TempFin f("fun main() <noret> {}\n");
+    const std::string target = uniqueTempPath("fin_o_flag_target");
+    auto r = runFinc({f.str(), "-o", target});
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 1) << err;
+    EXPECT_FALSE(fs::exists(target))
+        << "a build with no backend must not leave a file where -o pointed";
+    EXPECT_NE(err.find("without a backend"), std::string::npos)
+        << "the refusal must name the reason, not fail silently: " << err;
+    std::error_code ec;
+    fs::remove(target, ec);
+}
+#endif
 
 TEST(MachineContract, DashOWithoutAnOperandIsAUsageError) {
     TempFin f("fun main() <noret> {}\n");
