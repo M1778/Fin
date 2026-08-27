@@ -1,6 +1,7 @@
 #include "../SemanticAnalyzer.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../../utils/IntegerConstant.hpp"
+#include "../../types/Layout.hpp"
 #include <fmt/core.h>
 #include <fmt/color.h>
 
@@ -70,6 +71,25 @@ bool isAssignableTarget(const Expression* expr) {
 //
 // An unresolved or error type answers *true*, so that a name that already produced a
 // diagnostic does not produce a second one about its increment.
+// Is this type an integer -- any integer -- and so usable as an allocation's extent?
+//
+// The names come from types/Layout.hpp rather than from a list written here, because
+// that header says why not: it is the compiler's one scalar table, and the widths and
+// aliases live in it so that `int64`, `uint8` and lib/std's `u64`/`size_t` resolve to a
+// width rather than to a second table somewhere else. This pass decides whether an
+// extent is legal and the backend decides how many bytes it counts; two lists is how
+// those two answers come apart.
+//
+// `char` answers true, following isSignedIntegerName in Analyzer_Core.cpp, which also
+// counts it. `bool` answers false: the table gives it its own kind, and one bit of
+// value is not a count. No corpus line writes either as an extent.
+bool isIntegerExtentType(const TypePtr& type) {
+    auto* prim = dynamic_cast<const PrimitiveType*>(type.get());
+    if (!prim) return false;
+    const auto info = scalarByName(prim->name);
+    return info && info->kind == ScalarKind::Int;
+}
+
 bool isIncrementable(const TypePtr& type) {
     if (!type || isErrorType(type)) return true;
     auto* prim = dynamic_cast<const PrimitiveType*>(type.get());
@@ -1326,13 +1346,34 @@ void SemanticAnalyzer::visit(NewExpression& node) {
     // walked past.
     if (auto* arrNode = dynamic_cast<ArrayTypeNode*>(node.type.get())) {
         auto element = resolveTypeFromAST(arrNode->element_type.get());
+        // Any integer, and one diagnostic.
+        //
+        // What stood here checked the extent against `int` with checkType -- which
+        // reports on its own -- and then reported a second time that the size "must be
+        // an integer", about a value that in the corpus's own two cases is one. Both of
+        // stdio.fin's allocations are `ulong`: :109 declares `read(nbytes: ulong = -1)`
+        // and :112 allocates `new [char, nbytes - self.pointer]`; :123 declares
+        // `expand(nbytes: ulong)` and :124 allocates
+        // `new [char, nbytes + self.stream_length]`. That is four diagnostics for two
+        // lines the comment above this branch already names as allocations this pass
+        // must accept, and a byte count is the natural use for an unsigned type.
+        //
+        // isErrorType first, so an extent that already failed to type -- `new [int,
+        // nosuchvar]` -- stays one diagnostic about the name.
+        // Soundness_ArrayExtent.AnAllocationsExtentMayBeAnyIntegerType,
+        // .ANonIntegerExtentIsRefusedExactlyOnce, .AnUnresolvedExtentDoesNotCascade.
+        //
+        // The annotation path has the same doubled report (Analyzer_Core.cpp:260) and
+        // is deliberately left alone: an annotation's extent must be a constant, no
+        // corpus line writes a non-`int` one, and no line proves what the rule there
+        // should be.
         if (arrNode->size) {
             arrNode->size->accept(*this);
-            if (lastExprType) {
-                auto intType = currentScope->resolveType("int");
-                if (!checkType(*arrNode->size, lastExprType, intType)) {
-                    error(*arrNode->size, "An allocation's size must be an integer");
-                }
+            if (lastExprType && !isErrorType(lastExprType) &&
+                !isIntegerExtentType(lastExprType)) {
+                error(*arrNode->size,
+                      fmt::format("An allocation's size must be an integer, not '{}'",
+                                  lastExprType->toString()));
             }
         }
         if (!element) { lastExprType = nullptr; return; }

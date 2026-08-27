@@ -8677,6 +8677,55 @@ TEST(Soundness_ArrayExtent, AnAllocationsExtentNeedNotBeConstant) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
+TEST(Soundness_ArrayExtent, AnAllocationsExtentMayBeAnyIntegerType) {
+    // The test above cites stdio.fin:112 and then exercises an `int`, which is not
+    // what that line writes. tests/samples/stdlib/stdio.fin:109 declares
+    // `read(nbytes: ulong = -1)` and :112 allocates `new [char, nbytes - self.pointer]`
+    // from it; :123 declares `expand(nbytes: ulong)` and :124 allocates
+    // `new [char, nbytes + self.stream_length]`. Both extents are `ulong`, and both
+    // were refused -- twice each, because visit(NewExpression) checked the extent
+    // against `int` with checkType (which reports) and then reported a second time
+    // that the size "must be an integer" about a value that is one.
+    //
+    // A byte count is the natural use for an unsigned type, so the rule is the
+    // question the message already asks: is the extent an integer. Which integer is
+    // the backend's business, and it reads the same table this check now reads
+    // (types/Layout.hpp -- deliberately the compiler's one table, so that a width or
+    // an alias cannot mean one thing here and another there).
+    for (const char* t : {"int", "uint", "long", "ulong", "short", "ushort"}) {
+        const FincRun r = compile(
+            std::string("fun f(n: ") + t + ") <noret> { let a <[char]> = new [char, n]; }\n"
+            "fun main() <noret> {}\n");
+        EXPECT_EQ(r.exitCode, 0) << t << ":\n" << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_ArrayExtent, ANonIntegerExtentIsRefusedExactlyOnce) {
+    // The other half of the same edit. A `string`, a float and a bool are still not
+    // extents -- and each is now one diagnostic rather than two, which is what makes
+    // the count in a sample's `//@` note mean something.
+    for (const char* e : {"\"x\"", "1.5", "true"}) {
+        const FincRun r = compile(
+            std::string("fun main() <noret> { let a <[int]> = new [int, ") + e + "]; }\n");
+        EXPECT_NE(r.exitCode, 0) << e << ":\n" << stripAnsi(r.err);
+        const std::string err = messagesOnly(stripAnsi(r.err));
+        EXPECT_EQ(errorCount(err), 1u) << e << ":\n" << err;
+        EXPECT_NE(err.find("must be an integer"), std::string::npos) << e << ":\n" << err;
+    }
+}
+
+TEST(Soundness_ArrayExtent, AnUnresolvedExtentDoesNotCascade) {
+    // `new [int, nosuchvar]` was always one diagnostic and stays one: the undefined
+    // name is the fault and the extent check has nothing to add. Held here because the
+    // edit above rewrites the branch that guarantees it.
+    const FincRun r = compile(
+        "fun main() <noret> { let a <[int]> = new [int, nosuchvar]; }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("nosuchvar"), std::string::npos) << err;
+}
+
 TEST(Soundness_ArrayExtent, ANegativeExtentIsRefused) {
     const FincRun r = compile(
         "fun main() <noret> { let a <[int, -1]> = [1]; }\n");
