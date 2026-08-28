@@ -418,6 +418,31 @@ where marked:
   has. So `variables.fin` needs two rulings, not one, and the second was invisible while the
   first refusal stopped the pass — which is §17's rule that yield cannot be read off a first
   refusal, demonstrated again.
+- ~~**What a `class` is at run time**~~ — **RULED 2026-08-28: a struct that may name a base.**
+  A value, copied on assignment; `class` buys inheritance and nothing else. `readonly.fin:16`
+  says "Readonly in classes (same with struct)" and `stdlib/error.fin:7` says `#[class]`
+  "turns structs into classes (for stronger inheritance support)". The line that reads the
+  other way — `lib/std/stdptr.fin:29-30`, "returning it by value would copy the very counter"
+  — is about `own()`'s return type, and `rptr`'s counter is a `&uint`, so a copy shares it.
+  **No corpus site copies or assigns a class value**, which is why this needed the owner.
+  → **ADR 0026.** Still owed in code: `class X {}` parses to a `ClassDeclaration`, which does
+  **not** derive from `StructDeclaration` (`parser.y:556`; `:36-41` records a bug that cost),
+  while `declareStructs`/`StructInfo::decl`/`declareStructMethods` all key on
+  `StructDeclaration*`. `StructDeclaration::is_class` is not the hook — nothing sets it.
+- ~~**What `try`/`catch` does**~~ — **RULED 2026-08-28: `try` is a scope, `catch` emits
+  nothing.** Nothing in Fin raises anything a `catch` can receive: `blame`'s assert form
+  aborts without unwinding and its raise form is refused. The corpus has one `try`
+  (`readonly.fin:48`) and the `a.v1 = 5` it guards is a *compile-time* error elsewhere. The
+  catch body is still analysed (`Analyzer_Stmt.cpp:148-156`), so only codegen is skipped.
+  → **ADR 0026.** `Soundness_Codegen.ATryBlockRunsAndItsCatchDoesNot` is what fails the day a
+  raise form lowers, and that failure is the signal to build a real mechanism.
+- **May a `&Derived` be passed where a `&Base` is expected?** — *blocks nothing today.*
+  The ABI makes it free now (base fields at offset 0, so an upcast emits nothing), and the
+  analyzer refuses it: `expected '&Base', got '&Derived'`. **Left refused deliberately.**
+  Measured across all fifty samples: no corpus site writes such a call, so there is no
+  witness for the rule — and the neighbouring case is not obvious, since `&&Derived` → `&&Base`
+  is almost certainly *no* (it would let a `Base*` be stored through a `Derived**`). ADR 0008:
+  the layout makes it possible, a witness makes it ruled.
 - **How `fin_core` links LLVM on Windows** — *blocks `windows-x86_64` and `windows-arm64`.*
   `CMakeLists.txt` links the monolithic libLLVM (`target_link_libraries(fin_core PUBLIC LLVM)`),
   which LLVM cannot build under MSVC at **any** version: `llvm/CMakeLists.txt` sets
