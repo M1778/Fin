@@ -2382,12 +2382,15 @@ expression:
         $$->setLoc(@$);
     }
     /* New expression - pointer type */
-    /* `new int(5)` -- tests/samples/variables.fin:28, :36 and
-       simple_pointers.fin:24. Every other `new` form starts with an IDENTIFIER,
-       so heap-allocating a builtin was a syntax error: "unexpected TYPE_INT,
-       expecting IDENTIFIER". `primitive_type` rather than `type` keeps it out of
-       the way of the five IDENTIFIER forms -- TYPE_INT and friends are their own
-       tokens, so no state has to choose. */
+    /* `new int(5)` -- tests/samples/variables.fin:28 and :36, both of which bind
+       the result to a `&int`, which is what this form yields. Every other `new`
+       form starts with an IDENTIFIER, so heap-allocating a builtin was a syntax
+       error: "unexpected TYPE_INT, expecting IDENTIFIER". `primitive_type` rather
+       than `type` keeps it out of the way of the five IDENTIFIER forms -- TYPE_INT
+       and friends are their own tokens, so no state has to choose.
+       simple_pointers.fin:24 used to be cited here too and no longer is: it wrote
+       `**x = new int(10);` into an `int` lvalue, which this form cannot satisfy
+       without breaking the two sites above, and the sample was repaired instead. */
     | KW_NEW primitive_type LPAREN arguments RPAREN {
         auto ty = std::make_unique<fin::TypeNode>($2);
         ty->setLoc(@2);
@@ -2615,12 +2618,15 @@ no_struct_expression:
         $$->setLoc(@$);
     }
     /* New expression - pointer type */
-    /* `new int(5)` -- tests/samples/variables.fin:28, :36 and
-       simple_pointers.fin:24. Every other `new` form starts with an IDENTIFIER,
-       so heap-allocating a builtin was a syntax error: "unexpected TYPE_INT,
-       expecting IDENTIFIER". `primitive_type` rather than `type` keeps it out of
-       the way of the five IDENTIFIER forms -- TYPE_INT and friends are their own
-       tokens, so no state has to choose. */
+    /* `new int(5)` -- tests/samples/variables.fin:28 and :36, both of which bind
+       the result to a `&int`, which is what this form yields. Every other `new`
+       form starts with an IDENTIFIER, so heap-allocating a builtin was a syntax
+       error: "unexpected TYPE_INT, expecting IDENTIFIER". `primitive_type` rather
+       than `type` keeps it out of the way of the five IDENTIFIER forms -- TYPE_INT
+       and friends are their own tokens, so no state has to choose.
+       simple_pointers.fin:24 used to be cited here too and no longer is: it wrote
+       `**x = new int(10);` into an `int` lvalue, which this form cannot satisfy
+       without breaking the two sites above, and the sample was repaired instead. */
     | KW_NEW primitive_type LPAREN arguments RPAREN {
         auto ty = std::make_unique<fin::TypeNode>($2);
         ty->setLoc(@2);
