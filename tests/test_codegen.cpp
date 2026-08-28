@@ -2414,6 +2414,88 @@ BACKEND_TEST(Soundness_Codegen, AnEmptyStructIsOneByteSoItsValuesHaveDistinctAdd
 // structs section above exists to catch.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// `try` / `catch`: the try block runs, the catch block does not exist at run time.
+//
+// Ruled 2026-08-28. Nothing in Fin raises anything a `catch` could receive --
+// `blame`'s assert form prints and aborts, and its raise form is still refused -- so a
+// handler for an event that cannot occur is honestly lowered as nothing. `try` becomes
+// its block, and the block is a scope like any other.
+//
+// These tests are new because there were none: the refusal was never asserted anywhere,
+// which is why lowering it broke nothing and also why nothing would have noticed if it
+// had been lowered wrongly. The day a raise form lowers, ATryBlockRunsAndItsCatchDoesNot
+// is what fails, and that failure is the signal to build a real mechanism.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, ATryBlockRunsAndItsCatchDoesNot) {
+    // readonly.fin:48-52 in miniature. Both halves asserted in one test, because
+    // "the try ran" and "the catch did not" are the two things that can go wrong
+    // independently: emitting neither would silently drop the guarded statement, which
+    // is the miscompile this file exists to prevent.
+    const Built b = build(std::string(kPrintf) +
+        "struct Error { message <string> }\n"
+        "fun main() <noret> {\n"
+        "    let n <int> = 1;\n"
+        "    try {\n"
+        "        n = 5;\n"
+        "        printf(\"try ran\\n\");\n"
+        "    } catch (Error as err) {\n"
+        "        printf(\"catch ran\\n\");\n"
+        "    }\n"
+        "    printf(\"n=%d\\n\", n);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "try ran\nn=5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ATryBlocksSideEffectsSurviveIt) {
+    // The guarded statement is not merely *reached*, its effect outlives the block --
+    // `n = 5` above is read after the `try` closes. Separate from the test above
+    // because a lowering that emitted the try block into a scope it then discarded
+    // would print "try ran" and still report n=1.
+    const Built b = build(std::string(kPrintf) +
+        "struct Error { message <string> }\n"
+        "fun main() <noret> {\n"
+        "    let total <int> = 0;\n"
+        "    try { total = total + 7; } catch (Error as err) { total = 100; }\n"
+        "    try { total = total + 3; } catch (Error as err) { total = 200; }\n"
+        "    printf(\"%d\\n\", total);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnUnlowerableStatementInsideATryIsStillRefused) {
+    // `try` is a scope, not a suppression. A construct the backend cannot lower is
+    // refused wherever it is written, and writing it inside a `try` must not turn the
+    // refusal off -- that would be the "refuse, never skip" rule with a hole in it.
+    const Built b = build(
+        "struct Error { message <string> }\n"
+        "fun main() <noret> {\n"
+        "    try { m1778; } catch (Error as err) { }\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("'m1778'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ACatchBlockIsStillAnalysedEvenThoughItIsNotEmitted) {
+    // The front end walks the catch body and type-checks it (Analyzer_Stmt.cpp:148-156),
+    // so skipping *code generation* for it does not make it an unchecked region. This
+    // is the test that says the two passes disagree on purpose rather than by accident:
+    // an undefined name in there is still a diagnostic, and it comes from the analyzer.
+    const Built b = build(
+        "struct Error { message <string> }\n"
+        "fun main() <noret> {\n"
+        "    try { } catch (Error as err) { let x <int> = nosuchname; }\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.compileErr.find("codegen:"), std::string::npos)
+        << "the catch body's fault must come from the front end, not from the backend\n"
+        << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnInheritedFieldIsReadAndWrittenThroughTheDerivedStruct) {
     // The base's two fields, then the derived one's, and each distinct so that reading
     // a neighbour gives a different answer. The write half matters as much as the read:

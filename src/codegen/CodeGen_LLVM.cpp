@@ -1624,12 +1624,14 @@ private:
     // The struct shapes this file will not lower, each with the reason it cannot be
     // guessed at. Returns false having already reported.
     bool lowerableStruct(StructDeclaration& s) {
-        if (s.is_class) {
-            // Whether a `class` is a value like a struct or a reference is not
-            // settled, and the two lower differently at every assignment.
-            unsupported(s, fmt::format("a class '{}'", s.name));
-            return false;
-        }
+        // `StructDeclaration::is_class` is not consulted, and nothing sets it: the
+        // parser builds a *ClassDeclaration* for `class X { ... }` (parser.y:556) and
+        // leaves that field false on every StructDeclaration it makes. It survives only
+        // because CloneDecls.cpp:54 copies it. So there is no class to refuse here, and
+        // the branch that used to refuse one was dead.
+        //
+        // Where a class *is* refused is visit(ClassDeclaration&), and the ruling that
+        // makes that refusal wrong is recorded there rather than here.
         if (s.destructor) {
             // A destructor runs implicitly at the end of a scope. Lowering the
             // struct as plain data and emitting no call is not an unimplemented
@@ -4739,7 +4741,35 @@ private:
         }
         return module_.getOrInsertFunction(name, type);
     }
-    void visit(TryCatch& node) override { unsupported(node, "'try'/'catch'"); }
+    // `try { ... } catch (E as e) { ... }` lowers as the try block alone.
+    //
+    // Ruled 2026-08-28, and it is a ruling about what Fin currently *is* rather than
+    // about how to implement exceptions. Nothing in this language raises anything a
+    // `catch` could receive: `blame`'s assert form prints and calls `abort` (ADR is in
+    // the f5aedc3 commit message), so it does not unwind, and its raise form is still
+    // refused. The corpus has exactly one `try` -- readonly.fin:48, wrapping
+    // `a.v1 = 5` with `catch (Error as err)` -- and the assignment it guards cannot
+    // raise: assigning to a readonly field is a *compile-time* error in every other
+    // sample that does it.
+    //
+    // So the catch block is unreachable, and emitting nothing for it is not a dropped
+    // statement -- it is the honest lowering of a handler for an event that cannot
+    // occur. Emitting landing pads and a personality function instead would be
+    // machinery no corpus site exercises, which is the thing this project has
+    // consistently declined to build.
+    //
+    // The catch block is still *analysed* -- the front end walks it and type-checks
+    // its body (Analyzer_Stmt.cpp:148-156) -- so a mistake inside one is still a
+    // diagnostic. What is skipped is only the code generation.
+    //
+    // The day a raise form lowers, this becomes wrong and has to grow a real
+    // mechanism. Soundness_Codegen.ATryBlockRunsAndItsCatchDoesNot is what will fail
+    // then, because it asserts the catch body's printf never runs.
+    void visit(TryCatch& node) override {
+        if (!node.try_block) { unsupported(node, "a 'try' with no block"); return; }
+        node.try_block->accept(*this);
+    }
+
 
     // `blame c` and `blame c, "why"` -- the assert form, which prints where it failed
     // and aborts.
