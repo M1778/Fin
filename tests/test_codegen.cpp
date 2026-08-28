@@ -71,6 +71,12 @@ struct Built {
     int runExit = -1;
     std::string out;
 
+    // The path the program was compiled from. Kept because a failed `blame` prints
+    // it, so a test that pins the location whole needs the same spelling the driver
+    // was handed -- and the harness writes to a unique temporary, so that spelling
+    // is not a constant any assertion could hold.
+    std::string srcPath;
+
     // The message an assertion should print. Both halves, always: which one is
     // interesting depends on where it went wrong.
     std::string why() const {
@@ -84,6 +90,7 @@ Built build(const std::string& code) {
     Built b;
     fs::path src = uniqueTempPath("fin_cg", ".fin");
     fs::path exe = uniqueTempPath("fin_cg_exe");
+    b.srcPath = src.string();
     {
         std::ofstream f(src, std::ios::binary);
         f.write(code.data(), (std::streamsize)code.size());
@@ -6285,16 +6292,15 @@ BACKEND_TEST(Soundness_Codegen, AFunctionValueSurvivesAStructFieldRoundTrip) {
 // readonly.fin's `try` wraps `a.v1 = 5` and its `blame` at :56 is outside it. A
 // mechanism for an unevidenced case would be a mechanism nothing checks.
 //
-// One caveat these tests are explicit about: the file half of the location reads
-// `<input>` under the test harness and under finc today, because nothing hands the
-// backend the source path -- a node's `loc` carries a null filename (the lexer
-// initialises every one that way), the AST has no path field, and DiagnosticEngine
-// keeps its copy private. `generateObject` now takes a `sourceName` and defaults it
-// to DiagnosticEngine's own `<input>`; one line in the driver would pass the real
-// path, and that line is not in this lane. So these tests assert the part that is
-// this file's to get right -- the line number, the wording, the message, the exit --
-// and AFailedBlameNamesAFileAndALine pins the shape of the whole thing so the day the
-// driver passes a path is a day this test goes red rather than a day nobody notices.
+// One detail these tests used to be explicit about, and no longer have to be: the
+// file half of the location read `<input>`, because nothing handed the backend the
+// source path -- a node's `loc` carries a null filename (the lexer initialises every
+// one that way), the AST has no path field, and DiagnosticEngine keeps its copy
+// private. `generateObject` takes a `sourceName`, defaulted to DiagnosticEngine's own
+// `<input>`, and the driver now passes `options.inputFile` at both of its call sites,
+// so a failed assertion names a file a person can open. AFailedBlameNamesAFileAndALine
+// is where that arrived: it pinned the whole string, so the driver's one line turned it
+// red on the spot, which is the only reason the change could not land half-done.
 
 BACKEND_TEST(Soundness_Codegen, APassingBlameCostsTheProgramNothing) {
     // The ordinary case, and the one that must not print: an assertion that holds is a
@@ -6348,10 +6354,11 @@ BACKEND_TEST(Soundness_Codegen, AFailedBlameWithNoMessageStillSaysWhere) {
 }
 
 BACKEND_TEST(Soundness_Codegen, AFailedBlameNamesAFileAndALine) {
-    // The shape of the location, pinned whole. Today the file half is `<input>` because
-    // nothing passes the backend a source path (see this section's note); the day the
-    // driver passes one, this assertion is what notices, and its replacement is the
-    // sample's own name rather than a new guess.
+    // The shape of the location, pinned whole -- both halves, one exact string, no
+    // substring search. The file half is the path the driver was handed, which is why
+    // the harness keeps it: asserting against `b.srcPath` and not a pattern is what
+    // makes this test fail if the driver ever stops passing the path, or passes the
+    // object's path, or the stem, instead of the source's.
     const Built b = build(
         "fun main() <void> {\n"
         "    let n <int> = 0;\n"
@@ -6359,7 +6366,7 @@ BACKEND_TEST(Soundness_Codegen, AFailedBlameNamesAFileAndALine) {
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_NE(b.runExit, 0) << b.why();
-    EXPECT_EQ(b.out, "<input>:3: assertion failed: n must be positive\n") << b.why();
+    EXPECT_EQ(b.out, b.srcPath + ":3: assertion failed: n must be positive\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AFailedBlameGoesToStderrAndNotToStdout) {
