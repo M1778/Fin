@@ -553,16 +553,35 @@ declaration_body:
         $$ = std::move(en);
         $$->setLoc(@$);
     }
+    /* `class X { ... }` builds a **StructDeclaration** with `is_class` set, not a
+       ClassDeclaration -- one line different from the `struct` production above it.
+
+       ADR 0026 ruled that a class *is* a struct that may name a base: a value, copied
+       on assignment, with inheritance the whole of the difference. readonly.fin:16
+       introduces `class MyClass` with "Readonly in classes (same with struct)" and
+       stdlib/error.fin:7 says `#[class]` "turns structs into classes (for stronger
+       inheritance support)". If the two are one thing, one node is the honest encoding.
+
+       This production used to copy six vectors out of `struct_body_content` -- which is
+       itself a StructDeclaration accumulator -- into a ClassDeclaration that duplicated
+       every field. That duplication cost a real bug, recorded at the top of this file:
+       ClassDeclaration does not derive from StructDeclaration, so an attribute-dispatch
+       chain with no ClassDeclaration branch dropped every `#[...]` and `pub` on a class
+       silently. It would have cost more, because the backend keys on `StructDeclaration*`
+       in three places and the analyzer carried a 144-line class path beside the struct
+       path's 201 -- and the struct path does strictly more (it tracks
+       `currentStructContext` in six places against four, and declares generic parameters
+       in two against one).
+
+       So a class now gets every struct pass for free, including the ones the class path
+       did not have. `is_class` is set for a reader that wants to know how the type was
+       spelled; nothing in codegen branches on it, because ADR 0026 says nothing should. */
     | KW_CLASS IDENTIFIER generic_params_opt inheritance_opt LBRACE struct_body_content RBRACE {
-        auto cls = std::make_unique<fin::ClassDeclaration>($2, std::move($6->members), false);
-        cls->methods = std::move($6->methods);
-        cls->operators = std::move($6->operators);
-        cls->constructors = std::move($6->constructors);
-        cls->destructor = std::move($6->destructor);
-        cls->attributes = std::move($6->attributes);
-        cls->generic_params = std::move($3);
-        cls->parents = std::move($4);
-        $$ = std::move(cls);
+        $6->name = $2;
+        $6->generic_params = std::move($3);
+        $6->parents = std::move($4);
+        $6->is_class = true;
+        $$ = std::move($6);
         $$->setLoc(@$);
     }
     | KW_LET IDENTIFIER LT type GT EQUAL expression SEMICOLON {

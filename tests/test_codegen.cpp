@@ -344,7 +344,7 @@ BACKEND_TEST(Soundness_Codegen, ACompileOnlyBuildStillRefusesWhatItCannotLower) 
     // -- a stale one is a link that succeeds against yesterday's code.
     const fs::path obj = uniqueTempPath("fin_obj_bad", ".o");
     const Compiled c = compileOnly(
-        "class MyClass { v <int> }\n"
+        "fun bad() <noret> { m1778; }\n"
         "fun make() <int> { return 1; }\n", obj);
     EXPECT_NE(c.exitCode, 0) << c.why();
     EXPECT_NE(c.err.find("codegen"), std::string::npos) << c.why();
@@ -645,25 +645,8 @@ BACKEND_TEST(Soundness_Codegen, AnEscapeIsLoweredOnce) {
 // ---------------------------------------------------------------------------
 
 BACKEND_TEST(Soundness_Codegen, AnUnloweredConstructIsRefused) {
-    // A class declaration is well-typed and cannot be lowered: a class is a struct
-    // plus inheritance plus a vtable plus `super` plus a destructor -- stdlib/stdptr.fin:37
-    // writes `pub class rptr<T>: <rptr_iface>`, which is all five at once -- and each of
-    // those is a unit of its own. The compile must fail and say so; the one outcome that
-    // must never happen is exit 0 with a binary whose behaviour does not match the
-    // program.
-    //
-    // The construct in a refusal test is a moving part, and this one has now moved
-    // three times. It was a plain struct until structs lowered, a generic struct until
-    // monomorphisation landed, and an interface until an interface declaration became
-    // nothing to emit -- and each time keeping it would have turned a passing refusal
-    // test into a passing test of nothing. Which is the argument for picking the
-    // construct that is furthest from being lowered rather than the one that reads
-    // best. A class is that construct today for a reason worth writing down: no
-    // sample's first refusal is a class, so lowering one unblocks nothing, and nothing
-    // that unblocks nothing reaches the front of a queue ordered by yield.
     const Built b = build(
-        "class MyClass { v <int> }\n"
-        "fun main() <noret> { let i <int> = 1; }\n");
+        "fun main() <noret> { m1778; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
 }
@@ -684,11 +667,10 @@ BACKEND_TEST(Soundness_Codegen, ARefusalNamesTheLine) {
     const Built b = build(
         "fun main() <noret> {\n"
         "    let i <int> = 1;\n"
-        "}\n"
-        "\n"
-        "class MyClass { v <int> }\n");
+        "    m1778;\n"
+        "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find(".fin:5:"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find(".fin:3:"), std::string::npos) << b.why();
 }
 
 // ---------------------------------------------------------------------------
@@ -720,12 +702,12 @@ BACKEND_TEST(Soundness_Codegen, TwoIndependentUnloweredDeclarationsAreBothReport
     // `foreach` in a different function share nothing, so reporting one and stopping
     // hides a whole unit of work from anyone reading the output.
     const Built b = build(
-        "class A { v <int> }\n"
         "fun f() <noret> { let a <[int, 3]> = [1,2,3]; foreach (e <int> in a) { } }\n"
+        "fun g(v: int) <noret> { m1778; }\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
-    EXPECT_NE(b.compileErr.find("a class declaration"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("'m1778'"), std::string::npos) << b.why();
     EXPECT_NE(b.compileErr.find("'foreach' loop"), std::string::npos) << b.why();
 }
 
@@ -757,8 +739,8 @@ BACKEND_TEST(Soundness_Codegen, CollectingRefusalsStillWritesNoObject) {
     // artifact": a stale or partial object is a link against code that was refused.
     const fs::path obj = uniqueTempPath("fin_obj_multi", ".o");
     const Compiled c = compileOnly(
-        "class A { v <int> }\n"
         "fun f() <noret> { let a <[int, 3]> = [1,2,3]; foreach (e <int> in a) { } }\n"
+        "fun g(v: int) <noret> { m1778; }\n"
         "fun main() <noret> { let i <int> = 1; }\n", obj);
     EXPECT_NE(c.exitCode, 0) << c.why();
     EXPECT_EQ(occurrences(c.err, "codegen: "), 2u) << c.why();
@@ -772,17 +754,12 @@ BACKEND_TEST(Soundness_Codegen, EachCollectedRefusalStillNamesItsOwnLine) {
     // The two here are eight lines apart, so a location that was reused or left default
     // would show up as the same line twice.
     const Built b = build(
-        "class A { v <int> }\n"
-        "\n"
-        "fun f() <noret> {\n"
-        "    let a <[int, 3]> = [1,2,3];\n"
-        "    foreach (e <int> in a) { }\n"
-        "}\n"
-        "\n"
+        "fun f() <noret> { let a <[int, 3]> = [1,2,3]; foreach (e <int> in a) { } }\n"
+        "fun g(v: int) <noret> { m1778; }\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find(".fin:1:"), std::string::npos) << b.why();
-    EXPECT_NE(b.compileErr.find(".fin:5:"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find(".fin:2:"), std::string::npos) << b.why();
 }
 
 // Statements inside one body, which is where the corpus actually keeps its chains: a
@@ -2552,30 +2529,23 @@ BACKEND_TEST(Soundness_Codegen, AnImplementedInterfaceAddsNoFieldsToTheStruct) {
     EXPECT_EQ(b.out, "4 7\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, ABaseThisFileDidNotLowerIsRefusedRatherThanSpliced) {
-    // The guard on the whole unit. Splicing fields in from a shape this file declined
-    // to give a layout would be inventing one -- so a base that is a `class` (whose
-    // value-or-reference semantics are unsettled) refuses at the derived struct.
-    //
-    // This is the shape `stdlib/hashmap.fin:12` is: `struct HashMapError: <Error>`,
-    // where `stdlib/error.fin:8` declares `Error` under `#[class]`.
-    const Built b = build(
+BACKEND_TEST(Soundness_Codegen, ABaseClassSplicesLikeABaseStruct) {
+    const Built b = build(std::string(kPrintf) +
         "class Base { a <int> }\n"
         "struct Derived: <Base> { c <int> }\n"
-        "fun main() <noret> { let d <Derived> = Derived{ a: 1, c: 2 }; }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+        "fun main() <noret> { let d <Derived> = Derived{ a: 1, c: 2 }; printf(\"%d %d\\n\", d.a, d.c); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "1 2\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AClassIsRefused) {
-    // Whether a `class` is a value like a struct or a reference is not settled, and
-    // the two lower differently at every single assignment. The analyzer accepts the
-    // declaration, so the refusal has to be here.
-    const Built b = build(
+BACKEND_TEST(Soundness_Codegen, AClassLowersLikeAStruct) {
+    const Built b = build(std::string(kPrintf) +
         "class C { a <int> }\n"
-        "fun main() <noret> { let c <C> = C { a: 1 }; }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+        "fun main() <noret> { let c <C> = C { a: 1 }; printf(\"%d\\n\", c.a); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AnOperatorOnAStructIsRefused) {
@@ -2614,12 +2584,13 @@ BACKEND_TEST(Soundness_Codegen, AStructAsAConditionIsRefused) {
 // value or a reference and Fin has not said which (lowerableStruct), and no `Box<T>`
 // at any T changes that, so it is refused where it is written rather than at each
 // use.
-BACKEND_TEST(Soundness_Codegen, AGenericClassIsRefusedAtItsDeclarationNotItsUse) {
+BACKEND_TEST(Soundness_Codegen, AGenericClassLowersAtItsUse) {
     const Built b = build(std::string(kPrintf) +
         "class Box<T> { v <T> }\n"
-        "fun main() <noret> { printf(\"%d\\n\", 1); }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+        "fun main() <noret> { let b <Box<int>> = Box::<int> { v: 7 }; printf(\"%d\\n\", b.v); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
 }
 
 // These two cannot use BACKEND_TEST: their bodies name llvm::DataLayout and

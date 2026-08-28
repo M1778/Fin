@@ -129,6 +129,7 @@ namespace {
 // operands into a signed divide -- correct for every value the tests happen to
 // use and wrong at the top of the range. `isFloat` is here for the same reason.
 struct StructInfo;
+struct InterfaceInfo;
 
 struct CgType {
     enum class Kind { Void, Int, Float, Ptr, Struct, Array, Fn };
@@ -149,6 +150,7 @@ struct CgType {
     // and these are named, so they are distinct. It points into Emitter::structs_,
     // which is never rehashed after declareStructs finishes.
     const StructInfo* structInfo = nullptr;
+    const InterfaceInfo* interfaceInfo = nullptr;
 
     // Set for Kind::Array and null otherwise: what one element is. Held by value
     // through a shared_ptr rather than inline, because a CgType cannot contain
@@ -164,6 +166,9 @@ struct CgType {
     // Keeping the element type here lets indexing and delete recover the pointee
     // without pretending the LLVM struct itself is an array.
     bool isDynamicArray = false;
+    // Interface references are fat values: {data, vtable}.
+    bool isInterface = false;
+    std::string interfaceName;
 
     // Set for Kind::Ptr when this file knows what is at the other end, and null
     // when it does not.
@@ -259,6 +264,12 @@ struct TypeBinding {
 // it, so this holds both without a second structure.
 using Substitution = std::vector<std::pair<std::string, TypeBinding>>;
 
+struct InterfaceInfo {
+    std::string finName;
+    std::vector<StructField> fields;
+    std::vector<FunctionDeclaration*> methods;
+};
+
 struct StructInfo {
     std::string finName;
     llvm::StructType* llvmType = nullptr;
@@ -330,6 +341,9 @@ struct EnumInfo {
 struct CgVal {
     llvm::Value* value = nullptr;
     CgType type;
+    // Set when the value was loaded from an addressable source. Interface conversion
+    // needs this home for its data pointer; an rvalue has no stable address to borrow.
+    llvm::Value* address = nullptr;
     bool ok() const { return value != nullptr; }
 };
 
@@ -379,6 +393,8 @@ public:
     void bindEnums(const std::unordered_map<std::string, EnumInfo>* enums) {
         enums_ = enums;
     }
+
+    void bindInterfaces(const std::unordered_map<std::string, InterfaceInfo>* interfaces) { interfaces_ = interfaces; }
 
     // How a `Box<int>` becomes a struct that exists.
     //
@@ -501,6 +517,16 @@ public:
         }
         if (auto scalar = byName(node->name)) return scalar;
         if (auto e = enumByName(node->name)) return e;
+        if (interfaces_ && interfaces_->count(node->name)) {
+            CgType t;
+            t.kind = CgType::Kind::Struct;
+            t.isInterface = true;
+            t.interfaceName = node->name;
+            t.interfaceInfo = interfaces_ ? &interfaces_->at(node->name) : nullptr;
+            t.llvmType = llvm::StructType::get(ctx_, {
+                llvm::PointerType::get(ctx_, 0), llvm::PointerType::get(ctx_, 0)});
+            return t;
+        }
         return structByName(node->name, allowIncomplete);
     }
 
@@ -730,6 +756,7 @@ private:
     llvm::LLVMContext& ctx_;
     const std::unordered_map<std::string, StructInfo>* structs_ = nullptr;
     const std::unordered_map<std::string, EnumInfo>* enums_ = nullptr;
+    const std::unordered_map<std::string, InterfaceInfo>* interfaces_ = nullptr;
     std::function<bool(const TypeNode&, std::string&)> instantiate_;
     const Substitution* bindings_ = nullptr;
 };
@@ -798,6 +825,7 @@ public:
           module_("fin", ctx_), builder_(ctx_), types_(ctx_) {
         types_.bindStructs(&structs_);
         types_.bindEnums(&enums_);
+        types_.bindInterfaces(&interfaces_);
         types_.bindInstantiator([this](const TypeNode& node, std::string& out) {
             return instantiateGeneric(node, out);
         });
@@ -1107,6 +1135,15 @@ private:
         for (auto& stmt : program.statements) {
             if (auto* i = dynamic_cast<InterfaceDeclaration*>(stmt.get())) {
                 interfaceNames_.insert(i->name);
+                InterfaceInfo info;
+                info.finName = i->name;
+                for (const auto& m : i->members) {
+                    if (!m || !m->type) continue;
+                    auto mapped = types_.map(m->type.get(), true);
+                    if (mapped) info.fields.push_back({m->name, *mapped, nullptr});
+                }
+                for (const auto& m : i->methods) if (m) info.methods.push_back(m.get());
+                interfaces_[i->name] = std::move(info);
             }
         }
     }
@@ -1624,14 +1661,8 @@ private:
     // The struct shapes this file will not lower, each with the reason it cannot be
     // guessed at. Returns false having already reported.
     bool lowerableStruct(StructDeclaration& s) {
-        // `StructDeclaration::is_class` is not consulted, and nothing sets it: the
-        // parser builds a *ClassDeclaration* for `class X { ... }` (parser.y:556) and
-        // leaves that field false on every StructDeclaration it makes. It survives only
-        // because CloneDecls.cpp:54 copies it. So there is no class to refuse here, and
-        // the branch that used to refuse one was dead.
-        //
-        // Where a class *is* refused is visit(ClassDeclaration&), and the ruling that
-        // makes that refusal wrong is recorded there rather than here.
+        // A class is represented by the same StructDeclaration path as a struct (ADR
+        // 0026), so it reaches this check here and receives the same layout rules.
         if (s.destructor) {
             // A destructor runs implicitly at the end of a scope. Lowering the
             // struct as plain data and emitting no call is not an unimplemented
@@ -5762,6 +5793,7 @@ private:
     // declareEnums runs before it: a name has to be classified before a declaration
     // that mentions it is read.
     std::set<std::string> interfaceNames_;
+    std::unordered_map<std::string, InterfaceInfo> interfaces_;
 
     // Every generic struct declaration, by name, borrowed from the AST -- which
     // outlives the emitter (run() takes the Program by reference). Not in structs_,

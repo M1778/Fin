@@ -3184,8 +3184,9 @@ TEST(Soundness_Attributes, AnAttributeOnAClassReachesTheAST) {
     auto parsed = parseSource("#[export]\nclass C { }\n", diag);
     ASSERT_TRUE(parsed.parsed) << "#[export] class C {} must parse";
     ASSERT_EQ(parsed.ast->statements.size(), 1u);
-    auto* cls = dynamic_cast<fin::ClassDeclaration*>(parsed.ast->statements[0].get());
-    ASSERT_NE(cls, nullptr) << "expected a ClassDeclaration";
+    auto* cls = dynamic_cast<fin::StructDeclaration*>(parsed.ast->statements[0].get());
+    ASSERT_NE(cls, nullptr) << "expected a StructDeclaration";
+    EXPECT_TRUE(cls->is_class);
     ASSERT_EQ(cls->attributes.size(), 1u)
         << "the attribute was dropped: parser.y's attribute dispatch lost its "
            "ClassDeclaration branch";
