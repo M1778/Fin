@@ -532,8 +532,16 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
 
     for (const auto& f : t.faults) ADD_FAILURE() << f;
 
-    EXPECT_EQ(t.samples, 50)
-        << "the corpus is 50 samples. Sample code changes only by a ratified "
+    // 50 -> 51 on 2026-08-28: the owner contributed tests/samples/love.fin, which is
+    // the ratified-decision case this message names rather than the accident case. It
+    // earns its place by being the corpus's FIRST site for interface-as-a-runtime-type
+    // -- ADR 0019 fixed that representation while recording that no sample exercised
+    // it, and this one does. It also found a real compiler bug on arrival: an interface
+    // member was resolved and discarded, so reading a declared member through an
+    // interface type reported "has no member"
+    // (Soundness_Interfaces.AnInterfaceMemberIsReadableThroughTheInterfaceType).
+    EXPECT_EQ(t.samples, 51)
+        << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";
 
@@ -569,7 +577,13 @@ TEST(Census, ThePassingSampleCountNeverFalls) {
     // Raise this when the number goes up; never lower it. Lowering it is the
     // review question "which capability did we lose?", and that question is the
     // only reason this test exists.
-    constexpr int kFloor = 17;
+    // 17 -> 29 on 2026-08-28. Not a jump in capability: the census counts samples
+    // whose expectation is `//@ ok`, and twelve of those had been `ok` for a while
+    // -- this floor had simply not been raised as they landed, which is exactly the
+    // "discovered later by someone debugging a regression" case the NOTE below
+    // exists to prevent. Raised to what the tree actually measures so the next fall
+    // is visible.
+    constexpr int kFloor = 29;
 
     const auto t = census();
     EXPECT_GE(t.ok, kFloor)

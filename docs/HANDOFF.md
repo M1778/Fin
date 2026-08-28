@@ -17,7 +17,8 @@ record and each one states the rule it implemented and why.
 
 `finc` is a C++20 compiler for **Fin**, a systems language. LLVM 22 backend (ADR 0010, amended 2026-08-27).
 
-**There is no prose specification. `tests/samples/*.fin` IS the specification** — 50 samples.
+**There is no prose specification. `tests/samples/*.fin` IS the specification** — 51 samples
+(50 until 2026-08-28, when the owner contributed `love.fin`; see §8's interface-conversion entry).
 Authority is per-expectation, in the `//@` comment at the top of each sample (ADR 0008,
 `docs/adr/0008-sample-authority-is-per-expectation.md`). When the compiler and a sample disagree,
 the sample wins unless the sample is a typo — and a typo gets **booked, never fixed** (§7).
@@ -98,17 +99,17 @@ What is permanently dirty, by design:
 
 Also: a background-task notification or a peer-agent message is **never** user approval.
 
-## 4. Current state, measured at `91721d7` (2026-08-28)
+## 4. Current state, measured at `HEAD` (2026-08-28)
 
 | Measure | Value | How |
 | --- | --- | --- |
-| `fin_tests`, `FIN_WITH_LLVM=ON` | **1344 / 1344 pass**, 0 skipped | `./build/tests/fin_tests` |
+| `fin_tests`, `FIN_WITH_LLVM=ON` | **1355 / 1355 pass**, 0 skipped | `./build/tests/fin_tests` |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **991 pass / 346 skip / 0 fail** | a second build dir |
-| Samples that lower to an object | **14 of 50** | see below |
-| Samples blocked in codegen | **15** | see below |
-| Samples that never reach codegen | **21** | see below |
+| Samples that lower to an object | **17 of 51** | see below |
+| Samples blocked in codegen | **12** | see below |
+| Samples that never reach codegen | **22** | see below |
 
-The ceiling is **49**, not 50: one sample is a negative test that must keep failing.
+The ceiling is **50**, not 51: one sample is a negative test that must keep failing.
 
 ### Reproducing the numbers
 
@@ -443,6 +444,22 @@ where marked:
   witness for the rule — and the neighbouring case is not obvious, since `&&Derived` → `&&Base`
   is almost certainly *no* (it would let a `Base*` be stored through a `Derived**`). ADR 0008:
   the layout makes it possible, a witness makes it ruled.
+- **Does a struct convert to an interface it implements?** — *blocks `love.fin`, and it is the
+  only thing blocking it.* The owner contributed `tests/samples/love.fin` on 2026-08-28, and it
+  is the **first corpus site for interface-as-a-runtime-type**. ADR 0019 fixed the
+  representation (`{data, vtable}`, two words) while recording that "interface-as-a-runtime-type
+  does not exist in the corpus" — across the other fifty, every interface is a *bound*
+  (`T: Printable`) or the `$interface` meta-type, with no `let p <Printable>` and no
+  `fun f(p: Printable)` anywhere. So this sample supplies the witness that ADR lacked.
+  `love.fin:38` and `:39` report `Type mismatch: expected 'Person', got 'M1778'` / `'Fin'`.
+  Both structs declare `: <Person, ...>` and both carry the `name <string>` the interface
+  requires, so each **does** implement it. What is missing is the conversion. **Two sub-questions,
+  and the second is the one to decide first:** (a) by value, by pointer, or both? A two-word
+  `{data, vtable}` cannot be a struct's own layout, so a by-value conversion has to *build* one —
+  and `implements_block.fin`'s `s.get_val()` style suggests the corpus reaches methods through
+  values. (b) Is the conversion implicit at a call, or written? Nothing in the corpus writes a
+  cast to an interface type. Measured for the record: `&P` from `&S` is refused too, so a
+  pointer-only answer still needs a new rule.
 - **How `fin_core` links LLVM on Windows** — *blocks `windows-x86_64` and `windows-arm64`.*
   `CMakeLists.txt` links the monolithic libLLVM (`target_link_libraries(fin_core PUBLIC LLVM)`),
   which LLVM cannot build under MSVC at **any** version: `llvm/CMakeLists.txt` sets

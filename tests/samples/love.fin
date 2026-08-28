@@ -1,0 +1,40 @@
+//@ normative
+//@ unimplemented "Two diagnostics, and they are one question: `I.love(F)` at 38:9 and `F.hate(I)` at 39:9 report `Type mismatch: expected 'Person', got 'M1778'` / `got 'Fin'`. Both structs declare `: <Person, ...>` and both carry the `name <string>` the interface requires, so each *does* implement it -- what is missing is the rule that a value of an implementing struct converts to its interface type. This file is the corpus's FIRST site for that: ADR 0019 fixed the representation of an interface reference (`{data, vtable}`, two words) while recording that \"interface-as-a-runtime-type does not exist in the corpus\", measured across the other fifty samples, where every interface appears as a *bound* (`T: Printable`) or as the `$interface` meta-type. So this sample supplies the witness that ADR was written without, and the ruling it needs is the owner's: whether a struct converts to an interface it implements, by value or only by pointer. Until that is made, both diagnostics are correct. Two repairs landed here 2026-08-28, under the owner's ruling that a sample whose own logic is wrong may be repaired rather than booked, and both are witnessed by the rest of the corpus rather than invented. (1) Lines 12 and 22 read `struct Fin <Person,Beautiful>` and `struct M1778 <Person,Loser>` -- angle brackets directly after the name declare *generic parameters*, so `Person` became a type parameter that shadowed the interface of the same name, and `self.hate.name` then reported `Type 'Person' is not a struct` about an unbound parameter rather than about the interface three lines up. Inheritance is spelled with a colon, which four samples write the same way: `readonly.fin:34` `struct ChangableSomehow: <UnchanableString>`, `deeptest2.fin:67` and `:83`, `stdlib/stdio.fin:46` `struct IOError: <Error>`. (2) Lines 38 and 39 read `M1778.love(F)` and `Fin.hate(M1778)`, calling a method on the *type* rather than on a value; `I` and `F` are the values, declared on 35 and 36. Three samples write the value form: `implements_block.fin:36` `s.get_val()`, `readonly.fin:55` `a.change_v1(1024)`, `interfaces.fin:17` `item.to_string()`. What this file already proved is a compiler bug rather than a sample bug, fixed rather than booked: an interface member was resolved and then discarded, so `interface Person { readonly name <string>, }` followed by any read of `.name` through a `Person`-typed value reported `Struct 'Person' has no member 'name'` -- about a member the interface declares. A method in the same position always worked, so the two halves of an interface disagreed about whether they existed. `readonly.fin:29` declares the same shape and never reads it through the interface, which is why fifty samples missed it (Soundness_Interfaces.AnInterfaceMemberIsReadableThroughTheInterfaceType). Note `printf` is declared with `fmt: string` rather than `fmt: <string>`: nineteen samples write the unbracketed form and none writes the bracketed one, though both parse."
+@define printf(fmt: string, ...) <noret>;
+
+interface Loser {}
+interface Beautiful {}
+interface Person {
+	readonly name <string>,
+}
+
+
+struct Fin: <Person,Beautiful> {
+	readonly hate <Person>,
+	name <string>,
+
+	fun hate(someone: <Person>) <noret> {
+		self.hate = someone;
+		printf("Fin started hating %s\n", self.hate.name);
+	}
+}
+
+struct M1778: <Person,Loser> {
+pub:
+	readonly love <Person>,
+	name <string>,
+
+	fun love(a: <Person>) <noret> {
+		self.love = a;
+		printf("N1778 started loving %s\n", a.name);
+	}
+
+}
+
+fun main() <noret> {
+	const I <auto> = M1778{name:"M1778"};
+	const F <auto> = Fin{name:"Fin"};
+
+	I.love(F);
+	F.hate(I);
+}
