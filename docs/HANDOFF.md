@@ -444,22 +444,39 @@ where marked:
   witness for the rule — and the neighbouring case is not obvious, since `&&Derived` → `&&Base`
   is almost certainly *no* (it would let a `Base*` be stored through a `Derived**`). ADR 0008:
   the layout makes it possible, a witness makes it ruled.
-- **Does a struct convert to an interface it implements?** — *blocks `love.fin`, and it is the
-  only thing blocking it.* The owner contributed `tests/samples/love.fin` on 2026-08-28, and it
-  is the **first corpus site for interface-as-a-runtime-type**. ADR 0019 fixed the
-  representation (`{data, vtable}`, two words) while recording that "interface-as-a-runtime-type
-  does not exist in the corpus" — across the other fifty, every interface is a *bound*
-  (`T: Printable`) or the `$interface` meta-type, with no `let p <Printable>` and no
-  `fun f(p: Printable)` anywhere. So this sample supplies the witness that ADR lacked.
-  `love.fin:38` and `:39` report `Type mismatch: expected 'Person', got 'M1778'` / `'Fin'`.
-  Both structs declare `: <Person, ...>` and both carry the `name <string>` the interface
-  requires, so each **does** implement it. What is missing is the conversion. **Two sub-questions,
-  and the second is the one to decide first:** (a) by value, by pointer, or both? A two-word
-  `{data, vtable}` cannot be a struct's own layout, so a by-value conversion has to *build* one —
-  and `implements_block.fin`'s `s.get_val()` style suggests the corpus reaches methods through
-  values. (b) Is the conversion implicit at a call, or written? Nothing in the corpus writes a
-  cast to an interface type. Measured for the record: `&P` from `&S` is refused too, so a
-  pointer-only answer still needs a new rule.
+- ~~**Does a struct convert to an interface it implements?**~~ — **RULED 2026-08-28: yes, by
+  value, from any addressable value.** One rule in `Type::isAssignableTo`, gated on the target
+  being an interface and the source being a struct that is not one, and on `implements()` --
+  the same predicate the declaration-site check uses, so the two passes agree by construction.
+  One direction only: an interface does not convert back to a struct. → **ADR 0027** for the
+  layout. Four tests in `Soundness_Interfaces`, including the two controls that matter (two
+  unrelated structs still do not convert; a non-implementor still refuses).
+- ~~**How is a field declared in an interface reached at run time?**~~ — **RULED 2026-08-28:
+  field offsets in the vtable.** `{data, vtable}`, with one `i64` offset slot per required
+  field ahead of the method pointers; a field read loads the offset, adds it to `data`, loads.
+  The alternative -- forcing every implementor to place the interface's fields first -- was
+  rejected because it is **unsatisfiable for a struct implementing two interfaces that both
+  require fields**, and `love.fin` already has two such structs (only the accident that
+  `Loser` and `Beautiful` are empty keeps it from failing). → **ADR 0027**, which also lists
+  the five implementation steps in order.
+  **Prerequisite, and it is not optional:** `KnownDefect_Interfaces.AMissingFieldIsAccepted`
+  must be closed first. `implements()` never checks fields, so a struct missing a required
+  field converts today -- and a vtable then needs an offset for a field the implementor does
+  not have. This layout turns that latent hole into a live one.
+- ~~**Is `&string` the same representation as `string`?**~~ — **RULED 2026-08-28: no, it is a
+  pointer to a cell holding the string**, so `*Complex` is the string and `&string` behaves
+  like `&T` for every other T. The lifetime half was never the blocker: a literal's value
+  exists before the program starts, so its holder can be static, and at module scope static is
+  *forced*. A fresh holder per occurrence, because LLVM may merge the character data but the
+  holder is mutable. `&make()` stays refused. Unblocked `variables.fin` (`81f2d05`).
+- ~~**What does `#[slaveof(x)]` do to a local's lifetime?**~~ — **RULED 2026-08-28: nothing,
+  today.** Both corpus forms ask for a lifetime at least as long as something else, and neither
+  can be violated because **nothing in this backend frees anything implicitly** (ADR 0003:
+  memory management is a library) -- measured, an object built from a scope that allocates
+  references `malloc` and not `free`. So emitting nothing *satisfies* both requests.
+  `ASlaveofAttributeKeepsItsAllocationAlive` asserts the consequence, not the no-op, so it goes
+  red the day scope-based freeing arrives; `AnUnreadAttributeOnAVariableIsStillRefused` holds
+  that no other attribute became acceptable.
 - **How `fin_core` links LLVM on Windows** — *blocks `windows-x86_64` and `windows-arm64`.*
   `CMakeLists.txt` links the monolithic libLLVM (`target_link_libraries(fin_core PUBLIC LLVM)`),
   which LLVM cannot build under MSVC at **any** version: `llvm/CMakeLists.txt` sets
