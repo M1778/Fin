@@ -268,6 +268,7 @@ struct InterfaceInfo {
     std::string finName;
     std::vector<StructField> fields;
     std::vector<FunctionDeclaration*> methods;
+    llvm::StructType* vtableType = nullptr;
 };
 
 struct StructInfo {
@@ -2538,6 +2539,94 @@ private:
     // program well-typed. It converts and never checks: `int` into `long`, an
     // integer constant into a float parameter. A pair it cannot convert is a gap in
     // this slice, not a type error, so it refuses rather than emitting a bitcast.
+    bool interfaceMethodSignature(const InterfaceInfo& iface, const std::string& name,
+                                  llvm::FunctionType*& signature, CgType& result,
+                                  std::vector<CgType>& params) {
+        for (auto* method : iface.methods) {
+            if (!method || method->name != name) continue;
+            auto ret = types_.map(method->return_type.get());
+            if (!ret) return false;
+            result = *ret;
+            std::vector<llvm::Type*> llvmParams{llvm::PointerType::get(ctx_, 0)};
+            for (const auto& p : method->params) {
+                if (!p || p->name == "self" || p->is_vararg) continue;
+                auto mapped = types_.map(p->type.get());
+                if (!mapped || mapped->isVoid()) return false;
+                params.push_back(*mapped);
+                llvmParams.push_back(mapped->llvmType);
+            }
+            signature = llvm::FunctionType::get(result.llvmType, llvmParams, false);
+            return true;
+        }
+        return false;
+    }
+
+    bool emitInterfaceMethodCall(MethodCall& node, const CgVal& object,
+                                 const InterfaceInfo& iface) {
+        llvm::FunctionType* signature = nullptr;
+        CgType result;
+        std::vector<CgType> params;
+        if (!interfaceMethodSignature(iface, node.method_name, signature, result, params)) {
+            unsupported(node, fmt::format("the method '{}' of interface '{}'",
+                                          node.method_name, iface.finName));
+            return false;
+        }
+        auto value = object.value;
+        auto* data = builder_.CreateExtractValue(value, {0}, "data");
+        auto* table = builder_.CreateExtractValue(value, {1}, "vtable");
+        const size_t slot = iface.fields.size();
+        auto* entryPtr = builder_.CreateInBoundsGEP(llvm::PointerType::get(ctx_, 0), table,
+            llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), slot));
+        auto* entry = builder_.CreateLoad(llvm::PointerType::get(ctx_, 0), entryPtr, "method");
+        std::vector<llvm::Value*> args{data};
+        if (node.args.size() != params.size()) {
+            unsupported(node, fmt::format("a call to interface method '{}' with wrong arity",
+                                          node.method_name));
+            return false;
+        }
+        for (size_t i = 0; i < params.size(); ++i) {
+            CgVal arg = emitAs(*node.args[i], params[i]);
+            if (failed_ || !arg.ok()) return false;
+            auto* converted = convert(node, arg, params[i]);
+            if (!converted) return false;
+            args.push_back(converted);
+        }
+        auto* call = builder_.CreateCall(signature, entry, args);
+        if (!result.isVoid()) value_ = CgVal{call, result};
+        return true;
+    }
+
+    llvm::Value* interfaceVtable(const CgType& source, const InterfaceInfo& iface) {
+        const std::string key = source.structInfo->finName + "." + iface.finName;
+        auto found = interfaceVtables_.find(key);
+        if (found != interfaceVtables_.end()) return found->second;
+        auto* ptrTy = llvm::PointerType::get(ctx_, 0);
+        auto* tableTy = llvm::ArrayType::get(ptrTy, iface.fields.size() + iface.methods.size());
+        std::vector<llvm::Constant*> entries;
+        for (const auto& field : iface.fields) {
+            size_t index = 0;
+            if (!source.structInfo->find(field.name, index)) return llvm::ConstantPointerNull::get(ptrTy);
+            const auto* layout = module_.getDataLayout().getStructLayout(
+                llvm::cast<llvm::StructType>(source.llvmType));
+            auto* offset = llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_),
+                                                   layout->getElementOffset(index));
+            entries.push_back(llvm::ConstantExpr::getIntToPtr(offset, ptrTy));
+        }
+        for (const auto* method : iface.methods) {
+            auto fn = functions_.find(methodKey(source.structInfo->finName, method->name));
+            if (fn == functions_.end()) {
+                entries.push_back(llvm::ConstantPointerNull::get(ptrTy));
+            } else {
+                entries.push_back(llvm::cast<llvm::Constant>(fn->second.fn));
+            }
+        }
+        auto* init = llvm::ConstantArray::get(tableTy, entries);
+        auto* global = new llvm::GlobalVariable(module_, tableTy, true,
+            llvm::GlobalValue::LinkOnceODRLinkage, init, "fin.vtable." + key);
+        interfaceVtables_[key] = global;
+        return builder_.CreateBitCast(global, ptrTy);
+    }
+
     llvm::Value* convert(ASTNode& node, const CgVal& from, const CgType& to) {
         if (!from.ok()) return nullptr;
         // Before the identity shortcut below, and that is the whole point of putting it
@@ -2560,6 +2649,19 @@ private:
                 return nullptr;
             }
             return from.value;
+        }
+        if (from.type.isInterface && to.isInterface) return from.value;
+        if (to.isInterface && from.type.isStruct() && !from.type.isInterface) {
+            if (!from.address || !to.interfaceInfo) {
+                unsupported(node, "an interface conversion from a value without an address");
+                return nullptr;
+            }
+            auto* data = builder_.CreateBitCast(from.address, llvm::PointerType::get(ctx_, 0));
+            auto* vtable = interfaceVtable(from.type, *to.interfaceInfo);
+            llvm::Value* pair = llvm::UndefValue::get(to.llvmType);
+            pair = builder_.CreateInsertValue(pair, data, {0});
+            pair = builder_.CreateInsertValue(pair, vtable, {1});
+            return pair;
         }
         if (from.type.llvmType == to.llvmType) return from.value;
 
@@ -3526,8 +3628,8 @@ private:
 
     void visit(Identifier& node) override {
         if (Local* local = findLocal(node.name)) {
-            value_ = CgVal{builder_.CreateLoad(local->type.llvmType, local->slot, node.name),
-                           local->type};
+            auto loaded = builder_.CreateLoad(local->type.llvmType, local->slot, node.name);
+            value_ = CgVal{loaded, local->type, local->slot};
             return;
         }
         if (failed_) return;  // a name refused above; see findLocal
@@ -3536,9 +3638,9 @@ private:
         // shadows one (ALocalOutranksAGlobalOfTheSameName).
         auto global = globals_.find(node.name);
         if (global != globals_.end()) {
-            value_ = CgVal{builder_.CreateLoad(global->second.type.llvmType,
-                                               global->second.var, node.name),
-                           global->second.type};
+            auto loaded = builder_.CreateLoad(global->second.type.llvmType,
+                                              global->second.var, node.name);
+            value_ = CgVal{loaded, global->second.type, global->second.var};
             return;
         }
         // After the locals and not before: a local of the same name shadows the
@@ -5011,6 +5113,11 @@ private:
         // field (deeptest3.fin:39).
         auto receiver = baseAddress(*node.object, CgType::Kind::Struct);
         if (failed_) return;
+        if (receiver && receiver->type.isInterface && receiver->type.interfaceInfo) {
+            auto object = builder_.CreateLoad(receiver->type.llvmType, receiver->ptr, "interface");
+            emitInterfaceMethodCall(node, CgVal{object, receiver->type}, *receiver->type.interfaceInfo);
+            return;
+        }
         if (!receiver) {
             // `Point::make(1).get()`. The struct is a value with no home, so there is
             // no pointer to pass -- and a method takes a pointer because it may assign
@@ -5248,9 +5355,30 @@ private:
             objectValue = emit(*node.object);
             if (failed_) return;
         }
-        CgVal object = *objectValue;
+        CgVal object = objectValue ? *objectValue : emit(*node.object);
         if (!object.ok()) { unsupported(node, "this member's object"); return; }
-        // A pointer that is a value rather than a variable: `make(3).hp` where `make`
+        if (object.type.isInterface && object.type.interfaceInfo) {
+            size_t slot = 0;
+            for (; slot < object.type.interfaceInfo->fields.size(); ++slot)
+                if (object.type.interfaceInfo->fields[slot].name == node.member) break;
+            if (slot == object.type.interfaceInfo->fields.size()) {
+                unsupported(node, fmt::format("the member '{}' of interface '{}', which has no such field",
+                                              node.member, object.type.interfaceName));
+                return;
+            }
+            auto* data = builder_.CreateExtractValue(object.value, {0}, "data");
+            auto* table = builder_.CreateExtractValue(object.value, {1}, "vtable");
+            auto* offsetPtr = builder_.CreateInBoundsGEP(llvm::PointerType::get(ctx_, 0), table,
+                                                         llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), slot));
+            auto* offset = builder_.CreateLoad(llvm::PointerType::get(ctx_, 0), offsetPtr, "field.offset");
+            auto* bytePtr = builder_.CreateInBoundsGEP(llvm::Type::getInt8Ty(ctx_), data,
+                                                       builder_.CreatePtrToInt(offset, llvm::Type::getInt64Ty(ctx_)));
+            auto& field = object.type.interfaceInfo->fields[slot];
+            auto* typed = builder_.CreateBitCast(bytePtr, field.type.llvmType->getPointerTo());
+            value_ = CgVal{builder_.CreateLoad(field.type.llvmType, typed, node.member), field.type};
+            return;
+        }
+
         // returns a `&P`. The value *is* the address, so this is the addressed path's
         // GEP with one fewer load in front of it.
         if (object.type.isPointer() && object.type.pointee &&
@@ -5794,6 +5922,7 @@ private:
     // that mentions it is read.
     std::set<std::string> interfaceNames_;
     std::unordered_map<std::string, InterfaceInfo> interfaces_;
+    std::unordered_map<std::string, llvm::GlobalVariable*> interfaceVtables_;
 
     // Every generic struct declaration, by name, borrowed from the AST -- which
     // outlives the emitter (run() takes the Program by reference). Not in structs_,
