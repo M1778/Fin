@@ -3462,38 +3462,111 @@ BACKEND_TEST(Soundness_Codegen, TheAddressOfAValueWithNoHomeIsRefused) {
     EXPECT_NE(b.compileErr.find("address"), std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, TheAddressOfAStringLiteralIsRefused) {
-    // tests/samples/variables.fin:11 (`let Complex <&string> = &"Hello world";`).
-    // A `string` is already a pointer to bytes here, so `&"..."` is either that
-    // same pointer -- making `*Complex` a char and `&string` the same
-    // representation as `string` -- or the address of an anonymous cell holding
-    // it, making `*Complex` the string. Nothing in the corpus reads `Complex`, so
-    // both readings run, and picking one would be inventing the answer.
+BACKEND_TEST(Soundness_Codegen, TheAddressOfAStringLiteralIsACellHoldingIt) {
+    // tests/samples/variables.fin:11, `let Complex <&string> = &"Hello world";`.
     //
-    // ONE OF THE TWO OBJECTIONS IS NOW SETTLED, AND IT IS NOT THIS ONE. The
-    // refusal in CodeGen_LLVM.cpp gave *lifetime* as its reason -- how long the
-    // slot lives and what the pointer means afterwards. For a literal that is
-    // answerable: a literal's value exists before the program starts, so a holder
-    // can have static storage, which cannot dangle under any later use, and at
-    // module scope static is forced rather than chosen because there is no function
-    // to hold an alloca. That was implemented, and it worked: compiled, ran, and a
-    // write through one `&"..."` did not reach another.
+    // Was TheAddressOfAStringLiteralIsRefused, and its argument was that the question
+    // had two answers the corpus could not separate: a `string` is already a pointer to
+    // bytes, so `&"..."` is either **that same pointer** -- making `&string` and
+    // `string` one representation and `*Complex` a *char* -- or **the address of a cell
+    // holding it**, making `*Complex` the string. Both compiled. variables.fin:11 is
+    // the only `&"..."` and the only `&string` in tests/samples/ and lib/std/, and
+    // nothing reads `Complex`, so no measurement could decide it.
     //
-    // It was reverted anyway, because this test's objection survives it, and
-    // because the check that appeared to confirm the lowering was circular -- it
-    // printed `*G` with `%s`, which only makes sense under the reading it had just
-    // picked. Under the other reading `*G` is a char and that test is wrong rather
-    // than passing. So the ruling is narrower than "what does `&literal` mean": it
-    // is exactly **is `&string` the same representation as `string`, or a pointer to
-    // a cell holding one**. Recorded in docs/HANDOFF.md §8 in those terms.
+    // Ruled by the owner 2026-08-28: **the cell.** So `*Complex` is the string, and
+    // `&string` behaves like `&T` for every other T.
     //
-    // Measured while narrowing it: variables.fin:11 is the ONLY `&"..."` and the
-    // only `&string` in tests/samples/ and lib/std/, and `Complex` is read nowhere,
-    // so no new corpus evidence is available without the owner.
+    // READ THIS BEFORE CHANGING THE ASSERTION. `%s` on `*G` is only meaningful under
+    // the reading that was chosen -- under the other one `*G` is a char and `%s` is
+    // wrong. That is precisely the circularity that sank the first attempt at this
+    // lowering: a test written in the semantics it is trying to establish passes for
+    // that reason alone. What makes this test evidence rather than an assumption is
+    // that the semantics came from the ruling and the test came after; it verifies the
+    // implementation against the decision, not the decision against itself.
     const Built b = build(std::string(kPrintf) +
-        "let Complex <&string> = &\"Hello world\";\n"
-        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+        "let G <&string> = &\"Hello world\";\n"
+        "fun main() <noret> { printf(\"%s\\n\", *G); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "Hello world\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoAddressesOfEqualLiteralsAreDistinct) {
+    // A fresh holder per occurrence, not one per distinct value. LLVM may merge the
+    // literal's character *data* with an identical literal's -- that data is
+    // `constant`, so sharing it is invisible -- but the holder is not constant, because
+    // `let G <&string>` is mutable.
+    //
+    // So a write through one `&"Hello world"` must not reach another `&"Hello world"`
+    // written elsewhere in the program. This is the test that fails if the holder is
+    // ever keyed by the literal's text, which is the natural-looking optimisation and
+    // the wrong one.
+    const Built b = build(std::string(kPrintf) +
+        "let G <&string> = &\"Hello world\";\n"
+        "let H <&string> = &\"Hello world\";\n"
+        "fun main() <noret> {\n"
+        "    *H = \"replaced\";\n"
+        "    printf(\"%s %s\\n\", *H, *G);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "replaced Hello world\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TheAddressOfACallIsStillRefused) {
+    // The other half of the fork, and the control on the test above: lowering
+    // `&"literal"` must not have lowered `&expression` generally. `&make()` has no home
+    // and no forced answer -- a fresh slot answers "how long does it live" by picking
+    // one, and unlike a literal every candidate is a real choice with a program that
+    // can tell them apart. A literal's value exists before the program starts, which is
+    // what makes static storage forced rather than chosen there.
+    const Built b = build(std::string(kPrintf) +
+        "fun make() <int> { return 5; }\n"
+        "fun main() <noret> {\n"
+        "    let p <&int> = &make();\n"
+        "    printf(\"%d\\n\", *p);\n"
+        "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("no home"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ASlaveofAttributeKeepsItsAllocationAlive) {
+    // tests/samples/variables.fin:27 and :35. `#[slaveof(z)]` ties a local's storage to
+    // another variable's lifetime and `#[slaveof($Fin)]` asks for "until the program
+    // exits", and both lower to nothing -- because nothing in this backend frees
+    // anything implicitly (ADR 0003: memory management is a library), so an allocation
+    // nobody `delete`s already outlives every scope.
+    //
+    // The assertion is the *consequence*, not the no-op: `m` is allocated inside a
+    // block, `z` outlives that block, and the read through `z` afterwards must give 5.
+    // That is what makes this test fail the day scope-based freeing arrives -- at which
+    // point `#[slaveof]` becomes a real rule and has to grow a mechanism, rather than
+    // this test being relaxed.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let z <&int>;\n"
+        "    {\n"
+        "        #[slaveof(z)]\n"
+        "        let m <&int> = new int(5);\n"
+        "        z = m;\n"
+        "    }\n"
+        "    printf(\"%d\\n\", *z);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnUnreadAttributeOnAVariableIsStillRefused) {
+    // `#[slaveof]` is exempt because it provably cannot change the generated code. That
+    // exemption must not have become a general one: an attribute this file does not
+    // read may be the one that decides where the variable lives, and accepting it is
+    // claiming to have done what it asked.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    #[nosuchattribute]\n"
+        "    let x <int> = 1;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("nosuchattribute"), std::string::npos) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, IndexingAPointerToAScalarIsRefused) {
@@ -4278,10 +4351,34 @@ BACKEND_TEST(Soundness_Codegen, AnEnumWithNoAttributesStillLowers) {
 // (`#[slaveof($Fin)]`, :35, asks for what a global already does); the local is the one
 // that actually changes something, and it was the one being dropped.
 //
-// A struct member's were unread too. readonly.fin:19 writes `#[debug]` on a field, and
-// a field attribute is one edit away from being a field *offset* attribute.
+// THE `slaveof` HALF OF THAT WAS RULED ON, 2026-08-28, AND THE ARGUMENT ABOVE IS WHY
+// IT COULD BE. It rests on "a rule about when the storage dies" -- and nothing in this
+// backend makes storage die. Memory management is a library (ADR 0003), so a heap
+// allocation is released only by an explicit `delete`: measured, an object built from a
+// scope that allocates references `malloc` and not `free`. So an allocation nobody
+// deletes already outlives every scope, which is what `slaveof(z)` asks for, and
+// already lives until the program exits, which is what `slaveof($Fin)` asks for.
+// Emitting nothing *satisfies* both rather than dropping them.
+//
+// That is a narrow exemption and it is guarded from both sides:
+// ASlaveofAttributeKeepsItsAllocationAlive asserts the consequence (a read through a
+// pointer whose scope has closed still gives 5) so this goes red the day scope-based
+// freeing arrives, and AnUnreadAttributeOnAVariableIsStillRefused holds that no *other*
+// attribute became acceptable. Both live in the address-of section beside the other
+// ruling of the same day.
+//
+// A struct member's were unread too, and that half stands. readonly.fin:19 writes
+// `#[debug]` on a field, and a field attribute is one edit away from being a field
+// *offset* attribute.
 
-BACKEND_TEST(Soundness_Codegen, AnAttributeOnALocalIsRefused) {
+BACKEND_TEST(Soundness_Codegen, ASlaveofAttributeOnALocalIsAccepted) {
+    // Was AnAttributeOnALocalIsRefused. Inverted rather than deleted: the same program,
+    // now expected to build and run, which is what makes the pair of assertions a
+    // record of where the boundary moved rather than of a test that vanished.
+    //
+    // `slaveof` on a local whose storage is not even heap-allocated is the weakest form
+    // of the case -- there is nothing here for any lifetime rule to act on -- so if this
+    // ever refuses again, the exemption has been narrowed further than the ruling.
     const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
         "    let z <int> = 1;\n"
@@ -4289,8 +4386,8 @@ BACKEND_TEST(Soundness_Codegen, AnAttributeOnALocalIsRefused) {
         "    let m <int> = 2;\n"
         "    printf(\"%d\\n\", z + m);\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("slaveof"), std::string::npos) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, ALocalWithNoAttributesStillLowers) {

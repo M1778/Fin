@@ -3189,12 +3189,35 @@ private:
 
     void visit(VariableDeclaration& node) override {
         if (registeredGlobals_.count(&node)) return;  // declareGlobals did it
-        // A local's attributes, which a global's have always been refused and a local's
-        // were not. `#[slaveof(z)]` (variables.fin:27) says the storage lives as long
-        // as another variable does, and the sample's own comment is explicit that this
-        // is about lifetime -- so it is a rule about generated code, and dropping it
-        // produces a program that frees too early and runs anyway.
+        // `#[slaveof(...)]` on a local is a no-op today, and that is a ruling rather
+        // than an omission (2026-08-28).
+        //
+        // Both corpus forms ask for a lifetime *at least* as long as something else:
+        // `#[slaveof(z)]` (variables.fin:27) ties `m`'s storage to `z`'s, and
+        // `#[slaveof($Fin)]` (:35) asks for "until the program exits". Neither can be
+        // violated by this backend, because **nothing here frees anything implicitly.**
+        // Memory management is a library in Fin (ADR 0003), so a heap allocation is
+        // released only by an explicit `delete` -- measured: an object built from a
+        // scope that allocates references `malloc` and not `free`, and a `new int(5)`
+        // whose scope has closed is still readable through a pointer that outlived it.
+        //
+        // So an allocation nobody deletes already lives until the program exits, which
+        // is what `$Fin` asks for, and it already outlives any named variable, which is
+        // what `slaveof(z)` asks for. Emitting nothing satisfies both requests rather
+        // than ignoring them, and that is the difference between this and the refusals
+        // below: an unread attribute is refused when it *could* change the generated
+        // code, and this one provably cannot.
+        //
+        // The day scope-based freeing exists -- a destructor running implicitly, or an
+        // owning pointer released at scope exit -- this becomes a real rule and has to
+        // grow one. Soundness_Codegen.ASlaveofAttributeKeepsItsAllocationAlive is what
+        // fails then, because it reads through a pointer whose scope has closed.
+        //
+        // Other attributes still refuse. An attribute this file does not read may be
+        // one that changes where the variable lives, and ignoring that is how a working
+        // program ends up in the wrong section.
         for (auto& attr : node.attributes) {
+            if (attr->name == "slaveof") continue;
             unsupported(node, fmt::format("the attribute '{}' on the variable '{}'",
                                           attr->name, node.name));
             return;
@@ -3968,34 +3991,73 @@ private:
         auto addr = emitAddress(*node.operand);
         if (failed_) return;
         if (!addr) {
-            // `&make()` and `&"Hello world"` (variables.fin:11). The value is real and
-            // has no home, so taking its address means putting it in a fresh slot --
-            // which answers "how long does that slot live, and what does the pointer
-            // mean afterwards" by picking one. Nothing in the corpus reads such a
-            // pointer, so nothing would catch the wrong pick.
-            //
-            // FOR A LITERAL, LIFETIME IS NOT THE BLOCKER -- REPRESENTATION IS. A
-            // literal's value exists before the program starts, so a holder for it can
-            // have static storage, which cannot dangle under any later use; at module
-            // scope, where variables.fin:11 sits, static is not merely safe but forced,
-            // since there is no function to hold an alloca. So the lifetime half of
-            // this comment is answerable for `&"..."` and was tried: it compiles, runs,
-            // and a write through one `&"..."` correctly does not reach another.
-            //
-            // It was reverted, because the question that actually decides `&"..."` is
-            // the one Soundness_Codegen.TheAddressOfAStringLiteralIsRefused states: a
-            // `string` is already a pointer to bytes, so `&"..."` is either that same
-            // pointer -- making `&string` the same representation as `string` and
-            // `*Complex` a *char* -- or the address of a cell holding it, making
-            // `*Complex` the string. variables.fin:11 is the only `&"..."` and the only
-            // `&string` in the corpus or lib/std, and nothing reads `Complex`, so both
-            // readings run and no measurement can separate them. Lowering either one is
-            // inventing the answer, and a test written in whichever reading was chosen
-            // would pass for that reason alone. Owner ruling; see docs/HANDOFF.md §8.
+            if (emitAddressOfLiteral(node)) return;
+            // `&make()`. The value is real and has no home, so taking its address means
+            // putting it in a fresh slot -- which answers "how long does that slot live,
+            // and what does the pointer mean afterwards" by picking one. Nothing in the
+            // corpus reads such a pointer, so nothing would catch the wrong pick. A
+            // *literal* is the case where both halves of that are settled; see
+            // emitAddressOfLiteral.
             unsupported(node, "the address of a value with no home");
             return;
         }
         value_ = CgVal{addr->ptr, types_.pointerTo(addr->type)};
+    }
+
+    // `&"Hello world"` -- tests/samples/variables.fin:11,
+    // `let Complex <&string> = &"Hello world";`.
+    //
+    // Two questions had to be answered and they were answered separately.
+    //
+    // REPRESENTATION, ruled by the owner 2026-08-28: `&string` is **a pointer to a cell
+    // holding the string**, not the string's own pointer. So `*Complex` is the string
+    // and `&string` behaves like `&T` for every other T. The alternative -- that
+    // `&"..."` is the same pointer the `string` already is, making `&string` and
+    // `string` one representation and `*Complex` a *char* -- was rejected. Both
+    // compiled, and no measurement could separate them: variables.fin:11 is the only
+    // `&"..."` and the only `&string` in the corpus or lib/std, and nothing reads
+    // `Complex`. Soundness_Codegen.TheAddressOfAStringLiteralIsACellHoldingIt carries
+    // the argument, and it is worth reading before changing this: a test written in
+    // whichever reading was chosen passes for that reason alone, which is the trap this
+    // one is shaped to avoid.
+    //
+    // LIFETIME, which is not a choice: a literal's value exists before the program
+    // starts and depends on nothing the program does, so a holder for it can have
+    // static storage -- and static cannot dangle under any later use. At module scope,
+    // where variables.fin:11 sits, static is not merely safe but *forced*: there is no
+    // function to put an alloca in. That is what separates this from `&make()`, where
+    // every candidate lifetime is a real choice with a program that can tell them apart.
+    //
+    // A fresh holder per occurrence, not one per distinct value. LLVM may merge the
+    // literal's character *data* with an identical literal's, which is fine because
+    // that data is `constant`; the holder is not, since `let Complex <&string>` is
+    // mutable and a write through this pointer must not reach a second `&"..."`
+    // elsewhere in the program. Soundness_Codegen.TwoAddressesOfEqualLiteralsAreDistinct
+    // is what holds that.
+    //
+    // Creating a GlobalVariable emits no instruction, so this still folds inside
+    // constantInitializer's throwaway function, whose block has to come out empty.
+    bool emitAddressOfLiteral(UnaryOp& node) {
+        auto* lit = dynamic_cast<Literal*>(node.operand.get());
+        if (!lit) return false;
+
+        node.operand->accept(*this);
+        if (failed_) return true;  // already reported; do not add a second refusal
+        auto* konst = llvm::dyn_cast<llvm::Constant>(value_.value);
+        if (!konst) {
+            // A literal whose lowering is not a constant would break the reasoning
+            // above rather than merely being unhandled, so the refusal says so in those
+            // terms instead of blaming the address.
+            unsupported(node, "the address of a literal that does not lower to a constant");
+            return true;
+        }
+
+        const CgType pointee = value_.type;
+        auto* holder = new llvm::GlobalVariable(
+            module_, pointee.llvmType, /*isConstant=*/false,
+            llvm::GlobalValue::InternalLinkage, konst, ".fin.literal.addr");
+        value_ = CgVal{holder, types_.pointerTo(pointee)};
+        return true;
     }
 
     void visit(UnaryOp& node) override {
