@@ -81,6 +81,42 @@ bool Type::isAssignableTo(const Type& other) const {
     // Soundness_Pointers.AVoidPointerIsAssignableInBothDirections cover what is left.
 
     if (dynamic_cast<const GenericType*>(&other)) return true;
+
+    // A struct converts to an interface it implements (owner ruling, 2026-08-28).
+    //
+    // `tests/samples/love.fin` is the corpus's first and only witness: `I.love(F)` at
+    // :38 hands a `Fin` to a parameter declared `<Person>`, both structs declare
+    // `: <Person, ...>`, and both carry the `name <string>` the interface requires. ADR
+    // 0019 fixed the representation of an interface reference -- `{data, vtable}`, two
+    // words -- while recording that "interface-as-a-runtime-type does not exist in the
+    // corpus"; that sample supplies what the ADR was written without.
+    //
+    // Guarded on the *target* being an interface and the source being a struct that is
+    // not one, so this cannot make two unrelated structs assignable, and cannot make an
+    // interface assignable to a struct -- an interface reference carries no fields of
+    // its own to satisfy a struct's, and the corpus asks for the conversion in one
+    // direction only.
+    //
+    // `implements()` is the same predicate the declaration-site conformance check uses
+    // (`X does not implement Y`), which is what makes an accepted conversion and an
+    // accepted declaration agree by construction rather than by two rules that happen
+    // to match. Its known gap is fields: it walks methods, operators, constructors and
+    // the destructor and never fields
+    // (KnownDefect_Interfaces.AMissingFieldIsAccepted). So a struct missing a required
+    // *field* converts today and should not; that is the existing defect's to fix, and
+    // narrowing it here would put the rule in two places.
+    //
+    // The backend is where this becomes real: ADR 0027 has the `{data, vtable}` layout
+    // and the field-offset slots. Until a call site is lowered, an accepted conversion
+    // is a codegen refusal rather than a wrong program.
+    if (auto* target = dynamic_cast<const StructType*>(&other)) {
+        if (target->is_interface) {
+            if (auto* src = dynamic_cast<const StructType*>(this)) {
+                if (!src->is_interface && src->implements(target)) return true;
+            }
+        }
+    }
+
     return false;
 }
 

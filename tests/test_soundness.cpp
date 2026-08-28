@@ -2524,6 +2524,67 @@ TEST(Soundness_Interfaces, AnInterfaceMemberIsReadableThroughTheInterfaceType) {
     EXPECT_EQ(withComma.exitCode, 0) << stripAnsi(withComma.err);
 }
 
+TEST(Soundness_Interfaces, AStructConvertsToAnInterfaceItImplements) {
+    // Ruled by the owner 2026-08-28, on the witness of tests/samples/love.fin:38 --
+    // `I.love(F)` hands a `Fin` to a parameter declared `<Person>`, where `Fin`
+    // declares `: <Person, Beautiful>` and carries the `name <string>` the interface
+    // requires. ADR 0019 fixed the representation of an interface reference while
+    // recording that "interface-as-a-runtime-type does not exist in the corpus"; that
+    // sample is what the ADR was written without.
+    //
+    // Front end only. What the value *is* at run time -- `{data, vtable}`, two words,
+    // with a field-offset slot per required field -- is ADR 0027 and the backend still
+    // refuses it, which is why this test compiles without `-o` rather than running.
+    const FincRun r = compile(
+        "interface P { pub fun f() <int>; }\n"
+        "struct S: <P> { fun f() <int> { return 1; } }\n"
+        "fun g(a: P) <noret> {}\n"
+        "fun main() <noret> { let s <S> = S{}; g(s); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, AStructThatDoesNotImplementAnInterfaceDoesNotConvert) {
+    // The conversion is gated on `implements()`, which is the same predicate the
+    // declaration-site check uses. Without this, the rule above would read "a struct
+    // converts to any interface", and the two passes would disagree about what
+    // conformance means.
+    const FincRun r = compile(
+        "interface P { pub fun f() <int>; }\n"
+        "struct S { v <int>, }\n"
+        "fun g(a: P) <noret> {}\n"
+        "fun main() <noret> { let s <S> = S{v:1}; g(s); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, AnInterfaceDoesNotConvertBackToAStruct) {
+    // One direction only. An interface reference carries no fields of its own to
+    // satisfy a struct's, and the corpus asks for the conversion in one direction --
+    // so the reverse must stay refused rather than falling out of a symmetric rule.
+    //
+    // Written as a call inside a function, because a `fun g(a: S)` that nobody calls
+    // never asks the question: an earlier probe of this read as "accepted" for exactly
+    // that reason, which is worth recording as the shape of a false negative here.
+    const FincRun r = compile(
+        "interface P { pub fun f() <int>; }\n"
+        "struct S: <P> { fun f() <int> { return 1; } }\n"
+        "fun g(a: S) <noret> {}\n"
+        "fun takes(p: P) <noret> { g(p); }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, TwoUnrelatedStructsStillDoNotConvert) {
+    // The control on the whole rule: it is guarded on the *target* being an interface,
+    // so two structs with identical fields remain distinct types. A rule that had
+    // dropped that guard passes all three tests above.
+    const FincRun r = compile(
+        "struct A { v <int>, }\n"
+        "struct B { v <int>, }\n"
+        "fun g(a: A) <noret> {}\n"
+        "fun main() <noret> { let b <B> = B{v:1}; g(b); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
 TEST(Soundness_Interfaces, AnUndeclaredMemberIsStillNotReadableThroughAnInterface) {
     // The control. Registering the declared members must not make *every* name
     // readable -- a lookup that answered yes to anything would pass the test above for

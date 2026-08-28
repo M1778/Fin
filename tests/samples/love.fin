@@ -1,5 +1,49 @@
 //@ normative
-//@ unimplemented "Two diagnostics, and they are one question: `I.love(F)` at 38:9 and `F.hate(I)` at 39:9 report `Type mismatch: expected 'Person', got 'M1778'` / `got 'Fin'`. Both structs declare `: <Person, ...>` and both carry the `name <string>` the interface requires, so each *does* implement it -- what is missing is the rule that a value of an implementing struct converts to its interface type. This file is the corpus's FIRST site for that: ADR 0019 fixed the representation of an interface reference (`{data, vtable}`, two words) while recording that \"interface-as-a-runtime-type does not exist in the corpus\", measured across the other fifty samples, where every interface appears as a *bound* (`T: Printable`) or as the `$interface` meta-type. So this sample supplies the witness that ADR was written without, and the ruling it needs is the owner's: whether a struct converts to an interface it implements, by value or only by pointer. Until that is made, both diagnostics are correct. Two repairs landed here 2026-08-28, under the owner's ruling that a sample whose own logic is wrong may be repaired rather than booked, and both are witnessed by the rest of the corpus rather than invented. (1) Lines 12 and 22 read `struct Fin <Person,Beautiful>` and `struct M1778 <Person,Loser>` -- angle brackets directly after the name declare *generic parameters*, so `Person` became a type parameter that shadowed the interface of the same name, and `self.hate.name` then reported `Type 'Person' is not a struct` about an unbound parameter rather than about the interface three lines up. Inheritance is spelled with a colon, which four samples write the same way: `readonly.fin:34` `struct ChangableSomehow: <UnchanableString>`, `deeptest2.fin:67` and `:83`, `stdlib/stdio.fin:46` `struct IOError: <Error>`. (2) Lines 38 and 39 read `M1778.love(F)` and `Fin.hate(M1778)`, calling a method on the *type* rather than on a value; `I` and `F` are the values, declared on 35 and 36. Three samples write the value form: `implements_block.fin:36` `s.get_val()`, `readonly.fin:55` `a.change_v1(1024)`, `interfaces.fin:17` `item.to_string()`. What this file already proved is a compiler bug rather than a sample bug, fixed rather than booked: an interface member was resolved and then discarded, so `interface Person { readonly name <string>, }` followed by any read of `.name` through a `Person`-typed value reported `Struct 'Person' has no member 'name'` -- about a member the interface declares. A method in the same position always worked, so the two halves of an interface disagreed about whether they existed. `readonly.fin:29` declares the same shape and never reads it through the interface, which is why fifty samples missed it (Soundness_Interfaces.AnInterfaceMemberIsReadableThroughTheInterfaceType). Note `printf` is declared with `fmt: string` rather than `fmt: <string>`: nineteen samples write the unbracketed form and none writes the bracketed one, though both parse."
+//@ ok
+// The front end accepts this file. `finc -c` on it still exits 1, and the refusal names
+// work rather than a question: `a struct field of type 'Person' is not lowered yet` at
+// 57:11, because `readonly hate <Person>` is a field whose type is an interface and an
+// interface reference has no backend representation yet. ADR 0027 specifies it as
+// `{data, vtable}` with a field-offset slot per required field. The corpus harness
+// checks the front end, which is what `ok` asserts here.
+//
+// Three things landed for this file on 2026-08-28.
+//
+// (1) A COMPILER BUG it found. An interface member was resolved and then discarded, so
+// `interface Person { readonly name <string>, }` followed by any read of `.name` through
+// a `Person`-typed value reported `Struct 'Person' has no member 'name'` -- about a
+// member the interface declares. A method in the same position always worked, so the two
+// halves of an interface disagreed about whether they existed. readonly.fin:29 declares
+// the same shape and never reads it through the interface, which is why fifty samples
+// missed it. Soundness_Interfaces.AnInterfaceMemberIsReadableThroughTheInterfaceType.
+//
+// (2) THE RULING this file is the witness for: a struct converts to an interface it
+// implements. ADR 0019 fixed the representation of an interface reference while recording
+// that "interface-as-a-runtime-type does not exist in the corpus" -- across the other
+// fifty samples every interface is a bound (`T: Printable`) or the `$interface`
+// meta-type. This file supplies what that ADR was written without. The conversion is
+// gated on `implements()`, the same predicate the declaration-site check uses, and is
+// one-directional: an interface does not convert back to a struct.
+//
+// (3) TWO REPAIRS, each witnessed by the rest of the corpus rather than invented, under
+// the owner's ruling that a sample whose own logic is wrong may be repaired.
+//
+//   Lines 56 and 66 read `struct Fin <Person,Beautiful>` and `struct M1778
+//   <Person,Loser>`. Angle brackets directly after the name declare *generic
+//   parameters*, so `Person` became a type parameter shadowing the interface of the same
+//   name, and `self.hate.name` then reported `Type 'Person' is not a struct` about an
+//   unbound parameter rather than about the interface three lines up. Both spellings were
+//   measured in a scratch copy to confirm that was the cause. Inheritance is spelled with
+//   a colon, which four samples write: readonly.fin:34, deeptest2.fin:67 and :83,
+//   stdlib/stdio.fin:46.
+//
+//   Lines 82 and 83 read `M1778.love(F)` and `Fin.hate(M1778)`, calling a method on the
+//   *type*. `I` and `F` are the values, declared on 79 and 80. Three samples write the
+//   value form: implements_block.fin:36, readonly.fin:55, interfaces.fin:17.
+//
+// Left as written: `fun hate(someone: <Person>)`. Nineteen samples write a parameter type
+// unbracketed and none bracketed, but both parse to the same type -- measured -- so the
+// bracketed form is a style the corpus does not otherwise use rather than an error.
 @define printf(fmt: string, ...) <noret>;
 
 interface Loser {}
