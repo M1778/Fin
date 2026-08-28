@@ -155,13 +155,15 @@ struct CgType {
     // itself and `[[int, 2], 2]` needs it to contain one.
     //
     // The extent is a separate field and not read off the llvm::ArrayType, because
-    // `.length` is answered from it and an ArrayType's element count is the same
-    // number only as long as nothing here starts lowering an array as anything but
-    // an [N x T]. A dynamic `[T]` never becomes a CgType at all -- its
-    // representation is undecided (ADR 0003's neighbourhood) and it refuses at the
-    // mapper.
+    // `.length` is answered from it. Fixed arrays use LLVM [N x T]; a dynamic `[T]`
+    // is the two-field `{ptr, len}` struct described by ADR 0025.
     std::shared_ptr<CgType> element;
     uint64_t extent = 0;
+
+    // Dynamic `[T]` only: the pair's fields are pointer-to-element and `int` length.
+    // Keeping the element type here lets indexing and delete recover the pointee
+    // without pretending the LLVM struct itself is an array.
+    bool isDynamicArray = false;
 
     // Set for Kind::Ptr when this file knows what is at the other end, and null
     // when it does not.
@@ -575,31 +577,28 @@ public:
     }
 
     // `[T, N]` becomes an LLVM [N x T]: N of the element, laid end to end, with LLVM
-    // placing them. The stride is the element's size rounded up to its alignment and
-    // LLVM computes it, which is the same division of labour a struct gets here --
-    // this file hands over the shape and does not do the arithmetic.
-    // Soundness_Codegen.TheLayoutTableAgreesWithLLVM is what keeps that agreeing with
-    // what src/types/Layout.cpp computes for a collector.
-    //
-    // A *dynamic* `[T]` returns nullopt, and it is not a fixed array with a number
-    // missing. How a `[T]` is represented -- a pointer and a length side by side, a
-    // header word ahead of the elements, something else -- is undecided, and it decides
-    // what `array.length` compiles to inside a callee that was handed one
-    // (arrays.fin's `sort(array: &[T])`). The caller turns the nullopt into a refusal
-    // naming the line, which is the same answer Layout.cpp gives at the same fork.
-    //
-    // A non-constant extent returns nullopt too. The analyzer has already refused it
-    // -- `new [T, n]` is Fin's spelling for a run-time count -- so this is a
-    // disagreement between the two passes rather than a program error, and reading it
-    // as anything (least of all as 1) would be a stack slot the wrong size.
+    // placing them. A dynamic `[T]` becomes `{ptr, len}`: the pointer to elements
+    // followed by an i32 length, matching Layout.cpp's two-word ABI (ADR 0025).
     std::optional<CgType> mapArray(const ArrayTypeNode& node) const {
-        if (!node.element_type || !node.size) return std::nullopt;
-
-        uint64_t extent = 0;
-        if (readConstant(*node.size, extent) != ConstantRead::Ok) return std::nullopt;
+        if (!node.element_type) return std::nullopt;
 
         auto element = map(node.element_type.get());
         if (!element) return std::nullopt;
+
+        if (!node.size) {
+            CgType t;
+            t.kind = CgType::Kind::Array;
+            t.element = std::make_shared<CgType>(*element);
+            t.isDynamicArray = true;
+            auto* pair = llvm::StructType::create(ctx_, {element->llvmType->getPointerTo(),
+                                                               llvm::Type::getInt32Ty(ctx_)},
+                                                   "fin.array");
+            t.llvmType = pair;
+            return t;
+        }
+
+        uint64_t extent = 0;
+        if (readConstant(*node.size, extent) != ConstantRead::Ok) return std::nullopt;
         // An array of void or of an incomplete struct has no size, so it is not an
         // array of anything. LLVM would assert rather than refuse.
         if (element->isVoid() || !element->llvmType || !element->llvmType->isSized()) {
@@ -2578,9 +2577,16 @@ private:
                                  : (idx.type.isSigned
                                         ? builder_.CreateSExt(idx.value, builder_.getInt64Ty())
                                         : builder_.CreateZExt(idx.value, builder_.getInt64Ty()));
-            llvm::Value* ptr = builder_.CreateInBoundsGEP(
-                base->type.llvmType, base->ptr,
-                {builder_.getInt64(0), i}, "elem");
+            llvm::Value* ptr = nullptr;
+            if (base->type.isDynamicArray) {
+                llvm::Value* pair = builder_.CreateLoad(base->type.llvmType, base->ptr, "array");
+                llvm::Value* data = builder_.CreateExtractValue(pair, {0}, "data");
+                ptr = builder_.CreateInBoundsGEP(base->type.element->llvmType, data, i, "elem");
+            } else {
+                ptr = builder_.CreateInBoundsGEP(
+                    base->type.llvmType, base->ptr,
+                    {builder_.getInt64(0), i}, "elem");
+            }
             return Addr{ptr, *base->type.element};
         }
         return std::nullopt;
@@ -4575,11 +4581,14 @@ private:
         if (!node.expr) { unsupported(node, "'delete' with no operand"); return; }
         CgVal v = emit(*node.expr);
         if (failed_) return;
-        if (!v.ok() || !v.type.isPointer()) {
-            // The analyzer already refuses `delete x` on a non-pointer ("Cannot delete
-            // non-pointer type 'int'"), so this is the two passes disagreeing rather
-            // than a program error -- and freeing a value read as an address is the one
-            // outcome worse than refusing.
+        if (!v.ok()) {
+            unsupported(node, "'delete' of an invalid value");
+            return;
+        }
+        llvm::Value* address = v.value;
+        if (v.type.isDynamicArray) {
+            address = builder_.CreateExtractValue(v.value, {0}, "array_data");
+        } else if (!v.type.isPointer()) {
             unsupported(node, "'delete' of a non-pointer");
             return;
         }
@@ -4589,7 +4598,7 @@ private:
                                     {llvm::PointerType::getUnqual(ctx_)}, false),
             "a deallocation");
         if (!release) return;
-        builder_.CreateCall(release, {v.value});
+        builder_.CreateCall(release, {address});
     }
 
     // A libc entry point, declared on demand.
@@ -4968,8 +4977,16 @@ private:
             }
             if (arrayType) {
                 CgType i32 = types_.intType(32, true);
-                value_ = CgVal{llvm::ConstantInt::get(i32.llvmType, arrayType->extent, true),
-                               i32};
+                if (arrayType->isDynamicArray) {
+                    auto arrayAddr = baseAddress(*node.object, CgType::Kind::Array);
+                    if (!arrayAddr) return;
+                    value_ = CgVal{builder_.CreateExtractValue(
+                                       builder_.CreateLoad(arrayType->llvmType, arrayAddr->ptr),
+                                       {1}, "length"), i32};
+                } else {
+                    value_ = CgVal{llvm::ConstantInt::get(i32.llvmType, arrayType->extent, true),
+                                   i32};
+                }
                 return;
             }
             // Not an array. A `string`'s length is a library question (ADR 0003) and a
@@ -5183,6 +5200,37 @@ private:
             return;
         }
         const CgType type = *arrayHint_;
+        if (type.isDynamicArray) {
+            // A dynamic literal owns a fresh heap buffer; its pair is `{ptr, len}`.
+            llvm::Value* count = llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_),
+                                                        node.elements.size());
+            auto* elemTy = type.element->llvmType;
+            auto* bytes = llvm::ConstantExpr::getSizeOf(elemTy);
+            llvm::Value* byteCount = builder_.CreateMul(
+                bytes, builder_.CreateZExt(count, llvm::Type::getInt64Ty(ctx_)));
+            llvm::FunctionCallee mallocFn = runtimeFn(node, "malloc", llvm::FunctionType::get(
+                llvm::PointerType::get(ctx_, 0), {llvm::Type::getInt64Ty(ctx_)}, false),
+                "a dynamic array allocation");
+            llvm::Value* raw = builder_.CreateCall(mallocFn, {builder_.CreateZExt(byteCount, llvm::Type::getInt64Ty(ctx_))});
+            llvm::Value* data = builder_.CreateBitCast(raw, elemTy->getPointerTo());
+            for (size_t i = 0; i < node.elements.size(); ++i) {
+                auto* saved = arrayHint_;
+                arrayHint_ = nullptr;
+                CgVal v = emit(*node.elements[i]);
+                arrayHint_ = saved;
+                if (failed_ || !v.ok()) return;
+                llvm::Value* stored = convert(node, v, *type.element);
+                if (!stored) return;
+                auto* slot = builder_.CreateInBoundsGEP(elemTy, data,
+                                                         llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), i));
+                builder_.CreateStore(stored, slot);
+            }
+            llvm::Value* pair = llvm::UndefValue::get(type.llvmType);
+            pair = builder_.CreateInsertValue(pair, data, {0});
+            pair = builder_.CreateInsertValue(pair, count, {1});
+            value_ = CgVal{pair, type};
+            return;
+        }
         if (node.elements.size() != type.extent) {
             // The front end refuses a literal whose length does not match its type,
             // which is what the extent being part of the type bought. A disagreement

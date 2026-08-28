@@ -263,9 +263,20 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
         // silently has the wrong shape. The retired
         // KnownDefect_Layout.AFixedArrayHasNoExtentToLayOut is what held that open.
         if (!arr->extent) {
-            return {{}, refuse(t, "a dynamic array's representation -- a pointer and a "
-                                  "length side by side, a header ahead of the elements, "
-                                  "something else -- is undecided")};
+            // ADR 0025: dynamic `[T]` is `{ptr, len}`. The element pointer is at
+            // offset zero and the signed int length follows at its natural alignment.
+            TypeLayout out;
+            const ScalarInfo ptrInfo{ScalarKind::Pointer, 0, false};
+            const ScalarInfo lenInfo{ScalarKind::Int, 32, true};
+            const uint64_t ptrSize = sizeOfScalar(ptrInfo, target_);
+            const uint64_t ptrAlign = alignOfScalar(ptrInfo, target_);
+            const uint64_t lenSize = sizeOfScalar(lenInfo, target_);
+            const uint64_t lenAlign = alignOfScalar(lenInfo, target_);
+            out.align = std::max<uint64_t>(ptrAlign, lenAlign);
+            const uint64_t lenOffset = alignUp(ptrSize, lenAlign);
+            out.size = alignUp(lenOffset + lenSize, out.align);
+            if (arr->element_type) out.pointers.push_back({0, arr->element_type});
+            return {out, ""};
         }
         if (!arr->element_type) return {{}, refuse(t, "it has no element type")};
         auto element = layoutOf(arr->element_type);

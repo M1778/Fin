@@ -822,44 +822,36 @@ BACKEND_TEST(Soundness_Codegen, TwoIndependentUnloweredStatementsInOneBodyAreBot
 }
 
 BACKEND_TEST(Soundness_Codegen, ARefusedDeclarationDoesNotCascadeIntoItsReaders) {
-    // The failure mode this whole mechanism has to avoid. `<[int]>` is refused, so `a`
-    // has no storage; the two statements after it read `a` and would each refuse for
-    // want of a name -- three refusals, of which two describe no work. One refusal, and
-    // it is the real one.
+    // The former fixture used `[int]` as the refused declaration. That construct now
+    // lowers, so the test's old argument is preserved as the replacement: use a
+    // prototype, whose backend representation is still deliberately refused.
     const Built b = build(
         "fun f() <noret> {\n"
-        "    let a <[int]> = [1,2,3];\n"
-        "    let b <int> = a[0];\n"
-        "    let c <int> = a[1];\n"
+        "    let a <fn<T>(m: T) -> T>;\n"
+        "    let b <auto> = a;\n"
+        "    let c <auto> = a;\n"
         "}\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 1u) << b.why();
-    EXPECT_NE(b.compileErr.find("a variable of type '[int]'"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type 'fn<...>(T) -> T'"), std::string::npos) << b.why();
     EXPECT_EQ(b.compileErr.find("the name 'a'"), std::string::npos)
         << "a reader of the refused name was reported as a finding of its own\n" << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, SuppressingACascadeDoesNotSuppressAnUnrelatedRefusal) {
-    // The other half, and the one that says the suppression is targeted rather than a
-    // dressed-up stop: `a[0]` reads the poisoned name and is not reported, while the
-    // `m1778` two lines later shares nothing with it and is.
-    //
-    // `m1778` was a `blame` until `blame`'s assert form lowered; see
-    // TwoUnloweredFunctionBodiesAreBothReported for why it is the replacement. Note that
-    // the substitution keeps this test's argument intact rather than weakening it -- what
-    // it needs from the third statement is only that it refuses and reads no name, which
-    // is exactly what `blame v > 0` supplied.
+    // The dynamic-array declaration used by the original fixture now lowers. Preserve
+    // the cascade argument with a construct still refused by the backend.
     const Built b = build(
         "fun f(v: int) <noret> {\n"
-        "    let a <[int]> = [1,2,3];\n"
-        "    let b <int> = a[0];\n"
+        "    let a <fn<T>(m: T) -> T>;\n"
+        "    let b <auto> = a;\n"
         "    m1778;\n"
         "}\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
-    EXPECT_NE(b.compileErr.find("a variable of type '[int]'"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type 'fn<...>(T) -> T'"), std::string::npos) << b.why();
     EXPECT_NE(b.compileErr.find("'m1778'"), std::string::npos) << b.why();
     EXPECT_EQ(b.compileErr.find("the name 'a'"), std::string::npos) << b.why();
 }
@@ -872,8 +864,8 @@ BACKEND_TEST(Soundness_Codegen, WhatWasNotExaminedIsSaidInTheTrace) {
     // `--debug-codegen` is the channel that already exists for what the backend did.
     const std::string trace = codegenTrace(
         "fun f() <noret> {\n"
-        "    let a <[int]> = [1,2,3];\n"
-        "    let b <int> = a[0];\n"
+        "    let a <fn<T>(m: T) -> T>;\n"
+        "    let b <auto> = a;\n"
         "}\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(trace.find("not examined"), std::string::npos) << trace;
@@ -1158,16 +1150,19 @@ BACKEND_TEST(Soundness_Codegen, AZeroLengthArrayLowers) {
     EXPECT_EQ(b.out, "ok\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, ADynamicArrayIsRefused) {
-    // Not a fixed array with a number missing. How a `[T]` is represented is an
-    // undecided ruling, and it decides what `array.length` compiles to inside a
-    // callee that was handed one. Refused rather than guessed at.
-    const Built b = build(
+BACKEND_TEST(Soundness_Codegen, ADynamicArrayIsAvaPairOfPointerAndLength) {
+    // Not a fixed array with a number missing. How a `[T]` is represented is now
+    // settled by ADR 0025: `{ptr, len}`, with the pointer first and an `int` length
+    // second. The literal below exercises allocation, stores and runtime indexing;
+    // the sample suite exercises the same pair through a reference and `.length`.
+    const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
         "    let a <[int]> = [1, 2, 3];\n"
+        "    printf(\"%d %d\\n\", a.length, a[1]);\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "3 2\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AnArrayOnAnExternBoundaryIsRefused) {

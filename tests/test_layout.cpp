@@ -735,14 +735,15 @@ TEST(Soundness_Layout, AnArrayTooLargeToMeasureIsRefusedRatherThanWrapped) {
     EXPECT_NE(r.refusal.find("does not fit"), std::string::npos) << r.refusal;
 }
 
-TEST(Soundness_Layout, ADynamicArrayStillHasNoLayout) {
+TEST(Soundness_Layout, ADynamicArrayHasAPointerAndLengthLayout) {
     LayoutEngine e;
     const LayoutResult r = e.layoutOf(std::make_shared<ArrayType>(prim("int")));
-    ASSERT_FALSE(r.ok());
-    // And the refusal no longer blames the missing extent, because the extent is
-    // not what is missing: `[int]` has no extent by design.
-    EXPECT_EQ(r.refusal.find("not resolved into its type"), std::string::npos) << r.refusal;
-    EXPECT_NE(r.refusal.find("undecided"), std::string::npos) << r.refusal;
+    ASSERT_TRUE(r.ok()) << r.refusal;
+    const uint64_t pointerSize = e.target().pointerSize;
+    EXPECT_EQ(r.layout.size, pointerSize + 4u + (pointerSize >= 8 ? 4u : 0u));
+    EXPECT_EQ(r.layout.align, pointerSize);
+    ASSERT_EQ(r.layout.pointers.size(), 1u);
+    EXPECT_EQ(r.layout.pointers[0].offset, 0u);
 }
 
 TEST(Soundness_Layout, AFixedArrayFieldTakesItsWholeExtentInAStruct) {
