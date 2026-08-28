@@ -72,8 +72,8 @@
 
     // Copies an attribute list onto a declaration, for the `%{ ... }%` block:
     // one written list, N statements, so the nodes cannot share the originals.
-    // Attribute is plain data (name, value, flag), so this is a real copy and
-    // needs no help from CloneVisitor.
+    // Attribute is plain data (name, value, flag, std_scoped), so this is a real
+    // copy and needs no help from CloneVisitor.
     void copy_attributes_onto(fin::Statement* s,
                               const std::vector<std::unique_ptr<fin::Attribute>>& attrs) {
         DeclFields f = decl_fields_of(s);
@@ -83,6 +83,12 @@
             auto dup = a->is_flag ? std::make_unique<fin::Attribute>(a->name, true)
                                   : std::make_unique<fin::Attribute>(a->name, a->value_str);
             dup->setLoc(a->loc);
+            // Carried rather than defaulted. Today the `%{ ... }%` block always
+            // reduces before the `namespace std` around it, so every dup is
+            // stamped afterwards and this line changes nothing; a copy that
+            // dropped the stamp would nonetheless turn a legal `#[global] %{ ... }%`
+            // into a diagnostic the moment those two reductions swapped order.
+            dup->std_scoped = a->std_scoped;
             f.attributes->push_back(std::move(dup));
         }
     }
@@ -393,9 +399,23 @@ attribute_block:
  
    So: parsing is complete here, name resolution is not.  `ImportModule::
    namespace_path` already carries the `::` tail from the import side; the two
-   halves meet when namespaces get a node and a scope. */
+   halves meet when namespaces get a node and a scope.
+
+   ONE THING IS READ OFF THE NAME BEFORE IT GOES.  `#[global]` is usable only
+   inside `namespace std` (ADR 0021), and this production is the last place in
+   the compiler that knows which namespace a declaration was written in -- so a
+   `std` block stamps every `#[global]` underneath it as std-scoped, and the
+   analyzer refuses the ones that carry no stamp.  Stamping here rather than
+   refusing here because a refusal wants the whole file's worth of context to be
+   reported once, in the pass that owns diagnostics about declarations; and
+   because a nested `namespace std { namespace ops { ... } }` reduces inner-first,
+   so the inner block's statements are already spliced into `$4` by the time the
+   `std` block runs.  A `namespace mine { namespace std { ... } }` counts as std
+   for the same reason every other pass does: the outer name is discarded and
+   nothing downstream can tell the two apart. */
 namespace_block:
     KW_NAMESPACE IDENTIFIER LBRACE block_stmts RBRACE {
+        if ($2 == "std") fin::markStdScopedGlobals($4);
         $$ = std::move($4);
     }
     ;
