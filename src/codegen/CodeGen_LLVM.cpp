@@ -2574,7 +2574,13 @@ private:
         auto value = object.value;
         auto* data = builder_.CreateExtractValue(value, {0}, "data");
         auto* table = builder_.CreateExtractValue(value, {1}, "vtable");
-        const size_t slot = iface.fields.size();
+        size_t slot = iface.fields.size();
+        for (size_t i = 0; i < iface.methods.size(); ++i) {
+            if (iface.methods[i] && iface.methods[i]->name == node.method_name) {
+                slot += i;
+                break;
+            }
+        }
         auto* entryPtr = builder_.CreateInBoundsGEP(llvm::PointerType::get(ctx_, 0), table,
             llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), slot));
         auto* entry = builder_.CreateLoad(llvm::PointerType::get(ctx_, 0), entryPtr, "method");
