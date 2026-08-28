@@ -2596,42 +2596,98 @@ TEST(Soundness_Interfaces, AnUndeclaredMemberIsStillNotReadableThroughAnInterfac
     EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Interfaces, AMissingFieldIsAccepted) {
+TEST(Soundness_Interfaces, AMissingFieldIsRejected) {
+    // Was KnownDefect_Interfaces.AMissingFieldIsAccepted, whose failure message named
+    // this exact change: "Invert this to EXPECT_NE(r.exitCode, 0), move it to
+    // Soundness_Interfaces". `implements` walked methods, operators, constructors and
+    // the destructor and never fields, so a struct carrying none of an interface's
+    // required fields satisfied it.
+    //
+    // ADR 0027 is what made this urgent rather than merely wrong: an interface reference
+    // carries a vtable with one offset slot per required field, so a struct missing a
+    // required field has no offset to emit. The gap stops being latent the moment a
+    // vtable exists, and the backend would have to refuse a program the front end had
+    // blessed -- which is why the ADR lists closing this as step 1 of 5, before any
+    // vtable is emitted.
     auto r = compile(
         "interface I { x <int>; }\n"
         "struct S : <I> { y <int>, }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a struct that does not carry a required field is now rejected. "
-           "Invert this to EXPECT_NE(r.exitCode, 0), move it to Soundness_Interfaces, "
-           "and delete the interface-fields entry from docs/plan.md.";
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("does not implement"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Interfaces, AMissingFieldIsAcceptedEvenWhenTheMethodsAreChecked) {
-    // Sharper than the test above. Here the struct satisfies the method half, so
-    // `implements` runs to completion and returns true anyway — the field is not
-    // merely unchecked when nothing else is, it is invisible to a check that did
-    // happen.
+TEST(Soundness_Interfaces, AMissingFieldIsRejectedEvenWhenTheMethodsAreSatisfied) {
+    // Sharper than the test above, and its argument is preserved verbatim from the
+    // KnownDefect it replaces: "Here the struct satisfies the method half, so
+    // `implements` runs to completion and returns true anyway -- the field is not merely
+    // unchecked when nothing else is, it is invisible to a check that did happen."
+    //
+    // That distinction is why the field loop is *first* in `implements` now: a check
+    // that only ran when something else had already failed would pass this test for the
+    // wrong reason.
     auto r = compile(
         "interface I { x <int>; fun m(self: &Self) <int>; }\n"
         "struct S : <I> {\n"
         "  y <int>,\n"
         "  fun m(self: &Self) <int> { return 1; }\n"
         "}\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: the field half of an interface contract is now checked "
-           "alongside the method half. See KnownDefect_Interfaces.AMissingFieldIsAccepted.";
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Interfaces, AFieldOfTheWrongTypeIsAccepted) {
-    // And the field is not checked even when it is present: `x <string>` where
-    // the interface said `x <int>`. So the fix needs both a presence check and a
-    // type comparison, and a fix that only adds presence will leave this failing.
+TEST(Soundness_Interfaces, AFieldOfTheWrongTypeIsRejected) {
+    // The third of the trio, and the one that decided the shape of the fix. Its
+    // KnownDefect form said so: "the fix needs both a presence check and a type
+    // comparison, and a fix that only adds presence will leave this failing." So both
+    // landed together rather than presence first.
     auto r = compile(
         "interface I { x <int>; }\n"
         "struct S : <I> { pub x <string>, }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a required field's type is now compared. If the presence check "
-           "landed but not this, that is the remaining half.";
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, AnInheritedFieldSatisfiesARequirement) {
+    // The requirement is about *storage*, not about where the declaration was written.
+    // A base struct's fields splice in at offset 0 (ADR 0026's neighbourhood), so an
+    // inherited field occupies a slot in this type exactly as a declared one does --
+    // which is precisely what a vtable offset slot needs.
+    const FincRun r = compile(
+        "interface I { x <int>; }\n"
+        "struct B { pub x <int>, }\n"
+        "struct S: <B, I> { y <int>, }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, ARequiredSelfFieldIsSatisfiedByTheImplementorsOwnType) {
+    // `Self` in a requirement means the implementor's type, and this is the case that
+    // caught it: `lib/std/stdptr.fin:53` declares `readonly restrict <&Self>;` on
+    // `rptr_iface` and `:76` declares `readonly restrict <&Self>,` on `rptr`. Inside the
+    // interface `Self` is the interface (Analyzer_Decl.cpp:625); inside the class it is a
+    // SelfType wrapping the class (:1136). So the two are `&rptr_iface` and `&rptr`, and
+    // a literal comparison can never match -- which is the semantics, not a defect in
+    // either declaration.
+    //
+    // Found by Soundness_BundledStdlib.EverySymbolTheCorpusImportsIsExported going red
+    // the moment the field check landed, which is the guard that matters here: a
+    // conformance check strict enough to reject the standard library is a wrong check,
+    // and that test is what says so before a sample does.
+    const FincRun ok = compile(
+        "interface I { restrict <&Self>; }\n"
+        "class C : <I> { readonly restrict <&Self>, }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(ok.exitCode, 0) << stripAnsi(ok.err);
+
+    // And not loosened into "any pointer satisfies a `&Self`": a pointer to some other
+    // struct is still wrong. Without this, the rule above would accept anything
+    // pointer-shaped, which is how a fix for one corpus file breaks the check for
+    // everything else.
+    const FincRun wrong = compile(
+        "interface I { restrict <&Self>; }\n"
+        "struct Other { v <int>, }\n"
+        "class C : <I> { readonly restrict <&Other>, }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(wrong.exitCode, 0) << stripAnsi(wrong.err);
 }
 
 // ---------------------------------------------------------------------------

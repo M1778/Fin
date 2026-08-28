@@ -263,7 +263,109 @@ static bool constructorSatisfies(const TypePtr& mine, const TypePtr& required) {
     return true;
 }
 
+// This type's own field of that name, or one inherited from a *base struct* -- never
+// one that only an implemented interface declares.
+//
+// That distinction is the whole reason this is not getFieldType. An interface a struct
+// implements sits in the same `parents` vector a base struct does, so getFieldType's
+// walk reaches it, and asking "does S have x" for `struct S : <I>` where only `I`
+// declares `x` answers yes. For a *read* that is arguably right; for a conformance
+// check it lets the requirement satisfy itself.
+// Does the implementor's field type satisfy the interface's requirement?
+//
+// Not `typesEqual`, and the reason is `Self`. Inside an interface, `Self` is bound to
+// the interface's own type (Analyzer_Decl.cpp:625); inside a struct or class it is a
+// SelfType wrapping the implementor (:341, :1136). So `readonly restrict <&Self>` is
+// `&rptr_iface` in the requirement and `&rptr` in the class that carries it, and a
+// literal comparison can never match -- which is the semantics, not a defect in either
+// declaration. `Self` in a requirement means "the implementor's own type".
+//
+// The constructor half of `implements` hit exactly this and solved it by comparing
+// parameters only, on the grounds that a constructor's return type "is the check of the
+// one thing guaranteed to differ". The method half never hit it because it checks
+// presence and not signatures. A field has neither escape: its type is the whole of what
+// there is to check, so this walks the pair and treats the interface's own type as
+// satisfied by the implementor's.
+//
+// Structural over pointers, because that is the shape the corpus writes -- `<&Self>` and
+// `<&T>` (lib/std/stdptr.fin:53, :54). Anything else falls through to typesEqual, so an
+// unrecognised shape is compared strictly rather than waved through.
+static bool fieldTypeSatisfies(const TypePtr& mine, const TypePtr& required,
+                               const StructType* interface, const StructType* implementor) {
+    if (!mine || !required) return true;  // one side failed to resolve; already reported
+
+    // The requirement names the interface itself -- i.e. it was written `Self`. Satisfied
+    // by the implementor, however the implementor spells it: a SelfType wrapping itself,
+    // or its own name written out (struct_methods.fin writes both and they are one type).
+    if (auto* wanted = required->as<StructType>()) {
+        if (wanted == interface || (interface && wanted->name == interface->name)) {
+            if (auto* got = mine->as<SelfType>()) {
+                auto owner = std::dynamic_pointer_cast<StructType>(got->originalStruct);
+                return owner && implementor && owner->name == implementor->name;
+            }
+            if (auto* got = mine->as<StructType>()) {
+                return implementor && got->name == implementor->name;
+            }
+            return false;
+        }
+    }
+
+    if (auto* wantedPtr = required->as<PointerType>()) {
+        auto* minePtr = mine->as<PointerType>();
+        if (!minePtr) return false;
+        return fieldTypeSatisfies(minePtr->pointee, wantedPtr->pointee, interface, implementor);
+    }
+
+    return typesEqual(mine, required);
+}
+
+static TypePtr fieldFromStorageOf(const StructType& t, const std::string& n) {
+    if (auto* own = t.findField(n)) return own->type;
+    for (const auto& parent : t.parents) {
+        auto p = std::dynamic_pointer_cast<StructType>(parent);
+        if (!p || p->is_interface) continue;
+        if (auto found = fieldFromStorageOf(*p, n)) return found;
+    }
+    return nullptr;
+}
+
 bool StructType::implements(const StructType* interface) const {
+    // The field half, and it is first because it is the half that was missing.
+    //
+    // `implements` walked methods, operators, constructors and the destructor and never
+    // fields, so a struct that declared none of an interface's required fields
+    // satisfied it -- KnownDefect_Interfaces.AMissingFieldIsAccepted, and its two
+    // sharper siblings: the field was invisible even when the method half ran to
+    // completion, and a field of the *wrong type* was accepted too.
+    //
+    // Both halves of the check are here for that reason. A presence-only check leaves
+    // AFieldOfTheWrongTypeIsAccepted standing, and that defect's own comment says so:
+    // "a fix that only adds presence will leave this failing".
+    //
+    // ADR 0027 is what made this urgent rather than merely wrong. An interface
+    // reference carries a vtable with one offset slot per required field, so a struct
+    // missing a required field has no offset to put there -- the gap stops being latent
+    // the moment a vtable is emitted, and the backend would have to refuse a program
+    // the front end had blessed.
+    //
+    // getFieldType would answer this question wrongly, and the way it does is worth
+    // naming: it walks `parents`, and an implemented interface *is* in `parents`. So
+    // `S.getFieldType("x")` for `struct S : <I>` finds `x` on `I` itself and reports
+    // that S has it -- the requirement satisfying itself. Measured: with getFieldType
+    // here, the wrong-type case refused correctly while the missing-field case was
+    // still accepted, which is what pointed at the walk rather than at the comparison.
+    //
+    // So the lookup is this type's own fields plus its *base struct* parents, skipping
+    // interfaces. An inherited field is as present as a declared one -- base fields
+    // splice in at offset 0, so it occupies a slot in this type either way, which is
+    // exactly what a vtable offset needs -- but a field only an interface declares is a
+    // requirement, not storage.
+    for (const auto& required : interface->fields) {
+        if (!required.type) continue;  // the interface's own field failed to resolve
+        TypePtr mine = fieldFromStorageOf(*this, required.name);
+        if (!mine) return false;
+        if (!fieldTypeSatisfies(mine, required.type, interface, this)) return false;
+    }
     for (const auto& [methodName, retType] : interface->methods) {
         if (methods.find(methodName) == methods.end()) return false;
     }

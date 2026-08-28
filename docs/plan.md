@@ -21,17 +21,25 @@ four items and has grown every time anyone probed for more, and a number in the 
 claim nobody updates. It had one — "and has six" — which went stale within the day, which is the
 argument for the rule rather than against it.)
 
-**Interface fields are not checked at all.** A struct declaring `: <I>` where `I` requires `x <int>`,
-carrying no `x`, compiles successfully. Omitting a required *method* is caught; omitting a required
-field is not. `Analyzer_Decl.cpp:367` resolves interface member types without ever calling
-`defineField`, so `StructType::implements` (`StructType.cpp:114-130`) has no fields to compare and
-checks methods and constructors only. Every interface contract in the standard library is therefore
-decorative — this is the most serious item in the plan.
+~~**Interface fields are not checked at all.**~~ **FIXED 2026-08-28.** The diagnosis here was
+right in both halves and both are closed. `visit(InterfaceDeclaration&)` resolved interface member
+types without ever calling `defineField`, so the interface's own type had no fields — which meant
+`StructType::implements` had nothing to compare *and* that a read of a declared member through an
+interface-typed value reported `has no member` about a member three lines up. The member is
+registered now, and `implements` checks presence and type together, because this entry's sibling
+`KnownDefect` warned that "a fix that only adds presence will leave this failing".
 
-```fin
-interface I { x <int>; }
-struct S : <I> { y <int>, }     // Build Successful.
-```
+What the entry could not predict is the case that made the check hard: `Self` in a requirement
+means the *implementor's* type, so `readonly restrict <&Self>` is `&rptr_iface` in
+`lib/std/stdptr.fin`'s interface and `&rptr` in the class that satisfies it. A literal comparison
+rejects the standard library, and
+`Soundness_BundledStdlib.EverySymbolTheCorpusImportsIsExported` is what said so — before any
+sample did. Held by `Soundness_Interfaces.AMissingFieldIsRejected` and four neighbours, including
+the control that a `&Self` requirement is not satisfied by a pointer to some other struct.
+
+Made urgent by ADR 0027 rather than by this entry: an interface reference carries a vtable with one
+offset slot per required field, so a struct missing one has no offset to emit. Closing this was
+step 1 of that ADR's five.
 
 **Integer widths are a lie.** `uint{8}` and `uint{64}` are the same type; assigning one to the other
 succeeds. `resolveTypeFromAST` (`Analyzer_Core.cpp:142-146`) walks the width annotations for side
