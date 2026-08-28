@@ -1715,12 +1715,28 @@ BACKEND_TEST(Soundness_Codegen, SizeofAVoidIsRefused) {
     EXPECT_NE(b.compileErr.find("sizeof"), std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, SizeofATypeWithNoRepresentationIsRefused) {
-    // A dynamic `[T]`: how one is represented is undecided, so its size is the same
-    // undecided thing rather than a pointer's width guessed here.
-    const Built b = build("fun main() <noret> { let n <int> = sizeof([int]); }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("sizeof"), std::string::npos) << b.why();
+BACKEND_TEST(Soundness_Codegen, SizeofADynamicArrayIsThePairAndNotAPointer) {
+    // Was SizeofATypeWithNoRepresentationIsRefused, whose argument was: "A dynamic
+    // `[T]`: how one is represented is undecided, so its size is the same undecided
+    // thing rather than a pointer's width guessed here." That was right while the
+    // representation was open, and ADR 0025 has since decided it -- so the size is no
+    // longer a guess and the refusal is no longer honest.
+    //
+    // The number is what makes this worth asserting rather than merely flipping. On a
+    // 64-bit target the pair is 8 bytes of pointer, 4 of length, and 4 of tail padding
+    // to the pointer's alignment: 16. The old comment's feared wrong answer -- "a
+    // pointer's width" -- is 8, so this assertion is precisely what tells a correct
+    // lowering from the one that treats a `[T]` as its data pointer alone.
+    //
+    // It is also a cross-check between the two passes: this reads the backend's number
+    // through `sizeof`, and Soundness_Layout.ADynamicArrayHasAPointerAndLengthLayout
+    // computes the same one in LayoutEngine, which is the pass a collector asks. Two
+    // tables that agree today are two tables that disagree after one edit, and the
+    // disagreement would be an ABI split in which every program still runs.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> { printf(\"%d\\n\", sizeof([int])); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "16\n") << b.why();
 }
 
 // ---------------------------------------------------------------------------
@@ -3650,20 +3666,31 @@ BACKEND_TEST(Soundness_Codegen, AnEmptyGenericStructLowersWhereItIsInstantiated)
     EXPECT_EQ(b.out, "ok\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AnInstantiationAtATypeThisFileCannotLowerIsRefused) {
-    // `Box<[int]>` is a fine template at a type argument with no representation
-    // yet: a dynamic `[T]` is the undecided one. The refusal has to name the
-    // argument rather than the template, because the template is not the problem
-    // and `Box<int>` right beside it still works.
+BACKEND_TEST(Soundness_Codegen, AGenericStructInstantiatedAtADynamicArrayCarriesThePair) {
+    // Was AnInstantiationAtATypeThisFileCannotLowerIsRefused, and its argument was
+    // that `Box<[int]>` is "a fine template at a type argument with no representation
+    // yet: a dynamic `[T]` is the undecided one", so the refusal had to name the
+    // *argument* rather than the template, because `Box<int>` beside it still worked.
+    // ADR 0025 gave the argument a representation, so the refusal has nothing left to
+    // report -- and the half of that argument worth keeping is the half about the
+    // template, which is why this asserts through the field rather than merely
+    // compiling.
+    //
+    // Reading `b.val.length` and `b.val[1]` is the point. A `[T]` inside a struct is
+    // the case a `{ptr, len}` representation makes work and a bare-pointer one cannot:
+    // the length is a field of the pair, so it survives being stored in and loaded
+    // back out of an enclosing aggregate. `stdlib/collection.fin:51` (`_arr <[T]>`) is
+    // the corpus's own version of this shape.
     const Built b = build(std::string(kPrintf) +
         "struct Box<T> {\n"
         "    val <T>\n"
         "}\n"
         "fun main() <noret> {\n"
         "    let b <Box<[int]>> = Box::<[int]>{ val: [1, 2] };\n"
-        "    printf(\"ok\\n\");\n"
+        "    printf(\"%d %d\\n\", b.val.length, b.val[1]);\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 2\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodIsCalledOnAnInstantiation) {
