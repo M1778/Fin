@@ -226,6 +226,16 @@ struct StructField {
     // the emitter -- kept as an expression rather than folded to a constant here
     // because it may be a call, and a call has to happen where the literal is.
     Expression* defaultValue = nullptr;
+    // True for a field this struct got from a base rather than declaring itself.
+    //
+    // The offsets are the same either way -- base fields come first, so an inherited
+    // field is at the index it had in the base -- which is what makes an upcast emit
+    // nothing. The flag exists because a struct *literal* must not be allowed to name
+    // one: `Derived { a: 1, c: 3 }` writes a field the derived struct did not declare,
+    // and whether that is legal is a language question nobody has answered. Mirrors
+    // FieldLayout::inherited in src/types/Layout.hpp, which carries it for the
+    // collector's benefit for the same reason.
+    bool inherited = false;
 };
 
 // What one type parameter became, for as long as a template's body is being
@@ -799,6 +809,11 @@ public:
         // have a representation before a signature that mentions it is built.
         declareEnums(program);
         if (failed_) return false;
+        // Before the structs, because a struct's `parents` vector holds base structs
+        // and implemented interfaces together and only a name can tell them apart.
+        // Nothing is emitted: see interfaceNames_.
+        declareInterfaces(program);
+        if (failed_) return false;
         // Before the functions, because a function's signature may name a struct.
         declareStructs(program);
         if (failed_) return false;
@@ -1080,6 +1095,34 @@ private:
     // an enum declaration that is quietly skipped is a type name that later resolves
     // to nothing, and "resolves to nothing" is how a variable gets a size this file
     // invented.
+    // Records every module-scope interface's name, and emits nothing.
+    //
+    // Deliberately not a check: visit(InterfaceDeclaration&) already refuses the
+    // shapes an interface may not have (a method body, an implemented operator, a
+    // constructor, a destructor, a member default), and it runs in the statement walk
+    // where each refusal names its own line. Doing it twice would report one fault
+    // twice; doing it *here* instead would report it before the structs, where a
+    // reader would see an interface's fault blamed for a struct that never got read.
+    void declareInterfaces(Program& program) {
+        for (auto& stmt : program.statements) {
+            if (auto* i = dynamic_cast<InterfaceDeclaration*>(stmt.get())) {
+                interfaceNames_.insert(i->name);
+            }
+        }
+    }
+
+    // Whether a parent in a struct's `parents` vector names an interface rather than a
+    // base struct.
+    //
+    // By name, because that is the only witness the AST carries: `parents` is a vector
+    // of TypeNode, and a TypeNode is a spelling. Generic arguments are ignored --
+    // `rptr_iface<T>` (stdlib/stdptr.fin:37) names the interface declared as
+    // `interface rptr_iface<T>` (:10), and an interface's arguments cannot change
+    // whether it has bytes.
+    bool parentIsInterface(const TypeNode& parent) const {
+        return interfaceNames_.count(parent.name) > 0;
+    }
+
     void declareEnums(Program& program) {
         for (auto& stmt : program.statements) {
             auto* e = dynamic_cast<EnumDeclaration*>(stmt.get());
@@ -1215,6 +1258,52 @@ private:
         for (StructDeclaration* s : decls) {
             StructInfo& info = structs_[s->name];
             std::vector<llvm::Type*> members;
+            // The base's fields first, at the indices they had in the base. That is
+            // the owner's ruling -- "the parent's fields splice in at offset 0" -- and
+            // it is what makes a pointer to the derived struct a valid pointer to the
+            // base, so an upcast emits no instruction. src/types/Layout.cpp:428-451
+            // already computes exactly this for the collector; this is the backend
+            // catching up rather than deciding.
+            //
+            // The base is looked up in `structs_`, which the first pass has finished
+            // filling, so a base declared anywhere at module scope is found. Its
+            // *body* may not be set yet (this pass sets bodies in `decls` order), which
+            // is why the fields are copied from `StructInfo::fields` rather than from
+            // the llvm::StructType -- the CgTypes are complete after pass one even
+            // when the LLVM bodies are not.
+            //
+            // A base declared *below* its derived struct cannot arrive here at all:
+            // the analyzer reports `Undefined type 'Base'` first (measured), so the
+            // ordering problem the third pass exists to solve does not apply.
+            for (auto& parent : s->parents) {
+                if (!parent || parentIsInterface(*parent)) continue;
+                auto base = structs_.find(parent->name);
+                if (base == structs_.end()) {
+                    // lowerableStruct refuses a base it cannot classify, so reaching
+                    // here means the base was registered and then dropped -- the two
+                    // passes disagreeing, not a program error.
+                    unsupported(*s, fmt::format("struct '{}' inheriting '{}', which "
+                                                "this file did not lower",
+                                                s->name, parent->name));
+                    return;
+                }
+                for (const StructField& f : base->second.fields) {
+                    if (info.indexByName.count(f.name)) {
+                        // Two bases with a field of the same name, or a base and this
+                        // struct. Which one `d.x` means is a language question, and
+                        // answering it by declaration order would answer it silently.
+                        unsupported(*s, fmt::format("struct '{}' inheriting a second "
+                                                    "field '{}' from '{}'",
+                                                    s->name, f.name, parent->name));
+                        return;
+                    }
+                    StructField carried = f;
+                    carried.inherited = true;
+                    info.indexByName[f.name] = info.fields.size();
+                    info.fields.push_back(carried);
+                    members.push_back(f.type.llvmType);
+                }
+            }
             for (auto& m : s->members) {
                 auto t = types_.map(m->type.get());
                 if (!t) { unsupportedType(*m, m->type.get(), "a struct field"); return; }
@@ -1565,9 +1654,34 @@ private:
                 return false;
             }
         }
-        if (!s.parents.empty()) {
-            unsupported(s, fmt::format("struct '{}' inheriting another type", s.name));
-            return false;
+        for (auto& parent : s.parents) {
+            if (!parent) continue;
+            // An interface contributes no bytes and no fields, so implementing one
+            // changes nothing about the struct's shape -- which is what makes
+            // `struct HashMap<T, U> : <Index, IndexAssign>` (stdlib/hashmap.fin:15)
+            // and `struct ChangableSomehow: <UnchanableString>` (readonly.fin:34)
+            // lowerable as the plain structs they are. src/types/Layout.cpp:427 skips
+            // an interface parent for the same reason and in the same words.
+            //
+            // What is *not* claimed here: that the struct satisfies the interface.
+            // Nothing in this file checks that, and nothing needs to -- the analyzer
+            // reports `X does not implement Y`, and an unimplemented method is a call
+            // that finds no symbol rather than a wrong lowering. ADR 0019 rules that an
+            // interface *reference* is two words; no corpus site takes one, so the day
+            // one does is the day that needs its own unit rather than this one.
+            if (parentIsInterface(*parent)) continue;
+            // A base struct's fields splice into this struct at offset 0 (the owner's
+            // ruling; src/types/Layout.cpp:428-451 already computes it, and the second
+            // pass of declareStructs now copies them). What is still refused is a base
+            // this file did not itself lower -- a template, a class, or a struct
+            // refused for one of the shapes above -- because splicing in fields from a
+            // shape this file declined to give a layout would be inventing one.
+            if (!structs_.count(parent->name)) {
+                unsupported(s, fmt::format("struct '{}' inheriting '{}', which is not a "
+                                           "struct this file lowered",
+                                           s.name, parent->name));
+                return false;
+            }
         }
         for (auto& attr : s.attributes) {
             if (attr->name == "llvm_name" && !attr->is_flag) continue;  // read below
@@ -5537,6 +5651,25 @@ private:
     // Which StructDeclaration nodes declareStructs actually took, so that one it
     // never saw is refused rather than assumed handled.
     std::set<const StructDeclaration*> registered_;
+
+    // Every interface declared at module scope, by name.
+    //
+    // An interface has no representation here -- visit(InterfaceDeclaration&) emits
+    // nothing at all -- so this is not a table of types. It exists for one question
+    // that cannot be answered without it: a struct's `parents` vector holds base
+    // structs and implemented interfaces *together* (parser.y puts `struct S : <I>`
+    // and `struct S : <Base>` in the same place), and the two do opposite things to a
+    // layout. A base struct's fields splice in at offset 0; an interface contributes
+    // no bytes, and reserving a slot for one would move every field after it for
+    // something with no run-time existence.
+    //
+    // src/types/Layout.cpp:427 asks the same question and answers it from
+    // `StructType::is_interface`, which this file has no access to -- it works from
+    // the AST, where the only witness is which kind of declaration carried the name.
+    // Populated by declareInterfaces before declareStructs, for the same reason
+    // declareEnums runs before it: a name has to be classified before a declaration
+    // that mentions it is read.
+    std::set<std::string> interfaceNames_;
 
     // Every generic struct declaration, by name, borrowed from the AST -- which
     // outlives the emitter (run() takes the Program by reference). Not in structs_,

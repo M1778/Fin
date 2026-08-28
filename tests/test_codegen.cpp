@@ -2399,6 +2399,92 @@ BACKEND_TEST(Soundness_Codegen, AnEmptyStructIsOneByteSoItsValuesHaveDistinctAdd
     EXPECT_EQ(b.out, "distinct\n") << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// Struct inheritance: the base's fields splice in at offset 0.
+//
+// The owner's ruling, and src/types/Layout.cpp:428-451 already computed it for the
+// collector before the backend could emit it -- so this unit is the backend agreeing
+// with a number the type layer had already fixed, which is the safer direction. The
+// two are checked against each other by
+// Soundness_Layout.AnInheritedFieldComesBeforeTheOnesDeclaredHere over there and by
+// the sizes asserted here.
+//
+// Every test prints or asserts a value. A wrong splice is not a build failure: it is
+// a well-typed read at the wrong offset, which is exactly the failure mode the
+// structs section above exists to catch.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AnInheritedFieldIsReadAndWrittenThroughTheDerivedStruct) {
+    // The base's two fields, then the derived one's, and each distinct so that reading
+    // a neighbour gives a different answer. The write half matters as much as the read:
+    // an inherited field is a real slot, not a copy, so assigning through the derived
+    // struct has to land in it.
+    const Built b = build(std::string(kPrintf) +
+        "struct Base { a <int>, b <int> }\n"
+        "struct Derived: <Base> { c <int> }\n"
+        "fun main() <noret> {\n"
+        "    let d <Derived> = Derived{ a: 1, b: 2, c: 3 };\n"
+        "    printf(\"%d %d %d\\n\", d.a, d.b, d.c);\n"
+        "    d.a = 10;\n"
+        "    d.c = 30;\n"
+        "    printf(\"%d %d %d\\n\", d.a, d.b, d.c);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 3\n10 2 30\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADerivedStructIsItsBasePlusItsOwnFields) {
+    // The size is what says the splice happened rather than the fields being ignored.
+    // Base is two ints; Derived must be three, not one -- a lowering that dropped the
+    // inherited fields would report 4 here and every field of every derived struct in
+    // the program would be at the wrong offset, in a program that still runs.
+    const Built b = build(std::string(kPrintf) +
+        "struct Base { a <int>, b <int> }\n"
+        "struct Derived: <Base> { c <int> }\n"
+        "fun main() <noret> { printf(\"%d %d\\n\", sizeof(Base), sizeof(Derived)); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "8 12\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnImplementedInterfaceAddsNoFieldsToTheStruct) {
+    // `parents` holds base structs and implemented interfaces together (parser.y puts
+    // `struct S : <I>` and `struct S : <Base>` in the same vector), and this is the
+    // half that has to contribute nothing. A slot reserved for an interface would move
+    // every field after it for something with no run-time existence -- so the size
+    // here is the plain struct's, and `x` is still at offset 0.
+    //
+    // The two corpus sites this is for: `struct ChangableSomehow: <UnchanableString>`
+    // (readonly.fin:34) and `struct HashMap<T, U> : <Index, IndexAssign>`
+    // (stdlib/hashmap.fin:15). Neither has a base struct at all.
+    const Built b = build(std::string(kPrintf) +
+        "interface I { pub fun f(self: &Self) <int>; }\n"
+        "struct S: <I> {\n"
+        "    x <int>\n"
+        "    fun f() <int> { return self.x; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S{ x: 7 };\n"
+        "    printf(\"%d %d\\n\", sizeof(S), s.x);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4 7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABaseThisFileDidNotLowerIsRefusedRatherThanSpliced) {
+    // The guard on the whole unit. Splicing fields in from a shape this file declined
+    // to give a layout would be inventing one -- so a base that is a `class` (whose
+    // value-or-reference semantics are unsettled) refuses at the derived struct.
+    //
+    // This is the shape `stdlib/hashmap.fin:12` is: `struct HashMapError: <Error>`,
+    // where `stdlib/error.fin:8` declares `Error` under `#[class]`.
+    const Built b = build(
+        "class Base { a <int> }\n"
+        "struct Derived: <Base> { c <int> }\n"
+        "fun main() <noret> { let d <Derived> = Derived{ a: 1, c: 2 }; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AClassIsRefused) {
     // Whether a `class` is a value like a struct or a reference is not settled, and
     // the two lower differently at every single assignment. The analyzer accepts the
