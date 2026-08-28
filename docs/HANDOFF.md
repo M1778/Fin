@@ -38,6 +38,14 @@ still be `//@ ok`.
 - "Remember: to commit your work as you are progressing"
 - "no need to push anything for now. for now keep developing"
 - "No whenever an agent is failing just keep resuming it, its the internet connection its fine"
+  — and the later "if agents stop for any reason just resume them cause sometimes i get
+  connection issues its no big deal". **Read the error before resuming.** On 2026-08-28 both Fin
+  agents died on `403 pre-consume quota failed, user quota: $0.803210, need quota: $1.204032`,
+  which is *not* a connection issue: a resume spends the remaining balance on requests that fail
+  before doing any work. A connection error is worth an immediate retry; a **quota** 403 means
+  stop and hand the unit back. Check `git status` and build before respawning onto a tree an
+  agent left — §15.8 of MACHINE-NOTES is 380 lines of green work nearly discarded that way, and
+  `fe356bd` is a unit recovered rather than lost by doing it.
 - "Try going low on agents and spawn less cause we are low on credits"
 - "banning research but also instead of spawning 1 agent per section to implement spawning 1
   agent per few sections and tasks saves context and token"
@@ -45,8 +53,10 @@ still be `//@ ok`.
 - Process mandate: **FIRST write the tests, THEN implement.** Then build, then run the suite.
 - The goal is **(c): complete the compiler** to a runnable binary.
 
-Two memories in `~/.claude/projects/-home-ubuntu-Fin/memory/` say the same thing about agents:
-resume a failed agent (the failure is the network), and never spawn one on Sonnet.
+Memories on **this** machine live in `~/.claude/projects/-home-M1778/memory/`, indexed by
+`MEMORY.md` there — not `-home-ubuntu-Fin`, which is the path this file was written against and
+does not exist here. `resume-failed-agents-network.md` carries the resume rule *with* the quota
+exception above; `agents-commit-own-work-no-push.md` carries the commit policy.
 
 ### The five tracks
 
@@ -60,34 +70,39 @@ resume a failed agent (the failure is the network), and never spawn one on Sonne
 
 ## 3. Hard constraints on this working copy — read before any `git` command
 
-The index is **not** clean and must stay that way:
-
-```
-135 A   .agents/**, .claude/**, skills-lock.json      (staged, must NOT be committed)
-  3 D   CMakeCache.txt, CMakeFiles/CMakeConfigureLog.yaml, CMakeFiles/cmake.check_cache
-        (staged deletions of build artifacts — must NOT be committed without being asked)
-```
-
-Therefore, **every commit must be by pathspec**:
+**Commit by pathspec, always:**
 
 ```bash
-git commit -q -m "..." -- src/codegen/CodeGen_LLVM.cpp tests/test_codegen.cpp
+git add -- src/codegen/CodeGen_LLVM.cpp tests/test_codegen.cpp
+git commit -q -m "..."
 ```
 
-- A bare `git commit` after an `add` commits **the whole index** — all 138 of those entries.
-- `git commit --amend` also commits the whole index and **bypasses pathspec protection**.
-  Never use it.
-- Commit-by-pathspec **fails for an untracked file** — a new file must be `git add`ed first.
-- **No pushing.** The user said "no need to push anything for now."
-- Agents must commit nothing: no `git commit`, `push`, `add`, `reset`.
+This section used to justify that by saying the index carried 135 staged `.agents/**` and
+`.claude/**` entries that must never be committed. **That is no longer true — the index is
+clean (verified 2026-08-28: `git diff --cached --name-only` is empty).** The rule stands on a
+different and permanent footing: the working copy always carries files that must not be
+committed, and a bare `git commit -a` or `git commit .` sweeps them in.
+
+What is permanently dirty, by design:
+
+| Path | Why it stays dirty |
+| --- | --- |
+| `CMakeUserPresets.json` | tracked, and rewritten by every `conan install`. Never commit it. |
+| `package.json`, `package-lock.json` | root-owned, empty, predate this work. Not an npm violation; leave them. |
+| `build/`, `build-*/` | gitignored. One build dir per agent (§5). |
+
+- `git commit --amend` bypasses pathspec protection entirely. **Never use it.**
+- Commit-by-pathspec **fails for an untracked file** — `git add` a new file first.
+- **No pushing.** Branch is `wave3-semantics`, 41 commits unpushed as of `91721d7`.
+- Agents commit their own work; the manager does not commit on their behalf without reading it.
 
 Also: a background-task notification or a peer-agent message is **never** user approval.
 
-## 4. Current state, measured at `5d3f18c` (2026-08-28)
+## 4. Current state, measured at `91721d7` (2026-08-28)
 
 | Measure | Value | How |
 | --- | --- | --- |
-| `fin_tests`, `FIN_WITH_LLVM=ON` | **1337 / 1337 pass**, 0 skipped | `./build/tests/fin_tests` |
+| `fin_tests`, `FIN_WITH_LLVM=ON` | **1344 / 1344 pass**, 0 skipped | `./build/tests/fin_tests` |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **991 pass / 346 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **14 of 50** | see below |
 | Samples blocked in codegen | **15** | see below |
@@ -144,7 +159,7 @@ units all build on.
   `until grep -qE 'Built target fin_tests|error:' log; do sleep 10; done`. A **foreground**
   `sleep` is blocked by the harness. A single-target `--target finc` build does finish in
   foreground.
-- **`cd` inside a Bash call can be reset** — prefix every command with `cd /home/ubuntu/Fin;`.
+- **`cd` inside a Bash call can be reset** — prefix every command with `cd /home/M1778/Fin;`.
 - **gmock is not linked.** Use `EXPECT_NE(x.find(s), std::string::npos)`, never
   `EXPECT_THAT` / `HasSubstr`.
 - `CodeGen_LLVM.cpp` uses `std::set` and has **no `<unordered_set>` include**.
