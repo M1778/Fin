@@ -31,13 +31,26 @@ bool PrimitiveType::isAssignableTo(const Type& other) const {
     // Both directions of sign are permitted when the target is wider, which is the
     // ruling as given: `ushort` -> `int` loses nothing at all, and `int` -> `ulong`
     // loses only a negative, which this corpus does write -- `nbytes: ulong = -1` on
-    // :109 is a sentinel, and it is *accepted* there today. Refusing the same pair
-    // at :110's comparison while accepting it at :109's initialiser would be the
-    // compiler disagreeing with itself about one line of one file, so the rule is
-    // the width and not the sign. What that costs is a negative constant silently
-    // becoming a large unsigned one; the check that would catch it is
-    // constantFitsType, which no longer runs once this returns true, and narrowing
-    // it back is a separate ruling with no corpus site asking for it yet.
+    // :109 is a sentinel the body replaces. So the rule is the width and not the sign.
+    //
+    // What that costs is a negative constant silently becoming a large unsigned one,
+    // and it is paid, by ordering rather than by an exception: checkType reads the
+    // constant *before* it asks about assignability (Analyzer_Core.cpp:467), so
+    // constantFitsType's `!negative` rule still gets its say. Two tests hold it in
+    // both places it has to hold -- Soundness_IntegerWidening.WideningDoesNotAdmitA-
+    // NegativeConstantToAnUnsignedTarget for a declaration and .AComparisonDoesNot-
+    // AdmitANegativeConstantToAnUnsigned for a comparison. This comment used to say
+    // narrowing it back was "a separate ruling with no corpus site asking for it
+    // yet"; those two tests are that ruling, and they landed after this paragraph.
+    //
+    // It also used to say that refusing `-1` against a `ulong` in a comparison while
+    // accepting it in an initialiser would be the compiler disagreeing with itself
+    // about one line of one file. That disagreement is real and still present -- but
+    // it is not about signs. `stdio.fin:109` is accepted because **a default argument
+    // is not type-checked against its parameter's type at all**: `fun f(a: int =
+    // "hello")` compiles. KnownDefect_DefaultArguments.ADefaultArgumentIsNotChecked-
+    // AgainstItsParameterType asserts it in both directions. Nothing here needs to
+    // change for that; the check is missing one layer up.
     //
     // Equal widths pass only when the sign agrees, so `int32` -> `int` would be the
     // identity it actually is while `int` -> `uint` stays refused: reinterpreting a

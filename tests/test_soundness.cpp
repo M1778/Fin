@@ -4626,6 +4626,45 @@ TEST(Soundness_IntegerWidening, AComparisonDoesNotAdmitANegativeConstantToAnUnsi
     EXPECT_EQ(signedOk.exitCode, 0) << signedOk.err;
 }
 
+TEST(KnownDefect_DefaultArguments, ADefaultArgumentIsNotCheckedAgainstItsParameterType) {
+    // Found while writing ADR 0022, and it is not the negative-constant question --
+    // it is larger than that and swallows it.
+    //
+    // `src/types/PrimitiveType.cpp` argues that refusing `-1` against a `ulong` in a
+    // comparison while accepting it in an initialiser "would be the compiler
+    // disagreeing with itself about one line of one file", citing
+    // tests/samples/stdlib/stdio.fin:109 `fun read(nbytes: ulong = -1)` as the site
+    // where it is accepted. The two Soundness_IntegerWidening tests above then ruled
+    // the *other* way, refusing a negative constant to an unsigned target -- and
+    // :109 is still accepted, so the disagreement the comment predicted is real and
+    // present. But the reason is not the sign rule. It is that **nothing checks a
+    // default argument at all**:
+    for (const char* decl : {"fun f(a: int = \"hello\") <noret> {}",
+                             "fun f(a: string = 5) <noret> {}",
+                             "fun f(a: bool = 7) <noret> {}",
+                             "fun f(a: ulong = -1) <noret> {}"}) {
+        const std::string code = std::string(decl) + "\nfun main() <noret> {}\n";
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "this test asserts the defect. If this now REFUSES, that is good news:\n"
+            << "invert it to Soundness_DefaultArguments.ADefaultArgumentIsCheckedAgainstIts"
+               "ParameterType, keep this comment, and check whether\n"
+            << "tests/samples/stdlib/stdio.fin:109 `nbytes: ulong = -1` is now a\n"
+               "diagnostic -- it is a sentinel the body replaces, so the sample may need\n"
+               "the owner rather than a repair.\n"
+            << code << r.err;
+    }
+    // The same expression in an initialiser IS refused, which is what makes this a
+    // hole in one path rather than a language rule. Both halves in one test, so the
+    // asymmetry cannot be read as two unrelated facts.
+    const FincRun asInitialiser =
+        compile("fun main() <noret> { let x <ulong> = -1; }\n");
+    EXPECT_NE(asInitialiser.exitCode, 0)
+        << "if this stops refusing, the sign rule was revoked and the two "
+           "Soundness_IntegerWidening tests above are the ones to read:\n"
+        << asInitialiser.err;
+}
+
 // ===========================================================================
 // A subscript may be any integer (ADR 0022).
 //
