@@ -2478,6 +2478,63 @@ TEST(Soundness_Interfaces, AMissingMethodIsRejected) {
     EXPECT_NE(r.err.find("does not implement"), std::string::npos) << r.err;
 }
 
+TEST(Soundness_Interfaces, AnInterfaceMemberIsReadableThroughTheInterfaceType) {
+    // `interface P { readonly name <string>; }` and then a read of `.name` off a
+    // `P`-typed value reported `Struct 'P' has no member 'name'` -- about a member the
+    // interface declares two lines up. visit(InterfaceDeclaration&) resolved each
+    // member's type, checked its default, and then *discarded* it: nothing called
+    // defineField, so the interface's own StructType had methods and no fields.
+    //
+    // A method in the same position always worked (defineMethod is called right below
+    // the member loop), so the two halves of an interface disagreed about whether they
+    // existed -- which is the shape of bug that survives a long time, because the half
+    // that works is the half people write.
+    //
+    // Found by tests/samples/love.fin, contributed 2026-08-28, which declares
+    // `interface Person { readonly name <string>, }` and reads `.name` off values of
+    // that type. readonly.fin:29 declares the same shape (`pub readonly value
+    // <string>;`) and never reads it through the interface, which is why fifty samples
+    // did not catch it.
+    //
+    // Both halves asserted: through a parameter, and through a struct field of
+    // interface type. They reach getStructType by different routes.
+    const FincRun viaParam = compile(
+        "interface P { readonly name <string>; }\n"
+        "fun f(a: P) <noret> { let n <string> = a.name; }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(viaParam.exitCode, 0)
+        << "an interface's own member must be readable through its type\n"
+        << stripAnsi(viaParam.err);
+
+    const FincRun viaField = compile(
+        "interface P { readonly name <string>; }\n"
+        "struct S { other <P>, fun show() <noret> { let n <string> = self.other.name; } }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(viaField.exitCode, 0)
+        << "a field of interface type must expose the interface's members\n"
+        << stripAnsi(viaField.err);
+
+    // The separator does not matter: love.fin writes `<string>,` and readonly.fin
+    // writes `<string>;`, and both parse. A fix that registered only one of them would
+    // pass the two assertions above and fail the corpus.
+    const FincRun withComma = compile(
+        "interface P { readonly name <string>, }\n"
+        "fun f(a: P) <noret> { let n <string> = a.name; }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(withComma.exitCode, 0) << stripAnsi(withComma.err);
+}
+
+TEST(Soundness_Interfaces, AnUndeclaredMemberIsStillNotReadableThroughAnInterface) {
+    // The control. Registering the declared members must not make *every* name
+    // readable -- a lookup that answered yes to anything would pass the test above for
+    // the wrong reason.
+    const FincRun r = compile(
+        "interface P { readonly name <string>; }\n"
+        "fun f(a: P) <noret> { let n <string> = a.nosuchmember; }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
 TEST(KnownDefect_Interfaces, AMissingFieldIsAccepted) {
     auto r = compile(
         "interface I { x <int>; }\n"

@@ -629,6 +629,30 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     // a type that has already reported.
     for (auto& member : node.members) {
         auto memberType = resolveTypeOrError(member->type.get());
+        // Registered on the interface's own type, so that a value of interface type
+        // can be read through. Before this, an interface member was resolved and then
+        // *discarded*: `interface P { readonly name <string>; }` followed by
+        // `fun f(a: P) { let n <string> = a.name; }` reported `Struct 'P' has no
+        // member 'name'` -- about a member the interface plainly declares, three lines
+        // up. A method in the same position already worked (`defineMethod` below), so
+        // the two halves of an interface disagreed about whether they existed.
+        //
+        // Found by tests/samples/love.fin, which declares `interface Person { readonly
+        // name <string>, }` and reads `.name` off two values whose type is `Person`.
+        // readonly.fin:29 declares the same shape (`pub readonly value <string>;`) and
+        // never reads it through the interface, which is why fifty samples did not
+        // catch this.
+        //
+        // Visibility is carried through rather than defaulted: an interface member is
+        // written `pub` in the corpus (readonly.fin:29, literal_interface.fin:21) and a
+        // reader outside the declaring file has to see it as public.
+        //
+        // What this does NOT change: whether an implementor is *required* to carry the
+        // field. That is KnownDefect_Interfaces.AMissingFieldIsAccepted, still open --
+        // `implements()` walks methods, operators, constructors and the destructor, and
+        // never fields. Registering the member is what makes a read type-check; the
+        // requirement is a separate rule with its own test.
+        if (memberType) ifaceType->defineField(member->name, memberType, member->is_public);
         // literal_interface.fin:21 gives an interface member a default
         // (`pub picked_first <bool> = true;`), so a default on one is part of the
         // language and is checked exactly as a struct member's is (pass 2 step 1 of
