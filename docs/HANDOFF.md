@@ -215,6 +215,12 @@ type_annotations.fin      a variable of type 'prototype<int, float>'
 variables.fin             the address of a value with no home
 ```
 
+**That list is first refusals only, and a first refusal is not a count.** `finc -c` stops
+where it stops, so a sample with one line here may have two rulings behind it. Demonstrated
+twice: `variables.fin`'s single `&"..."` refusal hid a second, `#[slaveof(x)]` on a local
+(`:27`, `:35`), which appeared only when the first was lowered; and a prediction of "10 → 14
+from three features" delivered 10 → 11 for the same reason. Measure after landing, never before.
+
 Recommended order — cheapest first, and each one unblocks the next:
 
 1. ~~**Generic methods**~~ — **done.** Instantiated at the call site, both substitutions
@@ -224,7 +230,25 @@ Recommended order — cheapest first, and each one unblocks the next:
 3. **Struct inheritance** — `readonly.fin`, `stdlib/hashmap.fin`. Two samples.
 4. **Interfaces** — `deeptest1.fin`, `implements_block.fin`. ADR 0019 already rules that an
    interface reference is two words and the pointer map has three states.
-5. **Imports** — `complex.fin`, `deeptest4.fin`.
+5. **Imports** — `complex.fin`, `deeptest4.fin`. **Measured 2026-08-28, and the fix is not in
+   codegen.** `complex.fin:14` writes `stdio.printf("Big")` against `import stdio::std as stdio;`
+   on `:3`, and the front end already resolves it correctly —
+   `Soundness_Modules.AModuleFunctionIsCallableThroughADot` passes, and
+   `Analyzer_Expr.cpp:1154`/`:1609` have the `NamespaceType` branch. What fails is codegen,
+   which reports *"the receiver of a call to the method 'printf' on a value with no address"*
+   because `visit(MethodCall&)` goes straight to `baseAddress(object, Kind::Struct)` and
+   `stdio` is a module, not a struct.
+   **Do not teach codegen about namespaces.** It has zero references to `NamespaceType` and
+   `visit(ImportModule&)` refuses any import that reaches it at all — the backend deals in
+   symbols, and that is the design. The analyzer should **rewrite** a namespace-qualified
+   `MethodCall` into a plain `FunctionCall` on the symbol it already resolved, so the qualifier
+   never reaches the backend. The precedent for erasing module machinery in the front end is
+   `dropConsumedImports` (`Analyzer_Core.cpp`), which deletes spent imports for the same reason
+   and explains itself in those terms.
+   One thing to look at before starting: `complex.fin` declares `@define printf(fmt: string,
+   ...) <int>;` on `:5` **and** imports a `stdio` that exports `printf`, and calls the plain one
+   on `:16`. Two `printf`s in one file is the `#[overwrite]` question in miniature, and the
+   rewrite must not silently pick one.
 6. **`::`-call type-argument inference** — `letssee.fin`. The refusal already names the template
    correctly; the missing piece is inferring `T` from the arguments, the same inference a free
    generic call needs and does not have.
