@@ -3851,6 +3851,25 @@ private:
             // which answers "how long does that slot live, and what does the pointer
             // mean afterwards" by picking one. Nothing in the corpus reads such a
             // pointer, so nothing would catch the wrong pick.
+            //
+            // FOR A LITERAL, LIFETIME IS NOT THE BLOCKER -- REPRESENTATION IS. A
+            // literal's value exists before the program starts, so a holder for it can
+            // have static storage, which cannot dangle under any later use; at module
+            // scope, where variables.fin:11 sits, static is not merely safe but forced,
+            // since there is no function to hold an alloca. So the lifetime half of
+            // this comment is answerable for `&"..."` and was tried: it compiles, runs,
+            // and a write through one `&"..."` correctly does not reach another.
+            //
+            // It was reverted, because the question that actually decides `&"..."` is
+            // the one Soundness_Codegen.TheAddressOfAStringLiteralIsRefused states: a
+            // `string` is already a pointer to bytes, so `&"..."` is either that same
+            // pointer -- making `&string` the same representation as `string` and
+            // `*Complex` a *char* -- or the address of a cell holding it, making
+            // `*Complex` the string. variables.fin:11 is the only `&"..."` and the only
+            // `&string` in the corpus or lib/std, and nothing reads `Complex`, so both
+            // readings run and no measurement can separate them. Lowering either one is
+            // inventing the answer, and a test written in whichever reading was chosen
+            // would pass for that reason alone. Owner ruling; see docs/HANDOFF.md §8.
             unsupported(node, "the address of a value with no home");
             return;
         }

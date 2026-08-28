@@ -3290,6 +3290,27 @@ BACKEND_TEST(Soundness_Codegen, TheAddressOfAStringLiteralIsRefused) {
     // representation as `string` -- or the address of an anonymous cell holding
     // it, making `*Complex` the string. Nothing in the corpus reads `Complex`, so
     // both readings run, and picking one would be inventing the answer.
+    //
+    // ONE OF THE TWO OBJECTIONS IS NOW SETTLED, AND IT IS NOT THIS ONE. The
+    // refusal in CodeGen_LLVM.cpp gave *lifetime* as its reason -- how long the
+    // slot lives and what the pointer means afterwards. For a literal that is
+    // answerable: a literal's value exists before the program starts, so a holder
+    // can have static storage, which cannot dangle under any later use, and at
+    // module scope static is forced rather than chosen because there is no function
+    // to hold an alloca. That was implemented, and it worked: compiled, ran, and a
+    // write through one `&"..."` did not reach another.
+    //
+    // It was reverted anyway, because this test's objection survives it, and
+    // because the check that appeared to confirm the lowering was circular -- it
+    // printed `*G` with `%s`, which only makes sense under the reading it had just
+    // picked. Under the other reading `*G` is a char and that test is wrong rather
+    // than passing. So the ruling is narrower than "what does `&literal` mean": it
+    // is exactly **is `&string` the same representation as `string`, or a pointer to
+    // a cell holding one**. Recorded in docs/HANDOFF.md §8 in those terms.
+    //
+    // Measured while narrowing it: variables.fin:11 is the ONLY `&"..."` and the
+    // only `&string` in tests/samples/ and lib/std/, and `Complex` is read nowhere,
+    // so no new corpus evidence is available without the owner.
     const Built b = build(std::string(kPrintf) +
         "let Complex <&string> = &\"Hello world\";\n"
         "fun main() <noret> { printf(\"ok\\n\"); }\n");

@@ -351,6 +351,34 @@ where marked:
   `deeptest2.fin:111`), and used as a generic argument (`const.fin:98` `rptr<[int]>`).
   Blocks `arrays_enums.fin` and `deeptest1.fin`, but **not** the top of the queue: both
   carry suppressed statements that `fn` parameters and struct inheritance do not.
+- **Is `&string` the same representation as `string`, or a pointer to a cell holding one?**
+  — *blocks `variables.fin`, and it is the whole of what blocks it there.*
+  `variables.fin:11` writes `let Complex <&string> = &"Hello world";`. A `string` already
+  lowers to a pointer to bytes, so `&"..."` reads two ways and both compile:
+  **(A)** it is that same pointer, making `&string` and `string` one representation and
+  `*Complex` a **char**; **(B)** it is the address of a cell holding the pointer, making
+  `*Complex` the **string**. `variables.fin:11` is the **only** `&"..."` and the only
+  `&string` in `tests/samples/` and `lib/std/` — measured — and nothing reads `Complex`, so
+  no corpus evidence separates them and none can be obtained without you.
+  **What is already settled, so you do not have to weigh it:** the *lifetime* half. A
+  literal's value exists before the program starts, so a holder can be static, which cannot
+  dangle under any later use; at module scope static is forced, since there is no function to
+  hold an alloca. That was implemented and worked — compiled, ran, and a write through one
+  `&"..."` did not reach another — and was reverted, because representation is the objection
+  that survives and because the check confirming it was circular (it printed `*G` with `%s`,
+  which only makes sense under reading B). `Soundness_Codegen.TheAddressOfAStringLiteralIs-`
+  `Refused` carries the argument; the refusal comment in `CodeGen_LLVM.cpp` carries the
+  narrowing.
+- **What `#[slaveof(x)]` does to a local's lifetime** — *blocks `variables.fin` behind the
+  above.* Found by lowering the `&"..."` refusal and seeing what appeared: `variables.fin:27`
+  `#[slaveof(z)]` on `let m <&int> = new int(5);` and `:35` `#[slaveof($Fin)]` on
+  `const invincible <&int> = new int(1778);`, both **locals** inside `main`. The sample's own
+  comments say `slaveof` ties a variable's lifetime to another variable's, and `$Fin` means
+  until the program exits. `declareGlobals` already refuses an attribute on a *global* for the
+  same reason, with the note that `#[slaveof($Fin)]` on a global asks for what a global already
+  has. So `variables.fin` needs two rulings, not one, and the second was invisible while the
+  first refusal stopped the pass — which is §17's rule that yield cannot be read off a first
+  refusal, demonstrated again.
 - **How `fin_core` links LLVM on Windows** — *blocks `windows-x86_64` and `windows-arm64`.*
   `CMakeLists.txt` links the monolithic libLLVM (`target_link_libraries(fin_core PUBLIC LLVM)`),
   which LLVM cannot build under MSVC at **any** version: `llvm/CMakeLists.txt` sets
