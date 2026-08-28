@@ -1,4 +1,6 @@
 #include "../SemanticAnalyzer.hpp"
+#include "../../ast/StructuralWalk.hpp"
+#include "../../ast/types/Attribute.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../../utils/IntegerConstant.hpp"
 #include <algorithm>
@@ -609,11 +611,65 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
 }
 
 void SemanticAnalyzer::visit(Program& node) {
+    refuseMisplacedGlobals(node);
     hoistTopLevelSignatures(node);
     for (auto& stmt : node.statements) {
         stmt->accept(*this);
     }
     dropConsumedImports(node);
+}
+
+namespace {
+
+// Reports every `#[global]` that the parser did not stamp as std-scoped.
+//
+// A walk over *attributes* rather than over declaration shapes, deliberately.
+// `#[global]` is legal on any declaration the grammar accepts an attribute on, and
+// an enforcement written as "check it on a function, and on a special, and on a
+// variable, and ..." is wrong the day a shape is added and nobody remembers this
+// list -- the failure mode is silence, which is the one this rule exists to
+// prevent. StructuralWalk knows every node's children (ADR 0004), so the check
+// cannot miss a declaration it was never told about.
+//
+// `unregisteredNode` is left at its throwing default for the same reason the
+// parser's marker leaves it: a node type missing from FIN_NODE_LIST would skip a
+// whole subtree, and a skipped subtree here means a misplaced `#[global]` accepted
+// in silence.
+class MisplacedGlobalFinder : public StructuralWalk {
+public:
+    std::vector<Attribute*> found;
+
+protected:
+    bool enter(ASTNode& node) override {
+        if (node.kind() == NodeKind::Attribute) {
+            auto& attr = static_cast<Attribute&>(node);
+            if (attr.name == kGlobalAttribute && attr.is_flag && !attr.std_scoped) {
+                found.push_back(&attr);
+            }
+        }
+        return true;
+    }
+};
+
+} // namespace
+
+// Runs before anything else in the program, so the diagnostic is not buried under
+// the cascade a name that failed to resolve would produce.
+//
+// Every misplaced one is reported, not just the first: a file with three of them
+// has three things to fix, and reporting one at a time makes that three edit-build
+// cycles. Same reasoning as codegen collecting every refusal.
+void SemanticAnalyzer::refuseMisplacedGlobals(Program& node) {
+    MisplacedGlobalFinder finder;
+    finder.walkAll(node.statements);
+    for (Attribute* attr : finder.found) {
+        error(*attr,
+              "#[global] is usable only inside `namespace std` (ADR 0021). A "
+              "declaration marked #[global] is visible to every file in the "
+              "compilation with no import, and a library that could mint such names "
+              "would collide with another library in a third file that imported "
+              "neither");
+    }
 }
 
 // The last thing the front end does to the tree, and the reason it is a separate

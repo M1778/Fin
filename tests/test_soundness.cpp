@@ -11846,3 +11846,120 @@ TEST(Soundness_ArrayBounds, APrototypeKeyIsNotAnIndex) {
                            "}\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
+
+// ===========================================================================
+// `#[global]` is usable only inside `namespace std` (ADR 0021).
+//
+// The rule is one sentence and the tests are not, because the interesting part is
+// coverage of *shapes*. `#[global]` is legal wherever the grammar takes an
+// attribute, so an enforcement that checked a hand-written list of declaration
+// kinds would be wrong the day an eleventh kind was added and nobody remembered
+// the list -- and wrong silently, which is the failure this rule exists to
+// prevent. The check is a StructuralWalk over attributes instead, and these tests
+// are what prove the walk reaches all ten writable forms.
+//
+// That is not hypothetical. StructuralWalk did *not* emit the `attributes` vector
+// for DefineDeclaration, MacroDeclaration or ImportModule, so the walk found
+// nothing on a `@define` -- and `printf` at lib/std/stdio.fin:72 is a `@define`,
+// which is to say `#[global]` could not work on the one declaration it exists
+// for. `forEachChild`'s UnregisteredNodeError does not catch that class of bug: the
+// node type *was* registered, only some of its children were missing.
+
+TEST(Soundness_GlobalAttribute, GlobalOutsideStdIsRefusedOnEveryDeclarationFormThatTakesOne) {
+    // Every form the grammar accepts a leading attribute on, measured rather than
+    // assumed -- each of these was probed against finc to confirm it parses, so a
+    // failure here is the rule breaking and not this test's Fin being wrong.
+    const char* const forms[] = {
+        "#[global] @define pf(fmt: string) <noret>;",
+        "#[global] fun f() <noret> {}",
+        "#[global] let x <int> = 1;",
+        "#[global] struct S { a <int> }",
+        "#[global] class C { a <int> }",
+        "#[global] interface I {}",
+        "#[global] enum E { A }",
+        "#[global] type T = int;",
+        "#[global] import { printf } from stdio;",
+        "#[global] @special sp() <int> { return 1; }",
+    };
+    for (const char* form : forms) {
+        const auto r = compile(std::string(form) + "\nfun main() <noret> {}\n");
+        const std::string err = stripAnsi(r.err);
+        EXPECT_NE(r.exitCode, 0) << "accepted outside std:\n" << form;
+        EXPECT_NE(err.find("usable only inside"), std::string::npos)
+            << "refused, but not for being outside std -- if this is a syntax error "
+               "the form above needs fixing, not the rule:\n"
+            << form << "\n" << err;
+    }
+}
+
+TEST(Soundness_GlobalAttribute, GlobalInsideStdIsAccepted) {
+    // The other direction, and it has to be here: a rule that refuses everything
+    // passes the test above and is useless. `@define` first, because it is the form
+    // ADR 0021 is actually about.
+    const char* const forms[] = {
+        "namespace std { #[global] @define pf(fmt: string) <noret>; }",
+        "namespace std { #[global] import { printf } from stdio; }",
+        "namespace std { #[global] fun f() <noret> {} }",
+    };
+    for (const char* form : forms) {
+        const auto r = compile(std::string(form) + "\nfun main() <noret> {}\n");
+        EXPECT_EQ(r.exitCode, 0) << form << "\n" << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_GlobalAttribute, AGlobalNestedInsideAStdFunctionBodyStillCounts) {
+    // The reason the parser's marker walks deep rather than one level: the grammar
+    // takes an attributed declaration anywhere it takes a statement, so a rule
+    // enforced over a namespace's immediate statements only would refuse this.
+    const auto r = compile(
+        "namespace std { fun f() <noret> { #[global] let x <int> = 1; } }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, ANamespaceThatIsNotStdDoesNotGrantIt) {
+    // The rule is `std`, not "any namespace". Without this, `namespace anything`
+    // would be a way to mint ambient names, which is the collision ADR 0021 is
+    // about -- and it would surface in a third file that imported neither party.
+    const auto r = compile("namespace mine { #[global] @define pf(fmt: string) <noret>; }\n"
+                           "fun main() <noret> {}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("usable only inside"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, EveryMisplacedGlobalIsReportedNotJustTheFirst) {
+    // Same reasoning as codegen collecting every refusal: a file with three of them
+    // has three things to fix, and one-at-a-time makes that three build cycles.
+    const auto r = compile("#[global] let a <int> = 1;\n"
+                           "#[global] let b <int> = 2;\n"
+                           "#[global] let c <int> = 3;\n"
+                           "fun main() <noret> {}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << err;
+    size_t n = 0;
+    for (size_t at = err.find("usable only inside"); at != std::string::npos;
+         at = err.find("usable only inside", at + 1)) {
+        ++n;
+    }
+    EXPECT_EQ(n, 3u) << "reported " << n << " of 3:\n" << err;
+}
+
+TEST(Soundness_GlobalAttribute, AnUnrelatedAttributeIsNotTouched) {
+    // The check claims one attribute name. An enforcement that fired on any
+    // attribute would be a new refusal for every `#[export]` in lib/std, so this is
+    // the guard that the name is read and not the shape.
+    const auto r = compile("#[export] fun f() <noret> {}\n"
+                           "fun main() <noret> {}\n");
+    EXPECT_EQ(stripAnsi(r.err).find("usable only inside"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+// A note on the one form not covered above: the rules-form `@macro` (the shape
+// tests/samples/macro_definitions.fin:9 writes) takes no leading attribute in the
+// grammar today -- `#[export] @macro m { ... }` is a syntax error at the brace,
+// with or without an attribute, so there is nothing to write a case against.
+// MacroDeclaration's attributes are emitted by the walk anyway, because
+// `decl_fields_of` in parser.y gives it an attributes vector and the two lists
+// disagreeing is exactly how the `@define` gap happened. ADR 0023 has the `@macro`
+// form as design-only, so the case goes in when the syntax does.

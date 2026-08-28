@@ -42,6 +42,10 @@ public:
     void visit(Program& node) override;
     // Erases every import that bound everything it named. See its definition.
     void dropConsumedImports(Program& node);
+    // Refuses every `#[global]` the parser did not stamp as written inside
+    // `namespace std` (ADR 0021). See its definition for why it walks attributes
+    // rather than declaration shapes.
+    void refuseMisplacedGlobals(Program& node);
     void visit(VariableDeclaration& node) override;
     void visit(FunctionDeclaration& node) override;
     void visit(StructDeclaration& node) override;

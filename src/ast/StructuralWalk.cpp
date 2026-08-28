@@ -166,6 +166,7 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
 
         case NodeKind::DefineDeclaration: {
             auto& n = static_cast<DefineDeclaration&>(node);
+            emitAll(out, n.attributes);
             emitAll(out, n.params);
             emit(out, n.return_type.get());
             return;
@@ -173,6 +174,7 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
 
         case NodeKind::MacroDeclaration: {
             auto& n = static_cast<MacroDeclaration&>(node);
+            emitAll(out, n.attributes);
             emit(out, n.body.get());
             for (const MacroRule& rule : n.rules) {
                 emit(out, rule.expansion.get());
@@ -206,9 +208,13 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
             return;
         }
 
-        case NodeKind::ImportModule:
-            // A leaf: source, alias and targets are strings.
+        case NodeKind::ImportModule: {
+            // Source, alias and targets are strings, so the attributes are the only
+            // children. It read as a leaf until `#[global]` needed finding on one.
+            auto& n = static_cast<ImportModule&>(node);
+            emitAll(out, n.attributes);
             return;
+        }
 
         case NodeKind::VariableDeclaration: {
             auto& n = static_cast<VariableDeclaration&>(node);

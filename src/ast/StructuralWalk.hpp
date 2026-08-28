@@ -41,6 +41,21 @@ using ChildCallback = std::function<void(ASTNode&)>;
 //
 // Throws UnregisteredNodeError if `node`'s dynamic type is not in
 // FIN_NODE_LIST -- silently reporting "no children" would drop a subtree.
+//
+// THE FAILURE THAT THROW DOES NOT CATCH.  A registered node whose case emits
+// *some* of its children is indistinguishable, from out here, from one that
+// emitted all of them.  `DefineDeclaration`, `MacroDeclaration` and
+// `ImportModule` each carried an `attributes` vector that this function did not
+// emit, so every consumer walking for an attribute silently missed `@define`,
+// `@macro` and `import` -- and `#[global]`, whose one intended target is the
+// `@define` of `printf` at lib/std/stdio.fin:72, could not work at all.  Found
+// only because a refusal written against the walk refused nothing.
+//
+// Soundness_StructuralWalk.EveryNodeWithAnAttributesFieldEmitsIt is the guard.
+// It is written against `decl_fields_of`'s list in parser.y, which is the other
+// place that enumerates who has attributes, so the two lists cannot drift apart
+// silently.  When you add a child vector to a node, add it here in the same
+// commit; nothing will tell you if you do not.
 void forEachChild(ASTNode& node, const ChildCallback& callback);
 
 // `forEachChild` collected into a vector, for callers that want to index or
