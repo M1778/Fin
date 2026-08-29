@@ -35,6 +35,7 @@ public:
     void beginRootFile(const std::string& path);
 
     std::shared_ptr<Scope> loadModule(const std::string& importPath, bool isPackage);
+    void loadGlobalModuleIfPresent(const std::string& importPath, bool isPackage);
     std::shared_ptr<Scope> sharedGlobalScope() const { return globalScope; }
 
 private:

@@ -168,7 +168,7 @@ int Driver::compile() {
     // The standard I/O module owns the explicit ambient `#[global] printf`
     // declaration. Load it before the root analyzer so its published binding is
     // available without an import, while all other std names remain import-only.
-    loader.loadModule("stdio", true);
+    loader.loadGlobalModuleIfPresent("stdio", true);
     // ----------------------------
 
     // 3.5 Macro Expansion
