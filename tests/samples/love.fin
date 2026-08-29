@@ -1,11 +1,12 @@
 //@ normative
 //@ ok
-// The front end accepts this file. `finc -c` on it still exits 1, and the refusal names
-// work rather than a question: `a struct field of type 'Person' is not lowered yet` at
-// 57:11, because `readonly hate <Person>` is a field whose type is an interface and an
-// interface reference has no backend representation yet. ADR 0027 specifies it as
-// `{data, vtable}` with a field-offset slot per required field. The corpus harness
-// checks the front end, which is what `ok` asserts here.
+// This file compiles and runs. `finc tests/samples/love.fin -o love` exits 0 and the
+// program prints both lines. That was not true when this header was first written: a
+// struct field whose type is an interface was refused by the backend, because an
+// interface reference had no representation there. ADR 0027 gave it one -- `{data,
+// vtable}`, with a field-offset slot per required field -- and `aea960e` and `d8ce220`
+// implemented it. The corpus harness only runs the front end, so `ok` above still
+// asserts the narrower thing; the build is measured by the codegen suite.
 //
 // Three things landed for this file on 2026-08-28.
 //
@@ -25,8 +26,9 @@
 // gated on `implements()`, the same predicate the declaration-site check uses, and is
 // one-directional: an interface does not convert back to a struct.
 //
-// (3) TWO REPAIRS, each witnessed by the rest of the corpus rather than invented, under
-// the owner's ruling that a sample whose own logic is wrong may be repaired.
+// (3) THREE REPAIRS, each witnessed by the rest of the corpus rather than invented, under
+// the owner's ruling that a sample whose own logic is wrong may be repaired. The third
+// landed 2026-08-29.
 //
 //   Lines 56 and 66 read `struct Fin <Person,Beautiful>` and `struct M1778
 //   <Person,Loser>`. Angle brackets directly after the name declare *generic
@@ -41,9 +43,14 @@
 //   *type*. `I` and `F` are the values, declared on 79 and 80. Three samples write the
 //   value form: implements_block.fin:36, readonly.fin:55, interfaces.fin:17.
 //
-// Left as written: `fun hate(someone: <Person>)`. Nineteen samples write a parameter type
-// unbracketed and none bracketed, but both parse to the same type -- measured -- so the
-// bracketed form is a style the corpus does not otherwise use rather than an error.
+//   Lines 60 and 71 read `fun hate(someone: <Person>)` and `fun love(a: <Person>)`. The
+//   brackets are the parameter-type spelling of a compiler seven months older than this
+//   one and the owner did not intend them here (owner, 2026-08-29). Both spellings still
+//   parse to the same type -- measured -- so this is a repair of the file's style and not
+//   of a diagnostic: nineteen samples write a parameter type unbracketed, and after this
+//   none writes one bracketed. Two corpus files still spell a *different* position that
+//   way, `@define printf(fmt: <string>, ...)` at preprocessor.fin:3 and operators.fin:4,
+//   and they are left alone -- neither is this file and neither was reported.
 @define printf(fmt: string, ...) <noret>;
 
 interface Loser {}
@@ -57,7 +64,7 @@ struct Fin: <Person,Beautiful> {
 	readonly hate <Person>,
 	name <string>,
 
-	fun hate(someone: <Person>) <noret> {
+	fun hate(someone: Person) <noret> {
 		self.hate = someone;
 		printf("Fin started hating %s\n", self.hate.name);
 	}
@@ -68,7 +75,7 @@ pub:
 	readonly love <Person>,
 	name <string>,
 
-	fun love(a: <Person>) <noret> {
+	fun love(a: Person) <noret> {
 		self.love = a;
 		printf("N1778 started loving %s\n", a.name);
 	}

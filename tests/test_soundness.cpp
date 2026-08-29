@@ -2525,8 +2525,8 @@ TEST(Soundness_Interfaces, AnInterfaceMemberIsReadableThroughTheInterfaceType) {
 }
 
 TEST(Soundness_Interfaces, AStructConvertsToAnInterfaceItImplements) {
-    // Ruled by the owner 2026-08-28, on the witness of tests/samples/love.fin:38 --
-    // `I.love(F)` hands a `Fin` to a parameter declared `<Person>`, where `Fin`
+    // Ruled by the owner 2026-08-28, on the witness of tests/samples/love.fin --
+    // `I.love(F)` hands a `Fin` to a parameter declared `Person`, where `Fin`
     // declares `: <Person, Beautiful>` and carries the `name <string>` the interface
     // requires. ADR 0019 fixed the representation of an interface reference while
     // recording that "interface-as-a-runtime-type does not exist in the corpus"; that
