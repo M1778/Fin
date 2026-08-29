@@ -583,7 +583,10 @@ TEST(Census, ThePassingSampleCountNeverFalls) {
     // "discovered later by someone debugging a regression" case the NOTE below
     // exists to prevent. Raised to what the tree actually measures so the next fall
     // is visible.
-    constexpr int kFloor = 29;
+    // 29 -> 31 on 2026-08-29, raised by the NOTE below rather than by a failure --
+    // which is the mechanism working. Measured from a detached worktree at 4788753
+    // built from scratch, so no agent's uncommitted work is in the number.
+    constexpr int kFloor = 31;
 
     const auto t = census();
     EXPECT_GE(t.ok, kFloor)

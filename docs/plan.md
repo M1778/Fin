@@ -3024,6 +3024,47 @@ the call. `Soundness_Generics.AnOperatorsRegisteredReturnTypeIsWhatItsCallIsType
 it is what kills `D-opgen` and `D-opreg` both. A name that overstates what a test verifies is worse than no
 test, because it retires the suspicion that would have found the gap.
 
+### The corpus, measured from a tree with nothing live in it
+
+Task #3 asked for one thing: re-measure the corpus from a clean detached worktree once `#[global]`
+resolved names, against a recorded baseline of "14/15/21 at `43b3324`, suite 1344/1344". Two facts had
+to be recovered before the measurement could mean anything, and both are worth writing down because
+the task's own note was not enough to act on.
+
+**What the triple counts appeared in no document.** `14/15/21` is in five commit messages and nowhere
+else -- not in `docs/plan.md`, not in `docs/baseline.md`, not in `docs/HANDOFF.md`'s table. It is the
+three-bucket census `HANDOFF.md` §4 documents the *command* for without ever naming the buckets in a
+sentence a reader could grep: `OBJECT_CLEAN` (exit 0 under `-c -o`), `CODEGEN_REFUSED` (at least one
+`codegen:` line), `FRONTEND_ERROR` (everything else). A measurement whose units live only in commit
+messages is a measurement the next person re-derives or misreads, so §4 now names them and carries the
+current numbers.
+
+**`Census.ThePassingSampleCountNeverFalls` is not the same measure, and `baseline.md` said it was.**
+Two revisions of that file pointed at the test as "the live number" for samples surviving the full
+pipeline. It counts samples annotated `//@ ok`, and the corpus harness runs the **front end only** --
+it never invokes `-o` (ADR 0008). So the test answers "how many type-check as expected" and the census
+answers "how many reach an object", and the gap between them is not noise: it is 31 against 19, because
+twelve samples type-check exactly as annotated and are then refused by the backend. The two numbers
+looking interchangeable is precisely why the wrong one was cited, and `baseline.md` now says which
+question each answers.
+
+**The measurement.** A detached worktree at `4788753`, configured against the existing Conan toolchain
+and built from scratch -- §17.1 of the machine notes is the argument for that being the default rather
+than a precaution. `FIN_WITH_LLVM=ON`: **1396 / 1396 pass, 0 skipped**. A second build directory at
+`FIN_WITH_LLVM=OFF`: **1391 ran, 1022 pass, 369 skip, 0 fail** -- the skips are the codegen suites
+behind `BACKEND_TEST`, and the delta of 5 in the total is the codegen tests that are not even
+registered without a backend. Corpus: **19 `OBJECT_CLEAN` / 12 `CODEGEN_REFUSED` / 20 `FRONTEND_ERROR`
+of 51**.
+
+Against `43b3324`'s 14/15/21 of 50: five samples out of codegen refusal, one out of front-end error,
+one sample added by ratified decision (`love.fin`), and **nothing moved to a worse bucket**. That last
+clause is the only part of a bucket census that is a regression check; the rest is progress reporting.
+
+The floor in `Census.ThePassingSampleCountNeverFalls` went 29 -> 31, raised by its own `[  NOTE  ]`
+line rather than by a failure. That is the asymmetry the floor was chosen for working as designed: the
+equality it replaced would have failed on every unit of progress, in a harness file the agent making
+the progress does not own.
+
 ## Rulings owed
 
 Every entry below is a question only the language owner can answer, discovered by measurement and blocking

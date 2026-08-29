@@ -99,17 +99,44 @@ What is permanently dirty, by design:
 
 Also: a background-task notification or a peer-agent message is **never** user approval.
 
-## 4. Current state, measured at `HEAD` (2026-08-28)
+## 4. Current state, measured at `4788753` (2026-08-29)
+
+Every row was measured from a **detached worktree at `4788753`, configured and built from
+scratch**, so no agent's uncommitted work is in any of these numbers. §17.1 is why that is the
+default and not a precaution: the one time the corpus was measured from a live tree the answer
+happened to be right, which is the worst outcome, because nothing in the result said the method
+was broken.
 
 | Measure | Value | How |
 | --- | --- | --- |
-| `fin_tests`, `FIN_WITH_LLVM=ON` | **1355 / 1355 pass**, 0 skipped | `./build/tests/fin_tests` |
-| `fin_tests`, `FIN_WITH_LLVM=OFF` | **991 pass / 346 skip / 0 fail** | a second build dir |
-| Samples that lower to an object | **17 of 51** | see below |
+| `fin_tests`, `FIN_WITH_LLVM=ON` | **1396 / 1396 pass**, 0 skipped | `./build/tests/fin_tests` |
+| `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
+| Samples that lower to an object | **19 of 51** | see below |
 | Samples blocked in codegen | **12** | see below |
-| Samples that never reach codegen | **22** | see below |
+| Samples that never reach codegen | **20** | see below |
+| Samples whose front-end expectation is `//@ ok` | **31 of 51** | `Census.ThePassingSampleCountNeverFalls` |
 
-The ceiling is **50**, not 51: one sample is a negative test that must keep failing.
+The ceiling is **50**, not 51: one sample is a negative test that must keep failing —
+`undefined_behavior.fin`, whose expectation is `error 3:1 "Function 'add' is missing a return
+statement on some paths"`.
+
+The last two rows count different things and are both worth keeping. The object column is the
+whole pipeline under `-c -o`; the `//@ ok` column is the front end only, which is all the corpus
+harness runs (ADR 0008). A sample can be `//@ ok` and still be refused by the backend, and twelve
+are.
+
+The nineteen that reach an object: `arrays.fin`, `arrays_enums.fin`, `basic.fin`,
+`blame_assert.fin`, `deeptest1.fin`, `deeptest3.fin`, `extern_as.fin`, `functions.fin`,
+`love.fin`, `macro_definitions.fin`, `macros.fin`, `macros2.fin`, `operators.fin`,
+`simple_pointers.fin`, `struct_methods.fin`, `structs.fin`, `variables.fin`,
+`stdlib/networking.fin`, `stdlib/somelib.fin`. The last two are hollow — one is a comment, the
+other an empty module kept so directory resolution has a subject.
+
+### Movement since `43b3324`
+
+`43b3324` measured 14 / 15 / 21 of 50 with a suite of 1344. The five commits between it and
+`4788753` moved five samples out of codegen refusal and one out of front-end error, and the corpus
+grew by one (`love.fin`, ADR 0008 ratified). Nothing regressed: no sample moved to a worse bucket.
 
 ### Reproducing the numbers
 
