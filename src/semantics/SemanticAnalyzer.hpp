@@ -47,6 +47,13 @@ public:
     // `namespace std` (ADR 0021). See its definition for why it walks attributes
     // rather than declaration shapes.
     void refuseMisplacedGlobals(Program& node);
+    // Publishes a declaration the parser stamped `#[global]` into the scope the
+    // ModuleLoader owns, so it resolves in files that import nothing (ADR 0021).
+    // A no-op when no loader-owned scope was injected. See its definition.
+    void publishIfGlobal(ASTNode& node,
+                         const std::vector<std::unique_ptr<Attribute>>& attributes,
+                         const std::string& name,
+                         const std::shared_ptr<Type>& type);
     void visit(VariableDeclaration& node) override;
     void visit(FunctionDeclaration& node) override;
     void visit(StructDeclaration& node) override;

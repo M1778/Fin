@@ -12138,3 +12138,118 @@ TEST(Soundness_GlobalAttribute, AnUnrelatedAttributeIsNotTouched) {
 // `decl_fields_of` in parser.y gives it an attributes vector and the two lists
 // disagreeing is exactly how the `@define` gap happened. ADR 0023 has the `@macro`
 // form as design-only, so the case goes in when the syntax does.
+
+// ===========================================================================
+// The other half of `#[global]`: a marked declaration resolves with no import
+// (ADR 0021).
+//
+// The tests above are about *where the attribute may be written*, and every one of
+// them would stay green against a compiler that parsed the attribute, refused it
+// outside `std`, and then did nothing with it at all. That is not a hypothetical
+// half-implementation, it is the state this file was in for a day: `#[global]` was
+// stamped, validated, and reached no scope. So these assert resolution, which is
+// the behaviour the attribute exists for.
+//
+// The mechanism is one shared `Scope` owned by the ModuleLoader and installed as
+// the *parent* of every module analyzer's own global scope, published into by
+// `SemanticAnalyzer::publishIfGlobal`. Parent rather than the same scope, because a
+// module's own declarations must not become ambient: an analyzer's global scope
+// also holds the fourteen builtin types, and a module scope is read directly
+// through its `symbols` map by `import *` (docs/plan.md on explicit-beats-wildcard),
+// so merging the two would put every `pub` name in `lib/std` into every file and
+// answer the ambience half of the prelude question `yes` by accident. That is the
+// half ADR 0021 answers **no**, and `ANonGlobalStdNameStillNeedsItsImport` in
+// test_stdlib.cpp is what holds it there.
+
+TEST(Soundness_GlobalAttribute, AGlobalDeclarationResolvesInTheFileThatWroteIt) {
+    // The floor, and it is worth having on its own: publishing to the ambient scope
+    // must not *cost* the declaring file its own binding. `publishIfGlobal` defines
+    // into `globalScope->parent` after `currentScope->define`, and a version that
+    // moved the binding instead of adding one would fail here and nowhere else in
+    // this file, since every other case reaches the name from a different file.
+    const auto r = compile("namespace std { #[global] @define pf(fmt: string) <noret>; }\n"
+                           "fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, AGlobalNameIsNotResolvableWhenNothingDeclaresIt) {
+    // The control for every test below. `pf` resolving in the cases that load a
+    // declaration is only evidence if it fails when none is loaded -- otherwise a
+    // scope that admits any name would pass them all.
+    const auto r = compile("fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Undefined function or type 'pf'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, TwoGlobalsOfOneNameWithDifferentTypesAreRefused) {
+    // `Scope::define` assigns over an existing key, so without a check here the
+    // second declaration silently wins and the file that resolved the first is
+    // reading a signature that nothing it can see wrote. That is the collision the
+    // `std`-only rule *bounds* rather than *detects*, and bounding is not detecting:
+    // `lib/std` is one library and two of its modules can still disagree.
+    //
+    // Deliberately not the same case as KnownDefect_Duplicates, which books ordinary
+    // redeclaration as silently accepted and whose fix waits on `#[overwrite]`
+    // (stdlib/stdio.fin:33 declares a second `printf` under it on purpose). An
+    // ordinary redeclaration is two lines a reader can see at once; an ambient one is
+    // two files that never mention each other.
+    const auto r = compile("namespace std { #[global] @define pf(fmt: string) <noret>; }\n"
+                           "namespace std { #[global] @define pf(n: int) <int>; }\n"
+                           "fun main() <noret> {}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << err;
+    EXPECT_NE(err.find("declared #[global] twice with different types"), std::string::npos)
+        << err;
+}
+
+TEST(Soundness_GlobalAttribute, TheSameGlobalDeclaredTwiceIdenticallyIsNotAConflict) {
+    // The guard is on the type and not on the name, and this is why. Fourteen corpus
+    // samples write `@define printf(fmt: string, ...) <noret>;` verbatim, and a file
+    // that writes the declaration the bundled module also carries has stated one fact
+    // twice. Refusing that would turn the ambient `printf` into a reason those
+    // fourteen samples stop compiling -- the opposite of what ADR 0021 promises them.
+    const auto r = compile("namespace std { #[global] @define pf(fmt: string) <noret>; }\n"
+                           "namespace std { #[global] @define pf(fmt: string) <noret>; }\n"
+                           "fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, AGlobalWrittenInsideAFunctionBodyIsStillPublished) {
+    // The placement rule accepts this -- `AGlobalNestedInsideAStdFunctionBodyStillCounts`
+    // above is the same shape, because the parser's marker walks the whole subtree under a
+    // `namespace std` block -- so the publish has to agree with it rather than quietly
+    // depend on the declaration sitting at file level.
+    //
+    // This is the test that pins *which* scope is published into. `publishIfGlobal`
+    // targets `globalScope->parent`, and the obvious alternative, `currentScope->parent`,
+    // is identical for every other case in this file and wrong here: inside a body it
+    // names whatever block encloses the declaration, so the ambient name would be
+    // visible to the rest of `holder` and to nothing else -- neither ambient nor
+    // refused, and no diagnostic anywhere to say so. Written and measured: that mutant
+    // passes all fifteen other cases and the whole corpus, and fails this one.
+    const auto r = compile(
+        "namespace std { fun holder() <noret> { #[global] @define pf(fmt: string) <noret>; } }\n"
+        "fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, AnUnmarkedDeclarationBesideAMarkedOneIsNotPublished) {
+    // The attribute is opt-in per declaration, so a `@define` sitting in the same
+    // `namespace std` block as a marked one must stay local. Written as one file with
+    // both, because that is the shape a mistake would take: a publish keyed on "we
+    // are inside a std namespace" rather than on the stamp would pass every other
+    // test here and take the whole block with it.
+    //
+    // Only the negative half is asserted, and from the declaring file, which cannot
+    // distinguish local from ambient -- `local` resolves either way. The half that
+    // needs a second file is in test_stdlib.cpp against the real bundle
+    // (`ANonGlobalStdNameStillNeedsItsImport`), because a temp-file harness that
+    // compiles one string has no second file to look from.
+    const auto r = compile("namespace std {\n"
+                           "  #[global] @define pf(fmt: string) <noret>;\n"
+                           "  @define local(fmt: string) <noret>;\n"
+                           "}\n"
+                           "fun main() <noret> { pf(\"x\"); local(\"y\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}

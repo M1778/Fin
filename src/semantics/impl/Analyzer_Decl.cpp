@@ -878,14 +878,70 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
 
     auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg);
     currentScope->define({node.name, funcType, false, true});
-    // A std-scoped #[global] declaration is also published to the loader-owned
-    // parent scope, making it visible to independently analysed modules.
+    publishIfGlobal(node, node.attributes, node.name, funcType);
+}
+
+// The ambient half of `#[global]` (ADR 0021): a declaration the parser stamped as
+// std-scoped is published into the scope the ModuleLoader owns, which sits under
+// every analyzer's own global scope, so a name declared in one file resolves in a
+// file that imported nothing.
+//
+// The target is `globalScope->parent` and not `currentScope->parent`. They are the
+// same scope for a declaration written at file level, which is where the one marked
+// declaration in the tree is written -- and they are not the same for one written
+// inside a function body, which the placement rule accepts (a `namespace std` block
+// stamps every `#[global]` under it, however deep). Publishing to `currentScope->parent`
+// there would put an ambient name into whatever block happened to enclose it: visible
+// to the rest of that function and to nobody else, which is neither what the attribute
+// says nor a failure anything would report.
+//
+// Nothing is published when no external scope was injected. A `SemanticAnalyzer`
+// constructed without a loader has a parentless global scope, and the attribute is then
+// a no-op rather than a crash -- the analyzer is used that way by tests and by the
+// macro expander.
+void SemanticAnalyzer::publishIfGlobal(
+        ASTNode& node,
+        const std::vector<std::unique_ptr<Attribute>>& attributes,
+        const std::string& name,
+        const std::shared_ptr<Type>& type) {
     bool isGlobal = false;
-    for (const auto& attr : node.attributes)
+    for (const auto& attr : attributes)
         if (attr && attr->name == kGlobalAttribute && attr->is_flag && attr->std_scoped)
             isGlobal = true;
-    if (isGlobal && currentScope->parent)
-        currentScope->parent->define({node.name, funcType, false, true});
+    if (!isGlobal || !type) return;
+
+    Scope* ambient = globalScope ? globalScope->parent : nullptr;
+    if (!ambient) return;
+
+    // A second marked declaration of the same name, with a different type, is refused
+    // rather than allowed to overwrite the first.
+    //
+    // `Scope::define` assigns over an existing key, and for an ordinary declaration in
+    // an ordinary scope that silence is the booked defect KnownDefect_Duplicates
+    // records -- whose fix waits on `#[overwrite]`, because stdlib/stdio.fin declares a
+    // second `printf` under it deliberately. This is not that case and does not wait on
+    // it. An ordinary redeclaration is two lines a reader can see in one file; an
+    // ambient one is two declarations in two files that never mention each other, and
+    // the file that gets the loser resolves a signature nothing it can read wrote. That
+    // is the collision ADR 0021's `std`-only rule exists to bound, and bounding is not
+    // the same as detecting.
+    //
+    // Guarded on the type rather than on the name, so publishing the same declaration
+    // twice is silent. The root file may write the same `@define` the bundled module
+    // does -- fourteen corpus samples write that exact line -- and two identical
+    // bindings are one fact, not a conflict.
+    if (Symbol* existing = ambient->resolve(name)) {
+        if (existing->type && !existing->type->equals(*type)) {
+            error(node,
+                  fmt::format("'{}' is declared #[global] twice with different types, "
+                              "'{}' and '{}' (ADR 0021). An ambient name reaches a file "
+                              "through no import, so nothing the losing file can read "
+                              "would say which of the two it resolved",
+                              name, existing->type->toString(), type->toString()));
+            return;
+        }
+    }
+    ambient->define({name, type, false, true});
 }
 
 // One `::`-separated path from an `extern` or a symbol resolution, resolved as a

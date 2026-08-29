@@ -56,6 +56,29 @@ FincRun compileBundled(const std::string& code) {
     return runFinc({s.str()}, {{"FIN_LIBS", ""}});
 }
 
+// A throwaway directory of .fin modules, for the one test here that needs a second
+// file the bundle does not provide. test_module_loader.cpp has the same class against
+// the loader's C++ API; this copy drives the real binary and the two share nothing
+// else.
+class TempModuleDir {
+public:
+    TempModuleDir() {
+        dir_ = uniqueTempPath("fin_stdlib_mods");
+        fs::create_directories(dir_);
+    }
+    ~TempModuleDir() { std::error_code ec; fs::remove_all(dir_, ec); }
+
+    void write(const std::string& name, const std::string& contents) {
+        const fs::path p = dir_ / name;
+        std::ofstream f(p, std::ios::binary);
+        f.write(contents.data(), (std::streamsize)contents.size());
+    }
+    std::string path() const { return dir_.string(); }
+
+private:
+    fs::path dir_;
+};
+
 size_t errorCount(const std::string& stripped) {
     size_t n = 0;
     for (size_t i = 0; i < stripped.size();) {
@@ -245,4 +268,136 @@ TEST(KnownDefect_Modules, AModuleStructIsNotConstructibleThroughADot) {
         << "FIXED: a module's struct is now constructible through a dot. Check that "
            "`let e <stdio.IOError>;` parses too, then invert this.\n"
         << err;
+}
+
+// ---------------------------------------------------------------------------
+// `#[global]` against the real bundle (ADR 0021).
+//
+// These belong here rather than in test_soundness.cpp for the reason that file's own
+// `#[global]` block gives: the interesting cases need a *second* file, and a harness
+// that compiles one string has none. The bundle is the second file, and it is the
+// honest one -- `printf` is ambient because `lib/std/stdio.fin:71` marks it, and if
+// that line is ever deleted these must go red rather than a corpus sample quietly
+// gaining a diagnostic.
+//
+// `compileBundled` clears `FIN_LIBS`, so the only way any of this resolves is the
+// bundled path the driver adds for itself. That matters here more than elsewhere:
+// the ambient declaration is reached by the driver *preloading* the stdio module
+// before it analyses the root file, and a preload against a search path the test
+// supplied would say nothing about what a user gets.
+
+TEST(Soundness_GlobalAttribute, TheBundledPrintfResolvesWithNoImport) {
+    // The two corpus sites this exists for are `const.fin:68` and `interfaces.fin:18`,
+    // which call `printf` bare and declare nothing. ADR 0021 promises both resolve with
+    // no edit to either sample; this is that promise as one line, so a failure names
+    // the mechanism instead of arriving as two sample expectations flipping.
+    const FincRun r = compileBundled("fun main() <noret> { printf(\"hi\\n\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, ANonGlobalStdNameStillNeedsItsImport) {
+    // The ambience half, answered no. `getkeyid` is `pub` inside `#[export]` inside
+    // `namespace std` at lib/std/enums.fin:24 -- every property `printf` has except the
+    // attribute -- so it is exactly the "everything else" the owner's ruling keeps
+    // import-only, and it is the test that says the shared scope carries the marked set
+    // and not a module.
+    //
+    // A stronger claim than it looks: `enums` is not preloaded at all, so this would
+    // pass against a broken implementation that published every `pub` name of every
+    // *loaded* module. The next test closes that.
+    const std::string err = stripAnsi(
+        compileBundled("fun main() <noret> { let x <int> = getkeyid(1); }\n").err);
+    EXPECT_NE(err.find("Undefined function or type 'getkeyid'"), std::string::npos)
+        << "a `pub` name in `namespace std` that is not marked #[global] must still be\n"
+           "imported (ADR 0021, the ambience half). If this went green because the\n"
+           "shared scope now takes a module's whole `symbols` map, that answers the\n"
+           "half the owner answered no.\n"
+        << err;
+}
+
+TEST(Soundness_GlobalAttribute, TheStdioModulesOwnUnmarkedExportsStayImportOnly) {
+    // The case above with the loading question removed. `stdio` *is* preloaded, so
+    // `Printable`, `print`, `println`, `IOError` and `Stream` are all analysed and all
+    // sitting in a scope the root file's lookup can reach the parent of -- and every one
+    // of them must still be invisible, because only the stamped declaration is
+    // published. This is what holds `publishIfGlobal` to the stamp rather than to the
+    // module: a publish that copied the loaded scope would leave the test above green
+    // and every name here would leak.
+    for (const char* name : {"print", "println", "Printable", "IOError", "Stream"}) {
+        const std::string code =
+            std::string("fun main() <noret> { let x <int> = ") + name + "(1); }\n";
+        const std::string err = stripAnsi(compileBundled(code).err);
+        EXPECT_NE(errorCount(err), 0u)
+            << "`" << name << "` is exported by the preloaded stdio module and is not\n"
+               "marked #[global], so it must not resolve without an import.\n"
+            << err;
+    }
+}
+
+TEST(Soundness_GlobalAttribute, AnAmbientNameReachesAnImportedModuleToo) {
+    // "Visible to every file in the compiler session" includes the files the session
+    // loads on the user's behalf, and this is the case the shared scope was built for
+    // rather than a consequence of it: a module is analysed by its *own*
+    // SemanticAnalyzer, so an implementation that put the ambient binding in the root
+    // analyzer's scope would pass every test above and fail here.
+    //
+    // `helper` calls `printf` and imports nothing. It resolves only if the loader's
+    // scope is the parent of the module analyzer's scope as well as the root's.
+    // `-I` rather than `--fin-libs`, because the flag *replaces* the library paths
+    // and would take the bundle -- and with it the ambient declaration -- out of the
+    // run this test is about. An include path is additive and leaves the bundle
+    // exactly where the driver puts it (Driver.cpp's configureLoader, steps 1-3).
+    TempModuleDir d;
+    d.write("helper.fin", "pub fun shout() <noret> { printf(\"loud\\n\"); }\n");
+    Src s("import { shout } from helper;\n"
+          "fun main() <noret> { shout(); }\n");
+    const FincRun r = runFinc({s.str(), "-I", d.path()}, {{"FIN_LIBS", ""}});
+    EXPECT_EQ(r.exitCode, 0)
+        << "an ambient declaration must reach a module the session loaded, not just\n"
+           "the root file.\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, AnUnmarkedExternInALoadedModuleIsNotPublished) {
+    // The stamp is what publishes, not the declaration form -- and this is the only
+    // test in either file that says so, which is why it is written against a module
+    // rather than folded into one of the cases above.
+    //
+    // Measured, not assumed. A mutant that dropped the attribute check from
+    // `publishIfGlobal` and published every `@define` passed all seventeen cases in
+    // test_soundness.cpp's `#[global]` block and every other case here: the unmarked
+    // declarations they look at are a `fun`, an `interface` and two structs, and the
+    // one `@define` in `lib/std/stdio.fin` is the marked one. So the leak this rules
+    // out had no witness anywhere until this file got a module with a second `@define`
+    // in it.
+    //
+    // `absent` is `@define`d and unmarked, `anchor` is what the import is for -- an
+    // import that binds nothing would fail for its own reasons and say nothing about
+    // the extern.
+    TempModuleDir d;
+    d.write("externs.fin",
+            "@define absent(fmt: string) <noret>;\n"
+            "pub fun anchor() <noret> {}\n");
+    Src s("import { anchor } from externs;\n"
+          "fun main() <noret> { anchor(); absent(\"x\"); }\n");
+    const std::string err = stripAnsi(runFinc({s.str(), "-I", d.path()},
+                                              {{"FIN_LIBS", ""}}).err);
+    EXPECT_NE(err.find("Undefined function or type 'absent'"), std::string::npos)
+        << "an `@define` in a loaded module that carries no #[global] must stay local\n"
+           "to that module. #[global] is opt-in per declaration (ADR 0021), so what\n"
+           "publishes is the stamp and never the declaration form.\n"
+        << err;
+}
+
+TEST(Soundness_GlobalAttribute, AFileMayDeclareTheAmbientPrintfItself) {
+    // Fourteen corpus samples write `@define printf(fmt: string, ...) <noret>;`
+    // verbatim, so the ambient declaration lands on top of a local one in most of the
+    // corpus and must not turn any of them into a duplicate-global error. The identical
+    // signature is the point: test_soundness.cpp's
+    // TwoGlobalsOfOneNameWithDifferentTypesAreRefused is the other side, and this pins
+    // that the check compares types rather than counting declarations.
+    const FincRun r = compileBundled(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "fun main() <noret> { printf(\"hi\\n\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
