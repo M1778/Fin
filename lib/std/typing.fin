@@ -1,35 +1,72 @@
 // `Result` and the interface it implements.
 //
-// tests/samples/stdlib/typing.fin is the specification. This copy keeps the enum, the
-// interface and the implements block; what it drops is the `ErrorLike` union bound on
-// `Result`'s second generic parameter, because the draft spells it
-// `string | any implements <Error>` and this file would then have to import `Error`
-// from a module that imports nothing back -- a cycle the loader has no rule for yet.
-// The bound is a hint, not a constraint the corpus depends on.
+// tests/samples/stdlib/typing.fin is the specification, and as of this rewrite the shape
+// it specifies is the shape that is here: the enum, the `ErrorLike` bound on its second
+// parameter, the `IResult` interface, and the `implements` block with all three bodies.
 //
-// The draft's `Result<T, U> implements <IResult> { ... }` block is dropped for a
-// second reason, and one reason only: `keyidof(Ok)`, which every one of its three
-// bodies guards on, reports `expected '$enum_member', got 'fn(T) -> Result<T, U>'` --
-// a payloaded member named rather than called is its constructor, and whether that
-// satisfies the `$enum_member` meta-type is an owner ruling stdlib/typing.fin's note
-// records as undecided.
+// THE `keyidof` QUESTION IS ANSWERED, AND THE ANSWER IS NOT THE ONE THIS FILE PREDICTED.
+// The header that stood here said `keyidof(Ok)` reported `expected '$enum_member', got
+// 'fn(T) -> Result<T, U>'` and that whether a payloaded member named rather than called
+// satisfies `$enum_member` was an undecided owner ruling. It is decided and it resolves:
+// re-measured against the current compiler, all three bodies type-check with zero
+// diagnostics, and `keyidof` reads the *name* as the member rather than reading its type
+// (lib/std/enums.fin:29 states the rule; Soundness_EnumMemberValue holds it). The check
+// is not vacuous, which is what makes this a measurement rather than a hope:
+// `keyidof(NoSuchMember)` reports `Undefined variable 'NoSuchMember'`, so the name is
+// genuinely resolved against the enum's members.
 //
-// The two reasons that used to stand here are gone. An enum *can* be the target of an
-// implements block, and the block declares its target's generic parameters, so every
-// `T` and `U` in the bodies' own signatures resolves; and the bodies' `enum_.0` reads
-// too -- positional payload access is slot N of whichever member the value holds
-// (Soundness_PositionalMembers), and raising one is the raise form of `blame` rather
-// than the assert form (Soundness_Blame.RaisingAValueOfErasedTypeIsAccepted). What is
-// left is one expression, so `IResult` is declared and unimplemented here, exactly as
-// far as the compiler goes.
+// So `Result<T, U>` has methods now. `unwrap`, `expect` and `select` are the draft's
+// three; `unwrap_or`, `is_ok` and `is_err` are additions, and every one of them is a
+// question a caller otherwise answers by writing `getkeyid(r) == keyidof(Ok)` by hand.
+//
+// THE `ErrorLike` BOUND IS BACK. The note that stood here said the bound was dropped
+// because spelling it `string | any implements <Error>` would make this file import a
+// module that imports nothing back, "a cycle the loader has no rule for yet". Measured:
+// there is no cycle. `error::std` imports nothing at all, this file imports it, and the
+// pair loads clean both standalone and through a consumer. What the bound does *not* do
+// is constrain anything: `Result<int, int>` -- an `int` where an `ErrorLike` is required
+// -- is accepted, because a generic argument is not checked against a constraint-set
+// bound (KnownDefect_GenericBounds.AStructInstantiationViolatingItsBoundIsAccepted). It
+// is here because the draft has it and because it documents the intent at the
+// declaration, and the day that check lands it starts being enforced without an edit.
+//
+// THE RECEIVER RULE, because it changes how these are called. The first parameter of a
+// method on an enum is its receiver when its type is the enum
+// (Soundness_EnumMethodReceiver), so `r.unwrap()` passes nothing and `enum_` is `r`.
+// `unwrap_or` therefore takes its fallback as the *second* parameter and is called
+// `r.unwrap_or(0)`. The draft's own comment on the implements block states this
+// condition -- methods on an enum are implementable "ONLY ON CONDITIONS like having
+// their first parameter the enum value itself" -- and it is the rule now.
+//
+// GAPS hit while writing this:
+//
+//   * A payload slot is an `any` when the members disagree about what sits there, and
+//     `Ok(T)`/`Err(U)` disagree at position 0. So `enum_.0` returns an erased value that
+//     a `T` return accepts without a narrowing check -- a guarded read is as erased as
+//     an unguarded one (KnownDefect_PositionalMembers.ADisagreeingPayloadSlotIsNever-
+//     Narrowed). `unwrap` on an `Err` therefore raises rather than mistyping, but it
+//     raises because of the `getkeyid` guard and not because the type system stopped it.
+//   * None of this reaches an executable. A generic enum is refused in codegen (`a
+//     generic enum 'Result' is not lowered yet`) whether or not a member carries a
+//     payload, so `Result` is a type-checking story today and `HashMap` chooses `blame`
+//     over returning one for exactly that reason (see hashmap.fin's header).
+//   * `expect` takes no message. The draft's signature is `expect(enum_) <noret>` and
+//     the corpus is what fixes it; a message parameter would need `blame` to raise a
+//     formatted value, and the raise form of `blame` takes one expression.
 #[stdimport] %{
 import { getkeyid, keyidof } from enums::std;
+import { Error } from error::std;
 }%
 
 namespace std {
 
+// "A string, or anything that inherits Error." Written as the draft writes it. Not
+// enforced yet -- see the header.
+#[export]
+pub type ErrorLike = string | any implements <Error>;
+
 #[llvm_name="Result"]
-pub enum Result <T, U> {
+pub enum Result <T, U: ErrorLike> {
     Ok(T),
     Err(U),
 }
@@ -38,8 +75,58 @@ pub enum Result <T, U> {
 pub interface IResult<T, U> {
     pub:
       fun unwrap(enum_ : Result<T, U>) <T>;
+      fun unwrap_or(enum_ : Result<T, U>, fallback: T) <T>;
       fun expect(enum_ : Result<T, U>) <noret>;
       fun select(enum_ : Result<T, U>, callback : fn(T) -> void) <noret>;
+      fun is_ok(enum_ : Result<T, U>) <bool>;
+      fun is_err(enum_ : Result<T, U>) <bool>;
+}
+
+Result<T, U> implements <IResult> {
+    // The value, or a raise of the error. `enum_` is the receiver, so this is `r.unwrap()`.
+    pub fun unwrap(enum_ : Result<T, U>) <T> {
+        if (getkeyid(enum_) == keyidof(Ok)) {
+            return enum_.0;
+          } else {
+            blame enum_.0;
+          }
+      }
+
+    // The total form: the value, or `fallback` when this is an `Err`. `r.unwrap_or(0)`.
+    // This is the one to reach for where `unwrap` would abort.
+    pub fun unwrap_or(enum_ : Result<T, U>, fallback: T) <T> {
+        if (getkeyid(enum_) == keyidof(Ok)) {
+            return enum_.0;
+          }
+        return fallback;
+      }
+
+    // Raise if this is an `Err`, and say nothing if it is not. The draft's name and
+    // signature; see the header on why it carries no message.
+    pub fun expect(enum_ : Result<T, U>) <noret> {
+        if (getkeyid(enum_) == keyidof(Err)) {
+            blame enum_.0;
+          }
+      }
+
+    // Run `callback` on the value if there is one. The `Ok`-only branch of a `match`
+    // that the language does not have.
+    pub fun select(enum_ : Result<T, U>, callback : fn(T) -> void) <noret> {
+        if (getkeyid(enum_) == keyidof(Ok)) {
+            callback(enum_.0);
+          }
+      }
+
+    // The two questions a caller otherwise writes out by hand, which is the whole reason
+    // they are here: `getkeyid(r) == keyidof(Ok)` needs both intrinsics imported at every
+    // use site, and `r.is_ok()` needs none.
+    pub fun is_ok(enum_ : Result<T, U>) <bool> {
+        return getkeyid(enum_) == keyidof(Ok);
+      }
+
+    pub fun is_err(enum_ : Result<T, U>) <bool> {
+        return getkeyid(enum_) == keyidof(Err);
+      }
 }
 
 }

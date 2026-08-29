@@ -1,40 +1,93 @@
 // The standard error class.
 //
-// tests/samples/stdlib/error.fin is the full specification of this module and this
-// is the part of it that compiles today: the class, its fields, its constructor and
-// a formatter. What is left out is left out because the compiler cannot express it
-// yet, not because the design changed --
+// tests/samples/stdlib/error.fin is the full specification of this module and this is
+// the part of it that compiles today: the class, its fields, its two-parameter
+// constructor and a formatter. What is left out is left out because the compiler cannot
+// express it yet, not because the design changed --
 //
 //   #[stderror] / #[uncastable] / #[llvm_name]  attributes with no reader
-//   format!("Error: {}", self.message)          no formatting macro exists
-//   err_code: int = null                        the draft then assigns to the
-//                                               parameter, which finc denies
 //   @special(pub) is_error_type(t: $type)       needs the compiler API
 //
 // Seven samples import `Error` from here, and four of them subclass it
 // (`struct IOError: <Error> {}`), so the inheritable shape is the load-bearing part.
+//
+// THE SECOND PARAMETER IS BACK. This file carried a one-parameter constructor and a
+// note saying a defaulted parameter was still required at the call site. That stopped
+// being true at `d7a91df`, re-measured here rather than taken from the note: `Error(msg:
+// string, err_code: int = -1)` accepts both `Error("boom")` and `Error("boom", 3)`, and
+// so does the draft's own spelling with a `null` sentinel the body replaces. The draft
+// is what this file now matches, with one substitution: `= -1` directly instead of
+// `= null` and an `if (err_code == null)` that replaces it. Both type-check; `= -1`
+// needs no null comparison, and a null comparison is refused in codegen (`an operator on
+// a pointer is not lowered yet`), so the shorter form is the one that could run.
+//
+// `format()` returns the message, and `describe()` is the formatter the draft wanted.
+// The draft writes `format!("Error: {}", self.message)`; `format!` is not a registered
+// macro (`Undefined macro 'format!'`) and ADR 0021 records that it is to be a compiler
+// builtin rather than a declared one, so it cannot be written here at all. `describe()`
+// does the same job through C's `snprintf` -- measured end to end, not merely
+// type-checked: an `error_id` of 7 and a message of "boom" prints `Error 7: boom` from a
+// linked executable. `format()` keeps its name and its one-line body because it is the
+// name the library's own subclasses inherit and nothing in the corpus calls either.
+//
+// GAPS hit while writing this:
+//
+//   * `describe()` allocates with `malloc` and nothing frees it. There is no destructor
+//     to hang a `free` on -- `~Self()` does not parse, and the spelling that does,
+//     `~Error()`, would run at a scope exit the backend does not implement yet -- so the
+//     buffer is the caller's to free and this header is the only place that says so.
+//   * The two externs are declared `#[llvm_name]`-renamed and not `#[global]`, so they
+//     are this module's own. An extern reached through an import *does* lower, unlike a
+//     Fin function (measured: a `#[global]` extern in a loaded module links and runs),
+//     but `#[global]` is legal only for the marked set of two names (ADR 0021) and
+//     minting a third would be a hole in the module system, not a convenience.
 namespace std {
+
+// C's formatter, by two names this module owns. `snprintf` bounds what it writes, which
+// is why it and not `sprintf` is what `describe` calls.
+#[llvm_name="snprintf"]
+@define error_snprintf(buf: string, limit: ulong, fmt: string, ...) <int>;
+
+#[llvm_name="malloc"]
+@define error_alloc(bytes: ulong) <string>;
+
+#[llvm_name="strlen"]
+@define error_strlen(s: string) <ulong>;
 
 #[class]
 pub struct Error {
     pub message <string>,
     pub error_id <int> = -1,
 
-    // One parameter, not the draft's `Error(msg: string, err_code: int = -1)`.
-    // Every call in the corpus writes one argument -- `Error("The answer is
-    // forbidden")` in blame_assert.fin, `CollectionError("Index out of bounds")` in
-    // stdlib/collection.fin -- and a defaulted parameter is still required at the
-    // call site today (KnownDefect_ParameterDefaults.ADefaultedConstructorParameter-
-    // IsStillRequired). Writing the two-parameter form here would make every one of
-    // those calls an arity error inside the library's own consumers. The second
-    // parameter comes back with that defect, not before.
-    Error(msg: string) {
-        return new Error{message: msg};
-    }
+    // Two parameters, as the draft has it. `err_code` defaults to `-1`, which is the
+    // value the draft's body substitutes for its `null` sentinel, so the two spellings
+    // agree on what an unspecified code is.
+    Error(msg: string, err_code: int = -1) {
+        return new Error{message: msg, error_id: err_code};
+      }
 
+    // The message alone. Four subclasses inherit this and nothing in the corpus calls
+    // it, so it stays the cheap accessor and `describe` is the formatter.
     pub fun format(self: &Self) <string> {
         return self.message;
-    }
-}
+      }
+
+    // "Error <id>: <message>", in a fresh buffer the caller owns. 32 bytes of headroom
+    // covers the widest `int` written as decimal plus the literal text.
+    pub fun describe(self: &Self) <string> {
+        let want <int> = cast<int>(error_strlen(self.message)) + 32;
+        let buf <string> = error_alloc(cast<ulong>(want));
+        let written <int> = error_snprintf(buf, cast<ulong>(want), "Error %d: %s",
+                                          self.error_id, self.message);
+        return buf;
+      }
+
+    // Whether a code was supplied. `-1` is the "none given" value the constructor's
+    // default and the draft's sentinel agree on, so this is the question a caller
+    // otherwise writes as a comparison against a magic number.
+    pub fun has_code(self: &Self) <bool> {
+        return self.error_id != -1;
+      }
+  }
 
 }
