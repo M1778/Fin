@@ -59,11 +59,13 @@ fun main() <noret> {
 }
 ```
 
-The result is a `[T]`, not a pointer to a fixed-size array. `delete` frees it.
+The result is a `[T]`, not a pointer to a fixed-size array — this is the one `new` that
+does not produce a pointer. `delete` frees it, and it frees the pair's data word.
 
-This type-checks, and it is not yet lowered: any program allocating an array with
-`new [T, n]{}` fails to build with `-o`, reporting `codegen: 'new' of type '[int]' is not
-lowered yet`. Array literals, indexing, assignment and `.length` all build and run.
+This builds and runs. The elements are zeroed, which is what the empty `{}` means; `new [int]`
+with no extent at all is refused, because there is no count to allocate and zero would be a
+guess. Array literals, indexing, assignment and `.length` build and run too, including
+`.length` on an array that never had an address (`give().length`).
 
 ## Passing arrays
 
