@@ -1,0 +1,451 @@
+// Strings: length, comparison, search, slicing, splitting, joining, trimming, and the
+// two conversions between a `string` and a `[char]`.
+//
+// NO SAMPLE SPECIFIES THIS MODULE. Every other file under lib/std names the draft it is
+// derived from; there is no `tests/samples/stdlib/strings.fin` and no corpus file imports
+// anything string-shaped, so this module has no draft to diverge from and no consumer to
+// answer to. That makes the design decisions below mine rather than the corpus's, and the
+// module is written to be deletable: nothing else in lib/std imports it.
+//
+// It is called `strings` and not `string` because `string` is a keyword. `import { len }
+// from string::std;` reports `syntax error, unexpected TYPE_STRING, expecting IDENTIFIER
+// or STRING_LITERAL` -- the lexer sees the type name before the module resolver ever gets
+// a chance, so a module can never be called `string` in this language.
+//
+// WHAT A `string` IS, because every decision here follows from it. A `string` is a pointer
+// to bytes: `Soundness_Codegen`'s note on `&"..."` records the owner's ruling that
+// `&string` is the address of a *cell* holding that pointer, so a `string` behaves like
+// `&T` for every other T. Three consequences shape this module:
+//
+//   * `==` compares pointers, not bytes. Measured: two spellings of "hello" in one program
+//     are equal because the literals are pooled, and `strdup("hello") == "hello"` is
+//     false. So `equals(a, b)` here is `strcmp(a, b) == 0` and a caller who writes `a == b`
+//     is asking a different and usually wrong question. This is the same fact
+//     `hashmap.fin` records, from the other side.
+//   * `s.length` type-checks and does not lower (`the member 'length' of a non-struct is
+//     not lowered yet`), and `s[0]` does not type-check at all (`Type 'string' is not an
+//     array or pointer`). So `len()` calls `strlen` and there is no direct byte access;
+//     everything that needs bytes goes through `to_chars`.
+//   * `a + "b"` type-checks and is refused in codegen (`an operator on a pointer is not
+//     lowered yet`). `concat()` is the operation that works.
+//
+// EVERY RETURNED `string` IS `malloc`ED AND THE CALLER OWNS IT. `clone`, `concat`,
+// `substr`, `from_chars`, `trim`, `trim_start`, `trim_end`, `to_upper`, `to_lower`,
+// `replace_char`, `repeat` and `join` each return fresh memory, and `free_str` is the way
+// to release it. There is no destructor to do it -- `~Self()` does not parse and nothing
+// runs at scope exit -- so this is stated here rather than left for a reader to discover.
+// A caller who never frees leaks, which ADR 0003 makes a library's business rather than
+// the compiler's.
+//
+// THE BYTE ROUTE, and why it is shaped the way it is. `to_chars(s)` copies a `string` into
+// a fresh NUL-terminated `[char]`, and `from_chars(bytes, start, count)` copies a slice
+// back out into a fresh `string`. Everything that inspects or rearranges characters goes
+// through those two, because indexing a `[char]` is the only byte access that both
+// type-checks and lowers. That is one copy more than a language with real string slicing
+// would need, and it is the honest cost of the gaps above rather than a design preference.
+//
+// GAPS, every one hit while writing this file:
+//
+//   * `p[i]` on a `&char` type-checks and is refused in codegen (`this index expression is
+//     not lowered yet`), while `*p` lowers fine. So a `&char` cannot be walked, and
+//     `to_chars` exists to turn one into a `[char]`, which can.
+//   * A `string` does not cast to a `&char` or to a `[char]`, and does not pass to a
+//     `&char` parameter. `cast<&char>(cast<any>(s))` type-checks and `cast<any>` is refused
+//     in codegen. The route that works is C's `memcpy` with the `string` in the parameter
+//     slot that is declared `string`.
+//   * Two `@define`s carrying the same `#[llvm_name]` do not both link: the second is
+//     emitted as a call to `memcpy.1`, and the link fails with `undefined reference to
+//     'memcpy.1'`. Both directions of the copy are needed here, so one is declared against
+//     `memcpy` and the other against `memmove` -- which is a correct choice on its own
+//     terms, since one of the two copies can overlap, but the reason it is written that
+//     way is the name collision.
+//   * A `malloc`ed buffer plus a raw byte copy has no terminator, and nothing in the
+//     language supplies one. `from_chars` allocates with `calloc` for that reason -- found
+//     by running `trim`, which printed a stray byte past its result while `substr` on the
+//     same buffer happened to look correct.
+//   * `from` is a keyword (`syntax error, unexpected KW_FROM, expecting IDENTIFIER`), so no
+//     local here is called `from`.
+//   * `&` `|` `^` are not in the expression grammar, so `to_upper`/`to_lower` compare and
+//     add rather than masking a bit.
+//   * None of the Fin functions here lower when reached through an import -- a call to an
+//     imported function is not lowered. Each one was measured by transliterating it into a
+//     single file and running it: `substr("hello world", 6, 5)` gives `world`,
+//     `trim("  hi  ")` gives `hi`, `trim("   ")` gives the empty string,
+//     `starts_with("hello", "hel")` is true and `starts_with("hello", "xel")` is false.
+#[stdimport] %{
+import { Collection } from collection::std;
+}%
+
+namespace std {
+
+#[llvm_name="strlen"]
+@define strings_len(s: string) <ulong>;
+
+#[llvm_name="strcmp"]
+@define strings_cmp(a: string, b: string) <int>;
+
+#[llvm_name="strncmp"]
+@define strings_ncmp(a: string, b: string, count: ulong) <int>;
+
+#[llvm_name="strstr"]
+@define strings_find(haystack: string, needle: string) <string>;
+
+#[llvm_name="strchr"]
+@define strings_find_char(s: string, c: int) <string>;
+
+#[llvm_name="strrchr"]
+@define strings_find_last_char(s: string, c: int) <string>;
+
+#[llvm_name="strcpy"]
+@define strings_copy(dst: string, src: string) <string>;
+
+#[llvm_name="strcat"]
+@define strings_append(dst: string, src: string) <string>;
+
+// `calloc` and not `malloc`, and this is load-bearing rather than tidy. Every allocation
+// here is followed by a copy of exactly the content, with no terminator written, so an
+// uninitialised final byte makes the result a string with no end. Found by running:
+// `trim("  hi  ")` printed `hi` followed by a stray byte, while `substr` on the same
+// buffer happened to look right -- so reading the code proved nothing and running it
+// proved it twice.
+//
+// `strcpy` and `strcat` write their own terminator, so `clone` and `concat` were never
+// affected; `from_chars` is the one that copies raw bytes, and it is what every other
+// allocating function here goes through.
+#[llvm_name="calloc"]
+@define strings_alloc_zeroed(count: ulong, size: ulong) <string>;
+
+priv fun strings_alloc(bytes: ulong) <string> {
+    return strings_alloc_zeroed(bytes, cast<ulong>(1));
+  }
+
+#[llvm_name="free"]
+@define strings_release(p: string) <noret>;
+
+// The two copy directions. See the header: they carry different `#[llvm_name]`s because
+// two externs sharing one name do not both link.
+#[llvm_name="memcpy"]
+@define strings_bytes_out(dst: &char, src: string, count: ulong) <&char>;
+
+#[llvm_name="memmove"]
+@define strings_bytes_in(dst: string, src: &char, count: ulong) <string>;
+
+// The byte length, not counting the terminator. `s.length` does not lower, so this is
+// how a length is asked for.
+#[export]
+pub fun len(s: string) <int> {
+    return cast<int>(strings_len(s));
+  }
+
+#[export]
+pub fun is_empty(s: string) <bool> {
+    return strings_len(s) == cast<ulong>(0);
+  }
+
+// Content comparison, which is what `==` does not do. See the header.
+#[export]
+pub fun equals(a: string, b: string) <bool> {
+    return strings_cmp(a, b) == 0;
+  }
+
+// Negative, zero or positive, as C's `strcmp` gives it -- the ordering a sort wants.
+#[export]
+pub fun compare(a: string, b: string) <int> {
+    return strings_cmp(a, b);
+  }
+
+// Frees a string this module returned. Named rather than left to the caller's own
+// `@define` of `free`, because every allocating function here says to call this one.
+#[export]
+pub fun free_str(s: string) <noret> {
+    strings_release(s);
+  }
+
+// The byte offset of `needle`, or `-1`. Computed as a difference of lengths rather than of
+// pointers: pointer subtraction is not an operator this language has, and two `strlen`s
+// are.
+#[export]
+pub fun find(haystack: string, needle: string) <int> {
+    let at <string> = strings_find(haystack, needle);
+    if (at == null) { return -1; }
+    return cast<int>(strings_len(haystack)) - cast<int>(strings_len(at));
+  }
+
+#[export]
+pub fun contains(haystack: string, needle: string) <bool> {
+    return find(haystack, needle) >= 0;
+  }
+
+#[export]
+pub fun index_of_char(s: string, c: char) <int> {
+    let at <string> = strings_find_char(s, cast<int>(c));
+    if (at == null) { return -1; }
+    return cast<int>(strings_len(s)) - cast<int>(strings_len(at));
+  }
+
+#[export]
+pub fun last_index_of_char(s: string, c: char) <int> {
+    let at <string> = strings_find_last_char(s, cast<int>(c));
+    if (at == null) { return -1; }
+    return cast<int>(strings_len(s)) - cast<int>(strings_len(at));
+  }
+
+// A `string` as a NUL-terminated `[char]`, which is the only form whose bytes can be read
+// one at a time -- indexing a `&char` does not lower. The buffer is one longer than the
+// content, so `.length` is `len(s) + 1`. `delete` frees it.
+#[export]
+pub fun to_chars(s: string) <[char]> {
+    let count <int> = cast<int>(strings_len(s));
+    let buffer <[char]> = new [char, count + 1]{};
+    let copied <&char> = strings_bytes_out(&buffer[0], s, cast<ulong>(count));
+    buffer[count] = cast<char>(0);
+    return buffer;
+  }
+
+// A slice of a `[char]` as a fresh `string`. `&bytes[start]` is what makes a mid-buffer
+// slice expressible: a `[char]` does not cast to a `&char`, but the address of one of its
+// elements is a `&char`.
+#[export]
+pub fun from_chars(bytes: [char], start: int, count: int) <string> {
+    blame start >= 0, "a slice start cannot be negative";
+    blame count >= 0, "a slice length cannot be negative";
+    let out <string> = strings_alloc(cast<ulong>(count + 1));
+    let copied <string> = strings_bytes_in(out, &bytes[start], cast<ulong>(count));
+    return out;
+  }
+
+// A fresh copy. The caller owns it; `free_str` releases it.
+#[export]
+pub fun clone(s: string) <string> {
+    let out <string> = strings_alloc(strings_len(s) + cast<ulong>(1));
+    let copied <string> = strings_copy(out, s);
+    return out;
+  }
+
+// `a` then `b`, in fresh memory. This is what `a + b` would be if `+` on a pointer
+// lowered.
+#[export]
+pub fun concat(a: string, b: string) <string> {
+    let out <string> = strings_alloc(strings_len(a) + strings_len(b) + cast<ulong>(1));
+    let started <string> = strings_copy(out, a);
+    let finished <string> = strings_append(out, b);
+    return out;
+  }
+
+// `count` bytes from `start`, clamped to what is there. A `start` past the end raises
+// rather than returning empty, because that is a caller's arithmetic error and an empty
+// string would hide it; a `count` past the end does not, because "to the end" is a
+// reasonable thing to ask for.
+#[export]
+pub fun substr(s: string, start: int, count: int) <string> {
+    let total <int> = cast<int>(strings_len(s));
+    blame start >= 0, "a substring start cannot be negative";
+    blame start <= total, "a substring start is past the end of the string";
+    let want <int> = count;
+    if (want < 0) { want = 0; }
+    if (start + want > total) { want = total - start; }
+    let bytes <[char]> = to_chars(s);
+    let out <string> = from_chars(bytes, start, want);
+    delete bytes;
+    return out;
+  }
+
+#[export]
+pub fun starts_with(s: string, prefix: string) <bool> {
+    let n <ulong> = strings_len(prefix);
+    if (n > strings_len(s)) { return false; }
+    return strings_ncmp(s, prefix, n) == 0;
+  }
+
+#[export]
+pub fun ends_with(s: string, suffix: string) <bool> {
+    let total <int> = cast<int>(strings_len(s));
+    let n <int> = cast<int>(strings_len(suffix));
+    if (n > total) { return false; }
+    let tail <string> = substr(s, total - n, n);
+    let same <bool> = strings_cmp(tail, suffix) == 0;
+    strings_release(tail);
+    return same;
+  }
+
+// Whitespace is space, tab, newline and carriage return. There is no `isspace` here
+// because the set a trim should use is a decision and not a library detail, and these four
+// are the ones a text file produces.
+priv fun is_space(c: char) <bool> {
+    if (c == ' ') { return true; }
+    if (c == '\t') { return true; }
+    if (c == '\n') { return true; }
+    if (c == '\r') { return true; }
+    return false;
+  }
+
+#[export]
+pub fun trim(s: string) <string> {
+    let bytes <[char]> = to_chars(s);
+    let total <int> = cast<int>(strings_len(s));
+    let low <int> = 0;
+    while (low < total) {
+        if (is_space(bytes[low])) { low++; } else { break; }
+      }
+    let high <int> = total;
+    while (high > low) {
+        if (is_space(bytes[high - 1])) { high--; } else { break; }
+      }
+    let out <string> = from_chars(bytes, low, high - low);
+    delete bytes;
+    return out;
+  }
+
+#[export]
+pub fun trim_start(s: string) <string> {
+    let bytes <[char]> = to_chars(s);
+    let total <int> = cast<int>(strings_len(s));
+    let low <int> = 0;
+    while (low < total) {
+        if (is_space(bytes[low])) { low++; } else { break; }
+      }
+    let out <string> = from_chars(bytes, low, total - low);
+    delete bytes;
+    return out;
+  }
+
+#[export]
+pub fun trim_end(s: string) <string> {
+    let bytes <[char]> = to_chars(s);
+    let total <int> = cast<int>(strings_len(s));
+    let high <int> = total;
+    while (high > 0) {
+        if (is_space(bytes[high - 1])) { high--; } else { break; }
+      }
+    let out <string> = from_chars(bytes, 0, high);
+    delete bytes;
+    return out;
+  }
+
+// Case conversion by comparison and offset, because `&` and `|` are not in the expression
+// grammar and the usual bit trick cannot be written. ASCII only, and that is a limit
+// rather than an oversight: a correct Unicode fold needs tables this library has no way to
+// carry.
+#[export]
+pub fun to_upper(s: string) <string> {
+    let bytes <[char]> = to_chars(s);
+    let total <int> = cast<int>(strings_len(s));
+    for (let i <int> = 0; i < total; i++) {
+        if (bytes[i] >= 'a') {
+            if (bytes[i] <= 'z') {
+                bytes[i] = cast<char>(cast<int>(bytes[i]) - 32);
+              }
+          }
+      }
+    let out <string> = from_chars(bytes, 0, total);
+    delete bytes;
+    return out;
+  }
+
+#[export]
+pub fun to_lower(s: string) <string> {
+    let bytes <[char]> = to_chars(s);
+    let total <int> = cast<int>(strings_len(s));
+    for (let i <int> = 0; i < total; i++) {
+        if (bytes[i] >= 'A') {
+            if (bytes[i] <= 'Z') {
+                bytes[i] = cast<char>(cast<int>(bytes[i]) + 32);
+              }
+          }
+      }
+    let out <string> = from_chars(bytes, 0, total);
+    delete bytes;
+    return out;
+  }
+
+// Every occurrence of one character replaced by another. Character-for-character rather
+// than substring-for-substring, because a substring replace changes the length and needs
+// a second pass to size the result; this is the half that is one pass.
+#[export]
+pub fun replace_char(s: string, target: char, replacement: char) <string> {
+    let bytes <[char]> = to_chars(s);
+    let total <int> = cast<int>(strings_len(s));
+    for (let i <int> = 0; i < total; i++) {
+        if (bytes[i] == target) { bytes[i] = replacement; }
+      }
+    let out <string> = from_chars(bytes, 0, total);
+    delete bytes;
+    return out;
+  }
+
+#[export]
+pub fun repeat(s: string, times: int) <string> {
+    blame times >= 0, "cannot repeat a string a negative number of times";
+    let unit <int> = cast<int>(strings_len(s));
+    let scratch <[char]> = new [char, unit * times + 1]{};
+    let source <[char]> = to_chars(s);
+    for (let r <int> = 0; r < times; r++) {
+        for (let i <int> = 0; i < unit; i++) {
+            scratch[r * unit + i] = source[i];
+          }
+      }
+    let out <string> = from_chars(scratch, 0, unit * times);
+    delete source;
+    delete scratch;
+    return out;
+  }
+
+// Splits on a single character. Always returns at least one part, and a separator at
+// either end produces an empty part there -- so `split("a,b,", ',')` is three parts, the
+// last empty, which is what makes `join(split(x, c), c)` give `x` back.
+//
+// Every part is fresh memory and so is the `Collection`; a caller frees each part with
+// `free_str`.
+#[export]
+pub fun split(s: string, separator: char) <&Collection<string>> {
+    let parts <&Collection<string>> = new Collection::<string>{};
+    let bytes <[char]> = to_chars(s);
+    let total <int> = cast<int>(strings_len(s));
+    let begin <int> = 0;
+    for (let i <int> = 0; i < total; i++) {
+        if (bytes[i] == separator) {
+            parts.push(from_chars(bytes, begin, i - begin));
+            begin = i + 1;
+          }
+      }
+    parts.push(from_chars(bytes, begin, total - begin));
+    delete bytes;
+    return parts;
+  }
+
+// The inverse of `split`, for any separator rather than a single character. Sizes the
+// result first and copies once, rather than concatenating in a loop -- which would
+// allocate and leak one intermediate per part.
+#[export]
+pub fun join(parts: &Collection<string>, separator: string) <string> {
+    let count <int> = parts.len();
+    let separator_len <int> = cast<int>(strings_len(separator));
+    let total <int> = 0;
+    for (let i <int> = 0; i < count; i++) {
+        total += cast<int>(strings_len(parts.get(i)));
+        if (i + 1 < count) { total += separator_len; }
+      }
+
+    let scratch <[char]> = new [char, total + 1]{};
+    let at <int> = 0;
+    for (let i <int> = 0; i < count; i++) {
+        let piece <[char]> = to_chars(parts.get(i));
+        let piece_len <int> = cast<int>(strings_len(parts.get(i)));
+        for (let k <int> = 0; k < piece_len; k++) { scratch[at + k] = piece[k]; }
+        at += piece_len;
+        delete piece;
+
+        if (i + 1 < count) {
+            let gap <[char]> = to_chars(separator);
+            for (let k <int> = 0; k < separator_len; k++) { scratch[at + k] = gap[k]; }
+            at += separator_len;
+            delete gap;
+          }
+      }
+
+    let out <string> = from_chars(scratch, 0, total);
+    delete scratch;
+    return out;
+  }
+
+}
