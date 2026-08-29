@@ -509,7 +509,13 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         // Inject Self
         currentScope->define({"self", structType, true, true});
         
+        // A constructor has the struct itself as its declared result.  Keep that
+        // expectation active while walking the body so `return` cannot smuggle an
+        // unrelated value through the constructor signature.
+        auto prevCtorRet = context.currentFuncReturnType;
+        context.currentFuncReturnType = structType;
         if (ctor->body) ctor->body->accept(*this);
+        context.currentFuncReturnType = prevCtorRet;
         exitScope();
     }
 

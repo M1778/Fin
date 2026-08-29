@@ -375,6 +375,7 @@ struct FnInfo {
     // which parameter the first written argument lands on, and by emitBody, to know
     // which argument is `self`.
     bool hasReceiver = false;
+    bool isConstructor = false;
 };
 
 // The one place that maps a written type name to a representation. Returns
@@ -1604,6 +1605,21 @@ private:
                                                  &info.methodBindings});
         }
 
+        for (auto& c : info.decl->constructors) {
+            if (!c->body) continue;
+            const std::string key = methodKey(info.finName, "constructor");
+            TypeNode result(info.finName);
+            declareFunction(*c, key, key, c->params, &result,
+                            /*isVarArg=*/false, /*isExtern=*/false, &receiver);
+            auto declared = functions_.find(key);
+            if (declared == functions_.end()) return false;
+            declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+            declared->second.isConstructor = true;
+            pendingBodies_.push_back(PendingBody{c.get(), &c->params, c->body.get(), key,
+                                                 &info.methodBindings});
+            break; // constructorFor currently selects constructors[0]
+        }
+
         // The operators, on the same terms. An operator is a method with a spelled name:
         // the receiver is the same pointer, the body is deferred to the same queue, the
         // linkage is weak for the same reason, and an instantiation gets its own copy
@@ -1680,8 +1696,12 @@ private:
         }
         if (!lowerableMethods(s)) return false;
         if (!lowerableOperators(s)) return false;
-        for (auto& c : s.constructors) {
-            unsupported(*c, fmt::format("a constructor on struct '{}'", s.name));
+        // Constructors use one symbol per struct, matching the analyzer's current
+        // constructorFor rule: overload resolution is deliberately not invented here.
+        // The first declaration wins, and every other overload is refused by name.
+        if (s.constructors.size() > 1) {
+            unsupported(*s.constructors[1], fmt::format("constructor overloads on struct '{}'",
+                                                         s.name));
             return false;
         }
         for (auto& m : s.members) {
@@ -2715,6 +2735,10 @@ private:
             pair = builder_.CreateInsertValue(pair, vtable, {1});
             return pair;
         }
+        if (to.isStruct() && from.type.isPtr() && from.type.pointee &&
+            from.type.pointee->isStruct()) {
+            return builder_.CreateLoad(to.llvmType, from.value, "constructed");
+        }
         if (from.type.llvmType == to.llvmType) return from.value;
 
         if (from.type.kind == CgType::Kind::Int && to.kind == CgType::Kind::Int) {
@@ -3090,6 +3114,11 @@ private:
                 builder_.CreateRet(builder_.getInt32(0));
             } else if (info.returnType.isVoid()) {
                 builder_.CreateRetVoid();
+            } else if (info.isConstructor && info.hasReceiver && !info.paramTypes.empty()) {
+                auto* self = scopes_.back().find("self");
+                if (self) builder_.CreateRet(builder_.CreateLoad(info.returnType.llvmType,
+                                                                  self->second.slot, "constructed"));
+                else builder_.CreateUnreachable();
             } else {
                 // The analyzer's missing-return check is what makes this
                 // unreachable for a well-typed program; `fun?` is its documented
@@ -3497,7 +3526,15 @@ private:
             return;
         }
         if (target.isVoid()) { unsupported(node, "a 'return <value>' from a void function"); return; }
-        llvm::Value* out = convert(node, v, target);
+        llvm::Value* out = nullptr;
+        if (currentFn_->isConstructor && target.isStruct() && v.type.isPtr() &&
+            v.type.pointee && v.type.pointee->isStruct()) {
+            // Constructor bodies commonly return `new S{...}`. The constructor's
+            // public result is S, so read the allocated aggregate back as its value.
+            out = builder_.CreateLoad(target.llvmType, v.value, "constructed");
+        } else {
+            out = convert(node, v, target);
+        }
         if (out) builder_.CreateRet(out);
     }
 
@@ -4362,7 +4399,12 @@ private:
             unsupported(node, "a call with explicit generic arguments");
             return;
         }
-        auto found = functions_.find(node.name);
+        std::string emittedName = node.name;
+        // A type-shaped call is represented by the constructor symbol declared with
+        // the struct.  The analyzer has already selected constructors[0]; this pass
+        // deliberately uses the same single-symbol rule.
+        if (structs_.count(node.name)) emittedName = methodKey(node.name, "constructor");
+        auto found = functions_.find(emittedName);
         if (found == functions_.end()) {
             unsupported(node, fmt::format("a call to '{}'", node.name));
             return;
@@ -4370,6 +4412,11 @@ private:
         const FnInfo& info = found->second;
 
         std::vector<llvm::Value*> args;
+        llvm::Value* ctorStorage = nullptr;
+        if (info.isConstructor) {
+            ctorStorage = builder_.CreateAlloca(info.returnType.llvmType, nullptr, "constructor");
+            args.push_back(ctorStorage);
+        }
         if (!emitCallArgs(node, info, node.name, argList(node.args), args)) return;
         emitCall(info, args);
     }
