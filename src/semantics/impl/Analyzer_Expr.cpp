@@ -868,19 +868,33 @@ void SemanticAnalyzer::checkCallArity(ASTNode& node, const char* kind,
                                      const FunctionType& sig, size_t actual) {
     size_t expected = sig.param_types.size();
 
-    // A nullable parameter is optional at the call site. nullifier.fin:39 calls
-    // `make_A()` with no arguments and says why: "since make_A says \"n?: int\" we
-    // know that n can be null and we don't need to pass any arguments".
+    // Two things make a parameter optional at the call site, and they are folded
+    // together here rather than checked in sequence, because a parameter that is both
+    // nullable and defaulted is optional once, not twice.
+    //
+    // A nullable parameter. nullifier.fin:39 calls `make_A()` with no arguments and says
+    // why: "since make_A says \"n?: int\" we know that n can be null and we don't need
+    // to pass any arguments".
+    //
+    // A parameter written with a default. `lib/std/error.fin:11` declares
+    // `Error(message: string, err_code: int = null)` and `blame_assert.fin:15` wants to
+    // call it `Error("The answer is forbidden")`. Before this, a default could be named
+    // in a sibling parameter's expression and checked against its own type, and had no
+    // other observable effect anywhere -- which made writing one a comment with syntax.
     //
     // The minimum is one past the *last* required parameter rather than the count
     // of required ones, because arguments bind positionally: `(a?: int, b: int)`
     // still needs both written, `(a: int, b?: int)` needs one. That falls out of
     // positional binding and needs no rule about which order the two kinds may
     // appear in -- which matters, because the corpus only ever writes the trailing
-    // form and a rule invented here would be unratified.
+    // form and a rule invented here would be unratified. The same positional argument
+    // covers a default in a leading position, at no extra cost: `(a: int = 1, b: int)`
+    // still requires two arguments, because there is no way to write the second
+    // without writing the first.
     size_t required = 0;
     for (size_t i = 0; i < expected; ++i) {
-        if (!sig.param_types[i]->as<NullableType>()) required = i + 1;
+        const bool optional = sig.param_types[i]->as<NullableType>() || sig.hasDefault(i);
+        if (!optional) required = i + 1;
     }
 
     if (!sig.is_vararg && (actual < required || actual > expected)) {
@@ -1933,14 +1947,27 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
     }
 
     std::vector<std::shared_ptr<Type>> paramTypes;
+    // Pushed inside the `if(t)`, at the same statement as the type, because the
+    // `if` is what makes the two vectors able to disagree: a parameter whose
+    // annotation did not resolve is in `node.params` and not in `paramTypes`, so a
+    // flag pushed unconditionally would describe a later parameter's position.
+    std::vector<bool> paramDefaults;
     for(auto& param : node.params) {
         auto t = resolveTypeFromAST(param->type.get());
         if(t) {
             defineParameter(*param, t);
             paramTypes.push_back(t);
+            paramDefaults.push_back(param->default_value != nullptr);
         }
     }
-    
+    // A lambda's default is checked the same way a function's is, and it was not
+    // before this: `fun(a: int, b: int = "hello") <int> { ... }` built and the same
+    // parameters written on a named function reported the mismatch. Nine callers of
+    // this helper were declaration sites and the tenth was missing, which is what a
+    // helper factored out of declaration handling gets wrong -- a lambda is not a
+    // declaration and so was never in the list.
+    visitParameterDefaults(node.params);
+
     auto prevRet = context.currentFuncReturnType;
     context.currentFuncReturnType = retType;
     
@@ -1959,7 +1986,15 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
     // Not when the return type did not resolve: FunctionType dereferences it in
     // toString(), and nullptr already means "unknown, stop asking" to every
     // reader of lastExprType.
-    lastExprType = retType ? std::make_shared<FunctionType>(paramTypes, retType) : nullptr;
+    // The flags travel with the type, or a defaulted lambda parameter is optional
+    // nowhere: a lambda's type is the only record of its signature that a call site
+    // ever sees. This is also what makes the receiver-erase in the implements-block
+    // overwriter (Analyzer_Decl.cpp) reachable -- with the vector always empty its
+    // guarded `defaults.erase` was dead, which is how the mutation matrix found this
+    // gap rather than a missing test.
+    lastExprType = retType ? std::make_shared<FunctionType>(paramTypes, retType, false,
+                                                            paramDefaults)
+                           : nullptr;
 }
 
 void SemanticAnalyzer::visit(QuoteExpression& node) {

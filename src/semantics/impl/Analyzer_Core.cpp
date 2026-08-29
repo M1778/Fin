@@ -612,10 +612,17 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
 
         bool resolved = true;
         std::vector<std::shared_ptr<Type>> paramTypes;
+        // The hoisted signature carries defaults for the same reason it carries
+        // parameter types: it is what a call *above* the declaration is checked
+        // against. Without this, `f(1)` before `fun f(a: int, b: int = 2)` reported an
+        // arity error while the identical call below it did not -- the defaultedness
+        // would have depended on which side of the declaration the call sat on.
+        std::vector<bool> paramDefaults;
         for (auto& param : *params) {
             auto type = resolveTypeFromAST(param->type.get());
             if (!type || isErrorType(type)) { resolved = false; break; }
             paramTypes.push_back(type);
+            paramDefaults.push_back(param->default_value != nullptr);
         }
 
         std::shared_ptr<Type> retType;
@@ -638,7 +645,8 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
         // that was already there.
         if (currentScope->symbols.count(name)) continue;
 
-        currentScope->define({name, std::make_shared<FunctionType>(paramTypes, retType),
+        currentScope->define({name, std::make_shared<FunctionType>(paramTypes, retType,
+                                                                   false, paramDefaults),
                               false, true});
         debugLog(fg(fmt::color::gray), "      [Hoist] Registered '{}' at file scope\n", name);
     }

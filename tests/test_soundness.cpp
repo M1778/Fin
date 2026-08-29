@@ -14,6 +14,7 @@
 #include "ast/decls/ClassDecl.hpp"
 #include "ast/decls/Program.hpp"
 #include "semantics/SemanticAnalyzer.hpp"
+#include "types/FunctionType.hpp"
 #include "types/StructType.hpp"
 
 // The soundness defects listed at the top of docs/plan.md, each pinned by a test
@@ -6684,45 +6685,295 @@ TEST(Soundness_ParameterDefaults, ADefaultMayNameASiblingParameter) {
     EXPECT_EQ(r.exitCode, 0) << "an earlier parameter is in scope in a later default:\n" << r.err;
 }
 
-// The second half of the same root cause, and a bigger change than the first.
+// The second half of the same root cause, landed 2026-08-29.
 //
-// `required` is computed in Analyzer_Expr's arity check as the index of the last
-// parameter that is not nullable, plus one -- so a nullable parameter is optional and
-// nothing else is. A parameter with a default is still counted as required, which
-// leaves the default with no observable purpose at a call site: it can be named in an
-// expression (see above) but never actually supplied by omission.
+// `required` was computed in Analyzer_Expr's arity check as the index of the last
+// parameter that is not nullable, plus one -- so a nullable parameter was optional and
+// nothing else was. A parameter with a default was still counted as required, which left
+// the default with no observable purpose at a call site: it could be named in a sibling
+// parameter's expression and checked against its own type, and nothing else. A default
+// was a comment with syntax.
 //
-// Not fixed here, for a reason worth writing down rather than a lack of clarity about
-// the meaning. The arity check reads a `FunctionType`, and `FunctionType` records only
-// `param_types`, `return_type` and `is_vararg` -- it has no idea which parameters had
-// defaults. Fixing this means a new field carried through eleven construction sites
-// plus `substitute` and `clone`, which is the same "N copies of one loop" shape that
-// this wave has now hit three times. It is a unit of its own.
+// The fix is a `param_defaults` vector on `FunctionType`, positionally parallel to
+// `param_types`, folded into that same `required` loop: a parameter is optional if it is
+// nullable OR defaulted, and the two are folded rather than sequenced because a
+// parameter that is both is optional once. Carried through fifteen construction sites
+// plus `substitute` and `clone` -- which is what made this a unit of its own rather than
+// a line, and it is the fourth time this wave has met the "N copies of one loop" shape.
 //
-// It is also, by measurement, a low-ranked one: the corpus declares exactly three
-// defaulted parameters (stdlib/stdio.fin:87 and :109, stdlib/error.fin:11) and calls
-// none of them. The one call that would need this, `Error("The answer is forbidden")`
-// at blame_assert.fin:15, is commented out. So the corpus effect of the fix is zero
-// diagnostics, which puts it below every other unit currently queued.
+// The fifteenth site is a lambda, and it was not in the first draft of the fix. Eleven
+// mutants over the five files it touches; two survived, and both survivals were the same
+// omission seen from different ends. M4 dropped the field in `clone()` and no test could
+// tell, because `FunctionType::clone` is reached only through `StructType::clone` and
+// nothing in the compiler calls that -- so the answer there is a type-level test
+// (CloneKeepsTheDefaults) on the same grounds Soundness_FieldOrder gives for its own:
+// `clone` is a faithful-copy contract, and this repo's "a guard no test can distinguish
+// from its absence is deleted" rule is about guards, not about a copy silently losing a
+// field. M7 removed the receiver-erase from the implements-block overwriter and no test
+// could tell either -- and that one was not a missing test at all: the vector it erases
+// from was *always empty*, because `visit(LambdaExpression&)` recorded no flags. It also
+// never called `visitParameterDefaults`, so `fun(a: int, b: int = "hello")` built clean
+// where the same parameters on a named function reported the mismatch. Both halves are
+// fixed and pinned below, and the eleven mutants are all killed now. A surviving mutant
+// pointed at a hole in the implementation and not at a hole in the tests, which is the
+// argument for the matrix rather than for reading harder.
+//
+// What the previous version of this comment got wrong, and it is worth keeping: it
+// ranked the unit last on the grounds that "the corpus effect of the fix is zero
+// diagnostics", because the three defaulted parameters the corpus declares
+// (stdlib/stdio.fin:87 and :109, stdlib/error.fin:11) are called by nothing and
+// `blame_assert.fin:15`'s `Error("The answer is forbidden")` is commented out. The corpus
+// arithmetic was right and the ranking was wrong: what a corpus diagnostic count cannot
+// measure is a shape the library declines to write *because* the compiler refuses it.
+// `lib/std/error.fin` cut its second parameter away and shipped a one-argument `Error`
+// -- the guide's chapter 12 says so in as many words, "the constructor takes one
+// argument, not the draft's two, because a defaulted parameter is still required at the
+// call site" -- so the defect was costing the standard library a declaration rather than
+// costing the corpus a diagnostic. An absent shape produces no diagnostic to count.
 
-TEST(KnownDefect_ParameterDefaults, ADefaultedParameterIsStillRequired) {
-    // Passes by asserting the defect. When the arity check learns about defaults this
-    // goes red -- invert it to EXPECT_EQ(r.exitCode, 0) and move it to Soundness.
+TEST(Soundness_ParameterDefaults, ADefaultedParameterIsOptionalAtACall) {
+    // Was KnownDefect_ParameterDefaults.ADefaultedParameterIsStillRequired, inverted per
+    // its own instructions. Both call forms, because a default that made the argument
+    // *illegal* to pass would satisfy an inversion that only tested the omission.
     auto r = compile("fun g(a: int, b: int = 2) <int> { return a + b; }\n"
+                     "fun main() <int> { let y <int> = g(1); let z <int> = g(1, 5); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a default makes a parameter optional:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultedConstructorParameterIsOptionalAtACall) {
+    // lib/std/error.fin:11's shape, called the way blame_assert.fin:15 wants to call it.
+    // A constructor is reached as `S(args)` and goes through the same arity check, but
+    // through a different construction site -- a struct's constructor list, not a
+    // function's signature -- so the two tests are not redundant.
+    auto r = compile("struct S { pub v <int>, S(msg: int, code: int = null) { return new S{v: msg}; } }\n"
+                     "fun main() <int> { let b <S> = S(1); let c <S> = S(1, 2); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a constructor's default makes its parameter optional:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultInALeadingPositionStillRequiresTheArgument) {
+    // Positional binding, and the reason the loop finds the *last* required parameter
+    // rather than counting the required ones. There is no way to write the second
+    // argument without writing the first, so `(a: int = 1, b: int)` needs both -- and
+    // the diagnostic says 2, not a range, because nothing here is actually optional.
+    auto r = compile("fun g(a: int = 1, b: int) <int> { return a + b; }\n"
                      "fun main() <int> { let z <int> = g(1); return 0; }\n");
-    EXPECT_EQ(r.exitCode, 1) << "today a default does not make a parameter optional:\n" << r.err;
+    EXPECT_NE(r.exitCode, 0) << "a leading default cannot be omitted positionally:\n" << r.err;
     EXPECT_NE(stripAnsi(r.err).find("expects 2 arguments, got 1"), std::string::npos)
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_ParameterDefaults, ADefaultedConstructorParameterIsStillRequired) {
-    // stdlib/error.fin:11's shape, called the way blame_assert.fin:15 wants to call it.
-    // A constructor is reached as `S(args)` and goes through the same arity check.
-    auto r = compile("struct S { pub v <int>, S(msg: int, code: int = null) { return new S{v: msg}; } }\n"
-                     "fun main() <int> { let b <S> = S(1); return 0; }\n");
-    EXPECT_EQ(r.exitCode, 1) << "today a constructor's default does not make it optional:\n" << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("expects 2 arguments, got 1"), std::string::npos)
-        << stripAnsi(r.err);
+TEST(Soundness_ParameterDefaults, TooFewArgumentsIsStillRefusedWithARange) {
+    // The floor still holds under the parameter that has no default, and the message is
+    // the range form rather than "expects 2 arguments" -- which is the case that message
+    // was written for. A fix that made every parameter optional would pass every test
+    // above this one and fail here.
+    auto r = compile("fun g(a: int, b: int = 2) <int> { return a + b; }\n"
+                     "fun main() <int> { let z <int> = g(); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << "the un-defaulted parameter is still required:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expects between 1 and 2 arguments, got 0"),
+              std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, TooManyArgumentsIsStillRefused) {
+    // The ceiling. `expected` is unchanged by any of this, and a signature that reported
+    // a range would be wrong at the top as well as at the bottom.
+    auto r = compile("fun g(a: int, b: int = 2) <int> { return a + b; }\n"
+                     "fun main() <int> { let z <int> = g(1, 2, 3); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << "a default does not make a function variadic:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("got 3"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, AMethodsDefaultIsOptionalAtACall) {
+    // buildMethodSignature is a third construction site, and the one whose loop has
+    // three `continue`s in it -- a written `self`, an enum receiver -- so the flags and
+    // the types can misalign there in a way they cannot elsewhere. A method whose
+    // receiver is written by name is the case that would break: the default belongs to
+    // `b`, and if the flag stayed at `self`'s index it would describe `a`.
+    auto r = compile("struct S { pub v <int>,\n"
+                     "  fun add(self: &Self, a: int, b: int = 2) <int> { return a + b; } }\n"
+                     "fun main() <int> { let s <S> = S{v: 1}; let z <int> = s.add(1); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a method's default makes its parameter optional:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, AGenericMethodsDefaultSurvivesInstantiation) {
+    // What `FunctionType::substitute` carrying the field is for. Substituting `T` -> `int`
+    // rebuilds the parameters and the return type; drop `param_defaults` on the way
+    // through and the method is optional as declared and required as instantiated, which
+    // is the silent half of this change.
+    // `Box::<int>{...}` is the corpus's spelling for a generic struct literal
+    // (complex.fin:12); `Box<int>{...}` is a syntax error, measured.
+    auto r = compile("struct Box<T> { pub v <T>,\n"
+                     "  fun put(self: &Self, a: T, n: int = 1) <int> { return n; } }\n"
+                     "fun main() <int> { let b <Box<int>> = Box::<int>{v: 1};\n"
+                     "  let z <int> = b.put(2); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "an instantiated generic keeps its defaults:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, AnAmbientExternsDefaultIsOptionalAtACall) {
+    // `@define` is its own construction site and the only one whose signature also
+    // reaches the backend (ADR 0021's splice). A default on an extern is a claim about
+    // the Fin call, not about the C symbol, so the arity check is the only thing that
+    // can honour it.
+    auto r = compile("@define ext(a: int, b: int = 2) <int>;\n"
+                     "fun main() <int> { let z <int> = ext(1); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "an extern's default makes its parameter optional:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultedParameterIsOptionalAboveItsDeclaration) {
+    // The file-scope hoist builds a second signature for every top-level function, and
+    // that signature is what a call *above* the declaration is checked against. Leave
+    // the defaults out of it and optionality depends on which side of the declaration
+    // the call sits on -- which no reader would ever suspect.
+    auto r = compile("fun main() <int> { let z <int> = g(1); return 0; }\n"
+                     "fun g(a: int, b: int = 2) <int> { return a + b; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a call above the declaration sees the default too:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultIsNotPartOfTheFunctionType) {
+    // FunctionType::equals deliberately ignores `param_defaults`. `fn(int) -> int` is one
+    // type whether or not the function behind it wrote `= 2`: a default is a fact about a
+    // declaration, and the only way to observe it is to omit an argument, which is arity.
+    // Comparing them would make these two assignments disagree over a difference the
+    // annotation cannot express.
+    // `fn(int) -> int` is the spelling, with the arrow -- lambdas.fin:23 writes it and
+    // `fn(int) <int>` does not parse, measured.
+    auto r = compile("fun a(x: int) <int> { return x; }\n"
+                     "fun b(x: int = 1) <int> { return x; }\n"
+                     "fun main() <int> { let f <fn(int) -> int> = a;\n"
+                     "  let g <fn(int) -> int> = b; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a default does not change the function's type:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ANullableAndADefaultedParameterAgreeOnOneMinimum) {
+    // The two sources of optionality are folded into one `required`, not applied in
+    // sequence. A parameter that is both nullable and defaulted is optional once; a
+    // signature mixing the two kinds has one minimum, at the last parameter that is
+    // neither.
+    auto r = compile("fun g(a: int, b?: int, c: int = 3) <int> { return a; }\n"
+                     "fun main() <int> { let x <int> = g(1); let y <int> = g(1, null);\n"
+                     "  let z <int> = g(1, null, 3); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "nullable and defaulted both reduce the same minimum:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ALambdasDefaultIsOptionalAtACall) {
+    // A lambda was the tenth parameter loop, and it was missing from the list of nine
+    // this block's walk tests enumerate -- because those nine are declaration forms and a
+    // lambda is an expression, so a helper factored out of declaration handling never
+    // reached it. Two consequences, both fixed together and both pinned here: the flags
+    // were not recorded on the lambda's type, and `visitParameterDefaults` was not
+    // called at all.
+    //
+    // Found by mutation rather than by reading: M7 of the matrix removed the
+    // receiver-erase from the implements-block overwriter and survived, which is only
+    // possible if the vector it erases from is always empty.
+    auto r = compile("fun main() <int> {\n"
+                     "  let g <auto> = fun(a: int, b: int = 2) <int> { return a + b; };\n"
+                     "  let x <int> = g(1); let y <int> = g(1, 5); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a lambda's default is optional at a call too:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ALambdasDefaultIsCheckedAgainstItsType) {
+    // The other half of the same omission, and the one that was a silent hole rather than
+    // a missing feature: `fun(a: int, b: int = "hello")` built clean while the identical
+    // parameters on a named function reported the mismatch, measured before the fix. A
+    // default the compiler does not look at is the defect this whole block exists about,
+    // surviving in the one form the block never listed.
+    auto r = compile("fun main() <int> {\n"
+                     "  let g <auto> = fun(a: int, b: int = \"hello\") <int> { return a; };\n"
+                     "  return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << "a lambda's default is checked like any other:\n" << r.err;
+    const std::string msgs = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(msgs.find("expected 'int', got 'string'"), std::string::npos) << msgs;
+    EXPECT_EQ(errorCount(msgs), 1u) << "once, not once per pass:\n" << msgs;
+}
+
+TEST(Soundness_ParameterDefaults, ALambdaWithAnUnresolvedParameterKeepsTheFlagsAligned) {
+    // The flag is pushed inside the `if (t)`, at the same statement as the type, because
+    // a lambda drops a parameter whose annotation did not resolve from `param_types` --
+    // and only from `param_types`. Pushed once per parameter instead, the vectors
+    // desynchronise: here `b`'s `true` would land at index 0, where the surviving type is
+    // `b` itself, making it required and reporting a second diagnostic underneath the
+    // first.
+    //
+    // Exactly one diagnostic is the assertion, and it is the undefined type. The same
+    // shape as Soundness_ErrorRecovery's rule -- one mistake, one report -- reached
+    // through a vector alignment rather than through a suppression.
+    auto r = compile("fun main() <int> {\n"
+                     "  let g <auto> = fun(a: NoSuchType, b: int = 2) <int> { return 0; };\n"
+                     "  let x <int> = g(); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string msgs = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(msgs.find("Undefined type 'NoSuchType'"), std::string::npos) << msgs;
+    EXPECT_EQ(errorCount(msgs), 1u)
+        << "the flags must be dropped with the types they describe:\n" << msgs;
+}
+
+TEST(Soundness_ParameterDefaults, AnOverwrittenMemberDropsItsReceiverAndKeepsItsDefault) {
+    // The single-member `@implements T<...>::name = fun(self: &Self, ...)` form, where the
+    // receiver is erased from the type by hand and the flags have to be erased with it --
+    // or they describe the receiver's position while the types describe the first real
+    // parameter, which makes a defaulted first parameter required and a required second
+    // one optional.
+    //
+    // Both bounds are asserted, because erasing from the wrong vector shifts the range
+    // rather than breaking it: with the flags left unerased this reported `expects
+    // between 1 and 1`, so a test that only omitted the argument would pass on the bug.
+    auto r = compile("struct S<T> { v <T>, }\n"
+                     "@implements S<int>::greet = fun(self: &Self, n: int = 3) <int> { return n; }\n"
+                     "fun main() <int> {\n"
+                     "  let s <&S<int>> = new S::<int>{v: 1};\n"
+                     "  let a <int> = s.greet(); let b <int> = s.greet(7); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "the erase must move both vectors:\n" << r.err;
+
+    auto bad = compile("struct S<T> { v <T>, }\n"
+                       "@implements S<int>::greet = fun(self: &Self, n: int = 3) <int> { return n; }\n"
+                       "fun main() <int> {\n"
+                       "  let s <&S<int>> = new S::<int>{v: 1};\n"
+                       "  let a <int> = s.greet(1, 2); return 0; }\n");
+    EXPECT_NE(bad.exitCode, 0) << bad.err;
+    EXPECT_NE(stripAnsi(bad.err).find("between 0 and 1 arguments, got 2"), std::string::npos)
+        << stripAnsi(bad.err);
+}
+
+TEST(Soundness_ParameterDefaults, CloneKeepsTheDefaults) {
+    // Read off the type rather than through a program, for the reason
+    // Soundness_FieldOrder.CloneKeepsTheOrder gives for doing the same: there is no
+    // CLI-visible symptom to read. `FunctionType::clone` is reached only through
+    // `StructType::clone`, and the only callers of that are this file and an
+    // `ArrayType` branch in Analyzer_Expr -- so no program the compiler accepts can
+    // tell whether the copy kept the flags.
+    //
+    // That is exactly the shape this repo deletes rather than tests, and the deletion
+    // is wrong here: `clone` is a faithful-copy contract, and a copy that silently
+    // drops a field is a trap for the first caller who needs one. The precedent is
+    // the field-order block, which made the same call for the same reason. M4 of the
+    // mutation matrix survived on this line and this test is what kills it.
+    fin::DiagnosticEngine diag("", "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    auto parsed = parseSource(
+        "struct S { pub v <int>,\n"
+        "  pub fun m(self: &Self, a: int, b: int = 2) <int> { return a; } }\n", diag);
+    ASSERT_TRUE(parsed.parsed);
+    fin::SemanticAnalyzer analyzer(diag, false);
+    analyzer.visit(*parsed.ast);
+    auto st = std::dynamic_pointer_cast<fin::StructType>(
+        analyzer.getGlobalScope()->resolveType("S"));
+    ASSERT_NE(st, nullptr);
+
+    // The original first, so that a failure says which half is wrong.
+    auto orig = std::dynamic_pointer_cast<fin::FunctionType>(st->getMethodType("m"));
+    ASSERT_NE(orig, nullptr);
+    ASSERT_EQ(orig->param_types.size(), 2u) << "the receiver is dropped: " << orig->toString();
+    EXPECT_FALSE(orig->hasDefault(0));
+    EXPECT_TRUE(orig->hasDefault(1));
+
+    auto copy = std::dynamic_pointer_cast<fin::StructType>(st->clone());
+    ASSERT_NE(copy, nullptr);
+    auto cloned = std::dynamic_pointer_cast<fin::FunctionType>(copy->getMethodType("m"));
+    ASSERT_NE(cloned, nullptr);
+    EXPECT_FALSE(cloned->hasDefault(0));
+    EXPECT_TRUE(cloned->hasDefault(1))
+        << "clone() dropped param_defaults; the copy makes `b` required again";
 }
 
 // ---------------------------------------------------------------------------

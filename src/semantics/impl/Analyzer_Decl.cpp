@@ -86,6 +86,12 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDec
     declareGenericParams(method.generic_params);
 
     std::vector<std::shared_ptr<Type>> paramTypes;
+    // Parallel to paramTypes, and pushed at exactly the same statements, which is the
+    // whole discipline this field needs. Three of the `continue`s below drop a parameter
+    // from the signature -- a written `self`, an enum's spelled-out receiver -- so
+    // `method.params[i]` and `paramTypes[i]` are not the same parameter and a second
+    // loop over the AST would misalign the flags against the types silently.
+    std::vector<bool> paramDefaults;
     for (size_t i = 0; i < method.params.size(); ++i) {
         auto& param = method.params[i];
         auto type = resolveTypeOrError(param->type.get());
@@ -119,6 +125,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDec
         // unresolved parameter would make `pub fun m(a: NoSuchType)` called `s.m(1)`
         // report "expects 0 arguments, got 1" on top of the one real diagnostic.
         paramTypes.push_back(type);
+        paramDefaults.push_back(param->default_value != nullptr);
     }
     // Walked here rather than at the call sites because this is the only scope that has
     // the method's generics and parameters in it. At the struct and class sites this
@@ -135,7 +142,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDec
     // Null only when `void` itself failed to resolve, which means the primitive table
     // is broken; the callers gate on it as they always did.
     if (!retType) return nullptr;
-    return std::make_shared<FunctionType>(paramTypes, retType);
+    return std::make_shared<FunctionType>(paramTypes, retType, false, paramDefaults);
 }
 
 std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
@@ -144,6 +151,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
     declareGenericParams(op.generic_params);
 
     std::vector<std::shared_ptr<Type>> paramTypes;
+    std::vector<bool> paramDefaults;
     for (auto& param : op.params) {
         auto type = resolveTypeOrError(param->type.get());
         defineParameter(*param, type);
@@ -152,6 +160,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
         // about what a signature is.
         if (param->name == "self") continue;
         paramTypes.push_back(type);
+        paramDefaults.push_back(param->default_value != nullptr);
     }
     visitParameterDefaults(op.params);
 
@@ -180,6 +189,12 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
                 if (!fnNode->param_types.empty() && fnNode->param_types[0]->name == "Self") first = 1;
                 for (size_t i = first; i < fnNode->param_types.size(); ++i) {
                     paramTypes.push_back(resolveTypeOrError(fnNode->param_types[i].get()));
+                    // A parameter that came out of `fn(Self, T)` cannot have a default:
+                    // a function *type* has no expressions in it, only types. Pushed
+                    // false rather than left short so the two vectors stay the same
+                    // length here, where `paramTypes` grew after the loop above stopped
+                    // filling `paramDefaults`.
+                    paramDefaults.push_back(false);
                 }
                 // `fn(Self, T)` has no return type at all -- parser.y's fn_type leaves
                 // it null rather than inventing one, "so a pass that needs one can tell
@@ -209,7 +224,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
 
     // Null only when `void` itself failed to resolve. Callers gate on it as they did.
     if (!retType) return nullptr;
-    return std::make_shared<FunctionType>(paramTypes, retType);
+    return std::make_shared<FunctionType>(paramTypes, retType, false, paramDefaults);
 }
 
 void SemanticAnalyzer::visit(FunctionDeclaration& node) {
@@ -235,6 +250,7 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
 
     // 3. Resolve Parameters & Build Signature
     std::vector<std::shared_ptr<Type>> paramTypes;
+    std::vector<bool> paramDefaults;
     bool hasSelf = false;
     
     for (auto& param : node.params) {
@@ -247,6 +263,10 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
         // parameter is what made `fun f(p: NoSuchType)` called as `f(1)` report
         // "expects 0 arguments, got 1" -- a claim about a signature nobody wrote.
         paramTypes.push_back(type);
+        // A written `self` is *not* dropped here -- unlike buildMethodSignature, this
+        // loop pushes every parameter and the implicit-self injection below is what
+        // differs -- so the two vectors stay aligned with no `continue` to think about.
+        paramDefaults.push_back(param->default_value != nullptr);
     }
     visitParameterDefaults(node.params);
 
@@ -288,7 +308,7 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     // reported "Undefined function or type 'f'" about a function that is defined.
     if (currentScope->parent) {
         auto funcType = std::make_shared<FunctionType>(
-            paramTypes, retType ? retType : errorType());
+            paramTypes, retType ? retType : errorType(), false, paramDefaults);
         // Mark as immutable and initialized
         currentScope->parent->define({node.name, funcType, false, true});
         debugLog(fg(fmt::color::gray), "      [Register] Registered function '{}' in parent scope\n", node.name);
@@ -430,13 +450,22 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
             // Resolve params in a temp scope to get signature
             enterScope();
             std::vector<std::shared_ptr<Type>> paramTypes;
+            std::vector<bool> paramDefaults;
             for (auto& param : ctor->params) {
                 // Sentinel, not dropped: the constructor keeps its written arity.
                 paramTypes.push_back(resolveTypeOrError(param->type.get()));
+                paramDefaults.push_back(param->default_value != nullptr);
             }
             exitScope();
 
-            auto ctorType = std::make_shared<FunctionType>(paramTypes, structType);
+            // The site `lib/std/error.fin:11` needs. `Error(message: string, err_code:
+            // int = null)` is the library's own base error, and its one-argument call
+            // `Error("boom")` is the shape every module's error subclass is used
+            // through -- so a constructor learning about defaults is what lets the
+            // library write the two-parameter declaration its draft asks for instead of
+            // cutting the second parameter away.
+            auto ctorType = std::make_shared<FunctionType>(paramTypes, structType, false,
+                                                           paramDefaults);
             structType->addConstructor(ctorType);
             debugLog(fg(fmt::color::green), "      [Ctor] Registered constructor for '{}' with {} params\n", node.name, paramTypes.size());
         }
@@ -695,10 +724,13 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     for (auto& ctor : node.constructors) {
         enterScope();
         std::vector<std::shared_ptr<Type>> paramTypes;
+        std::vector<bool> paramDefaults;
         for (auto& param : ctor->params) {
             paramTypes.push_back(resolveTypeOrError(param->type.get()));
+            paramDefaults.push_back(param->default_value != nullptr);
         }
-        auto ctorType = std::make_shared<FunctionType>(paramTypes, ifaceType);
+        auto ctorType = std::make_shared<FunctionType>(paramTypes, ifaceType, false,
+                                                       paramDefaults);
         ifaceType->addConstructor(ctorType);
         debugLog(fg(fmt::color::gray), "      [Interface] Added constructor requirement\n");
         exitScope();
@@ -871,12 +903,15 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
     auto retType = resolveTypeOrError(node.return_type.get());
 
     std::vector<std::shared_ptr<Type>> paramTypes;
+    std::vector<bool> paramDefaults;
     for (auto& param : node.params) {
         paramTypes.push_back(resolveTypeOrError(param->type.get()));
+        paramDefaults.push_back(param->default_value != nullptr);
     }
     visitParameterDefaults(node.params);
 
-    auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg);
+    auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg,
+                                                  paramDefaults);
     currentScope->define({node.name, funcType, false, true});
     if (publishIfGlobal(node, node.attributes, node.name, funcType) && loader) {
         // The backend half. Publishing the name makes a call to it type-check in a file
@@ -1149,6 +1184,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
     applyUseAttributes(node, node.attributes);
 
     std::vector<std::shared_ptr<Type>> paramTypes;
+    std::vector<bool> paramDefaults;
     for (auto& param : node.params) {
          auto type = resolveTypeOrError(param->type.get());
          defineParameter(*param, type);
@@ -1156,6 +1192,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
          // dropping a parameter whose type did not resolve advertises an arity
          // nobody wrote.
          paramTypes.push_back(type);
+         paramDefaults.push_back(param->default_value != nullptr);
     }
     visitParameterDefaults(node.params);
 
@@ -1182,7 +1219,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
     // (KnownDefect_DeclarationOrder).
     if (currentScope->parent) {
         auto funcType = std::make_shared<FunctionType>(
-            paramTypes, retType ? retType : errorType());
+            paramTypes, retType ? retType : errorType(), false, paramDefaults);
         currentScope->parent->define({node.name, funcType, false, true});
         debugLog(fg(fmt::color::gray), "      [Register] Registered special '{}' in parent scope\n", node.name);
     }
@@ -1457,13 +1494,21 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
             // against is one too many -- next to the diagnostic about the annotation.
             auto* lam = dynamic_cast<LambdaExpression*>(node.overwrite_value.get());
             std::vector<std::shared_ptr<Type>> params = fn->param_types;
+            std::vector<bool> defaults = fn->param_defaults;
             if (lam && lam->params.size() == params.size() && !params.empty() &&
                 (lam->params[0]->name == "self" ||
                  (structType->is_enum && isReceiverOf(params[0], *structType)))) {
                 params.erase(params.begin());
+                // The same erase, or the flags would describe the receiver's position
+                // while the types describe the first real parameter. Guarded because
+                // the vector is allowed to be shorter than the parameters -- a lambda
+                // with no defaults anywhere leaves it empty, and erasing from an empty
+                // vector is undefined rather than a no-op.
+                if (!defaults.empty()) defaults.erase(defaults.begin());
             }
             structType->defineMethod(node.overwrite_member,
-                                     std::make_shared<FunctionType>(params, fn->return_type));
+                                     std::make_shared<FunctionType>(params, fn->return_type,
+                                                                    false, defaults));
             debugLog(fg(fmt::color::green), "      [Implements] Registered member '{}::{}' with {} params\n",
                      node.target_type, node.overwrite_member, params.size());
         }
@@ -1532,16 +1577,19 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
     // nothing looks at which identifier it was.
     for (auto& ctor : node.constructors) {
         std::vector<std::shared_ptr<Type>> paramTypes;
+        std::vector<bool> paramDefaults;
         {
             QuietPass quiet(*this);
             enterScope();
             for (auto& param : ctor->params) {
                 // Sentinel, not dropped: the constructor keeps its written arity.
                 paramTypes.push_back(resolveTypeOrError(param->type.get()));
+                paramDefaults.push_back(param->default_value != nullptr);
             }
             exitScope();
         }
-        structType->addConstructor(std::make_shared<FunctionType>(paramTypes, structType));
+        structType->addConstructor(std::make_shared<FunctionType>(paramTypes, structType,
+                                                                 false, paramDefaults));
         debugLog(fg(fmt::color::green), "      [Implements] Registered constructor for '{}' with {} params\n",
                  node.target_type, paramTypes.size());
 

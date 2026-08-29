@@ -194,7 +194,11 @@ TypePtr StructType::substitute(const TypeMap& mapping, TypePtr selfReplacement) 
             std::vector<TypePtr> newParams;
             for(auto& p : func->param_types) newParams.push_back(p->substitute(mapping, nextSelf));
             
-            auto newCtor = std::make_shared<FunctionType>(newParams, nextSelf, func->is_vararg);
+            // The defaults are the declaration's and substitution does not touch them,
+            // which is what keeps `Box<int>("x")` optional-in-the-second-parameter when
+            // `Box<T>(a: T, b: int = 1)` is.
+            auto newCtor = std::make_shared<FunctionType>(newParams, nextSelf, func->is_vararg,
+                                                          func->param_defaults);
             newStruct->addConstructor(newCtor);
         }
     }
@@ -223,7 +227,11 @@ TypePtr StructType::constructorFor(const std::shared_ptr<StructType>& type) {
             // call has already rebound it to `p`; only the outermost binding survives,
             // which is the one the caller asked about.
             if (auto* sig = inherited->as<FunctionType>()) {
-                return std::make_shared<FunctionType>(sig->param_types, type, sig->is_vararg);
+                // Including the parent's defaults: an inherited constructor is the
+                // parent's parameter list rebound to the child, and which of those
+                // parameters were optional is part of the parameter list.
+                return std::make_shared<FunctionType>(sig->param_types, type, sig->is_vararg,
+                                                      sig->param_defaults);
             }
             // Not a signature, so there is nothing to rebind and nothing this can
             // usefully say about it. Handed back as found rather than dropped: a
