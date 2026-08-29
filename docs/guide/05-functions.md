@@ -1,0 +1,235 @@
+# 5. Functions
+
+## Declaration
+
+`fun`, a name, a parenthesised parameter list, then the return type in angle brackets:
+
+```fin
+fun add(x: int, y: int) <int> {
+    return x + y;
+}
+```
+
+The return type's position is the thing to notice: it comes *after* the parameters, in
+angle brackets, the same bracket that annotates a variable. `<noret>` (equivalently
+`<void>`) means the function returns nothing:
+
+```fin
+@define printf(fmt: string, ...) <noret>;
+
+fun greet(name: string) <noret> {
+    printf("hello %s\n", name);
+}
+```
+
+Parameters use `name: type` — a colon, with no angle brackets. This is the one place in Fin
+where a type is written without them, and it is worth memorising early because it differs
+from every `let` you write:
+
+```fin
+let a <int> = 1;            // declaration: angle brackets
+fun f(a: int) <int> { ... } // parameter: colon
+```
+
+A parameter type *may* be written bracketed (`fun f(a: <int>)`) and parses to the same
+type, but the corpus writes nineteen parameters unbracketed and none bracketed, so the
+colon form is the idiom.
+
+`main` is the entry point, and building an executable with `-o` requires a top-level
+`fun main` with a body.
+
+## `const` parameters
+
+A `const` parameter cannot be reassigned inside the body:
+
+```fin
+fun test(const a: int) <noret> {
+    let copy <int> = a;    // read and copy freely
+    copy = 5;              // the copy is writable
+    // a = 10;             // rejected: Cannot assign to immutable variable 'a'
+}
+```
+
+For a pointer parameter, `const` protects the pointer and not the pointee:
+
+```fin
+fun test_2(const a: &int) <noret> {
+    // a = new int(1);     // rejected
+    *a = 20;               // allowed: writes through
+}
+```
+
+## Function types
+
+A function's type is written `fn(params) -> ret`. Both `->` and `=>` are accepted as the
+arrow:
+
+```fin
+fun compute(a: int, b: int, operation: fn(int, int) => int) <int> {
+    return operation(a, b);
+}
+
+fun main() <noret> {
+    let my_op <fn(int, int) => int> = add;
+    let res <int> = my_op(5, 5);
+}
+```
+
+A named function can be passed wherever a matching function type is expected:
+
+```fin
+let res1 <int> = compute(10, 20, add);
+```
+
+## Lambdas
+
+There are three spellings, and they differ only in punctuation.
+
+**`fun` with a block body** — an anonymous function:
+
+```fin
+let f1 <fn(int) -> int> = fun (x: int) <int> {
+    return x * 2;
+};
+```
+
+**Arrow with a block body**:
+
+```fin
+let f2 <fn(int) -> int> = (x: int) <int> => { return x + 5; };
+```
+
+**Arrow with an expression body** — no `return`, no braces:
+
+```fin
+let f3 <fn(int) -> int> = (x: int) <int> => x - 3;
+```
+
+In every form the return type is annotated in angle brackets, in the same position as a
+named function's. `auto` infers the whole function type:
+
+```fin
+let inferred <auto> = (x: int) <int> => x * x;
+let logger <auto> = (msg: string) <void> => printf("Log: %s\n", msg);
+```
+
+A lambda can be written inline at a call site:
+
+```fin
+let res <int> = compute(100, 50, fun (a: int, b: int) <int> {
+    return a - b;
+});
+
+compute(20, 10, (a: int, b: int) <int> => a + b);
+```
+
+Here is the whole set, verified together:
+
+```fin
+@define printf(fmt: string, ...) <noret>;
+
+fun add(x: int, y: int) <int> {
+    return x + y;
+}
+
+fun compute(a: int, b: int, operation: fn(int, int) => int) <int> {
+    return operation(a, b);
+}
+
+fun main() <noret> {
+    let f1 <fn(int) -> int> = fun (x: int) <int> { return x * 2; };
+    let f2 <fn(int) -> int> = (x: int) <int> => { return x + 5; };
+    let f3 <fn(int) -> int> = (x: int) <int> => x - 3;
+    let f4 <auto> = (x: int) <int> => x * x;
+
+    printf("%d %d %d %d\n", f1(10), f2(10), f3(10), f4(5));
+    printf("%d\n", compute(10, 20, add));
+    printf("%d\n", compute(100, 50, fun (a: int, b: int) <int> { return a - b; }));
+}
+```
+
+A function can also return a function type:
+
+```fin
+fun get_adder() <fn(int, int) -> int> {
+    return (a: int, b: int) <int> => a + b;
+}
+```
+
+This type-checks. Capturing the enclosing environment is not implemented, so treat a
+returned lambda as a function pointer rather than a closure.
+
+## Generic functions
+
+Type parameters go in angle brackets after the name, and a bound after a colon:
+
+```fin
+fun identity<T>(a: T) <T> {
+    return a;
+}
+
+fun using_erasure<T: Castable, U: Castable>(a: T, b: U) <int> {
+    return cast<int>(a) + cast<int>(b);
+}
+```
+
+An unbounded parameter is monomorphised — one instantiation per concrete type. A parameter
+bound by an erasure marker such as `Castable` is erased instead; erasure type-checks but is
+not yet lowered, so a program using a `Castable` bound will not build with `-o`. Generic
+arguments can be supplied explicitly with `::<...>` at the call site, or inferred from the
+arguments:
+
+```fin
+printf("%d\n", identity::<int>(7));
+```
+
+A lambda can be generic too:
+
+```fin
+import { Addable } from operators::std;
+
+let g <auto> = fun <G: Addable>(a: G, b: G) <G> { return a + b; };
+```
+
+## Variadic and foreign declarations
+
+`@define` declares a function implemented outside Fin. It has a signature and no body, and
+`...` makes it variadic:
+
+```fin
+@define printf(fmt: string, ...) <noret>;
+@define sqrt(f: float) <float>;
+```
+
+A `@define` accepts anything through `...` — there is no format checking.
+
+## Missing returns
+
+The compiler requires a return on every path of a value-returning function:
+
+```
+error: Function 'add' is missing a return statement on some paths
+```
+
+`fun?` relaxes this to "returns the type or null", and falling off the end returns null:
+
+```fin
+fun? make_a(n?: int) <A> {
+    if (n == null) {
+        return null;
+    }
+    if (n > 0) {
+        return A{};
+    }
+    // returns null implicitly
+}
+```
+
+## Default parameter values
+
+A default value on a parameter parses, but it is not honoured at the call site — the
+parameter is still required, and omitting it reports an arity error. The standard library
+works around this by declaring separate methods rather than defaulted ones. Do not rely on
+defaults yet.
+
+Next: [structs and classes](06-structs-and-classes.md).
