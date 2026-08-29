@@ -1142,6 +1142,158 @@ BACKEND_TEST(Soundness_Codegen, ADynamicArrayIsAvaPairOfPointerAndLength) {
     EXPECT_EQ(b.out, "3 2\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, TwoDynamicArraysOfOneElementTypeAreTheSameType) {
+    // The pair is a *literal* struct type, which LLVM uniques by its element types, so
+    // every mapping of `[int]` is one llvm::StructType. It was built with
+    // `StructType::create` and so was a fresh named type per call -- and nothing
+    // noticed, because a `[T]` that is only ever declared, indexed and `.length`-ed
+    // never has one compared against another.
+    //
+    // Passing one and returning one are exactly the comparisons: `convert` shortcuts on
+    // `from.type.llvmType == to.llvmType`, which was false for two `[int]`s, and the
+    // walk fell through every remaining case to the bottom and reported `this
+    // conversion is not lowered yet` -- a refusal about the representation ADR 0025
+    // had already decided, at a caret on the call rather than on anything wrong.
+    //
+    // Both directions in one test so they cannot drift apart: a parameter is a
+    // conversion into a callee's type and a return is a conversion into the caller's,
+    // and a fix that unified only one of them would leave the other refusing.
+    const Built b = build(std::string(kPrintf) +
+        "fun take(a: [int]) <int> { return a.length; }\n"
+        "fun give() <[int]> { let a <[int]> = [1, 2, 3, 4]; return a; }\n"
+        "fun main() <noret> {\n"
+        "    let a <[int]> = [1, 2, 3];\n"
+        "    printf(\"%d %d\\n\", take(a), give().length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayAllocationIsAPairAndNotAPointerToAFixedArray) {
+    // `new [T, n]{}` is the one allocation whose result is not a pointer. The analyzer
+    // types it `[T]` (`self._arr = new [T, amount]{}` at stdlib/collection.fin:54
+    // stores it into a `[T]` field), so the backend must produce the pair.
+    //
+    // A run-time extent, deliberately: it is what the corpus writes -- stdio.fin
+    // allocates `new [char, nbytes + self.stream_length]` -- and it is what cannot be
+    // served by mapping the written type, because `mapArray` needs a constant to build
+    // an `[N x T]`. A literal extent is the trap in the other direction: `new [int, 3]`
+    // maps to a fixed `[3 x i32]`, which would make the result a `&[int, 3]` and not
+    // the `[int]` the analyzer said. So the extent is never read as a type here.
+    //
+    // The contents are asserted zero, and that is a decision and not an observation:
+    // `{}` is the empty initialiser written at every corpus allocation site, and
+    // undefined contents is the one answer no test can pin.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let n <int> = 4;\n"
+        "    let a <[int]> = new [int, n]{};\n"
+        "    printf(\"%d %d\\n\", a.length, a[3]);\n"
+        "    a[3] = 7;\n"
+        "    printf(\"%d\\n\", a[3]);\n"
+        "    delete a;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4 0\n7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayAllocationsExtentMayBeAnyIntegerAndAnExpression) {
+    // Both of the corpus's own allocations write a `ulong` count -- stdio.fin:109
+    // declares `read(nbytes: ulong = -1)` and :112 allocates
+    // `new [char, nbytes - self.pointer]` -- and the analyzer accepts any integer on
+    // purpose (Soundness_ArrayExtent.AnAllocationsExtentMayBeAnyIntegerType). So the
+    // backend converts rather than assuming an `int`, and it converts *twice* from one
+    // value: widened for the byte multiply, narrowed for the length word, each carrying
+    // the source's signedness. A `ulong` sign-extended into the byte count is a
+    // negative number handed to malloc, which then fails for a reason that has nothing
+    // to do with the program.
+    //
+    // The expression form is the other half: an extent is an expression, not a name,
+    // and `n + 3` is emitted here rather than read as part of a type.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let n <ulong> = 5;\n"
+        "    let a <[char]> = new [char, n]{};\n"
+        "    let m <int> = 2;\n"
+        "    let c <[int]> = new [int, m + 3]{};\n"
+        "    printf(\"%d %d\\n\", a.length, c.length);\n"
+        "    delete a;\n"
+        "    delete c;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5 5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAllocatedArrayOfStructsStridesByTheWholeElement) {
+    // The stride comes from `getTypeAllocSize` and not `getSizeOf`: an element in an
+    // array occupies its size *plus* its tail padding, and a struct is where the two
+    // differ. Reading element 0 back after writing element 1 is what catches a stride
+    // that is too small -- the write would land inside element 0 and the program would
+    // still run.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { x <int>, y <int>, }\n"
+        "fun main() <noret> {\n"
+        "    let a <[P]> = new [P, 2]{};\n"
+        "    a[1].x = 9;\n"
+        "    printf(\"%d %d %d\\n\", a.length, a[1].x, a[0].x);\n"
+        "    delete a;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 9 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAllocatedArrayStoredInAFieldKeepsItsLength) {
+    // `stdlib/collection.fin` is this shape: `_arr <[T]>` at :51, allocated at :54 and
+    // freed at :46. The length has to survive being stored into an enclosing aggregate
+    // and loaded back out, which is what a `{ptr, len}` pair buys and a bare data
+    // pointer cannot.
+    const Built b = build(std::string(kPrintf) +
+        "struct C { _arr <[int]>, }\n"
+        "fun main() <noret> {\n"
+        "    let n <int> = 3;\n"
+        "    let c <C> = C{_arr: new [int, n]{}};\n"
+        "    c._arr[0] = 5;\n"
+        "    printf(\"%d %d\\n\", c._arr.length, c._arr[0]);\n"
+        "    delete c._arr;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TheLengthOfADynamicArrayWithNoAddressIsRead) {
+    // A `[T]` that never had a home. `give()` returns a pair in a register and
+    // `mk().xs` is a field extracted out of one, and neither has an address to load a
+    // length word through -- which is a normal answer from `baseAddress`, not a
+    // refusal.
+    //
+    // The path used to ask for the address twice: once to learn the object was an
+    // array, and again inside the dynamic branch to load from. The second ask returned
+    // nullopt, the branch returned with no value produced, and the caller reported
+    // whatever *it* was in the middle of -- `this conversion is not lowered yet`
+    // pointing at line 1, or `an array passed to a C variadic`. Both name something
+    // other than the length, which is the part that made it worth a test rather than a
+    // one-line fix: a missing value propagates as a refusal about the wrong construct.
+    const Built b = build(std::string(kPrintf) +
+        "struct S { xs <[int]>, }\n"
+        "fun give() <[int]> { let a <[int]> = [1, 2, 3, 4]; return a; }\n"
+        "fun mk() <S> { return S{xs: [1, 2]}; }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d\\n\", give().length, mk().xs.length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnArrayAllocationWithNoExtentIsRefused) {
+    // `new [int]` parses. There is no count, and zero would be a guess rather than an
+    // answer -- so it is refused, and named as `new`'s own refusal rather than as
+    // something about the element type, which is fine.
+    const Built b = build(
+        "fun main() <noret> { let a <[int]> = new [int]{}; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("no extent"), std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnArrayOnAnExternBoundaryIsRefused) {
     // The struct rule at the second aggregate. A C function's parameter of array
     // type is a pointer by C's own decay rule, and passing an LLVM [3 x i32] by

@@ -627,10 +627,17 @@ public:
             t.kind = CgType::Kind::Array;
             t.element = std::make_shared<CgType>(*element);
             t.isDynamicArray = true;
-            auto* pair = llvm::StructType::create(ctx_, {element->llvmType->getPointerTo(),
-                                                               llvm::Type::getInt32Ty(ctx_)},
-                                                   "fin.array");
-            t.llvmType = pair;
+            // `get` and not `create`: a *literal* struct type, which LLVM uniques by
+            // its element types, so every mapping of `[int]` is the same
+            // llvm::StructType. `create` mints a fresh named type per call, and two
+            // `[int]`s were then two different types -- which nothing noticed until
+            // `convert`'s `from.type.llvmType == to.llvmType` fell through to the
+            // bottom and refused with `this conversion is not lowered yet` on
+            // `take(a)` and on `return a`. The interface pair above is built the same
+            // way for the same reason. A name buys nothing here: nothing reads it, and
+            // two `[T]`s of one element type must be assignable.
+            t.llvmType = llvm::StructType::get(ctx_, {element->llvmType->getPointerTo(),
+                                                     llvm::Type::getInt32Ty(ctx_)});
             return t;
         }
 
@@ -5348,9 +5355,17 @@ private:
             // A pointer to an array answers with the array's, which is the same rule
             // `ptr_to_arr[0]` follows (deeptest3.fin:111).
             std::optional<CgType> arrayType;
-            if (auto addr = baseAddress(*node.object, CgType::Kind::Array)) {
-                arrayType = addr->type;
-            }
+            // The address is kept rather than recomputed. It used to be asked for
+            // twice -- once to learn the type and again, inside the dynamic branch, to
+            // load from -- and the second ask is the one that fails for an array with
+            // no home: `give().length` on a function returning `[int]`, or
+            // `mk().xs.length` on a field of a returned struct. `baseAddress` answers
+            // nullopt there, which is a normal answer and not a refusal, so the branch
+            // returned with `value_` unset and the caller reported whatever it was
+            // doing -- `this conversion is not lowered yet` at the top of the file, or
+            // `an array passed to a C variadic`, neither about the length.
+            std::optional<Addr> arrayAddr = baseAddress(*node.object, CgType::Kind::Array);
+            if (arrayAddr) arrayType = arrayAddr->type;
             if (failed_) return;
             if (!arrayType) {
                 objectValue = emit(*node.object);
@@ -5367,11 +5382,25 @@ private:
             if (arrayType) {
                 CgType i32 = types_.intType(32, true);
                 if (arrayType->isDynamicArray) {
-                    auto arrayAddr = baseAddress(*node.object, CgType::Kind::Array);
-                    if (!arrayAddr) return;
-                    value_ = CgVal{builder_.CreateExtractValue(
-                                       builder_.CreateLoad(arrayType->llvmType, arrayAddr->ptr),
-                                       {1}, "length"), i32};
+                    // The length word out of the pair: loaded through the address when
+                    // there is one, extracted from the value when there is not. A
+                    // temporary has no address to borrow and needs none -- the pair is
+                    // already in a register, and `extractvalue` reads a field of it.
+                    llvm::Value* pair = nullptr;
+                    if (arrayAddr) {
+                        pair = builder_.CreateLoad(arrayType->llvmType, arrayAddr->ptr);
+                    } else if (objectValue && objectValue->ok() &&
+                               objectValue->type.isDynamicArray) {
+                        pair = objectValue->value;
+                    } else if (objectValue && objectValue->ok()) {
+                        // A pointer to a `[T]`: the pointer is the address.
+                        pair = builder_.CreateLoad(arrayType->llvmType, objectValue->value);
+                    }
+                    if (!pair) {
+                        unsupported(node, "the length of an array with no representation here");
+                        return;
+                    }
+                    value_ = CgVal{builder_.CreateExtractValue(pair, {1}, "length"), i32};
                 } else {
                     value_ = CgVal{llvm::ConstantInt::get(i32.llvmType, arrayType->extent, true),
                                    i32};
@@ -5704,8 +5733,116 @@ private:
     // emitting a branch here would be making it; emitting none says "the pointer is
     // whatever malloc returned", which is the same thing C says and is at least a
     // rule someone else wrote down.
+    // `new [T, n]{}` -- the only allocation whose result is not a pointer.
+    //
+    // Returns false having reported, per the convention in this file. Split out of
+    // visit(NewExpression&) because the two share nothing: this one never maps the
+    // written type, and everything it emits is about the pair.
+    bool emitArrayAllocation(NewExpression& node, ArrayTypeNode& arrayType) {
+        if (!node.init_fields.empty()) {
+            // `new [int, 3]{x: 1}`. The braces in the corpus's spelling are always
+            // empty -- `new [T, amount]{}` -- and a field name on an array is not a
+            // thing the language has anywhere else.
+            unsupported(node, "'new' of an array with field initialisers");
+            return false;
+        }
+        if (!node.args.empty()) {
+            unsupported(node, "'new' of an array with an initial value");
+            return false;
+        }
+        if (!arrayType.element_type) {
+            unsupported(node, "'new' of an array with no element type");
+            return false;
+        }
+        if (!arrayType.size) {
+            // `new [int]` -- no extent at all. The parser accepts it; there is no count
+            // to allocate, and zero would be a guess rather than an answer.
+            unsupported(node, "'new' of an array with no extent");
+            return false;
+        }
+
+        auto element = types_.map(arrayType.element_type.get());
+        if (!element || element->isVoid() || !element->llvmType ||
+            !element->llvmType->isSized()) {
+            unsupportedType(node, arrayType.element_type.get(), "'new' of an array of");
+            return false;
+        }
+
+        // The pair the result *is*, taken from the mapper rather than built here, so
+        // the field order and the length's width come from mapArray and are stated
+        // once. `[T]` with no extent is what the analyzer typed this expression as.
+        ArrayTypeNode dynamicNode(std::move(arrayType.element_type));
+        auto pairType = types_.map(&dynamicNode);
+        arrayType.element_type = std::move(dynamicNode.element_type);
+        if (!pairType) {
+            unsupportedType(node, &arrayType, "'new'");
+            return false;
+        }
+
+        // The extent, as the expression it is. Any integer type: stdio.fin:112 and
+        // :124 both allocate with a `ulong` count, which the analyzer accepts on
+        // purpose (Soundness_ArrayExtent.AnAllocationsExtentMayBeAnyIntegerType).
+        CgVal count = emit(*arrayType.size);
+        if (failed_) return false;
+        if (!count.ok() || count.type.kind != CgType::Kind::Int) {
+            unsupported(node, "an array allocation whose extent is not an integer");
+            return false;
+        }
+        auto* i64 = llvm::Type::getInt64Ty(ctx_);
+        auto* i32 = llvm::Type::getInt32Ty(ctx_);
+        // Widened for the byte arithmetic and narrowed for the length word, both from
+        // the same value and both explicitly signed-or-not: a `ulong` count near the
+        // top of its range sign-extends to a negative byte count otherwise, and
+        // `malloc` is handed a number it will refuse for the wrong reason.
+        llvm::Value* wide = builder_.CreateIntCast(count.value, i64, count.type.isSigned);
+        llvm::Value* len = builder_.CreateIntCast(count.value, i32, count.type.isSigned);
+
+        // getTypeAllocSize and not getSizeOf: the stride, including the padding an
+        // element carries in an array, and the same table `sizeof` and every GEP in
+        // this file read.
+        const uint64_t stride = module_.getDataLayout().getTypeAllocSize(element->llvmType);
+        llvm::Value* bytes = builder_.CreateMul(wide, builder_.getInt64(stride), "array_bytes");
+
+        llvm::FunctionCallee alloc = runtimeFn(
+            node, "malloc",
+            llvm::FunctionType::get(llvm::PointerType::getUnqual(ctx_), {i64}, false),
+            "an array allocation");
+        if (!alloc) return false;
+        llvm::Value* raw = builder_.CreateCall(alloc, {bytes}, "array_new");
+
+        // Zeroed, which is the answer `new int*` gets three functions down and the
+        // answer a local with no initialiser gets: undefined contents is the one
+        // answer no test can pin. `{}` is written at every corpus allocation site and
+        // it is the empty initialiser, so zero is also what it reads as.
+        builder_.CreateMemSet(raw, builder_.getInt8(0), bytes, llvm::MaybeAlign(1));
+
+        llvm::Value* pair = llvm::UndefValue::get(pairType->llvmType);
+        pair = builder_.CreateInsertValue(pair, raw, {0});
+        pair = builder_.CreateInsertValue(pair, len, {1});
+        value_ = CgVal{pair, *pairType};
+        return true;
+    }
+
     void visit(NewExpression& node) override {
         if (!currentFn_) { unsupported(node, "'new' outside a function"); return; }
+
+        // An array allocation before the general path, because it is not the general
+        // path: every other `new` is a pointer to one of something, and this one is a
+        // `[T]` -- a `{ptr, len}` pair, no extra indirection, which is what the
+        // analyzer types it as (Analyzer_Expr.cpp, visit(NewExpression&)) and what the
+        // corpus stores into a `[T]` field at stdlib/collection.fin:54.
+        //
+        // It has to be its own branch rather than a case of the code below for two
+        // reasons that pull in opposite directions. `new [T, n]` with a run-time `n`
+        // maps to nothing at all -- `mapArray` needs a constant extent to build an
+        // `[N x T]` -- and `new [int, 3]` maps to *too much*: a fixed `[3 x i32]`,
+        // making the result a `&[int, 3]`, which is not the `[int]` the analyzer said
+        // and does not convert to one. So the extent is never read as a type here. It
+        // is emitted as the expression it is, and only the element is mapped.
+        if (auto* arrayType = dynamic_cast<ArrayTypeNode*>(node.type.get())) {
+            if (!emitArrayAllocation(node, *arrayType)) return;
+            return;
+        }
 
         auto allocated = types_.map(node.type.get());
         if (!allocated || allocated->isVoid() || !allocated->llvmType ||
