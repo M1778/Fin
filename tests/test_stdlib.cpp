@@ -193,13 +193,28 @@ TEST(Soundness_BundledStdlib, EverySymbolTheCorpusImportsIsExported) {
     }
 }
 
-// `import * from somelib;` and `import networking;` -- the two whole-module forms the
-// corpus uses, which resolve a module without naming anything inside it.
+// The whole-module import forms the corpus uses, which resolve a module without naming
+// anything inside it.
+//
+// `import * from somelib;` was a fourth row here and is gone, because the module is:
+// `4d79ae7` deleted `lib/std/somelib/index.fin` with the message "somelib isnt a real
+// stdlib module", and a row asserting that a deleted module resolves is a row asserting
+// the deletion was a mistake. It was not -- the directory existed only to exercise
+// `<base>/<name>/index.fin` resolution, and that candidate is covered against temp trees
+// by test_cli.cpp's library-path tests and by test_module_loader.cpp, neither of which
+// needs a directory inside the shipped library to do it. `import * from` itself is held by
+// Soundness_Imports.ImportStarBindsEveryValueTheModuleDeclares and its two siblings in
+// test_cli.cpp, which build their own module rather than borrowing one from the bundle.
+//
+// What the deletion does cost is two diagnostics in `tests/samples/importing.fin`, which
+// writes `import "somelib";` and `import * from somelib;` and now reports `module not
+// found` for both. Its expectation is `unimplemented`, so the corpus stays green; the
+// sample is the specification (ADR 0008) and it asks for a module the library no longer
+// ships, which is an owner question and not this file's to answer.
 TEST(Soundness_BundledStdlib, TheWholeModuleImportFormsResolve) {
     for (const char* code : {
              "import networking;\nfun main() <int> { return 0; }\n",
              "import networking as net;\nfun main() <int> { return 0; }\n",
-             "import * from somelib;\nfun main() <int> { return 0; }\n",
              "import stdio::std as stdio;\nfun main() <int> { return 0; }\n",
          }) {
         const std::string err = stripAnsi(compileBundled(code).err);
@@ -537,3 +552,309 @@ TEST(Soundness_GlobalAttribute, AnUnmarkedExternInALoadedModuleIsNotSpliced) {
 }
 
 #endif  // FIN_TESTS_HAVE_BACKEND
+
+// ---------------------------------------------------------------------------
+// The rewritten library's surface.
+//
+// These belong here rather than in test_soundness.cpp for the reason the file's header
+// gives: what is under test is the *bundle*, and reaching it needs the real binary with
+// no library flags. `compileBundled` is that.
+//
+// What they do NOT assert is any algorithm. `HashMap`'s probe sequence and
+// `Collection`'s insert arithmetic were verified by transliterating each module into C
+// and running it against a reference, because a call to an imported function is not
+// lowered and no Fin program can exercise them. Asserting an algorithm here would mean
+// asserting that a type-check succeeded, which says nothing about whether the algorithm
+// is right -- so these hold the *shape* to account and the commit messages carry the
+// measurements.
+//
+// Each test pairs a positive case with a negative one. A test that only checks "this
+// compiles" passes against a library that dropped the method and gained a
+// catch-all, and passes against a module that failed to load in a way that suppressed
+// its own diagnostics -- both have happened in this repository. The negative case is
+// what makes the positive one evidence.
+
+namespace {
+
+// Compiles a program against the bundle and returns its ANSI-stripped diagnostics.
+std::string bundledErr(const std::string& code) {
+    return stripAnsi(compileBundled(code).err);
+}
+
+// A program body that imports from the bundle and runs the given statements in `main`.
+std::string program(const std::string& imports, const std::string& body) {
+    return imports + "fun main() <noret> {\n" + body + "}\n";
+}
+
+} // namespace
+
+TEST(Soundness_BundledStdlib, EveryModuleChecksCleanThroughAnImport) {
+    // The blanket claim the guide chapter makes, held to account one module at a time so
+    // that a failure names the module rather than "the stdlib".
+    //
+    // Through an *import* and not standalone, deliberately: `finc lib/std/stdio.fin` and
+    // `finc lib/std/error.fin` each report a circular dependency when they are the root
+    // file, which is a loader limitation rather than a fault in either file, and
+    // TwoModulesDoNotCheckStandalone below is where that is recorded. Every module has
+    // to be clean by the route a program actually uses.
+    for (const char* module : {"error", "collection", "hashmap", "types", "typing",
+                               "enums", "operators", "stdptr", "stdio", "strings",
+                               "math", "networking"}) {
+        const std::string err =
+            bundledErr(std::string("import ") + module + ";\nfun main() <noret> {}\n");
+        EXPECT_EQ(errorCount(err), 0u)
+            << "lib/std/" << module << ".fin does not check clean through an import.\n"
+            << err;
+    }
+}
+
+TEST(Soundness_BundledStdlib, TheHashMapSurfaceResolves) {
+    // Every method the rewritten `HashMap` gained, named at a call. `get_index`,
+    // `exists`, `len`, `__get`, `__set` and the two operators are the draft's and are
+    // covered by the corpus; these are the additions, and without a test the first thing
+    // to notice one had been dropped would be a user's program.
+    const std::string err = bundledErr(program(
+        "import { HashMap, hash_of } from hashmap::std;\n",
+        "  let m <auto> = HashMap::<string, int>();\n"
+        "  m[\"a\"] = 1;\n"
+        "  let v <int> = m[\"a\"];\n"
+        "  let g <int> = m.get_or(\"z\", -1);\n"
+        "  let r <bool> = m.remove(\"a\");\n"
+        "  let e <bool> = m.is_empty();\n"
+        "  let c <int> = m.capacity();\n"
+        "  let n <int> = m.slot_count();\n"
+        "  let live <bool> = m.is_live(0);\n"
+        "  let k <string> = m.key_at(0);\n"
+        "  let w <int> = m.value_at(0);\n"
+        "  m.clear();\n"
+        "  let h <int> = hash_of::<string>(\"a\");\n"));
+    EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_BundledStdlib, AHashMapCallIsStillCheckedAgainstItsSignature) {
+    // The negative half of the test above. Without it, a `HashMap` that had lost
+    // `get_or` and gained a variadic catch-all would pass -- and so would one whose
+    // module failed to load in a way that suppressed the diagnostics, which is the
+    // failure mode `stdio.fin`'s circular dependency produces when it is the root file.
+    const std::string err = bundledErr(program(
+        "import { HashMap } from hashmap::std;\n",
+        "  let m <auto> = HashMap::<string, int>();\n"
+        "  let g <int> = m.get_or(\"z\");\n"));
+    EXPECT_NE(err.find("expects 2 arguments, got 1"), std::string::npos)
+        << "a method on a library type must be arity-checked like any other:\n" << err;
+}
+
+TEST(Soundness_BundledStdlib, TheCollectionSurfaceResolves) {
+    const std::string err = bundledErr(program(
+        "import { Collection } from collection::std;\n",
+        "  let c <&Collection<int>> = new Collection::<int>{};\n"
+        "  c.push(1);\n"
+        "  let n <int> = c.len();\n"
+        "  let e <bool> = c.is_empty();\n"
+        "  let cap <int> = c.capacity();\n"
+        "  c.reserve(16);\n"
+        "  let f <int> = c.first();\n"
+        "  let l <int> = c.last();\n"
+        "  let i <int> = c.index_of(1);\n"
+        "  let has <bool> = c.contains(1);\n"
+        "  c.insert(0, 2);\n"
+        "  let gone <int> = c.remove(0);\n"
+        "  c.set(0, 3);\n"
+        "  c.reverse();\n"
+        "  let d <&Collection<int>> = new Collection::<int>{};\n"
+        "  d.extend(c);\n"
+        "  c.clear();\n"));
+    EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_BundledStdlib, ACollectionCallIsStillCheckedAgainstItsSignature) {
+    const std::string err = bundledErr(program(
+        "import { Collection } from collection::std;\n",
+        "  let c <&Collection<int>> = new Collection::<int>{};\n"
+        "  c.insert(0);\n"));
+    EXPECT_NE(err.find("expects 2 arguments, got 1"), std::string::npos) << err;
+}
+
+TEST(Soundness_BundledStdlib, TheSmartPointerSurfaceResolves) {
+    // `rptr`'s counting members and `wptr`, which the module gained together: the counts
+    // are only meaningful because the counters are shared, and `wptr` is the handle that
+    // reads a count without incrementing it.
+    const std::string err = bundledErr(program(
+        "import { rptr, wptr, OwnershipError } from stdptr::std;\n",
+        "  let p <rptr<int>> = rptr(5);\n"
+        "  let refs <int> = p.refs();\n"
+        "  let borrows <int> = p.borrows();\n"
+        "  let owned <bool> = p.is_owned();\n"
+        "  let borrowed <bool> = p.is_borrowed();\n"
+        "  let back <bool> = p.is_givenback();\n"
+        "  let a <&rptr<int>> = p.alias();\n"
+        "  let ro <&rptr<int>> = p.readonly_view();\n"
+        "  let w <wptr<int>> = p.weak();\n"
+        "  let alive <bool> = w.is_alive();\n"
+        "  let seen <&int> = w.get();\n"
+        "  let lent <&rptr<int>> = p.borrow();\n"
+        "  lent.set(7);\n"
+        "  lent.giveback();\n"
+        "  let heir <&rptr<int>> = p.own();\n"
+        "  let value <&int> = heir.get();\n"
+        "  heir.release();\n"));
+    EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_BundledStdlib, ASmartPointerCallIsStillTypeChecked) {
+    // `refs()` returns an `int`. Assigning it to a `string` has to fail, or the test
+    // above is measuring that the names exist rather than that they mean anything.
+    const std::string err = bundledErr(program(
+        "import { rptr } from stdptr::std;\n",
+        "  let p <rptr<int>> = rptr(5);\n"
+        "  let n <string> = p.refs();\n"));
+    EXPECT_NE(err.find("expected 'string', got 'int'"), std::string::npos) << err;
+}
+
+TEST(Soundness_BundledStdlib, TheResultSurfaceResolves) {
+    // `typing.fin`'s `implements` block, reached the way a caller reaches it. The receiver
+    // of a method on an enum is its first parameter (Soundness_EnumMethodReceiver), so
+    // `r.unwrap()` passes nothing and `r.unwrap_or(0)` passes one argument.
+    const std::string err = bundledErr(program(
+        "import { Result } from typing::std;\n"
+        "fun consume(v: int) <noret> {}\n",
+        "  let r <Result<int, string>> = Result::Ok(1);\n"
+        "  let v <int> = r.unwrap();\n"
+        "  let w <int> = r.unwrap_or(0);\n"
+        "  r.expect();\n"
+        "  let ok <bool> = r.is_ok();\n"
+        "  let bad <bool> = r.is_err();\n"
+        "  r.select(consume);\n"));
+    EXPECT_EQ(errorCount(err), 0u)
+        << "Result's implements block is what makes these resolve; if `keyidof` regressed\n"
+           "the block stops type-checking and every one of these becomes an unknown method.\n"
+        << err;
+}
+
+TEST(Soundness_BundledStdlib, AnEnumMethodTakesItsReceiverAsItsFirstParameter) {
+    // The negative half, and it pins the receiver rule rather than just an arity. If the
+    // first parameter ever stopped being the receiver, `r.unwrap()` would need an
+    // argument and `r.unwrap_or(0)` would need two -- so passing one to `unwrap` must be
+    // an error today and would silently become correct if the rule changed.
+    const std::string err = bundledErr(program(
+        "import { Result } from typing::std;\n",
+        "  let r <Result<int, string>> = Result::Ok(1);\n"
+        "  let v <int> = r.unwrap(r);\n"));
+    EXPECT_NE(errorCount(err), 0u)
+        << "the receiver of an enum method is its first parameter, so `unwrap` takes no\n"
+           "argument at the call. If this went green, Soundness_EnumMethodReceiver moved\n"
+           "and typing.fin's signatures need re-reading.\n"
+        << err;
+}
+
+TEST(Soundness_BundledStdlib, TheIOResultAndFileSurfacesResolve) {
+    const std::string err = bundledErr(program(
+        "import { IOResult, File, Stream, PathLike, eprintln_str, println_str,\n"
+        "         print_int, flush } from stdio::std;\n",
+        "  let r <IOResult<int>> = IOResult::Ok(1);\n"
+        "  let v <int> = r.unwrap();\n"
+        "  let w <int> = r.unwrap_or(0);\n"
+        "  let ok <bool> = r.is_ok();\n"
+        "  let path <PathLike> = \"/tmp/fin_stdlib_surface\";\n"
+        "  let there <bool> = File::exists(path);\n"
+        "  let size <int> = File::size(path);\n"
+        "  let wrote <bool> = File::write_text(path, \"x\", 1);\n"
+        "  let more <bool> = File::append_text(path, \"y\", 1);\n"
+        "  let bytes <[char]> = File::read_all(path);\n"
+        "  let s <Stream> = File::open(path);\n"
+        "  let t <int> = s.tell();\n"
+        "  let left <int> = s.remaining();\n"
+        "  s.rewind();\n"
+        "  let read <[char]> = s.read_all();\n"
+        "  let n <int> = s.write(bytes, 1);\n"
+        "  let gone <bool> = File::remove(path);\n"
+        "  println_str(\"a\"); eprintln_str(\"b\"); print_int(1); flush();\n"));
+    EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_BundledStdlib, TheStringsAndMathSurfacesResolve) {
+    // The two modules with no draft behind them, so nothing else in the tree would
+    // notice if either went missing -- which is exactly why they are held here.
+    const std::string err = bundledErr(program(
+        "import { Collection } from collection::std;\n"
+        "import { len, equals, find, substr, trim, to_upper, split, join,\n"
+        "         concat, free_str, to_chars, from_chars } from strings::std;\n"
+        "import { min, max, clamp, abs, signum, gcd, lcm, ipow, isqrt,\n"
+        "         floor_div, floor_mod, PI, math_sqrt } from math::std;\n",
+        "  let n <int> = len(\"hi\");\n"
+        "  let eq <bool> = equals(\"a\", \"a\");\n"
+        "  let at <int> = find(\"hello\", \"ell\");\n"
+        "  let sub <string> = substr(\"hello\", 1, 3);\n"
+        "  let t <string> = trim(\"  x  \");\n"
+        "  let up <string> = to_upper(\"x\");\n"
+        "  let cat <string> = concat(\"a\", \"b\");\n"
+        "  let parts <&Collection<string>> = split(\"a,b\", ',');\n"
+        "  let joined <string> = join(parts, \",\");\n"
+        "  let bytes <[char]> = to_chars(\"hi\");\n"
+        "  let back <string> = from_chars(bytes, 0, 2);\n"
+        "  free_str(cat);\n"
+        "  let lo <int> = min::<int>(1, 2);\n"
+        "  let hi <int> = max::<int>(1, 2);\n"
+        "  let cl <int> = clamp::<int>(5, 0, 3);\n"
+        "  let a <int> = abs::<int>(-1);\n"
+        "  let s <int> = signum::<int>(-1);\n"
+        "  let g <int> = gcd(12, 18);\n"
+        "  let l <int> = lcm(4, 6);\n"
+        "  let p <int> = ipow(2, 8);\n"
+        "  let q <int> = isqrt(15);\n"
+        "  let fd <int> = floor_div(-7, 2);\n"
+        "  let fm <int> = floor_mod(-7, 2);\n"
+        "  let pi <double> = PI;\n"
+        "  let r <double> = math_sqrt(cast<double>(2.0));\n"));
+    EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_BundledStdlib, AModuleNamedStringCannotExist) {
+    // Why the module is `strings`. This is a lexer fact and not a naming preference: the
+    // token is TYPE_STRING before any module resolution happens, so `from string::std`
+    // cannot parse whatever a file called `string.fin` contains. Asserted so that a
+    // future reader does not "fix" the name.
+    const std::string err = bundledErr(
+        "import { len } from string::std;\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(err.find("unexpected TYPE_STRING"), std::string::npos)
+        << "`string` is a keyword, so a module can never carry that name. If this went\n"
+           "green the lexer changed and lib/std/strings.fin's header needs re-reading.\n"
+        << err;
+}
+
+TEST(KnownDefect_BundledStdlib, TwoModulesDoNotCheckStandalone) {
+    // `finc lib/std/stdio.fin` and `finc lib/std/error.fin` each report a circular
+    // dependency when they are the root file. Neither is a cycle in the source: stdio
+    // imports error and error imports nothing, so the graph is a single edge. What
+    // produces it is the driver preloading stdio before analysing the root file (ADR
+    // 0021's eager-loading consequence) -- so compiling either of those two *as* the root
+    // means the file is already on the loader's in-progress stack when its own import is
+    // reached.
+    //
+    // Every other module checks clean standalone, which is what makes this two files and
+    // not a general limitation. Recorded rather than fixed because the fix is in the
+    // loader's cycle detection and that is not the stdlib's lane.
+    //
+    // Inverts into Soundness_BundledStdlib.EveryModuleChecksCleanStandalone: delete this
+    // and add "stdio" and "error" to a standalone loop.
+    for (const char* module : {"stdio", "error"}) {
+        const std::string path = testsDir() + "/../lib/std/" + module + ".fin";
+        const std::string err = stripAnsi(runFinc({path}, {{"FIN_LIBS", ""}}).err);
+        EXPECT_NE(err.find("circular dependency"), std::string::npos)
+            << "GOOD NEWS: lib/std/" << module << ".fin checks standalone now. Invert\n"
+               "this test into EveryModuleChecksCleanStandalone and drop the caveat from\n"
+               "docs/guide/12-standard-library-tour.md.\n"
+            << err;
+    }
+
+    // The control, and it is what makes the above about those two files rather than about
+    // compiling anything in lib/std directly: a module that imports nothing loads fine as
+    // a root file.
+    const std::string path = testsDir() + "/../lib/std/collection.fin";
+    const std::string ok = stripAnsi(runFinc({path}, {{"FIN_LIBS", ""}}).err);
+    EXPECT_EQ(errorCount(ok), 0u)
+        << "collection.fin must still check standalone, or the test above is measuring\n"
+           "something wider than the two files it names.\n"
+        << ok;
+}
