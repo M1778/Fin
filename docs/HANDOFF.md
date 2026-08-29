@@ -110,6 +110,7 @@ was broken.
 | Measure | Value | How |
 | --- | --- | --- |
 | `fin_tests`, `FIN_WITH_LLVM=ON` | **1396 / 1396 pass**, 0 skipped | `./build/tests/fin_tests` |
+| — since `4788753`, at `d7a91df` | **1410 / 1410 pass**, 0 skipped | parameter defaults; corpus unmoved |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **19 of 51** | see below |
 | Samples blocked in codegen | **12** | see below |
@@ -338,8 +339,8 @@ conversion between integer types. `cast<int>` of a float is not lowered.
 `Ok(T)`.
 
 **Analyzer/AST defects carried:** `StructType::substitute` leaks the outer struct as a nested
-struct's `Self`; default parameter values parse but are not honoured; an interface cannot inherit
-an interface; `StructType::implements()` compares names only; **operators have no arity check**
+struct's `Self`; an interface cannot inherit an interface; `StructType::implements()` compares
+names only; **operators have no arity check**
 (which is why the backend's own `too few arguments` refusal is where a wrong-arity operator
 lands); interface-typed pointer assignability; `Scope::resolve` leaks non-exports through a
 namespace; prototype methods; index assignment never consults `operator []=`; the two

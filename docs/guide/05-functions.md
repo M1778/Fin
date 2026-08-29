@@ -261,11 +261,49 @@ fun span(lo: int, hi: int = lo) <int> { return hi - lo; }
 
 (`from` is a keyword — it is `import`'s — so a parameter cannot be called that.)
 
-What a default does **not** do yet is make the parameter optional at the call site. The
-arity check knows about nullable parameters and not about defaults, so `span(1)` reports
-`Function 'span' expects 2 arguments, got 1`. Both arguments must be written. The standard
-library works around this by declaring separate methods rather than defaulted ones —
-`lib/std/stdio.fin` has `read` and `read_all` where its draft had one `read` with a
-sentinel default.
+A default makes the parameter optional at the call site, so `span(1)` is a call and
+`hi` is 2:
+
+```fin
+fun greet(name: string, times: int = 2) <noret> { }
+
+fun main() <noret> {
+    greet("hi");
+    greet("hi", 3);
+}
+```
+
+Two limits on that, both about where the optionality comes from rather than about
+defaults. It is *positional*: arguments bind by position, so only a trailing run of
+optional parameters can be omitted. `fun f(a: int = 1, b: int)` still requires both, and
+`f(2)` reports `Function 'f' expects 2 arguments, got 1` — there is no way to write the
+second without the first. And a default does not yet supply the *value*: the argument
+stops being required, and a call to an ordinary imported function is not lowered at all
+yet (chapter 10), so nothing in the language observes what the omitted argument would have
+been. Within a single file the same holds — the arity check is what a default reaches, and
+codegen for the missing argument is a separate unit.
+
+Defaults and nullable parameters (chapter 2) are the same mechanism from the arity check's
+point of view, and a signature may mix them:
+
+```fin
+fun g(a: int, b?: int, c: int = 3) <int> { return a; }
+```
+
+`g(1)`, `g(1, null)` and `g(1, null, 4)` are all calls. The minimum is the last parameter
+that is neither nullable nor defaulted, and a parameter that is both counts once — so this
+signature reports `expects between 1 and 3 arguments` when given none.
+
+A default is not part of the function's type. `fn(int) -> int` describes both of these,
+and either may be assigned to a variable of that type:
+
+```fin
+fun a(x: int) <int> { return x; }
+fun b(x: int = 1) <int> { return x; }
+```
+
+That follows from what a default is: a fact about the declaration, observable only by
+omitting an argument. A `fn` annotation has nowhere to write one, so making the two types
+disagree would split them over a difference no call site can see.
 
 Next: [structs and classes](06-structs-and-classes.md).

@@ -3065,6 +3065,71 @@ line rather than by a failure. That is the asymmetry the floor was chosen for wo
 equality it replaced would have failed on every unit of progress, in a harness file the agent making
 the progress does not own.
 
+### A default that had no effect, and the tenth parameter loop
+
+The second half of the parameter-defaults root cause, and the paragraph two sections up
+("A visitor nobody called") is the record of it being measured and deferred. That deferral
+ranked the unit last, on arithmetic that was correct: the corpus declares exactly three
+defaulted parameters (`stdlib/stdio.fin:87`, `:109`, `stdlib/error.fin:11`), calls none of
+them, and the one call that would need the fix is commented out -- so the corpus effect is
+zero diagnostics, measured as 78 before and 78 after.
+
+**The ranking was wrong and the arithmetic was not.** What a corpus diagnostic count
+cannot measure is a shape the library declines to write *because* the compiler refuses it.
+`lib/std/error.fin` cut its second parameter away and ships a one-argument `Error`, and the
+guide's chapter 12 said so in as many words -- "the constructor takes one argument, not the
+draft's two, because a defaulted parameter is still required at the call site". An absent
+declaration produces no diagnostic to count. A defect that costs the standard library a
+shape ranks by what the library cannot write, not by what the corpus reports.
+
+**The field.** `FunctionType` gains `param_defaults`, a `std::vector<bool>` positionally
+parallel to `param_types`, read through `hasDefault(i)` which returns false past its end so
+a site that knows about only its leading parameters need not pad. Parallel to the
+parameters rather than a count of required ones, because *which* parameters are optional
+decides arity and a count cannot say it: arguments bind positionally, so `(a: int = 1, b:
+int)` still needs both written while `(a: int, b: int = 1)` needs one. Flags rather than the
+default *expressions*: nothing consumes an expression at a call site, and storing one would
+put an AST pointer inside a `Type`, which is the aliasing `clone` and `substitute` exist to
+avoid.
+
+`checkCallArity` folds the flag together with nullability into one `required` rather than
+applying them in sequence, because a parameter that is both nullable and defaulted is
+optional once. `equals()` deliberately ignores the field: a default is a fact about a
+declaration, observable only by omitting an argument, and a `fn(int) -> int` annotation has
+nowhere to write one -- so comparing them would split two types over a difference no call
+site can see. The file-scope hoist carries it, or optionality would have depended on which
+side of the declaration a call sat on.
+
+**Fifteen construction sites, and the fifteenth was found by mutation.** Eleven mutants
+over five files; two survived, and both survivals were the same omission from different
+ends. M4 dropped the field in `clone()` and no test could tell -- `FunctionType::clone` is
+reached only through `StructType::clone`, which nothing in the compiler calls, so no
+accepted program can observe it. That is the shape this repo deletes rather than tests, and
+the deletion is wrong here: the rule is about *guards*, and a faithful-copy contract that
+silently loses a field is not a guard but a trap for its first caller. It gets a type-level
+test, on the precedent `Soundness_FieldOrder` set for exactly this on exactly this method.
+
+M7 removed the receiver-erase from the implements-block overwriter and no test could tell
+either -- and that was not a missing test at all. The vector it erases from was *always
+empty*, because `visit(LambdaExpression&)` recorded no flags. A lambda was the tenth
+parameter loop, and it was absent from the list of nine the earlier unit enumerated,
+because those nine are declaration forms and a lambda is an expression: a helper factored
+out of declaration handling never reached it. Two consequences, one of them a silent hole
+rather than a missing feature -- `fun(a: int, b: int = "hello")` built clean where the
+identical parameters on a named function reported the mismatch, so a lambda's default was
+never checked against anything. Both halves are fixed, five tests pin them, and all eleven
+mutants are dead.
+
+The lesson is narrower than "mutation testing works", which this plan has said four times.
+A surviving mutant is usually a weak test; twice in this unit it was a hole in the
+implementation, pointed at from the only direction that could see it. Reading harder would
+not have found the lambda, because nothing in the fix's own five files mentions one.
+
+Suite **1410 / 1410 pass, 0 skipped**, from 1396. Corpus **19 / 12 / 20 of 51** and 78
+diagnostics -- unchanged, cross-checked at clean HEAD. Lane: `src/types/`,
+`src/semantics/impl/`, `tests/test_soundness.cpp`, and `docs/guide/05-functions.md`, whose
+"Default parameter values" section carried the limitation with the arity error verbatim.
+
 ## Rulings owed
 
 Every entry below is a question only the language owner can answer, discovered by measurement and blocking
