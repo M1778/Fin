@@ -425,11 +425,19 @@ private:
     // signature-registration passes over the same constructor parameters (struct
     // and class), which would report every diagnostic twice.
     //
-    // It visits and does not type-check. Comparing the default against the declared
-    // type is blocked on the integer ruling: stdlib/stdio.fin:87 and :109 write
-    // `nbytes: ulong = -1`, and `let x <ulong> = -1` is an error today, so the check
-    // would put two new diagnostics on a normative sample over a question the owner
-    // has not answered. KnownDefect_ParameterDefaults holds that half.
+    // It visits *and* type-checks, the second half having landed after the first. The
+    // check is checkInitializer, so a default follows the same rule as every other
+    // initialiser -- `= null` is permitted whatever the declared type is, widening
+    // reaches it, and a negative constant is not an unsigned value. What that costs is
+    // two diagnostics on tests/samples/stdlib/stdio.fin, whose :87 and :109 write
+    // `nbytes: ulong = -1`; the argument for paying it is that :110's `nbytes == -1` has
+    // been refused in that same file since ADR 0022, so the alternative was a compiler
+    // that disagreed with itself about one line. Soundness_ParameterDefaults and
+    // Soundness_DefaultArguments hold both halves.
+    //
+    // Whether a defaulted parameter may be *omitted* at a call is a separate defect and
+    // still open: the arity check reads a FunctionType, which records no defaults.
+    // KnownDefect_ParameterDefaults.ADefaultedParameterIsStillRequired holds it.
     void visitParameterDefaults(const std::vector<std::unique_ptr<Parameter>>& params);
     bool checkReturnPaths(Statement* node);
 

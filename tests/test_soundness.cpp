@@ -4801,7 +4801,11 @@ TEST(Soundness_IntegerWidening, AComparisonDoesNotAdmitANegativeConstantToAnUnsi
     EXPECT_EQ(signedOk.exitCode, 0) << signedOk.err;
 }
 
-TEST(KnownDefect_DefaultArguments, ADefaultArgumentIsNotCheckedAgainstItsParameterType) {
+TEST(Soundness_DefaultArguments, ADefaultArgumentIsCheckedAgainstItsParameterType) {
+    // Inverted from KnownDefect_DefaultArguments.ADefaultArgumentIsNotCheckedAgainstIts-
+    // ParameterType, whose comment is kept below because it is the diagnosis and it was
+    // right.
+    //
     // Found while writing ADR 0022, and it is not the negative-constant question --
     // it is larger than that and swallows it.
     //
@@ -4811,27 +4815,25 @@ TEST(KnownDefect_DefaultArguments, ADefaultArgumentIsNotCheckedAgainstItsParamet
     // tests/samples/stdlib/stdio.fin:109 `fun read(nbytes: ulong = -1)` as the site
     // where it is accepted. The two Soundness_IntegerWidening tests above then ruled
     // the *other* way, refusing a negative constant to an unsigned target -- and
-    // :109 is still accepted, so the disagreement the comment predicted is real and
-    // present. But the reason is not the sign rule. It is that **nothing checks a
-    // default argument at all**:
+    // :109 was still accepted, so the disagreement the comment predicted was real and
+    // present. The reason was not the sign rule: **nothing checked a default argument
+    // at all**. It does now, and the disagreement is gone in the direction the rest of
+    // the compiler already pointed -- :110's `nbytes == -1` has been a diagnostic in
+    // that sample since ADR 0022, so this makes the compiler say the same thing at all
+    // three places the sample writes the sentinel rather than at one of the three.
     for (const char* decl : {"fun f(a: int = \"hello\") <noret> {}",
                              "fun f(a: string = 5) <noret> {}",
                              "fun f(a: bool = 7) <noret> {}",
                              "fun f(a: ulong = -1) <noret> {}"}) {
         const std::string code = std::string(decl) + "\nfun main() <noret> {}\n";
         const FincRun r = compile(code);
-        EXPECT_EQ(r.exitCode, 0)
-            << "this test asserts the defect. If this now REFUSES, that is good news:\n"
-            << "invert it to Soundness_DefaultArguments.ADefaultArgumentIsCheckedAgainstIts"
-               "ParameterType, keep this comment, and check whether\n"
-            << "tests/samples/stdlib/stdio.fin:109 `nbytes: ulong = -1` is now a\n"
-               "diagnostic -- it is a sentinel the body replaces, so the sample may need\n"
-               "the owner rather than a repair.\n"
-            << code << r.err;
+        EXPECT_NE(r.exitCode, 0) << "a default argument is checked:\n" << code << r.err;
+        EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos)
+            << code << stripAnsi(r.err);
     }
-    // The same expression in an initialiser IS refused, which is what makes this a
-    // hole in one path rather than a language rule. Both halves in one test, so the
-    // asymmetry cannot be read as two unrelated facts.
+    // The same expression in an initialiser is refused too. Both halves stay in one
+    // test: the asymmetry between them was this defect, so the test that recorded it
+    // is the test that has to show it is gone.
     const FincRun asInitialiser =
         compile("fun main() <noret> { let x <ulong> = -1; }\n");
     EXPECT_NE(asInitialiser.exitCode, 0)
@@ -5165,27 +5167,31 @@ TEST(Soundness_IntegerConstants, AnArrayOfConstantsTakesTheAnnotatedElementType)
 }
 
 // ---------------------------------------------------------------------------
-// A parameter default: walked now, still not type-checked.
+// A parameter default: walked, and now type-checked.
 //
-// This block was written when neither happened, and the split it predicted held.
-// The walk was the whole defect's first half and is fixed -- see
-// Soundness_ParameterDefaults, which owns that half and its eight call sites. The
-// diagnosis here was right about the cause and wrong about the remedy: visit(Parameter&)
-// does walk the default, but nothing dispatches to it, so the fix was not to add a
-// checkType inside a dead visitor but to reach the defaults from the eleven parameter
-// loops that do run. It is still dead code; Analyzer_Core.cpp says so at its definition.
+// This block was written when neither happened, and the split it predicted held. The
+// walk was the first half. The diagnosis here was right about the cause and wrong about
+// the remedy: visit(Parameter&) does walk the default, but nothing dispatches to it, so
+// the fix was not to add a check inside a dead visitor but to reach the defaults from
+// the parameter loops that do run. It is still dead code; Analyzer_Core.cpp says so at
+// its definition.
 //
-// What remains below is the type half, and it is blocked rather than unwritten. Adding
-// the check convicts stdlib/stdio.fin:87 and :109 (`nbytes: ulong = -1`) the moment it
-// lands, which is the integer ruling. Mutation-tested in advance: applying the naive
-// version (checkType, not checkInitializer) kills ANullDefaultIsStillAccepted, because
-// stdlib/error.fin:11 writes `err_code: int = null` and a plain checkType has no null
-// exemption. So the eventual fix is checkInitializer, and that is known before it is
-// written rather than after.
+// The type half landed second, and the prediction made for it in advance held too.
+// Mutation-tested before it was written: applying the naive version (checkType, not
+// checkInitializer) kills ANullDefaultIsStillAccepted, because stdlib/error.fin:11
+// writes `err_code: int = null` and a plain checkType has no null exemption. It is
+// checkInitializer, which was known before rather than after.
 //
-// Measured, and still worth knowing: the corpus test for stdio.fin would NOT catch a
-// regression here -- its expectation is prose (`//@ unimplemented "..."`), so a new
-// diagnostic in that file flips nothing. These tests are the only thing watching.
+// What it cost is two new diagnostics on tests/samples/stdlib/stdio.fin -- :87 and :109
+// both write `nbytes: ulong = -1` -- and that was the whole reason it waited. It is
+// paid rather than dodged: ADR 0022 already refused a negative constant to an unsigned
+// target in a declaration and in a comparison, and :110's `nbytes == -1` has been a
+// diagnostic in that same file since. So the choice was not "convict the sample or not"
+// but "convict it at one of its three sentinel sites or at all three", and one compiler
+// that disagrees with itself about one line is worse than three honest diagnostics.
+// stdio.fin's expectation is `//@ unimplemented "..."`, prose, so the corpus test does
+// not flip either way -- these tests are the only thing watching, which is why the
+// count is asserted here.
 // ---------------------------------------------------------------------------
 
 TEST(Soundness_ParameterDefaults, AParameterDefaultIsAnalysed) {
@@ -5214,31 +5220,40 @@ TEST(Soundness_ParameterDefaults, AParameterDefaultIsAnalysed) {
     EXPECT_NE(body.exitCode, 0) << "an undefined name in a body must still be caught: " << body.err;
 }
 
-TEST(KnownDefect_ParameterDefaults, AParameterDefaultIsNotCheckedAgainstItsType) {
-    // The type half. The walk it waited on exists now (Soundness_ParameterDefaults),
-    // and this still asserts the defect -- which is exactly the split predicted when
-    // both halves were one test.
-    const FincRun r = compile("fun f(x: uint = \"nope\") <noret> { }\nfun main() <noret> { }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a parameter default is type-checked now. Invert this into "
-           "Soundness_ParameterDefaults and check the negative-constant case too -- "
-           "`fun f(x: uint = -1)` is the corpus's own spelling and the ruling on it "
-           "decides whether that is a second diagnostic or none.";
+TEST(Soundness_ParameterDefaults, AParameterDefaultIsCheckedAgainstItsType) {
+    // The type half, inverted from KnownDefect_ParameterDefaults.AParameterDefaultIsNot-
+    // CheckedAgainstItsType. That test asked its successor to "check the negative-constant
+    // case too -- `fun f(x: uint = -1)` is the corpus's own spelling and the ruling on it
+    // decides whether that is a second diagnostic or none". It is one diagnostic and the
+    // same one: the ruling came out where ADR 0022's own two tests already had it, so
+    // `-1` against an unsigned parameter reads exactly as `let x <uint> = -1` does.
+    const FincRun wrong = compile("fun f(x: uint = \"nope\") <noret> { }\nfun main() <noret> { }\n");
+    EXPECT_NE(wrong.exitCode, 0) << "a wrong default is a diagnostic:\n" << wrong.err;
+    EXPECT_NE(stripAnsi(wrong.err).find("expected 'uint', got 'string'"), std::string::npos)
+        << stripAnsi(wrong.err);
+
+    const FincRun negative = compile("fun f(x: uint = -1) <noret> { }\nfun main() <noret> { }\n");
+    EXPECT_NE(negative.exitCode, 0)
+        << "`-1` on an unsigned parameter, exactly as in a declaration:\n" << negative.err;
+    EXPECT_EQ(errorCount(messagesOnly(stripAnsi(negative.err))), 1u)
+        << "one diagnostic, not one per pass over the parameter list:\n"
+        << stripAnsi(negative.err);
 }
 
-TEST(KnownDefect_ParameterDefaults, AStructFieldDefaultIsCheckedButAParameterIsNot) {
-    // The asymmetry is the evidence that this is a missing call and not a missing
-    // capability: the same wrong default in a struct field is both walked and checked
-    // (Analyzer_Decl.cpp:181 accepts it, :183 calls checkType). Its own test because a
-    // fix that adds checking to parameters must not disturb the path that works.
+TEST(Soundness_ParameterDefaults, AStructFieldDefaultAndAParameterDefaultAreBothChecked) {
+    // The asymmetry was the evidence that this was a missing call and not a missing
+    // capability: the same wrong default in a struct field was both walked and checked
+    // (Analyzer_Decl.cpp:453) while a parameter's was walked only. Kept as one test with
+    // both halves, because a change that reached parameters by disturbing the field path
+    // would be a regression this is the only thing watching for.
     const FincRun field = compile("struct S { pub x <uint> = \"nope\", }\nfun main() <noret> { }\n");
     EXPECT_NE(field.exitCode, 0)
         << "a struct field default of the wrong type must still be caught: " << field.err;
     EXPECT_NE(stripAnsi(field.err).find("Type mismatch"), std::string::npos) << field.err;
 
     const FincRun param = compile("fun f(x: uint = \"nope\") <noret> { }\nfun main() <noret> { }\n");
-    EXPECT_EQ(param.exitCode, 0)
-        << "FIXED: parameters are checked like fields now. Invert this.";
+    EXPECT_NE(param.exitCode, 0) << "and so must a parameter's: " << param.err;
+    EXPECT_NE(stripAnsi(param.err).find("Type mismatch"), std::string::npos) << param.err;
 }
 
 // ---------------------------------------------------------------------------
@@ -6556,38 +6571,104 @@ TEST(Soundness_ParameterDefaults, ADefaultMayNameAnEarlierDeclaration) {
 }
 
 // ---------------------------------------------------------------------------
-// KnownDefect_ParameterDefaults
+// The other half of the same defect, landed second.
 //
-// The other half of the same defect, and the half that is blocked. A parameter's
-// default is not compared against the parameter's declared type, so
-// `fun g(n: string = 3)` is accepted. Every other default in the language is
+// A parameter's default was not compared against the parameter's declared type, so
+// `fun g(n: string = 3)` was accepted while every other default in the language was
 // checked -- a struct member's `pub v <int> = "nope"` reports `expected 'int', got
-// 'string'` -- so this is an inconsistency, not a design.
+// 'string'`. An inconsistency, not a design, and now closed.
 //
-// It is not fixed here because the corpus would regress on a question the owner
-// has not answered. stdlib/stdio.fin:87 and :109 both write
-// `fun read(nbytes: ulong = -1)`, and `let x <ulong> = -1` is an error today
-// (`expected 'ulong', got 'int'`). Adding the check therefore puts two new
-// diagnostics on a normative sample, and whether it should is exactly the integer
-// ruling in docs/plan.md: is `-1` a legal unsigned constant? Answer that and this
-// becomes a two-line change at the site the tests above already reach.
+// It waited on what the corpus would do: stdlib/stdio.fin:87 and :109 both write
+// `fun read(nbytes: ulong = -1)`, and `let x <ulong> = -1` is an error. The check
+// therefore puts two new diagnostics on a normative sample. Landing it anyway is the
+// smaller of the two inconsistencies, and the argument is in the block above.
 
-TEST(KnownDefect_ParameterDefaults, ADefaultOfTheWrongTypeIsAccepted) {
+TEST(Soundness_ParameterDefaults, ADefaultOfTheWrongTypeIsRefused) {
     auto r = compile("fun g(n: string = 3) <int> { return 0; }\n"
                      "fun main() <int> { return 0; }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "when this fails, the default is being type-checked: invert it, and check\n"
-           "stdlib/stdio.fin -- `nbytes: ulong = -1` decides whether that is correct.\n"
-        << r.err;
+    EXPECT_NE(r.exitCode, 0) << "`n: string = 3`:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_ParameterDefaults, AnUnsignedParameterDefaultingToMinusOneIsAccepted) {
-    // stdlib/stdio.fin:87 and :109, reduced. This is the sample line that the fix
-    // above would break, kept as its own test so that the blocker is visible from
-    // the suite and not only from the plan.
+TEST(Soundness_ParameterDefaults, AnUnsignedParameterDefaultingToMinusOneIsRefused) {
+    // stdlib/stdio.fin:87 and :109, reduced. Kept as its own test for the reason it was
+    // kept as its own test when it asserted the opposite: this is the sample line the
+    // check convicts, and it should be readable from the suite and not only from a note.
+    // Its diagnostic is the one `let x <ulong> = -1` gets, from the same guard in
+    // checkType, which is what makes the compiler agree with itself about the line.
     auto r = compile("fun g(n: ulong = -1) <int> { return 0; }\n"
                      "fun main() <int> { return 0; }\n");
-    EXPECT_EQ(r.exitCode, 0) << "stdlib/stdio.fin:87's `nbytes: ulong = -1`:\n" << r.err;
+    EXPECT_NE(r.exitCode, 0) << "stdlib/stdio.fin:87's `nbytes: ulong = -1`:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'ulong', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, EveryDeclarationFormChecksItsDefaultExactlyOnce) {
+    // The type check lives in visitParameterDefaults, which the nine walk tests above
+    // already prove is reached from all nine loops -- so this does not re-prove the
+    // reach, it proves the *count*. Three of those loops run over parameters that a
+    // second pass also walks (a struct constructor's, a class constructor's, an
+    // implements block's), and a check placed one line further out would report each of
+    // them twice. Reported once is the assertion; `nosuchvar` cannot make it, because a
+    // walk test's diagnostic and a check's diagnostic are indistinguishable by count.
+    for (const char* code : {
+             "fun f(n: int = \"x\") <int> { return 0; }\n",
+             "struct S { pub fun m(self: &Self, n: int = \"x\") <int> { return 0; } }\n",
+             "class C { pub v <int>, pub fun m(self: &Self, n: int = \"x\") <int> { return 0; } }\n",
+             "struct S { pub v <int>, S(n: int = \"x\") { self.v = 1; } }\n",
+             "class C { pub v <int>, C(n: int = \"x\") { self.v = 1; } }\n",
+             "interface I { fun m(n: int = \"x\") <int>; }\n",
+             "interface I { operator +(self: &Self, other: int = \"x\") <int>; }\n",
+             "struct S { pub v <int>, operator +(self: &Self, other: int = \"x\") <int> { return 0; } }\n",
+             "@special sp(n: int = \"x\") <int> { return 0; }\n"}) {
+        const std::string program = std::string(code) + "fun main() <int> { return 0; }\n";
+        const FincRun r = compile(program);
+        EXPECT_NE(r.exitCode, 0) << "the default is checked here:\n" << program << r.err;
+        const std::string msgs = messagesOnly(stripAnsi(r.err));
+        EXPECT_NE(msgs.find("expected 'int', got 'string'"), std::string::npos)
+            << program << msgs;
+        EXPECT_EQ(errorCount(msgs), 1u)
+            << "once per parameter, not once per pass over the parameter list:\n"
+            << program << msgs;
+    }
+    // An extern too, with the types the other way round so that a copy-paste of the
+    // wrong literal into this loop could not pass it vacuously.
+    const FincRun ext = compile("@define e(fmt: string = 3, ...) <int>;\n"
+                                "fun main() <int> { return 0; }\n");
+    EXPECT_NE(ext.exitCode, 0) << ext.err;
+    EXPECT_NE(stripAnsi(ext.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(ext.err);
+}
+
+TEST(Soundness_ParameterDefaults, AnUnresolvedParameterTypeIsStillReportedOnce) {
+    // The check re-resolves the parameter's type rather than being handed it, which is
+    // one resolution more than there used to be at every site. Under a QuietPass, for
+    // this: without it `fun f(p: NoSuchType = 1)` reports its undefined type twice, once
+    // from the loop above the call and once from inside it. Soundness_ErrorRecovery owns
+    // the general rule; this is the site that change put at risk.
+    const FincRun r = compile("fun f(p: NoSuchType = 1) <noret> { }\nfun main() <noret> { }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string msgs = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(msgs.find("Undefined type 'NoSuchType'"), std::string::npos) << msgs;
+    EXPECT_EQ(errorCount(msgs), 1u)
+        << "the default's own resolution must be quiet:\n" << msgs;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultThatWidensIsAccepted) {
+    // The check is checkInitializer, so it is the same rule as every other assignment
+    // and ADR 0022's widening reaches it. `int` to `ulong` is the corpus's own direction
+    // (stdlib/stdio.fin's lengths), and refusing a *positive* constant there while
+    // refusing the negative one would be a rule about defaults rather than about types.
+    for (const char* decl : {"fun g(n: ulong = 5) <int> { return 0; }",
+                             "fun g(n: long = 5) <int> { return 0; }",
+                             "fun g(n: double = 5) <int> { return 0; }",
+                             "fun g(n: float = 5) <int> { return 0; }"}) {
+        const std::string code = std::string(decl) + "\nfun main() <int> { return 0; }\n";
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << "a default widens like any other initialiser:\n"
+                                 << code << r.err;
+    }
 }
 
 TEST(Soundness_ParameterDefaults, ADefaultMayNameASiblingParameter) {

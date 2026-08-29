@@ -526,7 +526,41 @@ bool SemanticAnalyzer::checkInitializer(ASTNode& node, std::shared_ptr<Type> act
 
 void SemanticAnalyzer::visitParameterDefaults(const std::vector<std::unique_ptr<Parameter>>& params) {
     for (auto& param : params) {
-        if (param->default_value) param->default_value->accept(*this);
+        if (!param->default_value) continue;
+        param->default_value->accept(*this);
+
+        // The declared type, re-resolved rather than passed in. Every one of the nine
+        // callers resolves the same TypeNode a few lines above this call, so the
+        // answer is already known there -- but not in a form this helper can be
+        // handed: three of them drop a receiver or an enum's first parameter from the
+        // vector they build, so `paramTypes[i]` and `params[i]` are not the same
+        // parameter. Aligning them would mean a second vector at nine sites, which is
+        // the "N copies of one loop" shape this helper exists to remove.
+        //
+        // Quiet, because the caller has already reported anything that does not
+        // resolve: resolveTypeOrError runs first at all nine sites. Without the
+        // QuietPass, `fun f(p: NoSuchType = 1)` would report its undefined type
+        // twice, and Soundness_ErrorRecovery is what would catch it.
+        std::shared_ptr<Type> declared;
+        {
+            QuietPass quiet(*this);
+            declared = resolveTypeFromAST(param->type.get());
+        }
+        // No guard on either side of the comparison, deliberately, and each absence was
+        // mutation-tested: deleting an `isErrorType(declared)` guard and deleting a
+        // `!lastExprType` guard both left every one of the 1396 tests green, because
+        // checkType already answers both -- it returns false silently on a null and true
+        // on the error sentinel, which is where that suppression belongs and where every
+        // other caller relies on it. A guard here that no test can distinguish from its
+        // absence is a claim about behaviour that is not true.
+        //
+        // checkInitializer and not checkType, which was known before this was written
+        // rather than discovered after: a mutation over the walk half applied the naive
+        // version and killed ANullDefaultIsStillAccepted, because stdlib/error.fin:11
+        // writes `err_code: int = null` and a plain checkType has no null exemption. A
+        // default is an initialiser -- `= null` means "absent" here exactly as it does
+        // on a field or a `let` (see checkInitializer's own comment).
+        checkInitializer(*param->default_value, lastExprType, declared);
     }
 }
 

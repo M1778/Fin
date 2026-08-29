@@ -45,12 +45,13 @@ bool PrimitiveType::isAssignableTo(const Type& other) const {
     //
     // It also used to say that refusing `-1` against a `ulong` in a comparison while
     // accepting it in an initialiser would be the compiler disagreeing with itself
-    // about one line of one file. That disagreement is real and still present -- but
-    // it is not about signs. `stdio.fin:109` is accepted because **a default argument
-    // is not type-checked against its parameter's type at all**: `fun f(a: int =
-    // "hello")` compiles. KnownDefect_DefaultArguments.ADefaultArgumentIsNotChecked-
-    // AgainstItsParameterType asserts it in both directions. Nothing here needs to
-    // change for that; the check is missing one layer up.
+    // about one line of one file. That disagreement was real and is now gone, and it
+    // was never about signs: `stdio.fin:109` was accepted because **a default argument
+    // was not type-checked against its parameter's type at all**, so `fun f(a: int =
+    // "hello")` compiled. The check landed one layer up, in visitParameterDefaults, and
+    // nothing here changed for it -- Soundness_DefaultArguments.ADefaultArgumentIs-
+    // CheckedAgainstItsParameterType is the inverted test, and it keeps both directions
+    // in one place for the reason the original gave.
     //
     // Equal widths pass only when the sign agrees, so `int32` -> `int` would be the
     // identity it actually is while `int` -> `uint` stays refused: reinterpreting a
