@@ -50,7 +50,15 @@ public:
     // Publishes a declaration the parser stamped `#[global]` into the scope the
     // ModuleLoader owns, so it resolves in files that import nothing (ADR 0021).
     // A no-op when no loader-owned scope was injected. See its definition.
-    void publishIfGlobal(ASTNode& node,
+    //
+    // True when this call is what published the name -- so the caller can do the other
+    // half of `#[global]` for the shapes that need one, without a second reading of the
+    // stamp. False for an unmarked declaration, for one with no resolved type, for a
+    // refused conflict, and when no ambient scope was injected at all. An identical
+    // second declaration of a published name returns true, because it *is* a publish of
+    // that name -- the two declarations are one fact and either may be the one a reader
+    // finds.
+    bool publishIfGlobal(ASTNode& node,
                          const std::vector<std::unique_ptr<Attribute>>& attributes,
                          const std::string& name,
                          const std::shared_ptr<Type>& type);

@@ -109,6 +109,13 @@ void CloneVisitor::visit(DefineDeclaration& node) {
         clone(node.return_type.get()),
         node.is_vararg
     );
+    // `#[llvm_name="printf"]` is what binds an extern to its C symbol, so a clone
+    // that dropped it produced a prototype for a *different* function under the same
+    // Fin name -- and one that links, because the Fin name is a valid symbol too.
+    // Every other declaration visit in this file already copies this vector; this one
+    // did not, and the omission had no witness until something started cloning an
+    // `@define` (ModuleLoader::appendAmbientPrototypes).
+    res->attributes = cloneVector(node.attributes);
     res->setLoc(node.loc);
     result = std::move(res);
 }

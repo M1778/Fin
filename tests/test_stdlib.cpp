@@ -56,6 +56,38 @@ FincRun compileBundled(const std::string& code) {
     return runFinc({s.str()}, {{"FIN_LIBS", ""}});
 }
 
+// The bundled library, compiled to a real executable and run. Returns the program's
+// stdout, or the compiler's stderr prefixed with `compile failed:` -- one string, so a
+// test that expected output prints the reason it did not get any instead of an empty
+// diff.
+//
+// Here rather than in test_codegen.cpp, which has the same shape twice over, because
+// what these tests are about is the *bundle*: `build` there passes no environment and
+// declares `printf` in the source, and the fact under test here is that the declaration
+// arrives from lib/std/stdio.fin and the source declares nothing.
+std::string buildBundledAndRun(const std::string& code) {
+    Src src(code);
+    const fs::path exe = uniqueTempPath("fin_stdlib_exe");
+    const FincRun c = runFinc({src.str(), "-o", exe.string()}, {{"FIN_LIBS", ""}});
+    if (c.exitCode != 0 || !fs::exists(exe)) {
+        return "compile failed: " + stripAnsi(c.err);
+    }
+    const fs::path outPath = uniqueTempPath("fin_stdlib_out");
+    const std::string cmd = "'" + exe.string() + "' > '" + outPath.string() + "' 2>&1";
+    const int status = std::system(cmd.c_str());
+    const std::string out = readWholeFile(outPath.string());
+    std::error_code ec;
+    fs::remove(exe, ec);
+    fs::remove(outPath, ec);
+#ifdef WIFEXITED
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return "program exited non-zero, output: " + out;
+#else
+    if (status != 0) return "program exited non-zero, output: " + out;
+#endif
+    return out;
+}
+
 // A throwaway directory of .fin modules, for the one test here that needs a second
 // file the bundle does not provide. test_module_loader.cpp has the same class against
 // the loader's C++ API; this copy drives the real binary and the two share nothing
@@ -401,3 +433,107 @@ TEST(Soundness_GlobalAttribute, AFileMayDeclareTheAmbientPrintfItself) {
         "fun main() <noret> { printf(\"hi\\n\"); }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// The backend half of the ambient declaration.
+//
+// Publishing `printf` into the shared scope is what makes a call to it type-check in a
+// file that imports nothing. It is not what makes the call *link*: `declareTopLevel`
+// walks the root program's own statements, and the declaration that named the C symbol
+// is in `lib/std/stdio.fin`, whose AST the loader keeps in `astStorage` where the
+// backend never looks. So `finc hello.fin` exited 0 and `finc hello.fin -o hello`
+// refused with `codegen: a call to 'printf' is not lowered yet` -- in a file the
+// compiler had just told needed no import.
+//
+// The driver closes it by splicing a prototype for each ambiently-published extern into
+// the root program between the front end and the backend
+// (ModuleLoader::appendAmbientPrototypes). These tests are the ones that would go red if
+// that splice went away, and they are written as build-and-run because the failure they
+// replaced was a *link* failure: a compile that exits 0 proves nothing about it.
+//
+// Guarded, because a build with FIN_WITH_LLVM=OFF has no backend to link with and ADR
+// 0010 keeps that configuration supported. The front-end tests above run either way.
+#ifdef FIN_TESTS_HAVE_BACKEND
+
+TEST(Soundness_GlobalAttribute, TheAmbientPrintfLinksAndRuns) {
+    // The exit criterion for the ambient name, and the shortest program that states it:
+    // no import, no declaration, one call. `const.fin:68` and `interfaces.fin:18` are
+    // the corpus sites, and until this held neither could be built.
+    EXPECT_EQ(buildBundledAndRun("fun main() <noret> { printf(\"hi\\n\"); }\n"),
+              "hi\n");
+}
+
+TEST(Soundness_GlobalAttribute, TheAmbientPrintfCallsTheCLibrarysPrintfAndNotItsFinName) {
+    // The prototype carries `#[llvm_name="printf"]` and it has to survive being copied,
+    // which is not automatic: `CloneVisitor::visit(DefineDeclaration&)` did not clone the
+    // `attributes` vector at all -- nine other declaration visits did -- so a clone
+    // produced a prototype under the Fin name with no rename on it. Here the two names
+    // are the same string and the bug would be invisible, so this asserts on the *format
+    // string* instead: a call that reached the C library formats `%d`, and one that
+    // reached anything else does not.
+    EXPECT_EQ(buildBundledAndRun(
+                  "fun main() <noret> { printf(\"%d-%s\\n\", 7, \"seven\"); }\n"),
+              "7-seven\n");
+}
+
+TEST(Soundness_GlobalAttribute, AFileThatDeclaresPrintfItselfStillGetsOneSymbol) {
+    // Fourteen corpus samples write the `@define` themselves while the bundle publishes
+    // it, so the splice lands on top of a local declaration in most of the corpus. One
+    // declaration has to win: `declareFunction` keeps the first (`if
+    // (functions_.count(name)) return;`), and two `llvm::Function::Create` calls for one
+    // name would otherwise give the second a `printf.1` that nothing defines.
+    EXPECT_EQ(buildBundledAndRun("@define printf(fmt: string, ...) <noret>;\n"
+                                 "fun main() <noret> { printf(\"both\\n\"); }\n"),
+              "both\n");
+}
+
+TEST(Soundness_GlobalAttribute, AnAmbientExternIsSplicedForItsLlvmNameAndNotItsFinName) {
+    // The rename, with the two names actually different, which the bundle cannot show:
+    // its `printf` is renamed to `printf`. A module publishes `shout` bound to C's
+    // `puts`, and the program calls `shout`. If the splice dropped `#[llvm_name]` the
+    // object would ask for a symbol called `shout`, and the link would fail -- so this
+    // running at all is the assertion.
+    //
+    // `-I` rather than `--fin-libs`: the flag replaces the library paths and would take
+    // the bundle out of the run, and `main` is not the point here.
+    TempModuleDir d;
+    d.write("shouter.fin",
+            "namespace std {\n"
+            "#[llvm_name=\"puts\"]\n"
+            "#[global]\n"
+            "@define shout(msg: string) <noret>;\n"
+            "}\n"
+            "pub fun anchor() <noret> {}\n");
+    Src s("import { anchor } from shouter;\n"
+          "fun main() <noret> { shout(\"loud\"); }\n");
+    const fs::path exe = uniqueTempPath("fin_stdlib_shout");
+    const FincRun c = runFinc({s.str(), "-I", d.path(), "-o", exe.string()},
+                              {{"FIN_LIBS", ""}});
+    ASSERT_EQ(c.exitCode, 0)
+        << "an ambiently-published extern must reach the backend with its #[llvm_name]\n"
+           "intact, or the object asks for a symbol nothing defines.\n"
+        << stripAnsi(c.err);
+    ASSERT_TRUE(fs::exists(exe));
+    std::error_code ec;
+    fs::remove(exe, ec);
+}
+
+TEST(Soundness_GlobalAttribute, AnUnmarkedExternInALoadedModuleIsNotSpliced) {
+    // The splice follows the stamp, like the publish does. An implementation that handed
+    // the backend every `@define` of every loaded module would pass every test above --
+    // the names would all link -- and would quietly put `lib/std`'s externs into the
+    // symbol table of a program that imports nothing. `absent` is unmarked, so a call to
+    // it must still fail, and in the front end rather than the linker.
+    TempModuleDir d;
+    d.write("externs.fin",
+            "@define absent(msg: string) <noret>;\n"
+            "pub fun anchor() <noret> {}\n");
+    Src s("import { anchor } from externs;\n"
+          "fun main() <noret> { absent(\"x\"); }\n");
+    const std::string err = stripAnsi(runFinc({s.str(), "-I", d.path(), "-o",
+                                               uniqueTempPath("fin_stdlib_absent")},
+                                              {{"FIN_LIBS", ""}}).err);
+    EXPECT_NE(err.find("Undefined function or type 'absent'"), std::string::npos) << err;
+}
+
+#endif  // FIN_TESTS_HAVE_BACKEND

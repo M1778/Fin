@@ -878,7 +878,14 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
 
     auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg);
     currentScope->define({node.name, funcType, false, true});
-    publishIfGlobal(node, node.attributes, node.name, funcType);
+    if (publishIfGlobal(node, node.attributes, node.name, funcType) && loader) {
+        // The backend half. Publishing the name makes a call to it type-check in a file
+        // that imports nothing; the prototype is what makes that call *link*, because
+        // the declaration lives in a module whose AST the backend never sees. Only an
+        // `@define` reaches here, which is the shape the splice is limited to -- a
+        // symbol and a signature, with nothing to emit.
+        loader->retainAmbientPrototype(node);
+    }
 }
 
 // The ambient half of `#[global]` (ADR 0021): a declaration the parser stamped as
@@ -899,7 +906,7 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
 // constructed without a loader has a parentless global scope, and the attribute is then
 // a no-op rather than a crash -- the analyzer is used that way by tests and by the
 // macro expander.
-void SemanticAnalyzer::publishIfGlobal(
+bool SemanticAnalyzer::publishIfGlobal(
         ASTNode& node,
         const std::vector<std::unique_ptr<Attribute>>& attributes,
         const std::string& name,
@@ -908,10 +915,10 @@ void SemanticAnalyzer::publishIfGlobal(
     for (const auto& attr : attributes)
         if (attr && attr->name == kGlobalAttribute && attr->is_flag && attr->std_scoped)
             isGlobal = true;
-    if (!isGlobal || !type) return;
+    if (!isGlobal || !type) return false;
 
     Scope* ambient = globalScope ? globalScope->parent : nullptr;
-    if (!ambient) return;
+    if (!ambient) return false;
 
     // A second marked declaration of the same name, with a different type, is refused
     // rather than allowed to overwrite the first.
@@ -938,10 +945,11 @@ void SemanticAnalyzer::publishIfGlobal(
                               "through no import, so nothing the losing file can read "
                               "would say which of the two it resolved",
                               name, existing->type->toString(), type->toString()));
-            return;
+            return false;
         }
     }
     ambient->define({name, type, false, true});
+    return true;
 }
 
 // One `::`-separated path from an `extern` or a symbol resolution, resolved as a

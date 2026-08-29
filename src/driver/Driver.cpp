@@ -202,6 +202,21 @@ int Driver::compile() {
         if (options.debugSema) diag.success("[SUCCESS] Semantics Verified.");
     }
 
+    // 4.5 The prototypes for the ambient externs, spliced into the root program.
+    //
+    // Between the front end and the backend, and in the driver rather than in either,
+    // because it belongs to neither: the analyzer must not see these (the root file may
+    // declare the same `@define` itself -- fourteen corpus samples do -- and a
+    // declaration the analyzer did not walk arriving mid-pass would be a duplicate), and
+    // the backend must not have to know what a module or an ambient name is. What it
+    // sees is a program whose statements declare everything it calls, which is the only
+    // shape `declareTopLevel` has ever handled.
+    //
+    // Unconditional on `skipCodegen`: nothing else reads `ast` afterwards, and making
+    // the tree depend on the flag would mean `--no-codegen` checked a different program
+    // from the one a build compiles.
+    loader.appendAmbientPrototypes(*ast);
+
     // 5. CodeGen
     if (!options.skipCodegen) {
         if (!runCodeGen(*ast, diag)) {

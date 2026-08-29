@@ -6758,6 +6758,110 @@ BACKEND_TEST(Soundness_Codegen, ABlameSharesADeclarationOfAbortWithTheProgramsOw
               std::string::npos) << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// `#[global]`, from the backend's side (ADR 0021).
+//
+// The attribute's whole meaning is a front-end one: the analyzer publishes the marked
+// name into a scope every file's lookup reaches, so a call resolves with no import. It
+// asks this file for nothing -- an extern has no body to emit and no linkage to choose.
+//
+// That is why it is accepted here rather than refused, and it is the only attribute
+// besides a valued `#[llvm_name]` that is. The refusal is the default because an
+// attribute this file cannot read may be the one that decides linkage or which of two
+// definitions wins; `#[global]` provably decides neither, and the front end has already
+// acted on it by the time a program gets here.
+//
+// Accepted on an `@define` and nowhere else, because an `@define` is the only shape that
+// publishes. `#[global]` on a `fun` or a `struct` parses, validates, and then binds
+// nothing anywhere -- so accepting it there would be this file claiming to have honoured
+// what nothing honoured.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AGlobalExternWrittenInTheRootFileLowersAndRuns) {
+    // The whole path, in one file and with no module involved: `namespace std` stamps the
+    // attribute, the analyzer publishes the name, and this file has to lower the call
+    // anyway. Before `#[global]` was accepted here the program failed to build with
+    // `the attribute 'global' on a '@define' is not lowered yet` -- a refusal of the one
+    // attribute whose job was already finished.
+    const Built b = build(
+        "namespace std {\n"
+        "#[global]\n"
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "}\n"
+        "fun main() <noret> { printf(\"%d\\n\", 42); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGlobalExternKeepsItsLlvmNameRename) {
+    // The two attributes together, which is how lib/std/stdio.fin writes it. They are
+    // read by different passes and the accepted-attribute list must not have made the
+    // second unreadable: `#[global]` published the Fin name, `#[llvm_name]` says which C
+    // symbol it calls, and a build that honoured the first and dropped the second would
+    // link against a symbol named `finprint` that nothing defines.
+    const std::string code =
+        "namespace std {\n"
+        "#[llvm_name=\"printf\"]\n"
+        "#[global]\n"
+        "@define finprint(fmt: string, ...) <noret>;\n"
+        "}\n"
+        "fun main() <noret> { finprint(\"renamed\\n\"); }\n";
+    const Built b = build(code);
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "renamed\n") << b.why();
+
+    // And the rename is the reason it ran, not a coincidence: the trace names the Fin
+    // name, and the symbol the object asks for is the C one.
+    const std::string trace = codegenTrace(code);
+    EXPECT_NE(trace.find("declared finprint"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("not lowered yet"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, GlobalIsAcceptedOnAnExternAndRefusedOnAFunction) {
+    // The bound on the exception, asserted as a pair so the two halves cannot drift.
+    // Only a `DefineDeclaration` publishes -- measured: `#[global]` on a `fun`, a
+    // `let`, a `struct`, an `interface`, an `enum` and a `type` all parse and validate
+    // and every one of the six is still undefined in a consuming file -- so a `fun`
+    // carrying it has been given nothing by the front end, and accepting it here would
+    // be a claim to have done something with it.
+    const Built onFunction = build(std::string(kPrintf) +
+        "namespace std {\n"
+        "#[global]\n"
+        "pub fun helper() <int> { return 1; }\n"
+        "}\n"
+        "fun main() <noret> { printf(\"%d\\n\", helper()); }\n");
+    EXPECT_NE(onFunction.compileExit, 0) << onFunction.why();
+    EXPECT_NE(onFunction.compileErr.find("the attribute 'global' on a function"),
+              std::string::npos) << onFunction.why();
+
+    const Built onExtern = build(
+        "namespace std {\n"
+        "#[global]\n"
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "}\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_EQ(onExtern.compileExit, 0) << onExtern.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnUnreadableAttributeOnAnExternIsStillRefusedBesideAGlobal) {
+    // The list grew by one entry and not into a policy. `#[export]` sits directly beside
+    // `#[global]` in lib/std/stdio.fin, so the accepted set is exactly where a second
+    // attribute would be waved through by accident -- and `#[export]` is what tells a
+    // module's scope what to hand an import, which this file has no way to honour.
+    const Built b = build(
+        "namespace std {\n"
+        "#[global]\n"
+        "#[export]\n"
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "}\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("the attribute 'export' on a '@define'"),
+              std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, ABlameAbortsRatherThanFallingThroughToLaterCode) {
     // The failing block ends in `unreachable` and not in a branch to the surviving one.
     // A branch would tell every later pass that execution continues past a failed

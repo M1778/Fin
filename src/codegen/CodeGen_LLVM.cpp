@@ -2341,7 +2341,7 @@ private:
                 // that is the only mechanism the corpus has for binding an extern to
                 // a C symbol whose spelling differs. The Fin name is still what a
                 // call site writes, so the two are tracked separately.
-                if (!attributesAreJustLlvmName(*def, def->attributes, "'@define'")) return;
+                if (!defineAttributesAreReadable(*def)) return;
                 declareFunction(*def, def->name,
                                 symbolNameOf(def->attributes, def->name), def->params,
                                 def->return_type.get(), def->is_vararg,
@@ -2375,6 +2375,45 @@ private:
         for (auto& attr : attributes) {
             if (attr->name == "llvm_name" && !attr->is_flag) continue;
             unsupported(node, fmt::format("the attribute '{}' on a {}", attr->name, what));
+            return false;
+        }
+        return true;
+    }
+
+    // The rule above, with `#[global]` added, for an `@define` and for nothing else.
+    //
+    // `#[global]` asks this file for nothing, and unlike every other attribute the
+    // refusal above is written against, that is provable rather than assumed: the
+    // attribute's entire meaning is that the *analyzer* publishes the name into an
+    // ambient scope so a file resolves it with no import (ADR 0021), and by the time a
+    // program reaches here the front end has either done that or reported why it could
+    // not. It changes no signature, no symbol and no linkage -- an extern's linkage is
+    // external whatever is written above it, because there is nothing to emit.
+    //
+    // Accepted here rather than in `attributesAreJustLlvmName`, because only a
+    // `DefineDeclaration` publishes: `#[global]` on a `fun`, a `struct`, an `interface`,
+    // an `enum` or a `type` parses and validates and then binds nothing anywhere, so
+    // accepting it on one of those would be this file claiming to have honoured what
+    // nothing honoured -- which is the failure the refusal exists to prevent.
+    //
+    // Two spellings reach this, and both must build. `printf` called with no import is
+    // the bundled `lib/std/stdio.fin` declaration, whose prototype the driver splices in
+    // with only `#[llvm_name]` kept (ModuleLoader::appendAmbientPrototypes); a file that
+    // writes `namespace std { #[global] @define ... }` itself keeps its attribute all the
+    // way here, because the tree the backend walks is the file's own. Refusing the second
+    // while the first works would make where a declaration was written decide whether it
+    // lowers.
+    //
+    // `#[export]` is deliberately not on this list. It is the same kind of front-end
+    // fact -- what a module's scope hands to an import -- but nothing needs it accepted
+    // here yet: the one declaration in the tree that carries it is published from a
+    // module, and the splice strips it. Adding it would be widening the set with no case
+    // asking, and the set is what keeps an unread attribute from being dropped.
+    bool defineAttributesAreReadable(DefineDeclaration& node) {
+        for (auto& attr : node.attributes) {
+            if (attr->name == "llvm_name" && !attr->is_flag) continue;
+            if (attr->name == kGlobalAttribute && attr->is_flag) continue;
+            unsupported(node, fmt::format("the attribute '{}' on a '@define'", attr->name));
             return false;
         }
         return true;
