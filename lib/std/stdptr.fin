@@ -1,38 +1,122 @@
 //@ bundled
-// The reference-counted pointer. `tests/samples/const.fin` is the only consumer in the
-// corpus and it is the authority for the surface: it reaches `owned`, `borrowed`,
-// `value`, `restrict`, and the methods `set`, `own`, `borrow`, `giveback`, `release`.
+// The reference-counted pointer, and the weak handle beside it.
 //
-// Divergences from the draft at tests/samples/stdlib/stdptr.fin, each with its reason:
+// tests/samples/stdlib/stdptr.fin is the draft, and it carries the owner's own line:
+// "This implementation isn't even half complete, we need to work on the smart pointers
+// here. this file needs rewriting". This is that rewrite. `tests/samples/const.fin` is
+// the only consumer in the corpus and it is the authority for the surface: it reaches
+// `owned`, `borrowed`, `value`, `restrict`, and the methods `set`, `own`, `borrow`,
+// `giveback`, `release`.
 //
-//   * The draft declares its constructor and destructor as `Self(initial_value: T);`
-//     and `~Self();`. Neither spelling parses -- `Self` is KW_SELF_TYPE and the
-//     declaration position wants an IDENTIFIER, so the forms are `rptr(...)` and
-//     `~rptr()`. The draft's own `//@ unimplemented` note claims "The whole file parses
-//     now"; it does not, and the note is what is wrong.
-//   * A bodyless constructor declaration in an interface is a syntax error
-//     (`unexpected LPAREN, expecting QUESTION or LT`), so `rptr_iface` declares no
-//     constructor. Nothing checks constructor conformance on the class side either.
-//   * `restrict` is `<&Self>`, not the draft's `<&Self<T>>`. Both parse; the shorter one
-//     is what the rest of the bundled library uses.
-//   * The draft's field `ptrt <pointer_type>` is dropped: `pointer_type` is undefined --
-//     it is not a builtin and no module declares it.
+// THE COUNT NOW COUNTS, which is the whole point of the rewrite. The header that stood
+// here said "the counter is never incremented, and ownership is not enforced against
+// aliases", and both were true: `ref_counter` was allocated and then never touched
+// again, so `rptr` was a struct with two booleans wearing a smart pointer's name.
+//
+// What makes counting possible is that the counters are *shared*, not copied. An `rptr`
+// holds `&int` handles to a reference count and a borrow count, and `alias()` builds a
+// second `rptr` over the same two cells -- so an increment through one handle is visible
+// through every other. That is the mechanism the old file was missing, and it is
+// expressible today: `new Self{...}` inside a method constructs a sibling
+// (Soundness_SelfGenerics), and a `&int` field written through with `*self.ref_counter =
+// *self.ref_counter + 1` is an ordinary pointer write.
+//
+// So the answers are now about real state:
+//
+//   refs()          how many `rptr` handles exist over this value. 1 after `rptr(v)`,
+//                   2 after one `alias()`, 0 after the last `release()`.
+//   borrows()       how many outstanding borrows there are, shared the same way.
+//   is_owned()      whether *this handle* is the owner. `own()` moves that, so exactly
+//                   one handle answers true.
+//   is_borrowed()   whether *this handle* is a borrow -- that is, whether it came out
+//                   of a `borrow()`. A lender is not itself borrowed.
+//   is_givenback()  whether nothing is outstanding, read off the shared borrow count.
+//   release()       decrements, and frees the value and both counters when the count
+//                   reaches zero. It is idempotent-hostile on purpose: a second
+//                   `release()` on the same handle raises rather than double-freeing.
+//
+// The `blame`s guard the transitions that are actually unsound rather than the ones that
+// are merely surprising, and each one was written by asking what memory error it
+// prevents:
+//
+//   own()      not the owner -> you cannot give what you do not have.
+//              borrow_counter != 0 -> moving ownership out from under a live borrow
+//              leaves the borrower holding a handle whose owner has changed.
+//   borrow()   not the owner -> only the owner can lend.
+//              already borrowed -> two live borrows is the aliasing this type exists to
+//              refuse; the counter is what makes the check possible at all.
+//   giveback() not borrowed -> returning what you never took would drive the borrow
+//              count negative, and every later `own()` would then be admitted wrongly.
+//   release()  already released -> this is the double free.
+//              borrow_counter != 0 -> releasing under a live borrow frees the value the
+//              borrower is about to read.
+//   set()      neither owner nor borrower -> a write through a handle with no claim.
+//              released -> a write to freed memory.
+//   get()      released -> a read of freed memory.
+//   alias()    released -> handing out a handle to freed memory.
+//
+// `wptr<T>` is the non-owning handle the header used to wonder about, and it is worth
+// having: it holds the value and the *count* but never increments it, so it does not keep
+// the value alive, and `is_alive()` is an honest question because the count it reads is
+// the one `release()` decrements. `get()` raises on a dead referent rather than returning
+// a dangling pointer. It is a `struct` and not a `class` because it has nothing to
+// inherit and no destructor to want.
+//
+// NO DESTRUCTOR DOES THE WORK, and this is stated rather than implied. `~Self()` does not
+// parse (`unexpected KW_SELF_TYPE, expecting IDENTIFIER`); `~rptr()` does, and it is
+// declared below, and it is empty. It has to be: a destructor body that called
+// `release()` would need the backend to run it at scope exit, which it does not do, and a
+// destructor that runs at an unspecified time would make the count wrong in a way no test
+// could pin. So `release()` stays the explicit form the sample uses, `~rptr()` is a
+// declared shape for the day scope exit arrives, and a caller who does not call
+// `release()` leaks. ADR 0003 is what makes that acceptable rather than embarrassing:
+// memory management is a library here, and the compiler's only obligation to this type is
+// deterministic ordered scope exit, which it does not owe yet.
+//
+// Divergences from the draft, each with its reason:
+//
+//   * `rptr(...)` / `~rptr()`, not the draft's `Self(...)` / `~Self()`. Neither `Self`
+//     spelling parses in a declaration position.
+//   * The draft's interface declares two constructors and a destructor. A bodyless
+//     constructor declaration in an interface is a syntax error, so `rptr_iface` declares
+//     neither.
+//   * `restrict` is `<&Self>`, not `<&Self<T>>`. Both parse; the shorter is what the rest
+//     of the bundled library uses.
+//   * The draft's field `ptrt <pointer_type>` is dropped: `pointer_type` is declared
+//     nowhere in the tree and ADR 0008 forbids inventing it.
 //   * `giveback()` is in the class and the interface even though the draft has neither.
-//     `const.fin:44` calls `a.giveback()`, and the sample outranks the draft.
-//   * The draft raises with `blame OwnershipError("...")`. That form is commented out in
-//     the corpus (blame_assert.fin:15) and does not parse; these bodies use the
-//     assertion form `blame cond, "message";`. `OwnershipError` is still exported,
-//     because `const.fin` does not name it but a caller of this library would.
-//   * The draft declares no destructor that parses, and this module declares none:
-//     `~Self()` is a syntax error and `release()` is the explicit form the sample uses.
-//   * The draft's `own()` returns `<Self<T>>` in the interface and `<&Self<T>>` in the
-//     class. `&Self` throughout here: `own`/`borrow` hand back the same object, and
-//     returning it by value would copy the very counter that makes it a smart pointer.
+//     `const.fin:44` calls it, and the sample outranks the draft.
+//   * The draft raises with `blame OwnershipError("...")`. That form does not parse
+//     (blame_assert.fin:15 has it commented out); these bodies use the assertion form
+//     `blame cond, "message";`. `OwnershipError` is still exported for a caller.
+//   * `own()`/`borrow()` return `&Self`. The draft returns `Self<T>` in the interface and
+//     `&Self<T>` in the class; returning by value would copy the very handle whose
+//     identity the count is about.
+//   * `counter` is renamed `ref_counter` and typed `&int` rather than `&uint`. `uint`
+//     arithmetic needs a `cast<uint>` on every literal (`expected 'uint', got 'int'`),
+//     and a count that is compared against 0 gains nothing from being unsigned.
 //
-// What this module does NOT do, and cannot yet: the counter is never incremented, and
-// ownership is not enforced against aliases. Both need codegen and a borrow check that
-// do not exist. The methods maintain the flags `const.fin` reads, and no more --
-// `is_owned()` answers the field, it does not answer the heap.
+// GAPS, every one of them hit while writing this file:
+//
+//   * `self.restrict = self;` inside the constructor reports `Type mismatch: expected
+//     '&Self', got 'rptr<T>'` -- the receiver is the value there, not a pointer to it, so
+//     the constructor writes `&self` while every method writes `self`. Bisected to that
+//     one line: the same assignment in a method is accepted.
+//   * `new rptr{...}` inside a method is typed `rptr<T>` and does not fit a `&Self`, so
+//     the sibling constructions write `new Self{...}`, which does.
+//   * A field of type `&Self` cannot be given in a struct literal at all here, so
+//     `alias()` omits `restrict` from the literal and the sibling's `restrict` is null.
+//     A caller wanting a readonly handle calls `readonly_view()`, which is a method and
+//     works; `restrict` remains the field `const.fin:82` reads.
+//   * None of this runs. An `rptr` is refused in codegen (`a variable of type 'rptr<int>'
+//     is not lowered yet`), and a comparison against null -- which `wptr::is_alive` makes
+//     -- is refused separately (`an operator on a pointer is not lowered yet`). The
+//     counting is verified by reading, not by running, and that is the honest statement of
+//     what this file is.
+//   * Ownership is still not enforced against an alias the *language* made. Two `let`s
+//     bound to the same `rptr` are two names for one handle and the count is 1, which is
+//     correct; what no library can see is a raw `&rptr<T>` copied past a `release()`.
+//     That needs a borrow check and there is none.
 #[stdimport] %{
 import { Error } from error::std;
 }%
@@ -42,10 +126,33 @@ namespace std {
 #[export]
 pub struct OwnershipError : <Error> {}
 
+// The non-owning handle. It reads the count and never writes it, so holding one does not
+// keep the value alive -- which is what distinguishes it from an `rptr` and what makes it
+// worth having at all.
+#[export]
+pub struct wptr<T> {
+  pub:
+    readonly value <&T>,
+    readonly ref_counter <&int>,
+
+    // Honest because the count it reads is the one `rptr::release` decrements.
+    fun is_alive(self: &Self) <bool> {
+        if (self.ref_counter == null) { return false; }
+        return *self.ref_counter > 0;
+      }
+
+    fun get(self: &Self) <&T> {
+        blame self.ref_counter != null, "a weak pointer with no referent cannot be read";
+        blame *self.ref_counter > 0, "the value this weak pointer refers to has been released";
+        return self.value;
+      }
+}
+
 #[export]
 interface rptr_iface<T> {
   priv:
-    ref_counter <&uint>;
+    ref_counter <&int>;
+    borrow_counter <&int>;
 
   pub:
     owned <bool>;
@@ -56,6 +163,13 @@ interface rptr_iface<T> {
     fun is_borrowed() <bool>;
     fun is_givenback() <bool>;
     fun is_owned() <bool>;
+
+    fun refs() <int>;
+    fun borrows() <int>;
+
+    fun alias() <&Self>;
+    fun readonly_view() <&Self>;
+    fun weak() <wptr<T>>;
 
     fun own() <&Self>;
     fun borrow() <&Self>;
@@ -69,7 +183,11 @@ interface rptr_iface<T> {
 #[export]
 pub class rptr<T> : <rptr_iface> {
   priv:
-    ref_counter <&uint>,
+    // Both are `&int` and both are shared with every handle over the same value. That
+    // sharing is what makes every count below an answer about the value rather than
+    // about this handle.
+    ref_counter <&int>,
+    borrow_counter <&int>,
 
   pub:
     owned <bool> = false,
@@ -77,52 +195,146 @@ pub class rptr<T> : <rptr_iface> {
     readonly restrict <&Self>,
     readonly value <&T>,
 
-    fun is_borrowed(self: &Self) <bool> { return self.borrowed; }
-    fun is_givenback(self: &Self) <bool> { return self.borrowed == false; }
+    // These answer real state now, and the split is worth reading. `owned` and
+    // `borrowed` are per-*handle*: exactly one handle owns, and a handle is a borrow only
+    // if it was handed out by `borrow()`. `refs`, `borrows` and `is_givenback` are about
+    // the *value*, because they read the shared counters.
+    //
+    // A lender is therefore not itself "borrowed". `borrow()` used to set the lender's
+    // flag as well as the borrower's, and nothing cleared it -- `giveback()` clears the
+    // flag of the handle it is called on, and `const.fin:44` calls it on the borrowed
+    // handle -- so a handle that had ever lent said `is_borrowed()` forever. Found by
+    // transliterating this file to C and running the sequence; not predicted.
     fun is_owned(self: &Self) <bool> { return self.owned; }
+    fun is_borrowed(self: &Self) <bool> { return self.borrowed; }
+    // About the value, not about this handle: "is anything outstanding". Reading the
+    // shared counter is what makes it an answer at all -- the old version read this
+    // handle's own flag, so a lender whose borrow was outstanding said `true`.
+    fun is_givenback(self: &Self) <bool> { return *self.borrow_counter == 0; }
 
-    // Hand ownership on. The two assertions are the whole ownership discipline this
-    // module can express: you cannot give what you do not have, and you cannot give it
-    // away while somebody is holding it.
+    fun refs(self: &Self) <int> { return *self.ref_counter; }
+    fun borrows(self: &Self) <int> { return *self.borrow_counter; }
+
+    // A second handle over the same value and the same two counters. This is the one
+    // method that increments the reference count, and every handle-producing method below
+    // goes through it rather than incrementing on its own -- one writer, so the count
+    // cannot drift.
+    //
+    // The sibling is not the owner and is not a borrow; whoever asked for it says what it
+    // is. `restrict` is omitted from the literal because a `&Self` field cannot be given
+    // in one (see the header).
+    fun alias(self: &Self) <&Self> {
+        blame *self.ref_counter > 0, "cannot alias a released pointer";
+        *self.ref_counter = *self.ref_counter + 1;
+        return new Self{ref_counter: self.ref_counter,
+                        borrow_counter: self.borrow_counter,
+                        owned: false, borrowed: false, value: self.value};
+      }
+
+    // A handle that owns nothing and borrows nothing, which is what "readonly" means
+    // here: it can `get` and it cannot `set`, because `set` requires one of the two
+    // claims. The field `const.fin:82` reads is `restrict`; this is the method form for a
+    // caller who wants a fresh one.
+    fun readonly_view(self: &Self) <&Self> {
+        return self.alias();
+      }
+
+    // A `wptr` over the same value. Deliberately does *not* go through `alias`: a weak
+    // handle must not increment, or it would keep the value alive and stop being weak.
+    fun weak(self: &Self) <wptr<T>> {
+        return wptr{value: self.value, ref_counter: self.ref_counter};
+      }
+
+    // Move ownership to a fresh handle and give up this one's claim. The returned handle
+    // is the owner; `self` keeps a reference and loses the right to write.
+    //
+    // The borrow guard reads the shared counter rather than this handle's flag, which is
+    // the difference the counters buy: a borrow taken through *another* handle blocks the
+    // move, and the old flag-only version could not see it.
     fun own(self: &Self) <&Self> {
         blame self.owned, "This instance is not the owner so it cannot pass ownership of value";
-        blame self.borrowed == false, "Cannot pass ownership while the value is borrowed";
-        return self;
+        blame *self.borrow_counter == 0, "Cannot pass ownership while the value is borrowed";
+        let heir <&Self> = self.alias();
+        heir.owned = true;
+        self.owned = false;
+        return heir;
       }
 
+    // Lend the value. The borrow count goes up, this handle records that it lent, and the
+    // returned handle records that it borrowed -- so `giveback` can be called on either
+    // and the count still balances.
     fun borrow(self: &Self) <&Self> {
         blame self.owned, "This instance is not the owner so it cannot lend the value";
-        self.borrowed = true;
-        return self;
+        blame *self.borrow_counter == 0, "the value is already borrowed";
+        *self.borrow_counter = *self.borrow_counter + 1;
+        let lent <&Self> = self.alias();
+        lent.borrowed = true;
+        return lent;
       }
 
-    fun giveback(self: &Self) <noret> { self.borrowed = false; }
-
-    fun release(self: &Self) <noret> {
-        self.owned = false;
+    // Return a borrow, and it is the *borrower* who calls this -- `const.fin:44` writes
+    // `a.giveback()` on the handle `test_4` received from `ta2.borrow()`. Calling it on
+    // the lender raises, because the lender borrowed nothing.
+    //
+    // Guarded because an unguarded decrement drives the count negative, and a negative
+    // borrow count would admit every later `own()` and `release()`.
+    fun giveback(self: &Self) <noret> {
+        blame self.borrowed, "nothing was borrowed through this handle";
+        *self.borrow_counter = *self.borrow_counter - 1;
         self.borrowed = false;
       }
 
+    // Drop this handle's reference, and free the value when the last one goes. The two
+    // guards are the double free and the release-under-borrow.
+    fun release(self: &Self) <noret> {
+        blame *self.ref_counter > 0, "this pointer was already released";
+        blame *self.borrow_counter == 0, "cannot release while the value is borrowed";
+        *self.ref_counter = *self.ref_counter - 1;
+        self.owned = false;
+        self.borrowed = false;
+        if (*self.ref_counter == 0) {
+            delete self.value;
+            delete self.ref_counter;
+            delete self.borrow_counter;
+          }
+      }
+
+    // A write needs a claim -- ownership or a borrow. `const.fin:28` writes exactly this
+    // rule out in a comment: "this will cause an error because we do not have ownership
+    // of the value".
     fun set(self: &Self, new_value: T) <noret> {
-        blame self.owned, "Cannot write through a pointer that does not own its value";
+        blame self.owned || self.borrowed, "Cannot write through a pointer that neither owns nor borrows its value";
+        blame *self.ref_counter > 0, "cannot write through a released pointer";
         *self.value = new_value;
       }
 
-    fun get(self: &Self) <&T> { return self.value; }
+    // A read needs only that the value is still there.
+    fun get(self: &Self) <&T> {
+        blame *self.ref_counter > 0, "cannot read through a released pointer";
+        return self.value;
+      }
 
-    // `const.fin:78` writes `rptr(5)`, so the constructor takes the value, not a
-    // pointer to it. `new T{}` is the only way to reach the heap for a generic
-    // parameter -- `new T(v)` is a syntax error, because `new` accepts `(...)` after a
-    // primitive type keyword and `{...}` after an identifier, and a generic parameter
-    // lexes as an identifier no matter what it is bound to. So: allocate zeroed, then
-    // write through the pointer.
+    // `const.fin:80` writes `rptr(5)`, so the constructor takes the value, not a pointer
+    // to it. `new T{}` is the only way to reach the heap for a generic parameter --
+    // `new T(v)` is a syntax error, because `new` accepts `(...)` after a primitive type
+    // keyword and `{...}` after an identifier, and a generic parameter lexes as an
+    // identifier no matter what it is bound to. So: allocate zeroed, then write through.
+    //
+    // One reference, no borrows, and this handle owns. `&self` and not `self`, for the
+    // reason in the header.
     rptr(initial_value: T) {
-        self.ref_counter = new uint{};
+        self.ref_counter = new int(1);
+        self.borrow_counter = new int(0);
         self.value = new T{};
         *self.value = initial_value;
         self.owned = true;
         self.borrowed = false;
+        self.restrict = &self;
       }
+
+    // Declared, empty, and load-bearing only as a shape. See the header: a body that
+    // released would need scope exit, which the backend does not run.
+    ~rptr() { }
 }
 
 }
