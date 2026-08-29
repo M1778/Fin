@@ -610,6 +610,13 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
     }
 }
 
+void SemanticAnalyzer::setExternalGlobalScope(const std::shared_ptr<Scope>& scope) {
+    if (!scope || scope.get() == globalScope.get()) return;
+    // Keep builtins and this module's declarations local, while resolving names
+    // through the loader-owned ambient scope.
+    globalScope->parent = scope.get();
+}
+
 void SemanticAnalyzer::visit(Program& node) {
     refuseMisplacedGlobals(node);
     hoistTopLevelSignatures(node);

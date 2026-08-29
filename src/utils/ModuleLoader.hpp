@@ -35,6 +35,7 @@ public:
     void beginRootFile(const std::string& path);
 
     std::shared_ptr<Scope> loadModule(const std::string& importPath, bool isPackage);
+    std::shared_ptr<Scope> sharedGlobalScope() const { return globalScope; }
 
 private:
     DiagnosticEngine* diags = nullptr;
@@ -42,6 +43,7 @@ private:
     std::vector<std::string> searchPaths; // Global search paths (FIN_LIBS, -I)
     
     std::unordered_map<std::string, std::shared_ptr<Scope>> moduleCache;
+    std::shared_ptr<Scope> globalScope;
     std::set<std::string> loadingStack;
 
     // Imports already reported as unresolvable. `moduleCache` remembers only

@@ -35,6 +35,7 @@ public:
     ~SemanticAnalyzer();
 
     void setModuleLoader(ModuleLoader* loader) { this->loader = loader; }
+    void setExternalGlobalScope(const std::shared_ptr<Scope>& scope);
     
     std::shared_ptr<Scope> getGlobalScope() { return globalScope; }
 

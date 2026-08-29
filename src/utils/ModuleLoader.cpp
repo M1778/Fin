@@ -11,6 +11,7 @@
 #include <fmt/core.h>
 #include <fmt/color.h>
 #include <algorithm>
+#include "../semantics/Scope.hpp"
 
 namespace fs = std::filesystem;
 
@@ -18,7 +19,7 @@ namespace fin {
 
 extern std::unique_ptr<Program> root;
 
-ModuleLoader::ModuleLoader(const std::string& base) : rootBasePath(base) {
+ModuleLoader::ModuleLoader(const std::string& base) : rootBasePath(base), globalScope(std::make_shared<Scope>()) {
     if (!fs::is_directory(rootBasePath)) {
         rootBasePath = fs::path(rootBasePath).parent_path().string();
     }
@@ -296,6 +297,7 @@ std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, b
     // 7. Semantic Analysis
     SemanticAnalyzer analyzer(diag, false);
     analyzer.setModuleLoader(this);
+    analyzer.setExternalGlobalScope(globalScope);
     analyzer.visit(*moduleAST);
 
     if (analyzer.hasError) {

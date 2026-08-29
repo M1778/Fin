@@ -165,6 +165,10 @@ int Driver::compile() {
     // This file is already being compiled, so an import of it is a cycle and not a module
     // to go and load. See `ModuleLoader::beginRootFile`.
     loader.beginRootFile(options.inputFile);
+    // The standard I/O module owns the explicit ambient `#[global] printf`
+    // declaration. Load it before the root analyzer so its published binding is
+    // available without an import, while all other std names remain import-only.
+    loader.loadModule("stdio", true);
     // ----------------------------
 
     // 3.5 Macro Expansion
@@ -188,6 +192,7 @@ int Driver::compile() {
 
         SemanticAnalyzer analyzer(diag, options.debugSema);
         analyzer.setModuleLoader(&loader); // Use same loader
+        analyzer.setExternalGlobalScope(loader.sharedGlobalScope());
         analyzer.visit(*ast);
 
         if (analyzer.hasError || diag.hasErrors()) {

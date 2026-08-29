@@ -878,6 +878,14 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
 
     auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg);
     currentScope->define({node.name, funcType, false, true});
+    // A std-scoped #[global] declaration is also published to the loader-owned
+    // parent scope, making it visible to independently analysed modules.
+    bool isGlobal = false;
+    for (const auto& attr : node.attributes)
+        if (attr && attr->name == kGlobalAttribute && attr->is_flag && attr->std_scoped)
+            isGlobal = true;
+    if (isGlobal && currentScope->parent)
+        currentScope->parent->define({node.name, funcType, false, true});
 }
 
 // One `::`-separated path from an `extern` or a symbol resolution, resolved as a

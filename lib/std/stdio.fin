@@ -68,6 +68,7 @@ namespace std {
 // The C library's printf, by its own name. Variadic, and no format checking: the
 // `...` in a `@define` accepts anything.
 #[llvm_name="printf"]
+#[global]
 #[export]
 @define printf(fmt: string, ...) <noret>;
 
