@@ -1975,10 +1975,15 @@ purpose because `I(n: int = ...)` does not parse. `visit(Parameter&)` was left i
 interface requires it -- with a comment at its definition saying it is dead, so the next reader does not spend
 what this cost to find out.
 
-**The type check.** Written as `KnownDefect_ParameterDefaults` rather than as code, because it is blocked on
-the integer ruling: `stdlib/stdio.fin:87` and `:109` write `nbytes: ulong = -1`, and checking a default would
-put `Type mismatch: expected 'ulong', got 'int'` on two lines of a normative sample. That is ruling #1, and it
-now blocks two things.
+**The type check.** Written as `KnownDefect_ParameterDefaults` at the time rather than as code, because it
+looked blocked on the integer ruling: `stdlib/stdio.fin:87` and `:109` write `nbytes: ulong = -1`, and checking
+a default puts `Type mismatch: expected 'ulong', got 'int'` on two lines of a normative sample. **Landed
+2026-08-29** anyway, and the reason it stopped being blocked is that the question had already been answered
+elsewhere in the same file. ADR 0022 refuses a negative constant to an unsigned target in a declaration *and*
+in a comparison, and `:110`'s `nbytes == -1` has been a diagnostic in that sample ever since. So the choice was
+never "convict the sample or not"; it was "convict it at one of its three sentinel sites or at all three", and
+a compiler that disagrees with itself about one line is worse than three honest diagnostics. See "A default is
+an initialiser" below.
 
 Twelve mutants over the unit's tests. The eight per-site mutants each delete one call, and each is killed by
 exactly the tests belonging to that site and no others -- which is the useful result, because it proves the
@@ -2028,6 +2033,53 @@ are `-1` and `null` and both walk clean.
 
 Suite: **375 tests, all passing**, corpus 50/50. Lane note: `src/semantics/**` and `tests/test_soundness.cpp`;
 no parser change, no type-system change, no sample change.
+
+### A default is an initialiser
+
+The second half of "A visitor nobody called", landed 2026-08-29. A parameter's default is now compared against
+the parameter's declared type, which every other default in the language already was.
+
+The change is one call and its cost was all in deciding to make it. The three edge cases were known in advance
+rather than discovered: `checkInitializer` and not `checkType`, because a mutation over the *walk* half had
+already established that a plain `checkType` kills `ANullDefaultIsStillAccepted` -- `stdlib/error.fin:11` writes
+`err_code: int = null` and only `checkInitializer` has the null exemption. Widening reaches it, so `n: ulong = 5`
+is accepted. And a negative constant is not an unsigned value, so `n: ulong = -1` is refused by the same guard
+in `checkType` that refuses `let x <ulong> = -1`.
+
+**What unblocked it was reading the file it was blocked on.** The gap was held open by "checking a default would
+put two new diagnostics on a normative sample", which is true: `stdlib/stdio.fin:87` and `:109` both write
+`nbytes: ulong = -1`. What that argument missed is that the *same sample* writes `nbytes == -1` on `:110`, and
+ADR 0022 has refused that since it landed. So the sample was already convicted over the same sentinel, on the
+same reading of the same constant, and the position being defended was not "the corpus is intact" but "the
+corpus is contradicted at one of its three sites instead of three". The second is strictly worse: it is the
+compiler disagreeing with itself about one line, which is exactly the defect `PrimitiveType.cpp`'s comment
+predicted and ADR 0022 recorded as real. Corpus effect: `stdlib/stdio.fin` goes from 9 diagnostics to 11, both
+new ones on lines already carrying the sentinel, and its expectation is prose so the corpus test does not move.
+The ruling on `-1` is still owed; what changed is that it now decides between three consistent diagnostics and
+none, rather than blocking a fix.
+
+Five mutants. Replacing `checkInitializer` with `checkType` kills exactly `ANullDefaultIsStillAccepted`, as
+predicted a wave earlier. Dropping the `QuietPass` around the re-resolution kills
+`AnUnresolvedParameterTypeIsStillReportedOnce` and nothing else -- that test exists because the check resolves
+the parameter's `TypeNode` a second time, which is one resolution more than each of the nine sites used to do,
+and `fun f(p: NoSuchType = 1)` would otherwise report its undefined type twice. Making the check a no-op kills
+the four inverted tests. And two mutants killed nothing, which is the useful result: deleting the
+`isErrorType(declared)` guard and deleting the `!lastExprType` guard both left all 1396 tests green, because
+`checkType` already answers both -- it returns silently on a null and returns true on the error sentinel. Both
+guards were deleted rather than given tests. A guard no test can distinguish from its absence is a claim about
+behaviour that is not true, and it is the second time in this wave that the fix for a zero-kill mutant was to
+remove the code rather than to write the test.
+
+The check re-resolves the declared type instead of being handed it, and that is deliberate: three of the nine
+parameter loops drop a receiver or an enum's first parameter from the vector they build, so `paramTypes[i]` and
+`params[i]` are not the same parameter at those sites. Threading a parallel vector through nine call sites to
+avoid one re-resolution is the "N copies of one loop" shape the helper exists to remove.
+
+Still open, and separately: a default does not make a parameter optional at a call site. That is the
+`FunctionType` change described above and it is unchanged by this.
+
+Suite: **1396 tests, all passing**, corpus 51/51. Lane note: `src/semantics/**`, `tests/test_soundness.cpp`,
+`docs/guide/05-functions.md`, `docs/plan.md`; no parser change, no sample change.
 
 ### One unresolved type, twenty-seven diagnostics
 
@@ -2981,11 +3033,14 @@ exist yet and which will be written against whatever the answers turn out to be.
 so an answer converts directly into work rather than into more discussion.
 
 **Integers.** Is `-1` a legal unsigned constant by C wraparound, or must a maximum be spelled explicitly?
-This one now blocks two things and the evidence is exact. `stdlib/stdio.fin:87` and `:109` both write
-`fun read(nbytes: ulong = -1)` -- a parameter default -- and `:110` compares `nbytes == -1`. A parameter
-default is now *visited* (see below), but it is deliberately not *type-checked*, because the check would put
-`Type mismatch: expected 'ulong', got 'int'` on two lines of a normative sample. `KnownDefect_ParameterDefaults`
-holds the gap open with a test naming this ruling as the blocker. Does an
+The evidence is exact and it is all in one file. `stdlib/stdio.fin:87` and `:109` both write
+`fun read(nbytes: ulong = -1)` -- a parameter default -- and `:110` compares `nbytes == -1`. **This no longer
+blocks anything**, and what unblocked it was noticing that the compiler had already answered it: ADR 0022's two
+`Soundness_IntegerWidening` tests refuse the constant in a declaration and in a comparison, so `:110` was
+already convicted, and the parameter default now is too
+(`Soundness_ParameterDefaults.AnUnsignedParameterDefaultingToMinusOneIsRefused`). The ruling is still owed --
+it decides whether the answer is a `constantFitsType` change or a ratified edit to `stdio.fin` -- but it is now
+a question about three consistent diagnostics rather than a blocker on a fix. Does an
 `int`-typed *expression* convert to unsigned implicitly as in C, or require a cast as in Rust and Zig?
 (Five `int` <- `ulong` diagnostics in the corpus.) What are the widths of `int`, `long`, `short` and `char`,
 and is `char` signed? (Nothing can range-check a literal until these are fixed, and the answer is ABI, so it
@@ -3055,11 +3110,10 @@ slip for `<A>`, or does `_` suppress the check? It is the file's last diagnostic
 *omitted argument*, so the type looks incidental to what it is demonstrating. (3) May a parameter be
 assigned inside the body? `stdlib/error.fin:13` writes `err_code = -1;` and finc answers "Cannot assign to
 immutable variable 'err_code'"; a normative sample and the compiler disagree, so one of them is wrong.
-(4) A parameter's default value is never checked against the parameter's type at all
-(`visit(Parameter&)` resolves the type and visits the default without comparing them), so
-`fun g(n: string = 3)` is accepted. That is a defect rather than a ruling, but it shares a site with (3) and
-is worth fixing in the same visit; it is why `ANullDefaultOnAParameterIsAccepted` passed before this wave
-started.
+~~(4) A parameter's default value is never checked against the parameter's type.~~ **FIXED** -- and this
+entry's own diagnosis was the wrong half. `visit(Parameter&)` does resolve the type and visit the default
+without comparing them, but nothing dispatches to `visit(Parameter&)` at all, so a check added there would
+have changed nothing. Both halves live in `visitParameterDefaults` now; see "A default is an initialiser".
 
 **Diagnostics.** Is there a legal third diagnostic shape beyond error and warning — a note, or a remark
 attached to a parent? Two sites want one, and the JSON contract in ADR 0009 fixes the shape, so the answer

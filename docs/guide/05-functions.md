@@ -227,9 +227,45 @@ fun? make_a(n?: int) <A> {
 
 ## Default parameter values
 
-A default value on a parameter parses, but it is not honoured at the call site — the
-parameter is still required, and omitting it reports an arity error. The standard library
-works around this by declaring separate methods rather than defaulted ones. Do not rely on
-defaults yet.
+A parameter may carry a default value, and it is checked against the parameter's declared
+type exactly as an initialiser is:
+
+```fin
+fun greet(name: string, times: int = 2) <noret> {
+    printf("%s %d\n", name, times);
+}
+```
+
+Writing a default of the wrong type is a diagnostic on the default itself:
+
+```
+error: Type mismatch: expected 'string', got 'int'
+   --> f.fin:1:19
+   |
+ 1 | fun f(n: string = 3) <noret> { }
+   |                   ^ here
+```
+
+It is an *initialiser* check, which is what settles the three edge cases. `= null` is
+accepted whatever the declared type is (chapter 2's rule for a declaration, and
+`lib/std/error.fin`'s draft writes `err_code: int = null`). A narrower constant widens, so
+`n: ulong = 5` is fine. And a negative constant is still not an unsigned value, so
+`n: ulong = -1` is refused for the same reason `let x <ulong> = -1;` is.
+
+A default may also name something already in scope, including an earlier parameter in the
+same list:
+
+```fin
+fun span(lo: int, hi: int = lo) <int> { return hi - lo; }
+```
+
+(`from` is a keyword — it is `import`'s — so a parameter cannot be called that.)
+
+What a default does **not** do yet is make the parameter optional at the call site. The
+arity check knows about nullable parameters and not about defaults, so `span(1)` reports
+`Function 'span' expects 2 arguments, got 1`. Both arguments must be written. The standard
+library works around this by declaring separate methods rather than defaulted ones —
+`lib/std/stdio.fin` has `read` and `read_all` where its draft had one `read` with a
+sentinel default.
 
 Next: [structs and classes](06-structs-and-classes.md).

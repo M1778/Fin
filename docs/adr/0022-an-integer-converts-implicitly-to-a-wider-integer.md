@@ -74,8 +74,13 @@ The reason is not the sign rule. It is that **a default argument is not type-che
 parameter's type at all**: `fun f(a: int = "hello")`, `fun f(a: string = 5)` and
 `fun f(a: bool = 7)` all compile with exit 0, while the same values in an initialiser are refused.
 Booked as `KnownDefect_DefaultArguments.ADefaultArgumentIsNotCheckedAgainstItsParameterType`,
-which asserts the defect in both directions so the asymmetry cannot be read as two unrelated
-facts.
+which asserted the defect in both directions so the asymmetry could not be read as two unrelated
+facts. **Fixed 2026-08-29** and inverted into
+`Soundness_DefaultArguments.ADefaultArgumentIsCheckedAgainstItsParameterType`: the check is
+`checkInitializer` in `visitParameterDefaults`, so a default follows this ADR's rules like any
+other initialiser, and `stdio.fin:87` and `:109` now carry the same diagnostic `:110` already
+did. Nothing in this ADR changed to make that happen — the check was missing a layer up, exactly
+as the comment above predicted.
 
 Recorded here because this ADR is where a reader will come looking after reading that comment, and
 because it is the second time in this project that a **source comment described a state the tree
