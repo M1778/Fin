@@ -1,35 +1,72 @@
-// The associative array.
+// The associative array. A real hash table: open addressing with linear probing
+// over a bucket vector, tombstones for erasure, and a rehash at a 0.75 load factor.
 //
-// tests/samples/stdlib/hashmap.fin is the specification: two parallel Collections, a
-// linear scan for the key, and the index operators on top. It is a linear-probe map
-// with no hashing, which is what the draft says it is; the name is the interface, not
-// a promise about the algorithm.
+// tests/samples/stdlib/hashmap.fin is the specification of the *surface*, and every
+// name it declares is still here with the same signature: `get_index` returning an
+// index or `-1`, `exists`, `__get`, `__set`, `operator []`, `operator []=`, the
+// no-argument constructor and `from_prototype`. What changed is underneath. The draft
+// -- and this file until now -- stored two parallel `Collection`s and scanned them
+// linearly for the key, which made `get_index` O(n) and made the type's name a lie.
+// The draft is design intent about the interface and says nothing about the algorithm,
+// so this is not a divergence from it; it is the first implementation of it.
 //
-// Four samples name it. `deeptest4.fin:11` writes `HashMap::<string, Data>()`, so the
-// no-argument constructor is load-bearing; `macro_definitions.fin:25` writes `new
-// HashMap::<string, int>{}`, so the empty literal has to stand on its own too.
+// HOW A KEY REACHES A BUCKET, and the one decision worth reading before using this.
+//
+// `hash_of<T>` folds `cast<int>(key)` -- the key's own machine value -- through two
+// primes. For an `int`, `char`, `bool` or `uint` key that is the value itself. For a
+// `string` key it is the *pointer*, not the bytes, and that is deliberate rather than
+// a shortcut: `==` on two `string`s in this compiler compares pointers, measured by
+// building the comparison and running it (two spellings of "hello" in one program are
+// equal because the literals are pooled; `strdup("hello") == "hello"` is false). A
+// content hash paired with a pointer equality is the one combination that is actually
+// broken -- two equal-by-`==` keys must never land in different buckets, and two
+// unequal keys landing in the same bucket only costs a probe. So the hash is
+// consistent with the equality the language gives, and it will need changing on the
+// day `==` on `string` starts comparing bytes. Until then, a `string`-keyed map works
+// for keys that are literals or are kept alive by the caller, which is what the corpus
+// does (`deeptest4.fin:12` writes `a["Hi"] = ...` and `:16` reads `a["Hi"]`).
+//
+// A caller who needs a different hash supplies one. `hasher <fn(any) -> int>` is a
+// field, `HashMap::with_hasher(f)` is the static that sets it, and `hash_key` consults
+// it when it is not null. That is the extension point instead of a `Hashable`
+// interface bound: a bound cannot be dispatched on today
+// (KnownDefect_GenericBounds.AnArgumentViolatingAFunctionBoundIsAccepted -- nothing on
+// the call path looks at a callee's generic parameters), so two `hash_of` overloads
+// distinguished only by `T: Hashable` would both type-check and neither would be
+// reliably selected. A decorative interface is worse than a function field that works.
 //
 // Divergences from the draft, each because the compiler says so today:
 //
-//   keys <Collection<T>>      `new Collection::<T>{}` is a pointer, so the fields
-//   values <Collection<U>>    are `<&Collection<T>>`. Same correction the draft's own
-//                             `_arr` needed in collection.fin.
+//   keys <Collection<T>>      `new Collection::<T>{}` is a pointer, so the fields are
+//                             `<&Collection<T>>`.
 //   operator[] implements     the `implements cast<fn(Self, T)>(__get)` form parses
 //     cast<fn(Self, T)>       (parser.y:939) but its expression is read by nobody, so
-//     (__get)                 an operator declared that way would be registered with
-//                             no signature. The operators are written out instead and
-//                             forward to `__get`/`__set`, which is what the copy was
-//                             for.
+//     (__get)                 the operators are written out and forward to
+//                             `__get`/`__set`.
 //   self.values[i] = value    an index expression never consults `operator []=`
 //                             (KnownDefect_IndexOperator.AnIndexExpressionNever-
-//                             ConsultsOperatorBracket), so the library calls
-//                             `__set` directly rather than emit a diagnostic of its
-//                             own into every importer.
-//   return -1 from `<U>`      the draft returns an int out of a function returning
-//                             the value type. A missing key is an assertion here.
+//                             ConsultsOperatorBracket), so `__set` is called directly.
+//   return -1 from `<U>`      the draft returns an int out of a function returning the
+//                             value type. See the note on `__get` below.
 //
-// The draft's `__set` pushes the key and never the value, which would desync the two
-// Collections on the first insert. Both are pushed below.
+// GAPS, all of them hit while writing this file rather than predicted:
+//
+//   * `&` `|` `^` are not in the expression grammar (`syntax error, unexpected
+//     AMPERSAND`), so the hash cannot avalanche with xor and the bucket index cannot
+//     be a mask. `%` does both jobs. This is the same gap `operators.fin` records for
+//     `BitAnd`/`BitOr`.
+//   * The old bucket vector is dropped, not freed, in `grow`. `Collection` has no
+//     destructor and `delete` on a `&Collection<int>` is not what frees its buffer;
+//     the only reclaim this library can express is `Collection::allocate`'s `delete`
+//     of its own `[T]`. So a map that grows leaks one `int` vector per growth.
+//   * An erased entry's key and value stay in `keys`/`values` forever. Compaction
+//     needs removal from the middle of a `Collection`, which would move every index
+//     the bucket vector holds; `Collection::remove` exists now, but rewriting the
+//     bucket vector after it is a second pass this file does not do yet.
+//   * A struct-typed key type-checks (`cast<int>` of a struct is accepted) and is not
+//     usable: `==` on two structs with no declared `operator ==` is refused in codegen
+//     (`an undeclared operator '==' on struct 'P' is not lowered yet`). `deeptest4.fin`
+//     keys by `string` and values by a struct, which is the supported direction.
 #[stdimport] %{
 import { Collection } from collection::std;
 import { Error } from error::std;
@@ -41,44 +78,272 @@ namespace std {
 #[export]
 pub struct HashMapError : <Error> {}
 
+// The default hash: fold the key's machine value through two primes so that both
+// halves of a wide value reach the result. Every intermediate is bounded by
+// 1000003 * 31, which fits an `int`, so nothing here relies on wraparound.
+//
+// `cast<int>(key)` is what makes this generic over an arbitrary `T` at all. It is
+// accepted for every key type the corpus uses and for a struct as well; what a struct
+// hashes to is its truncated representation, and see the header on why that is not the
+// part that limits struct keys.
+#[export]
+pub fun hash_of<T>(key: T) <int> {
+    let raw <int> = cast<int>(key);
+    let low <int> = raw % 1000003;
+    if (low < 0) { low = 0 - low; }
+    let high <int> = (raw / 1000003) % 1000003;
+    if (high < 0) { high = 0 - high; }
+    let mixed <int> = (low * 31 + high) % 1000003;
+    if (mixed < 0) { mixed = 0 - mixed; }
+    return mixed;
+}
+
 #[export]
 pub struct HashMap<T, U> : <Index, IndexAssign> {
     priv:
+      // Entry storage. A key and its value share an index -- a *slot* -- and a slot is
+      // never reused once written, which is what lets the bucket vector hold slot
+      // numbers rather than keys. `live` says whether a slot's entry is still present.
       keys <&Collection<T>>,
       values <&Collection<U>>,
+      live <&Collection<bool>>,
+
+      // The bucket vector: `cap` entries, each holding a slot number, `EMPTY` or
+      // `DELETED`. This is the hash table; everything above is where the entries live.
+      buckets <&Collection<int>>,
+
+      cap <int> = 0,
+      used <int> = 0,
+      dead <int> = 0,
+
+      // An optional replacement for `hash_of<T>`. See the header: a function field
+      // rather than an interface bound, because a bound is not dispatched on today.
+      hasher? <fn(any) -> int>,
 
     pub:
+      // A map is born with `cap` 0 and no vectors, so that both spellings the corpus
+      // writes -- `HashMap::<string, Data>()` at deeptest4.fin:11 and `new
+      // HashMap::<string, int>{}` at macro_definitions.fin:25 -- reach the same state.
+      // The literal form runs no constructor, so nothing else may assume a constructor
+      // ran; every method that touches a vector calls `ensure` first.
+      priv fun ensure(self: &Self) <noret> {
+          if (self.cap > 0) { return; }
+          self.keys = new Collection::<T>{};
+          self.values = new Collection::<U>{};
+          self.live = new Collection::<bool>{};
+          self.buckets = new Collection::<int>{};
+          for (let i <int> = 0; i < 8; i++) { self.buckets.push(-1); }
+          self.cap = 8;
+          self.used = 0;
+          self.dead = 0;
+      }
+
+      // The hash, folded to non-negative so that `%` gives a bucket in range. `%` on a
+      // negative left operand is negative in this compiler, so this is not decoration.
+      priv fun hash_key(self: &Self, key: T) <int> {
+          if (self.hasher == null) { return hash_of::<T>(key); }
+          let f <fn(any) -> int> = self.hasher?;
+          let h <int> = f(key);
+          if (h < 0) { h = 0 - h; }
+          if (h < 0) { h = 0; }
+          return h;
+      }
+
+      // The probe sequence, and the only place it is written. Linear, stride 1: it is
+      // the sequence with the best locality and the worst clustering, and clustering is
+      // what the 0.75 load factor is for.
+      //
+      // An `EMPTY` bucket ends the search -- nothing was ever placed past it for this
+      // key -- while a `DELETED` one does not, which is the whole reason tombstones
+      // exist rather than clearing the bucket on removal.
       fun get_index(self: &Self, other: T) <int> {
-        for (let i <int> = 0; i < self.keys.len(); i++) {
-            if (self.keys.get(i) == other) {
-                return i;
+          self.ensure();
+          if (self.used == 0) { return -1; }
+          let start <int> = self.hash_key(other) % self.cap;
+          for (let probe <int> = 0; probe < self.cap; probe++) {
+              let b <int> = (start + probe) % self.cap;
+              let slot <int> = self.buckets.get(b);
+              if (slot == -1) { return -1; }
+              if (slot >= 0) {
+                  if (self.keys.get(slot) == other) { return slot; }
               }
           }
-        return -1;
+          return -1;
       }
 
       fun exists(self: &Self, other: T) <bool> {
-        return self.get_index(other) >= 0;
+          return self.get_index(other) >= 0;
       }
 
       fun len(self: &Self) <int> {
-        return self.keys.len();
+          self.ensure();
+          return self.used;
+      }
+
+      fun is_empty(self: &Self) <bool> {
+          return self.len() == 0;
+      }
+
+      // The bucket vector's size, not the entry count. Reported because the load factor
+      // is the only thing standing between this and quadratic behaviour, and a caller
+      // who wants to check it needs both numbers.
+      fun capacity(self: &Self) <int> {
+          self.ensure();
+          return self.cap;
+      }
+
+      // Rehash into a bucket vector of twice the size. Tombstones do not survive it,
+      // which is the other half of why they are affordable.
+      //
+      // The old vector is dropped rather than freed -- see the header's gap list.
+      priv fun grow(self: &Self) <noret> {
+          let bigger <int> = self.cap * 2;
+          let fresh <&Collection<int>> = new Collection::<int>{};
+          for (let i <int> = 0; i < bigger; i++) { fresh.push(-1); }
+
+          self.cap = bigger;
+          self.buckets = fresh;
+          self.dead = 0;
+
+          let slots <int> = self.keys.len();
+          for (let s <int> = 0; s < slots; s++) {
+              if (self.live.get(s)) {
+                  let start <int> = self.hash_key(self.keys.get(s)) % self.cap;
+                  for (let probe <int> = 0; probe < self.cap; probe++) {
+                      let b <int> = (start + probe) % self.cap;
+                      if (self.buckets.get(b) == -1) {
+                          self.buckets.__set(b, s);
+                          break;
+                      }
+                  }
+              }
+          }
       }
 
     pub fun __set(self: &Self, key: T, value: U) <noret> {
-        let idx <int> = self.get_index(key);
-        if (idx < 0) {
-            self.keys.push(key);
-            self.values.push(value);
+        self.ensure();
+
+        let at <int> = self.get_index(key);
+        if (at >= 0) {
+            self.values.__set(at, value);
             return;
           }
-        self.values.__set(idx, value);
+
+        // Load factor 0.75, counting tombstones: a table full of tombstones probes as
+        // badly as a table full of entries, so both belong on the same side of the test.
+        if ((self.used + self.dead) * 4 >= self.cap * 3) { self.grow(); }
+
+        let start <int> = self.hash_key(key) % self.cap;
+        for (let probe <int> = 0; probe < self.cap; probe++) {
+            let b <int> = (start + probe) % self.cap;
+            let slot <int> = self.buckets.get(b);
+            if (slot < 0) {
+                if (slot == -2) { self.dead--; }
+                self.keys.push(key);
+                self.values.push(value);
+                self.live.push(true);
+                self.buckets.__set(b, self.keys.len() - 1);
+                self.used++;
+                return;
+              }
+          }
+
+        // Unreachable while the load factor holds: `grow` above guarantees a free
+        // bucket, so arriving here means the invariant broke rather than that the
+        // caller did something wrong. Written as a comparison because that is the form
+        // of `blame` that parses (blame_assert.fin:15 comments out the raise form).
+        blame self.used < self.cap, "hash map has no free bucket";
       }
 
+    // A missing key stays an assertion, deliberately, and the reason is that the
+    // alternative is worse in this language rather than that it is better in general.
+    // Returning a `Result<U, HashMapError>` would make every read of a present key cost
+    // an `unwrap`, and `Result`'s `unwrap` is reached through an `implements` block on a
+    // generic enum -- which type-checks and is refused in codegen (`a generic enum
+    // 'Result' is not lowered yet`), so the safe spelling would be the one that cannot
+    // run. `exists` before `__get` is the two-call form that does work today, and
+    // `get_or` below is the one-call form for a caller with a default.
     pub fun __get(self: &Self, other: T) <U> {
         let idx <int> = self.get_index(other);
         blame idx >= 0, "key not found";
         return self.values.get(idx);
+      }
+
+    // The total lookup: the value, or `fallback` when the key is absent. No assertion,
+    // so this is what a caller who does not know whether the key is there should use.
+    pub fun get_or(self: &Self, other: T, fallback: U) <U> {
+        let idx <int> = self.get_index(other);
+        if (idx < 0) { return fallback; }
+        return self.values.get(idx);
+      }
+
+    // Tombstone the bucket and mark the slot dead. Returns whether anything was there.
+    // The key and value stay in their vectors -- see the header's gap list.
+    pub fun remove(self: &Self, other: T) <bool> {
+        self.ensure();
+        if (self.used == 0) { return false; }
+        let start <int> = self.hash_key(other) % self.cap;
+        for (let probe <int> = 0; probe < self.cap; probe++) {
+            let b <int> = (start + probe) % self.cap;
+            let slot <int> = self.buckets.get(b);
+            if (slot == -1) { return false; }
+            if (slot >= 0) {
+                if (self.keys.get(slot) == other) {
+                    self.buckets.__set(b, -2);
+                    self.live.__set(slot, false);
+                    self.used--;
+                    self.dead++;
+                    return true;
+                  }
+              }
+          }
+        return false;
+      }
+
+    // Empties the map without freeing anything, which is all this library can express.
+    pub fun clear(self: &Self) <noret> {
+        self.ensure();
+        for (let b <int> = 0; b < self.cap; b++) { self.buckets.__set(b, -1); }
+        let slots <int> = self.keys.len();
+        for (let s <int> = 0; s < slots; s++) { self.live.__set(s, false); }
+        self.keys.clear();
+        self.values.clear();
+        self.live.clear();
+        self.used = 0;
+        self.dead = 0;
+      }
+
+    // Index-based iteration, because `foreach` over a struct is not a thing the
+    // language defines (KnownDefect_Foreach.TheIterableIsNeverCheckedForBeingIterable
+    // records that `foreach` does not even ask what it is walking). A caller walks
+    // `0 .. slot_count()` and skips the slots `is_live` denies:
+    //
+    //     for (let s <int> = 0; s < m.slot_count(); s++) {
+    //         if (m.is_live(s)) { ... m.key_at(s) ... m.value_at(s) ... }
+    //     }
+    //
+    // `slot_count` is not `len`: it counts slots ever written, live and dead alike.
+    pub fun slot_count(self: &Self) <int> {
+        self.ensure();
+        return self.keys.len();
+      }
+
+    pub fun is_live(self: &Self, slot: int) <bool> {
+        self.ensure();
+        blame slot < self.keys.len(), "slot out of range";
+        return self.live.get(slot);
+      }
+
+    pub fun key_at(self: &Self, slot: int) <T> {
+        self.ensure();
+        blame slot < self.keys.len(), "slot out of range";
+        return self.keys.get(slot);
+      }
+
+    pub fun value_at(self: &Self, slot: int) <U> {
+        self.ensure();
+        blame slot < self.values.len(), "slot out of range";
+        return self.values.get(slot);
       }
 
     pub operator [](key: <T>) <U> {
@@ -90,14 +355,24 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
       }
 
     // `HashMap::from_prototype({ "a" : 10, "b" : 20 })` in prototype_test.fin:27.
-    // Empty for the same reason Collection::from_prototype is: nothing can walk a
-    // prototype yet.
+    // Still empty, and still for the reason it always was: a prototype resolves no
+    // member and no index, so nothing in the language can walk its entries. Declared
+    // because the corpus calls it.
     pub static fun from_prototype(prtp: {T, U}) <Self> {
-        return HashMap{keys: new Collection::<T>{}, values: new Collection::<U>{}};
+        return HashMap{keys: null, values: null, live: null, buckets: null,
+                       cap: 0, used: 0, dead: 0, hasher: null};
+      }
+
+    // The extension point named in the header. `f` is handed the key as an `any` and
+    // returns anything; `hash_key` folds a negative result.
+    pub static fun with_hasher(f: fn(any) -> int) <Self> {
+        return HashMap{keys: null, values: null, live: null, buckets: null,
+                       cap: 0, used: 0, dead: 0, hasher: f};
       }
 
     HashMap() {
-        return new HashMap{keys: new Collection::<T>{}, values: new Collection::<U>{}};
+        return new HashMap{keys: null, values: null, live: null, buckets: null,
+                           cap: 0, used: 0, dead: 0, hasher: null};
       }
   }
 
