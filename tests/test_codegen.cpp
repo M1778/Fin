@@ -4317,6 +4317,107 @@ BACKEND_TEST(Soundness_Codegen, AStructsConstructorIsEmittedAndCallable) {
         "struct Point { x <int>, constructor(nx: int) { self.x = nx; } }\n").find("declared Point.constructor"), std::string::npos);
 }
 
+BACKEND_TEST(Soundness_Codegen, AConstructorWritesThroughTheCallersStorage) {
+    // The calling convention, stated as a test rather than as a comment. The object is
+    // the caller's: it allocates, passes the address as parameter 0, and the
+    // constructor's stores land in it. A by-value return that forgot to copy back
+    // passes the previous shape of this test and prints uninitialised memory, so the
+    // assertion is on a field the constructor computes from another -- `y` cannot come
+    // out right by accident.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    y <int>,\n"
+        "    constructor(nx: int) { self.x = nx; self.y = nx * 2; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point(7);\n"
+        "    printf(\"%d %d\\n\", p.x, p.y);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 14\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFieldNoConstructorAssignsIsZero) {
+    // `z` is declared and never written, by the constructor or the call. Zero rather
+    // than whatever the frame held -- the answer a local with no initialiser gets in
+    // this file, and the one answer a test can pin at all.
+    const Built b = build(std::string(kPrintf) +
+        "struct Sparse {\n"
+        "    a <int>,\n"
+        "    z <int>,\n"
+        "    constructor(n: int) { self.a = n; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <Sparse> = Sparse(4);\n"
+        "    printf(\"%d %d\\n\", s.a, s.z);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AConstructorMayReturnAnAllocationOfItsOwnStruct) {
+    // `return new S{...}` is what six of the fifteen constructors in the corpus and
+    // lib/std write, lib/std/error.fin:66 among them. The constructor's emitted result
+    // is void and the object is the caller's, so the returned pointer is read back and
+    // copied into the caller's storage rather than returned -- which is the only
+    // reading under which the value the body built is the value the caller sees.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box {\n"
+        "    v <int>,\n"
+        "    constructor(n: int) { return new Box{v: n + 1}; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <Box> = Box(1);\n"
+        "    printf(\"%d\\n\", a.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AConstructorMayReturnALiteralOfItsOwnStruct) {
+    // The other half of the same rule, without the allocation. A returned aggregate is
+    // stored through the receiver as it is; that the two forms agree is what makes the
+    // load in the `new` case a representation detail rather than a second convention.
+    const Built b = build(std::string(kPrintf) +
+        "struct Plain {\n"
+        "    v <int>,\n"
+        "    constructor(n: int) { return Plain{v: n + 5}; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Plain> = Plain(1);\n"
+        "    printf(\"%d\\n\", b.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "6\n") << b.why();
+}
+
+BACKEND_TEST(KnownDefect_Codegen, ConstructorOverloadsAreRefusedRatherThanResolved) {
+    // The booked defect (docs/HANDOFF.md §7): the analyzer resolves `constructors[0]`
+    // and no more. One symbol per struct is what this file declares to match it, so a
+    // second `constructor` is refused *by name* at its declaration rather than silently
+    // losing to the first -- a call that reached the wrong body would be a program that
+    // quietly computes something else. The day overload resolution lands, this test is
+    // the one that says so.
+    const Built b = build(std::string(kPrintf) +
+        "struct Two {\n"
+        "    a <int>,\n"
+        "    constructor(n: int) { self.a = n; }\n"
+        "    constructor(n: int, m: int) { self.a = n + m; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let t <Two> = Two(1);\n"
+        "    printf(\"%d\\n\", t.a);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("constructor overloads on struct 'Two'"),
+              std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AStructWithNoFunctionsOfItsOwnStillLowers) {
     // The boundary, from the other side. Refusing a declared function must not turn
     // into refusing every struct: structs.fin's Vector3 has three fields and nothing

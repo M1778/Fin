@@ -1608,8 +1608,19 @@ private:
         for (auto& c : info.decl->constructors) {
             if (!c->body) continue;
             const std::string key = methodKey(info.finName, "constructor");
-            TypeNode result(info.finName);
-            declareFunction(*c, key, key, c->params, &result,
+            // The object is the receiver and the result is nothing: the caller owns the
+            // storage, passes its address as parameter 0, and reads the value back out
+            // of its own slot afterwards. That is the same convention `set_x` already
+            // uses -- `self.x = nx` is a store through a pointer into the caller's
+            // object -- and choosing it here is what makes the three sites that must
+            // agree (this declaration, emitBodyOf/visit(ReturnStatement&) and
+            // visit(FunctionCall&)) describe one calling convention rather than three.
+            //
+            // Returning the aggregate by value instead would need the struct ABI
+            // classifier for the day a constructor crosses an `@define` boundary, and
+            // would still load: the corpus's dominant body is `return new S{...}`,
+            // which produces a pointer whatever the signature says.
+            declareFunction(*c, key, key, c->params, /*returnType=*/nullptr,
                             /*isVarArg=*/false, /*isExtern=*/false, &receiver);
             auto declared = functions_.find(key);
             if (declared == functions_.end()) return false;
@@ -3114,11 +3125,6 @@ private:
                 builder_.CreateRet(builder_.getInt32(0));
             } else if (info.returnType.isVoid()) {
                 builder_.CreateRetVoid();
-            } else if (info.isConstructor && info.hasReceiver && !info.paramTypes.empty()) {
-                auto self = scopes_.back().find("self");
-                if (self != scopes_.back().end()) builder_.CreateRet(builder_.CreateLoad(info.returnType.llvmType,
-                                                                  self->second.slot, "constructed"));
-                else builder_.CreateUnreachable();
             } else {
                 // The analyzer's missing-return check is what makes this
                 // unreachable for a well-typed program; `fun?` is its documented
@@ -3503,6 +3509,42 @@ private:
         popScope();
     }
 
+    // The object a constructor's `return` names, stored into the caller's storage.
+    //
+    // Both shapes the corpus writes land here. `return new S{...}` yields a pointer to
+    // a heap copy, which is read back and copied into the caller's slot -- the heap
+    // block is then unreferenced, which is the same bargain every other allocation in
+    // this file strikes (see ADR 0003: memory management is a library, and nothing here
+    // frees). `return S{...}` yields the aggregate directly and is stored as it is.
+    //
+    // Returns false having already reported.
+    bool emitConstructedValue(ReturnStatement& node, const CgVal& v) {
+        Local* self = findLocal("self");
+        if (!self) {
+            // A constructor is declared with a receiver or not declared at all, so
+            // arriving here without one is this file disagreeing with itself.
+            unsupported(node, "a constructor's 'return' with no receiver in scope");
+            return false;
+        }
+        if (self->type.pointee == nullptr || !self->type.pointee->isStruct()) {
+            unsupported(node, "a constructor whose receiver is not a pointer to a struct");
+            return false;
+        }
+        const CgType object = *self->type.pointee;
+        llvm::Value* dest = builder_.CreateLoad(self->type.llvmType, self->slot, "self.ptr");
+
+        llvm::Value* stored = nullptr;
+        if (v.type.isPointer() && v.type.pointee && v.type.pointee->isStruct() &&
+            v.type.pointee->llvmType == object.llvmType) {
+            stored = builder_.CreateLoad(object.llvmType, v.value, "constructed");
+        } else {
+            stored = convert(node, v, object);
+        }
+        if (!stored) return false;
+        builder_.CreateStore(stored, dest);
+        return true;
+    }
+
     void visit(ReturnStatement& node) override {
         if (!currentFn_) { unsupported(node, "a return outside a function"); return; }
         const bool isMain = currentFn_->isMain;
@@ -3525,16 +3567,18 @@ private:
             if (status) builder_.CreateRet(status);
             return;
         }
-        if (target.isVoid()) { unsupported(node, "a 'return <value>' from a void function"); return; }
-        llvm::Value* out = nullptr;
-        if (currentFn_->isConstructor && target.isStruct() && v.type.isPointer() &&
-            v.type.pointee && v.type.pointee->isStruct()) {
-            // Constructor bodies commonly return `new S{...}`. The constructor's
-            // public result is S, so read the allocated aggregate back as its value.
-            out = builder_.CreateLoad(target.llvmType, v.value, "constructed");
-        } else {
-            out = convert(node, v, target);
+        if (currentFn_->isConstructor) {
+            // `return new S{...}` -- what six of the fifteen constructors in the corpus
+            // and the library write. A constructor's emitted result is void and the
+            // object it builds is the caller's storage at parameter 0, so a returned
+            // value is not returned: it is *the* value of the object, and it is stored
+            // through the receiver before the void return.
+            if (!emitConstructedValue(node, v)) return;
+            builder_.CreateRetVoid();
+            return;
         }
+        if (target.isVoid()) { unsupported(node, "a 'return <value>' from a void function"); return; }
+        llvm::Value* out = convert(node, v, target);
         if (out) builder_.CreateRet(out);
     }
 
@@ -4399,11 +4443,14 @@ private:
             unsupported(node, "a call with explicit generic arguments");
             return;
         }
+        // `Point(7)` -- a call whose name is a struct's. It is the constructor symbol
+        // declared beside the struct, and the analyzer has already selected
+        // constructors[0]; this pass deliberately uses the same single-symbol rule
+        // rather than inventing an overload resolution the front end does not have.
         std::string emittedName = node.name;
-        // A type-shaped call is represented by the constructor symbol declared with
-        // the struct.  The analyzer has already selected constructors[0]; this pass
-        // deliberately uses the same single-symbol rule.
-        if (structs_.count(node.name)) emittedName = methodKey(node.name, "constructor");
+        auto asStruct = structs_.find(node.name);
+        const bool isCtorCall = asStruct != structs_.end();
+        if (isCtorCall) emittedName = methodKey(node.name, "constructor");
         auto found = functions_.find(emittedName);
         if (found == functions_.end()) {
             unsupported(node, fmt::format("a call to '{}'", node.name));
@@ -4414,11 +4461,35 @@ private:
         std::vector<llvm::Value*> args;
         llvm::Value* ctorStorage = nullptr;
         if (info.isConstructor) {
-            ctorStorage = builder_.CreateAlloca(info.returnType.llvmType, nullptr, "constructor");
+            if (!isCtorCall || !asStruct->second.complete) {
+                // The symbol is a constructor and the name is not the struct's, which
+                // is not a spelling that exists: `Struct.constructor` is not writable.
+                unsupported(node, fmt::format("a call to the constructor '{}'", node.name));
+                return;
+            }
+            // The caller owns the object. It is allocated here, its address is passed
+            // as parameter 0, and the call's value is what the constructor left in it.
+            ctorStorage = builder_.CreateAlloca(asStruct->second.llvmType, nullptr,
+                                                node.name);
+            // Zeroed first, so a field no constructor assigns reads as zero rather
+            // than as whatever the frame held -- the answer a local with no
+            // initialiser gets here too.
+            builder_.CreateStore(llvm::Constant::getNullValue(asStruct->second.llvmType),
+                                 ctorStorage);
             args.push_back(ctorStorage);
         }
         if (!emitCallArgs(node, info, node.name, argList(node.args), args)) return;
         emitCall(info, args);
+        if (ctorStorage) {
+            auto object = types_.structByName(asStruct->second.finName);
+            if (!object) {
+                unsupported(node, fmt::format("a call to the constructor of '{}'",
+                                              node.name));
+                return;
+            }
+            value_ = CgVal{builder_.CreateLoad(object->llvmType, ctorStorage, "constructed"),
+                           *object};
+        }
     }
 
     // The arguments of a call, each offered the type of the parameter it lands on.
