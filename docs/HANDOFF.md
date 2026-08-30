@@ -114,6 +114,7 @@ was broken.
 | — since `4788753`, at `cfebdd5` | **1428 / 1428 pass**, 0 skipped | constructors; corpus unmoved |
 | — since `4788753`, at `80f4f8e` | **1436 / 1436 pass**, 0 skipped | inherited methods; corpus unmoved |
 | — since `4788753`, at `5d70a6e` | **1448 / 1448 pass**, 0 skipped | implements blocks; **corpus 19 → 20** |
+| — since `4788753`, at `HEAD` | **1465 / 1465 pass**, 0 skipped | the interface reference's missing tests; corpus unmoved |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -332,6 +333,108 @@ a vtable slot that used to hold null makes a call through it a jump to address z
 The eleven remaining first refusals, measured at `5d70a6e`, are the twelve above minus
 `implements_block.fin` and otherwise identical, refusal for refusal.
 
+### The interface reference, measured 2026-08-30 — item 4's third bullet was wrong
+
+**It is built.** The queue said no corpus site takes an interface reference as a value and that
+nothing measured it, and both halves are false: `love.fin` is such a site, it runs, and commit
+`aea960e` (2026-08-28, "Lower interface values and dispatch", 136 lines in `CodeGen_LLVM.cpp`)
+implemented all five of ADR 0027's steps. It shipped with **no test asserting a value through a
+reference** and its subject line contains a literal `\n\n`, so the commit has no body and left no
+design record. That is why this subsection exists and why the seventeen tests below do.
+
+Nothing was fixed here. Nothing needed to be. What follows is the measurement, and the tests are
+the part that was owed.
+
+The five sites in `CodeGen_LLVM.cpp`, for the next reader:
+
+- `TypeMapper::map` (505-562) — the interface branch, which answers a two-word `{i8*, i8**}`.
+- `declareInterfaces` / `parentIsInterface` (1179-1206) — an interface declares nothing.
+- `interfaceVtable` (2884-2935) — the table, `linkonce_odr`, keyed per (implementor, interface):
+  one i64 **byte offset** per required field first, then one function pointer per method. It walks
+  base structs for a provider it cannot find on the implementor itself, guarded by
+  `baseSharesLayout`.
+- `convert` (2961-2972) — builds the pair from the implementor's **address** and the table.
+- `visit(MemberAccess&)` (6026-6046) — a field read: extract data, extract table, GEP the slot,
+  load the offset, byte-GEP, bitcast, load. `emitAddress` (3048-3150) has **no** interface case,
+  which is the whole reason a write refuses.
+
+**Measured working, each by compiling, linking and running** — twelve shapes, now twelve
+`Soundness_Codegen` tests: an interface-typed parameter; an interface-typed local; a struct
+**field** of interface type; assignment to an interface variable; a required **field** read; a
+required field at a **shifted** offset; two field-requiring interfaces live on one struct at once;
+a write through a method reaching the caller's object; an **inherited** field satisfying a
+requirement, and one at a non-zero offset in the parent; a reference passed on to a second
+function unchanged; and a **generic struct** as the implementor (`G<T> implements <Speaker>`,
+which is where this unit meets `5d70a6e`'s extras).
+
+**The four edges ADR 0027 lists as undecided, measured as they stand today.** Three refuse and one
+is a front-end type error; none is miscompiled, and three now have tests:
+
+1. **A temporary with no address** — `hear(make())` gives `codegen: an interface conversion from a
+   value without an address`. Correct as it stands: the data word needs an address, and a spilled
+   copy would silently break the write-through-a-method case above.
+2. **Is a required field writable through the reference** — `x.a = 12` gives `codegen: an
+   assignment to this target`. `emitAddress` has no interface-member case. Refused, not dropped,
+   which is the founding rule; it stays refused until the ruling lands, and `readonly` is the half
+   that has to be decided first, since a field requirement says nothing about mutability today.
+3. **Interface-to-interface conversion** — `let n <Narrow> = w;` where `Wide` requires everything
+   `Narrow` does gives the front end's `Type mismatch: expected 'Narrow', got 'Wide'`. No corpus
+   witness. The test asserts it is the **front end** and specifically not a codegen refusal,
+   because a `Wide` that reached `convert` as if it were a struct would take the *pair's* address
+   for the data word and build a reference to a reference.
+4. **Reference equality** — untested, unwitnessed, unchanged.
+
+**Two defects booked, both `KnownDefect_Codegen`:**
+
+- **A generic interface as a value type refuses.** `let b <Box<int>>` gives `codegen: a variable of
+  type 'Box<int>' is not lowered yet`. Root cause located: `TypeMapper::map` tests
+  `!node->generics.empty()` **before** `interfaces_->count(node->name)`, so the name is sent to
+  `instantiateGeneric` as a struct template, finds none, and refuses — the interface branch is
+  never reached. The fix is to ask "is this an interface" first. Booked rather than done because no
+  corpus site needs it: `IResult<T, U>` (`stdlib/typing.fin:27`), `rptr_iface<T>` and `GetVal<T>`
+  are all written as bounds or in `implements` clauses, never as the type of a value, and ADR 0008
+  makes the corpus the specification. A *non-generic* interface whose fields have generic types is
+  a different path and already works — that one is conformance, not a value.
+- **An escaping reference is accepted and reads a dead frame.** `make` converts a local and returns
+  the pair; the caller prints garbage, and `objdump` shows `lea -0x8(%rsp),%rax` — the data word
+  points into the frame `make` just left. Booked, and **not as an interface defect**: the same
+  program with a plain `&D` in place of the interface is accepted just as happily (measured four
+  ways, and a `noise()` call in between makes the plain pointer print `222`). There is no lifetime
+  analysis anywhere in the pipeline, which is the same fact §8's `#[slaveof]` ruling turns on (ADR
+  0003 — nothing frees implicitly, so nothing today can state how long anything lives). The test
+  holds **both** halves and asserts only that each compiles, because a dead frame's contents are
+  not a specification: if the interface half ever refuses while the pointer half still compiles,
+  the refusal was written in the wrong place.
+
+**One front-end gap, already booked in §7:** an interface satisfied by an **inherited method**
+gives `Struct 'Talker' does not implement interface 'Speaker'` (`Analyzer_Decl.cpp:537`). The
+backend's `interfaceVtable` already resolves such a provider through the hierarchy — the test
+`.AnInheritedFieldSatisfiesARequirementThroughTheReference` proves the field half works — so this
+is the analyzer's half only.
+
+**Corpus unmoved: 20 / 11 / 20, refusal for refusal.** No compiler source changed in this unit,
+only `tests/test_codegen.cpp` and this file, so it could not have moved. Suite **1448 → 1465**.
+
+The seventeen tests, all in `tests/test_codegen.cpp` under the section "An interface as the type of
+a value: the two-word reference": `Soundness_Codegen.AnInterfaceTypedParameterCallsTheImplementorsMethod`,
+`.AnInterfaceTypedLocalCallsTheImplementorsMethod`, `.AStructFieldOfAnInterfaceTypeHoldsTheReference`,
+`.AssigningToAnInterfaceVariableRebindsBothWords`,
+`.AFieldRequiredByAnInterfaceIsReadThroughTheReference`,
+`.ARequiredFieldAtANonZeroOffsetIsReadThroughTheReference`,
+`.TwoInterfacesOnOneStructGetTheirOwnTables`, `.AMethodCalledThroughAReferenceWritesToTheOriginal`,
+`.AnInheritedFieldSatisfiesARequirementThroughTheReference`,
+`.AnInheritedFieldAtANonZeroOffsetIsReadThroughTheReference`,
+`.AnInterfaceReferenceIsPassedOnUnchanged`, `.AGenericStructConvertsToAnInterfaceItImplements`,
+`.AConversionFromAValueWithNoAddressIsRefused`,
+`.AWriteToAFieldThroughAnInterfaceReferenceIsRefused`, `.AConversionBetweenTwoInterfacesIsRefused`,
+`KnownDefect_Codegen.AGenericInterfaceAsAValueTypeIsRefused` and
+`.AnEscapingInterfaceReferenceIsAcceptedLikeAnyEscapingAddress`. Three of them exist because a
+weaker version would pass on broken code: the shifted-offset read (a table storing `0` prints
+`99`), the inherited field at a non-zero offset (`a` sits at 0 in both layouts, so the plain
+inherited test cannot tell "found in a parent" from "at the right offset"), and the write through a
+method (a conversion that spilled the struct into a fresh slot would compile, link, run and print
+`0`).
+
 ### Movement since `43b3324`
 
 `43b3324` measured 14 / 15 / 21 of 50 with a suite of 1344. The five commits between it and
@@ -499,11 +602,14 @@ Recommended order — cheapest first, and each one unblocks the next:
    implements-block unit". A block's methods, operators and constructor are now declared by exactly
    the code that declares a struct's own, so a call, an operator, a static method, a constructor and
    dispatch through an interface's vtable all work.
-   **Neither sample this item named is still evidence for it.** `deeptest1.fin` was already
-   OBJECT_CLEAN when §4 was re-measured at `cfebdd5` — the interface declaration it was blamed for
-   is not its blocker and has not been for two commits — and `implements_block.fin` is now clean
-   too. What is left under this title is **three unrelated things**, and the first is not an
-   interface gap at all:
+   **The reference half is done too — it was already built when this item said it was not.** See
+   §4, "The interface reference": `aea960e` implemented all of ADR 0027 on 2026-08-28 and shipped no
+   test for it; seventeen tests now measure it, twelve of them asserting a value through a
+   reference. **Neither sample this item named is still evidence for it.** `deeptest1.fin` was
+   already OBJECT_CLEAN when §4 was re-measured at `cfebdd5` — the interface declaration it was
+   blamed for is not its blocker and has not been for two commits — and `implements_block.fin` is
+   now clean too. What is left under this title is **two unrelated things**, and neither is an
+   interface-lowering gap:
    - **`interfaces.fin` is not blocked on interface lowering.** Its refusal is `a call to the method
      'to_string' on struct 'User'`, and `User` **declares no `to_string`** — not in the struct, not
      in a block. The sample's own comment says "we don't check impl yet, just syntax". So this is a
@@ -512,15 +618,20 @@ Recommended order — cheapest first, and each one unblocks the next:
      `operator[] implements cast<fn(Self, T)>(__get)`. That is an operator whose implementation is a
      cast of another symbol, which is neither a body nor an extern — and it sits behind hashmap's
      three separate-compilation blockers anyway (item 3).
-   - **ADR 0019's interface reference as two words** (`{data, vtable}`, and the pointer map's three
-     states). `interfaceVtable` builds a table and the inheritance unit taught it to resolve a slot
-     through the hierarchy, but **no corpus site takes an interface reference as a value**, so
-     nothing measures it. Do not build it before a site exists; ADR 0008 makes the corpus the
-     specification.
-   Also booked from the unit's measurements: the analyzer does not resolve a generic argument
+   ~~**ADR 0019's interface reference as two words**~~ — **built at `aea960e`, measured
+   2026-08-30.** The bullet that stood here said no corpus site takes an interface reference as a
+   value and that nothing measures it. Both are false: `love.fin` is such a site and it runs, and
+   the reference works for a parameter, a local, a struct field, an assignment, a field read
+   (including at a shifted offset and through an inherited field), a write through a method, a
+   re-pass, and a generic implementor. §4 has the sites, the four ADR-0027-undecided edges as they
+   measure today, and the two booked defects — a **generic interface as a value type** refuses
+   (`TypeMapper::map` tests generics before interfaces), and an **escaping reference** reads a dead
+   frame, which is the pipeline's general lack of lifetime analysis and not an interface defect.
+   Also booked from the two units' measurements: the analyzer does not resolve a generic argument
    written on the *interface* of a generic-target block (`Box<T> implements <IBox<T>>` →
    `Undefined type 'T'`), and an interface satisfied by an **inherited** method is still reported
-   unimplemented (`Analyzer_Decl.cpp:537`). Both are front-end work.
+   unimplemented (`Analyzer_Decl.cpp:537`) even though the backend's table already resolves such a
+   provider through the hierarchy. Both are front-end work.
 5. **Imports** — `complex.fin`, `deeptest4.fin`. **Measured 2026-08-28, and the fix is not in
    codegen.** `complex.fin:14` writes `stdio.printf("Big")` against `import stdio::std as stdio;`
    on `:3`, and the front end already resolves it correctly —
@@ -613,6 +724,19 @@ literal; `let s <module.Type>`; `Box<int>()` in a call; `new int;`; an empty `im
 **Codegen residuals:** the `baseAddress`-then-`emit` double-emit for `(*get()).field` — and now,
 narrowly, for a struct-typed left operand of an operator (one dead aggregate load; `-O1` removes
 it). A flat pointer map for a very large fixed array is a size problem.
+
+**The interface reference's two, booked 2026-08-30** (§4, "The interface reference"):
+**a generic interface as the type of a value refuses** — `TypeMapper::map` tests
+`!node->generics.empty()` before `interfaces_->count(name)`, so the name goes to
+`instantiateGeneric` as a struct template and the interface branch is never reached; no corpus site
+writes one, so it is booked rather than reordered
+(`KnownDefect_Codegen.AGenericInterfaceAsAValueTypeIsRefused`). And **an escaping reference reads a
+dead frame** — accepted, garbage at run time, `lea -0x8(%rsp)` in the disassembly. That one is
+**not** an interface defect and must not be fixed as one: a plain `&D` returned from a function is
+accepted identically, because there is no lifetime analysis anywhere in the pipeline — the same fact
+§8's `#[slaveof]` ruling turns on.
+`KnownDefect_Codegen.AnEscapingInterfaceReferenceIsAcceptedLikeAnyEscapingAddress` holds both halves
+and asserts only that each compiles, so the day escape analysis lands they go red together.
 
 **`conanfile.py`'s LLVM block still says 18 — booked by ruling, 2026-08-27.** The docstring
 (lines 12–14) and the `requirements()` comment (lines 48–67) say "a single LLVM major -- 18", quote
@@ -745,6 +869,10 @@ where marked:
   must be closed first. `implements()` never checks fields, so a struct missing a required
   field converts today -- and a vtable then needs an offset for a field the implementor does
   not have. This layout turns that latent hole into a live one.
+  **All five steps landed at `aea960e` the same day, and the prerequisite is closed** (the test is
+  now `Soundness_Interfaces.AMissingFieldIsRejected`). What did *not* land with them is a single
+  test asserting a value through the reference; that debt was paid 2026-08-30 — §4, "The interface
+  reference", has the seventeen tests and the four edges this ruling left open.
 - ~~**Is `&string` the same representation as `string`?**~~ — **RULED 2026-08-28: no, it is a
   pointer to a cell holding the string**, so `*Complex` is the string and `&string` behaves
   like `&T` for every other T. The lifetime half was never the blocker: a literal's value

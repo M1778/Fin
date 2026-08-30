@@ -6740,6 +6740,410 @@ BACKEND_TEST(Soundness_Codegen, AnInterfaceMethodWithABodyIsRefused) {
 }
 
 // ---------------------------------------------------------------------------
+// An interface as the type of a value: the two-word reference.
+// ---------------------------------------------------------------------------
+// The section above is about an interface declaration, which lowers to nothing.
+// This one is about an interface *name in a type position*, which lowers to
+// something: ADR 0019's two words, `{data: i8*, vtable: i8**}` (ADR 0027 fixes
+// the layout). `convert` builds the pair by taking the implementor's address and
+// the `linkonce_odr` table keyed on (implementor, interface); a method call loads
+// the slot and calls through it; a *field* read loads the i64 byte offset the
+// table's leading slots hold and byte-GEPs the data word.
+//
+// Commit `aea960e` built all of that and shipped no test that asserts a value
+// through one -- its message body is empty too, so these tests are the record.
+// `tests/samples/love.fin` is the corpus's only witness and it exercises two
+// shapes; the rest below are the shapes the machinery has to get right for that
+// one to be right, each measured against a run rather than a compile.
+//
+// The refusals at the end are the four edges ADR 0027 explicitly left undecided.
+// Three are refused by name and one is a front-end type error; none of them is
+// silently miscompiled, which is what these assert.
+
+BACKEND_TEST(Soundness_Codegen, AnInterfaceTypedParameterCallsTheImplementorsMethod) {
+    // love.fin's shape, and the one every other test here is a variation of: the
+    // callee names the interface, the caller passes a struct, and the value the
+    // implementor's body computes is what comes back. A vtable slot resolved to the
+    // wrong function would still compile and still link.
+    const Built b = build(std::string(kPrintf) +
+        "interface Speaker { pub fun speak() <int>; }\n"
+        "struct Dog { n <int> }\n"
+        "Dog implements <Speaker> {\n"
+        "    pub fun speak() <int> { return self.n; }\n"
+        "}\n"
+        "fun hear(s: Speaker) <int> { return s.speak(); }\n"
+        "fun main() <noret> {\n"
+        "    let d <Dog> = Dog { n: 42 };\n"
+        "    printf(\"%d\\n\", hear(d));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInterfaceTypedLocalCallsTheImplementorsMethod) {
+    // The same conversion at a `let` rather than at an argument. Worth its own test
+    // because the two go through different code: an argument is converted against a
+    // parameter's declared type, a local against its own annotation.
+    const Built b = build(std::string(kPrintf) +
+        "interface Speaker { pub fun speak() <int>; }\n"
+        "struct Dog { n <int> }\n"
+        "Dog implements <Speaker> {\n"
+        "    pub fun speak() <int> { return self.n; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let d <Dog> = Dog { n: 42 };\n"
+        "    let s <Speaker> = d;\n"
+        "    printf(\"%d\\n\", s.speak());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructFieldOfAnInterfaceTypeHoldsTheReference) {
+    // The reference is two words wide, so a struct that has one as a field has to
+    // reserve both -- `TypeMapper::map` answering with a single pointer would give
+    // Holder the wrong size and put the vtable word wherever the next field is.
+    const Built b = build(std::string(kPrintf) +
+        "interface Speaker { pub fun speak() <int>; }\n"
+        "struct Dog { n <int> }\n"
+        "Dog implements <Speaker> {\n"
+        "    pub fun speak() <int> { return self.n; }\n"
+        "}\n"
+        "struct Holder { s <Speaker> }\n"
+        "fun main() <noret> {\n"
+        "    let d <Dog> = Dog { n: 5 };\n"
+        "    let h <Holder> = Holder { s: d };\n"
+        "    printf(\"%d\\n\", h.s.speak());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AssigningToAnInterfaceVariableRebindsBothWords) {
+    // Two implementors of the same interface share a vtable, so an assignment that
+    // wrote only the data word would still print the right answer here. The point is
+    // that the store is a store of the whole pair: `s = e` after `s = d` has to leave
+    // no word of the first behind.
+    const Built b = build(std::string(kPrintf) +
+        "interface Speaker { pub fun speak() <int>; }\n"
+        "struct Dog { n <int> }\n"
+        "Dog implements <Speaker> {\n"
+        "    pub fun speak() <int> { return self.n; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let d <Dog> = Dog { n: 1 };\n"
+        "    let e <Dog> = Dog { n: 2 };\n"
+        "    let s <Speaker> = d;\n"
+        "    s = e;\n"
+        "    printf(\"%d\\n\", s.speak());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFieldRequiredByAnInterfaceIsReadThroughTheReference) {
+    // The other half of ADR 0027's table, and the half a method call never touches:
+    // the leading slots hold one i64 *byte offset* per required field, and a read is
+    // a load of the offset followed by a byte-GEP on the data word. love.fin does not
+    // exercise this; `interface Named { pub name <int>; }` is the smallest thing that
+    // does.
+    const Built b = build(std::string(kPrintf) +
+        "interface Named { pub name <int>; }\n"
+        "struct Cat { name <int> }\n"
+        "Cat implements <Named> { }\n"
+        "fun main() <noret> {\n"
+        "    let c <Cat> = Cat { name: 9 };\n"
+        "    let n <Named> = c;\n"
+        "    printf(\"%d\\n\", n.name);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ARequiredFieldAtANonZeroOffsetIsReadThroughTheReference) {
+    // The offset has to be *the implementor's*, not the requirement's position. `b` is
+    // the interface's only field, so a table that stored 0 -- or that numbered slots by
+    // the interface's own field order -- would read `pad` and print 99.
+    const Built b = build(std::string(kPrintf) +
+        "interface HasB { pub b <int>, }\n"
+        "struct S: <HasB> { pad <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S { pad: 99, b: 5 };\n"
+        "    let y <HasB> = s;\n"
+        "    printf(\"%d\\n\", y.b);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoInterfacesOnOneStructGetTheirOwnTables) {
+    // The table is keyed per (implementor, interface) pair, not per implementor, and
+    // this is the test that says so: one struct, two references live at once, each
+    // naming a different field. A single table shared between them would make one of
+    // the two reads pick up the other's offset.
+    const Built b = build(std::string(kPrintf) +
+        "interface HasA { pub a <int>, }\n"
+        "interface HasB { pub b <int>, }\n"
+        "struct S: <HasA, HasB> { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S { a: 3, b: 4 };\n"
+        "    let x <HasA> = s;\n"
+        "    let y <HasB> = s;\n"
+        "    printf(\"%d %d\\n\", x.a, y.b);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodCalledThroughAReferenceWritesToTheOriginal) {
+    // The data word is the *implementor's* address, not a copy of it, so a method that
+    // mutates `self` through the reference has to change the object the caller still
+    // holds. A conversion that spilled the struct into a fresh slot would compile,
+    // link, run and print 0 -- the reference would be a copy and no test that only
+    // reads could tell.
+    const Built b = build(std::string(kPrintf) +
+        "interface Settable { pub fun set(n: int) <noret>; }\n"
+        "struct C { v <int> }\n"
+        "C implements <Settable> {\n"
+        "    pub fun set(n: int) <noret> { self.v = n; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let c <C> = C { v: 0 };\n"
+        "    let s <Settable> = c;\n"
+        "    s.set(11);\n"
+        "    printf(\"%d\\n\", c.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "11\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInheritedFieldSatisfiesARequirementThroughTheReference) {
+    // Soundness_Interfaces.AnInheritedFieldSatisfiesARequirement is the analyzer's half
+    // of this; the backend's half is that `interfaceVtable` walks the hierarchy for a
+    // field it cannot find on the implementor itself, and stores the offset the field
+    // has *in the derived layout*. `a` comes from B, and S's own field follows it.
+    const Built b = build(std::string(kPrintf) +
+        "interface HasA { pub a <int>, }\n"
+        "struct B { pub a <int>, }\n"
+        "struct S: <B, HasA> { y <int>, }\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S { a: 6, y: 1 };\n"
+        "    let h <HasA> = s;\n"
+        "    printf(\"%d\\n\", h.a);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInheritedFieldAtANonZeroOffsetIsReadThroughTheReference) {
+    // The one above would still pass if the walk answered 0 for anything it found in a
+    // parent, because `a` is at 0 in both layouts. `b` is the parent's *second* field,
+    // so this is the test that distinguishes "found in a parent" from "at the offset a
+    // parent's field has here": a wrong answer prints 1, and 3 if it counted from S.
+    const Built b = build(std::string(kPrintf) +
+        "interface HasB { pub b <int>, }\n"
+        "struct Base { pub a <int>, pub b <int>, }\n"
+        "struct S: <Base, HasB> { c <int>, }\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S { a: 1, b: 77, c: 3 };\n"
+        "    let h <HasB> = s;\n"
+        "    printf(\"%d\\n\", h.b);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "77\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInterfaceReferenceIsPassedOnUnchanged) {
+    // A reference that is already a reference must not be converted again. The first
+    // callee holds a `Speaker` and hands it to a second one -- a `convert` that took
+    // the address of its own parameter slot instead of passing the pair through would
+    // make the data word point at the pair rather than at the Dog.
+    const Built b = build(std::string(kPrintf) +
+        "interface Speaker { pub fun speak() <int>; }\n"
+        "struct D { n <int>\n"
+        "    fun speak() <int> { return self.n; }\n"
+        "}\n"
+        "D implements <Speaker> { }\n"
+        "fun again(s: Speaker) <int> { return s.speak(); }\n"
+        "fun hear(s: Speaker) <int> { return again(s); }\n"
+        "fun main() <noret> {\n"
+        "    let d <D> = D { n: 9 };\n"
+        "    printf(\"%d\\n\", hear(d));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructConvertsToAnInterfaceItImplements) {
+    // The implementor side of a template: `G<T> implements <Speaker>` is one block over
+    // every instantiation, and the table is keyed on the *live* struct, so `G<int>` gets
+    // its own. This is the pair the implements-block unit's extras and this section's
+    // conversion have to agree about -- the block declares the members, the table names
+    // them.
+    const Built b = build(std::string(kPrintf) +
+        "interface Speaker { pub fun speak() <int>; }\n"
+        "struct G<T> { n <T>\n"
+        "    fun speak() <int> { return 5; }\n"
+        "}\n"
+        "G<T> implements <Speaker> { }\n"
+        "fun hear(s: Speaker) <int> { return s.speak(); }\n"
+        "fun main() <noret> {\n"
+        "    let g <G<int>> = G::<int>{ n: 1 };\n"
+        "    printf(\"%d\\n\", hear(g));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AConversionFromAValueWithNoAddressIsRefused) {
+    // ADR 0027 leaves "what happens to a temporary with no address" undecided, and the
+    // backend needs an address to put in the data word -- so `hear(make())` is refused
+    // by name rather than given a spilled copy whose lifetime nothing states. A copy
+    // would be the wrong answer for AMethodCalledThroughAReferenceWritesToTheOriginal,
+    // above: the write would land in the spill and vanish.
+    const Built b = build(std::string(kPrintf) +
+        "interface Speaker { pub fun speak() <int>; }\n"
+        "struct D { n <int>\n"
+        "    fun speak() <int> { return self.n; }\n"
+        "}\n"
+        "D implements <Speaker> { }\n"
+        "fun make() <D> { return D { n: 3 }; }\n"
+        "fun hear(s: Speaker) <int> { return s.speak(); }\n"
+        "fun main() <noret> { printf(\"%d\\n\", hear(make())); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find(
+        "an interface conversion from a value without an address"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWriteToAFieldThroughAnInterfaceReferenceIsRefused) {
+    // The read is built (AFieldRequiredByAnInterfaceIsReadThroughTheReference); the
+    // write is not, because `emitAddress` has no interface-member case -- so `x.a = 12`
+    // is refused rather than dropped. It has to be refused and not dropped: a discarded
+    // store is exactly the silent miscompile this file's founding rule names. ADR 0027
+    // leaves "is a required field writable through the reference" undecided, and it
+    // stays refused until that ruling lands; `readonly` is the half that has to be
+    // decided first, since a requirement says nothing about mutability today.
+    const Built b = build(std::string(kPrintf) +
+        "interface HasA { pub a <int>, }\n"
+        "struct S: <HasA> { a <int> }\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S { a: 1 };\n"
+        "    let x <HasA> = s;\n"
+        "    x.a = 12;\n"
+        "    printf(\"%d\\n\", s.a);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("an assignment to this target"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AConversionBetweenTwoInterfacesIsRefused) {
+    // `Wide` requires everything `Narrow` does, so widening one reference to the other
+    // is a question a language has to answer -- and ADR 0027 lists it among the four it
+    // does not answer, with no corpus witness to force the issue. The front end holds
+    // the line, and this asserts that it is the front end: a `Wide` reaching `convert`
+    // as if it were a struct would take the *pair's* address for the data word and
+    // build a reference to a reference, which reads a vtable pointer as an object.
+    const Built b = build(std::string(kPrintf) +
+        "interface Wide { pub a <int>, pub b <int>, }\n"
+        "interface Narrow { pub b <int>, }\n"
+        "struct S: <Wide, Narrow> { a <int>, b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S { a: 11, b: 22 };\n"
+        "    let w <Wide> = s;\n"
+        "    let n <Narrow> = w;\n"
+        "    printf(\"%d\\n\", n.b);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("expected 'Narrow', got 'Wide'"), std::string::npos)
+        << b.why();
+    EXPECT_EQ(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(KnownDefect_Codegen, AGenericInterfaceAsAValueTypeIsRefused) {
+    // The one gap in the reference that is a gap and not a ruling. `TypeMapper::map`
+    // tests `!node->generics.empty()` before it tests `interfaces_->count(name)`, so a
+    // generic interface in a type position is sent to instantiateGeneric as if it were
+    // a struct template, finds no template, and refuses -- the interface branch is
+    // never reached. The fix is to ask "is this an interface" first; the reason it is
+    // booked rather than done is that no corpus site needs it: `IResult<T, U>`,
+    // `rptr_iface<T>` and `GetVal<T>` are all written as bounds or in `implements`
+    // clauses, never as the type of a value, and ADR 0008 makes the corpus the
+    // specification. A *non-generic* interface whose fields have generic types is a
+    // different path and already works -- that one is conformance, not a value.
+    const Built b = build(std::string(kPrintf) +
+        "interface Box<T> { pub fun get() <T>; }\n"
+        "struct IB { v <int> }\n"
+        "IB implements <Box<int>> {\n"
+        "    pub fun get() <int> { return self.v; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = IB { v: 8 };\n"
+        "    printf(\"%d\\n\", b.get());\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type 'Box<int>' is not lowered yet"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(KnownDefect_Codegen, AnEscapingInterfaceReferenceIsAcceptedLikeAnyEscapingAddress) {
+    // A reference whose implementor died is a dangling `data` word, and this backend
+    // accepts it: `make` converts a local and returns the pair, and the caller reads
+    // through it. Measured, it prints garbage -- the disassembly is `lea -0x8(%rsp)`,
+    // so the word points into the frame `make` just left.
+    //
+    // Booked rather than fixed, and booked *here* rather than as an interface defect,
+    // because it is not one. The second half of this test is the same program with a
+    // plain `&D` in place of the interface, and it is accepted just as happily: there
+    // is no lifetime analysis anywhere in the pipeline, and §8's `#[slaveof]` ruling
+    // turns on the same fact (ADR 0003 -- nothing frees implicitly, so nothing today
+    // can state how long anything lives). An interface reference inherits the general
+    // property; it does not add one.
+    //
+    // Neither half asserts the value, because a dead frame's contents are not a
+    // specification -- the assertion is that the compile is *accepted*, which is what
+    // has to go red the day escape analysis arrives. The two halves must move together:
+    // if the interface half ever refuses while the pointer half still compiles, the
+    // refusal was written in the wrong place.
+    const std::string tail =
+        "fun main() <noret> {\n"
+        "    let s <Speaker> = make();\n"
+        "    printf(\"%d\\n\", s.speak());\n"
+        "}\n";
+    const Built iface = build(std::string(kPrintf) +
+        "interface Speaker { pub fun speak() <int>; }\n"
+        "struct D { n <int>\n"
+        "    fun speak() <int> { return self.n; }\n"
+        "}\n"
+        "D implements <Speaker> { }\n"
+        "fun make() <Speaker> { let d <D> = D { n: 7 }; return d; }\n" + tail);
+    EXPECT_EQ(iface.compileExit, 0) << iface.why();
+
+    const Built ptr = build(std::string(kPrintf) +
+        "struct D { n <int> }\n"
+        "fun make() <&D> { let d <D> = D { n: 7 }; return &d; }\n"
+        "fun main() <noret> {\n"
+        "    let p <&D> = make();\n"
+        "    printf(\"%d\\n\", p.n);\n"
+        "}\n");
+    EXPECT_EQ(ptr.compileExit, 0) << ptr.why();
+}
+
+// ---------------------------------------------------------------------------
 // The no-backend diagnostic names the pin.
 // ---------------------------------------------------------------------------
 // Not a BACKEND_TEST, and deliberately: the string this checks lives in
