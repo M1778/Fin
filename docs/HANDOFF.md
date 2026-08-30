@@ -114,7 +114,7 @@ was broken.
 | — since `4788753`, at `cfebdd5` | **1428 / 1428 pass**, 0 skipped | constructors; corpus unmoved |
 | — since `4788753`, at `80f4f8e` | **1436 / 1436 pass**, 0 skipped | inherited methods; corpus unmoved |
 | — since `4788753`, at `5d70a6e` | **1448 / 1448 pass**, 0 skipped | implements blocks; **corpus 19 → 20** |
-| — since `4788753`, at `HEAD` | **1465 / 1465 pass**, 0 skipped | the interface reference's missing tests; corpus unmoved |
+| — since `4788753`, at `2aa0993` | **1465 / 1465 pass**, 0 skipped | the interface reference's missing tests; corpus unmoved |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -333,7 +333,7 @@ a vtable slot that used to hold null makes a call through it a jump to address z
 The eleven remaining first refusals, measured at `5d70a6e`, are the twelve above minus
 `implements_block.fin` and otherwise identical, refusal for refusal.
 
-### The interface reference, measured 2026-08-30 — item 4's third bullet was wrong
+### The interface reference at `2aa0993` (2026-08-30) — item 4's third bullet was wrong
 
 **It is built.** The queue said no corpus site takes an interface reference as a value and that
 nothing measured it, and both halves are false: `love.fin` is such a site, it runs, and commit
