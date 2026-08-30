@@ -113,7 +113,7 @@ was broken.
 | — since `4788753`, at `d7a91df` | **1410 / 1410 pass**, 0 skipped | parameter defaults; corpus unmoved |
 | — since `4788753`, at `cfebdd5` | **1428 / 1428 pass**, 0 skipped | constructors; corpus unmoved |
 | — since `4788753`, at `80f4f8e` | **1436 / 1436 pass**, 0 skipped | inherited methods; corpus unmoved |
-| — since `4788753`, at `HEAD` | **1448 / 1448 pass**, 0 skipped | implements blocks; **corpus 19 → 20** |
+| — since `4788753`, at `5d70a6e` | **1448 / 1448 pass**, 0 skipped | implements blocks; **corpus 19 → 20** |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -140,8 +140,8 @@ other an empty module kept so directory resolution has a subject.
 
 Measured from the live tree with no agent in it, which §17.1 tolerates only because the result was
 checked against the `4788753` worktree numbers and matched them row for row at the time:
-**19 / 12 / 20**, the same three buckets and the same members. It is **20 / 11 / 20** since this
-commit — this subsection is kept because its per-sample refusal text is still the queue's, minus
+**19 / 12 / 20**, the same three buckets and the same members. It is **20 / 11 / 20** since
+`5d70a6e` — this subsection is kept because its per-sample refusal text is still the queue's, minus
 one line. The constructor unit unblocked no sample, for the reason the generic-methods unit
 unblocked none — the corpus declares constructors on structs whose *other* refusals sit in front,
 so the refusal that went was not any sample's first.
@@ -176,7 +176,7 @@ Four of those differences are the section's own warning coming true a third time
 - **`interfaces.fin` is new to the list**, blocked on a method call through an interface. It was
   a front-end error when §6 was written.
 - **`implements_block.fin`** refuses the `@implements` block itself, not the interface
-  declaration §6 named. **Superseded (this commit)**: it is OBJECT_CLEAN, and it is the one
+  declaration §6 named. **Superseded at `5d70a6e`**: it is OBJECT_CLEAN, and it is the one
   sample the implements-block unit moved. See the next subsection.
 - **`arrays_enums.fin`, `blame_assert.fin`, `extern_as.fin`, `functions.fin` and `variables.fin`**
   are all OBJECT_CLEAN and off the queue.
@@ -255,7 +255,7 @@ refusals listed above — for the third time in a row, and for the same reason e
 corpus's uses of a newly lowered construct sit behind other refusals. The streak broke at the
 next unit; see below.
 
-### The implements-block unit (this commit) — the corpus moved, 19 → 20
+### The implements-block unit at `5d70a6e` — the corpus moved, 19 → 20
 
 The first unit in four to move a sample. `implements_block.fin` is OBJECT_CLEAN, and it was the
 one sample the scoping predicted: the analyzer already did **all** of the semantics of an
@@ -329,7 +329,7 @@ a vtable slot that used to hold null makes a call through it a jump to address z
 2. **A block written above its target** gives `Unknown type 'S' in implements block`. Ordering in
    the analyzer, unchanged by this unit.
 
-The eleven remaining first refusals, measured at this commit, are the twelve above minus
+The eleven remaining first refusals, measured at `5d70a6e`, are the twelve above minus
 `implements_block.fin` and otherwise identical, refusal for refusal.
 
 ### Movement since `43b3324`
@@ -437,7 +437,7 @@ write, and writes the file only at the very end — so a failed assertion change
 
 The 17 samples that reach codegen and are blocked by exactly one refusal each, measured at
 `91312b8`. This list **is** the work queue for the backend, but **read §4's re-measurements
-first**: it is eleven samples as of this commit, and six of them report something other than what
+first**: it is eleven samples at `5d70a6e`, and six of them report something other than what
 the block below says. The numbered items keep their old titles for continuity; the corrections are
 in their text.
 
@@ -494,7 +494,7 @@ Recommended order — cheapest first, and each one unblocks the next:
    imported interfaces, which the same decision settles, and (c) the **`class` unit** (ADR 0026),
    because its base `Error` is `#[class]`. `readonly.fin` remains gated behind the `#[debug]` field
    attribute in front of its inheritance. **No sample is unblocked by any of this**, measured.
-4. **Interfaces** — **the implements-block half is done (this commit)**, and it moved the corpus
+4. **Interfaces** — **the implements-block half is done at `5d70a6e`**, and it moved the corpus
    for the first time in four units: `implements_block.fin` is OBJECT_CLEAN. See §4, "The
    implements-block unit". A block's methods, operators and constructor are now declared by exactly
    the code that declares a struct's own, so a call, an operator, a static method, a constructor and
