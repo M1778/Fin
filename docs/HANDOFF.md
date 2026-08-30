@@ -111,6 +111,7 @@ was broken.
 | --- | --- | --- |
 | `fin_tests`, `FIN_WITH_LLVM=ON` | **1396 / 1396 pass**, 0 skipped | `./build/tests/fin_tests` |
 | — since `4788753`, at `d7a91df` | **1410 / 1410 pass**, 0 skipped | parameter defaults; corpus unmoved |
+| — since `4788753`, at `cfebdd5` | **1428 / 1428 pass**, 0 skipped | constructors; corpus unmoved |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **19 of 51** | see below |
 | Samples blocked in codegen | **12** | see below |
@@ -132,6 +133,51 @@ The nineteen that reach an object: `arrays.fin`, `arrays_enums.fin`, `basic.fin`
 `simple_pointers.fin`, `struct_methods.fin`, `structs.fin`, `variables.fin`,
 `stdlib/networking.fin`, `stdlib/somelib.fin`. The last two are hollow — one is a comment, the
 other an empty module kept so directory resolution has a subject.
+
+### The corpus at `cfebdd5` (2026-08-30) — unmoved, and the refusals rewritten
+
+Measured from the live tree with no agent in it, which §17.1 tolerates only because the result
+is checked against the numbers above and matches them row for row: **19 / 12 / 20**, the same
+three buckets and the same members. The constructor unit unblocked no sample, for the reason the
+generic-methods unit unblocked none — the corpus declares constructors on structs whose *other*
+refusals sit in front, so the refusal that went was not any sample's first.
+
+What did change is the queue's own text. Twelve first refusals, re-measured at `cfebdd5`, against
+the seventeen listed in §6 below — five samples have since moved out of codegen refusal entirely,
+and **six of the twelve that remain report something other than what §6 says they do**:
+
+```
+complex.fin               the receiver of a call to the method 'printf' on a value with no address
+deeptest4.fin             a call with explicit generic arguments
+generics_interfaces.fin   the erasure marker 'Castable' on 'T' of a generic function
+implements_block.fin      an implements block
+interfaces.fin            a call to the method 'to_string' on struct 'User'
+lambdas.fin               a variable of type 'fn<...>(T) -> T'
+letssee.fin               a '::' call to 'from_angle' on the generic struct 'Vec2' with no type arguments
+loops.fin                 a 'foreach' loop
+readonly.fin              the attribute 'debug' on field 'v1' of struct 'MyClass'
+stdlib/hashmap.fin        struct 'HashMapError' inheriting 'Error', which is not a struct this file lowered
+stdlib/prototypes.fin     a return of type '$type'
+type_annotations.fin      a variable of type 'prototype<int, float>'
+```
+
+Four of those differences are the section's own warning coming true a third time.
+
+- **`readonly.fin` is not gated on inheritance.** Its first refusal is `#[debug]` on a field, at
+  `readonly.fin:20`, which sits *in front* of `ChangableSomehow` inheriting anything. Item 3 does
+  not unblock this sample by itself; the field-attribute ruling does, and only then does the
+  inheritance behind it become the count.
+- **`deeptest1.fin` is gone from the list** — it reaches an object now, and the interface
+  declaration §6 blames it for is no longer its blocker.
+- **`interfaces.fin` is new to the list**, blocked on a method call through an interface. It was
+  a front-end error when §6 was written.
+- **`implements_block.fin`** refuses the `@implements` block itself, not the interface
+  declaration §6 names.
+- **`arrays_enums.fin`, `blame_assert.fin`, `extern_as.fin`, `functions.fin` and `variables.fin`**
+  are all OBJECT_CLEAN and off the queue.
+
+Reproduce with the loop in "Reproducing the numbers", then per sample:
+`./build/finc -c "$f" -o /dev/null 2>&1 | sed -r 's/\x1b\[[0-9;]*m//g' | grep 'codegen:' | head -1`.
 
 ### Movement since `43b3324`
 
@@ -269,9 +315,22 @@ Recommended order — cheapest first, and each one unblocks the next:
 
 1. ~~**Generic methods**~~ — **done.** Instantiated at the call site, both substitutions
    composed, keyed `Struct<args>.method<margs>`, `linkonce_odr`. See below and the commit.
-2. **Constructors and `new S(args)`.** `lowerableStruct` still refuses `s.constructors`.
-   Note the booked defect: **constructor overloads are not resolved — only `constructors[0]`.**
-3. **Struct inheritance** — `readonly.fin`, `stdlib/hashmap.fin`. Two samples.
+2. ~~**Constructors**~~ — **done at `cfebdd5`.** One convention, three sites agreeing: the
+   caller allocates the object, zeroes it, passes its address as parameter 0, and reads the value
+   back out of its own slot; the constructor returns void and `return new S{...}` / `return S{...}`
+   both store through the receiver first. `Point(7)` is a `FunctionCall` whose name is a struct's,
+   rewritten to the `Point.constructor` symbol at the call. The booked defect stands —
+   **constructor overloads are not resolved, only `constructors[0]`** — and a second `constructor`
+   is now refused *by name* at its declaration rather than losing silently to the first
+   (`KnownDefect_Codegen.ConstructorOverloadsAreRefusedRatherThanResolved`).
+   **`new S(args)` is not part of this and was not skipped: it does not parse.** `let p <&P> = new
+   P(3, 4);` is `syntax error, unexpected LPAREN, expecting LBRACE or DOUBLE_COLON`, and no line in
+   the corpus writes that form. So that half of this item's old title is a grammar question for the
+   owner, not a lowering. `visit(NewExpression&)` still refuses `new` of a struct with arguments,
+   by name, for the day it does parse.
+3. **Struct inheritance** — `stdlib/hashmap.fin`, and `readonly.fin` only *behind* the `#[debug]`
+   field attribute (see §4: `readonly.fin`'s first refusal is the attribute, not the inheritance).
+   One sample unblocked outright, one gated.
 4. **Interfaces** — `deeptest1.fin`, `implements_block.fin`. ADR 0019 already rules that an
    interface reference is two words and the pointer map has three states.
 5. **Imports** — `complex.fin`, `deeptest4.fin`. **Measured 2026-08-28, and the fix is not in
@@ -346,7 +405,10 @@ lands); interface-typed pointer assignability; `Scope::resolve` leaks non-export
 namespace; prototype methods; index assignment never consults `operator []=`; the two
 `KnownDefect_TypeAliases` cases; the `isCastableTo` family is dead; `CloneVisitor` drops several
 flags; `namespace_path` read by nobody; **constructor overloads are not resolved (only
-`constructors[0]`)**; `ImplementsBlock::is_overwriter` read by nobody; a generic free function's
+`constructors[0]`)** — the backend declares one symbol per struct to match, and refuses a second
+`constructor` by name at its declaration rather than letting a call reach the wrong body
+(`KnownDefect_Codegen.ConstructorOverloadsAreRefusedRatherThanResolved`);
+`ImplementsBlock::is_overwriter` read by nobody; a generic free function's
 turbofish binds nothing (worked around in the backend); a member assignment is never
 mutability-checked.
 
