@@ -19,6 +19,13 @@
 // three; `unwrap_or`, `is_ok` and `is_err` are additions, and every one of them is a
 // question a caller otherwise answers by writing `getkeyid(r) == keyidof(Ok)` by hand.
 //
+// The three additions are in the `implements` block and NOT in `IResult`. That is forced:
+// `stdlib/stdio.fin:53` implements this very interface for `IOResult` with a block
+// supplying only the draft's three, so a widened interface makes that sample report
+// `'IOResult' does not fully implement interface 'IResult'`. Requiring them cost the draft
+// one diagnostic and a corpus census is what caught it -- the suite stayed green, because
+// the sample's expectation is `unimplemented` either way.
+//
 // THE `ErrorLike` BOUND IS BACK. The note that stood here said the bound was dropped
 // because spelling it `string | any implements <Error>` would make this file import a
 // module that imports nothing back, "a cycle the loader has no rule for yet". Measured:
@@ -71,15 +78,21 @@ pub enum Result <T, U: ErrorLike> {
     Err(U),
 }
 
+// EXACTLY THE DRAFT'S THREE REQUIREMENTS, and this is a corpus constraint rather than a
+// preference. `tests/samples/stdlib/stdio.fin:53` writes `IOResult<T> implements <IResult>`
+// against *this* interface with a block supplying `unwrap`, `expect` and `select` -- so a
+// fourth requirement here makes that sample report `'IOResult' does not fully implement
+// interface 'IResult'`. It did: adding three requirements took the draft from 11
+// diagnostics to 12, caught by a corpus census and not by the suite. ADR 0008 makes the
+// sample the specification, so the interface stays at three and the extra methods live in
+// the block below -- which is legal, and measured: a block may declare more than its
+// interface requires.
 #[export]
 pub interface IResult<T, U> {
     pub:
       fun unwrap(enum_ : Result<T, U>) <T>;
-      fun unwrap_or(enum_ : Result<T, U>, fallback: T) <T>;
       fun expect(enum_ : Result<T, U>) <noret>;
       fun select(enum_ : Result<T, U>, callback : fn(T) -> void) <noret>;
-      fun is_ok(enum_ : Result<T, U>) <bool>;
-      fun is_err(enum_ : Result<T, U>) <bool>;
 }
 
 Result<T, U> implements <IResult> {
