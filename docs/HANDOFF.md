@@ -112,7 +112,7 @@ was broken.
 | `fin_tests`, `FIN_WITH_LLVM=ON` | **1396 / 1396 pass**, 0 skipped | `./build/tests/fin_tests` |
 | — since `4788753`, at `d7a91df` | **1410 / 1410 pass**, 0 skipped | parameter defaults; corpus unmoved |
 | — since `4788753`, at `cfebdd5` | **1428 / 1428 pass**, 0 skipped | constructors; corpus unmoved |
-| — since `4788753`, at `HEAD` | **1436 / 1436 pass**, 0 skipped | inherited methods; corpus unmoved |
+| — since `4788753`, at `80f4f8e` | **1436 / 1436 pass**, 0 skipped | inherited methods; corpus unmoved |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **19 of 51** | see below |
 | Samples blocked in codegen | **12** | see below |
@@ -186,7 +186,7 @@ Item 3 below is titled "struct inheritance" and names `stdlib/hashmap.fin`. Meas
 title covers **two unrelated units**, and only one of them was doable. Both halves are recorded
 here so the next reader does not re-derive them.
 
-**Doable, and done (this commit): a method a struct inherits is callable through it.** In-file
+**Doable, and done at `80f4f8e`: a method a struct inherits is callable through it.** In-file
 inheritance already spliced the base's fields at offset 0 — that landed with the field work — but
 `d.get_a()` for a `get_a` declared on the base reported `codegen: a call to the method 'get_a' on
 struct 'Derived' is not lowered yet`, because the lookup walked only `info.decl->methods`. That is
@@ -219,7 +219,7 @@ reports `Struct 'Talker' does not implement interface 'Speaker'` when the implem
 the base's — measured — so the shape stops in the front end today. Fixing that is the interface
 unit's or the analyzer's, not this one's.
 
-**Not doable, and not this commit: `stdlib/hashmap.fin`.** Its refusal reads like inheritance and
+**Not doable, and not at `80f4f8e`: `stdlib/hashmap.fin`.** Its refusal reads like inheritance and
 is not one. It is **three stacked blockers, none about the field splice**, and each was measured
 directly:
 
@@ -399,7 +399,7 @@ Recommended order — cheapest first, and each one unblocks the next:
    the corpus writes that form. So that half of this item's old title is a grammar question for the
    owner, not a lowering. `visit(NewExpression&)` still refuses `new` of a struct with arguments,
    by name, for the day it does parse.
-3. ~~**Struct inheritance**~~ — **split, and the doable half is done.** See §4, "The inheritance
+3. ~~**Struct inheritance**~~ — **split at `80f4f8e`, and the doable half is done.** See §4, "The inheritance
    neighbourhood". An **inherited method, operator or static method is now callable through the
    derived struct**, resolved breadth-first over the parents so an override wins, with the two
    wrong-answer cases refused (a second base's method, and one name from two bases). What is left
