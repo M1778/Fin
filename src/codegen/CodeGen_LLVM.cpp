@@ -2735,7 +2735,7 @@ private:
             pair = builder_.CreateInsertValue(pair, vtable, {1});
             return pair;
         }
-        if (to.isStruct() && from.type.isPtr() && from.type.pointee &&
+        if (to.isStruct() && from.type.isPointer() && from.type.pointee &&
             from.type.pointee->isStruct()) {
             return builder_.CreateLoad(to.llvmType, from.value, "constructed");
         }
@@ -3115,8 +3115,8 @@ private:
             } else if (info.returnType.isVoid()) {
                 builder_.CreateRetVoid();
             } else if (info.isConstructor && info.hasReceiver && !info.paramTypes.empty()) {
-                auto* self = scopes_.back().find("self");
-                if (self) builder_.CreateRet(builder_.CreateLoad(info.returnType.llvmType,
+                auto self = scopes_.back().find("self");
+                if (self != scopes_.back().end()) builder_.CreateRet(builder_.CreateLoad(info.returnType.llvmType,
                                                                   self->second.slot, "constructed"));
                 else builder_.CreateUnreachable();
             } else {
@@ -3527,7 +3527,7 @@ private:
         }
         if (target.isVoid()) { unsupported(node, "a 'return <value>' from a void function"); return; }
         llvm::Value* out = nullptr;
-        if (currentFn_->isConstructor && target.isStruct() && v.type.isPtr() &&
+        if (currentFn_->isConstructor && target.isStruct() && v.type.isPointer() &&
             v.type.pointee && v.type.pointee->isStruct()) {
             // Constructor bodies commonly return `new S{...}`. The constructor's
             // public result is S, so read the allocated aggregate back as its value.
