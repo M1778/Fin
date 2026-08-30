@@ -2876,6 +2876,287 @@ BACKEND_TEST(Soundness_Codegen, AMethodInheritedFromTwoBasesIsRefusedRatherThanC
               std::string::npos) << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// An `implements` block writes members of a struct declared somewhere else.
+// ---------------------------------------------------------------------------
+// `MyStruct implements <GetVal<int>> { pub fun get_val() <int> {...} }`
+// (implements_block.fin:13) is the same method the struct could have written in its
+// own body, and this backend treats it as exactly that: one `Struct.method` symbol,
+// the same receiver pointer, the same weak linkage, the same deferred body. So the
+// tests below assert a *value* rather than a compile -- a block whose members were
+// collected under the wrong name, or declared twice, or bound to a copy of the
+// receiver, all compile and all run.
+//
+// What the interface named in the header contributes is nothing: it adds no fields
+// (AnImplementedInterfaceAddsNoFieldsToTheStruct, above) and no check here -- what a
+// struct owes an interface is the analyzer's question. A block this file could not
+// consume is refused by name, and the two tests at the end fix which those are.
+
+BACKEND_TEST(Soundness_Codegen, AMethodFromAnImplementsBlockIsCallable) {
+    const Built b = build(std::string(kPrintf) +
+        "interface GetVal<T> {\n"
+        "    pub fun get_val() <T>;\n"
+        "}\n"
+        "struct MyStruct {\n"
+        "    val <int>\n"
+        "}\n"
+        "MyStruct implements <GetVal<int>> {\n"
+        "    pub fun get_val() <int> {\n"
+        "        return self.val;\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <MyStruct> = MyStruct { val: 42 };\n"
+        "    printf(\"%d\\n\", s.get_val());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodFromAnImplementsBlockWritesThroughTheReceiver) {
+    // The receiver is the object's address and not a copy of it, which is the half of
+    // the convention a read-only method cannot witness: a `self` spilled to a
+    // temporary compiles, runs, and prints the old value.
+    const Built b = build(std::string(kPrintf) +
+        "interface Settable {\n"
+        "    pub fun set(n: int) <noret>;\n"
+        "}\n"
+        "struct Cell { v <int> }\n"
+        "Cell implements <Settable> {\n"
+        "    pub fun set(n: int) <noret> { self.v = n; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let c <Cell> = Cell { v: 1 };\n"
+        "    c.set(9);\n"
+        "    printf(\"%d\\n\", c.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOperatorFromAnImplementsBlockIsApplied) {
+    // implements_block.fin:28 verbatim in shape, and the value is what makes it a
+    // test: an operator bound to the wrong struct's symbol would still compile.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point {\n"
+        "    x <int>,\n"
+        "    y <int>\n"
+        "}\n"
+        "interface Addable<T> {\n"
+        "    pub operator + (other: <T>) <T>;\n"
+        "}\n"
+        "Point implements <Addable<Point>> {\n"
+        "    pub operator + (other: <Point>) <Point> {\n"
+        "        return Point { x: self.x + other.x, y: self.y + other.y };\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p1 <Point> = Point { x: 1, y: 2 };\n"
+        "    let p2 <Point> = Point { x: 3, y: 4 };\n"
+        "    let p3 <Point> = p1 + p2;\n"
+        "    printf(\"%d %d\\n\", p3.x, p3.y);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4 6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStaticMethodFromAnImplementsBlockIsCallable) {
+    // `Struct::name()` -- no receiver, so nothing about the pointer to assert. What
+    // this fixes is that a block's static goes into the same `Struct.name` table the
+    // `::` path already reads, rather than needing a second lookup.
+    const Built b = build(std::string(kPrintf) +
+        "interface Tagged {\n"
+        "    pub fun tag() <int>;\n"
+        "}\n"
+        "struct S { a <int> }\n"
+        "S implements <Tagged> {\n"
+        "    pub fun tag() <int> { return self.a; }\n"
+        "    pub static fun made() <int> { return 7; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", S::made());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AConstructorFromAnImplementsBlockRuns) {
+    // `Collection<T> implements <NoLengthCollection> { Collection() {...} }`
+    // (stdlib/collection.fin:103) is this shape. The value is what says the
+    // constructor ran at all: the caller zeroes the storage first, so a constructor
+    // that was declared and never called prints 0 and still compiles.
+    const Built b = build(std::string(kPrintf) +
+        "interface Makeable {\n"
+        "    pub fun get() <int>;\n"
+        "}\n"
+        "struct S { a <int> }\n"
+        "S implements <Makeable> {\n"
+        "    S() { self.a = 8; }\n"
+        "    pub fun get() <int> { return self.a; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S();\n"
+        "    printf(\"%d\\n\", s.get());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodFromAnImplementsBlockSatisfiesTheInterfacesVtable) {
+    // The block's method reached through the interface rather than through the
+    // struct: `hear(d)` converts a `Dog` to a `{data, vtable}` pair (ADR 0019) and
+    // calls slot 0. Before the block's methods were declared with the struct's, that
+    // slot held a null pointer -- a call through one is a jump to address zero, which
+    // is a crash and not a diagnostic.
+    const Built b = build(std::string(kPrintf) +
+        "interface Speaker {\n"
+        "    pub fun speak() <int>;\n"
+        "}\n"
+        "struct Dog { n <int> }\n"
+        "Dog implements <Speaker> {\n"
+        "    pub fun speak() <int> { return self.n * 2; }\n"
+        "}\n"
+        "fun hear(s: Speaker) <int> { return s.speak(); }\n"
+        "fun main() <noret> {\n"
+        "    let d <Dog> = Dog { n: 21 };\n"
+        "    printf(\"%d\\n\", hear(d));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnImplementsBlockOnATemplateIsDeclaredPerInstantiation) {
+    // `Result<T, U> implements <IResult>` (stdlib/typing.fin:27) is written on the
+    // template, and a method of a template has no signature until something says what
+    // T is. Two instantiations, two bodies, two representations -- one `int` and one
+    // `char` -- because a block's method is monomorphised on the same terms as one
+    // written in the body (ADR 0002).
+    const Built b = build(std::string(kPrintf) +
+        "interface Tagged {\n"
+        "    pub fun tag() <int>;\n"
+        "}\n"
+        "struct S<T> { a <T> }\n"
+        "S<T> implements <Tagged> {\n"
+        "    pub fun tag() <int> { return 1; }\n"
+        "    pub fun get() <T> { return self.a; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <S<int>> = S::<int>{ a: 6 };\n"
+        "    let b <S<char>> = S::<char>{ a: 65 };\n"
+        "    printf(\"%d %d %d\\n\", a.get(), cast<int>(b.get()), a.tag());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "6 65 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOverwriterImplementsBlockAddsItsMethodsToo) {
+    // `@implements Collection<T> { ... }` (stdlib/collection.fin:93) -- the form that
+    // names no interface, whose own comment reads "overwrites or adds
+    // methods/operators". Adding is what this backend does with it, on the same terms
+    // as the interface-named form: a method of the target, in the target's table.
+    const Built b = build(std::string(kPrintf) +
+        "struct S<T> { a <T> }\n"
+        "@implements S<T> {\n"
+        "    pub fun get() <T> { return self.a; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <S<int>> = S::<int>{ a: 6 };\n"
+        "    printf(\"%d\\n\", s.get());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodInABlockOfANameTheStructDeclaresIsRefused) {
+    // Two definitions of one `S.f` symbol, and `declareFunction` keeps the first --
+    // so the block's body would silently not be the one that runs. The same refusal a
+    // second method written inside the body gets, and it has to span the two places a
+    // method may be written or the check is only half a check.
+    const Built b = build(std::string(kPrintf) +
+        "interface I { pub fun f() <int>; }\n"
+        "struct S {\n"
+        "    a <int>,\n"
+        "    fun f() <int> { return 1; }\n"
+        "}\n"
+        "S implements <I> {\n"
+        "    pub fun f() <int> { return 2; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S { a: 0 };\n"
+        "    printf(\"%d\\n\", s.f());\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a second method 'f' on struct 'S'"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AConstructorInABlockBesideTheStructsOwnIsRefused) {
+    // One constructor symbol per struct, matching the analyzer's `constructors[0]`
+    // rule -- so two of them are two definitions of `S.constructor` however they are
+    // spread over the file, and which one `S()` meant is overload resolution nobody
+    // has written.
+    const Built b = build(std::string(kPrintf) +
+        "interface I { pub fun f() <int>; }\n"
+        "struct S {\n"
+        "    a <int>,\n"
+        "    S() { self.a = 1; }\n"
+        "}\n"
+        "S implements <I> {\n"
+        "    S() { self.a = 2; }\n"
+        "    pub fun f() <int> { return self.a; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S();\n"
+        "    printf(\"%d\\n\", s.f());\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("constructor overloads on struct 'S'"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnImplementsBlockOnAnEnumIsRefused) {
+    // `Result<T, U> implements <IResult>` on an *enum* (stdlib/typing.fin:27). An enum
+    // lowers to an integer here: it has no StructInfo to hang a method on, no address
+    // to be a receiver, and the analyzer's rule for one -- the first parameter is the
+    // receiver when its type is the enum -- is a second calling convention. Refused
+    // by name rather than half consumed.
+    const Built b = build(std::string(kPrintf) +
+        "enum E { A, B }\n"
+        "interface I { pub fun f() <int>; }\n"
+        "E implements <I> {\n"
+        "    pub fun f(e: E) <int> { return 1; }\n"
+        "}\n"
+        "fun main() <noret> { printf(\"%d\\n\", 1); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("an implements block on 'E'"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ASingleMemberOverwriteIsRefused) {
+    // `@implements Result<T, E>::unwrap = fun(...) {...}` (enums.fin:25) supplies a
+    // *value* for one named member rather than a declaration, and a value has no
+    // signature to declare a function from. Refused whole: consuming half of it would
+    // mean a struct whose method table depends on which form the writer used.
+    const Built b = build(std::string(kPrintf) +
+        "struct S<T> { a <T> }\n"
+        "@implements S<T>::g = fun(s: S<T>) <int> { return 1; }\n"
+        "fun main() <noret> {\n"
+        "    let s <S<int>> = S::<int>{ a: 1 };\n"
+        "    printf(\"%d\\n\", s.a);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("overwriting the member 'g'"),
+              std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnOperatorOnAStructIsRefused) {
     // Whether `a == b` on two structs compares field-wise is a ruling nobody has
     // made. It matters that this refuses rather than crashes: commonType compares

@@ -113,9 +113,10 @@ was broken.
 | — since `4788753`, at `d7a91df` | **1410 / 1410 pass**, 0 skipped | parameter defaults; corpus unmoved |
 | — since `4788753`, at `cfebdd5` | **1428 / 1428 pass**, 0 skipped | constructors; corpus unmoved |
 | — since `4788753`, at `80f4f8e` | **1436 / 1436 pass**, 0 skipped | inherited methods; corpus unmoved |
+| — since `4788753`, at `HEAD` | **1448 / 1448 pass**, 0 skipped | implements blocks; **corpus 19 → 20** |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
-| Samples that lower to an object | **19 of 51** | see below |
-| Samples blocked in codegen | **12** | see below |
+| Samples that lower to an object | **20 of 51** | see below |
+| Samples blocked in codegen | **11** | see below |
 | Samples that never reach codegen | **20** | see below |
 | Samples whose front-end expectation is `//@ ok` | **31 of 51** | `Census.ThePassingSampleCountNeverFalls` |
 
@@ -125,27 +126,29 @@ statement on some paths"`.
 
 The last two rows count different things and are both worth keeping. The object column is the
 whole pipeline under `-c -o`; the `//@ ok` column is the front end only, which is all the corpus
-harness runs (ADR 0008). A sample can be `//@ ok` and still be refused by the backend, and twelve
+harness runs (ADR 0008). A sample can be `//@ ok` and still be refused by the backend, and eleven
 are.
 
-The nineteen that reach an object: `arrays.fin`, `arrays_enums.fin`, `basic.fin`,
+The twenty that reach an object: `arrays.fin`, `arrays_enums.fin`, `basic.fin`,
 `blame_assert.fin`, `deeptest1.fin`, `deeptest3.fin`, `extern_as.fin`, `functions.fin`,
-`love.fin`, `macro_definitions.fin`, `macros.fin`, `macros2.fin`, `operators.fin`,
-`simple_pointers.fin`, `struct_methods.fin`, `structs.fin`, `variables.fin`,
+`implements_block.fin`, `love.fin`, `macro_definitions.fin`, `macros.fin`, `macros2.fin`,
+`operators.fin`, `simple_pointers.fin`, `struct_methods.fin`, `structs.fin`, `variables.fin`,
 `stdlib/networking.fin`, `stdlib/somelib.fin`. The last two are hollow — one is a comment, the
 other an empty module kept so directory resolution has a subject.
 
 ### The corpus at `cfebdd5` (2026-08-30) — unmoved, and the refusals rewritten
 
-Measured from the live tree with no agent in it, which §17.1 tolerates only because the result
-is checked against the numbers above and matches them row for row: **19 / 12 / 20**, the same
-three buckets and the same members. The constructor unit unblocked no sample, for the reason the
-generic-methods unit unblocked none — the corpus declares constructors on structs whose *other*
-refusals sit in front, so the refusal that went was not any sample's first.
+Measured from the live tree with no agent in it, which §17.1 tolerates only because the result was
+checked against the `4788753` worktree numbers and matched them row for row at the time:
+**19 / 12 / 20**, the same three buckets and the same members. It is **20 / 11 / 20** since this
+commit — this subsection is kept because its per-sample refusal text is still the queue's, minus
+one line. The constructor unit unblocked no sample, for the reason the generic-methods unit
+unblocked none — the corpus declares constructors on structs whose *other* refusals sit in front,
+so the refusal that went was not any sample's first.
 
 What did change is the queue's own text. Twelve first refusals, re-measured at `cfebdd5`, against
-the seventeen listed in §6 below — five samples have since moved out of codegen refusal entirely,
-and **six of the twelve that remain report something other than what §6 says they do**:
+the seventeen §6 then listed — five samples have since moved out of codegen refusal entirely,
+and **six of the twelve that remain report something other than what §6 said they did**:
 
 ```
 complex.fin               the receiver of a call to the method 'printf' on a value with no address
@@ -173,7 +176,8 @@ Four of those differences are the section's own warning coming true a third time
 - **`interfaces.fin` is new to the list**, blocked on a method call through an interface. It was
   a front-end error when §6 was written.
 - **`implements_block.fin`** refuses the `@implements` block itself, not the interface
-  declaration §6 names.
+  declaration §6 named. **Superseded (this commit)**: it is OBJECT_CLEAN, and it is the one
+  sample the implements-block unit moved. See the next subsection.
 - **`arrays_enums.fin`, `blame_assert.fin`, `extern_as.fin`, `functions.fin` and `variables.fin`**
   are all OBJECT_CLEAN and off the queue.
 
@@ -246,9 +250,87 @@ directly:
 
 Commit `e2e166f` predicted (1) and (3) already: "stdlib/hashmap.fin -> its base `Error` is declared
 `#[class]` (stdlib/error.fin:8)… So both now wait on the `class` ruling." So **item 3 unblocks no
-sample**, and the corpus is unmoved at 19 / 12 / 20 with the same twelve first refusals listed
-above — for the third time in a row, and for the same reason each time: the corpus's uses of a
-newly lowered construct sit behind other refusals.
+sample**, and the corpus was unmoved at `80f4f8e` — 19 / 12 / 20 with the same twelve first
+refusals listed above — for the third time in a row, and for the same reason each time: the
+corpus's uses of a newly lowered construct sit behind other refusals. The streak broke at the
+next unit; see below.
+
+### The implements-block unit (this commit) — the corpus moved, 19 → 20
+
+The first unit in four to move a sample. `implements_block.fin` is OBJECT_CLEAN, and it was the
+one sample the scoping predicted: the analyzer already did **all** of the semantics of an
+`implements` block — resolves the target, refuses a non-struct, binds `target_generics`,
+`defineMethod`/`defineOperator`/`addConstructor` against the target's `StructType`, then pushes the
+interface onto `parents` and runs the conformance check (`Analyzer_Decl.cpp:1384-1630`) — while
+codegen refused the whole construct in one line. So this was never interface lowering. It was
+**making a block's members reach the code that already declares a struct's own members.**
+
+What was built, all in `CodeGen_LLVM.cpp`:
+
+- **`struct StructExtras`** — a struct's `methods`, `operators`, `constructors` and the `blocks`
+  that contributed them, all borrowed pointers, for the reason `StructInfo::decl` is borrowed. It
+  is deliberately **not** merged into the `StructDeclaration`: mutating the AST from the backend
+  would make the analyzer's view of a program depend on whether it had been lowered.
+- **`collectImplementsBlocks(program)`, a new phase before `declareStructs`** — because a block
+  writes members *of* a struct, so the declaration `declareStructs` walks does not contain them,
+  and both the lowerability checks and the method pass have to see them at the same time they see
+  the struct's own. It collects and does not check: a block whose target is not a struct this file
+  lowered stays in the map and is refused later by `visit(ImplementsBlock&)`, where the block's own
+  line can be blamed — the same division `declareInterfaces` uses. Keyed by the **written** target
+  name, so `Result<T, U> implements <IResult>` (`stdlib/typing.fin:27`) is filed under `Result`.
+- **`StructInfo::extras`** — attached in `declareStructs`' first pass, because the method pass reads
+  it through `StructInfo`; and in `instantiateGeneric`, where `live.extras = extrasFor(tmpl.name)`
+  makes the template's blocks that instantiation's, declared once per instantiation.
+- **Three helpers out of `declareStructMethods`** — `declareStructMethod`,
+  `declareStructConstructor`, `declareStructOperator`, each holding the original body verbatim, run
+  over the struct's own members and then the extras. Not a pass of their own, because they are this
+  struct's members: same `Struct.name` key, same receiver, same `linkonce_odr`, same deferred body.
+- **`findMethod` / `findOperator` consult the extras** after the struct's own declaration, which is
+  what makes `s.get_val()`, `p1 + p2`, `S::made()`, `S()` and dispatch through an interface's
+  vtable all work through lookups that already existed.
+
+**Four things refuse by name rather than answering wrongly:**
+
+- A block method whose name the struct already declares. `lowerableMethods` and
+  `lowerableOperators` were split into per-member helpers sharing **one** `seen` set across the
+  struct's own members and the blocks', so the collision is refused as a second definition of one
+  symbol instead of quietly losing to whichever was declared first.
+- A **second constructor** across the two places one may be written. Two constructors are two
+  definitions of `Collection.constructor` however they are spread over the file, and the analyzer
+  registers both against the same `StructType` and then selects `constructors[0]` — so the
+  ambiguity is real on both sides, and it is the booked `cfebdd5` defect one file wider.
+- A block whose target is not a struct this file lowered — an enum, an interface, an undeclared
+  name, or a struct that itself refused.
+- The **single-member overwrite** form (`X implements <I> = expr`), not collected at all, because
+  its right-hand side is a value and not a declaration.
+
+Twelve tests, ten asserting a value and two a refusal message:
+`Soundness_Codegen.AMethodFromAnImplementsBlockIsCallable`,
+`.AMethodFromAnImplementsBlockWritesThroughTheReceiver`,
+`.AnOperatorFromAnImplementsBlockIsApplied`, `.AStaticMethodFromAnImplementsBlockIsCallable`,
+`.AConstructorFromAnImplementsBlockRuns`,
+`.AMethodFromAnImplementsBlockSatisfiesTheInterfacesVtable`,
+`.AnImplementsBlockOnATemplateIsDeclaredPerInstantiation`,
+`.AnOverwriterImplementsBlockAddsItsMethodsToo`,
+`.AMethodInABlockOfANameTheStructDeclaresIsRefused`,
+`.AConstructorInABlockBesideTheStructsOwnIsRefused`, `.AnImplementsBlockOnAnEnumIsRefused`,
+`.ASingleMemberOverwriteIsRefused`. Two of them exist because a weaker assertion would have
+passed on broken code: a declared-but-never-called constructor prints `0` and still compiles, and
+a vtable slot that used to hold null makes a call through it a jump to address zero.
+
+**Two front-end gaps measured beside this unit, neither of them its work:**
+
+1. **A generic argument on the *interface* of a generic-target block does not resolve.**
+   `Box<T> implements <IBox<T>>` gives `Undefined type 'T'` at the interface's own type argument,
+   then `Unknown interface 'IBox'`. The analyzer binds `target_generics` before it resolves
+   `interface_type`, but the interface's arguments are resolved outside that binding. Isolated by
+   using a non-generic interface on a generic target, which works — that is what
+   `.AnImplementsBlockOnATemplateIsDeclaredPerInstantiation` writes.
+2. **A block written above its target** gives `Unknown type 'S' in implements block`. Ordering in
+   the analyzer, unchanged by this unit.
+
+The eleven remaining first refusals, measured at this commit, are the twelve above minus
+`implements_block.fin` and otherwise identical, refusal for refusal.
 
 ### Movement since `43b3324`
 
@@ -353,8 +435,11 @@ write, and writes the file only at the very end — so a failed assertion change
 
 ## 6. What to do next
 
-The 17 samples that reach codegen and are blocked by exactly one refusal each, freshly measured
-at `91312b8`. This list **is** the work queue for the backend:
+The 17 samples that reach codegen and are blocked by exactly one refusal each, measured at
+`91312b8`. This list **is** the work queue for the backend, but **read §4's re-measurements
+first**: it is eleven samples as of this commit, and six of them report something other than what
+the block below says. The numbered items keep their old titles for continuity; the corrections are
+in their text.
 
 ```
 arrays_enums.fin          a variable of type '[int]'
@@ -409,8 +494,33 @@ Recommended order — cheapest first, and each one unblocks the next:
    imported interfaces, which the same decision settles, and (c) the **`class` unit** (ADR 0026),
    because its base `Error` is `#[class]`. `readonly.fin` remains gated behind the `#[debug]` field
    attribute in front of its inheritance. **No sample is unblocked by any of this**, measured.
-4. **Interfaces** — `deeptest1.fin`, `implements_block.fin`. ADR 0019 already rules that an
-   interface reference is two words and the pointer map has three states.
+4. **Interfaces** — **the implements-block half is done (this commit)**, and it moved the corpus
+   for the first time in four units: `implements_block.fin` is OBJECT_CLEAN. See §4, "The
+   implements-block unit". A block's methods, operators and constructor are now declared by exactly
+   the code that declares a struct's own, so a call, an operator, a static method, a constructor and
+   dispatch through an interface's vtable all work.
+   **Neither sample this item named is still evidence for it.** `deeptest1.fin` was already
+   OBJECT_CLEAN when §4 was re-measured at `cfebdd5` — the interface declaration it was blamed for
+   is not its blocker and has not been for two commits — and `implements_block.fin` is now clean
+   too. What is left under this title is **three unrelated things**, and the first is not an
+   interface gap at all:
+   - **`interfaces.fin` is not blocked on interface lowering.** Its refusal is `a call to the method
+     'to_string' on struct 'User'`, and `User` **declares no `to_string`** — not in the struct, not
+     in a block. The sample's own comment says "we don't check impl yet, just syntax". So this is a
+     ruling about a call to a method nothing declares, not a vtable.
+   - **`hashmap.fin:50-51` writes a bodiless forwarding operator**:
+     `operator[] implements cast<fn(Self, T)>(__get)`. That is an operator whose implementation is a
+     cast of another symbol, which is neither a body nor an extern — and it sits behind hashmap's
+     three separate-compilation blockers anyway (item 3).
+   - **ADR 0019's interface reference as two words** (`{data, vtable}`, and the pointer map's three
+     states). `interfaceVtable` builds a table and the inheritance unit taught it to resolve a slot
+     through the hierarchy, but **no corpus site takes an interface reference as a value**, so
+     nothing measures it. Do not build it before a site exists; ADR 0008 makes the corpus the
+     specification.
+   Also booked from the unit's measurements: the analyzer does not resolve a generic argument
+   written on the *interface* of a generic-target block (`Box<T> implements <IBox<T>>` →
+   `Undefined type 'T'`), and an interface satisfied by an **inherited** method is still reported
+   unimplemented (`Analyzer_Decl.cpp:537`). Both are front-end work.
 5. **Imports** — `complex.fin`, `deeptest4.fin`. **Measured 2026-08-28, and the fix is not in
    codegen.** `complex.fin:14` writes `stdio.printf("Big")` against `import stdio::std as stdio;`
    on `:3`, and the front end already resolves it correctly —

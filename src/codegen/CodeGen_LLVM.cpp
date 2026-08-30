@@ -271,6 +271,30 @@ struct InterfaceInfo {
     llvm::StructType* vtableType = nullptr;
 };
 
+// The members an `implements` block adds to a struct declared somewhere else.
+//
+// `MyStruct implements <GetVal<int>> { pub fun get_val() <int> {...} }`
+// (implements_block.fin:13) writes a method of `MyStruct` outside `MyStruct`, so the
+// declaration the third pass of declareStructs walks does not contain it. This is the
+// rest of that walk: three vectors of borrowed AST nodes, collected before the structs
+// are declared and read wherever a struct's own members are read.
+//
+// Borrowed pointers and not copies, for the reason StructInfo::decl is borrowed: the
+// Program outlives the emitter, a body is emitted from the node, and a diagnostic
+// blames the node's own line rather than the block's.
+//
+// Not merged into the StructDeclaration. Mutating the AST from the backend would make
+// the analyzer's view of a program depend on whether it had been lowered, and the two
+// passes reading one node is the property that keeps a diagnostic's line honest.
+struct StructExtras {
+    std::vector<FunctionDeclaration*> methods;
+    std::vector<OperatorDeclaration*> operators;
+    std::vector<ConstructorDeclaration*> constructors;
+    // Every block that contributed, so the statement walk can tell one this file
+    // consumed from one whose target it never lowered.
+    std::vector<const ImplementsBlock*> blocks;
+};
+
 struct StructInfo {
     std::string finName;
     llvm::StructType* llvmType = nullptr;
@@ -295,6 +319,12 @@ struct StructInfo {
     // readable off the declaration. Also what the third pass of declareStructs and
     // instantiateGeneric walk to declare the methods in the first place.
     const StructDeclaration* decl = nullptr;
+
+    // What an `implements` block added to this struct, or null for a struct no block
+    // names. Points into Emitter::implementsExtras_, which is filled before
+    // declareStructs and never touched again -- so an instantiation may point at the
+    // template's entry and outlive the statement that instantiated it.
+    const StructExtras* extras = nullptr;
 
     // What the mapper is handed while one of this struct's method bodies is emitted:
     // this struct's own substitution, plus `Self`, plus the template's bare name.
@@ -851,6 +881,12 @@ public:
         // Nothing is emitted: see interfaceNames_.
         declareInterfaces(program);
         if (failed_) return false;
+        // Before the structs, because a block writes members *of* a struct: the
+        // declaration declareStructs walks does not contain them, and both the
+        // lowerability checks and the third pass have to see them at the same time
+        // they see the struct's own. Nothing is emitted and nothing is refused here --
+        // see collectImplementsBlocks.
+        collectImplementsBlocks(program);
         // Before the functions, because a function's signature may name a struct.
         declareStructs(program);
         if (failed_) return false;
@@ -1169,6 +1205,51 @@ private:
         return interfaceNames_.count(parent.name) > 0;
     }
 
+    // Every module-scope `implements` block, filed under the name of the struct it
+    // writes members for.
+    //
+    // A collection pass and not a checking one: a block whose target is not a struct
+    // this file lowered -- an enum (stdlib/typing.fin:27), an interface, a name declared
+    // nowhere -- is left in the map and consumed by nobody, and visit(ImplementsBlock&)
+    // refuses it in the statement walk where it can blame the block's own line. Which
+    // is the same division declareInterfaces uses and for the same reason: reporting
+    // here would report an interface's or an enum's fault while the structs were being
+    // read, blamed on a struct that never got looked at.
+    //
+    // The single-member overwrite form is deliberately not collected. `@implements
+    // Result<T, E>::unwrap = fun(...) {...}` (enums.fin:25) supplies a *value* for one
+    // named member -- a lambda, not a declaration -- and a value has no signature to
+    // declare a function from, so it stays refused as the whole block rather than half
+    // consumed.
+    void collectImplementsBlocks(Program& program) {
+        for (auto& stmt : program.statements) {
+            auto* b = dynamic_cast<ImplementsBlock*>(stmt.get());
+            if (!b) continue;
+            if (b->target_type.empty()) continue;
+            if (!b->overwrite_member.empty()) continue;  // refused whole, see above
+            StructExtras& extras = implementsExtras_[b->target_type];
+            extras.blocks.push_back(b);
+            for (auto& m : b->methods) if (m) extras.methods.push_back(m.get());
+            for (auto& o : b->operators) if (o) extras.operators.push_back(o.get());
+            for (auto& c : b->constructors) if (c) extras.constructors.push_back(c.get());
+        }
+    }
+
+    // What the blocks added to the struct written under this name, or null for a name
+    // no block names. Keyed by the *written* name, so a template's key is `Result` and
+    // an instantiation of it borrows the template's entry (instantiateGeneric).
+    const StructExtras* extrasFor(const std::string& name) const {
+        auto found = implementsExtras_.find(name);
+        return found == implementsExtras_.end() ? nullptr : &found->second;
+    }
+
+    // Marks every block that contributed to a struct this file lowered, so the
+    // statement walk can tell one that was consumed from one whose target it never saw.
+    void registerImplementsBlocks(const std::string& name) {
+        if (const StructExtras* extras = extrasFor(name))
+            for (const ImplementsBlock* b : extras->blocks) registeredBlocks_.insert(b);
+    }
+
     void declareEnums(Program& program) {
         for (auto& stmt : program.statements) {
             auto* e = dynamic_cast<EnumDeclaration*>(stmt.get());
@@ -1278,6 +1359,11 @@ private:
                     return;
                 }
                 templates_[s->name] = s;
+                // A block on a template names the template: `Result<T, U> implements
+                // <IResult>` (stdlib/typing.fin:27). Marked consumed here, and its
+                // members are declared once per instantiation by instantiateGeneric --
+                // which is where a method of a template is declared anyway.
+                registerImplementsBlocks(s->name);
                 registered_.insert(s);
                 continue;
             }
@@ -1296,6 +1382,12 @@ private:
             info.finName = s->name;
             info.llvmType = llvm::StructType::create(ctx_, llvmNameOf(*s, s->name));
             info.decl = s;
+            // The blocks that wrote members for this struct, if any. Attached in the
+            // first pass because the third one reads it through StructInfo, and marked
+            // registered so the statement walk knows these blocks were consumed rather
+            // than skipped.
+            info.extras = extrasFor(s->name);
+            registerImplementsBlocks(s->name);
             structs_[s->name] = info;
             registered_.insert(s);
             decls.push_back(s);
@@ -1501,9 +1593,18 @@ private:
     // declared.
     static const OperatorDeclaration* findOperator(const StructInfo& info,
                                                   ASTTokenKind op) {
-        if (!info.decl) return nullptr;
-        for (auto& o : info.decl->operators)
-            if (o->op == op) return o.get();
+        if (info.decl)
+            for (auto& o : info.decl->operators)
+                if (o->op == op) return o.get();
+        // A block's operators are this struct's, so every reader of this answer -- the
+        // `a + b` path, the generic-operator path, the diagnostic -- sees one written in
+        // a block exactly as it sees one written in the body. Second, because the
+        // struct's own declaration is the one a reader looks at first; lowerableOperators
+        // has already refused the case where both declare the same token, so the order
+        // decides nothing.
+        if (info.extras)
+            for (OperatorDeclaration* o : info.extras->operators)
+                if (o->op == op) return o;
         return nullptr;
     }
 
@@ -1538,97 +1639,34 @@ private:
         if (!self) return true;
         CgType receiver = types_.pointerTo(*self);
 
-        for (auto& m : info.decl->methods) {
-            // A method generic is one layer further than this unit goes: two
-            // substitutions at once, the struct's and the call's. Not declared, so a
-            // call to it refuses at the call site with a name to blame rather than
-            // linking against a symbol that was never defined -- and *not* refused
-            // here, because struct_methods.fin declares `set_x<T>` and never calls it,
-            // and a declaration nobody instantiates has no signature to lower.
-            if (!m->generic_params.empty()) continue;
-            // Likewise a method with no body. `@define` writes prototypes at module
-            // scope, not inside a struct, so this is a shape the corpus does not have;
-            // declaring one would publish a symbol that nothing defines, and the
-            // failure would land on the linker rather than on the line.
-            if (!m->body) continue;
+        for (auto& m : info.decl->methods)
+            if (!declareStructMethod(info, *m, receiver)) return false;
+        // The methods an `implements` block wrote for this struct. Declared here and not
+        // in a pass of their own, because they are this struct's methods: they get
+        // `Struct.name` as their key, the same receiver, the same weak linkage and the
+        // same deferred body, so `s.get_val()` finds one through the lookup that already
+        // exists rather than through a second one written for blocks.
+        //
+        // Read off StructInfo::extras rather than the map, so an instantiation follows
+        // the template's entry -- see instantiateGeneric.
+        if (info.extras)
+            for (FunctionDeclaration* m : info.extras->methods)
+                if (!declareStructMethod(info, *m, receiver)) return false;
 
-            // A written `self` is the receiver, so it has to *be* the receiver: `&Self`,
-            // `&Point`, `&Point<T>` -- three spellings of one pointer. `self: Point` is
-            // a copy, and this file passes a pointer, so accepting it would mean a
-            // method whose signature says by-value and whose body assigns through a
-            // pointer into the caller's object. `self: int` is not the struct at all.
-            // Checked here and not in lowerableMethods because the receiver's type is
-            // only known once the struct is complete -- and for a template, only once
-            // it is instantiated.
-            if (!m->is_static && !m->params.empty() && m->params[0]->name == "self" &&
-                m->params[0]->type) {
-                auto written = types_.map(m->params[0]->type.get(), /*allowIncomplete=*/true);
-                const bool matches = written && written->isPointer() && written->pointee &&
-                                     written->pointee->llvmType == self->llvmType;
-                if (!matches) {
-                    if (failed_) return false;
-                    unsupported(*m->params[0],
-                                fmt::format("a 'self' of type '{}' on struct '{}', which "
-                                            "is not a pointer to it",
-                                            typeName(m->params[0]->type.get()), info.finName));
-                    return false;
-                }
-            }
-
-            const std::string key = methodKey(info.finName, m->name);
-            // A static method takes no receiver -- struct_methods.fin:8 calls
-            // `Point::make(1, 2)` with nobody to be `self`. Everything else does, and
-            // it is a *pointer*: `set_x` at :16 assigns to `self.x`, and a by-value
-            // receiver would make that a store into a copy that is discarded at the
-            // return. That is not an unimplemented feature, it is a program that
-            // silently does not assign.
-            declareFunction(*m, key, key, m->params, m->return_type.get(),
-                            /*isVarArg=*/false, /*isExtern=*/false,
-                            m->is_static ? nullptr : &receiver);
-            auto declared = functions_.find(key);
-            if (declared == functions_.end()) return false;  // declareFunction reported
-
-            // Weak, for the reason a generic function instance is weak: two objects
-            // that each declare this struct both publish this symbol and neither knows
-            // the other exists, so identical definitions and let the linker keep one.
-            // A method is not a template, but a struct declaration reaches an object
-            // file the same way a template does -- through a header everyone includes.
-            declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
-
-            // The body is deferred, not emitted here. Two reasons, and either alone
-            // would be enough: a method may call a free function whose prototype
-            // declareTopLevel has not created yet (declareStructs runs first), and a
-            // method of an *instantiation* is declared from the middle of another
-            // function's body, where emitting straight away would mean nesting two
-            // insert points for no reason.
-            pendingBodies_.push_back(PendingBody{m.get(), &m->params, m->body.get(), key,
-                                                 &info.methodBindings});
-        }
-
+        // At most one constructor, whichever declaration carries it: lowerableStruct
+        // refuses a second one across the struct and its blocks together, so reaching
+        // here with one in each is impossible and the first found is the only one.
         for (auto& c : info.decl->constructors) {
             if (!c->body) continue;
-            const std::string key = methodKey(info.finName, "constructor");
-            // The object is the receiver and the result is nothing: the caller owns the
-            // storage, passes its address as parameter 0, and reads the value back out
-            // of its own slot afterwards. That is the same convention `set_x` already
-            // uses -- `self.x = nx` is a store through a pointer into the caller's
-            // object -- and choosing it here is what makes the three sites that must
-            // agree (this declaration, emitBodyOf/visit(ReturnStatement&) and
-            // visit(FunctionCall&)) describe one calling convention rather than three.
-            //
-            // Returning the aggregate by value instead would need the struct ABI
-            // classifier for the day a constructor crosses an `@define` boundary, and
-            // would still load: the corpus's dominant body is `return new S{...}`,
-            // which produces a pointer whatever the signature says.
-            declareFunction(*c, key, key, c->params, /*returnType=*/nullptr,
-                            /*isVarArg=*/false, /*isExtern=*/false, &receiver);
-            auto declared = functions_.find(key);
-            if (declared == functions_.end()) return false;
-            declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
-            declared->second.isConstructor = true;
-            pendingBodies_.push_back(PendingBody{c.get(), &c->params, c->body.get(), key,
-                                                 &info.methodBindings});
+            if (!declareStructConstructor(info, *c, receiver)) return false;
             break; // constructorFor currently selects constructors[0]
+        }
+        if (info.extras && !functions_.count(methodKey(info.finName, "constructor"))) {
+            for (ConstructorDeclaration* c : info.extras->constructors) {
+                if (!c->body) continue;
+                if (!declareStructConstructor(info, *c, receiver)) return false;
+                break;
+            }
         }
 
         // The operators, on the same terms. An operator is a method with a spelled name:
@@ -1637,28 +1675,143 @@ private:
         // because this runs once per instantiation. What differs is where it is *reached*
         // from -- visit(BinaryOp&) rather than a written name -- and nothing about that
         // is decided here.
-        for (auto& o : info.decl->operators) {
-            // A generic operator: two substitutions at once, the struct's and the
-            // operator's, which is one layer further than this unit goes. Not declared
-            // and not refused, because operators.fin:15 declares `operator + : <T>` and
-            // applies it nowhere -- the sample is `//@ ok` with it in.
-            if (!o->generic_params.empty()) continue;
-            // An operator with no body is one bound by `implements`
-            // (hashmap.fin:50-51): the function it forwards to is written in the cast,
-            // and reading that cast is a feature of its own. Declaring the operator
-            // anyway would publish a symbol nothing defines and move the failure to the
-            // linker.
-            if (!o->body) continue;
+        for (auto& o : info.decl->operators)
+            if (!declareStructOperator(info, *o, receiver)) return false;
+        // And a block's, `Point implements <Addable<Point>> { pub operator + ... }`
+        // (implements_block.fin:28), which is the same operator of the same struct.
+        if (info.extras)
+            for (OperatorDeclaration* o : info.extras->operators)
+                if (!declareStructOperator(info, *o, receiver)) return false;
+        return true;
+    }
 
-            const std::string key = operatorKey(info.finName, o->op);
-            declareFunction(*o, key, key, o->params, o->return_type.get(),
-                            /*isVarArg=*/false, /*isExtern=*/false, &receiver);
-            auto declared = functions_.find(key);
-            if (declared == functions_.end()) return false;  // declareFunction reported
-            declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
-            pendingBodies_.push_back(PendingBody{o.get(), &o->params, o->body.get(), key,
-                                                &info.methodBindings});
+    // One method's prototype and one queued body. Split out of declareStructMethods so
+    // that a method written in an `implements` block goes through this code rather than
+    // a copy of it -- the block's method *is* the struct's method, and the only
+    // difference is which node it was read from.
+    bool declareStructMethod(StructInfo& info, FunctionDeclaration& m,
+                             const CgType& receiver) {
+        // A method generic is one layer further than this unit goes: two
+        // substitutions at once, the struct's and the call's. Not declared, so a
+        // call to it refuses at the call site with a name to blame rather than
+        // linking against a symbol that was never defined -- and *not* refused
+        // here, because struct_methods.fin declares `set_x<T>` and never calls it,
+        // and a declaration nobody instantiates has no signature to lower.
+        if (!m.generic_params.empty()) return true;
+        // Likewise a method with no body. `@define` writes prototypes at module
+        // scope, not inside a struct, so this is a shape the corpus does not have;
+        // declaring one would publish a symbol that nothing defines, and the
+        // failure would land on the linker rather than on the line.
+        if (!m.body) return true;
+
+        auto self = types_.structByName(info.finName, /*allowIncomplete=*/true);
+        if (!self) return true;
+
+        // A written `self` is the receiver, so it has to *be* the receiver: `&Self`,
+        // `&Point`, `&Point<T>` -- three spellings of one pointer. `self: Point` is
+        // a copy, and this file passes a pointer, so accepting it would mean a
+        // method whose signature says by-value and whose body assigns through a
+        // pointer into the caller's object. `self: int` is not the struct at all.
+        // Checked here and not in lowerableMethods because the receiver's type is
+        // only known once the struct is complete -- and for a template, only once
+        // it is instantiated.
+        if (!m.is_static && !m.params.empty() && m.params[0]->name == "self" &&
+            m.params[0]->type) {
+            auto written = types_.map(m.params[0]->type.get(), /*allowIncomplete=*/true);
+            const bool matches = written && written->isPointer() && written->pointee &&
+                                 written->pointee->llvmType == self->llvmType;
+            if (!matches) {
+                if (failed_) return false;
+                unsupported(*m.params[0],
+                            fmt::format("a 'self' of type '{}' on struct '{}', which "
+                                        "is not a pointer to it",
+                                        typeName(m.params[0]->type.get()), info.finName));
+                return false;
+            }
         }
+
+        const std::string key = methodKey(info.finName, m.name);
+        // A static method takes no receiver -- struct_methods.fin:8 calls
+        // `Point::make(1, 2)` with nobody to be `self`. Everything else does, and
+        // it is a *pointer*: `set_x` at :16 assigns to `self.x`, and a by-value
+        // receiver would make that a store into a copy that is discarded at the
+        // return. That is not an unimplemented feature, it is a program that
+        // silently does not assign.
+        declareFunction(m, key, key, m.params, m.return_type.get(),
+                        /*isVarArg=*/false, /*isExtern=*/false,
+                        m.is_static ? nullptr : &receiver);
+        auto declared = functions_.find(key);
+        if (declared == functions_.end()) return false;  // declareFunction reported
+
+        // Weak, for the reason a generic function instance is weak: two objects
+        // that each declare this struct both publish this symbol and neither knows
+        // the other exists, so identical definitions and let the linker keep one.
+        // A method is not a template, but a struct declaration reaches an object
+        // file the same way a template does -- through a header everyone includes.
+        declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+
+        // The body is deferred, not emitted here. Two reasons, and either alone
+        // would be enough: a method may call a free function whose prototype
+        // declareTopLevel has not created yet (declareStructs runs first), and a
+        // method of an *instantiation* is declared from the middle of another
+        // function's body, where emitting straight away would mean nesting two
+        // insert points for no reason.
+        pendingBodies_.push_back(PendingBody{&m, &m.params, m.body.get(), key,
+                                             &info.methodBindings});
+        return true;
+    }
+
+    // One constructor's prototype and its queued body. declareStructMethod's
+    // counterpart, and split out for the same reason.
+    bool declareStructConstructor(StructInfo& info, ConstructorDeclaration& c,
+                                  const CgType& receiver) {
+        const std::string key = methodKey(info.finName, "constructor");
+        // The object is the receiver and the result is nothing: the caller owns the
+        // storage, passes its address as parameter 0, and reads the value back out
+        // of its own slot afterwards. That is the same convention `set_x` already
+        // uses -- `self.x = nx` is a store through a pointer into the caller's
+        // object -- and choosing it here is what makes the three sites that must
+        // agree (this declaration, emitBodyOf/visit(ReturnStatement&) and
+        // visit(FunctionCall&)) describe one calling convention rather than three.
+        //
+        // Returning the aggregate by value instead would need the struct ABI
+        // classifier for the day a constructor crosses an `@define` boundary, and
+        // would still load: the corpus's dominant body is `return new S{...}`,
+        // which produces a pointer whatever the signature says.
+        declareFunction(c, key, key, c.params, /*returnType=*/nullptr,
+                        /*isVarArg=*/false, /*isExtern=*/false, &receiver);
+        auto declared = functions_.find(key);
+        if (declared == functions_.end()) return false;
+        declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+        declared->second.isConstructor = true;
+        pendingBodies_.push_back(PendingBody{&c, &c.params, c.body.get(), key,
+                                             &info.methodBindings});
+        return true;
+    }
+
+    // One operator's prototype and its queued body.
+    bool declareStructOperator(StructInfo& info, OperatorDeclaration& o,
+                               const CgType& receiver) {
+        // A generic operator: two substitutions at once, the struct's and the
+        // operator's, which is one layer further than this unit goes. Not declared
+        // and not refused, because operators.fin:15 declares `operator + : <T>` and
+        // applies it nowhere -- the sample is `//@ ok` with it in.
+        if (!o.generic_params.empty()) return true;
+        // An operator with no body is one bound by `implements`
+        // (hashmap.fin:50-51): the function it forwards to is written in the cast,
+        // and reading that cast is a feature of its own. Declaring the operator
+        // anyway would publish a symbol nothing defines and move the failure to the
+        // linker.
+        if (!o.body) return true;
+
+        const std::string key = operatorKey(info.finName, o.op);
+        declareFunction(o, key, key, o.params, o.return_type.get(),
+                        /*isVarArg=*/false, /*isExtern=*/false, &receiver);
+        auto declared = functions_.find(key);
+        if (declared == functions_.end()) return false;  // declareFunction reported
+        declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+        pendingBodies_.push_back(PendingBody{&o, &o.params, o.body.get(), key,
+                                             &info.methodBindings});
         return true;
     }
 
@@ -1710,9 +1863,24 @@ private:
         // Constructors use one symbol per struct, matching the analyzer's current
         // constructorFor rule: overload resolution is deliberately not invented here.
         // The first declaration wins, and every other overload is refused by name.
-        if (s.constructors.size() > 1) {
-            unsupported(*s.constructors[1], fmt::format("constructor overloads on struct '{}'",
-                                                         s.name));
+        //
+        // The count spans the `implements` blocks: `Collection<T> implements
+        // <NoLengthCollection> { Collection() {...} }` (stdlib/collection.fin:103)
+        // writes a constructor of a struct that may already declare one, and two of them
+        // are two definitions of `Collection.constructor` however they are spread over
+        // the file. The analyzer registers both against the same StructType
+        // (addConstructor) and selects `constructors[0]`, so the ambiguity is real on
+        // both sides rather than an artefact of this table.
+        const StructExtras* extras = extrasFor(s.name);
+        const size_t ctors = s.constructors.size() +
+                             (extras ? extras->constructors.size() : 0);
+        if (ctors > 1) {
+            ASTNode& second = s.constructors.size() > 1
+                                  ? static_cast<ASTNode&>(*s.constructors[1])
+                                  : static_cast<ASTNode&>(*extras->constructors[
+                                        s.constructors.empty() ? 1 : 0]);
+            unsupported(second, fmt::format("constructor overloads on struct '{}'",
+                                            s.name));
             return false;
         }
         for (auto& m : s.members) {
@@ -1779,62 +1947,77 @@ private:
     // works.
     bool lowerableMethods(StructDeclaration& s) {
         std::set<std::string> seen;
-        for (auto& m : s.methods) {
-            // An attribute this file does not read may be the one that decides
-            // linkage (`#[export]`) or which of two definitions wins
-            // (`#[overwrite]`), and a method is a symbol like any other.
-            if (!attributesAreJustLlvmName(*m, m->attributes, "method")) return false;
-            for (auto& attr : m->attributes) {
-                // The valued form is what attributesAreJustLlvmName lets through, and
-                // a method may not have it: an instantiation's method is emitted once
-                // per binding, and one name over two of them is either a duplicate
-                // definition or a silent `general_point.1` that nobody can call. This
-                // is the generic-function rule (declareTopLevel) applied one level in.
-                unsupported(*m, fmt::format("the attribute '{}' on the method '{}' of "
-                                            "struct '{}'", attr->name, m->name, s.name));
-                return false;
-            }
-            if (!seen.insert(m->name).second) {
-                // Two methods of one name would be two definitions of one symbol, and
-                // declareFunction keeps the first -- so the second body would silently
-                // not be the one that runs. Overload resolution is the analyzer's
-                // (`constructors[0]` is the state of it), and until it exists there is
-                // no way to tell which the call meant.
-                unsupported(*m, fmt::format("a second method '{}' on struct '{}'",
-                                            m->name, s.name));
-                return false;
-            }
-            for (auto& param : m->params) {
-                if (!param->is_vararg) continue;
-                // `...` on a Fin definition needs va_start, which is a library
-                // question (ADR 0003), and on a method it is not written anywhere in
-                // the corpus.
-                unsupported(*param, fmt::format("'...' on the method '{}' of struct '{}'",
-                                                m->name, s.name));
-                return false;
-            }
-            if (m->is_static && !m->params.empty() && m->params[0]->name == "self") {
-                // A static method has no receiver, and the analyzer drops a parameter
-                // called `self` wherever it appears (buildMethodSignature). So this
-                // parameter exists for the caller and not for the callee, or the other
-                // way round, depending on which pass you ask -- and either way the
-                // arguments after it land one place out.
-                unsupported(*m->params[0],
-                            fmt::format("a 'self' parameter on the static method '{}' of "
-                                        "struct '{}'", m->name, s.name));
-                return false;
-            }
-            for (size_t i = 0; i < m->params.size(); ++i) {
-                if (m->params[i]->name != "self" || i == 0) continue;
-                // The receiver is parameter 0 or it is injected. A `self` written
-                // second is not a receiver the analyzer dropped from the signature
-                // (buildMethodSignature drops it wherever it is), so lowering it as
-                // one would shift every argument by a place.
-                unsupported(*m->params[i],
-                            fmt::format("a 'self' parameter in position {} of method "
-                                        "'{}' on struct '{}'", i + 1, m->name, s.name));
-                return false;
-            }
+        for (auto& m : s.methods)
+            if (!lowerableMethod(*m, s.name, seen)) return false;
+        // The methods an `implements` block wrote for this struct, on exactly the terms
+        // its own are checked on -- one `seen` set across both, so a block method of a
+        // name the struct already declares is refused as the second definition of one
+        // symbol rather than quietly losing to whichever was declared first.
+        if (const StructExtras* extras = extrasFor(s.name))
+            for (FunctionDeclaration* m : extras->methods)
+                if (!lowerableMethod(*m, s.name, seen)) return false;
+        return true;
+    }
+
+    // One method's share of lowerableMethods, so a method written in an `implements`
+    // block is checked by the same code and not by a copy of it. `seen` is the caller's,
+    // so a block's methods and the struct's own share one namespace.
+    bool lowerableMethod(FunctionDeclaration& m, const std::string& sname,
+                         std::set<std::string>& seen) {
+        // An attribute this file does not read may be the one that decides
+        // linkage (`#[export]`) or which of two definitions wins
+        // (`#[overwrite]`), and a method is a symbol like any other.
+        if (!attributesAreJustLlvmName(m, m.attributes, "method")) return false;
+        for (auto& attr : m.attributes) {
+            // The valued form is what attributesAreJustLlvmName lets through, and
+            // a method may not have it: an instantiation's method is emitted once
+            // per binding, and one name over two of them is either a duplicate
+            // definition or a silent `general_point.1` that nobody can call. This
+            // is the generic-function rule (declareTopLevel) applied one level in.
+            unsupported(m, fmt::format("the attribute '{}' on the method '{}' of "
+                                       "struct '{}'", attr->name, m.name, sname));
+            return false;
+        }
+        if (!seen.insert(m.name).second) {
+            // Two methods of one name would be two definitions of one symbol, and
+            // declareFunction keeps the first -- so the second body would silently
+            // not be the one that runs. Overload resolution is the analyzer's
+            // (`constructors[0]` is the state of it), and until it exists there is
+            // no way to tell which the call meant.
+            unsupported(m, fmt::format("a second method '{}' on struct '{}'",
+                                       m.name, sname));
+            return false;
+        }
+        for (auto& param : m.params) {
+            if (!param->is_vararg) continue;
+            // `...` on a Fin definition needs va_start, which is a library
+            // question (ADR 0003), and on a method it is not written anywhere in
+            // the corpus.
+            unsupported(*param, fmt::format("'...' on the method '{}' of struct '{}'",
+                                            m.name, sname));
+            return false;
+        }
+        if (m.is_static && !m.params.empty() && m.params[0]->name == "self") {
+            // A static method has no receiver, and the analyzer drops a parameter
+            // called `self` wherever it appears (buildMethodSignature). So this
+            // parameter exists for the caller and not for the callee, or the other
+            // way round, depending on which pass you ask -- and either way the
+            // arguments after it land one place out.
+            unsupported(*m.params[0],
+                        fmt::format("a 'self' parameter on the static method '{}' of "
+                                    "struct '{}'", m.name, sname));
+            return false;
+        }
+        for (size_t i = 0; i < m.params.size(); ++i) {
+            if (m.params[i]->name != "self" || i == 0) continue;
+            // The receiver is parameter 0 or it is injected. A `self` written
+            // second is not a receiver the analyzer dropped from the signature
+            // (buildMethodSignature drops it wherever it is), so lowering it as
+            // one would shift every argument by a place.
+            unsupported(*m.params[i],
+                        fmt::format("a 'self' parameter in position {} of method "
+                                    "'{}' on struct '{}'", i + 1, m.name, sname));
+            return false;
         }
         return true;
     }
@@ -1844,48 +2027,61 @@ private:
     // operator's *body* is checked where it is emitted, once per instantiation.
     bool lowerableOperators(StructDeclaration& s) {
         std::set<std::string> seen;
-        for (auto& o : s.operators) {
-            const std::string spelling = spellOperator(o->op);
-            if (spelling.empty()) {
-                // A token this file cannot turn back into characters has no symbol to
-                // be declared under and no name to appear in a diagnostic, and picking
-                // one would put a symbol in the object file that no reader can trace to
-                // a line. `operator (...args)` is the one the corpus has.
-                unsupported(*o, fmt::format("an operator on struct '{}' whose token has "
-                                            "no spelling", s.name));
-                return false;
-            }
-            if (!seen.insert(spelling).second) {
-                // Two operators of one token are two definitions of one symbol, and
-                // declareFunction keeps the first -- so the second body would silently
-                // not be the one that runs. Which of the two a use meant is overload
-                // resolution, and the analyzer has none for an operator (it does not
-                // even check the arity), so there is nothing to pick with.
-                unsupported(*o, fmt::format("a second operator '{}' on struct '{}'",
-                                            spelling, s.name));
-                return false;
-            }
-            if (!o->params.empty() && o->params[0]->name == "self") {
-                // A method's written `self` *is* the receiver, because
-                // buildMethodSignature drops a parameter of that name wherever it
-                // appears. Nothing drops this one: the analyzer's
-                // visit(OperatorDeclaration&) defines `self` as the struct
-                // unconditionally and then defines every written parameter too, so a
-                // written `self` here is an ordinary operand hidden behind the injected
-                // receiver -- two things of one name that disagree about the arity.
-                unsupported(*o->params[0],
-                            fmt::format("a 'self' parameter on the operator '{}' of "
-                                        "struct '{}'", spelling, s.name));
-                return false;
-            }
-            for (auto& param : o->params) {
-                if (!param->is_vararg) continue;
-                // `...` needs va_start, which is a library question (ADR 0003), and an
-                // operator with one is not written anywhere in the corpus.
-                unsupported(*param, fmt::format("'...' on the operator '{}' of struct "
-                                                "'{}'", spelling, s.name));
-                return false;
-            }
+        for (auto& o : s.operators)
+            if (!lowerableOperator(*o, s.name, seen)) return false;
+        // The operators an `implements` block wrote for this struct, on the same terms
+        // and against the same `seen` set -- so a block operator of a token the struct
+        // already declares is the second definition of one symbol here too.
+        if (const StructExtras* extras = extrasFor(s.name))
+            for (OperatorDeclaration* o : extras->operators)
+                if (!lowerableOperator(*o, s.name, seen)) return false;
+        return true;
+    }
+
+    // One operator's share of lowerableOperators. lowerableMethod's counterpart, split
+    // out for the same reason: a block's operators go through this code and not a copy.
+    bool lowerableOperator(OperatorDeclaration& o, const std::string& sname,
+                           std::set<std::string>& seen) {
+        const std::string spelling = spellOperator(o.op);
+        if (spelling.empty()) {
+            // A token this file cannot turn back into characters has no symbol to
+            // be declared under and no name to appear in a diagnostic, and picking
+            // one would put a symbol in the object file that no reader can trace to
+            // a line. `operator (...args)` is the one the corpus has.
+            unsupported(o, fmt::format("an operator on struct '{}' whose token has "
+                                       "no spelling", sname));
+            return false;
+        }
+        if (!seen.insert(spelling).second) {
+            // Two operators of one token are two definitions of one symbol, and
+            // declareFunction keeps the first -- so the second body would silently
+            // not be the one that runs. Which of the two a use meant is overload
+            // resolution, and the analyzer has none for an operator (it does not
+            // even check the arity), so there is nothing to pick with.
+            unsupported(o, fmt::format("a second operator '{}' on struct '{}'",
+                                       spelling, sname));
+            return false;
+        }
+        if (!o.params.empty() && o.params[0]->name == "self") {
+            // A method's written `self` *is* the receiver, because
+            // buildMethodSignature drops a parameter of that name wherever it
+            // appears. Nothing drops this one: the analyzer's
+            // visit(OperatorDeclaration&) defines `self` as the struct
+            // unconditionally and then defines every written parameter too, so a
+            // written `self` here is an ordinary operand hidden behind the injected
+            // receiver -- two things of one name that disagree about the arity.
+            unsupported(*o.params[0],
+                        fmt::format("a 'self' parameter on the operator '{}' of "
+                                    "struct '{}'", spelling, sname));
+            return false;
+        }
+        for (auto& param : o.params) {
+            if (!param->is_vararg) continue;
+            // `...` needs va_start, which is a library question (ADR 0003), and an
+            // operator with one is not written anywhere in the corpus.
+            unsupported(*param, fmt::format("'...' on the operator '{}' of struct "
+                                            "'{}'", spelling, sname));
+            return false;
         }
         return true;
     }
@@ -2107,6 +2303,12 @@ private:
         //    two functions -- they are two bodies over two representations, the same
         //    as a generic free function's instances.
         live.decl = &tmpl;
+        // The blocks written on the template are this instantiation's: `Result<T, U>
+        // implements <IResult>` (stdlib/typing.fin:27) is filed under `Result`, and
+        // `Result<int, string>` is what a method of it is declared for. Keyed by the
+        // written name for exactly this reason -- a block cannot be written on a
+        // mangled name, because nobody writes one.
+        live.extras = extrasFor(tmpl.name);
         bindMethodTypes(live);
         // Nested inside `bound` above, and replacing it for the duration: a method
         // signature needs `Self` and the template's bare name as well as `T`, and
@@ -4640,9 +4842,14 @@ private:
     // to it did not find a function. Null for a name this struct does not declare.
     static const FunctionDeclaration* findMethod(const StructInfo& info,
                                                  const std::string& name) {
-        if (!info.decl) return nullptr;
-        for (auto& m : info.decl->methods)
-            if (m->name == name) return m.get();
+        if (info.decl)
+            for (auto& m : info.decl->methods)
+                if (m->name == name) return m.get();
+        // And a method an `implements` block wrote for it, for the reason findOperator
+        // reads the same list: the block's method is the struct's method.
+        if (info.extras)
+            for (FunctionDeclaration* m : info.extras->methods)
+                if (m->name == name) return m;
         return nullptr;
     }
 
@@ -5160,7 +5367,33 @@ private:
         unsupported(node, fmt::format("a declaration of enum '{}' here", node.name));
     }
     void visit(ClassDeclaration& node) override { unsupported(node, "a class declaration"); }
-    void visit(ImplementsBlock& node) override { unsupported(node, "an implements block"); }
+    // A block whose members a struct took emits nothing here, and nothing is the whole
+    // of it: its methods, operators and constructors were declared with that struct's
+    // (declareStructMethods, through StructInfo::extras) and their bodies are on the
+    // same queue, so by the time the statement walk reaches the block there is nothing
+    // left to do. The interface it names contributes no bytes and no check -- what a
+    // struct owes an interface is the analyzer's question, which it answers with
+    // `'X' does not fully implement interface 'Y'`.
+    //
+    // One that was *not* consumed is refused, and the reason it was not is always the
+    // same: its target is not a struct this file lowered. An enum target
+    // (stdlib/typing.fin:27), an interface, a name declared nowhere, a struct refused
+    // for one of lowerableStruct's shapes -- and the single-member overwrite form, whose
+    // right-hand side is a value rather than a declaration (collectImplementsBlocks says
+    // why it is not collected). Refusing here rather than at collection time is what
+    // puts the diagnostic on the block's own line.
+    void visit(ImplementsBlock& node) override {
+        if (registeredBlocks_.count(&node)) return;
+        if (!node.overwrite_member.empty()) {
+            unsupported(node, fmt::format("an implements block overwriting the member "
+                                          "'{}' of '{}'",
+                                          node.overwrite_member, node.target_type));
+            return;
+        }
+        unsupported(node, fmt::format("an implements block on '{}', which is not a "
+                                      "struct this file lowered",
+                                      node.target_type));
+    }
     void visit(OperatorDeclaration& node) override { unsupported(node, "an operator declaration"); }
     void visit(ConstructorDeclaration& node) override { unsupported(node, "a constructor"); }
     void visit(DestructorDeclaration& node) override { unsupported(node, "a destructor"); }
@@ -6443,6 +6676,17 @@ private:
     // Which StructDeclaration nodes declareStructs actually took, so that one it
     // never saw is refused rather than assumed handled.
     std::set<const StructDeclaration*> registered_;
+
+    // What each module-scope `implements` block added, by the name of the struct it
+    // names. Filled by collectImplementsBlocks before declareStructs and never written
+    // again, which is what makes StructInfo::extras a pointer that stays valid: a
+    // node-based map, so growing it moves no entry an instantiation is already pointing
+    // at.
+    std::unordered_map<std::string, StructExtras> implementsExtras_;
+    // The blocks whose members a struct actually took, so the statement walk can refuse
+    // one whose target this file never lowered -- an enum, an interface, a template
+    // nobody instantiated -- instead of emitting nothing for it.
+    std::set<const ImplementsBlock*> registeredBlocks_;
 
     // Every interface declared at module scope, by name.
     //
