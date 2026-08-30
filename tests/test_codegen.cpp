@@ -4300,20 +4300,21 @@ BACKEND_TEST(Soundness_Codegen, AStructsOperatorIsEmittedEvenIfNobodyWritesIt) {
         "}\n").find("declared MyInt.operator-"), std::string::npos);
 }
 
-BACKEND_TEST(Soundness_Codegen, AStructsConstructorIsRefusedAtItsDeclaration) {
-    // The literal path already refuses `new S(1)`, and that refusal is about the
-    // *call*. This is about the body: `constructor` is a function, and an object
-    // without it is a function the source declared and the object does not have.
+BACKEND_TEST(Soundness_Codegen, AStructsConstructorIsEmittedAndCallable) {
     const Built b = build(std::string(kPrintf) +
         "struct Point {\n"
         "    x <int>,\n"
         "    constructor(nx: int) { self.x = nx; }\n"
         "}\n"
         "fun main() <noret> {\n"
-        "    printf(\"ok\\n\");\n"
+        "    let p <Point> = Point(7);\n"
+        "    printf(\"%d\\n\", p.x);\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("constructor"), std::string::npos) << b.why();
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+    EXPECT_NE(codegenTrace(std::string(kPrintf) +
+        "struct Point { x <int>, constructor(nx: int) { self.x = nx; } }\n").find("declared Point.constructor"), std::string::npos);
 }
 
 BACKEND_TEST(Soundness_Codegen, AStructWithNoFunctionsOfItsOwnStillLowers) {
