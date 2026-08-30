@@ -112,6 +112,7 @@ was broken.
 | `fin_tests`, `FIN_WITH_LLVM=ON` | **1396 / 1396 pass**, 0 skipped | `./build/tests/fin_tests` |
 | — since `4788753`, at `d7a91df` | **1410 / 1410 pass**, 0 skipped | parameter defaults; corpus unmoved |
 | — since `4788753`, at `cfebdd5` | **1428 / 1428 pass**, 0 skipped | constructors; corpus unmoved |
+| — since `4788753`, at `HEAD` | **1436 / 1436 pass**, 0 skipped | inherited methods; corpus unmoved |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **19 of 51** | see below |
 | Samples blocked in codegen | **12** | see below |
@@ -178,6 +179,76 @@ Four of those differences are the section's own warning coming true a third time
 
 Reproduce with the loop in "Reproducing the numbers", then per sample:
 `./build/finc -c "$f" -o /dev/null 2>&1 | sed -r 's/\x1b\[[0-9;]*m//g' | grep 'codegen:' | head -1`.
+
+### The inheritance neighbourhood, measured 2026-08-30 — what item 3 actually is
+
+Item 3 below is titled "struct inheritance" and names `stdlib/hashmap.fin`. Measurement says the
+title covers **two unrelated units**, and only one of them was doable. Both halves are recorded
+here so the next reader does not re-derive them.
+
+**Doable, and done (this commit): a method a struct inherits is callable through it.** In-file
+inheritance already spliced the base's fields at offset 0 — that landed with the field work — but
+`d.get_a()` for a `get_a` declared on the base reported `codegen: a call to the method 'get_a' on
+struct 'Derived' is not lowered yet`, because the lookup walked only `info.decl->methods`. That is
+a soundness gap with nothing to do with modules: the corpus writes it at `deeptest2.fin:67-79`
+(`Student : <Person>`, with an override) and `love.fin:63,73` (both structs get `name` from
+`Person`). Now resolved by a breadth-first walk over the parents, which also serves operators
+(`operatorKey` instead of `methodKey`, one template) and static methods reached as `Derived::tag()`.
+The base's function is called with the derived pointer unchanged — no thunk, no second body — and
+the two cases where that would be wrong are refused rather than misread:
+
+- **A second base's method.** `Both: <P, Q>` puts `Q`'s fields after `P`'s, and `Q.get_q` GEPs at
+  the index `q` has in `Q`, which in a `Both` is `p`. The offsets are compared against the data
+  layout (`baseSharesLayout`) and the call refuses when they disagree. What a two-base object
+  should look like is deeptest2.fin:83's own open question.
+- **One name from two bases at the same distance.** Which `f()` `x.f()` means is a language
+  question; answering it by declaration order would answer it silently. Refused naming both bases,
+  the same way `declareStructs` already refuses a second inherited *field* of one name.
+
+Six tests, all asserting a value: `Soundness_Codegen.AnInheritedMethodIsCalledThroughTheDerived-`
+`Struct`, `.AnInheritedMethodWritesThroughTheDerivedObject`, `.AnOverrideWinsOverTheMethodIt-`
+`Overrides`, `.AMethodIsInheritedThroughTwoLevels`, `.AnInheritedStaticMethodIsCalledThroughThe-`
+`DerivedType`, `.AnInheritedOperatorIsAppliedThroughTheDerivedStruct`, plus the two refusals
+`.AMethodOfASecondBaseIsRefusedRatherThanMisread` and `.AMethodInheritedFromTwoBasesIsRefused-`
+`RatherThanChosen`.
+
+One thing the walk reaches that the corpus cannot yet: an interface satisfied by an **inherited**
+method. `interfaceVtable` now resolves a slot through the hierarchy instead of leaving it null (a
+call through a null slot is a jump to address zero rather than a diagnostic), but the analyzer
+reports `Struct 'Talker' does not implement interface 'Speaker'` when the implementing method is
+the base's — measured — so the shape stops in the front end today. Fixing that is the interface
+unit's or the analyzer's, not this one's.
+
+**Not doable, and not this commit: `stdlib/hashmap.fin`.** Its refusal reads like inheritance and
+is not one. It is **three stacked blockers, none about the field splice**, and each was measured
+directly:
+
+1. **An imported struct is not lowerable at all.** A module's AST lives in
+   `ModuleLoader::astStorage` and never reaches the backend; only ambient `#[global]` `@define`
+   prototypes are spliced into the root program (`appendAmbientPrototypes`), and deliberately only
+   externs — the header's own reason is that copying a Fin function *with a body* "would emit a
+   second definition of a symbol the module's own object already publishes, and that is separate
+   compilation rather than a splice." So `let e <Error> = …` against `import error::std` gives
+   `codegen: a variable of type 'Error' is not lowered yet`, and `len("hello")` against
+   `import strings::std` gives `codegen: a call to 'len'`. Inheriting from `Error` is that same
+   wall one step earlier. **This is a separate-compilation decision, not a lowering.**
+2. **An imported interface is misread as a base struct.** `parentIsInterface` consults
+   `interfaceNames_`, which `declareInterfaces` fills from the root program's own
+   `InterfaceDeclaration`s only. `hashmap.fin:15`'s `Index` and `IndexAssign` come from a module,
+   so with `HashMapError` removed the next refusal is `struct 'HashMap' inheriting 'Index', which
+   is not a struct this file lowered` — an interface being counted as a base. Fixed by whatever
+   answers (1), because the interface names have the same provenance problem the types do.
+3. **`hashmap.fin`'s base is a class.** `lib/std/error.fin`'s `Error` is `#[class]`, refused on its
+   own as `the attribute 'class' on struct 'Error'`. ADR 0026 books `class` as its own unit and
+   states the backend "cannot simply stop refusing", because `class X {}` parses to a
+   `ClassDeclaration` that does not derive from `StructDeclaration`, and that
+   `StructDeclaration::is_class` is not the hook because nothing sets it.
+
+Commit `e2e166f` predicted (1) and (3) already: "stdlib/hashmap.fin -> its base `Error` is declared
+`#[class]` (stdlib/error.fin:8)… So both now wait on the `class` ruling." So **item 3 unblocks no
+sample**, and the corpus is unmoved at 19 / 12 / 20 with the same twelve first refusals listed
+above — for the third time in a row, and for the same reason each time: the corpus's uses of a
+newly lowered construct sit behind other refusals.
 
 ### Movement since `43b3324`
 
@@ -328,9 +399,16 @@ Recommended order — cheapest first, and each one unblocks the next:
    the corpus writes that form. So that half of this item's old title is a grammar question for the
    owner, not a lowering. `visit(NewExpression&)` still refuses `new` of a struct with arguments,
    by name, for the day it does parse.
-3. **Struct inheritance** — `stdlib/hashmap.fin`, and `readonly.fin` only *behind* the `#[debug]`
-   field attribute (see §4: `readonly.fin`'s first refusal is the attribute, not the inheritance).
-   One sample unblocked outright, one gated.
+3. ~~**Struct inheritance**~~ — **split, and the doable half is done.** See §4, "The inheritance
+   neighbourhood". An **inherited method, operator or static method is now callable through the
+   derived struct**, resolved breadth-first over the parents so an override wins, with the two
+   wrong-answer cases refused (a second base's method, and one name from two bases). What is left
+   under this title is *not* inheritance: `stdlib/hashmap.fin` needs (a) an imported struct type to
+   be lowerable at all — a **separate-compilation decision**, since a module's AST never reaches the
+   backend and only ambient `@define` externs are spliced — (b) `parentIsInterface` to know about
+   imported interfaces, which the same decision settles, and (c) the **`class` unit** (ADR 0026),
+   because its base `Error` is `#[class]`. `readonly.fin` remains gated behind the `#[debug]` field
+   attribute in front of its inheritance. **No sample is unblocked by any of this**, measured.
 4. **Interfaces** — `deeptest1.fin`, `implements_block.fin`. ADR 0019 already rules that an
    interface reference is two words and the pointer map has three states.
 5. **Imports** — `complex.fin`, `deeptest4.fin`. **Measured 2026-08-28, and the fix is not in
@@ -398,7 +476,11 @@ conversion between integer types. `cast<int>` of a float is not lowered.
 `Ok(T)`.
 
 **Analyzer/AST defects carried:** `StructType::substitute` leaks the outer struct as a nested
-struct's `Self`; an interface cannot inherit an interface; `StructType::implements()` compares
+struct's `Self`; an interface cannot inherit an interface; **an interface satisfied by an
+*inherited* method is reported unimplemented** (`Analyzer_Decl.cpp:537` walks the struct's own
+methods, so `struct Talker: <Base, Speaker>` where `Base` declares `speak` gives `Struct 'Talker'
+does not implement interface 'Speaker'` — measured 2026-08-30; the backend's vtable now resolves
+that slot through the hierarchy, so the front end is the only thing in the way); `StructType::implements()` compares
 names only; **operators have no arity check**
 (which is why the backend's own `too few arguments` refusal is where a wrong-arity operator
 lands); interface-typed pointer assignability; `Scope::resolve` leaks non-exports through a
@@ -703,8 +785,19 @@ where marked:
   parent's size, so the type layer already half-implements it. **Deliberately queued behind
   `blame` anyway**, on measurement: permitting inheritance clears **zero** samples, because
   `readonly.fin` then needs a class declaration, `try`/`catch` and `blame`, and
-  `stdlib/hashmap.fin` then needs a constructor on a struct. Parent *methods* are **not** ruled
-  — report rather than invent.
+  `stdlib/hashmap.fin` then needs a constructor on a struct. Parent *methods* were **not** ruled
+  here — "report rather than invent" — and that is now the one open joint in this entry, because
+  they are implemented. **Flagged for ratification, not presented as settled:** a call to a base's
+  method, operator or static method through a derived value is lowered as a call to the base's own
+  function with the derived pointer passed unchanged. Nothing new was invented to do it — the
+  pointer identity *is* this ruling ("a pointer to the child is a valid pointer to the parent"), so
+  no thunk, no upcast and no second body are needed, and the derived struct's own method wins over
+  the base's by being found a level earlier. Everything that would have required an invention is
+  still refused by name: a second base's method (its fields are not at the offsets its body
+  indexes), one method name inherited from two bases at the same distance, and a `super::<P>::`
+  qualified call (unparsed, untouched). If the owner wants a different rule — a thunk, an implicit
+  copy, no inheritance of operators — the whole of it is `findProvider` and its three callers in
+  `src/codegen/CodeGen_LLVM.cpp`, and eight tests name the behaviour.
 
 - ~~**`format!`'s visibility**~~ — **RULED 2026-08-27: marked `#[global]`, alongside `printf`.**
   ADR 0023 ruled `format!` a compiler builtin rather than a declared macro, because

@@ -2700,6 +2700,182 @@ BACKEND_TEST(Soundness_Codegen, AClassLowersLikeAStruct) {
     EXPECT_EQ(b.out, "1\n") << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// A method a struct inherits is callable through it.
+//
+// The other half of the splice above. The base's fields are already at the offsets the
+// base's own body indexes them at, so the derived pointer *is* a valid pointer to the
+// base and the base's function is called with it unchanged -- no thunk, no second body,
+// no upcast instruction. What is refused is the case where that is not true: a second
+// base's fields begin after the first's, so its methods would read the first base's
+// fields, which is a wrong value rather than a missing feature.
+//
+// Every test prints a value, for the reason the splice tests do: calling the wrong
+// function or reading the wrong offset both compile and both run.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AnInheritedMethodIsCalledThroughTheDerivedStruct) {
+    // deeptest2.fin:67 in miniature: `Student : <Person>` calling what `Person`
+    // declares. The method reads `self.a`, so a receiver that was not the derived
+    // object -- or was it at the wrong offset -- prints something other than 3.
+    const Built b = build(std::string(kPrintf) +
+        "struct Base {\n"
+        "    a <int>\n"
+        "    fun get_a() <int> { return self.a; }\n"
+        "}\n"
+        "struct Derived: <Base> { b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let d <Derived> = Derived{ a: 3, b: 4 };\n"
+        "    printf(\"%d %d\\n\", d.get_a(), d.b);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInheritedMethodWritesThroughTheDerivedObject) {
+    // The write half, which the read half cannot catch: a receiver copied to a
+    // temporary would let `set_a` run, return, and change nothing -- and the call would
+    // still compile. Asserted by reading the field back through the derived struct.
+    const Built b = build(std::string(kPrintf) +
+        "struct Base {\n"
+        "    a <int>\n"
+        "    fun set_a(n: int) <noret> { self.a = n; }\n"
+        "}\n"
+        "struct Derived: <Base> { b <int> }\n"
+        "fun main() <noret> {\n"
+        "    let d <Derived> = Derived{ a: 1, b: 2 };\n"
+        "    d.set_a(9);\n"
+        "    printf(\"%d %d\\n\", d.a, d.b);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnOverrideWinsOverTheMethodItOverrides) {
+    // deeptest2.fin:78 writes `Student.to_string` over `Person.to_string` and calls the
+    // override "we can also override parents methods". The lookup is breadth-first for
+    // this: the derived struct's own method is found a level before the base's, so
+    // `who()` is 2 and not 1. A depth-first walk would print 1 and still run.
+    const Built b = build(std::string(kPrintf) +
+        "struct A {\n"
+        "    a <int>\n"
+        "    fun who() <int> { return 1; }\n"
+        "}\n"
+        "struct B: <A> {\n"
+        "    b <int>\n"
+        "    fun who() <int> { return 2; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let x <B> = B{ a: 5, b: 6 };\n"
+        "    printf(\"%d\\n\", x.who());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodIsInheritedThroughTwoLevels) {
+    // `C : <B>` and `B : <A>`, with the method on `A` and no redeclaration between.
+    // The walk is transitive because the layout is: A's fields are at offset 0 of B,
+    // which are at offset 0 of C. `deep()` multiplies the field it reads, so a read
+    // from the wrong slot cannot come out as 50 by accident.
+    const Built b = build(std::string(kPrintf) +
+        "struct A {\n"
+        "    a <int>\n"
+        "    fun deep() <int> { return self.a * 10; }\n"
+        "}\n"
+        "struct B: <A> { b <int> }\n"
+        "struct C: <B> { c <int> }\n"
+        "fun main() <noret> {\n"
+        "    let x <C> = C{ a: 5, b: 6, c: 7 };\n"
+        "    printf(\"%d %d\\n\", x.deep(), x.c);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "50 7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInheritedStaticMethodIsCalledThroughTheDerivedType) {
+    // `Derived::tag()` where `tag` is the base's static. There is no receiver, so there
+    // is no layout question to ask -- which is why this is inherited unconditionally
+    // where an instance method is not.
+    const Built b = build(std::string(kPrintf) +
+        "struct Base {\n"
+        "    a <int>\n"
+        "    static fun tag() <int> { return 42; }\n"
+        "}\n"
+        "struct Derived: <Base> { b <int> }\n"
+        "fun main() <noret> { printf(\"%d\\n\", Derived::tag()); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInheritedOperatorIsAppliedThroughTheDerivedStruct) {
+    // An operator is a method with a spelled name, so it is inherited by the same walk
+    // over the same table. Before this it refused as "an undeclared operator '+' on
+    // struct 'W'", which was true of the derived struct and not of the program.
+    const Built b = build(std::string(kPrintf) +
+        "struct V {\n"
+        "    x <int>\n"
+        "    operator +(o: int) <int> { return self.x + o; }\n"
+        "}\n"
+        "struct W: <V> { y <int> }\n"
+        "fun main() <noret> {\n"
+        "    let a <W> = W{ x: 1, y: 9 };\n"
+        "    printf(\"%d\\n\", a + 41);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodOfASecondBaseIsRefusedRatherThanMisread) {
+    // The refusal this unit is bounded by. `Q`'s fields start after `P`'s in `Both`, and
+    // `Q.get_q` GEPs at the index `q` has in `Q` -- which in a `Both` is `p`. Calling it
+    // would print 1 for a field holding 2, in a program that compiles and runs, so the
+    // offsets are compared and the call is refused when they disagree. What a two-base
+    // object should look like is deeptest2.fin:83's open question.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { p <int> }\n"
+        "struct Q {\n"
+        "    q <int>\n"
+        "    fun get_q() <int> { return self.q; }\n"
+        "}\n"
+        "struct Both: <P, Q> { z <int> }\n"
+        "fun main() <noret> {\n"
+        "    let x <Both> = Both{ p: 1, q: 2, z: 3 };\n"
+        "    printf(\"%d\\n\", x.get_q());\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("inherited from 'Q'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMethodInheritedFromTwoBasesIsRefusedRatherThanChosen) {
+    // Which `f()` `x.f()` means is a language question, and answering it by which base
+    // was written first would answer it silently. The same refusal declareStructs makes
+    // for a second inherited *field* of one name, one level along.
+    const Built b = build(std::string(kPrintf) +
+        "struct P {\n"
+        "    p <int>\n"
+        "    fun f() <int> { return 1; }\n"
+        "}\n"
+        "struct Q {\n"
+        "    q <int>\n"
+        "    fun f() <int> { return 2; }\n"
+        "}\n"
+        "struct Both: <P, Q> { z <int> }\n"
+        "fun main() <noret> {\n"
+        "    let x <Both> = Both{ p: 1, q: 2, z: 3 };\n"
+        "    printf(\"%d\\n\", x.f());\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("inherits one from 'P' and one from 'Q'"),
+              std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnOperatorOnAStructIsRefused) {
     // Whether `a == b` on two structs compares field-wise is a ruling nobody has
     // made. It matters that this refuses rather than crashes: commonType compares

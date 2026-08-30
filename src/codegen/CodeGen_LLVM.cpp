@@ -2696,7 +2696,30 @@ private:
             entries.push_back(llvm::ConstantExpr::getIntToPtr(offset, ptrTy));
         }
         for (const auto* method : iface.methods) {
-            auto fn = functions_.find(methodKey(source.structInfo->finName, method->name));
+            // The base's method satisfies the interface the derived struct declares.
+            // Looked up through the hierarchy because the alternative already here was
+            // a null slot, and a call through one is a jump to address zero rather than
+            // a diagnostic.
+            //
+            // No corpus site reaches this yet: the analyzer reports `Struct 'Talker'
+            // does not implement interface 'Speaker'` when the method that satisfies it
+            // is the base's (measured), so today the shape stops before the backend.
+            // The lookup is still the right one -- what a vtable slot holds is this
+            // file's question whoever answers the analyzer's.
+            //
+            // Only a base whose fields sit where its own methods expect them, because
+            // the entry is called with the *derived* object's data pointer and nothing
+            // adjusts it. A second base's method would read the first base's fields, so
+            // the slot stays null rather than becoming a wrong read; the interface's own
+            // unit is where a thunk that adjusts the pointer belongs.
+            const StructInfo* provider =
+                findMethodProvider(*source.structInfo, method->name);
+            if (provider && provider != source.structInfo &&
+                !baseSharesLayout(*source.structInfo, *provider)) {
+                provider = nullptr;
+            }
+            auto fn = provider ? functions_.find(methodKey(provider->finName, method->name))
+                               : functions_.end();
             if (fn == functions_.end()) {
                 entries.push_back(llvm::ConstantPointerNull::get(ptrTy));
             } else {
@@ -3922,6 +3945,27 @@ private:
         }
         const OperatorDeclaration* declared = findOperator(*owner, node.op);
         if (!declared) {
+            // The base's operator, on the terms an inherited method is called on: the
+            // left operand's address is already a valid pointer to the base, so the
+            // base's function is called with it unchanged -- and only when the base's
+            // fields sit where its own body indexes them, which for a second base with
+            // bytes they do not.
+            const StructInfo* provider = operatorProvider(node, *owner, node.op);
+            if (failed_) return;
+            if (provider && provider != owner) {
+                if (!baseSharesLayout(*owner, *provider)) {
+                    unsupported(node, fmt::format("an operator '{}' inherited from '{}', "
+                                                  "whose fields are not at the offsets "
+                                                  "they have in '{}'",
+                                                  spelling, provider->finName,
+                                                  owner->finName));
+                    return;
+                }
+                owner = provider;
+                declared = findOperator(*owner, node.op);
+            }
+        }
+        if (!declared) {
             unsupported(node, fmt::format("an undeclared operator '{}' on struct '{}'",
                                           spelling, owner->finName));
             return;
@@ -4600,6 +4644,131 @@ private:
         for (auto& m : info.decl->methods)
             if (m->name == name) return m.get();
         return nullptr;
+    }
+
+    // The struct whose declaration a member named on `info` reaches: `info` itself when
+    // it declares one, otherwise the nearest base that does. Null for a name nowhere in
+    // the hierarchy.
+    //
+    // `keyOf` turns a struct's name into the functions_ key to look for, which is what
+    // lets one walk serve both a method and an operator -- an operator is a method with
+    // a spelled name, and inheriting one is the same question about the same table.
+    //
+    // Breadth-first, so an override wins over what it overrides -- `Student.to_string`
+    // is found before `Person.to_string` because it is found a level earlier
+    // (deeptest2.fin:78 writes exactly that pair). Two bases at the *same* distance
+    // that both declare the name is a language question -- which one `d.f()` means --
+    // and `conflict` reports it back rather than being answered by declaration order,
+    // the same way declareStructs refuses a second inherited *field* of one name.
+    //
+    // Reports nothing itself, because one of its callers has no node to report at:
+    // interfaceVtable resolves a name for a table slot and answers a missing one with a
+    // null entry.
+    template <typename KeyOf>
+    const StructInfo* findProvider(const StructInfo& info, KeyOf keyOf,
+                                   const StructInfo** conflict = nullptr) const {
+        std::vector<const StructInfo*> level{&info};
+        std::set<const StructInfo*> seen{&info};
+        while (!level.empty()) {
+            std::vector<const StructInfo*> declaring;
+            for (const StructInfo* s : level)
+                if (functions_.count(keyOf(s->finName))) declaring.push_back(s);
+            if (declaring.size() > 1) {
+                if (conflict) *conflict = declaring[1];
+                return declaring[0];
+            }
+            if (declaring.size() == 1) return declaring[0];
+            std::vector<const StructInfo*> next;
+            for (const StructInfo* s : level) {
+                if (!s->decl) continue;
+                for (auto& parent : s->decl->parents) {
+                    // An interface contributes no methods to look up here: what a
+                    // struct owes an interface it declares itself, and a call *through*
+                    // an interface reference goes through the vtable instead.
+                    if (!parent || parentIsInterface(*parent)) continue;
+                    auto base = structs_.find(parent->name);
+                    // A base this file did not lower was already refused at the derived
+                    // struct's declaration (lowerableStruct), so there is nothing here
+                    // to report a second time.
+                    if (base == structs_.end()) continue;
+                    // A diamond reaches one base along two paths and it is one base.
+                    if (!seen.insert(&base->second).second) continue;
+                    next.push_back(&base->second);
+                }
+            }
+            level = std::move(next);
+        }
+        return nullptr;
+    }
+
+    const StructInfo* findMethodProvider(const StructInfo& info, const std::string& method,
+                                         const StructInfo** conflict = nullptr) const {
+        return findProvider(info,
+                            [&](const std::string& s) { return methodKey(s, method); },
+                            conflict);
+    }
+
+    // findMethodProvider, with the ambiguity reported. Null having reported, or null
+    // having said nothing when the name is simply not there -- the caller's own
+    // reportMissingMethod is the better message for that, and `failed_` tells the two
+    // apart.
+    const StructInfo* methodProvider(ASTNode& node, const StructInfo& info,
+                                     const std::string& method) {
+        const StructInfo* conflict = nullptr;
+        const StructInfo* provider = findMethodProvider(info, method, &conflict);
+        if (conflict && provider) {
+            unsupported(node, fmt::format("a call to the method '{}' on struct '{}', which "
+                                          "inherits one from '{}' and one from '{}'",
+                                          method, info.finName, provider->finName,
+                                          conflict->finName));
+            return nullptr;
+        }
+        return provider;
+    }
+
+    // The same walk for an operator, with the same ambiguity refusal: `a + b` where the
+    // base declares `operator +` and the derived struct does not.
+    const StructInfo* operatorProvider(ASTNode& node, const StructInfo& info,
+                                       ASTTokenKind op) {
+        const StructInfo* conflict = nullptr;
+        const StructInfo* provider = findProvider(
+            info, [&](const std::string& s) { return operatorKey(s, op); }, &conflict);
+        if (conflict && provider) {
+            unsupported(node, fmt::format("an operator '{}' on struct '{}', which inherits "
+                                          "one from '{}' and one from '{}'",
+                                          spellOperator(op), info.finName,
+                                          provider->finName, conflict->finName));
+            return nullptr;
+        }
+        return provider;
+    }
+
+    // Whether a `&derived` may be handed to `base`'s methods unchanged.
+    //
+    // Measured against the data layout rather than assumed from the declaration. The
+    // first base's fields splice in at offset 0, so for it the answer is always yes and
+    // the upcast emits no instruction -- but a *second* base's fields start after the
+    // first's, and a method of it GEPs at the indices it has in its own struct, which in
+    // the derived object are the first base's fields. That is a silent read of the wrong
+    // field rather than a missing feature, so the offsets are compared and the call is
+    // refused when they disagree.
+    //
+    // Every field is compared, the base's own inherited ones included, which is what
+    // makes the answer transitive: a base that shares its layout with the derived struct
+    // shares it for whatever its own methods pass further up.
+    bool baseSharesLayout(const StructInfo& derived, const StructInfo& base) const {
+        if (!derived.complete || !base.complete) return false;
+        if (!derived.llvmType || !base.llvmType) return false;
+        const auto& dl = module_.getDataLayout();
+        const auto* d = dl.getStructLayout(derived.llvmType);
+        const auto* b = dl.getStructLayout(base.llvmType);
+        for (size_t i = 0; i < base.fields.size(); ++i) {
+            size_t index = 0;
+            if (!derived.find(base.fields[i].name, index)) return false;
+            if (index >= derived.llvmType->getNumElements()) return false;
+            if (d->getElementOffset(index) != b->getElementOffset(i)) return false;
+        }
+        return true;
     }
 
     // Why `Struct.method` is not in functions_. Always reports.
@@ -5318,6 +5487,17 @@ private:
                 emitGenericMethodCall(node, owner, *receiver, *tmpl);
                 return;
             }
+            // `d.get_a()` where `get_a` is the *base*'s. The base's fields splice into
+            // this struct at offset 0 (declareStructs' second pass), so the receiver
+            // already is a valid pointer to the base and the method the source named is
+            // the base's method: it is called, not re-emitted. Which base is decided by
+            // methodProvider rather than here.
+            const StructInfo* provider = methodProvider(node, owner, node.method_name);
+            if (failed_) return;
+            if (provider && provider != &owner) {
+                emitInheritedMethodCall(node, owner, *provider, *receiver);
+                return;
+            }
             reportMissingMethod(node, owner, node.method_name);
             return;
         }
@@ -5332,6 +5512,56 @@ private:
         }
 
         std::vector<llvm::Value*> args{receiver->ptr};
+        if (!emitCallArgs(node, info, node.method_name, argList(node.args), args)) return;
+        emitCall(info, args);
+    }
+
+    // `d.get_a()` where `get_a` is declared on `d`'s base -- deeptest2.fin:67-79 and
+    // love.fin's two structs, whose `name` comes from `Person`.
+    //
+    // The base's function is called with the derived pointer unchanged. Nothing is
+    // emitted for the upcast because there is nothing to emit: LLVM has one `ptr`, and
+    // the base's fields are at the offsets the base's own methods GEP at -- which is
+    // checked and not assumed (baseSharesLayout), because for a second base it is false.
+    //
+    // Not a re-declaration of the method under the derived struct's name. One body per
+    // written method is what keeps `self` meaning one type inside it: emitting a copy
+    // bound to the derived struct would be an instantiation, and a method is not a
+    // template.
+    void emitInheritedMethodCall(MethodCall& node, const StructInfo& derived,
+                                 const StructInfo& base, const Addr& receiver) {
+        if (!baseSharesLayout(derived, base)) {
+            // A second base, whose fields begin after the first's. Its methods index
+            // from zero and would read the first base's fields instead -- the wrong
+            // field, silently, which is the one outcome worth a refusal here. What the
+            // derived object should look like when it has two bases with bytes is the
+            // owner's ruling (deeptest2.fin:83 writes `MultiInherit: <Person, Student>`
+            // and the sample's own comment says the behaviour is unsettled).
+            unsupported(node, fmt::format("a call to the method '{}' inherited from '{}', "
+                                          "whose fields are not at the offsets they have "
+                                          "in '{}'",
+                                          node.method_name, base.finName, derived.finName));
+            return;
+        }
+        auto found = functions_.find(methodKey(base.finName, node.method_name));
+        if (found == functions_.end()) {
+            // methodProvider answered with this struct because functions_ has the key,
+            // so losing it here is this file disagreeing with itself.
+            reportMissingMethod(node, base, node.method_name);
+            return;
+        }
+        const FnInfo& info = found->second;
+        if (!info.hasReceiver) {
+            // A static method of the base, reached through a derived value. Same
+            // refusal the struct's own static method gets one branch up, and for the
+            // same reason: there is no `self` to be given and dropping the receiver the
+            // source wrote would be a silent reinterpretation.
+            unsupported(node, fmt::format("a call to the static method '{}' inherited "
+                                          "from '{}' through a value",
+                                          node.method_name, base.finName));
+            return;
+        }
+        std::vector<llvm::Value*> args{receiver.ptr};
         if (!emitCallArgs(node, info, node.method_name, argList(node.args), args)) return;
         emitCall(info, args);
     }
@@ -5413,6 +5643,17 @@ private:
         const StructInfo& owner = *target->structInfo;
 
         auto found = functions_.find(methodKey(owner.finName, node.method_name));
+        if (found == functions_.end()) {
+            // `Derived::make()` where `make` is the base's static. Inherited on the same
+            // terms as an instance method, and with no layout question to ask: a static
+            // method takes no receiver, so there is no pointer being reinterpreted and
+            // nothing for baseSharesLayout to decide. The refusal for an *instance*
+            // method reached this way is still below and still applies.
+            const StructInfo* provider = methodProvider(node, owner, node.method_name);
+            if (failed_) return;
+            if (provider && provider != &owner)
+                found = functions_.find(methodKey(provider->finName, node.method_name));
+        }
         if (found == functions_.end()) {
             reportMissingMethod(node, owner, node.method_name);
             return;
