@@ -116,6 +116,7 @@ was broken.
 | — since `4788753`, at `5d70a6e` | **1448 / 1448 pass**, 0 skipped | implements blocks; **corpus 19 → 20** |
 | — since `4788753`, at `2aa0993` | **1465 / 1465 pass**, 0 skipped | the interface reference's missing tests; corpus unmoved |
 | — since `4788753`, at `211c8ab` | **1473 / 1473 pass**, 0 skipped | the namespace-qualified call rewrite; **corpus 20 → 21** |
+| — since `4788753`, at `HEAD` | **1481 / 1481 pass**, 0 skipped | the `::` call's type arguments; **corpus 21 → 22** |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -555,6 +556,132 @@ and behind it sits the imported-declaration gap above — `HashMap` is declared 
 `lib/std/hashmap.fin` and nothing puts a module's struct into the root program — so what it refuses
 *after* explicit generic arguments lower is unmeasured.
 
+### The `::` call's type arguments at `HEAD` (2026-08-31) — item 6 is done
+
+**`letssee.fin` lowers to an object, and the corpus is 22 / 9 / 20.** It is the only sample that
+moved; the other 50 kept their bucket. The suite is 1481.
+
+**Item 6's premise was incomplete, and the correction is the whole design.** It said the missing
+piece is "inferring `T` from the arguments, the same inference a free generic call needs". That is
+true of exactly one of `letssee.fin`'s three `::` calls:
+
+| Site | Call | What says which `Vec2` |
+| --- | --- | --- |
+| `:73` | `Vec2::normalize(scaled)` | the argument — `normalize(ptr: &Self)`, so `Self` unifies with `&Vec2<float>` |
+| `:59` | `Vec2::from_angle(0.7854)` | the **annotation** — `from_angle(angle: float)` mentions no `T`, so the `0.7854` binds nothing |
+| `:77` | `Vec2::zero()` | the **annotation** — the call names no type at all |
+
+An annotation is not something codegen has. `hintFor` is a front-end mechanism, the analyzer already
+runs it, and two of these three sites have nothing else. So the fix could not be argument inference
+in the backend, and it is item 5's division instead: **the front end resolves, the backend lowers
+what was resolved.**
+
+- **`SemanticAnalyzer::recordResolvedTarget`** (`Analyzer_Expr.cpp`, immediately above
+  `visit(StaticMethodCall&)`) takes the instantiation `checkGenericCall` already computed and leaves
+  a `TypeNode` for it on the call.
+- **`checkGenericCall` gained a trailing `std::shared_ptr<Type>* ownerInstanceOut`**, reported
+  *before* the substitution that follows it, so its one early return still hands the instantiation
+  over. The caller cannot reconstruct the receiver from the return value: `Vec2::normalize(scaled)`
+  returns `noret`.
+- **`StaticMethodCall::resolved_target`** (`src/ast/exprs/FunctionCall.hpp`) is the slot, beside
+  `target_type` and not written into it. `target_type` is what the source says and is what a
+  diagnostic about the target points at; an inferred argument has no source spelling to point at, so
+  overwriting the written node would move a caret onto text nobody wrote. `StructuralWalk.cpp` emits
+  both and `CloneExprs.cpp` clones it — the same treatment `MethodCall::resolved_call` gets.
+- **`CodeGen_LLVM::visit(StaticMethodCall&)` chooses between the two nodes in one line** and then
+  reads only its choice, refusal messages included. Null means the written target, which is every
+  spelling that already worked — a non-generic struct, `Self`, `Box::<int>::zero()` — so those go
+  through the same `map()` of the same node they always did.
+
+**Why recording a type on an AST node is sound here.** Codegen does not clone a template's body:
+`Emitter::instantiateGeneric` and `instantiateGenericMethod` emit **the same nodes** once per
+instantiation, under a `ScopedBindings` substitution in the `TypeMapper`. So a *concrete* type
+stamped on a node inside a template would be right for at most one of the emissions that read it.
+What is recorded is a `TypeNode`, and `spellType` (same file) spells a type **parameter** as its own
+bare name — after which the recorded node is indistinguishable from a written one: `TypeMapper::
+boundBinding` resolves the name through whichever substitution is live, and `Emitter::displayName`
+keys the instantiation on what it was bound to, exactly as it does for a hand-written `Box<T>`.
+
+Two guards keep that from becoming a licence to record anything:
+
+- **`spellType` returns null for a type it cannot spell** — a `SelfType`, a function type, a
+  prototype, `any`, the error sentinel, the type of `null`. Null records nothing and the backend
+  refuses as before. The distinction it draws is worth keeping straight: *null* means "this analyzer
+  could not say what the type is", and a node the **mapper** rejects means "the type is this, and the
+  backend does not lower it yet" — so `auto`, a `$`-meta-type and a dynamic `[T]` are spelled and
+  refused downstream, where their own messages are.
+- **`everyGenericParamResolvesHere` compares a parameter by identity, not by name.** This is the one
+  real hole and it is closed:
+
+  ```fin
+  struct Box<T> { static fun zero() <&Self> { return new Self{}; } }
+  fun bad<T>(x: T) <noret> { Box::zero(); }
+  ```
+
+  Nothing binds `Box`'s `T`, and `bad`'s `T` is a *different parameter that shares its spelling*. On
+  names alone this records `Box<T>`, the mapper binds it to whatever `bad` was instantiated at, and
+  `Box::zero()` lowers as `Box<int>` — an instantiation nobody in the program asked for. Compared by
+  identity against `Scope::resolveType` at the call, it records nothing and refuses.
+  `Soundness_Codegen.AStaticCallOnAGenericTargetDoesNotBorrowItsCallersTypeParameter` calls `bad`,
+  because a template nobody instantiates is never emitted and would pass for the wrong reason.
+
+**Eight tests, five of them asserting a value** (`tests/test_codegen.cpp`):
+`Soundness_Codegen.AStaticCallOnAGenericTargetTakesItsTypeArgumentFromTheAnnotation`,
+`.InfersItsTypeArgumentFromAnArgument`, `.InfersItsTypeArgumentFromASelfArgument`,
+`.InsideATemplateResolvesAtEachInstantiation`, `.ReachesAMethodOfTheInstantiationItResolved`,
+`.WithNothingToInferFromIsRefused`, `.DoesNotBorrowItsCallersTypeParameter`, and
+`Soundness_Codegen.AStaticCallsTurbofishAfterTheMethodIsStillRefused` (each of the middle names is
+prefixed `AStaticCallOnAGenericTarget`). The fourth is the one that measures the soundness claim:
+one `Box::of(x)` node inside `fun wrap<T>`, two instantiations, `7` and `A` out. Before the
+parameter-spelling arm existed it refused **twice** — once per emission of the one node — which is
+the safety property stated as a measurement.
+
+**Three refusals in this neighbourhood are untouched, and none of them is this unit's.** All three
+are the analyzer binding nothing, not the backend failing to read it:
+
+```
+Box::make::<int>(9)     a '::' call to 'make' with explicit generic arguments   nullifier.fin:28
+HashMap::<string, Data>()   a call with explicit generic arguments               deeptest4.fin:11
+Box(7)                  a call to 'Box'                                          (no corpus site)
+```
+
+The first is the turbofish *after* the method name, which binds the **method**'s parameters and not
+the target's; `StaticMethodCall::generic_args` is not read by the inference that fills
+`resolved_target`. The second is a generic **constructor** call, which is a `FunctionCall` whose name
+is a struct's — item 5's rewrite neighbourhood, with the imported-struct decision behind it. The
+third is the same shape with inference instead of a turbofish. `nullifier.fin` is FRONTEND_ERROR, so
+its line is unreached in the corpus; `deeptest4.fin`'s is a first refusal and still counts.
+
+**`letssee.fin` prints wrong numbers, and the cause is in the sample.** It reaches an object under
+`-c`; linked (it needs `-lm`) it runs and prints all six lines, but `Length of a` is
+`-76854900708868096.000000` and `Vec2::normalize` appears to do nothing. Neither is a `::` fault.
+The sample declares `@define sqrt(f: float) <float>` at `:6` against libm's
+`double sqrt(double)` — an **ABI mismatch in the sample's own prototype**. Measured with two probes:
+the `float` spelling reproduces that exact value, and `@define sqrt(f: double) <double>` prints
+`5.000000`. `normalize` follows from it — `len` is negative garbage, so its
+`if (len > cast<float>(0))` guard is false and it returns having changed nothing. **The corpus is the
+specification (ADR 0008), so this is a measurement to record and not a sample to edit**; what it
+wants is either implicit float→double promotion at a vararg/extern boundary or a ruling that
+`@define` must match the C declaration, and both are §8's.
+
+**The corpus at `HEAD`, all 51 measured** — 22 OBJECT_CLEAN, 9 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
+The nine, with their first refusal re-measured here:
+
+```
+deeptest4.fin             a call with explicit generic arguments
+generics_interfaces.fin   the erasure marker 'Castable' on 'T' of a generic function
+interfaces.fin            a call to the method 'to_string' on struct 'User'
+lambdas.fin               a variable of type 'fn<...>(T) -> T'
+loops.fin                 a 'foreach' loop
+readonly.fin              the attribute 'debug' on field 'v1' of struct 'MyClass'
+stdlib/hashmap.fin        struct 'HashMapError' inheriting 'Error', which is not a struct this file lowered
+stdlib/prototypes.fin     a return of type '$type'
+type_annotations.fin      a variable of type 'prototype<int, float>'
+```
+
+Every one of those lines is unchanged from the `cfebdd5` re-measurement except that `complex.fin`
+and `letssee.fin` are no longer on it. **Nothing regressed:** no sample moved to a worse bucket.
+
 ### Movement since `43b3324`
 
 `43b3324` measured 14 / 15 / 21 of 50 with a suite of 1344. The five commits between it and
@@ -660,7 +787,7 @@ write, and writes the file only at the very end — so a failed assertion change
 
 The 17 samples that reach codegen and are blocked by exactly one refusal each, measured at
 `91312b8`. This list **is** the work queue for the backend, but **read §4's re-measurements
-first**: it is eleven samples at `5d70a6e`, and six of them report something other than what
+first**: it is **nine** samples at `HEAD`, and six of them report something other than what
 the block below says. The numbered items keep their old titles for continuity; the corrections are
 in their text.
 
@@ -777,9 +904,24 @@ Recommended order — cheapest first, and each one unblocks the next:
    `codegen: a call with explicit generic arguments is not lowered yet` at `:11`,
    `let a <auto> = HashMap::<string, Data>();` — item 6's neighbourhood, with the imported-struct
    decision behind it.
-6. **`::`-call type-argument inference** — `letssee.fin`. The refusal already names the template
-   correctly; the missing piece is inferring `T` from the arguments, the same inference a free
-   generic call needs and does not have.
+6. ~~**`::`-call type-argument inference**~~ — **done at `HEAD` (2026-08-31), and `letssee.fin` is
+   OBJECT_CLEAN: the corpus is 22 / 9 / 20.** See §4, "The `::` call's type arguments".
+   **This item's premise was wrong about two of its three sites.** It said the missing piece is
+   inferring `T` from the arguments; `letssee.fin:73` does infer from an argument (`&Self`), but
+   `:59` and `:77` take `T` from the **annotation** on the left, which codegen cannot see. So the
+   answer is not argument inference in the backend: the analyzer records the instantiation it
+   already computed (`recordResolvedTarget` → `StaticMethodCall::resolved_target`) and the backend
+   maps that node instead of the bare template. A type **parameter** is recorded as its own name, so
+   one node inside a template body still resolves per instantiation; a parameter that is not in
+   scope at the call is compared by **identity** and refuses rather than borrowing the caller's.
+   **The three refusals next to it are still standing and are not this item's**: a `::` turbofish
+   after the method name (`Box::make::<int>(9)`), a generic **constructor** call with a turbofish
+   (`deeptest4.fin:11`, `HashMap::<string, Data>()`), and the same with inference (`Box(7)`). All
+   three are the analyzer binding nothing — `StaticMethodCall::generic_args` is not read by this
+   inference — and the second is the only one a sample's first refusal counts.
+   **`letssee.fin`'s printed numbers are wrong for a reason in the sample**: `@define sqrt(f: float)`
+   against libm's `double sqrt(double)`. §4 has the two probes that isolate it; it is a ruling
+   (§8), not a lowering.
 7. **Variable types:** `[int]` (`arrays_enums.fin`) — **blocked on an owner ruling for the
    representation of a dynamic `[T]`**; `prototype<int, float>` (`type_annotations.fin`).
 8. Then, in any order: the address-of-a-value-with-no-home ruling (`variables.fin`); the
@@ -839,7 +981,13 @@ flags; `namespace_path` read by nobody; **constructor overloads are not resolved
 (`KnownDefect_Codegen.ConstructorOverloadsAreRefusedRatherThanResolved`);
 `ImplementsBlock::is_overwriter` read by nobody; a generic free function's
 turbofish binds nothing (worked around in the backend); a member assignment is never
-mutability-checked.
+mutability-checked; **a `StructInstantiation` does not infer its generic arguments from the
+annotation** — `let p <Pair<int>> = Pair{one: 11};` is `Type mismatch: expected 'Pair<int>', got
+'Pair<A>'` (measured 2026-08-31 while probing item 6), so the turbofish is mandatory in a struct
+literal even where a `::` call on the same type now infers; a **method call chained onto a call's
+result** refuses in the backend, `the receiver of a call to the method '…' on a value with no
+address` for `outer.get().get()`, which is the temporary-with-no-address ruling (§8) and not a
+generics gap.
 
 **Unbooked parse gaps** (need `KnownDefect_*` tests written): hex literals; `fn(m: int) -> int`;
 `std::Error` in type position; `Box<int> { v: 1 }`; `{ 1: S{v:1} }`; `{}` as an empty prototype
@@ -1193,6 +1341,22 @@ where marked:
   `printf` and `format!`. Note `src/semantics/Scope.hpp:32,46` keeps macros in a separate
   namespace from symbols, so `#[global]` must span both; if it cannot sensibly, that is a
   finding to report rather than force.
+
+- **Does an `@define` have to match the C declaration it names?** — **new 2026-08-31, and it now
+  has a witness that runs.** `letssee.fin:4-6` declares `sin`, `cos` and `sqrt` as
+  `(f: float) <float>`; libm's are `double(double)`. Since `HEAD` that sample lowers, links against
+  `-lm` and **prints wrong numbers** — `Length of a: -76854900708868096.000000`, and
+  `Vec2::normalize` then silently does nothing because its `if (len > cast<float>(0))` guard reads
+  that garbage. Isolated with two probes: the `float` spelling reproduces the value exactly, and
+  `@define sqrt(f: double) <double>` prints `5.000000`. So it is the prototype, not the lowering.
+  Three ways out and they are not equivalent: **(a)** promote `float` to `double` at an extern
+  boundary the way C's default argument promotions do — but the corpus has no implicit widening
+  anywhere (§7) and this would be the first; **(b)** rule that an `@define`'s types are the C
+  types and a mismatch is the author's error, which makes this sample's own lines the bug and ADR
+  0008 then says the corpus is right and the compiler must not silently "fix" it; **(c)** leave it,
+  and accept that a sample in the corpus produces wrong output while exiting 0. **The corpus is the
+  specification, so nobody may edit those three lines to settle it.** Blocking nothing today: the
+  sample is OBJECT_CLEAN either way, and this is about what it *prints*.
 
 ### A warning about this section itself
 

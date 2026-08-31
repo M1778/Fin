@@ -5857,35 +5857,43 @@ private:
                                           "arguments", node.method_name));
             return;
         }
+        // The target with its type arguments, which for `Vec2::from_angle(0.7854)`
+        // (letssee.fin:59) is not the target the source wrote: the analyzer inferred
+        // `Vec2<float>` and recorded it, because the annotation on the left of that line
+        // is what says which Vec2 it is and an annotation is not a thing this pass has.
+        // Written where a `::` call on a non-generic struct, on `Self`, or on a template
+        // that already spells its arguments (`Box::<int>::zero()`) leaves it null, so
+        // those go through the same map() of the same node they always did.
+        const TypeNode* target_type = node.resolved_target ? node.resolved_target.get()
+                                                           : node.target_type.get();
         // Through the mapper, so `Box::<int>::zero()` instantiates `Box<int>` on the way
         // -- including its methods, which is what puts `Box<int>.zero` in functions_ for
         // the lookup below to find. A bare `Box` written inside `Box<T>`'s own method
         // reaches its own instantiation through the same call, by the binding.
-        auto target = types_.map(node.target_type.get());
+        auto target = types_.map(target_type);
         if (!target) {
             if (failed_) return;
-            // A template written with no arguments -- `Vec2::make(1, 2)` on a
-            // `struct Vec2<T>` (letssee.fin:26). The mapper cannot map it because there
-            // is nothing to lay out until T is known, and inferring T from the arguments
-            // is the same inference a free call needs and does not have. Named
-            // specifically because "of type 'Vec2'" on its own reads as an unknown type
-            // rather than as a template missing its arguments.
-            if (node.target_type && templates_.count(node.target_type->name) &&
-                node.target_type->generics.empty()) {
+            // A template with no arguments and nothing that resolved them -- `Vec2::make(
+            // 1, 2)` on a `struct Vec2<T>` where neither an argument nor an annotation
+            // says what T is (letssee.fin:26). The mapper cannot map it because there is
+            // nothing to lay out until T is known. Named specifically because "of type
+            // 'Vec2'" on its own reads as an unknown type rather than as a template
+            // missing its arguments.
+            if (target_type && templates_.count(target_type->name) &&
+                target_type->generics.empty()) {
                 unsupported(node, fmt::format("a '::' call to '{}' on the generic struct "
                                               "'{}' with no type arguments",
-                                              node.method_name,
-                                              node.target_type->name));
+                                              node.method_name, target_type->name));
                 return;
             }
-            unsupportedType(node, node.target_type.get(), "a '::' call on a target");
+            unsupportedType(node, target_type, "a '::' call on a target");
             return;
         }
         if (!target->isStruct() || !target->structInfo) {
             // An enum, or a scalar. `Colour::Red` is a member access and not this, and
             // a `::` call on anything but a struct is a shape the corpus does not have.
             unsupported(node, fmt::format("a '::' call to '{}' on type '{}'",
-                                          node.method_name, typeName(node.target_type.get())));
+                                          node.method_name, typeName(target_type)));
             return;
         }
         const StructInfo& owner = *target->structInfo;

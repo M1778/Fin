@@ -859,6 +859,148 @@ std::vector<TypePtr> orderedGenericArgs(const std::shared_ptr<StructType>& st, c
     return out;
 }
 
+// Is every generic parameter this type mentions one that will still be standing at the
+// emission that reads it?
+//
+// A parameter spelled back out as its own name (spellType, below) is sound exactly where
+// the substitution active when the backend maps that node binds *that* parameter: a
+// parameter of a template body the call is written inside, and nothing else. So the
+// question asked here is whether the name resolves, from where the call is, to this very
+// GenericType. `resolveType` walks out through the scopes `declareGenericParams` wrote an
+// enclosing template's parameters into; an argument the analyzer failed to infer is the
+// callee's own parameter, which no scope out here declared.
+//
+// Identity and not the name, because the two come apart:
+//
+//     struct Box<T> { static fun zero() <&Self> { return new Self{}; } }
+//     fun wrap<T>(x: T) <noret> { Box::zero(); }
+//
+// gives `Box::zero()` nothing to infer Box's `T` from, and `wrap`'s `T` is a different
+// parameter that happens to share its spelling. Compared by name this would record
+// `Box<T>`, the mapper would bind it to whatever `wrap` was instantiated at, and the call
+// would lower at a type nothing in the program asked for. Compared by identity it records
+// nothing and the call is refused exactly as it was before this unit.
+//
+// Walks the shapes spellType descends into and no others: what it does not spell it
+// refuses, so a parameter buried in one of those cannot reach a TypeNode from here.
+bool everyGenericParamResolvesHere(const TypePtr& t, Scope* scope) {
+    if (!t) return true;
+    if (auto* gen = t->as<GenericType>())
+        return scope && scope->resolveType(gen->name).get() == static_cast<Type*>(gen);
+    if (auto* ptr = t->as<PointerType>())
+        return everyGenericParamResolvesHere(ptr->pointee, scope);
+    if (auto* arr = t->as<ArrayType>())
+        return everyGenericParamResolvesHere(arr->element_type, scope);
+    if (auto* nullable = t->as<NullableType>())
+        return everyGenericParamResolvesHere(nullable->inner, scope);
+    if (auto* st = t->as<StructType>()) {
+        for (const auto& arg : st->generic_args)
+            if (!everyGenericParamResolvesHere(arg, scope)) return false;
+    }
+    return true;
+}
+
+// A resolved type, spelled as the type node a program could have written for it.
+//
+// The bridge a `::` call on a generic struct needs (HANDOFF section 6, item 6). The
+// backend maps type *nodes*: `Vec2<float>` is a name plus an argument list, and an
+// instantiation is keyed on what those arguments map to -- so an argument the analyzer
+// inferred has to be handed over as a node, because TypeMapper::map is the only door
+// into a representation and a node is all it takes. Teaching the backend to read a
+// semantic Type instead would be a second type system inside the pass that has one.
+//
+// What makes recording an answer on an AST node sound is that the answer is a *node*.
+// Codegen does not clone a template's body: it emits the one AST under a substitution,
+// once per instantiation (Emitter::instantiateGeneric, Emitter::instantiateGenericMethod),
+// while the analyzer walks that body once with the parameters still standing for
+// themselves. A concrete type stamped on a node inside a template would therefore be right
+// for at most one of those emissions. A type *parameter* stamped there is right for all of
+// them, because the mapper resolves a bare parameter name through whichever substitution is
+// active (TypeMapper::boundBinding), and keys the instantiation on what it was bound to
+// (Emitter::displayName) -- which is exactly what it already does for a `Box<T>` written by
+// hand inside a template's body. So `T` is spelled as `T`, and a recorded node is
+// indistinguishable from a written one.
+//
+// A parameter that is *not* bound where the node is emitted maps to nothing and refuses at
+// the target, which is the failure this cannot produce a wrong answer for: the mapper has
+// no way to turn an unbound name into a layout.
+//
+// A name with no representation -- `auto`, a `$` meta-type, a dynamic `[T]` -- is spelled
+// and refuses at the mapper, which is where the truthful message for it lives. That is
+// the difference between the two ways of returning nothing here: null means "this
+// analyzer could not say what the type is", and a node the mapper rejects means "the type
+// is this, and the backend does not lower it yet".
+//
+// No location is set. The caller sets one, because a node with no location makes any
+// diagnostic about it print at 1:1.
+std::unique_ptr<TypeNode> spellType(const TypePtr& t) {
+    if (!t) return nullptr;
+    if (auto* prim = t->as<PrimitiveType>()) {
+        // The names the layout table already answers to (`int`, `float`, `string`), so
+        // the round trip goes through scalarByName rather than through a second table
+        // written here that would have to be kept in step with it.
+        return std::make_unique<TypeNode>(prim->name);
+    }
+    if (auto* ptr = t->as<PointerType>()) {
+        auto pointee = spellType(ptr->pointee);
+        if (!pointee) return nullptr;
+        return std::make_unique<PointerTypeNode>(std::move(pointee));
+    }
+    if (auto* arr = t->as<ArrayType>()) {
+        auto element = spellType(arr->element_type);
+        if (!element) return nullptr;
+        // The extent as the literal the source would have written, because a Literal is
+        // what the mapper reads it back through (readConstant). A dynamic `[T]` has no
+        // size node, exactly as a written one has none, and refuses at the mapper for
+        // want of a representation -- which is item 7's question, not this one's.
+        std::unique_ptr<Expression> size;
+        if (arr->extent) {
+            size = std::make_unique<Literal>(std::to_string(*arr->extent),
+                                             ASTTokenKind::INTEGER);
+        }
+        return std::make_unique<ArrayTypeNode>(std::move(element), std::move(size));
+    }
+    if (auto* nullable = t->as<NullableType>()) {
+        // `?` is a flag on the node the parser sets, so a nullable spells as its inner
+        // type carrying the flag. The mapper refuses every nullable today; spelling it
+        // anyway is what makes that the refusal a reader gets, instead of a claim that
+        // the type arguments were never worked out.
+        auto inner = spellType(nullable->inner);
+        if (!inner) return nullptr;
+        inner->is_nullable = true;
+        return inner;
+    }
+    if (auto* gen = t->as<GenericType>()) {
+        // The parameter's own name, for the reason above. The name is the one the source
+        // wrote -- both the analyzer's binding and the backend's come from the same
+        // written `<T>` -- so the two passes are reading one spelling and not two that
+        // have to be kept in step. The constraint is dropped: `T: Castable` is a rule
+        // about what may be bound to T and says nothing about the representation, which
+        // is the whole of what a type node is asked for here.
+        return std::make_unique<TypeNode>(gen->name);
+    }
+    if (auto* st = t->as<StructType>()) {
+        // A struct, an enum or an interface -- all three are StructType, and all three
+        // are spelled by name and arguments. Which of them the backend can lay out is
+        // the backend's answer to give.
+        auto node = std::make_unique<TypeNode>(st->name);
+        for (const auto& arg : st->generic_args) {
+            auto spelled = spellType(arg);
+            if (!spelled) return nullptr;
+            node->generics.push_back(std::move(spelled));
+        }
+        return node;
+    }
+    // A SelfType, a function type, a prototype, `any`, the error sentinel, the type of
+    // `null`. Each is a type whose written spelling this function does not build, and a
+    // node built wrong is worse than no node: it would replace a refusal that names the
+    // template with one that names a type the program never wrote. `Self` is the near
+    // miss -- the mapper does bind the name -- and it stays out because a `Self` reaching
+    // here is a `Box<Self>`, which no sample writes and which would be recorded relative
+    // to whichever struct's method the call sits in rather than to the one it names.
+    return nullptr;
+}
+
 } // namespace
 
 // Arity only, so that the generic-inference path can report it before it walks the
@@ -987,7 +1129,8 @@ std::shared_ptr<Type> SemanticAnalyzer::checkGenericCall(ASTNode& node, const ch
                                                         FunctionType& sig,
                                                         std::vector<std::unique_ptr<Expression>>& args,
                                                         const std::shared_ptr<StructType>& owner,
-                                                        TypeMap seed) {
+                                                        TypeMap seed,
+                                                        std::shared_ptr<Type>* ownerInstanceOut) {
     TypeMap mapping = std::move(seed);
     if (auto hint = hintFor(node)) unifyGeneric(sig.return_type, hint, mapping);
 
@@ -1006,6 +1149,12 @@ std::shared_ptr<Type> SemanticAnalyzer::checkGenericCall(ASTNode& node, const ch
     if (owner && mentionsGenericParam(owner)) {
         instantiatedOwner = owner->instantiate(orderedGenericArgs(owner, mapping));
     }
+    // Reported before the substitution below, so that the one early return it has -- a
+    // signature that did not come back a FunctionType -- still hands the instantiation
+    // over. What the caller does with it is a separate question from whether the
+    // arguments checked out, and a caller that asked for it gets the same answer either
+    // way.
+    if (ownerInstanceOut) *ownerInstanceOut = instantiatedOwner;
     auto isig = std::dynamic_pointer_cast<FunctionType>(sig.substitute(mapping, instantiatedOwner));
     if (!isig) return sig.return_type;
 
@@ -2087,6 +2236,41 @@ void SemanticAnalyzer::visit(TernaryOp& node) {
     }
 }
 
+// The rewrite half of a `::` call on a generic struct (HANDOFF section 6, item 6).
+//
+// `Vec2::from_angle(0.7854)` (tests/samples/letssee.fin:59) is checked above against the
+// template's signature with `T` inferred, and the instantiation that inference produced
+// is recorded here for the backend to map. Nothing about the call is rewritten -- the
+// target the source wrote stays exactly where it was; what is added is the answer to the
+// one question the backend cannot ask, because `Vec2::zero()` (letssee.fin:77) infers its
+// `T` from the annotation on the left and codegen has no annotations.
+//
+// So the division is the same one the module qualifier's rewrite draws: the front end
+// resolves, the backend lowers what was resolved. Codegen's own inference stays as it is
+// -- it reads argument *values*, which is the only source it has and is enough for a
+// generic free call and for a generic method reached through a receiver.
+void SemanticAnalyzer::recordResolvedTarget(StaticMethodCall& node,
+                                           const std::shared_ptr<Type>& instance) {
+    if (!instance) return;
+    // A parameter of this call's own callee, left standing because nothing bound it --
+    // see everyGenericParamResolvesHere. Recording it would hand the mapper a name that
+    // means something else where it is read.
+    if (!everyGenericParamResolvesHere(instance, currentScope.get())) return;
+    auto spelled = spellType(instance);
+    // A type with no node to spell it -- see spellType. The call keeps the target it was
+    // written with and the backend refuses it exactly as it did before this unit, which is
+    // the whole of the failure mode: never a wrong instantiation, only the old refusal.
+    if (!spelled) return;
+    // The written target's location, so that a refusal about the instantiation points at
+    // the text the reader can go and change. Every part of `Vec2<float>` but the `Vec2`
+    // was inferred and has nowhere else to point.
+    spelled->setLoc(node.target_type ? node.target_type->loc : node.loc);
+    debugLog(fg(fmt::color::blue), "      [Generic] '{}::{}' resolved its target to '{}'\n",
+             node.target_type ? node.target_type->name : std::string("?"),
+             node.method_name, instance->toString());
+    node.resolved_target = std::move(spelled);
+}
+
 void SemanticAnalyzer::visit(StaticMethodCall& node) {
     // 1. Resolve Target Type (e.g. Vec2<float>)
     auto type = resolveTypeFromAST(node.target_type.get());
@@ -2185,8 +2369,10 @@ void SemanticAnalyzer::visit(StaticMethodCall& node) {
         // argument that mentions T at all, and the sample's own comment on 59 calls it
         // "inference on static call".
         if (mentionsGenericParam(structType)) {
+            std::shared_ptr<Type> ownerInstance;
             lastExprType = checkGenericCall(node, "Static method", node.method_name, *sig,
-                                            node.args, structType);
+                                            node.args, structType, {}, &ownerInstance);
+            recordResolvedTarget(node, ownerInstance);
             return;
         }
 

@@ -64,6 +64,31 @@ public:
     std::vector<std::unique_ptr<Expression>> args;
     std::vector<std::unique_ptr<TypeNode>> generic_args; 
 
+    // The target with its type arguments filled in: `Vec2<float>` for the
+    // `Vec2::from_angle(0.7854)` of tests/samples/letssee.fin:59, whose target as
+    // written is the bare template (HANDOFF section 6, item 6).
+    //
+    // Set by SemanticAnalyzer::recordResolvedTarget from the inference the analyzer
+    // already does, and only when that inference produced a type the analyzer can spell
+    // back out as a node. Concrete throughout is the ordinary case; a type *parameter* is
+    // spelled as its own name and is equally sound, because this node is read once per
+    // instantiation of whatever body encloses it and the mapper resolves a bare parameter
+    // through the substitution active at that emission -- exactly as it does for a
+    // hand-written `Box<T>`. The `spellType` of Analyzer_Expr.cpp is where both that rule
+    // and its exceptions are written down.
+    //
+    // Null everywhere else: where the arguments and the annotation between them left a
+    // parameter unbound, and where the type has no spelling (`auto`, a meta-type, a
+    // function type). So the backend that reads this either gets an answer it can map or
+    // gets nothing and refuses as it did before.
+    //
+    // Beside `target_type` rather than written into it. `target_type` is what the source
+    // says and is the node a diagnostic about the target points at; an inferred argument
+    // has no source spelling to point at (`Vec2::zero()` names no type anywhere), so
+    // overwriting the written node would move a caret onto text nobody wrote. The same
+    // record-don't-replace rule MethodCall::resolved_call follows, for the same reason.
+    std::unique_ptr<TypeNode> resolved_target;
+
     StaticMethodCall(std::unique_ptr<TypeNode> target, std::string name, 
                      std::vector<std::unique_ptr<Expression>> a,
                      std::vector<std::unique_ptr<TypeNode>> g = {});

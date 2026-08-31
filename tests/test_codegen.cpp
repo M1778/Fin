@@ -5894,6 +5894,204 @@ BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodOnTwoInstantiationsKeepsThe
     EXPECT_EQ(b.out, "300 x\n") << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// A `::` call whose target is a generic struct written without its type arguments:
+// `Vec2::zero()` and `Vec2::from_angle(0.7854)` (tests/samples/letssee.fin:77, :59).
+//
+// Three of the corpus's `::` calls are spelled this way and all three were refused,
+// because the target codegen has to map is the bare template and the answer to "which
+// instantiation" is not in the call. It is in the annotation on the left of the line, or
+// in the types of the arguments -- and the analyzer reads both, so the analyzer is where
+// the question is answered and records it (StaticMethodCall::resolved_target). The
+// backend maps that node instead of the written one when it is there, and maps the
+// written one when it is not, which is what keeps every spelling that already worked on
+// exactly the path it was on.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AStaticCallOnAGenericTargetTakesItsTypeArgumentFromTheAnnotation) {
+    // letssee.fin:77, `let zero <Vec2<float>> = Vec2::zero();`. Nothing in the call names
+    // a type: the annotation is the whole of the evidence, and an annotation is not
+    // something this pass can see -- which is why the front end has to hand it over.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "pub:\n"
+        "    v <T> = 0,\n"
+        "    static fun zero() <&Self> { return new Self{}; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let z <&Box<int>> = Box::zero();\n"
+        "    printf(\"%d\\n\", z.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStaticCallOnAGenericTargetInfersItsTypeArgumentFromAnArgument) {
+    // letssee.fin:59's other half: the argument decides. `char` rather than `int` so the
+    // answer is a width the wrong instantiation would get wrong -- 65 read out of an i32
+    // field is still 65, and out of the wrong field is not.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "pub:\n"
+        "    v <T> = 0,\n"
+        "    static fun of(x: T) <&Self> { return new Self{v: x}; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <&Box<int>> = Box::of(7);\n"
+        "    let c <&Box<char>> = Box::of('A');\n"
+        "    printf(\"%d %c\\n\", a.v, c.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 A\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStaticCallOnAGenericTargetInfersItsTypeArgumentFromASelfArgument) {
+    // letssee.fin:73, `Vec2::normalize(scaled)` -- a static method whose parameter is
+    // `&Self`, so the receiver arrives as an ordinary argument and the instantiation comes
+    // from it. Asserted by mutation rather than by a return value: `bump` writes through
+    // the pointer, so a call that lowered against some other instantiation would either
+    // refuse or write at the wrong offset, and 42 is what says it did neither.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "pub:\n"
+        "    v <T> = 0,\n"
+        "    static fun of(x: T) <&Self> { return new Self{v: x}; }\n"
+        "    static fun bump(s: &Self) <noret> { s.v = s.v + 1; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <&Box<int>> = Box::of(41);\n"
+        "    Box::bump(a);\n"
+        "    printf(\"%d\\n\", a.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStaticCallOnAGenericTargetInsideATemplateResolvesAtEachInstantiation) {
+    // The claim that makes recording an answer on an AST node sound at all. Codegen does
+    // not clone a template's body -- `Emitter::instantiateGeneric` emits the same nodes
+    // once per instantiation, under a substitution -- so the one `Box::of(x)` here is read
+    // twice, and a concrete type stamped on it would be right for at most one of those
+    // readings. What is recorded instead is `Box<T>`: a parameter spelled as its own name,
+    // which the mapper resolves through whichever substitution is live, exactly as it does
+    // for the hand-written `Box<T>` on the line above it.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "pub:\n"
+        "    v <T> = 0,\n"
+        "    static fun of(x: T) <&Self> { return new Self{v: x}; }\n"
+        "    fun get(self: &Self) <T> { return self.v; }\n"
+        "}\n"
+        "fun wrap<T>(x: T) <T> {\n"
+        "    let b <&Box<T>> = Box::of(x);\n"
+        "    return b.get();\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %c\\n\", wrap(7), wrap('A'));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 A\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStaticCallOnAGenericTargetReachesAMethodOfTheInstantiationItResolved) {
+    // Nested, and from inside a generic struct's own method: `Box<&Box<int>>` built by a
+    // `::` call whose argument is itself a `&Box<int>`, and `Pair<A>::mk` calling
+    // `Box::of(self.one)` where the `A` it resolves to is the struct's parameter rather
+    // than a function's. Two ways for the recorded node to be read under a substitution
+    // that is not the one it was recorded in, and both answers are still the right ones.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "pub:\n"
+        "    v <T> = 0,\n"
+        "    static fun of(x: T) <&Self> { return new Self{v: x}; }\n"
+        "    fun get(self: &Self) <T> { return self.v; }\n"
+        "}\n"
+        "struct Pair<A> {\n"
+        "pub:\n"
+        "    one <A> = 0,\n"
+        "    fun mk(self: &Self) <&Box<A>> { return Box::of(self.one); }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let inner <&Box<int>> = Box::of(3);\n"
+        "    let outer <&Box<&Box<int>>> = Box::of(inner);\n"
+        "    let back <&Box<int>> = outer.get();\n"
+        "    let p <Pair<char>> = Pair::<char>{one: 'B'};\n"
+        "    let made <&Box<char>> = p.mk();\n"
+        "    printf(\"%d %c\\n\", back.get(), made.get());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 B\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStaticCallOnAGenericTargetWithNothingToInferFromIsRefused) {
+    // The negative half of the annotation test: the same call with its result discarded,
+    // so there is no annotation, no argument, and nothing else in the program that says
+    // which `Box` this is. The analyzer records nothing, and the backend gives the answer
+    // it gave every one of these before this unit rather than choosing an instantiation.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "pub:\n"
+        "    v <T> = 0,\n"
+        "    static fun zero() <&Self> { return new Self{}; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    Box::zero();\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("no type arguments"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStaticCallOnAGenericTargetDoesNotBorrowItsCallersTypeParameter) {
+    // `bad<T>` has a `T` and `Box<T>` has a `T`, and they are different parameters that
+    // share a spelling. Nothing here binds Box's, so the recorded node -- if it were
+    // recorded by name -- would be resolved against `bad`'s substitution and `Box::zero()`
+    // would lower as `Box<int>`, an instantiation nobody in this program asked for. The
+    // parameter is compared by identity against what is actually in scope at the call, so
+    // this refuses; `bad` is called, because a template nobody instantiates is never
+    // emitted and would pass this test for the wrong reason.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "pub:\n"
+        "    v <T> = 0,\n"
+        "    static fun zero() <&Self> { return new Self{}; }\n"
+        "}\n"
+        "fun bad<T>(x: T) <noret> {\n"
+        "    Box::zero();\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    bad(7);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("no type arguments"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStaticCallsTurbofishAfterTheMethodIsStillRefused) {
+    // `maybe::unpack::<A>(myvar)` (tests/samples/nullifier.fin:28) -- the fourth `::`
+    // spelling, where the type arguments sit after the method name and bind the *method*'s
+    // parameters rather than the target's. A separate front-end question from this unit's:
+    // `StaticMethodCall::generic_args` is not read by the inference that fills
+    // `resolved_target` in, so the target of this call is still the bare template and the
+    // backend still says so. Booked here so the day it is implemented, this test is what
+    // says the refusal is gone.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "pub:\n"
+        "    v <T> = 0,\n"
+        "    static fun make(x: T) <&Self> { return new Self{v: x}; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <&Box<int>> = Box::make::<int>(9);\n"
+        "    printf(\"%d\\n\", b.v);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("explicit generic arguments"), std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AGenericMethodIsInstantiatedAtItsCall) {
     // `fun set_x<U>(new_x: U)` -- struct_methods.fin:14. Two substitutions at once,
     // the struct's and the call's, which is what makes this its own unit: `T` comes

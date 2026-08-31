@@ -337,6 +337,10 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
         case NodeKind::StaticMethodCall: {
             auto& n = static_cast<StaticMethodCall&>(node);
             emit(out, n.target_type.get());
+            // The target with its type arguments resolved, when the analyzer could
+            // resolve them. A second node beside the written one and not a replacement
+            // for it, so both are emitted -- see StaticMethodCall::resolved_target.
+            emit(out, n.resolved_target.get());
             emitAll(out, n.generic_args);
             emitAll(out, n.args);
             return;

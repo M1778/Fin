@@ -230,6 +230,7 @@ void CloneVisitor::visit(StaticMethodCall& node) {
         cloneVector(node.args),
         cloneVector(node.generic_args)
     );
+    res->resolved_target = clone(node.resolved_target.get());
     res->setLoc(node.loc);
     result = std::move(res);
 }

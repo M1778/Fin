@@ -329,11 +329,24 @@ private:
     // `seed` is the bindings the call already states outright -- a written turbofish --
     // which outrank both of the sources this reads, because unifyGeneric's first binding
     // wins and these are in the map before it runs.
+    // `ownerInstanceOut`, when given, receives what `owner` was instantiated to -- and
+    // null where `owner` was already concrete or nothing bound its parameters. The
+    // return value is the call's *result*, which for `Vec2::normalize(scaled)` is
+    // `noret` and says nothing about which Vec2 was called; recordResolvedTarget needs
+    // the receiver, so this is the one thing about the instantiation the caller cannot
+    // reconstruct from what it already has.
     std::shared_ptr<Type> checkGenericCall(ASTNode& node, const char* kind,
                                            const std::string& name, FunctionType& sig,
                                            std::vector<std::unique_ptr<Expression>>& args,
                                            const std::shared_ptr<StructType>& owner,
-                                           TypeMap seed = {});
+                                           TypeMap seed = {},
+                                           std::shared_ptr<Type>* ownerInstanceOut = nullptr);
+
+    // Records on a `::` call which instantiation of a generic target it resolved to,
+    // for the backend to map instead of the bare template (HANDOFF section 6, item 6).
+    // Records nothing where that instantiation has no node to spell it -- see
+    // StaticMethodCall::resolved_target and spellType.
+    void recordResolvedTarget(StaticMethodCall& node, const std::shared_ptr<Type>& instance);
 
     // The type an expression is about to be checked against, and the exact expression
     // node it belongs to.
