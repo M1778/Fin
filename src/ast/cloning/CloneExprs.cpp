@@ -62,6 +62,11 @@ void CloneVisitor::visit(MethodCall& node) {
         cloneVector(node.args),
         cloneVector(node.generic_args)
     );
+    // The resolved free call travels with the node. A clone taken after semantics
+    // without it would be a qualified call with nothing behind it, which is the one
+    // shape the backend refuses -- and cloning after semantics is what
+    // `retainAmbientPrototype` and the generic instantiations both do.
+    res->resolved_call = clone(node.resolved_call.get());
     res->setLoc(node.loc);
     result = std::move(res);
 }

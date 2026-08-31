@@ -62,7 +62,14 @@ public:
     // is the opposite: copying it would emit a second definition of a symbol the
     // module's own object already publishes, and that is separate compilation rather
     // than a splice.
-    void retainAmbientPrototype(const DefineDeclaration& decl);
+    //
+    // Returns whether `decl` is the declaration the splice will carry. False for a
+    // second `#[global]` declaration of a name already retained under a *different*
+    // symbol: first retention wins, so what the root program will declare is the
+    // first one's `#[llvm_name]`, and a caller that treated the loser as spliced
+    // would be pointing calls at someone else's symbol. True for an identical
+    // redeclaration, which is one fact and not a conflict.
+    bool retainAmbientPrototype(const DefineDeclaration& decl);
     void appendAmbientPrototypes(Program& root) const;
 
 private:
@@ -102,6 +109,9 @@ private:
     // module's AST. First declaration of a name wins, which is the rule
     // `Scope::resolve` and `declareFunction` already follow.
     std::vector<std::unique_ptr<DefineDeclaration>> ambientPrototypes;
+
+    // The symbol an `@define` names -- its valued `#[llvm_name]`, or its Fin name.
+    static std::string symbolOf(const DefineDeclaration& decl);
 
     std::string resolvePath(const std::string& importPath, bool isPackage);
     // Empty on nothing: a file the loader was not allowed to open used to be

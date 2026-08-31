@@ -335,7 +335,7 @@ std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, b
 // `#[global]` disagree about which names a file gets for free. The analyzer's
 // `publishIfGlobal` is the single place that reads the stamp, so it is the single place
 // that calls this.
-void ModuleLoader::retainAmbientPrototype(const DefineDeclaration& decl) {
+bool ModuleLoader::retainAmbientPrototype(const DefineDeclaration& decl) {
     // First declaration of a name wins, which is what `Scope::resolve` gives (the
     // ambient scope keeps the first binding and refuses a second of a different type)
     // and what `declareFunction` gives (`if (functions_.count(name)) return;`). Two
@@ -344,11 +344,30 @@ void ModuleLoader::retainAmbientPrototype(const DefineDeclaration& decl) {
     // the bundled module publishes it -- so this is reached with a duplicate name
     // routinely, and a second prototype for it would be a second copy of a signature
     // the tree already has.
+    //
+    // The answer says which of the two the caller is holding, and the comparison is on
+    // the *symbol* rather than on the signature. `publishIfGlobal` already refuses two
+    // ambient declarations of one name whose types differ; two whose types agree and
+    // whose `#[llvm_name]` does not are accepted there and are not interchangeable
+    // here, because the splice carries exactly one of them and it is the first.
     for (const auto& existing : ambientPrototypes)
-        if (existing->name == decl.name) return;
+        if (existing->name == decl.name) return symbolOf(*existing) == symbolOf(decl);
 
     CloneVisitor cloner;
     ambientPrototypes.push_back(cloner.clone(&decl));
+    return true;
+}
+
+// The symbol an `@define` names: its valued `#[llvm_name]` if it has one, otherwise its
+// Fin name. The same reading `CodeGen_LLVM::symbolNameOf` gives, and deliberately a
+// second copy of three lines rather than a dependency from the loader on the backend --
+// the two agreeing is what makes a retained prototype's symbol knowable from here.
+// Soundness_Modules.AQualifiedCallReachesTheSymbolTheRetainedPrototypeNames
+// (tests/test_stdlib.cpp) is what goes red if they ever disagree.
+std::string ModuleLoader::symbolOf(const DefineDeclaration& decl) {
+    for (const auto& attr : decl.attributes)
+        if (attr && attr->name == "llvm_name" && !attr->is_flag) return attr->value_str;
+    return decl.name;
 }
 
 // Splices a prototype for every ambiently-published extern into the root program.

@@ -5670,6 +5670,21 @@ private:
 
     // `p.get()`, and `q.get()` where q is a `&Point`.
     void visit(MethodCall& node) override {
+        // A call the analyzer resolved to a free call: `stdio.printf("Big")`
+        // (complex.fin:14), whose qualifier is a module. The front end checked it
+        // against the module member's signature and left the call it resolves to on the
+        // node, so what is lowered here is a plain call on a name this program declares
+        // -- which is the only shape this file has ever handled. Nothing below runs, and
+        // in particular `baseAddress` is not asked for the address of a module.
+        //
+        // Delegated rather than re-implemented, so a rewritten call goes through exactly
+        // the argument conversion, vararg promotion and template selection a written one
+        // does; a second copy of visit(FunctionCall&)'s dispatch here would be free to
+        // drift from it.
+        if (node.resolved_call) {
+            node.resolved_call->accept(*this);
+            return;
+        }
         if (!node.generic_args.empty()) {
             // A turbofish on the *method* rather than on the struct. Read by nobody
             // here, because a generic method is not declared at all, so it is refused

@@ -27,6 +27,30 @@ public:
     std::string method_name;
     std::vector<std::unique_ptr<Expression>> args;
     std::vector<std::unique_ptr<TypeNode>> generic_args;
+
+    // The free call this one resolved to, when the qualifier was a module:
+    // `stdio.printf("Big")` (complex.fin:14) resolves to `printf("Big")` and leaves it
+    // here. Null on every other method call, which is all of them until the analyzer's
+    // namespace branch fills it in.
+    //
+    // The qualifier is spent once this is set -- the same sense in which a consumed
+    // `import` is spent (SemanticAnalyzer::dropConsumedImports). `args` and
+    // `generic_args` are *moved* into the call below rather than copied, so every
+    // argument expression has exactly one owner in the tree and no consumer can walk
+    // one twice; `forEachChild` emits this member, so a structural pass sees the
+    // resolved call and not the qualified spelling.
+    //
+    // Why the resolution is recorded on the node rather than replacing it. Replacing
+    // one Expression with another needs the `unique_ptr` slot the parent holds it in,
+    // and the tree has no traversal that yields slots: `forEachChild` yields
+    // references, and the two ways to build one -- a second exhaustive switch beside
+    // `forEachChild`, or a copy of `SubstitutionVisitor`'s 55 overrides -- each
+    // duplicate the tree's shape with nothing to keep the copies in step, which is the
+    // failure ADR 0004 exists to remove. What the rewrite is *for* is that no backend
+    // logic reads a namespace, and this gives that: CodeGen_LLVM's visit(MethodCall&)
+    // delegates here in its first statement.
+    std::unique_ptr<Expression> resolved_call;
+
     MethodCall(std::unique_ptr<Expression> obj, std::string name, 
                std::vector<std::unique_ptr<Expression>> a,
                std::vector<std::unique_ptr<TypeNode>> g = {});

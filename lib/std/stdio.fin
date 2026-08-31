@@ -112,7 +112,12 @@ namespace std {
 
 // The rest of C's I/O that this module needs. None of these is `#[global]`: the marked set
 // is two names and minting a third would be a hole in the module system rather than a
-// convenience. An extern reached through an import does lower, unlike a Fin function.
+// convenience. So none of them is *callable* from a program that imports this module, and
+// the line here used to claim otherwise -- measured 2026-08-31, `io_fflush(null)` behind
+// `import { io_fflush } from stdio;` gives `codegen: a call to 'io_fflush' is not lowered
+// yet`, and `stdio.io_fflush(null)` gives the qualified form of the same refusal. An extern
+// is no better off than a Fin function here. What `#[global]` buys is the prototype splice
+// (ADR 0021), the one mechanism that puts a declaration into the program the backend walks.
 #[llvm_name="dprintf"]
 @define io_dprintf(fd: int, fmt: string, ...) <int>;
 

@@ -327,6 +327,10 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
             emit(out, n.object.get());
             emitAll(out, n.generic_args);
             emitAll(out, n.args);
+            // The free call a module-qualified call resolved to, when there is one. The
+            // arguments moved into it, so `args` above is empty in that case and each
+            // argument is still emitted exactly once -- through the resolved call.
+            emit(out, n.resolved_call.get());
             return;
         }
 

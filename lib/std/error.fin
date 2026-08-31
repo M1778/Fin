@@ -37,10 +37,14 @@
 //     `~Error()`, would run at a scope exit the backend does not implement yet -- so the
 //     buffer is the caller's to free and this header is the only place that says so.
 //   * The two externs are declared `#[llvm_name]`-renamed and not `#[global]`, so they
-//     are this module's own. An extern reached through an import *does* lower, unlike a
-//     Fin function (measured: a `#[global]` extern in a loaded module links and runs),
-//     but `#[global]` is legal only for the marked set of two names (ADR 0021) and
-//     minting a third would be a hole in the module system, not a convenience.
+//     are this module's own -- and that is a stronger restriction than the line here used
+//     to say. Measured 2026-08-31: an extern reached through an import does **not** lower.
+//     `error_strlen(s)` behind `import { error_strlen } from error;` gives `codegen: a call
+//     to 'error_strlen' is not lowered yet`, the same refusal an imported Fin function
+//     gets, and the qualified spelling refuses too. What links and runs is an *ambient*
+//     extern -- `#[global]`, spliced as a prototype into the root program (ADR 0021) --
+//     which is legal only for the marked set of two names, and minting a third would be a
+//     hole in the module system, not a convenience.
 namespace std {
 
 // C's formatter, by two names this module owns. `snprintf` bounds what it writes, which

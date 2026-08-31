@@ -21,6 +21,7 @@ class ModuleLoader; // Forward declaration
 class FunctionType;
 class StructType; // buildOperatorSignature takes the owner, to look a method up in it
 class ArrayType;  // checkIndexInBounds reads its extent
+class NamespaceType; // lowerModuleCall names the qualifier it resolved through
 
 struct AnalysisContext {
     bool inLoop = false;
@@ -98,6 +99,10 @@ public:
     void visit(Identifier& node) override;
     void visit(FunctionCall& node) override;
     void visit(MethodCall& node) override;
+    // Resolves a module-qualified call into a plain call on the name it named, when the
+    // root program the backend walks will declare that name for the same declaration.
+    // See its definition for the gate and for why the qualifier does not reach codegen.
+    void lowerModuleCall(MethodCall& node, const NamespaceType& ns, const Symbol& member);
     void visit(MacroCall& node) override;
     void visit(MacroInvocation& node) override;
     void visit(CastExpression& node) override;

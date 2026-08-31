@@ -925,7 +925,19 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
         // the declaration lives in a module whose AST the backend never sees. Only an
         // `@define` reaches here, which is the shape the splice is limited to -- a
         // symbol and a signature, with nothing to emit.
-        loader->retainAmbientPrototype(node);
+        if (loader->retainAmbientPrototype(node)) {
+            // And the module's own symbol records it, because the fact is needed from
+            // the *other* side: a file that writes `stdio.printf(...)` resolves this
+            // symbol through the module's scope, and whether that call can be rewritten
+            // into a call on the plain name turns on whether the root program will
+            // declare the plain name for this declaration. Nothing else can answer
+            // that -- a Symbol carries a type and not a declaration -- so it is
+            // answered here, where the retention happened.
+            //
+            // Re-defined rather than mutated in place: `Scope::define` is the only
+            // writer, and reaching into `symbols` here would be the second one.
+            currentScope->define({node.name, funcType, false, true, /*is_ambient=*/true});
+        }
     }
 }
 

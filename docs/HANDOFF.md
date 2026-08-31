@@ -115,6 +115,7 @@ was broken.
 | — since `4788753`, at `80f4f8e` | **1436 / 1436 pass**, 0 skipped | inherited methods; corpus unmoved |
 | — since `4788753`, at `5d70a6e` | **1448 / 1448 pass**, 0 skipped | implements blocks; **corpus 19 → 20** |
 | — since `4788753`, at `2aa0993` | **1465 / 1465 pass**, 0 skipped | the interface reference's missing tests; corpus unmoved |
+| — since `4788753`, at `HEAD` | **1473 / 1473 pass**, 0 skipped | the namespace-qualified call rewrite; **corpus 20 → 21** |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -435,6 +436,125 @@ inherited test cannot tell "found in a parent" from "at the right offset"), and 
 method (a conversion that spilled the struct into a fresh slot would compile, link, run and print
 `0`).
 
+### The namespace-qualified call at `HEAD` (2026-08-31) — item 5 is done
+
+**`complex.fin` lowers to an object, and the corpus is 21 / 10 / 20.** It is the only sample that
+moved; the other 50 kept their bucket line for line. `deeptest4.fin`, which item 5 named as the
+second import sample, **was already past the import** — see the correction at the end.
+
+The queue said the fix is not in codegen and that the analyzer should rewrite the call. That is what
+this is, in four parts:
+
+- **`SemanticAnalyzer::lowerModuleCall`** (`Analyzer_Expr.cpp`, immediately above
+  `visit(MethodCall&)`) builds a `FunctionCall` on the member's own Fin name and leaves it on the
+  node. The argument list and the generic arguments are **moved** out of the `MethodCall`, not
+  copied: two owners of one argument expression would be walked twice by anything structural, and
+  the arguments have already been checked in place.
+- **`MethodCall::resolved_call`** (`src/ast/exprs/FunctionCall.hpp`) is the slot it goes in. The
+  qualifier is *spent* there, in the same sense `dropConsumedImports` spends an import.
+  Recorded on the node rather than replacing the node in its parent's `unique_ptr` slot, because the
+  tree has no traversal that yields slots — `forEachChild` yields `ASTNode&`, and the two ways to
+  build one (a second exhaustive switch beside `forEachChild`, or a second copy of
+  `SubstitutionVisitor`'s 55 overrides) each duplicate the tree's shape with nothing to keep the
+  copies in step, which is the failure ADR 0004 exists to remove. `StructuralWalk.cpp`'s
+  `MethodCall` case emits it — and `args` is empty in that case, so every argument is still emitted
+  exactly once, through the resolved call — and `CloneExprs.cpp` clones it, because cloning happens
+  after semantics.
+- **`CodeGen_LLVM::visit(MethodCall&)`'s first statement** delegates to it and returns, ahead of the
+  `generic_args` refusal and ahead of `baseAddress`. Delegated rather than re-implemented, so a
+  rewritten call goes through exactly the same argument conversion, vararg promotion and template
+  selection a written one does.
+- **The gate is `Symbol::is_ambient`**, set in `Analyzer_Decl.cpp`'s `visit(DefineDeclaration&)`
+  where the prototype was retained.
+
+**Why that gate and not "the member resolved".** Exactly one mechanism puts a module's declaration
+into the root program the backend walks: ADR 0021's `#[global]`, retained by
+`ModuleLoader::retainAmbientPrototype` and spliced by `appendAmbientPrototypes`. Rewrite anything
+else and the plain name the backend is handed is bound to nothing, so a codegen refusal is traded
+for a **link failure** — which is the worse failure, because it arrives after a compile that
+exited 0.
+
+**The mark is not the fact, which is why three signatures changed.** `#[global]` is what *asks*;
+the retention is what the backend will actually be given, and the two differ when two modules
+publish one name. That is legal — `publishIfGlobal` refuses a second `#[global]` of a name only when
+the two *types* differ — and retention is first-wins in import order, so the second module's
+declaration is marked and is **not** the one the root program will declare. So
+`retainAmbientPrototype` now returns whether `decl` is the declaration the splice will carry (false
+for a second publication under a different symbol, true for an identical redeclaration), the
+analyzer re-defines the symbol with `is_ambient = true` only when it returns true, and
+`ModuleLoader::symbolOf` reads `#[llvm_name]` the way `CodeGen_LLVM::symbolNameOf` does —
+deliberately a second copy of three lines rather than a dependency from the loader on the backend.
+`Soundness_Modules.AQualifiedCallReachesTheSymbolTheRetainedPrototypeNames` is what goes red if the
+two readings ever drift apart.
+
+**Why the fact lives on `Symbol`.** It is needed from the *other* side: a file that writes
+`stdio.printf(...)` resolves the module's symbol through the module's scope, and whether that call
+can be rewritten turns on whether the root program will declare the plain name for *that*
+declaration. A `Symbol` carries a name, a type and two flags — no declaration pointer — so nothing
+else could answer it, and it is defaulted `false` so the twenty-two aggregate initialisations
+elsewhere mean what they meant.
+
+**The two `printf`s are held apart by ordering, and neither is picked.** `checkCallArguments` runs
+before `lowerModuleCall`, always — a rewrite performed first would hand a bare `printf` to the
+check, which would find the file's own declaration and pass. Measured in one file that declares
+`@define printf(fmt: string, ...) <int>;` and imports the bundle's `<noret>` one:
+`let a <int> = stdio.printf("hi\n")` gives `Type mismatch: expected 'int', got 'void'`, and
+`let a <int> = printf("hi\n")` in that same file is clean. Each spelling keeps its own declaration.
+`complex.fin` writes both (`:14` and `:16`), builds, and prints `Big`.
+
+**Measured, each by compiling and running the program:**
+
+- `complex.fin` itself: `-c` clean, and the built executable prints `Big`.
+- A value through a rewritten call in two expression positions — initialising a local and as an
+  argument to another call: a module publishing `#[llvm_name="abs"] #[global] @define c_abs(v: int)
+  <int>;` gives `5 9` for `am.c_abs(0 - 5)` and `am.c_abs(0 - 9)`. The symbol is what makes those
+  answers evidence: a rewrite that dropped its argument prints something else.
+- `import stdio::std as stdio; stdio.printf("%d\n", 41 + 1);` prints `42`.
+- Arity is still checked through a qualifier: `am.c_abs()` gives `Function 'am.c_abs' expects 1
+  arguments, got 0`, still naming the qualifier the program wrote.
+- The gate holds in **both** directions. An imported extern that is not `#[global]`
+  (`stdio.io_fflush(null)`) and an imported Fin function (`stdio.println("x")`) keep today's
+  refusal, `the receiver of a call to the method '…' on a value with no address`. The
+  discriminating case: a root file that declares `@define io_fflush(handle: &void) <int>;`
+  **itself** and calls `stdio.io_fflush(null)` **still refuses** — so the gate is not "the root
+  program binds this name", it is "binds this name to this declaration".
+- Two modules publishing `twin` under different symbols (`abs`, and `fin_no_such_symbol` so the
+  loser cannot answer plausibly): the first imported rewrites and prints `7`, the other refuses
+  rather than silently reaching `abs`. Swapping the two imports swaps which, which is what says
+  retention is first-wins rather than alphabetical.
+
+**What did not change.** Codegen still holds zero references to `NamespaceType`, and
+`visit(ImportModule&)` still refuses any import that reaches it. The only new backend line is the
+delegation.
+
+**Two gaps stay refused and are booked in §7**, both with `KnownDefect_Modules` tests: an imported
+extern that is not ambient, or any imported Fin function, is not lowered through a dot; and a file
+that redeclares an ambient name under a symbol of its own breaks the qualified spelling and the
+plain one **alike**, both at the link. The second is `#[overwrite]`'s question and must not be fixed
+on the qualified side alone — making `a.twin(…)` link while `twin(…)` in the same file does not
+would be worse than both failing.
+
+Ten source files: `Scope.hpp`, `ModuleLoader.hpp`/`.cpp`, `Analyzer_Decl.cpp`, `Analyzer_Expr.cpp`,
+`SemanticAnalyzer.hpp`, `FunctionCall.hpp`, `StructuralWalk.cpp`, `CloneExprs.cpp`,
+`CodeGen_LLVM.cpp`. Suite **1465 → 1473**: eight tests in `tests/test_stdlib.cpp` under "Lowering a
+call written through a module qualifier" —
+`Soundness_Modules.AModuleCallIsCheckedAgainstTheModulesSignatureAndNotTheFilesOwn`,
+`.AnAmbientMemberCalledThroughAQualifierIsStillCheckedForArity`,
+`.TheModulesPrintfLowersAndRunsThroughAQualifier`, `.AQualifiedCallLowersWhereverAnExpressionGoes`,
+`.AQualifiedCallReachesTheSymbolTheRetainedPrototypeNames`,
+`KnownDefect_Modules.AnImportedExternThatIsNotAmbientIsNotLoweredThroughADot`,
+`.AnImportedFinFunctionIsNotLoweredThroughADot` and
+`.RenamingAnAmbientNameInTheRootFileBreaksBothSpellingsAlike`. The last four are the reason the
+first two are not decoration: each of them passes against a wider gate only by failing at the
+linker instead.
+
+**The correction item 5 was owed.** `deeptest4.fin` does not refuse an import and has not for some
+time: its first refusal is `codegen: a call with explicit generic arguments is not lowered yet` at
+`:11`, `let a <auto> = HashMap::<string, Data>();`. That is item 6's neighbourhood, not item 5's,
+and behind it sits the imported-declaration gap above — `HashMap` is declared in
+`lib/std/hashmap.fin` and nothing puts a module's struct into the root program — so what it refuses
+*after* explicit generic arguments lower is unmeasured.
+
 ### Movement since `43b3324`
 
 `43b3324` measured 14 / 15 / 21 of 50 with a suite of 1344. The five commits between it and
@@ -632,25 +752,31 @@ Recommended order — cheapest first, and each one unblocks the next:
    `Undefined type 'T'`), and an interface satisfied by an **inherited** method is still reported
    unimplemented (`Analyzer_Decl.cpp:537`) even though the backend's table already resolves such a
    provider through the hierarchy. Both are front-end work.
-5. **Imports** — `complex.fin`, `deeptest4.fin`. **Measured 2026-08-28, and the fix is not in
-   codegen.** `complex.fin:14` writes `stdio.printf("Big")` against `import stdio::std as stdio;`
-   on `:3`, and the front end already resolves it correctly —
-   `Soundness_Modules.AModuleFunctionIsCallableThroughADot` passes, and
-   `Analyzer_Expr.cpp:1154`/`:1609` have the `NamespaceType` branch. What fails is codegen,
-   which reports *"the receiver of a call to the method 'printf' on a value with no address"*
-   because `visit(MethodCall&)` goes straight to `baseAddress(object, Kind::Struct)` and
-   `stdio` is a module, not a struct.
-   **Do not teach codegen about namespaces.** It has zero references to `NamespaceType` and
-   `visit(ImportModule&)` refuses any import that reaches it at all — the backend deals in
-   symbols, and that is the design. The analyzer should **rewrite** a namespace-qualified
-   `MethodCall` into a plain `FunctionCall` on the symbol it already resolved, so the qualifier
-   never reaches the backend. The precedent for erasing module machinery in the front end is
-   `dropConsumedImports` (`Analyzer_Core.cpp`), which deletes spent imports for the same reason
-   and explains itself in those terms.
-   One thing to look at before starting: `complex.fin` declares `@define printf(fmt: string,
-   ...) <int>;` on `:5` **and** imports a `stdio` that exports `printf`, and calls the plain one
-   on `:16`. Two `printf`s in one file is the `#[overwrite]` question in miniature, and the
-   rewrite must not silently pick one.
+5. ~~**Imports**~~ — **done at `HEAD` (2026-08-31), and `complex.fin` is OBJECT_CLEAN: the corpus
+   is 21 / 10 / 20.** The queue's own instruction is what was built. The analyzer rewrites a
+   namespace-qualified `MethodCall` into a plain `FunctionCall` on the member's own name
+   (`SemanticAnalyzer::lowerModuleCall`, left on the node in `MethodCall::resolved_call`), and
+   codegen delegates to it in the *first statement* of `visit(MethodCall&)` — so the qualifier never
+   reaches the backend, codegen still holds zero references to `NamespaceType`, and
+   `visit(ImportModule&)` still refuses any import that reaches it.
+   **The rewrite is gated on the member being ambiently published** (`Symbol::is_ambient`, set where
+   `ModuleLoader::retainAmbientPrototype` retained the prototype), because ADR 0021's `#[global]`
+   splice is the one mechanism that puts a module's declaration into the root program the backend
+   walks. A wider gate trades a codegen refusal for a link failure, and a link failure arrives after
+   a compile that exited 0. §4's "The namespace-qualified call" carries the mechanism, why the mark
+   is not the fact when two modules publish one name, and the shapes measured.
+   **The two `printf`s are answered by ordering, not by choosing.** `checkCallArguments` runs before
+   `lowerModuleCall`, so `stdio.printf` is typed by the module's `<noret>` declaration and the plain
+   `printf` by the file's own `<int>` one; `complex.fin` writes both and prints `Big`.
+   **Neither of the two gaps left under this title is a namespace fault**, and both are booked in §7
+   with tests: an imported extern that is not ambient, or any imported Fin function, is still not
+   lowered through a dot (that is separate compilation — item 3's (a)); and a file that redeclares an
+   ambient name under a symbol of its own breaks the qualified spelling and the plain one alike, at
+   the link, which is `#[overwrite]`'s question and must not be fixed on one side.
+   **`deeptest4.fin` was not item 5's, and had not been for some time.** Its first refusal is
+   `codegen: a call with explicit generic arguments is not lowered yet` at `:11`,
+   `let a <auto> = HashMap::<string, Data>();` — item 6's neighbourhood, with the imported-struct
+   decision behind it.
 6. **`::`-call type-argument inference** — `letssee.fin`. The refusal already names the template
    correctly; the missing piece is inferring `T` from the arguments, the same inference a free
    generic call needs and does not have.
@@ -737,6 +863,26 @@ accepted identically, because there is no lifetime analysis anywhere in the pipe
 §8's `#[slaveof]` ruling turns on.
 `KnownDefect_Codegen.AnEscapingInterfaceReferenceIsAcceptedLikeAnyEscapingAddress` holds both halves
 and asserts only that each compiles, so the day escape analysis lands they go red together.
+
+**The module qualifier's two, booked 2026-08-31** (§4, "The namespace-qualified call"): **an
+imported extern that is not `#[global]`, and any imported Fin function, is not lowered through a
+dot.** `stdio.io_fflush(null)` and `stdio.println("x")` both keep `the receiver of a call to the
+method '…' on a value with no address`. Only an ambiently-published declaration reaches the root
+program the backend walks, so there is nothing for a plain call to be a call *to* — the Fin-function
+half is separate compilation (§6 item 3's (a)), and rewriting either would move the refusal onto a
+different name rather than remove it. A root file that declares the same name *itself* still gets the
+refusal, which is what says the gate is "binds this name to **this declaration**" and not "binds this
+name". And **a file that redeclares an ambient name under a symbol of its own breaks the qualified
+spelling and the plain one alike** — both fail the link, because the file's declaration wins in
+`declareFunction` (first wins, and the splice is appended) and after the rewrite both spellings ask
+for its symbol. **Do not repair the qualified side alone:** `a.twin(…)` linking while `twin(…)` in
+the same file does not would be worse than both failing. It is `#[overwrite]`'s question — which of
+two declarations of a name wins, and under whose symbol — and `printf` never shows it because the
+corpus samples that redeclare it write no `#[llvm_name]`, so their symbol and the bundle's are the
+same string. `KnownDefect_Modules.AnImportedExternThatIsNotAmbientIsNotLoweredThroughADot`,
+`.AnImportedFinFunctionIsNotLoweredThroughADot` and
+`.RenamingAnAmbientNameInTheRootFileBreaksBothSpellingsAlike` hold all three; the last holds both
+spellings, so the day `#[overwrite]` is ruled on they invert together.
 
 **`conanfile.py`'s LLVM block still says 18 — booked by ruling, 2026-08-27.** The docstring
 (lines 12–14) and the `requirements()` comment (lines 48–67) say "a single LLVM major -- 18", quote

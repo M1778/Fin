@@ -1146,6 +1146,67 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
     lastExprType = funcType->return_type;
 }
 
+// The rewrite half of a module-qualified call (HANDOFF section 6, item 5).
+//
+// `stdio.printf("Big")` (complex.fin:14) is checked above as a call to the module member
+// the qualifier named, and then resolved here into `printf("Big")` -- a plain
+// FunctionCall on the same Fin name, carrying the same arguments -- which the node keeps
+// in `resolved_call` for the backend to lower instead of the qualified spelling.
+//
+// The backend is not taught what a namespace is, and that is the design rather than an
+// omission: CodeGen_LLVM has no reference to NamespaceType, `visit(ImportModule&)`
+// refuses any import that reaches it at all, and `visit(MethodCall&)` asks
+// `baseAddress` for the receiver's address -- which a module has none of, so the call
+// refused with `the receiver of a call to the method 'printf' on a value with no
+// address`. The backend deals in symbols; the qualifier is a front-end fact and is
+// spent in the front end.
+//
+// WHAT IS AND IS NOT REWRITTEN, AND WHY THE GATE IS THIS ONE
+//
+// The rewrite is legal only when the plain name, resolved in the root program the
+// backend walks, is bound to the declaration this qualifier named. Exactly one
+// mechanism puts a module's declaration into the root program: `#[global]` (ADR 0021),
+// whose prototype the driver splices in between the front end and the backend. So the
+// gate is `Symbol::is_ambient` -- set where the prototype was retained, and set only on
+// the declaration the splice will carry.
+//
+// Not a wider gate, and measured rather than assumed. An imported extern that is *not*
+// `#[global]` (`stdio.io_fflush`) and an imported Fin function (`stdio.println`) keep
+// today's refusal, `the receiver of a call to the method '<name>' on a value with no
+// address`, because neither declaration is in the root program the backend walks -- and
+// the *plain* spelling of either, behind `import { io_fflush } from stdio;`, refuses
+// too, with `codegen: a call to 'io_fflush' is not lowered yet`. So a rewrite has
+// nothing better to resolve to: it would trade one refusal for the same refusal under
+// a different name, or -- when the root file declares that name itself -- for a *link*
+// failure after a compile that exited 0.
+// KnownDefect_Modules.AnImportedExternThatIsNotAmbientIsNotLoweredThroughADot books
+// both halves.
+//
+// THE TWO printfs. complex.fin declares `@define printf(fmt: string, ...) <int>;` on :5
+// and imports a `stdio` whose `printf` is `<noret>`, and the rewrite must not silently
+// pick one. It does not, and the ordering is the whole answer: the call is checked
+// against the *module member's* signature above, before this runs, so
+// `let x <int> = stdio.printf("hi");` is a type error (void) while
+// `let x <int> = printf("hi");` in the same file is not. What the backend then sees is
+// one `printf` either way -- `functions_` is keyed by Fin name and `declareFunction`
+// keeps the first declaration -- and that conflation is `#[overwrite]`'s question, not
+// this one: it is already the answer a file with no import gets, and it is the same C
+// function under both signatures. Soundness_Modules.AModuleCallIsCheckedAgainstTheModulesSignatureAndNotTheFilesOwn
+// is what holds the front end to it.
+void SemanticAnalyzer::lowerModuleCall(MethodCall& node, const NamespaceType& ns,
+                                       const Symbol& member) {
+    if (!member.is_ambient) return;
+
+    // Moved, not copied. Two owners of one argument expression would be walked twice by
+    // anything structural, and the arguments have already been checked in place.
+    auto call = std::make_unique<FunctionCall>(node.method_name, std::move(node.args));
+    call->generic_args = std::move(node.generic_args);
+    call->setLoc(node.loc);
+    node.resolved_call = std::move(call);
+    debugLog(fg(fmt::color::blue), "      [Module] '{}.{}' resolved to a call on '{}'\n",
+             ns.name, node.method_name, node.method_name);
+}
+
 void SemanticAnalyzer::visit(MethodCall& node) {
     node.object->accept(*this);
     auto objType = lastExprType;
@@ -1186,6 +1247,7 @@ void SemanticAnalyzer::visit(MethodCall& node) {
         }
         checkCallArguments(node, "Function", ns->name + "." + node.method_name, *funcType, node.args);
         lastExprType = funcType->return_type;
+        lowerModuleCall(node, *ns, *sym);
         return;
     }
 

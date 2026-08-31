@@ -65,10 +65,19 @@ FincRun compileBundled(const std::string& code) {
 // what these tests are about is the *bundle*: `build` there passes no environment and
 // declares `printf` in the source, and the fact under test here is that the declaration
 // arrives from lib/std/stdio.fin and the source declares nothing.
-std::string buildBundledAndRun(const std::string& code) {
+//
+// `extra` goes on the command line between the source and `-o`, for the tests that need
+// a second file: `-I <dir>` *adds* to the search paths where `--fin-libs` replaces them,
+// and replacing them would take the bundle -- and with it the ambient `printf` those
+// programs print through -- out of the run.
+std::string buildAndRun(const std::string& code, const std::vector<std::string>& extra) {
     Src src(code);
     const fs::path exe = uniqueTempPath("fin_stdlib_exe");
-    const FincRun c = runFinc({src.str(), "-o", exe.string()}, {{"FIN_LIBS", ""}});
+    std::vector<std::string> args{src.str()};
+    args.insert(args.end(), extra.begin(), extra.end());
+    args.push_back("-o");
+    args.push_back(exe.string());
+    const FincRun c = runFinc(args, {{"FIN_LIBS", ""}});
     if (c.exitCode != 0 || !fs::exists(exe)) {
         return "compile failed: " + stripAnsi(c.err);
     }
@@ -88,8 +97,41 @@ std::string buildBundledAndRun(const std::string& code) {
     return out;
 }
 
-// A throwaway directory of .fin modules, for the one test here that needs a second
-// file the bundle does not provide. test_module_loader.cpp has the same class against
+std::string buildBundledAndRun(const std::string& code) { return buildAndRun(code, {}); }
+
+// The same, with a directory of extra modules on the search path.
+std::string buildWithModuleAndRun(const std::string& code, const std::string& includeDir) {
+    return buildAndRun(code, {"-I", includeDir});
+}
+
+// Compiles a program against the bundle and returns its ANSI-stripped diagnostics.
+std::string bundledErr(const std::string& code) {
+    return stripAnsi(compileBundled(code).err);
+}
+
+// finc's own diagnostics for a *build* rather than a check. The `-o` is the whole
+// difference: `finc file.fin` stops after the front end, so a codegen refusal and a link
+// failure are both absent from its output, and a test that expects either one cannot use
+// `compileBundled`.
+std::string buildErr(const std::string& code, const std::vector<std::string>& extra = {}) {
+    Src src(code);
+    const fs::path exe = uniqueTempPath("fin_stdlib_exe");
+    std::vector<std::string> args{src.str()};
+    args.insert(args.end(), extra.begin(), extra.end());
+    args.push_back("-o");
+    args.push_back(exe.string());
+    const FincRun c = runFinc(args, {{"FIN_LIBS", ""}});
+    std::error_code ec;
+    fs::remove(exe, ec);
+    return stripAnsi(c.err);
+}
+
+std::string buildErrWithModule(const std::string& code, const std::string& includeDir) {
+    return buildErr(code, {"-I", includeDir});
+}
+
+// A throwaway directory of .fin modules, for the tests here that need a second file
+// the bundle does not provide. test_module_loader.cpp has the same class against
 // the loader's C++ API; this copy drives the real binary and the two share nothing
 // else.
 class TempModuleDir {
@@ -318,12 +360,286 @@ TEST(KnownDefect_Modules, AModuleStructIsNotConstructibleThroughADot) {
 }
 
 // ---------------------------------------------------------------------------
+// Lowering a call written through a module qualifier (HANDOFF section 6, item 5).
+//
+// The block above is the front end's half: `stdio.printf("Big")` resolves, and is
+// checked. complex.fin still did not *build* -- codegen's `visit(MethodCall&)` asks
+// `baseAddress` for the receiver's address, a module has none, and the refusal was `the
+// receiver of a call to the method 'printf' on a value with no address is not lowered
+// yet`. The backend holds no reference to `NamespaceType` and that is the design, so the
+// qualifier is spent in the front end instead: `SemanticAnalyzer::lowerModuleCall`
+// resolves the call to a plain `printf("Big")` and leaves it on the node
+// (`MethodCall::resolved_call`), and the backend's first statement lowers that.
+//
+// What these have to say beyond "it compiles", because a rewrite that dropped the
+// arguments or reached some other symbol of the same shape compiles just as cleanly:
+//
+//   * The value arrives, in more than one expression position.
+//   * Only a name the root program will declare *for the same declaration* is rewritten.
+//     One mechanism puts a module's declaration into the root program -- `#[global]` and
+//     its prototype splice (ADR 0021) -- so the gate is `Symbol::is_ambient`, set where
+//     the prototype was retained. A wider gate would trade a refusal for a link failure,
+//     which is the worse failure because it arrives after a successful compile.
+//   * The module's signature still answers for the call, not the file's own. That is the
+//     two-`printf` hazard complex.fin is built out of, and the ordering is the whole
+//     answer: `checkCallArguments` runs before `lowerModuleCall`, never after.
+
+namespace {
+
+// A module publishing one fixed-arity ambient extern bound to C's `abs`, so a rewritten
+// call has a value to be wrong about -- `printf` cannot say this, because a vararg
+// signature is exempt from the arity check and its result is `<noret>`. `#[global]` is
+// legal only inside `namespace std` (ADR 0021), and the export is what makes the file
+// worth importing.
+const char* const kAbsModule =
+    "namespace std {\n"
+    "#[llvm_name=\"abs\"]\n"
+    "#[global]\n"
+    "@define c_abs(v: int) <int>;\n"
+    "}\n"
+    "pub fun anchor() <noret> {}\n";
+
+// Two modules publishing one ambient name, same signature, different symbols. Both are
+// accepted -- `publishIfGlobal` refuses a second `#[global]` of a name only when the two
+// *types* differ -- and one prototype is spliced, so one of the two qualifiers is
+// rewritable and it is not the one the writer happens to spell.
+const char* const kTwinAsAbs =
+    "namespace std {\n"
+    "#[llvm_name=\"abs\"]\n"
+    "#[global]\n"
+    "@define twin(v: int) <int>;\n"
+    "}\n"
+    "pub fun a_anchor() <noret> {}\n";
+
+// The loser names a symbol nothing defines, deliberately: an assertion that the losing
+// qualifier is refused fails loudly if the gate ever widens, and so does the linker. A
+// second real symbol would give a plausible answer instead -- the first probe here paired
+// `abs` with `labs`, and the mis-called version printed -7 rather than failing, because a
+// 32-bit argument in a `long` parameter is an ABI accident and not a diagnosis.
+const char* const kTwinAsAbsentSymbol =
+    "namespace std {\n"
+    "#[llvm_name=\"fin_no_such_symbol\"]\n"
+    "#[global]\n"
+    "@define twin(v: int) <int>;\n"
+    "}\n"
+    "pub fun b_anchor() <noret> {}\n";
+
+} // namespace
+
+TEST(Soundness_Modules, AModuleCallIsCheckedAgainstTheModulesSignatureAndNotTheFilesOwn) {
+    // complex.fin in miniature: its :5 declares `@define printf(fmt: string, ...) <int>;`
+    // and its :3 imports a `stdio` whose `printf` is `<noret>` (lib/std/stdio.fin:111), so
+    // one file holds two `printf`s of different return type and the qualified spelling
+    // must be the module's.
+    //
+    // A rewrite performed *before* the check would hand a bare `printf` to
+    // `checkCallArguments`, which would find the file's own `<int>` declaration and pass
+    // -- so this program compiling is exactly the "silently picks one" the queue entry
+    // warns about, and it is why the namespace branch checks first and rewrites second.
+    const std::string qualified = bundledErr(
+        "import stdio;\n"
+        "@define printf(fmt: string, ...) <int>;\n"
+        "fun main() <noret> { let a <int> = stdio.printf(\"hi\\n\"); }\n");
+    EXPECT_NE(qualified.find("expected 'int', got 'void'"), std::string::npos)
+        << "a module-qualified call must be typed by the module's signature. If this\n"
+           "compiled, the rewrite ran before the check and the file's own `<int>` printf\n"
+           "answered for the module's `<noret>` one.\n"
+        << qualified;
+
+    // The other half, and what makes the first evidence rather than a tautology: the
+    // *plain* name in the same file is the file's own declaration, and reading it as an
+    // `int` is right. A branch that refused both would satisfy the assertion above.
+    const std::string plain = bundledErr(
+        "import stdio;\n"
+        "@define printf(fmt: string, ...) <int>;\n"
+        "fun main() <noret> { let a <int> = printf(\"hi\\n\"); }\n");
+    EXPECT_EQ(errorCount(plain), 0u)
+        << "the plain name is the file's own `<int>` printf and must still type as one:\n"
+        << plain;
+}
+
+TEST(Soundness_Modules, AnAmbientMemberCalledThroughAQualifierIsStillCheckedForArity) {
+    // The rewrite *moves* the argument list into the call it builds, so the check has to
+    // have already happened to it. It has: this fails in the front end, before the
+    // qualifier is spent and before anything is lowered.
+    TempModuleDir d;
+    d.write("absmod.fin", kAbsModule);
+    const std::string err = buildErrWithModule(
+        "import absmod as am;\n"
+        "fun main() <noret> { am.c_abs(); }\n", d.path());
+    EXPECT_NE(err.find("Function 'am.c_abs' expects 1 arguments, got 0"), std::string::npos)
+        << "a call is checked before it is rewritten, and the diagnostic still names the\n"
+           "qualifier the program wrote:\n"
+        << err;
+}
+
+TEST(KnownDefect_Modules, AnImportedExternThatIsNotAmbientIsNotLoweredThroughADot) {
+    // `io_fflush` is one of lib/std/stdio.fin's own externs and is deliberately not
+    // `#[global]` (:113: "the marked set is two names and minting a third would be a hole
+    // in the module system rather than a convenience"). No prototype for it is spliced
+    // into the root program, so there is nothing for a plain `io_fflush(...)` to be a call
+    // *to*, and it keeps the refusal it had.
+    const std::string plain = buildErr(
+        "import stdio;\n"
+        "fun main() <noret> { let r <int> = stdio.io_fflush(null); }\n");
+    EXPECT_NE(plain.find("the receiver of a call to the method 'io_fflush' on a value "
+                         "with no address"), std::string::npos)
+        << "GOOD NEWS: a non-ambient imported extern lowers through a qualifier. Check\n"
+           "first that it reached the *module's* declaration and that the symbol it asks\n"
+           "the linker for is the one lib/std/stdio.fin names, then invert this into\n"
+           "Soundness_Modules.AnImportedExternIsLoweredThroughADot.\n"
+        << plain;
+
+    // The half that makes this discriminating rather than decorative: the file declares
+    // `io_fflush` itself, so the root program *does* bind that name -- and the call must
+    // still refuse. A gate written as "the root program binds this name" instead of
+    // "binds this name to this declaration" would rewrite here, and the rewritten call
+    // would go to the file's own declaration under the symbol `io_fflush`, which no C
+    // library defines: a clean compile followed by `undefined reference`. Refusing before
+    // the object file exists is the rule the corpus is held to -- a construct the backend
+    // cannot lower is refused, never skipped.
+    const std::string declared = buildErr(
+        "import stdio;\n"
+        "@define io_fflush(handle: &void) <int>;\n"
+        "fun main() <noret> { let r <int> = stdio.io_fflush(null); }\n");
+    EXPECT_NE(declared.find("the receiver of a call to the method 'io_fflush' on a value "
+                            "with no address"), std::string::npos)
+        << "a file declaring the name itself must not make the module's member\n"
+           "lowerable: the two are different declarations, and only the ambient one is\n"
+           "put into the root program by anything other than this file.\n"
+        << declared;
+}
+
+TEST(KnownDefect_Modules, AnImportedFinFunctionIsNotLoweredThroughADot) {
+    // The other half of the same gap, and the larger one: a Fin function with a body in a
+    // loaded module is not lowered under any spelling. Its definition stays in the
+    // loader's `astStorage`, where the backend never looks, so the root object has no copy
+    // of it -- this waits on separate compilation, not on the qualifier, and rewriting it
+    // would only move the refusal onto a different name.
+    const std::string err = buildErr(
+        "import stdio;\n"
+        "fun main() <noret> { stdio.println(\"x\"); }\n");
+    EXPECT_NE(err.find("the receiver of a call to the method 'println' on a value with no "
+                       "address"), std::string::npos)
+        << "GOOD NEWS: an imported Fin function lowers. That is separate compilation\n"
+           "rather than a namespace fix -- check the module's object is actually linked\n"
+           "in before inverting this.\n"
+        << err;
+}
+
+#ifdef FIN_TESTS_HAVE_BACKEND
+
+TEST(Soundness_Modules, TheModulesPrintfLowersAndRunsThroughAQualifier) {
+    // complex.fin's construct with a value asserted instead of a compile. The sample
+    // prints a bare "Big" and so says nothing about its argument; a `%d` does, because
+    // nothing but the C library's printf formats one.
+    EXPECT_EQ(buildBundledAndRun(
+                  "import stdio::std as stdio;\n"
+                  "fun main() <noret> { stdio.printf(\"%d\\n\", 41 + 1); }\n"),
+              "42\n");
+}
+
+TEST(Soundness_Modules, AQualifiedCallLowersWhereverAnExpressionGoes) {
+    // A rewritten call is an expression, not a statement form: one here initialises a
+    // local, one is an argument to another call. Both, because the rewrite is recorded on
+    // the node rather than replacing the node in its parent's slot -- if that made the
+    // lowering depend on where the call was written, this is where it would show.
+    //
+    // `abs` is the symbol, so the answers are 5 and 9 rather than -5 and -9: a rewrite
+    // that dropped its argument, or reached a different symbol, compiles and prints
+    // something else.
+    TempModuleDir d;
+    d.write("absmod.fin", kAbsModule);
+    EXPECT_EQ(buildWithModuleAndRun("import absmod as am;\n"
+                                    "fun main() <noret> {\n"
+                                    "    let v <int> = am.c_abs(0 - 5);\n"
+                                    "    printf(\"%d %d\\n\", v, am.c_abs(0 - 9));\n"
+                                    "}\n", d.path()),
+              "5 9\n");
+}
+
+TEST(Soundness_Modules, AQualifiedCallReachesTheSymbolTheRetainedPrototypeNames) {
+    // Two modules publish `twin` under different symbols and exactly one prototype is
+    // retained -- the first, in import order (`ModuleLoader::retainAmbientPrototype`). So
+    // `amod` is what the root program declares `twin` as, `a.twin(-7)` is 7, and
+    // `b.twin(-7)` must refuse rather than reach `abs`: rewriting it would answer a call
+    // on `bmod`'s declaration with `amod`'s symbol, and no diagnostic anywhere would
+    // mention that the two modules had disagreed.
+    //
+    // This is the test `ModuleLoader::symbolOf`'s comment names as the one that goes red
+    // if the loader's reading of `#[llvm_name]` and `CodeGen_LLVM::symbolNameOf`'s ever
+    // drift apart -- the two agreeing is what makes a retained prototype's symbol
+    // knowable from the loader at all.
+    TempModuleDir d;
+    d.write("amod.fin", kTwinAsAbs);
+    d.write("bmod.fin", kTwinAsAbsentSymbol);
+    EXPECT_EQ(buildWithModuleAndRun("import amod as a;\n"
+                                    "import bmod as b;\n"
+                                    "fun main() <noret> { printf(\"%d\\n\", a.twin(0 - 7)); }\n",
+                                    d.path()),
+              "7\n");
+
+    const std::string err = buildErrWithModule(
+        "import amod as a;\n"
+        "import bmod as b;\n"
+        "fun main() <noret> { printf(\"%d\\n\", b.twin(0 - 7)); }\n", d.path());
+    EXPECT_NE(err.find("the receiver of a call to the method 'twin' on a value with no "
+                       "address"), std::string::npos)
+        << "the losing module's qualifier must not be rewritten: the name the root\n"
+           "program declares is the other module's declaration, under the other module's\n"
+           "symbol. Swapping the two imports swaps which module wins, which is what says\n"
+           "the retention is first-wins rather than alphabetical.\n"
+        << err;
+}
+
+TEST(KnownDefect_Modules, RenamingAnAmbientNameInTheRootFileBreaksBothSpellingsAlike) {
+    // The residual hazard, booked rather than repaired, and bookable because the two
+    // spellings now agree. A file that redeclares an ambient name wins in
+    // `declareFunction` -- first declaration wins, and the splice is appended -- so the
+    // plain call goes to *its* symbol, and after the rewrite the qualified call goes there
+    // too. Here that symbol is `twin`, which no C library defines, and both fail at the
+    // link.
+    //
+    // Not repaired here because it is not a namespace fault: the plain call in this file
+    // was already broken before any rewrite existed, and the second assertion is what
+    // says so. Making the qualified spelling link while the plain one does not, in one
+    // file, would be worse than both failing. It is `#[overwrite]`'s question -- which of
+    // two declarations of a name wins, and under whose symbol -- and it is due whoever
+    // rules on that. `printf` never shows it because the corpus samples that redeclare it
+    // write no `#[llvm_name]`, so their symbol and the bundle's are the same string.
+    TempModuleDir d;
+    d.write("amod.fin", kTwinAsAbs);
+    const std::string plain = buildErrWithModule(
+        "import amod as a;\n"
+        "@define twin(v: int) <int>;\n"
+        "fun main() <noret> { printf(\"%d\\n\", twin(0 - 7)); }\n", d.path());
+    EXPECT_NE(plain.find("link failed"), std::string::npos)
+        << "the plain call is the baseline this defect is measured against, and it is\n"
+           "expected to fail the link: the file's own `twin` wins and names a symbol\n"
+           "nothing defines.\n"
+        << plain;
+
+    const std::string qualified = buildErrWithModule(
+        "import amod as a;\n"
+        "@define twin(v: int) <int>;\n"
+        "fun main() <noret> { printf(\"%d\\n\", a.twin(0 - 7)); }\n", d.path());
+    EXPECT_NE(qualified.find("link failed"), std::string::npos)
+        << "GOOD NEWS, maybe: the qualified spelling no longer fails the way the plain\n"
+           "one does. Check which symbol it reached. If it reached the module's, then two\n"
+           "spellings of one call in one file now disagree, which is a worse state than\n"
+           "this defect -- read the note above before inverting anything.\n"
+        << qualified;
+}
+
+#endif  // FIN_TESTS_HAVE_BACKEND
+
+// ---------------------------------------------------------------------------
 // `#[global]` against the real bundle (ADR 0021).
 //
 // These belong here rather than in test_soundness.cpp for the reason that file's own
 // `#[global]` block gives: the interesting cases need a *second* file, and a harness
 // that compiles one string has none. The bundle is the second file, and it is the
-// honest one -- `printf` is ambient because `lib/std/stdio.fin:71` marks it, and if
+// honest one -- `printf` is ambient because `lib/std/stdio.fin:109` marks it, and if
 // that line is ever deleted these must go red rather than a corpus sample quietly
 // gaining a diagnostic.
 //
@@ -575,11 +891,6 @@ TEST(Soundness_GlobalAttribute, AnUnmarkedExternInALoadedModuleIsNotSpliced) {
 // what makes the positive one evidence.
 
 namespace {
-
-// Compiles a program against the bundle and returns its ANSI-stripped diagnostics.
-std::string bundledErr(const std::string& code) {
-    return stripAnsi(compileBundled(code).err);
-}
 
 // A program body that imports from the bundle and runs the given statements in `main`.
 std::string program(const std::string& imports, const std::string& body) {
