@@ -117,7 +117,7 @@ was broken.
 | — since `4788753`, at `2aa0993` | **1465 / 1465 pass**, 0 skipped | the interface reference's missing tests; corpus unmoved |
 | — since `4788753`, at `211c8ab` | **1473 / 1473 pass**, 0 skipped | the namespace-qualified call rewrite; **corpus 20 → 21** |
 | — since `4788753`, at `132aed7` | **1481 / 1481 pass**, 0 skipped | the `::` call's type arguments; **corpus 21 → 22** |
-| — since `4788753`, at `HEAD` | **1517 / 1517 pass**, 0 skipped | the variable-refusal location, the width-annotation refusal, `prototype<K, V>`; corpus unmoved |
+| — since `4788753`, at `02fba4a` | **1517 / 1517 pass**, 0 skipped | the variable-refusal location, the width-annotation refusal, `prototype<K, V>`; corpus unmoved |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -683,7 +683,7 @@ type_annotations.fin      a variable of type 'prototype<int, float>'
 Every one of those lines is unchanged from the `cfebdd5` re-measurement except that `complex.fin`
 and `letssee.fin` are no longer on it. **Nothing regressed:** no sample moved to a worse bucket.
 
-### The prototype and the width annotation at `HEAD` (2026-08-31) — item 7 is done
+### The prototype and the width annotation at `02fba4a` (2026-08-31) — item 7 is done
 
 **No sample moved, and the corpus is still 22 / 9 / 20.** The suite is 1517. `type_annotations.fin`
 is the sample item 7 named and it is still CODEGEN_REFUSED, but **for a different reason and one line
@@ -758,7 +758,7 @@ storage any more: the first is `{object, object}` and `a.rm("b")`, the second `a
 '$type'` (item 8). Adding a `Kind` was safe to do: exactly two switches over it exist (`cgDisplay`,
 `describe`), both were updated, and there is no `-Wswitch`/`-Werror`.
 
-**The corpus at `HEAD`, all 51 measured** — 22 OBJECT_CLEAN, 9 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
+**The corpus at `02fba4a`, all 51 measured** — 22 OBJECT_CLEAN, 9 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
 The nine, with their first refusal re-measured here:
 
 ```
@@ -881,7 +881,7 @@ write, and writes the file only at the very end — so a failed assertion change
 
 The 17 samples that reach codegen and are blocked by exactly one refusal each, measured at
 `91312b8`. This list **is** the work queue for the backend, but **read §4's re-measurements
-first**: it is **nine** samples at `HEAD`, and seven of them report something other than what
+first**: it is **nine** samples at `02fba4a`, and seven of them report something other than what
 the block below says. The numbered items keep their old titles for continuity; the corrections are
 in their text.
 
@@ -1016,7 +1016,7 @@ Recommended order — cheapest first, and each one unblocks the next:
    **`letssee.fin`'s printed numbers are wrong for a reason in the sample**: `@define sqrt(f: float)`
    against libm's `double sqrt(double)`. §4 has the two probes that isolate it; it is a ruling
    (§8), not a lowering.
-7. ~~**Variable types**~~ — **done at `HEAD` (2026-08-31), and no sample moved: the corpus is still
+7. ~~**Variable types**~~ — **done at `02fba4a` (2026-08-31), and no sample moved: the corpus is still
    22 / 9 / 20.** See §4, "The prototype and the width annotation". **Both halves of this item's text
    were stale.** The `[int]` half says it is blocked on an owner ruling for the representation of a
    dynamic `[T]`; §8 records that ruling as made on 2026-08-27, ADR 0025's `{ptr, len}` is implemented
@@ -1040,7 +1040,7 @@ Recommended order — cheapest first, and each one unblocks the next:
    `lambdas.fin`); the erasure marker (`generics_interfaces.fin`, ADR 0002).
 9. After the corpus: the struct ABI classifier, `blame`/`try`/`catch`, the payload-carrying
    tagged-union enum, **real** bit-width annotations (`int{64}`) — which is now a narrowing to
-   implement rather than a miscompile to stop, because the annotation refuses as of `HEAD`; it is
+   implement rather than a miscompile to stop, because the annotation refuses as of `02fba4a`; it is
    also `type_annotations.fin`'s first refusal and so the sample's remaining blocker.
 
 ### The generic-methods unit — landed, and what it did not do
