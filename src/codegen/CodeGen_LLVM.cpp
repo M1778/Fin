@@ -131,8 +131,23 @@ namespace {
 struct StructInfo;
 struct InterfaceInfo;
 
+// `v.0`: is this member name a position rather than a name?
+//
+// The same test Analyzer_Expr.cpp's `positionalMember` makes, and deliberately a second
+// copy of five lines rather than a header shared between the analyzer and the backend:
+// what the two have to agree on is which *spellings* are positions, and that is fixed by
+// the grammar (`expression DOT INTEGER`, parser.y) rather than by either of them. A name
+// that is not all digits is not positional whatever else it is, because an identifier
+// cannot begin with a digit and so no declared field can collide with one.
+bool positionalMember(const std::string& name, size_t& index) {
+    if (name.empty() || name.size() > 9) return false;
+    for (char c : name) if (c < '0' || c > '9') return false;
+    index = static_cast<size_t>(std::stoul(name));
+    return true;
+}
+
 struct CgType {
-    enum class Kind { Void, Int, Float, Ptr, Struct, Array, Fn };
+    enum class Kind { Void, Int, Float, Ptr, Struct, Array, Fn, Prototype };
     llvm::Type* llvmType = nullptr;
     Kind kind = Kind::Void;
     bool isSigned = true;
@@ -209,15 +224,46 @@ struct CgType {
     std::vector<std::shared_ptr<CgType>> params;
     llvm::FunctionType* llvmSignature = nullptr;
 
+    // Kind::Prototype only: the `[K]` and the `[V]`, each a dynamic-array CgType.
+    //
+    // A `prototype<K, V>` is `{ [K], [V] }` -- the keys beside the values, two
+    // `{ptr, len}` pairs -- and that is a derivation from the corpus rather than a
+    // choice. tests/samples/stdlib/prototypes.fin is the normative statement of what
+    // a prototype is, and it says `prtp.0` is `[T]` (the keys) and `prtp.1` is the
+    // values; the analyzer types both exactly that way already
+    // (Analyzer_Expr.cpp, the positional-member path). Given that, storing anything
+    // other than two arrays would mean `.0` had to *build* one, which is a copy the
+    // program did not write, at a size only a run time knows.
+    //
+    // The two arrays are the whole representation and there is no third word: nothing
+    // in the corpus asks a prototype for a count that is not one of the two arrays'
+    // lengths, and the invariant that makes the pair meaningful -- key i belongs to
+    // value i -- is the reason `.0.length` and `.1.length` are the same number rather
+    // than a reason to store it twice.
+    //
+    // What this representation does *not* do is look a key up: `a[10]` needs an
+    // equality over an arbitrary key type and a search, which is prototype access and
+    // is a unit of its own (tests/samples/prototype_test.fin's note). Storage,
+    // construction and the two projections are what is here, and the subscript is
+    // refused rather than answered with element 0.
+    //
+    // shared_ptr for the reason `element`, `pointee` and `result` are: a CgType cannot
+    // contain itself, and `prototype<int, prototype<int, int>>` needs it to contain one.
+    std::shared_ptr<CgType> keys;
+    std::shared_ptr<CgType> values;
+
     bool isVoid() const { return kind == Kind::Void; }
     bool isStruct() const { return kind == Kind::Struct; }
     bool isArray() const { return kind == Kind::Array; }
     bool isPointer() const { return kind == Kind::Ptr; }
     bool isFn() const { return kind == Kind::Fn; }
+    bool isPrototype() const { return kind == Kind::Prototype; }
     // What may not cross an `@define` boundary or a C variadic: the platform ABI
     // decides how each is passed and clang implements that classification, so
-    // emitting the LLVM aggregate would link cleanly and pass garbage.
-    bool isAggregate() const { return isStruct() || isArray(); }
+    // emitting the LLVM aggregate would link cleanly and pass garbage. A prototype is
+    // two structs in a struct, so it is one of them -- and it is the only kind here
+    // that no C function could have been written to receive in the first place.
+    bool isAggregate() const { return isStruct() || isArray() || isPrototype(); }
 };
 
 // One field, in declaration order. The order is the whole point: the layout pass
@@ -502,10 +548,50 @@ public:
         // became rather than lost.
         if (const TypeBinding* bound = boundBinding(node)) return bound->type;
 
-        // A nullable, a prototype or an erasure constraint all mean "not this slice"
-        // rather than "the base name" -- silently dropping the decoration is how
-        // `[int]` would become `int` and start being copied by value.
-        // An array is one of the three decorations this slice lowers, and only when
+        // A bit-width annotation -- the `{64}` in `int{64}` -- is refused rather than
+        // dropped, and it is refused here so that every role gets the same answer from
+        // one place: a variable, a parameter, a return, a struct field, a pointer's
+        // pointee, an array's element and a `cast<>` target each reach this function
+        // and each used to be lowered at the *base* type's width. `let x <int{64}>`
+        // emitted an i32 and computed in 32 bits, silently, which is a miscompile of
+        // exactly the kind this file's "refuse, never skip" rule exists to prevent --
+        // and worse than the missing feature, because the program built and ran.
+        //
+        // Nothing in the compiler honours the annotation yet: `annotations` is written
+        // by one grammar production (parser.y, `base_type LBRACE expression_list
+        // RBRACE`) and read in four places -- StructuralWalk, ASTPrinter, CloneTypes,
+        // and Analyzer_Core.cpp:393, which walks the expressions for their own side
+        // effects and hands back the type *unannotated*. So the front end does not
+        // narrow either: `uint{8}` accepts -1 and lays out as four bytes
+        // (KnownDefect_IntegerWidths and KnownDefect_Layout.AWidthAnnotationDoesNot
+        // ChangeTheSize). Honouring the width end to end is its own unit (HANDOFF §6
+        // item 9); until then the honest answer is that this type is not lowered.
+        //
+        // `spell` renders the annotation, so the refusal names `int{64}` rather than
+        // `int` -- a refusal that says "a variable of type 'int'" about a line that
+        // lowers `int` fine would send the reader to the wrong half of the type.
+        if (!node->annotations.empty()) return std::nullopt;
+
+        // A prototype is a decoration this slice lowers, and the node is an ordinary
+        // TypeNode with the flag set rather than a subclass -- the parser builds
+        // `TypeNode("prototype")` with `is_prototype` and the key and value in
+        // `generics` (parser.y, `LBRACE type_list RBRACE`). Before the pointer and
+        // array branches for the same reason those come before the catch-all: a
+        // prototype that is also a pointer or an array is a decoration this does not
+        // cover, and mapPrototype says so by refusing rather than by dropping half of
+        // what was written.
+        if (node->is_prototype) {
+            if (node->pointer_depth != 0 || node->is_array || node->is_nullable ||
+                !node->implements_list.empty() || node->array_size) {
+                return std::nullopt;
+            }
+            return mapPrototype(*node);
+        }
+
+        // A nullable or an erasure constraint means "not this slice" rather than "the
+        // base name" -- silently dropping the decoration is how `[int]` would become
+        // `int` and start being copied by value.
+        // An array is one of the decorations this slice lowers, and only when
         // its extent is written and constant. See mapArray.
         if (auto* arr = dynamic_cast<const ArrayTypeNode*>(node)) {
             if (node->pointer_depth != 0 || node->is_nullable) return std::nullopt;
@@ -685,6 +771,69 @@ public:
         t.llvmType = llvm::ArrayType::get(element->llvmType, extent);
         t.element = std::make_shared<CgType>(*element);
         t.extent = extent;
+        return t;
+    }
+
+    // `prototype<K, V>` becomes `{ [K], [V] }`: the keys' dynamic array beside the
+    // values', which is two `{ptr, len}` pairs and so four words. See CgType::keys for
+    // why that is the representation and not a choice -- stdlib/prototypes.fin says
+    // `.0` is `[K]` and `.1` is `[V]`, and the analyzer already types them so.
+    //
+    // Refused rather than guessed at wherever the written type does not name both
+    // halves, and each refusal is a different question that is genuinely open:
+    //
+    //  - An arity other than two. The analyzer accepts `{int}` and `{int, float, char}`
+    //    and defaults a missing half to `any`, so a one-element prototype arrives here
+    //    as a real type with a made-up value type. Which of "the value is `any`", "it is
+    //    a set" and "it is an error" Fin means is unruled, and lowering it as `any`
+    //    would pick one silently.
+    //  - `any` or `object` on either side. Neither has a representation at all
+    //    (Layout.cpp refuses a DynamicType: `any` is to be `{i8*, i64}` from a
+    //    declaration in lib/std that does not exist), so `<{object, object}>` --
+    //    prototype_test.fin:40's own annotation -- is refused for the same reason a
+    //    bare `let v <any>` is, and not for being inside a prototype.
+    //  - A half whose own type does not lower, which is every other case and needs no
+    //    rule of its own: `map` on the element answers, and the answer propagates.
+    std::optional<CgType> mapPrototype(const TypeNode& node) const {
+        if (node.generics.size() != 2) return std::nullopt;
+
+        // Each half as a *dynamic* array of itself, built through mapArray so that
+        // there is one place in this file that decides what a `{ptr, len}` is. An
+        // ArrayTypeNode with no size is exactly what `[K]` is written as, so this is
+        // the same door `let k <[int]>` goes through rather than a second encoding of
+        // the pair -- and if ADR 0025's shape ever changes, it changes for both.
+        auto half = [&](const TypeNode* written) -> std::optional<CgType> {
+            if (!written) return std::nullopt;
+            auto inner = map(written);
+            if (!inner) return std::nullopt;
+            // `any` and `object` map to nothing here, so they are already refused by
+            // the line above; void is a name that maps to something and is still not a
+            // value, which is why it is named separately.
+            if (inner->isVoid() || !inner->llvmType || !inner->llvmType->isSized()) {
+                return std::nullopt;
+            }
+            CgType arr;
+            arr.kind = CgType::Kind::Array;
+            arr.element = std::make_shared<CgType>(*inner);
+            arr.isDynamicArray = true;
+            // `get`, not `create`, for the reason mapArray gives: LLVM uniques literal
+            // structs, so every `[int]` in the program is one llvm::StructType and two
+            // prototypes of one key and value type are assignable to each other.
+            arr.llvmType = llvm::StructType::get(ctx_,
+                {inner->llvmType->getPointerTo(), llvm::Type::getInt32Ty(ctx_)});
+            return arr;
+        };
+
+        auto keys = half(node.generics[0].get());
+        if (!keys) return std::nullopt;
+        auto values = half(node.generics[1].get());
+        if (!values) return std::nullopt;
+
+        CgType t;
+        t.kind = CgType::Kind::Prototype;
+        t.keys = std::make_shared<CgType>(*keys);
+        t.values = std::make_shared<CgType>(*values);
+        t.llvmType = llvm::StructType::get(ctx_, {keys->llvmType, values->llvmType});
         return t;
     }
 
@@ -1022,6 +1171,30 @@ private:
         }
         if (type->is_array) name = "[" + name + "]";
         if (type->pointer_depth > 0) name = std::string(type->pointer_depth, '&') + name;
+        // The bit-width annotation, `{64}` in `int{64}`. Included because the mapper
+        // refuses an annotated type and lowers the bare one, so a refusal that dropped
+        // the annotation would read "a variable of type 'int'" about a line whose
+        // `int` half is not the problem.
+        //
+        // A constant is printed as its value and anything else as `...`. `int{8 * 8}`
+        // (tests/samples/type_annotations.fin:8) is a BinaryOp, and this file has no
+        // expression printer -- an arithmetic annotation is folded nowhere yet, so
+        // there is no number to print. `...` is what ASTPrinter uses for the same
+        // reason, and it still distinguishes an annotated type from a bare one, which
+        // is the whole job here.
+        if (!type->annotations.empty()) {
+            name += "{";
+            for (size_t i = 0; i < type->annotations.size(); ++i) {
+                if (i) name += ", ";
+                uint64_t width = 0;
+                const ASTNode* ann = type->annotations[i].get();
+                if (ann && readConstant(*ann, width) == ConstantRead::Ok)
+                    name += std::to_string(width);
+                else
+                    name += "...";
+            }
+            name += "}";
+        }
         return name;
     }
 
@@ -1043,12 +1216,21 @@ private:
     // (visit(ArrayLiteral&) saves and restores it around each element).
     const CgType* arrayHint_ = nullptr;
 
+    // The same thing for a prototype literal, and separate from `arrayHint_` rather
+    // than one hint of either kind, because `{ 10: 1.5 }` and `[1, 2, 3]` are different
+    // nodes with different needs and a single slot would have each visitor checking
+    // that the hint it found is the kind it wanted. Two slots, one predicate each.
+    const CgType* prototypeHint_ = nullptr;
+
     // Emits `expr` with `type` offered to it, when it is a literal that needs one.
     CgVal emitAs(Expression& expr, const CgType& type) {
-        auto* saved = arrayHint_;
+        auto* savedArray = arrayHint_;
+        auto* savedProto = prototypeHint_;
         arrayHint_ = type.isArray() ? &type : nullptr;
+        prototypeHint_ = type.isPrototype() ? &type : nullptr;
         CgVal v = emit(expr);
-        arrayHint_ = saved;
+        arrayHint_ = savedArray;
+        prototypeHint_ = savedProto;
         return v;
     }
 
@@ -2378,6 +2560,18 @@ private:
             case CgType::Kind::Array:
                 return t.element ? fmt::format("[{}, {}]", cgDisplay(*t.element), t.extent)
                                  : "[]";
+            case CgType::Kind::Prototype:
+                // The Fin spelling, so an instantiation keyed on a prototype argument
+                // reads back as the program wrote it. Its two halves are dynamic arrays
+                // and a dynamic array's extent is 0, so `cgDisplay` of one would say
+                // `[int, 0]` -- the key is built from the *element* types instead, which
+                // is what actually distinguishes two prototypes.
+                return fmt::format("prototype<{}, {}>",
+                                   t.keys && t.keys->element ? cgDisplay(*t.keys->element)
+                                                             : "?",
+                                   t.values && t.values->element
+                                       ? cgDisplay(*t.values->element)
+                                       : "?");
         }
         return "?";
     }
@@ -2804,6 +2998,7 @@ private:
             case CgType::Kind::Ptr:    return "a pointer";
             case CgType::Kind::Int:    return t.isBool ? "bool" : "an integer";
             case CgType::Kind::Float:  return "a float";
+            case CgType::Kind::Prototype: return "a prototype";
             case CgType::Kind::Fn:     break;
         }
         std::string out = "fn(";
@@ -3089,6 +3284,37 @@ private:
         if (auto* member = dynamic_cast<MemberAccess*>(&expr)) {
             // `Type::name` is an enum member or a static, not a field of an object.
             if (member->is_static) return std::nullopt;
+
+            // `p.0` and `p.1` are the prototype's two halves, and they have addresses
+            // for the same reason a struct field does: the prototype is a struct here,
+            // and the half is the field at that index. Addressed rather than extracted
+            // wherever there is an address, because `p.0[1]` and `p.0.length` both
+            // arrive through here -- the first as an ArrayAccess whose array is this,
+            // the second as visit(MemberAccess&)'s `.length` path asking baseAddress
+            // for an array -- and an extractvalue would give them a copy of the pair
+            // with no home to index into.
+            //
+            // The position is checked against 2 rather than against the LLVM struct's
+            // arity: they are the same number today, and saying it in terms of the
+            // representation is what makes `p.2` refuse instead of GEPping past the end
+            // if a third word is ever added for a reason this comment does not know.
+            if (size_t position = 0; positionalMember(member->member, position)) {
+                auto proto = baseAddress(*member->object, CgType::Kind::Prototype);
+                if (failed_) return std::nullopt;
+                if (proto && proto->type.isPrototype() && position < 2 &&
+                    proto->type.keys && proto->type.values) {
+                    const CgType& half = position == 0 ? *proto->type.keys
+                                                       : *proto->type.values;
+                    llvm::Value* ptr = builder_.CreateStructGEP(
+                        proto->type.llvmType, proto->ptr, (unsigned)position,
+                        position == 0 ? "keys" : "values");
+                    return Addr{ptr, half};
+                }
+                // Not a prototype, or a position it does not have. Falls through: an
+                // enum payload's `.0` is a different question with its own answer, and
+                // a struct's is a refusal that visit(MemberAccess&) words.
+            }
+
             auto base = baseAddress(*member->object, CgType::Kind::Struct);
             if (!base) return std::nullopt;
             if (!base->type.isStruct() || !base->type.structInfo) return std::nullopt;
@@ -6087,6 +6313,27 @@ private:
                            info->fields[index].type};
             return;
         }
+        // A prototype that is a value and not a variable -- `keys(mk().0)` on a
+        // function returning one. `extractvalue` reads the half out of the register,
+        // which is what the struct path four lines down does for the same shape; the
+        // half is a `{ptr, len}` pair and a pair is a value, so nothing is copied that
+        // an assignment of it would not copy anyway.
+        if (object.type.isPrototype()) {
+            size_t position = 0;
+            if (positionalMember(node.member, position) && position < 2 &&
+                object.type.keys && object.type.values) {
+                const CgType& half = position == 0 ? *object.type.keys
+                                                   : *object.type.values;
+                value_ = CgVal{builder_.CreateExtractValue(object.value,
+                                                           {(unsigned)position},
+                                                           position == 0 ? "keys"
+                                                                         : "values"),
+                               half};
+                return;
+            }
+            unsupported(node, fmt::format("the member '{}' of a prototype", node.member));
+            return;
+        }
         if (!object.type.isStruct() || !object.type.structInfo) {
             unsupported(node, fmt::format("the member '{}' of a non-struct", node.member));
             return;
@@ -6237,7 +6484,112 @@ private:
         type.structInfo = &found->second;
         return CgVal{aggregate, type};
     }
-    void visit(PrototypeLiteral& node) override { unsupported(node, "a prototype literal"); }
+    // A dynamic `[T]` built from a list of element expressions: a fresh heap buffer,
+    // the elements stored into it in order, and the `{ptr, len}` pair as a value.
+    //
+    // Extracted from visit(ArrayLiteral&)'s dynamic branch so that a prototype literal
+    // builds its two halves through the same code an `[T]` literal does. Two copies of
+    // this would be two allocation rules and two pair layouts that agree today: the
+    // pair is ADR 0025's, and the whole point of the ADR is that there is one of it.
+    //
+    // Takes borrowed pointers rather than the AST vector, because a prototype's keys
+    // are not a vector -- they are the first of each pair in `elements`, and building a
+    // vector of `unique_ptr` copies to pass them is not a thing a unique_ptr can do.
+    //
+    // Returns null having already reported, or having had `failed_` set by an element.
+    llvm::Value* buildDynamicArray(ASTNode& node, const CgType& type,
+                                   const std::vector<Expression*>& elements) {
+        if (!type.element || !type.element->llvmType) {
+            unsupported(node, "an array with no element type here");
+            return nullptr;
+        }
+        llvm::Value* count = llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_),
+                                                    elements.size());
+        auto* elemTy = type.element->llvmType;
+        auto* bytes = llvm::ConstantExpr::getSizeOf(elemTy);
+        llvm::Value* byteCount = builder_.CreateMul(
+            bytes, builder_.CreateZExt(count, llvm::Type::getInt64Ty(ctx_)));
+        llvm::FunctionCallee mallocFn = runtimeFn(node, "malloc", llvm::FunctionType::get(
+            llvm::PointerType::get(ctx_, 0), {llvm::Type::getInt64Ty(ctx_)}, false),
+            "a dynamic array allocation");
+        if (!mallocFn) return nullptr;
+        llvm::Value* raw = builder_.CreateCall(mallocFn, {builder_.CreateZExt(byteCount, llvm::Type::getInt64Ty(ctx_))});
+        llvm::Value* data = builder_.CreateBitCast(raw, elemTy->getPointerTo());
+        for (size_t i = 0; i < elements.size(); ++i) {
+            if (!elements[i]) { unsupported(node, "an array element with no value"); return nullptr; }
+            // Each element gets the *element's* type as its own hint, which is what
+            // visit(ArrayLiteral&)'s fixed branch does and what makes a nested literal
+            // lower: an `[[int]]`'s elements are array literals, and a
+            // `prototype<int, [int]>`'s values are too. Set from the element's kind
+            // rather than left null, because a literal reaching here with no hint has
+            // nothing to be an array *of* and would refuse -- which is what
+            // `{ 1: [1, 2] }` did before this line, with a diagnostic about an array
+            // literal in a program whose author wrote a prototype.
+            auto* savedArray = arrayHint_;
+            auto* savedProto = prototypeHint_;
+            arrayHint_ = type.element->isArray() ? type.element.get() : nullptr;
+            prototypeHint_ = type.element->isPrototype() ? type.element.get() : nullptr;
+            CgVal v = emit(*elements[i]);
+            arrayHint_ = savedArray;
+            prototypeHint_ = savedProto;
+            if (failed_ || !v.ok()) return nullptr;
+            llvm::Value* stored = convert(node, v, *type.element);
+            if (!stored) return nullptr;
+            auto* slot = builder_.CreateInBoundsGEP(elemTy, data,
+                                                     llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), i));
+            builder_.CreateStore(stored, slot);
+        }
+        llvm::Value* pair = llvm::UndefValue::get(type.llvmType);
+        pair = builder_.CreateInsertValue(pair, data, {0});
+        pair = builder_.CreateInsertValue(pair, count, {1});
+        return pair;
+    }
+
+    // `{ 10: 1.5, 20: 2.5 }` becomes the two arrays side by side: every key into the
+    // first, every value into the second, in written order and index by index. That
+    // pairing *is* the data structure -- key i belongs to value i -- so the written
+    // order is not an author's convenience the way a struct literal's is, and nothing
+    // here may reorder it.
+    //
+    // The type comes from the hint the declaration set, for exactly the reason an array
+    // literal's does: `{ 10: 1.5 }` is not `prototype<int, float>` by inspection. The
+    // front end may have typed those constants against an annotation this file cannot
+    // see -- `<{long, double}>` accepts the same text -- and reading the key type off
+    // the first key is how the two passes come to disagree about a stride. So a
+    // literal with no hint is refused rather than guessed, which is what makes
+    // `let p <auto> = { 10: 1.5 }` a refusal and not an invented prototype.
+    void visit(PrototypeLiteral& node) override {
+        if (!prototypeHint_ || !prototypeHint_->keys || !prototypeHint_->values) {
+            unsupported(node, "a prototype literal with no declared type");
+            return;
+        }
+        const CgType type = *prototypeHint_;
+
+        std::vector<Expression*> keys;
+        std::vector<Expression*> values;
+        keys.reserve(node.elements.size());
+        values.reserve(node.elements.size());
+        for (auto& entry : node.elements) {
+            keys.push_back(entry.first.get());
+            values.push_back(entry.second.get());
+        }
+
+        // The keys' array first, then the values'. Two allocations, and the order
+        // between them is observable only through what `malloc` returns, which no Fin
+        // program may depend on -- but the *element* evaluations interleave nothing:
+        // all the keys run, then all the values. That is a real decision and it is the
+        // one a reader can predict from the code, the same argument
+        // visit(StructInstantiation&) makes for running written values before defaults.
+        llvm::Value* keyPair = buildDynamicArray(node, *type.keys, keys);
+        if (!keyPair) return;
+        llvm::Value* valuePair = buildDynamicArray(node, *type.values, values);
+        if (!valuePair) return;
+
+        llvm::Value* pair = llvm::UndefValue::get(type.llvmType);
+        pair = builder_.CreateInsertValue(pair, keyPair, {0});
+        pair = builder_.CreateInsertValue(pair, valuePair, {1});
+        value_ = CgVal{pair, type};
+    }
     void visit(ArrayLiteral& node) override {
         // Built as a value, the way a struct literal is, and stored whole by whoever
         // asked for it. That is what makes `let c <[int, 3]> = a;` a copy: an LLVM
@@ -6255,33 +6607,11 @@ private:
         }
         const CgType type = *arrayHint_;
         if (type.isDynamicArray) {
-            // A dynamic literal owns a fresh heap buffer; its pair is `{ptr, len}`.
-            llvm::Value* count = llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_),
-                                                        node.elements.size());
-            auto* elemTy = type.element->llvmType;
-            auto* bytes = llvm::ConstantExpr::getSizeOf(elemTy);
-            llvm::Value* byteCount = builder_.CreateMul(
-                bytes, builder_.CreateZExt(count, llvm::Type::getInt64Ty(ctx_)));
-            llvm::FunctionCallee mallocFn = runtimeFn(node, "malloc", llvm::FunctionType::get(
-                llvm::PointerType::get(ctx_, 0), {llvm::Type::getInt64Ty(ctx_)}, false),
-                "a dynamic array allocation");
-            llvm::Value* raw = builder_.CreateCall(mallocFn, {builder_.CreateZExt(byteCount, llvm::Type::getInt64Ty(ctx_))});
-            llvm::Value* data = builder_.CreateBitCast(raw, elemTy->getPointerTo());
-            for (size_t i = 0; i < node.elements.size(); ++i) {
-                auto* saved = arrayHint_;
-                arrayHint_ = nullptr;
-                CgVal v = emit(*node.elements[i]);
-                arrayHint_ = saved;
-                if (failed_ || !v.ok()) return;
-                llvm::Value* stored = convert(node, v, *type.element);
-                if (!stored) return;
-                auto* slot = builder_.CreateInBoundsGEP(elemTy, data,
-                                                         llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), i));
-                builder_.CreateStore(stored, slot);
-            }
-            llvm::Value* pair = llvm::UndefValue::get(type.llvmType);
-            pair = builder_.CreateInsertValue(pair, data, {0});
-            pair = builder_.CreateInsertValue(pair, count, {1});
+            std::vector<Expression*> elements;
+            elements.reserve(node.elements.size());
+            for (auto& e : node.elements) elements.push_back(e.get());
+            llvm::Value* pair = buildDynamicArray(node, type, elements);
+            if (!pair) return;
             value_ = CgVal{pair, type};
             return;
         }

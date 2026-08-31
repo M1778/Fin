@@ -117,6 +117,7 @@ was broken.
 | — since `4788753`, at `2aa0993` | **1465 / 1465 pass**, 0 skipped | the interface reference's missing tests; corpus unmoved |
 | — since `4788753`, at `211c8ab` | **1473 / 1473 pass**, 0 skipped | the namespace-qualified call rewrite; **corpus 20 → 21** |
 | — since `4788753`, at `132aed7` | **1481 / 1481 pass**, 0 skipped | the `::` call's type arguments; **corpus 21 → 22** |
+| — since `4788753`, at `HEAD` | **1517 / 1517 pass**, 0 skipped | the variable-refusal location, the width-annotation refusal, `prototype<K, V>`; corpus unmoved |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -682,6 +683,99 @@ type_annotations.fin      a variable of type 'prototype<int, float>'
 Every one of those lines is unchanged from the `cfebdd5` re-measurement except that `complex.fin`
 and `letssee.fin` are no longer on it. **Nothing regressed:** no sample moved to a worse bucket.
 
+### The prototype and the width annotation at `HEAD` (2026-08-31) — item 7 is done
+
+**No sample moved, and the corpus is still 22 / 9 / 20.** The suite is 1517. `type_annotations.fin`
+is the sample item 7 named and it is still CODEGEN_REFUSED, but **for a different reason and one line
+earlier**: its first refusal was `a variable of type 'prototype<int, float>'` at `:14` and is now
+`a variable of type 'int{64}'` at `:5`. The prototype at the bottom of that file lowers; the width
+annotation four declarations above it does not, and now says so.
+
+**Item 7 was stale in both halves.** Its `[int]` half is recorded as "blocked on an owner ruling for
+the representation of a dynamic `[T]`" — §8 records that ruling as made on 2026-08-27, ADR 0025's
+`{ptr, len}` has been implemented end to end since, and `arrays_enums.fin` has been OBJECT_CLEAN for
+several commits. So the only work under item 7 was the prototype, and it is three separate things,
+done in this order because the second is a correctness fix that had to precede the feature.
+
+**(a) A variable's refusal was reported at `1:1`.** `declaration_body`'s six variable productions
+never called `setLoc(@$)` while `variable_declaration`'s six did, and `annotated_declaration` masked
+it — so a bare `let v <any>;` blamed the top of the file while `#[slaveof($Fin)] let v <any>;` on the
+same line reported correctly. Three tests in `Soundness_DiagnosticLocation` hold it: the bare local,
+the attributed one that already worked (kept, so a regression localises), and a global on a line that
+is deliberately not line 1. `any` is the type they use, because there is no representation for a
+value whose type is unknown at compile time and so the test cannot quietly stop testing a location
+the way `ARefusalNamesTheLine` did three times.
+
+**(b) `int{64}` built an object and emitted an i32.** The annotation is written in exactly one place
+(`parser.y`'s `base_type LBRACE expression_list RBRACE`) and read in five, none of them in codegen;
+`Analyzer_Core.cpp` walks the expressions and hands back the *unannotated* type. So the backend never
+saw the width and lowered the base type. **That is a different kind of defect from the front end's**,
+which is why this was fixed rather than booked next to `KnownDefect_IntegerWidths`: a front end that
+does not narrow gives a program a value it did not ask for, and a backend that lowers `int{64}` as an
+i32 gives it a *machine* it did not ask for, on a compile that exits 0. `TypeMapper::map` now returns
+`nullopt` for any type carrying an annotation, and `spell` renders it — `int{64}`, `int{...}` for a
+non-constant one, `&int{32}`, `[int{64}, 2]` — so the reader is told which spelling was refused. One
+check covers every role because every role goes through that one function; eleven tests measure the
+eight (variable, parameter, return, struct field, pointee, array element, cast target, global), the
+positive without the annotation, the non-constant spelling, and that no object is written.
+
+Note the asymmetry this uncovered: a width **alias** (`type u64 = uint{64}`) already refused, for an
+unrelated reason — codegen does not resolve aliases. So the alias sites in `lib/std/types.fin` and
+`stdlib/memory.fin` were never the miscompile. The **direct** spellings were.
+
+**(c) `prototype<K, V>` lowers as `{ [K], [V] }`.** Derived, not chosen:
+`tests/samples/stdlib/prototypes.fin` is normative and says `prtp.0` is the keys and `prtp.1` the
+values; the analyzer already types those two as `[K]` and `[V]` (`Analyzer_Expr.cpp`, the positional
+path); and a dynamic `[T]` is ADR 0025's `{ptr, len}`, which lowers. Anything else would make `.0`
+*build* an array at a size only a run time knows. Each half is built through the same
+`llvm::StructType::get` shape `mapArray` produces, so LLVM uniques it and `p.0` assigns to an
+`[int]` — which is what `APrototypeHalfIsADynamicArrayAndAssignsToOne` measures, and what would fail
+if the two ever built the pair differently.
+
+What is in: `CgType::Kind::Prototype` with `keys`/`values`, `mapPrototype`, the literal (two
+`buildDynamicArray` calls, all keys then all values, in written order), the `.0`/`.1` projection both
+through an address and out of a value with no home, and the variable, parameter, return, struct-field
+and bare-global roles. `visit(ArrayLiteral&)`'s dynamic branch was factored into
+`buildDynamicArray(node, type, elements)` so the prototype literal builds its halves through the same
+code — two copies would be two allocation rules and two pair layouts that agree only today. That
+factoring also fixed a nested literal: a `prototype<int, [int]>`'s values are array literals and were
+refused for want of a hint, in a program whose author wrote no array declaration to be missing.
+
+Every uncovered case refuses with its open question named:
+
+| Refused | The question behind it |
+| --- | --- |
+| `p[10]`, `p[11] = 2.5` | an equality over an arbitrary key type and a search — prototype *access*, `prototype_test.fin`'s own note; the store also has to grow both buffers |
+| `{int}`, `{int, float, char}` | the analyzer accepts both and defaults a missing half to `any`; which of "the value is `any`", "it is a set" and "it is an error" Fin means is unruled |
+| `{object, object}`, `{int, any}` | no representation for an erased value, so none for an array of them — the same refusal a bare `let v <any>;` gets |
+| a literal with no declared type | `{ 10: 1.5 }` is not `prototype<int, float>` by inspection; `<{long, double}>` accepts the same text |
+| an extern parameter, a C variadic argument | there is no C type the pair-of-pairs is the ABI of |
+| a global with a literal initialiser | the initialiser is a malloc and two stores, and where a global's run-time initialiser runs is open; the bare declaration lowers, which is the pair that says so |
+| `p.2` | the backend checks the position against 2 as well, so the two ends agree without depending on each other |
+
+`prototype_test.fin` and `stdlib/prototypes.fin` both stay CODEGEN_REFUSED and neither is refused for
+storage any more: the first is `{object, object}` and `a.rm("b")`, the second `a return of type
+'$type'` (item 8). Adding a `Kind` was safe to do: exactly two switches over it exist (`cgDisplay`,
+`describe`), both were updated, and there is no `-Wswitch`/`-Werror`.
+
+**The corpus at `HEAD`, all 51 measured** — 22 OBJECT_CLEAN, 9 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
+The nine, with their first refusal re-measured here:
+
+```
+deeptest4.fin             a call with explicit generic arguments
+generics_interfaces.fin   the erasure marker 'Castable' on 'T' of a generic function
+interfaces.fin            a call to the method 'to_string' on struct 'User'
+lambdas.fin               a variable of type 'fn<...>(T) -> T'
+loops.fin                 a 'foreach' loop
+readonly.fin              the attribute 'debug' on field 'v1' of struct 'MyClass'
+stdlib/hashmap.fin        struct 'HashMapError' inheriting 'Error', which is not a struct this file lowered
+stdlib/prototypes.fin     a return of type '$type'
+type_annotations.fin      a variable of type 'int{64}'
+```
+
+Only the last line changed from `132aed7`, and it changed *within* the same bucket. **Nothing
+regressed:** no sample moved to a worse bucket, and the same 22 reach an object.
+
 ### Movement since `43b3324`
 
 `43b3324` measured 14 / 15 / 21 of 50 with a suite of 1344. The five commits between it and
@@ -787,7 +881,7 @@ write, and writes the file only at the very end — so a failed assertion change
 
 The 17 samples that reach codegen and are blocked by exactly one refusal each, measured at
 `91312b8`. This list **is** the work queue for the backend, but **read §4's re-measurements
-first**: it is **nine** samples at `132aed7`, and six of them report something other than what
+first**: it is **nine** samples at `HEAD`, and seven of them report something other than what
 the block below says. The numbered items keep their old titles for continuity; the corrections are
 in their text.
 
@@ -922,15 +1016,32 @@ Recommended order — cheapest first, and each one unblocks the next:
    **`letssee.fin`'s printed numbers are wrong for a reason in the sample**: `@define sqrt(f: float)`
    against libm's `double sqrt(double)`. §4 has the two probes that isolate it; it is a ruling
    (§8), not a lowering.
-7. **Variable types:** `[int]` (`arrays_enums.fin`) — **blocked on an owner ruling for the
-   representation of a dynamic `[T]`**; `prototype<int, float>` (`type_annotations.fin`).
+7. ~~**Variable types**~~ — **done at `HEAD` (2026-08-31), and no sample moved: the corpus is still
+   22 / 9 / 20.** See §4, "The prototype and the width annotation". **Both halves of this item's text
+   were stale.** The `[int]` half says it is blocked on an owner ruling for the representation of a
+   dynamic `[T]`; §8 records that ruling as made on 2026-08-27, ADR 0025's `{ptr, len}` is implemented
+   end to end, and `arrays_enums.fin` has been OBJECT_CLEAN for several commits. So only the prototype
+   was left, and `prototype<K, V>` now lowers as `{ [K], [V] }` — two dynamic arrays side by side,
+   derived from `stdlib/prototypes.fin`'s normative `prtp.0`/`prtp.1` and from the types the analyzer
+   already gives them. Storage, construction, both projections and the variable, parameter, return,
+   struct-field and bare-global roles are in; key **lookup** is not, and refuses rather than answering
+   with element 0 — that is prototype *access* (`prototype_test.fin`'s note) and a unit of its own.
+   **A third thing landed with it and belongs to item 9, not here:** a **bit-width annotation now
+   refuses** instead of being dropped. `int{64}` used to build an object and emit an i32, which is a
+   *machine* the program did not ask for on a compile that exited 0, so it was fixed rather than
+   booked. That is why `type_annotations.fin` is still CODEGEN_REFUSED: its first refusal moved from
+   the prototype at `:14` to `int{64}` at `:5`. Real widths remain item 9's.
 8. Then, in any order: the address-of-a-value-with-no-home ruling (`variables.fin`); the
    empty-struct ruling (`blame_assert.fin`'s `M<int>`); type aliases (`extern_as.fin` — also the
-   blocker for the corpus's own `<T: Number>` spelling); `[T]`/`$type` returns
-   (`stdlib/prototypes.fin`); `foreach` (`loops.fin`); lambdas and `fn` parameter types
-   (`functions.fin`, `lambdas.fin`); the erasure marker (`generics_interfaces.fin`, ADR 0002).
+   blocker for the corpus's own `<T: Number>` spelling, and the reason a width *alias* refuses
+   independently of item 9); `[T]`/`$type` returns (`stdlib/prototypes.fin` — its first refusal, and
+   the last thing between that sample and an object now that its `{any, any}` parameters are not the
+   block); `foreach` (`loops.fin`); lambdas and `fn` parameter types (`functions.fin`,
+   `lambdas.fin`); the erasure marker (`generics_interfaces.fin`, ADR 0002).
 9. After the corpus: the struct ABI classifier, `blame`/`try`/`catch`, the payload-carrying
-   tagged-union enum, bit-width annotations (`int{64}`).
+   tagged-union enum, **real** bit-width annotations (`int{64}`) — which is now a narrowing to
+   implement rather than a miscompile to stop, because the annotation refuses as of `HEAD`; it is
+   also `type_annotations.fin`'s first refusal and so the sample's remaining blocker.
 
 ### The generic-methods unit — landed, and what it did not do
 

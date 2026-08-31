@@ -674,6 +674,70 @@ BACKEND_TEST(Soundness_Codegen, ARefusalNamesTheLine) {
 }
 
 // ---------------------------------------------------------------------------
+// Where a variable's refusal is reported.
+//
+// The suite is Soundness_DiagnosticLocation, whose other cases live in
+// test_soundness.cpp; these three belong here because only the backend refuses a
+// written type that the analyzer accepted, so only a codegen probe can ask where
+// that refusal lands.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_DiagnosticLocation, AVariablesRefusalIsLocatedAtTheDeclaration) {
+    // A plain `let` inside a function had no location at all, so its refusal was
+    // reported at 1:1 -- and for every sample in tests/samples that is the `//@`
+    // expectation comment, which is the one line in the file that is not code. The
+    // reader was sent to a comment to find a type written twelve lines below it.
+    //
+    // The cause was in the grammar rather than in the backend: a `let` is reachable
+    // both as a `variable_declaration` statement and as a `declaration_body`, the
+    // two paths carry six duplicated productions each, and only the statement copies
+    // called setLoc (src/parser/parser.y). `any` is the type because it is refused
+    // for a reason that is not waiting on anything -- there is no representation for
+    // a value whose type is unknown at compile time -- so this test cannot quietly
+    // stop testing a location the way ARefusalNamesTheLine above did three times.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let i <int> = 1;\n"
+        "    let v <any>;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type 'any'"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find(".fin:3:5"), std::string::npos) << b.why();
+    EXPECT_EQ(b.compileErr.find(".fin:1:1"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_DiagnosticLocation, AnAttributedVariablesRefusalIsLocatedToo) {
+    // The case that already worked, kept beside the one that did not, because it is
+    // what made the bug hard to see: `annotated_declaration` sets a location over the
+    // attribute list and the declaration together, so an attributed `let` was located
+    // by its wrapper and the identical bare `let` was not. If a later change to the
+    // grammar takes the location back off `declaration_body`, this test keeps passing
+    // and the one above fails -- which is the pair that says where to look.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let i <int> = 1;\n"
+        "    #[slaveof($Fin)] let v <any>;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find(".fin:3:5"), std::string::npos) << b.why();
+    EXPECT_EQ(b.compileErr.find(".fin:1:1"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_DiagnosticLocation, AGlobalsRefusalIsLocatedAtItsOwnLine) {
+    // A module-scope `let` goes through the same six `declaration_body` productions,
+    // and 1:1 is a plausible answer there for the wrong reason: a global on line 1 of
+    // a file really is at 1:1, so a test that put it there would pass with no location
+    // at all. It is on line 2 for that reason.
+    const Built b = build(
+        "let i <int> = 1;\n"
+        "pub let v <any>;\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a global of type 'any'"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find(".fin:2:1"), std::string::npos) << b.why();
+}
+
+// ---------------------------------------------------------------------------
 // Every refusal, not just the first.
 //
 // `finc -c` used to stop at the first construct it could not lower, which made a
@@ -1325,6 +1389,341 @@ BACKEND_TEST(Soundness_Codegen, AnArrayLiteralWithTooFewElementsCannotReachTheBa
     const Built b = build(
         "fun main() <noret> {\n"
         "    let a <[int, 3]> = [1, 2];\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// A prototype is two arrays side by side.
+//
+// `prototype<K, V>` lowers as `{ [K], [V] }` -- the keys in one dynamic array, the
+// values in another, index by index. That is a derivation and not a choice:
+// tests/samples/stdlib/prototypes.fin is normative and says `prtp.0` is the keys and
+// `prtp.1` the values, the analyzer already types those two as `[K]` and `[V]`, and a
+// dynamic `[T]` is ADR 0025's `{ptr, len}`, which lowers today. Choosing anything else
+// would make `.0` *build* an array at a size only a run time knows.
+//
+// What is here is storage, construction and the two projections. Key *lookup* is not:
+// `a[10]` needs an equality over an arbitrary key type and a search over the keys, which
+// is prototype access (tests/samples/prototype_test.fin's own note) and a unit of its
+// own. It refuses rather than answering with element 0.
+
+BACKEND_TEST(Soundness_Codegen, APrototypeLiteralKeepsItsKeysAndValuesInWrittenOrder) {
+    // The pairing is the data structure -- key i belongs to value i -- so this asserts
+    // the *order*, not merely that three of each arrived. A build that sorted the keys,
+    // or that filled the values array from the keys' expressions, passes a length check
+    // and fails this one.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 30: 1.5, 10: 2.5, 20: 3.5 };\n"
+        "    printf(\"%d %d %d\\n\", p.0[0], p.0[1], p.0[2]);\n"
+        "    printf(\"%.1f %.1f %.1f\\n\", p.1[0], p.1[1], p.1[2]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "30 10 20\n1.5 2.5 3.5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, BothHalvesOfAPrototypeHaveTheSameLength) {
+    // `.length` through the projection, which is what makes the two arrays real arrays
+    // rather than two pointers: the length word is in each pair, and reading it is the
+    // same code path `a.length` on an `[int]` takes.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 1: 1.0, 2: 2.0, 3: 3.0, 4: 4.0 };\n"
+        "    printf(\"%d %d\\n\", p.0.length, p.1.length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4 4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeHalfIsADynamicArrayAndAssignsToOne) {
+    // `let k <[int]> = p.0;` -- the projection's type has to *be* the `[K]` the analyzer
+    // says it is, not merely a pair that happens to have the same shape. The assignment
+    // is what checks it: convert() compares llvm types, and a half built by any route
+    // other than the one mapArray uses would be a different llvm::StructType here.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 7: 1.5, 8: 2.5 };\n"
+        "    let k <[int]> = p.0;\n"
+        "    let v <[float]> = p.1;\n"
+        "    printf(\"%d %.1f %d\\n\", k[1], v[1], k.length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "8 2.5 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeIsPassedToAFunctionAndReturnedFromOne) {
+    // The pair-of-pairs by value across both boundaries. A `{ { ptr, i32 }, { ptr, i32 } }`
+    // is an aggregate, and the reason this is a test rather than an assumption is that
+    // the extern boundary refuses aggregates for a reason (AnArrayOnAnExternBoundaryIsRefused);
+    // a Fin-to-Fin call does not, and the two must not be confused.
+    const Built b = build(std::string(kPrintf) +
+        "fun mk() <{int, float}> {\n"
+        "    let q <{int, float}> = { 5: 1.5, 6: 2.5 };\n"
+        "    return q;\n"
+        "}\n"
+        "fun firstKey(p: {int, float}) <int> { return p.0[0]; }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d\\n\", firstKey(mk()), mk().1.length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeWithNoHomeIsProjectedFromTheValue) {
+    // `mk().0` -- a prototype returned by a call is a value with no address, so the half
+    // comes out of the register with extractvalue rather than through a GEP. Paired with
+    // the test above deliberately: that one reads through a variable, this one never has
+    // one, and the two paths in visit(MemberAccess&) are separate code.
+    const Built b = build(std::string(kPrintf) +
+        "fun mk() <{int, float}> {\n"
+        "    let q <{int, float}> = { 11: 1.5, 22: 2.5 };\n"
+        "    return q;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let k <[int]> = mk().0;\n"
+        "    printf(\"%d %d\\n\", k[1], mk().0.length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "22 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeIsAStructFieldAndCopiedWithTheStruct) {
+    // The field is the pair-of-pairs inline, so a struct holding one is stored and read
+    // like any other struct. The copy is a pointer copy of each half's buffer -- which
+    // is exactly what a dynamic `[T]` field already does
+    // (a struct with an `[int]` field lowers today) -- and is asserted rather than
+    // assumed because a reader will ask.
+    const Built b = build(std::string(kPrintf) +
+        "struct Bag {\n"
+        "    data <{int, float}>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Bag> = Bag { data: { 9: 1.5, 8: 2.5 } };\n"
+        "    let c <Bag> = b;\n"
+        "    printf(\"%d %d %.1f\\n\", c.data.0[0], c.data.0.length, c.data.1[1]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9 2 2.5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeWithOneEntryLowers) {
+    // The single-entry case, because one is the length every off-by-one gets right for
+    // the wrong reason and the one a malloc of `sizeof(T) * 1` cannot distinguish from
+    // a malloc of `sizeof(T)`.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 42: 4.5 };\n"
+        "    printf(\"%d %.1f %d\\n\", p.0[0], p.1[0], p.0.length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42 4.5 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADeclaredPrototypeWithNoInitialiserLowers) {
+    // Storage alone: the slot exists and the program compiles. Nothing is read out of
+    // it, because what an uninitialised prototype's halves *contain* is the same open
+    // question an uninitialised `[int]`'s pointer is, and reading one would be asserting
+    // an answer to it.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <{int, float}>;\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.runExit, 0) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeVariableIsCopiedWhenAssignedFromAnother) {
+    // `let q <{int, float}> = p;` -- the pair-of-pairs is a value, so this is a copy of
+    // two pointers and two lengths. Both names then read the same buffers, which is the
+    // same aliasing a dynamic `[T]` copy has and is ADR 0025's, not a new decision.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 3: 1.5, 4: 2.5 };\n"
+        "    let q <{int, float}> = p;\n"
+        "    printf(\"%d %.1f\\n\", q.0[1], q.1[0]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4 1.5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AKeyIsWrittenThroughTheProjection) {
+    // `p.0[1] = 99` -- the projection is an lvalue because the half is addressed, and
+    // the store lands in the heap buffer the literal allocated. This is the write half
+    // of the same address path the read uses, and the two disagreeing would mean a
+    // read-only view of something the program can name.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 3: 1.5, 4: 2.5 };\n"
+        "    p.0[1] = 99;\n"
+        "    p.1[0] = 7.5;\n"
+        "    printf(\"%d %.1f\\n\", p.0[1], p.1[0]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "99 7.5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedLiteralInsideAPrototypeGetsTheHalfsElementType) {
+    // `{ 1: [7, 8] }` -- the value half is an `[[int]]`, so each value expression is an
+    // array literal and needs the element type as its own hint. Without that it refused
+    // with "an array literal with no declared type" in a program whose author wrote no
+    // array declaration to be missing.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, [int]}> = { 1: [7, 8], 2: [9, 10] };\n"
+        "    printf(\"%d %d %d\\n\", p.0[1], p.1[0][1], p.1[1].length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 8 2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeIsAHalfOfAPrototype) {
+    // Recursion through the mapper, which is the property that makes the representation
+    // compositional rather than a special case for scalars: the inner prototype is a
+    // value like any other and its `{ [K], [V] }` sits in the outer values' buffer.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, {int, float}}> = { 1: { 5: 1.5 } };\n"
+        "    printf(\"%d %d\\n\", p.0[0], p.1[0].0[0]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeLiteralWithNoDeclaredTypeIsRefused) {
+    // The negative that pairs with every test above. `{ 10: 1.5 }` is not
+    // `prototype<int, float>` by inspection -- the front end may have typed those
+    // constants against a `<{long, double}>` this file cannot see -- so reading the key
+    // type off the first key is how the two passes come to disagree about a stride.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <auto> = { 10: 1.5 };\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a prototype literal with no declared type"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AKeyLookupOnAPrototypeIsRefused) {
+    // `a[10]` on a prototype is a *search*: it needs an equality over an arbitrary key
+    // type and a walk of the keys. tests/samples/prototype_test.fin calls it prototype
+    // access and it is a unit of its own. What must not happen is answering with element
+    // 10 of the keys array, which is what the ordinary index path would do if a prototype
+    // reached it -- so this refuses rather than compiling to the wrong load.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 10: 1.5 };\n"
+        "    let v <float> = p[10];\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AKeyStoreOnAPrototypeIsRefused) {
+    // The write half of the same question, and the harder one: `p[11] = 2.5` on a key
+    // that is not there has to *grow* both buffers, which is an allocator policy nothing
+    // in the corpus rules on. Refused at the assignment rather than at the index, which
+    // is why it is its own test: the two go through different code.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 10: 1.5 };\n"
+        "    p[11] = 2.5;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeOfAnArityOtherThanTwoIsRefused) {
+    // `{int}` and `{int, float, char}` both parse and both reach here. Which of "the
+    // value is `any`", "it is a set" and "it is an error" Fin means is unruled, and the
+    // representation is two arrays -- so a third half has nowhere to go and a missing one
+    // has no type. Refused with the arity in the spelling, so the reader sees what the
+    // compiler read.
+    const Built one = build("fun main() <noret> { let p <{int}>; }\n");
+    EXPECT_NE(one.compileExit, 0) << one.why();
+    EXPECT_NE(one.compileErr.find("prototype<int>"), std::string::npos) << one.why();
+
+    const Built three = build("fun main() <noret> { let p <{int, float, char}>; }\n");
+    EXPECT_NE(three.compileExit, 0) << three.why();
+    EXPECT_NE(three.compileErr.find("prototype<int, float, char>"),
+              std::string::npos) << three.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeWithAnErasedHalfIsRefused) {
+    // `{object, object}` is what tests/samples/prototype_test.fin:40 writes, and it
+    // refuses for the same reason a bare `let v <any>;` does: there is no representation
+    // for a value whose type is unknown at compile time, so there is none for an array of
+    // them either. This is the half of item 7 that stays refused until `any` has one.
+    const Built b = build("fun main() <noret> { let p <{object, object}>; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("prototype<object, object>"), std::string::npos) << b.why();
+
+    const Built one = build("fun main() <noret> { let p <{int, any}>; }\n");
+    EXPECT_NE(one.compileExit, 0) << one.why();
+    EXPECT_NE(one.compileErr.find("prototype<int, any>"), std::string::npos) << one.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeOnAnExternBoundaryIsRefused) {
+    // The array rule at the third aggregate. A `{ { ptr, i32 }, { ptr, i32 } }` passed by
+    // value to a C function would link cleanly and pass something C never agreed to --
+    // there is no C type this is the ABI of, because ADR 0025's pair is Fin's own.
+    const Built b = build(
+        "@define take(p: {int, float}) <noret>;\n"
+        "fun main() <noret> { let p <{int, float}> = { 1: 1.0 }; take(p); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypePassedToACVariadicIsRefused) {
+    // printf's `...` gives the analyzer nothing to check against, so this reaches the
+    // backend well-typed. What va_arg reads is not an aggregate.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 1: 1.0 };\n"
+        "    printf(\"%d\\n\", p);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeGlobalWithALiteralInitialiserIsRefused) {
+    // A global's initialiser has to be an LLVM constant, and a prototype literal is a
+    // malloc and two stores. That is the same refusal a global `[int]` literal gets and
+    // not a prototype rule: where a run-time initialiser for a global runs -- a
+    // module-init function, and in what order across modules -- is an open question.
+    // The declaration *without* one lowers, which is the pair that says so.
+    const Built b = build("pub let g <{int, float}> = { 1: 1.0 };\n"
+                          "fun main() <noret> {}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+
+    const Built bare = build("pub let g <{int, float}>;\n"
+                             "fun main() <noret> {}\n");
+    EXPECT_EQ(bare.compileExit, 0) << bare.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypesMethodsAreRefusedByTheFrontEnd) {
+    // `a.rm("b")` from tests/samples/prototype_test.fin:24. The analyzer says a prototype
+    // does not have methods, so this never reaches codegen -- asserted here because the
+    // backend's projection path reads `.0` and `.1` and a method name is neither: a
+    // positional test that accepted `rm` would GEP by a position parsed out of nothing.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 1: 1.0 };\n"
+        "    p.rm(1);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APositionPastAPrototypesTwoHalvesIsRefused) {
+    // `p.2`. The front end reports it (`has no member '2'`), and the backend's own path
+    // checks the position against 2 as well rather than against the LLVM struct's arity,
+    // so the two agree without depending on each other. A GEP at index 2 of a two-field
+    // struct is out of bounds.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 1: 1.0 };\n"
+        "    let v <int> = p.2;\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
 }
@@ -7576,6 +7975,157 @@ BACKEND_TEST(KnownDefect_Codegen, AnAliasedGlobalIsRefusedWhereTheNewNameIsRead)
         "fun main() <noret> { printf(\"%d\\n\", myglobv_diffname); }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("'myglobv_diffname'"), std::string::npos) << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// Bit-width annotations: refused, not dropped.
+//
+// `int{64}` is a written width, and nothing in the compiler honours it. The parser
+// attaches the expression to the TypeNode (`base_type LBRACE expression_list
+// RBRACE`), the analyzer walks it for its own side effects and hands back the
+// *unannotated* type (Analyzer_Core.cpp:393), and the layout pass and this backend
+// both then answer about the base name -- so `uint{8}` accepts -1, lays out as four
+// bytes, and used to emit an i32. Those front-end halves are booked as
+// KnownDefect_IntegerWidths (test_soundness.cpp) and
+// KnownDefect_Layout.AWidthAnnotationDoesNotChangeTheSize (test_layout.cpp).
+//
+// The backend half was different in kind, which is why it is fixed here rather than
+// booked beside them. A front end that does not narrow gives a program a value it
+// did not ask for; a backend that lowers `int{64}` as an i32 gives it a *machine*
+// it did not ask for, silently, on a compile that succeeds -- and this suite's
+// founding rule is that a construct the backend cannot lower is refused and never
+// skipped. Honouring the width end to end is a unit of its own (docs/HANDOFF.md §6
+// item 9); until it lands, refusing is the only honest answer.
+//
+// Each of these pairs the annotated form against the bare one, because "refused" is
+// only interesting next to evidence that the same shape without the annotation
+// lowers and runs: a refusal both ways would mean the annotation was not what
+// stopped it. When widths land, every negative here inverts into a positive that
+// asserts the width itself, and the pairs are already written to hold that.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAVariableIsRefused) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> { let x <int{64}> = 10; printf(\"%d\\n\", x); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    // The annotation is in the spelling, because the `int` half of this type is not
+    // the problem -- a refusal reading "a variable of type 'int'" would point the
+    // reader at the one part of the line that lowers.
+    EXPECT_NE(b.compileErr.find("a variable of type 'int{64}'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TheSameVariableWithoutTheAnnotationLowers) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> { let x <int> = 10; printf(\"%d\\n\", x); }\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_EQ(b.out, "10\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANonConstantWidthAnnotationIsRefusedAndSaidToBeOne) {
+    // tests/samples/type_annotations.fin:8 -- `let z <int{8 * 8}> = 42;`. The width is
+    // an arithmetic expression, folded nowhere, so there is no number to print and the
+    // spelling says `{...}`: the same thing ASTPrinter says, for the same reason. It
+    // still distinguishes an annotated type from a bare one, which is what the reader
+    // needs from it here.
+    const Built b = build(
+        "fun main() <noret> { let z <int{8 * 8}> = 42; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type 'int{...}'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAParameterIsRefused) {
+    const Built b = build(std::string(kPrintf) +
+        "fun f(x: int{64}) <void> { printf(\"%d\\n\", x); }\n"
+        "fun main() <noret> { f(7); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a parameter of type 'int{64}'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAReturnIsRefused) {
+    const Built b = build(std::string(kPrintf) +
+        "fun f() <int{64}> { return 7; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", f()); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a return of type 'int{64}'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAStructFieldIsRefused) {
+    // The shape tests/samples/enums.fin:8 writes as a payload and test_layout.cpp:806
+    // measures as a field: `uint{8}` is one byte written and four bytes laid out.
+    // Refusing the field is what stops a struct from being *emitted* at that wrong
+    // size, which a program can observe through sizeof and through every offset after
+    // it -- an ABI, not a value.
+    const Built b = build(std::string(kPrintf) +
+        "struct S { pub a <uint{8}>, }\n"
+        "fun main() <noret> { let s <S>; printf(\"ok\\n\"); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a struct field of type 'uint{8}'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAPointeeIsRefused) {
+    // tests/samples/type_annotations.fin:11 -- `let p <*int{32}> = &x;`. The mapper
+    // reaches an annotated pointee through mapPointer rather than at the top, so this
+    // is the case a check written only for an undecorated type would miss. `&` is how
+    // the spelling renders every pointer, `*int{32}` included.
+    const Built b = build(
+        "fun main() <noret> { let x <int> = 1; let p <*int{32}> = &x; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type '&int{32}'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAnArrayElementIsRefused) {
+    // Reached through mapArray's element, the other decorated door into the mapper.
+    // An array is where a dropped width is worst: the element width is the stride, so
+    // an `[int{64}, 2]` emitted as two i32s is not merely narrow, it is a different
+    // amount of memory than the program reserved.
+    const Built b = build(
+        "fun main() <noret> { let a <[int{64}, 2]>; }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type '[int{64}, 2]'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnACastTargetIsRefused) {
+    // A cast is the one role where the width is the entire request: `cast<int{64}>(x)`
+    // asks for a 64-bit value and nothing else, so lowering it as an i32 answered a
+    // question nobody asked while looking like it had answered theirs.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> { let x <int> = 1; printf(\"%d\\n\", cast<int{64}>(x)); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a cast of type 'int{64}'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAGlobalIsRefused) {
+    const Built b = build(std::string(kPrintf) +
+        "let g <int{64}> = 7;\n"
+        "fun main() <noret> { printf(\"%d\\n\", g); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a global of type 'int{64}'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ARefusedWidthAnnotationWritesNoObject) {
+    // The rule the refusal exists to keep: a program whose widths the backend cannot
+    // honour produces nothing, so no later build step can pick up an object that
+    // computes in the wrong precision.
+    fs::path src = uniqueTempPath("fin_ann", ".fin");
+    fs::path obj = uniqueTempPath("fin_ann", ".o");
+    {
+        std::ofstream f(src, std::ios::binary);
+        f << "fun main() <noret> { let x <int{64}> = 10; }\n";
+    }
+    const FincRun r = runFinc({"-c", src.string(), "-o", obj.string()});
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_FALSE(fs::exists(obj)) << "an object was written for a refused compile";
+    std::error_code ec;
+    fs::remove(src, ec);
+    fs::remove(obj, ec);
 }
 
 // ---------------------------------------------------------------------------

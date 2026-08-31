@@ -584,14 +584,27 @@ declaration_body:
         $$ = std::move($6);
         $$->setLoc(@$);
     }
+    /* The same six forms `variable_declaration` below has, and they are duplicated
+       because a `let` is reachable two ways: as a statement, and as a
+       `declaration_body` that `pub`, `priv` or an attribute list may precede. The
+       copies here are the ones a plain `let` inside a function goes through, and
+       they had no setLoc -- so a diagnostic reported at the *declaration* rather
+       than at its type landed at 1:1, which for every sample is its `//@` line.
+       `#[slaveof($Fin)] let p <...>` was located and a bare `let p <...>` was not,
+       because `annotated_declaration` sets a location over the whole thing and the
+       bare path had nothing to fall back on. Held by Soundness_DiagnosticLocation
+       .AVariablesRefusalIsLocatedAtTheDeclaration in tests/test_codegen.cpp. */
     | KW_LET IDENTIFIER LT type GT EQUAL expression SEMICOLON {
         $$ = std::make_unique<fin::VariableDeclaration>(true, $2, std::move($4), std::move($7));
+        $$->setLoc(@$);
     }
     | KW_CONST IDENTIFIER LT type GT EQUAL expression SEMICOLON {
         $$ = std::make_unique<fin::VariableDeclaration>(false, $2, std::move($4), std::move($7));
+        $$->setLoc(@$);
     }
     | KW_LET IDENTIFIER LT type GT SEMICOLON {
         $$ = std::make_unique<fin::VariableDeclaration>(true, $2, std::move($4), nullptr);
+        $$->setLoc(@$);
     }
     /* Nullable variable, `let x? <A>` -- tests/samples/nullifier.fin:27, :34, :39.
        `_` is an ordinary IDENTIFIER to the lexer, so `let _? <int>` needs no
@@ -599,14 +612,17 @@ declaration_body:
     | KW_LET IDENTIFIER QUESTION LT type GT EQUAL expression SEMICOLON {
         $5->is_nullable = true;
         $$ = std::make_unique<fin::VariableDeclaration>(true, $2, std::move($5), std::move($8));
+        $$->setLoc(@$);
     }
     | KW_LET IDENTIFIER QUESTION LT type GT SEMICOLON {
         $5->is_nullable = true;
         $$ = std::make_unique<fin::VariableDeclaration>(true, $2, std::move($5), nullptr);
+        $$->setLoc(@$);
     }
     | KW_CONST IDENTIFIER QUESTION LT type GT EQUAL expression SEMICOLON {
         $5->is_nullable = true;
         $$ = std::make_unique<fin::VariableDeclaration>(false, $2, std::move($5), std::move($8));
+        $$->setLoc(@$);
     }
     | type_definition { $$ = std::move($1); }
     ;
