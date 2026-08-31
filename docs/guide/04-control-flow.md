@@ -78,10 +78,18 @@ fun main() <noret> {
 }
 ```
 
+The parentheses are optional in both forms — `foreach element <int> in a { … }` is the same
+loop.
+
 Note the annotation syntax on the bindings — `element <int>`, in angle brackets, the same
-as a `let`. `foreach` type-checks but is not yet lowered to machine code, so a program using
-it will not build with `-o`; the three-clause `for` over `array.length` is the form that
-runs today.
+as a `let`. The binding is a copy of the element, and the index counts from 0 in step with it,
+so `element == a[idx]` holds at every step.
+
+`foreach` walks an array and nothing else: a struct, a prototype, a string or a number is
+refused rather than walked, because there is no iteration protocol in Fin. A `prototype`'s
+halves *are* arrays, so `foreach (k <int> in p.0)` walks its keys. The binding's written type
+has to be the element's own type — nothing widens `int` to `long` here, and a mismatch is
+refused rather than converted.
 
 ## `while` and `do`/`while`
 

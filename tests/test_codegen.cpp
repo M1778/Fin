@@ -762,17 +762,23 @@ BACKEND_TEST(Soundness_DiagnosticLocation, AGlobalsRefusalIsLocatedAtItsOwnLine)
 // by a filter applied afterwards.
 
 BACKEND_TEST(Soundness_Codegen, TwoIndependentUnloweredDeclarationsAreBothReported) {
-    // The whole point, at the coarsest grain that has it: a class declaration and a
-    // `foreach` in a different function share nothing, so reporting one and stopping
-    // hides a whole unit of work from anyone reading the output.
+    // The whole point, at the coarsest grain that has it: a refused declaration and a
+    // refused statement in a different function share nothing, so reporting one and
+    // stopping hides a whole unit of work from anyone reading the output.
+    //
+    // The first probe was a `foreach`, which lowers now. A generic `fn` type replaces it
+    // for the reason the two cascade tests below already give: it is a *declaration*
+    // that refuses, which is what this test's name is about, and it refuses on a type
+    // this file maps rather than on a feature that might land next week.
     const Built b = build(
-        "fun f() <noret> { let a <[int, 3]> = [1,2,3]; foreach (e <int> in a) { } }\n"
+        "fun f() <noret> { let a <fn<T>(m: T) -> T>; }\n"
         "fun g(v: int) <noret> { m1778; }\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
     EXPECT_NE(b.compileErr.find("'m1778'"), std::string::npos) << b.why();
-    EXPECT_NE(b.compileErr.find("'foreach' loop"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type 'fn<...>(T) -> T'"),
+              std::string::npos) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, TwoUnloweredFunctionBodiesAreBothReported) {
@@ -787,13 +793,18 @@ BACKEND_TEST(Soundness_Codegen, TwoUnloweredFunctionBodiesAreBothReported) {
     // about: an expression statement that declares no name, so nothing after it can be a
     // cascade. ADR 0001 fixes its meaning ("not implemented"), so it is a construct that
     // will never stop being refused, which makes it a stabler probe than any feature.
+    //
+    // The first statement was a `foreach` until `foreach` lowered, and a key lookup into
+    // a prototype replaces it on the same reasoning: an expression statement, declaring
+    // nothing, whose refusal is a ruling waiting on an answer (what equality over an
+    // arbitrary key type means) rather than a feature about to land.
     const Built b = build(
-        "fun f() <noret> { let a <[int, 3]> = [1,2,3]; foreach (e <int> in a) { } }\n"
+        "fun f() <noret> { let p <{int, int}> = { 1: 2 }; p[1]; }\n"
         "fun g(v: int) <noret> { m1778; }\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
-    EXPECT_NE(b.compileErr.find("'foreach' loop"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("this index expression"), std::string::npos) << b.why();
     EXPECT_NE(b.compileErr.find("'m1778'"), std::string::npos) << b.why();
 }
 
@@ -803,7 +814,7 @@ BACKEND_TEST(Soundness_Codegen, CollectingRefusalsStillWritesNoObject) {
     // artifact": a stale or partial object is a link against code that was refused.
     const fs::path obj = uniqueTempPath("fin_obj_multi", ".o");
     const Compiled c = compileOnly(
-        "fun f() <noret> { let a <[int, 3]> = [1,2,3]; foreach (e <int> in a) { } }\n"
+        "fun f() <noret> { let p <{int, int}> = { 1: 2 }; p[1]; }\n"
         "fun g(v: int) <noret> { m1778; }\n"
         "fun main() <noret> { let i <int> = 1; }\n", obj);
     EXPECT_NE(c.exitCode, 0) << c.why();
@@ -818,7 +829,7 @@ BACKEND_TEST(Soundness_Codegen, EachCollectedRefusalStillNamesItsOwnLine) {
     // The two here are eight lines apart, so a location that was reused or left default
     // would show up as the same line twice.
     const Built b = build(
-        "fun f() <noret> { let a <[int, 3]> = [1,2,3]; foreach (e <int> in a) { } }\n"
+        "fun f() <noret> { let p <{int, int}> = { 1: 2 }; p[1]; }\n"
         "fun g(v: int) <noret> { m1778; }\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
@@ -835,7 +846,7 @@ BACKEND_TEST(Soundness_Codegen, EachCollectedRefusalStillNamesItsOwnLine) {
 //
 // The rule is narrow and it is about names. The only thing a refused statement can
 // leave for a later one to trip over is a name with no storage behind it: a refused
-// `foreach`, a refused `m1778` or a refused expression declares nothing. So a refused
+// `m1778` or a refused expression statement declares nothing. So a refused
 // variable declaration poisons its name, a read of a poisoned name stops that statement
 // without reporting anything, and every other refusal in the block is its own finding.
 // A suppressed statement is not silently accepted -- it is not lowered either, and the
@@ -844,21 +855,22 @@ BACKEND_TEST(Soundness_Codegen, EachCollectedRefusalStillNamesItsOwnLine) {
 
 BACKEND_TEST(Soundness_Codegen, TwoIndependentUnloweredStatementsInOneBodyAreBothReported) {
     // Neither statement reads anything the other declares, so both are findings.
-    // `[int, 3]` is a fixed extent and lowers, which is what keeps this case free of
-    // any poisoned name and separates it from the test below.
+    // The declaration above them lowers, which is what keeps this case free of any
+    // poisoned name and separates it from the test below.
     //
-    // `m1778` was a `blame` until `blame`'s assert form lowered; see
-    // TwoUnloweredFunctionBodiesAreBothReported for why it is the replacement.
+    // `m1778` was a `blame` until `blame`'s assert form lowered, and the statement above
+    // it was a `foreach` until `foreach` lowered; see
+    // TwoUnloweredFunctionBodiesAreBothReported for why each replacement was chosen.
     const Built b = build(
         "fun f(v: int) <noret> {\n"
-        "    let a <[int, 3]> = [1,2,3];\n"
-        "    foreach (e <int> in a) { }\n"
+        "    let p <{int, int}> = { 1: 2 };\n"
+        "    p[1];\n"
         "    m1778;\n"
         "}\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
-    EXPECT_NE(b.compileErr.find("'foreach' loop"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("this index expression"), std::string::npos) << b.why();
     EXPECT_NE(b.compileErr.find("'m1778'"), std::string::npos) << b.why();
 }
 
@@ -1726,6 +1738,428 @@ BACKEND_TEST(Soundness_Codegen, APositionPastAPrototypesTwoHalvesIsRefused) {
         "    let v <int> = p.2;\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// `foreach` walks an array by index.
+//
+// A counter of the loop's own, a bound read once before the first iteration, an
+// indexed load into a slot, and an increment `continue` reaches. That is
+// `visit(ForLoop&)`'s shape, which is the point: `foreach` is the spelling that cannot
+// get the bound wrong, where `for (i: int = 0; i < a.length - 1; i++)`
+// (tests/samples/loops.fin:14) demonstrably can.
+//
+// What is iterable is an array and nothing else, and that is a ruling recorded in the
+// library rather than a gap here: `lib/std/collection.fin`:59 and `lib/std/hashmap.fin`
+// :316 both say there is no iteration protocol and that index-based iteration is what
+// those types support. So a struct, a prototype, a string or an integer is refused with
+// that named -- not skipped, and not silently walked as though it had a length.
+//
+// The binding is a *copy* of the element. loops.fin:20 is `blame element == a[idx]`,
+// which fixes the element at `idx` as the element the loop binds and the index as
+// counting from 0 in step with it; a copy is also what makes the one-binding and
+// two-binding spellings the same loop, and the front end refuses an assignment to the
+// binding anyway (`Cannot assign to immutable variable 'e'`), so nothing can observe
+// a write through it.
+//
+// The binding's written type has to *be* the element type. Nothing before the backend
+// checks it -- the analyzer defines both bindings from what was written and never asks
+// the iterable what it yields (KnownDefect_Foreach.ABindingTypeIsNeverCheckedAgainst
+// TheIterable) -- so `foreach (e <string> in a)` over an `[int]` arrives here as a
+// well-typed program, and converting it would read four bytes of an integer as a
+// pointer. Refusing is the only answer that does not invent a front-end rule here.
+
+BACKEND_TEST(Soundness_Codegen, AForeachOverAFixedArrayBindsEveryElementInOrder) {
+    // loops.fin:24 verbatim in shape, over the same `[int, 5]` the sample declares.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 5]> = [1, 2, 3, 4, 5];\n"
+        "    foreach (element <int> in a) {\n"
+        "        printf(\"%d \", element);\n"
+        "    }\n"
+        "    printf(\"\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 3 4 5 \n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachIndexCountsFromZeroInStepWithTheElement) {
+    // loops.fin:19-21's own claim, measured: `element == a[idx]` at every step. The
+    // sample writes it as a `blame`, which aborts on a mismatch; this prints both so a
+    // failure says which pair disagreed rather than only that one did.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 5]> = [10, 20, 30, 40, 50];\n"
+        "    foreach(idx <int>, element <int> in a) {\n"
+        "        printf(\"%d:%d \", idx, element);\n"
+        "        blame element == a[idx];\n"
+        "    }\n"
+        "    printf(\"\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0:10 1:20 2:30 3:40 4:50 \n") << b.why();
+    EXPECT_EQ(b.runExit, 0) << "the sample's own `blame element == a[idx]` fired\n"
+                            << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachOverADynamicArrayReadsItsRunTimeLength) {
+    // The bound is the pair's length word rather than a constant, which is the whole
+    // difference between the two array kinds here. Two arrays of different lengths in
+    // one program, so a bound taken from the wrong one would show up as the wrong count.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int]> = [7, 8, 9];\n"
+        "    let b <[int]> = [1, 2];\n"
+        "    foreach (e <int> in a) { printf(\"%d \", e); }\n"
+        "    foreach (e <int> in b) { printf(\"%d \", e); }\n"
+        "    printf(\"\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 8 9 1 2 \n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachOverAnEmptyArrayRunsItsBodyNoTimes) {
+    // Zero is the boundary the condition has to get right, and it is a boundary both
+    // array kinds have: a `[int, 0]` and a dynamic array built with a zero extent. A
+    // do-while shape -- body first, test after -- would run each of these once.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let z <[int, 0]> = [];\n"
+        "    foreach (e <int> in z) { printf(\"fixed\"); }\n"
+        "    let n <int> = 0;\n"
+        "    let d <[int]> = new [int, n]{};\n"
+        "    foreach (e <int> in d) { printf(\"dynamic\"); }\n"
+        "    printf(\"none\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "none\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, EveryForeachSpellingLowersToTheSameLoop) {
+    // The grammar has four (parser.y, `foreach_loop`): parenthesised or not, one binding
+    // or two. Soundness_Foreach.TheElementBindingIsDefinedInEveryForm holds the front
+    // end to all four, and a lowering that read `index_name` from only the productions
+    // that set it -- or that only ever saw the parenthesised spelling, which is the one
+    // the corpus writes -- would pass every other test here.
+    for (const char* body : {"foreach (e <int> in a) { printf(\"%d\", e); }",
+                             "foreach e <int> in a { printf(\"%d\", e); }",
+                             "foreach (i <int>, e <int> in a) { printf(\"%d\", e); }",
+                             "foreach i <int>, e <int> in a { printf(\"%d\", e); }"}) {
+        const Built b = build(std::string(kPrintf) +
+            "fun main() <noret> {\n"
+            "    let a <[int, 3]> = [4, 5, 6];\n"
+            "    " + body + "\n"
+            "    printf(\"\\n\");\n"
+            "}\n");
+        ASSERT_TRUE(b.ran) << body << "\n" << b.why();
+        EXPECT_EQ(b.out, "456\n") << body << "\n" << b.why();
+    }
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachBindsACopyAndNotTheElementItself) {
+    // The array is written *through the index* inside the loop and the binding keeps the
+    // value it was given, which is what says the binding is a copy loaded once per
+    // iteration rather than an alias of the slot. It also pins the direction of travel:
+    // clearing `a[i]` as the loop passes it would change what a later iteration reads if
+    // the loop walked backwards, and the printed values would not be the written ones.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 4]> = [10, 20, 30, 40];\n"
+        "    foreach (i <int>, e <int> in a) {\n"
+        "        a[i] = 0;\n"
+        "        printf(\"%d \", e);\n"
+        "    }\n"
+        "    printf(\"| %d %d\\n\", a[0], a[3]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10 20 30 40 | 0 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, BreakAndContinueInsideAForeachReachItsOwnTargets) {
+    // `continue` goes to the increment and not to the condition -- a `continue` that
+    // skipped the step would hang here, which is the one failure this file cannot let
+    // through, because a hung test is not a failed one. `break` leaves the loop rather
+    // than the enclosing one.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 5]> = [1, 2, 3, 4, 5];\n"
+        "    foreach (i <int>, e <int> in a) {\n"
+        "        if (i == 1) { continue; }\n"
+        "        if (e == 4) { break; }\n"
+        "        printf(\"%d \", e);\n"
+        "    }\n"
+        "    printf(\"\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 3 \n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedForeachKeepsItsOwnCounterAndBinding) {
+    // Two loops over one array, the inner one inside the outer's body. A shared counter
+    // slot -- one alloca reused, or a member rather than a local -- would run the outer
+    // loop once, because the inner would leave the counter at the end.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 2]> = [1, 2];\n"
+        "    foreach (x <int> in a) {\n"
+        "        foreach (y <int> in a) { printf(\"%d%d \", x, y); }\n"
+        "    }\n"
+        "    printf(\"\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "11 12 21 22 \n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachBindingIsScopedToTheLoop) {
+    // The binding is the loop's name and the enclosing body's variable of the same name
+    // is untouched, which is what `pushScope`/`popScope` around the whole statement buys.
+    // A binding registered in the *enclosing* scope would leave `e` holding 7 here.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let e <int> = 99;\n"
+        "    let a <[int, 3]> = [5, 6, 7];\n"
+        "    foreach (e <int> in a) { printf(\"%d \", e); }\n"
+        "    printf(\"| %d\\n\", e);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5 6 7 | 99\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachIndexTakesAnyIntegerWidth) {
+    // The counter is an `int` -- the type `.length` answers with -- and the binding is
+    // whatever integer was written, converted from it. Any width holds a position; a
+    // `char` index over a three-element array is the narrowest case the corpus makes
+    // reachable, and a conversion that sign-extended the wrong way or truncated the
+    // wrong end would show up here rather than in a wide one.
+    for (const char* type : {"int", "long", "uint", "ulong", "char"}) {
+        const Built b = build(std::string(kPrintf) +
+            "fun main() <noret> {\n"
+            "    let a <[int, 3]> = [4, 5, 6];\n"
+            "    foreach (i <" + std::string(type) + ">, e <int> in a) {\n"
+            "        printf(\"%d\", e);\n"
+            "    }\n"
+            "    printf(\"\\n\");\n"
+            "}\n");
+        ASSERT_TRUE(b.ran) << type << "\n" << b.why();
+        EXPECT_EQ(b.out, "456\n") << type << "\n" << b.why();
+    }
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachWalksAnArrayWhereverItLives) {
+    // The iterable is reached through `baseAddress`, which is the same door `a[i]` and
+    // `a.length` use -- so every home an array has is an iterable one, and none of them
+    // needed a case of its own. A global, a parameter, a struct field, and a pointer to
+    // an array (deeptest3.fin:111's rule: the base is dereferenced first), in one program
+    // so that a regression in any of them fails a single test.
+    const Built b = build(std::string(kPrintf) +
+        "struct Bag { xs <[int]> }\n"
+        "let g <[int, 2]> = [1, 2];\n"
+        "fun sum(xs: [int]) <int> {\n"
+        "    let t <int> = 0;\n"
+        "    foreach (e <int> in xs) { t = t + e; }\n"
+        "    return t;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    foreach (e <int> in g) { printf(\"%d\", e); }\n"
+        "    printf(\" %d\", sum([3, 4]));\n"
+        "    let b <Bag> = Bag { xs: [5, 6] };\n"
+        "    foreach (e <int> in b.xs) { printf(\" %d\", e); }\n"
+        "    let a <[int, 2]> = [7, 8];\n"
+        "    let p <&[int, 2]> = &a;\n"
+        "    foreach (e <int> in p) { printf(\" %d\", e); }\n"
+        "    printf(\"\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "12 7 5 6 7 8\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachElementCanBeAnyTypeAnArrayHolds) {
+    // The element is loaded and stored by its own type, so a struct element is a struct
+    // copy and a float element is a float -- neither is a case in the loop. A nested
+    // array is the one worth naming: the binding's type is `[int, 2]`, and iterating the
+    // binding is then an ordinary `foreach` over an array that lives in a frame slot.
+    const Built b = build(std::string(kPrintf) +
+        "struct P { x <int>, y <int> }\n"
+        "fun main() <noret> {\n"
+        "    let ps <[P, 2]> = [P{x: 1, y: 2}, P{x: 3, y: 4}];\n"
+        "    foreach (p <P> in ps) { printf(\"%d%d \", p.x, p.y); }\n"
+        "    let fs <[float, 2]> = [1.5, 2.5];\n"
+        "    foreach (f <float> in fs) { printf(\"%.1f \", f); }\n"
+        "    let rows <[[int, 2], 2]> = [[1, 2], [3, 4]];\n"
+        "    foreach (row <[int, 2]> in rows) {\n"
+        "        foreach (e <int> in row) { printf(\"%d\", e); }\n"
+        "    }\n"
+        "    printf(\"\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "12 34 1.5 2.5 1234\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachWalksAPrototypesHalf) {
+    // `p.0` is a `[K]` and iterating it is iterating a dynamic array -- no prototype case
+    // in the loop, which is what makes the two units one. The keys come back in written
+    // order, which is what APrototypeLiteralKeepsItsKeysAndValuesInWrittenOrder holds.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, float}> = { 30: 1.5, 10: 2.5 };\n"
+        "    foreach (k <int> in p.0) { printf(\"%d \", k); }\n"
+        "    foreach (v <float> in p.1) { printf(\"%.1f \", v); }\n"
+        "    printf(\"\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "30 10 1.5 2.5 \n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AReturnOutOfAForeachBodyLeavesTheFunction) {
+    // The body is walked with the ordinary statement visitor, so a `return` inside it
+    // terminates its block and the loop must not then append a branch to the step --
+    // which would be an LLVM error, not a wrong answer. `terminated()` is what checks it,
+    // and this is the case that reaches it.
+    const Built b = build(std::string(kPrintf) +
+        "fun first_over(a: [int], n: int) <int> {\n"
+        "    foreach (e <int> in a) { if (e > n) { return e; } }\n"
+        "    return -1;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d\\n\", first_over([1, 5, 9], 4), first_over([1, 2], 7));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5 -1\n") << b.why();
+}
+
+// The refusals. Each names the question it is waiting on, and each is paired with the
+// nearest thing that lowers, so what the refusal is *about* is the difference between
+// the two programs and not the whole of either.
+
+BACKEND_TEST(Soundness_Codegen, AForeachOverSomethingThatIsNotAnArrayIsRefused) {
+    // The ruling, not a gap: there is no iteration protocol in Fin
+    // (lib/std/collection.fin:59), so nothing but an array says what it yields. The front
+    // end accepts every one of these -- it never asks the iterable anything, which is
+    // KnownDefect_Foreach.TheIterableIsNeverCheckedForBeingIterable -- so each arrives
+    // here as a well-typed program and the backend is where it stops.
+    //
+    // A prototype is the one worth naming: it *has* two arrays inside it, so walking one
+    // half or the other would be a choice this file is not entitled to make. `p.0` is how
+    // a program says which, and AForeachWalksAPrototypesHalf measures it.
+    for (const char* code : {
+             "fun main() <noret> { foreach (e <int> in 5) { } }\n",
+             "fun main() <noret> { foreach (e <int> in true) { } }\n",
+             "fun main() <noret> { let s <string> = \"ab\";"
+             " foreach (e <char> in s) { } }\n",
+             "struct S { a <int> }\n"
+             "fun main() <noret> { let s <S> = S { a: 1 };"
+             " foreach (e <int> in s) { } }\n",
+             "fun main() <noret> { let p <{int, int}> = { 1: 2 };"
+             " foreach (e <int> in p) { } }\n",
+             "fun main() <noret> { let x <int> = 1; let p <&int> = &x;"
+             " foreach (e <int> in p) { } }\n"}) {
+        const Built b = build(code);
+        EXPECT_NE(b.compileExit, 0) << code << "\n" << b.why();
+        EXPECT_NE(b.compileErr.find("not an array"), std::string::npos)
+            << code << "\n" << b.why();
+    }
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachOverAnArrayWithNoHomeIsRefused) {
+    // Said apart from "not an array", because it sends a reader somewhere else: this one
+    // *is* an array and the gap is that a temporary has no address to index into --
+    // LLVM's extractvalue takes a constant index, so an array that is only a value cannot
+    // be walked at all. The same gap `give()[0]` and `mk().xs[0]` have.
+    //
+    // Paired with the array named by a variable, one line apart, which lowers.
+    const Built refused = build(std::string(kPrintf) +
+        "struct Box { xs <[int, 2]> }\n"
+        "fun mk() <Box> { return Box { xs: [1, 2] }; }\n"
+        "fun main() <noret> { foreach (e <int> in mk().xs) { printf(\"%d\", e); } }\n");
+    EXPECT_NE(refused.compileExit, 0) << refused.why();
+    EXPECT_NE(refused.compileErr.find("no home"), std::string::npos) << refused.why();
+
+    const Built lowered = build(std::string(kPrintf) +
+        "struct Box { xs <[int, 2]> }\n"
+        "fun mk() <Box> { return Box { xs: [1, 2] }; }\n"
+        "fun main() <noret> {\n"
+        "    let b <Box> = mk();\n"
+        "    foreach (e <int> in b.xs) { printf(\"%d\", e); }\n"
+        "    printf(\"\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(lowered.ran) << lowered.why();
+    EXPECT_EQ(lowered.out, "12\n") << lowered.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachBindingOfAnotherTypeThanTheElementIsRefused) {
+    // Nothing before the backend checks this, so refusing it here is what stands between
+    // `foreach (e <string> in a)` over an `[int]` and a program that reads four bytes of
+    // an integer as a pointer. Not converted, even where a conversion exists: `int` into
+    // `long` widens fine as an assignment, but a binding that silently widened would make
+    // `e` a different value from `a[i]` and loops.fin:20 asserts they are the same.
+    for (const char* code : {
+             "fun main() <noret> { let a <[int, 3]> = [1, 2, 3];"
+             " foreach (e <string> in a) { } }\n",
+             "fun main() <noret> { let a <[int, 3]> = [1, 2, 3];"
+             " foreach (e <long> in a) { } }\n",
+             "fun main() <noret> { let a <[float, 2]> = [1.5, 2.5];"
+             " foreach (e <int> in a) { } }\n",
+             "struct A { a <int> }\n"
+             "struct B { a <int> }\n"
+             "fun main() <noret> { let xs <[A, 1]> = [A{a: 1}];"
+             " foreach (e <B> in xs) { } }\n"}) {
+        const Built b = build(code);
+        EXPECT_NE(b.compileExit, 0) << code << "\n" << b.why();
+        EXPECT_NE(b.compileErr.find("elements of another type"), std::string::npos)
+            << code << "\n" << b.why();
+    }
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachBindingOfATypeWithNoRepresentationIsRefused) {
+    // A binding whose written type this file cannot map at all is refused by its type
+    // rather than by the comparison above it, so the message names the type. `<auto>` is
+    // the reachable case and it is a real one: a `let` infers from its initialiser and a
+    // binding has none, so there is nothing to infer from -- inferring the element type
+    // would be a front-end rule, and the front end has not made it.
+    const Built b = build(
+        "fun main() <noret> { let a <[int, 3]> = [1, 2, 3];"
+        " foreach (e <auto> in a) { } }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a 'foreach' binding of type 'auto'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachIndexBindingThatIsNotAnIntegerIsRefused) {
+    // What the index is handed is a position, and only an integer holds one as the number
+    // the body compares against an index (`a[idx]`, loops.fin:20). A `float` would arrive
+    // as 0.0, 1.0, ... and compare equal against an `int` index by conversion, which is a
+    // rule this file would have invented; a `bool` would be true for every element but
+    // the first. Refused rather than converted, and paired with the widths that do work
+    // in AForeachIndexTakesAnyIntegerWidth.
+    for (const char* type : {"float", "double", "bool", "string", "int{8}"}) {
+        const Built b = build(
+            "fun main() <noret> {\n"
+            "    let a <[int, 3]> = [1, 2, 3];\n"
+            "    foreach (i <" + std::string(type) + ">, e <int> in a) { }\n"
+            "}\n");
+        EXPECT_NE(b.compileExit, 0) << type << "\n" << b.why();
+        EXPECT_NE(b.compileErr.find("index binding"), std::string::npos)
+            << type << "\n" << b.why();
+    }
+}
+
+BACKEND_TEST(Soundness_Codegen, AForeachOutsideAFunctionIsRefused) {
+    // A loop at module scope has no frame to put its counter in, and there is no
+    // module initialiser to run it in either -- the same answer every statement outside a
+    // function gets here. Paired with the identical loop inside `main`.
+    const Built refused = build(
+        "let a <[int, 2]> = [1, 2];\n"
+        "foreach (e <int> in a) { }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(refused.compileExit, 0) << refused.why();
+    EXPECT_NE(refused.compileErr.find("outside a function"), std::string::npos)
+        << refused.why();
+
+    const Built lowered = build(std::string(kPrintf) +
+        "let a <[int, 2]> = [1, 2];\n"
+        "fun main() <noret> { foreach (e <int> in a) { printf(\"%d\", e); } }\n");
+    ASSERT_TRUE(lowered.ran) << lowered.why();
+    EXPECT_EQ(lowered.out, "12") << lowered.why();
 }
 
 // ---------------------------------------------------------------------------

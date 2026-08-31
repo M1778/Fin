@@ -5676,7 +5676,211 @@ private:
     void visit(QuoteExpression& node) override { unsupported(node, "a quote"); }
     void visit(ImportModule& node) override { unsupported(node, "an import (the module loader did not consume it)"); }
 
-    void visit(ForeachLoop& node) override { unsupported(node, "a 'foreach' loop"); }
+    // `foreach (e <T> in xs)` walks an array from the front, binding each element to a
+    // copy of it, and the two-binding form binds the position beside it.
+    //
+    // Derived rather than chosen. tests/samples/loops.fin:19 and :24 are the only
+    // `foreach` sites in the corpus and both walk the fixed `[int, 5]` declared at :12,
+    // one in each spelling; :20's body is `blame element == a[idx]`, which fixes three
+    // things at once -- the element at `idx` is the element the loop binds, the index
+    // counts from 0 in step with it, and the binding is a *value* of the element type
+    // rather than a reference (an `int` compares equal to `a[idx]` either way, but only
+    // a copy makes the two spellings at :19 and :24 the same loop). `lib/std/hashmap.fin`
+    // :316 and `lib/std/collection.fin`:59 both record that there is no iteration
+    // protocol and that index-based iteration is what the library types support, so an
+    // array is the whole of what is iterable here and anything else is a refusal with
+    // that ruling named, not a lowering invented for it.
+    //
+    // The shape is `visit(ForLoop&)`'s, because that is what this is: a counter, a
+    // comparison against a bound, an indexed read, and an increment `continue` reaches.
+    // What it adds is that the counter and the bound are the loop's own rather than the
+    // program's, so the two cannot disagree the way `i < a.length - 1` (loops.fin:14)
+    // does with the array it walks.
+    void visit(ForeachLoop& node) override {
+        if (!currentFn_) { unsupported(node, "a 'foreach' outside a function"); return; }
+        if (!node.iterable) { unsupported(node, "a 'foreach' with no iterable"); return; }
+
+        // The bindings live in a scope of their own, exactly as a `for`'s init does:
+        // `element` is the loop's name and not the enclosing body's.
+        pushScope();
+
+        // The iterable is reached once, before any block exists, and for its *address*.
+        //
+        // Once, because the iterable is an expression and may be a call: emitting it in
+        // the condition would call it on every iteration, which is the classic way to
+        // turn a walk of an array into a walk of N fresh arrays.
+        //
+        // Through an address, because indexing needs a home -- the same rule
+        // `visit(ArrayAccess&)` follows (LLVM's extractvalue takes a constant index, so
+        // an array that is only a value cannot be indexed at all). `baseAddress` also
+        // accepts a pointer to an array, which is what makes `foreach` over a
+        // `&[int, 3]` walk the array rather than the pointer, matching `ptr_to_arr[0]`
+        // (deeptest3.fin:111) and `.length` one screen up.
+        std::optional<Addr> seq = baseAddress(*node.iterable, CgType::Kind::Array);
+        if (failed_) { popScope(); return; }
+        if (!seq || !seq->type.isArray() || !seq->type.element ||
+            !seq->type.element->llvmType) {
+            // The two reasons said apart, because they send a reader to different
+            // places: "not an array" is the ruling that there is no iteration protocol,
+            // and "no home" is the same temporary-has-no-address gap `give()[0]` has.
+            // Emitting the iterable again to tell them apart is safe here and is what
+            // `.length` does for the same question: nothing that arrives here has an
+            // address, so nothing was emitted by the attempt above.
+            CgVal v = emit(*node.iterable);
+            const bool isArray = !failed_ && v.ok() &&
+                                 (v.type.isArray() ||
+                                  (v.type.isPointer() && v.type.pointee &&
+                                   v.type.pointee->isArray()));
+            popScope();
+            unsupported(node, isArray ? "a 'foreach' over an array with no home"
+                                      : "a 'foreach' over something that is not an array");
+            return;
+        }
+
+        const CgType element = *seq->type.element;
+
+        // The written binding type has to *be* the element type.
+        //
+        // Nothing before this point checks it -- the analyzer defines both bindings from
+        // their written types and never asks the iterable what it yields
+        // (KnownDefect_Foreach.ABindingTypeIsNeverCheckedAgainstTheIterable) -- so
+        // `foreach (e <string> in a)` over an `[int]` arrives here as a well-typed
+        // program. Converting each element to the written type would make that compile
+        // and read four bytes of an integer as a pointer; refusing it is the only answer
+        // that does not invent a rule the front end has not ruled on. The corpus writes
+        // the element's own type at both sites, so nothing measured needs more.
+        std::optional<CgType> bound = types_.map(node.var_type.get());
+        if (!bound) {
+            popScope();
+            unsupportedType(node, node.var_type.get(), "a 'foreach' binding");
+            return;
+        }
+        if (!sameType(*bound, element)) {
+            popScope();
+            unsupported(node, fmt::format("a 'foreach' binding of type '{}' over "
+                                          "elements of another type",
+                                          typeName(node.var_type.get())));
+            return;
+        }
+
+        // The index binding of the two-binding form. Any integer type, because what it
+        // is handed is a position and every integer width holds one -- and only an
+        // integer, because a position converted to a float or a pointer is not the
+        // number the body compares against an index (`a[idx]`).
+        std::optional<CgType> indexType;
+        if (!node.index_name.empty()) {
+            indexType = types_.map(node.index_type.get());
+            if (!indexType) {
+                popScope();
+                unsupportedType(node, node.index_type.get(), "a 'foreach' index binding");
+                return;
+            }
+            if (indexType->kind != CgType::Kind::Int || indexType->isBool) {
+                popScope();
+                unsupported(node, fmt::format("a 'foreach' index binding of type '{}'",
+                                              typeName(node.index_type.get())));
+                return;
+            }
+        }
+
+        // The counter is a signed `int`, which is the type `.length` answers with
+        // (Soundness_Members.ALengthIsAnIntAndNotAnotherIntegerWidth) and the type a
+        // dynamic array's length word already is. One type for the counter and the
+        // bound, so the comparison needs no conversion and cannot acquire a signedness
+        // this file did not choose.
+        const CgType counterType = types_.intType(32, true);
+
+        // A fixed array's extent is a constant of its type; a dynamic array's length is
+        // a word in its pair. Either way it is read *once*, before the loop -- a fixed
+        // extent cannot be re-read (there is nothing to re-read) and making the two
+        // kinds disagree about whether the bound is live would mean `foreach` over
+        // `[int, 3]` and over `[int]` were two loops. A body that replaces the array it
+        // is walking therefore keeps walking the one it started with; the corpus writes
+        // no such body, and the day it does is the day this is a ruling rather than a
+        // consequence.
+        llvm::Value* limit = nullptr;
+        llvm::Value* data = nullptr;  // the dynamic pair's element pointer, or null
+        if (seq->type.isDynamicArray) {
+            llvm::Value* pair = builder_.CreateLoad(seq->type.llvmType, seq->ptr, "array");
+            data = builder_.CreateExtractValue(pair, {0}, "data");
+            limit = builder_.CreateExtractValue(pair, {1}, "length");
+        } else {
+            // An extent past what an `int` holds would be truncated into a bound that
+            // walks the wrong number of elements, and silently. `.length` on such an
+            // array already misreports it -- that is one defect -- and a loop that runs
+            // the wrong count would be a second and a worse one.
+            if (seq->type.extent > 0x7fffffffull) {
+                popScope();
+                unsupported(node, "a 'foreach' over an array with more elements than an "
+                                  "'int' can count");
+                return;
+            }
+            limit = llvm::ConstantInt::get(counterType.llvmType,
+                                           (uint64_t)seq->type.extent, true);
+        }
+
+        // The three slots, before the loop rather than inside it: an alloca in the body
+        // is a fresh frame slot on every iteration.
+        auto* counter = builder_.CreateAlloca(counterType.llvmType, nullptr, "foreach.i");
+        builder_.CreateStore(llvm::ConstantInt::get(counterType.llvmType, 0), counter);
+        auto* elementSlot = builder_.CreateAlloca(element.llvmType, nullptr, node.var_name);
+        llvm::AllocaInst* indexSlot = nullptr;
+        if (indexType) {
+            indexSlot = builder_.CreateAlloca(indexType->llvmType, nullptr, node.index_name);
+        }
+        // Ordinary locals from here on, which is what makes the body's reads of them
+        // the same code any other read of a local is.
+        scopes_.back()[node.var_name] = Local{elementSlot, element};
+        if (indexType) scopes_.back()[node.index_name] = Local{indexSlot, *indexType};
+
+        auto* condBB = llvm::BasicBlock::Create(ctx_, "foreach.cond", currentFn_->fn);
+        auto* bodyBB = llvm::BasicBlock::Create(ctx_, "foreach.body", currentFn_->fn);
+        auto* stepBB = llvm::BasicBlock::Create(ctx_, "foreach.step", currentFn_->fn);
+        auto* endBB = llvm::BasicBlock::Create(ctx_, "foreach.end", currentFn_->fn);
+
+        builder_.CreateBr(condBB);
+        builder_.SetInsertPoint(condBB);
+        llvm::Value* at = builder_.CreateLoad(counterType.llvmType, counter, "i");
+        builder_.CreateCondBr(builder_.CreateICmpSLT(at, limit, "foreach.more"), bodyBB,
+                              endBB);
+
+        builder_.SetInsertPoint(bodyBB);
+        llvm::Value* i = builder_.CreateLoad(counterType.llvmType, counter, "i");
+        // Widened to i64 before it becomes a GEP index, and sign-extended because the
+        // counter is signed -- the same two lines `emitAddress`'s index path writes, and
+        // for the same reason: a single-index GEP on an array pointer strides by the
+        // whole array, so a fixed array needs the leading zero and a dynamic one, whose
+        // pointer is already to an element, must not have it.
+        llvm::Value* wide = builder_.CreateSExt(i, builder_.getInt64Ty());
+        llvm::Value* elementPtr =
+            data ? builder_.CreateInBoundsGEP(element.llvmType, data, wide, "elem")
+                 : builder_.CreateInBoundsGEP(seq->type.llvmType, seq->ptr,
+                                              {builder_.getInt64(0), wide}, "elem");
+        builder_.CreateStore(builder_.CreateLoad(element.llvmType, elementPtr, "element"),
+                             elementSlot);
+        if (indexSlot) {
+            llvm::Value* stored = convert(node, CgVal{i, counterType}, *indexType);
+            if (!stored) { popScope(); return; }
+            builder_.CreateStore(stored, indexSlot);
+        }
+
+        // `continue` goes to the step, so it advances the counter. Skipping it would be
+        // an infinite loop, and here it would be one with no visible increment to blame.
+        loops_.push_back({stepBB, endBB});
+        if (node.body) node.body->accept(*this);
+        if (!terminated()) builder_.CreateBr(stepBB);
+        loops_.pop_back();
+
+        builder_.SetInsertPoint(stepBB);
+        llvm::Value* next = builder_.CreateAdd(
+            builder_.CreateLoad(counterType.llvmType, counter, "i"),
+            llvm::ConstantInt::get(counterType.llvmType, 1), "next");
+        builder_.CreateStore(next, counter);
+        builder_.CreateBr(condBB);
+
+        builder_.SetInsertPoint(endBB);
+        popScope();
+    }
     // `delete p` returns the allocation. deeptest3.fin:44 says what it is:
     // "(Calls destructor if defined, then frees memory)".
     //

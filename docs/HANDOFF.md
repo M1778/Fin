@@ -118,6 +118,7 @@ was broken.
 | — since `4788753`, at `211c8ab` | **1473 / 1473 pass**, 0 skipped | the namespace-qualified call rewrite; **corpus 20 → 21** |
 | — since `4788753`, at `132aed7` | **1481 / 1481 pass**, 0 skipped | the `::` call's type arguments; **corpus 21 → 22** |
 | — since `4788753`, at `02fba4a` | **1517 / 1517 pass**, 0 skipped | the variable-refusal location, the width-annotation refusal, `prototype<K, V>`; corpus unmoved |
+| — since `4788753`, at `HEAD` | **1537 / 1537 pass**, 0 skipped | `foreach`; corpus unmoved, `loops.fin` refuses 27 lines later |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -776,6 +777,103 @@ type_annotations.fin      a variable of type 'int{64}'
 Only the last line changed from `132aed7`, and it changed *within* the same bucket. **Nothing
 regressed:** no sample moved to a worse bucket, and the same 22 reach an object.
 
+### `foreach` at `HEAD` (2026-08-31) — one of item 8's seven
+
+**No sample moved, and the corpus is still 22 / 9 / 20.** The suite is 1537. `loops.fin` is the
+sample this unit was named for and it is still CODEGEN_REFUSED, **for a different reason and 27 lines
+later**: its first refusal was `a 'foreach' loop` at `:19` and is now `a call to 'recursive'` at
+`:46`. Both `foreach` sites lower; the **nested function declaration** at `:40` does not, and that is
+a construct no §6 item names — it is booked below.
+
+**The lowering is derived from two corpus sites and one library note.** `tests/samples/loops.fin:19`
+and `:24` are the only `foreach` in the corpus, both over the fixed `[int, 5]` declared at `:12`, one
+in each binding form. `:20` is `blame element == a[idx]`, and that single line fixes three things: the
+element the loop binds is the element at `idx`, the index counts from 0 in step with it, and the
+binding is a **copy** of the element rather than an alias (an `int` compares equal either way, but
+only a copy makes the one-binding and two-binding spellings the same loop). `lib/std/collection.fin`
+:59 and `lib/std/hashmap.fin`:316 both record that **there is no iteration protocol** and that
+index-based iteration is what those types support — so an array is the whole of what is iterable, and
+that is a ruling already recorded rather than a gap here.
+
+So the shape is `visit(ForLoop&)`'s, because that is what this is: a counter, a comparison against a
+bound, an indexed load, and an increment `continue` reaches. What it *adds* is that the counter and
+the bound are the loop's own, so the two cannot disagree the way `for (i: int = 0; i < a.length - 1;
+i++)` (`loops.fin:14`, which walks four of five elements) demonstrably can.
+
+Four details are decisions and are worth naming:
+
+- **The iterable is reached once, before any block exists, and for its address.** Once because it is
+  an expression and may be a call — emitting it in the condition would turn a walk of one array into
+  a walk of N fresh ones. Through `baseAddress(iterable, Kind::Array)` because indexing needs a home
+  (LLVM's `extractvalue` takes a constant index, so an array that is only a value cannot be walked at
+  all) and because that one call is what makes **every home an array has** iterable with no case of
+  its own: a local, a global, a parameter, a struct field, a prototype half, and a pointer to an
+  array — `deeptest3.fin:111`'s rule that the base is dereferenced first, the same door `a[i]` and
+  `a.length` already use.
+- **The bound is read once, before the first iteration.** A fixed array's is the constant extent; a
+  dynamic array's is the length word out of ADR 0025's `{ptr, len}`. A body that replaced the array it
+  is walking would keep walking the one it started with. The corpus writes no such body, and the day
+  it does is the day that is a ruling rather than a consequence.
+- **The counter is a signed `int`** — the type `.length` answers with
+  (`Soundness_Members.ALengthIsAnIntAndNotAnotherIntegerWidth`) and the type the pair's length word
+  already is, so the comparison needs no conversion and cannot acquire a signedness this file did not
+  choose. An index binding of any other integer width is converted **from** it, which is why
+  `long`, `uint`, `ulong` and `char` all work.
+- **The binding's written type has to *be* the element type.** Nothing before the backend checks it:
+  the analyzer defines both bindings from what was written and never asks the iterable what it yields
+  (`KnownDefect_Foreach.ABindingTypeIsNeverCheckedAgainstTheIterable`). So `foreach (e <string> in a)`
+  over an `[int]` arrives here as a well-typed program, and *converting* it would read four bytes of
+  an integer as a pointer. Refused — including where a conversion exists, because `<long>` over an
+  `[int]` would make `e` a different value from `a[idx]` and `loops.fin:20` asserts they are the same.
+
+Every uncovered case refuses with its open question named:
+
+| Refused | The question behind it |
+| --- | --- |
+| `foreach (e <int> in 5)`, over a `bool`, a `string`, a struct, a prototype, an `&int` | there is no iteration protocol (`collection.fin`:59): nothing but an array says what it yields. A prototype *contains* two arrays, so walking one would be a choice this file may not make — `p.0` is how a program says which, and it lowers |
+| `foreach (e <int> in mk().xs)` | an array with no home; `extractvalue` takes a constant index, the same gap `give()[0]` has. Named apart from "not an array" because it sends a reader elsewhere |
+| a binding of another type than the element | nothing checks it before here (`KnownDefect_Foreach`), and converting would be a front-end rule invented in the backend |
+| `foreach (e <auto> in a)` | a `let` infers from its initialiser and a binding has none; inferring the element type is the front end's rule to make |
+| an index binding that is not an integer (`float`, `bool`, `string`, `int{8}`) | a position converted to a float compares equal against an `int` index only by conversion; a `bool` would be true for every element but the first |
+| a `foreach` at module scope | no frame for the counter and no module initialiser to run it in — the answer every statement outside a function gets here |
+| an extent past what an `int` counts | `.length` already misreports such an array (one defect); a loop that ran the wrong count would be a second and a worse one |
+
+**Twenty tests, and five existing ones had to change their probe.** Five `Soundness_Codegen` cases
+used `foreach (e <int> in a) { }` as a *construct the backend refuses* while testing something else
+entirely — that refusals are collected across siblings, that each names its own line, that no object
+is written, that a cascade is suppressed. All five went red the moment `foreach` lowered, which is the
+system working: a probe that stops being a refusal stops being a probe. They now use
+`let a <fn<T>(m: T) -> T>;` where the test is about a **declaration** and `p[1]` on a prototype where
+it is about a **statement that declares no name** — the second chosen because its refusal is a ruling
+waiting on an answer (what equality over an arbitrary key type means) rather than a feature about to
+land. The same reasoning `m1778` was chosen by when `blame` lowered, and it is written next to both.
+
+**The corpus at `HEAD`, all 51 measured** — 22 OBJECT_CLEAN, 9 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
+The nine, with their first refusal re-measured here:
+
+```
+deeptest4.fin             a call with explicit generic arguments
+generics_interfaces.fin   the erasure marker 'Castable' on 'T' of a generic function
+interfaces.fin            a call to the method 'to_string' on struct 'User'
+lambdas.fin               a variable of type 'fn<...>(T) -> T'
+loops.fin                 a call to 'recursive'
+readonly.fin              the attribute 'debug' on field 'v1' of struct 'MyClass'
+stdlib/hashmap.fin        struct 'HashMapError' inheriting 'Error', which is not a struct this file lowered
+stdlib/prototypes.fin     a return of type '$type'
+type_annotations.fin      a variable of type 'int{64}'
+```
+
+Only `loops.fin`'s line changed from `02fba4a`, and it changed *within* the same bucket. **Nothing
+regressed:** no sample moved to a worse bucket, and the same 22 reach an object.
+
+**A nested function declaration is not lowered, and nothing booked it.** `loops.fin:40` declares
+`fun recursive(a: int) <int>` *inside* `main` and calls it at `:46`; the call refuses with `a call to
+'recursive'`, because a function declared inside a body is never declared to the module. That is now
+`loops.fin`'s only remaining blocker and it is a unit of its own — the question is whether a nested
+function is a plain module-scope function under another name or a closure over the enclosing frame,
+and the corpus writes one that captures nothing, so the cheap answer is available but is a ruling.
+Added to §6 item 8.
+
 ### Movement since `43b3324`
 
 `43b3324` measured 14 / 15 / 21 of 50 with a suite of 1344. The five commits between it and
@@ -881,7 +979,7 @@ write, and writes the file only at the very end — so a failed assertion change
 
 The 17 samples that reach codegen and are blocked by exactly one refusal each, measured at
 `91312b8`. This list **is** the work queue for the backend, but **read §4's re-measurements
-first**: it is **nine** samples at `02fba4a`, and seven of them report something other than what
+first**: it is **nine** samples at `HEAD`, and eight of them report something other than what
 the block below says. The numbered items keep their old titles for continuity; the corrections are
 in their text.
 
@@ -1036,8 +1134,12 @@ Recommended order — cheapest first, and each one unblocks the next:
    blocker for the corpus's own `<T: Number>` spelling, and the reason a width *alias* refuses
    independently of item 9); `[T]`/`$type` returns (`stdlib/prototypes.fin` — its first refusal, and
    the last thing between that sample and an object now that its `{any, any}` parameters are not the
-   block); `foreach` (`loops.fin`); lambdas and `fn` parameter types (`functions.fin`,
-   `lambdas.fin`); the erasure marker (`generics_interfaces.fin`, ADR 0002).
+   block); ~~`foreach` (`loops.fin`)~~ — **done at `HEAD` (2026-08-31); no sample moved, the corpus is
+   still 22 / 9 / 20, and `loops.fin`'s first refusal moved from `a 'foreach' loop` at `:19` to `a call
+   to 'recursive'` at `:46`** (see §4, "`foreach`"); **a nested function declaration** (`loops.fin:40`
+   declares `fun recursive` inside `main` and the call at `:46` refuses — that is now the sample's only
+   blocker, and it was booked by nothing before this unit measured it); lambdas and `fn` parameter
+   types (`functions.fin`, `lambdas.fin`); the erasure marker (`generics_interfaces.fin`, ADR 0002).
 9. After the corpus: the struct ABI classifier, `blame`/`try`/`catch`, the payload-carrying
    tagged-union enum, **real** bit-width annotations (`int{64}`) — which is now a narrowing to
    implement rather than a miscompile to stop, because the annotation refuses as of `02fba4a`; it is
