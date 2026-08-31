@@ -115,7 +115,7 @@ was broken.
 | — since `4788753`, at `80f4f8e` | **1436 / 1436 pass**, 0 skipped | inherited methods; corpus unmoved |
 | — since `4788753`, at `5d70a6e` | **1448 / 1448 pass**, 0 skipped | implements blocks; **corpus 19 → 20** |
 | — since `4788753`, at `2aa0993` | **1465 / 1465 pass**, 0 skipped | the interface reference's missing tests; corpus unmoved |
-| — since `4788753`, at `HEAD` | **1473 / 1473 pass**, 0 skipped | the namespace-qualified call rewrite; **corpus 20 → 21** |
+| — since `4788753`, at `211c8ab` | **1473 / 1473 pass**, 0 skipped | the namespace-qualified call rewrite; **corpus 20 → 21** |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -436,7 +436,7 @@ inherited test cannot tell "found in a parent" from "at the right offset"), and 
 method (a conversion that spilled the struct into a fresh slot would compile, link, run and print
 `0`).
 
-### The namespace-qualified call at `HEAD` (2026-08-31) — item 5 is done
+### The namespace-qualified call at `211c8ab` (2026-08-31) — item 5 is done
 
 **`complex.fin` lowers to an object, and the corpus is 21 / 10 / 20.** It is the only sample that
 moved; the other 50 kept their bucket line for line. `deeptest4.fin`, which item 5 named as the
@@ -752,7 +752,7 @@ Recommended order — cheapest first, and each one unblocks the next:
    `Undefined type 'T'`), and an interface satisfied by an **inherited** method is still reported
    unimplemented (`Analyzer_Decl.cpp:537`) even though the backend's table already resolves such a
    provider through the hierarchy. Both are front-end work.
-5. ~~**Imports**~~ — **done at `HEAD` (2026-08-31), and `complex.fin` is OBJECT_CLEAN: the corpus
+5. ~~**Imports**~~ — **done at `211c8ab` (2026-08-31), and `complex.fin` is OBJECT_CLEAN: the corpus
    is 21 / 10 / 20.** The queue's own instruction is what was built. The analyzer rewrites a
    namespace-qualified `MethodCall` into a plain `FunctionCall` on the member's own name
    (`SemanticAnalyzer::lowerModuleCall`, left on the node in `MethodCall::resolved_call`), and
