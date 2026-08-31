@@ -116,7 +116,7 @@ was broken.
 | — since `4788753`, at `5d70a6e` | **1448 / 1448 pass**, 0 skipped | implements blocks; **corpus 19 → 20** |
 | — since `4788753`, at `2aa0993` | **1465 / 1465 pass**, 0 skipped | the interface reference's missing tests; corpus unmoved |
 | — since `4788753`, at `211c8ab` | **1473 / 1473 pass**, 0 skipped | the namespace-qualified call rewrite; **corpus 20 → 21** |
-| — since `4788753`, at `HEAD` | **1481 / 1481 pass**, 0 skipped | the `::` call's type arguments; **corpus 21 → 22** |
+| — since `4788753`, at `132aed7` | **1481 / 1481 pass**, 0 skipped | the `::` call's type arguments; **corpus 21 → 22** |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -556,7 +556,7 @@ and behind it sits the imported-declaration gap above — `HashMap` is declared 
 `lib/std/hashmap.fin` and nothing puts a module's struct into the root program — so what it refuses
 *after* explicit generic arguments lower is unmeasured.
 
-### The `::` call's type arguments at `HEAD` (2026-08-31) — item 6 is done
+### The `::` call's type arguments at `132aed7` (2026-08-31) — item 6 is done
 
 **`letssee.fin` lowers to an object, and the corpus is 22 / 9 / 20.** It is the only sample that
 moved; the other 50 kept their bucket. The suite is 1481.
@@ -664,7 +664,7 @@ specification (ADR 0008), so this is a measurement to record and not a sample to
 wants is either implicit float→double promotion at a vararg/extern boundary or a ruling that
 `@define` must match the C declaration, and both are §8's.
 
-**The corpus at `HEAD`, all 51 measured** — 22 OBJECT_CLEAN, 9 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
+**The corpus at `132aed7`, all 51 measured** — 22 OBJECT_CLEAN, 9 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
 The nine, with their first refusal re-measured here:
 
 ```
@@ -787,7 +787,7 @@ write, and writes the file only at the very end — so a failed assertion change
 
 The 17 samples that reach codegen and are blocked by exactly one refusal each, measured at
 `91312b8`. This list **is** the work queue for the backend, but **read §4's re-measurements
-first**: it is **nine** samples at `HEAD`, and six of them report something other than what
+first**: it is **nine** samples at `132aed7`, and six of them report something other than what
 the block below says. The numbered items keep their old titles for continuity; the corrections are
 in their text.
 
@@ -904,7 +904,7 @@ Recommended order — cheapest first, and each one unblocks the next:
    `codegen: a call with explicit generic arguments is not lowered yet` at `:11`,
    `let a <auto> = HashMap::<string, Data>();` — item 6's neighbourhood, with the imported-struct
    decision behind it.
-6. ~~**`::`-call type-argument inference**~~ — **done at `HEAD` (2026-08-31), and `letssee.fin` is
+6. ~~**`::`-call type-argument inference**~~ — **done at `132aed7` (2026-08-31), and `letssee.fin` is
    OBJECT_CLEAN: the corpus is 22 / 9 / 20.** See §4, "The `::` call's type arguments".
    **This item's premise was wrong about two of its three sites.** It said the missing piece is
    inferring `T` from the arguments; `letssee.fin:73` does infer from an argument (`&Self`), but
@@ -1344,7 +1344,7 @@ where marked:
 
 - **Does an `@define` have to match the C declaration it names?** — **new 2026-08-31, and it now
   has a witness that runs.** `letssee.fin:4-6` declares `sin`, `cos` and `sqrt` as
-  `(f: float) <float>`; libm's are `double(double)`. Since `HEAD` that sample lowers, links against
+  `(f: float) <float>`; libm's are `double(double)`. Since `132aed7` that sample lowers, links against
   `-lm` and **prints wrong numbers** — `Length of a: -76854900708868096.000000`, and
   `Vec2::normalize` then silently does nothing because its `if (len > cast<float>(0))` guard reads
   that garbage. Isolated with two probes: the `float` spelling reproduces the value exactly, and
