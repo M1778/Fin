@@ -118,7 +118,7 @@ was broken.
 | — since `4788753`, at `211c8ab` | **1473 / 1473 pass**, 0 skipped | the namespace-qualified call rewrite; **corpus 20 → 21** |
 | — since `4788753`, at `132aed7` | **1481 / 1481 pass**, 0 skipped | the `::` call's type arguments; **corpus 21 → 22** |
 | — since `4788753`, at `02fba4a` | **1517 / 1517 pass**, 0 skipped | the variable-refusal location, the width-annotation refusal, `prototype<K, V>`; corpus unmoved |
-| — since `4788753`, at `HEAD` | **1537 / 1537 pass**, 0 skipped | `foreach`; corpus unmoved, `loops.fin` refuses 27 lines later |
+| — since `4788753`, at `624a061` | **1537 / 1537 pass**, 0 skipped | `foreach`; corpus unmoved, `loops.fin` refuses 27 lines later |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -777,7 +777,7 @@ type_annotations.fin      a variable of type 'int{64}'
 Only the last line changed from `132aed7`, and it changed *within* the same bucket. **Nothing
 regressed:** no sample moved to a worse bucket, and the same 22 reach an object.
 
-### `foreach` at `HEAD` (2026-08-31) — one of item 8's seven
+### `foreach` at `624a061` (2026-08-31) — one of item 8's seven
 
 **No sample moved, and the corpus is still 22 / 9 / 20.** The suite is 1537. `loops.fin` is the
 sample this unit was named for and it is still CODEGEN_REFUSED, **for a different reason and 27 lines
@@ -848,7 +848,7 @@ it is about a **statement that declares no name** — the second chosen because 
 waiting on an answer (what equality over an arbitrary key type means) rather than a feature about to
 land. The same reasoning `m1778` was chosen by when `blame` lowered, and it is written next to both.
 
-**The corpus at `HEAD`, all 51 measured** — 22 OBJECT_CLEAN, 9 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
+**The corpus at `624a061`, all 51 measured** — 22 OBJECT_CLEAN, 9 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
 The nine, with their first refusal re-measured here:
 
 ```
@@ -979,7 +979,7 @@ write, and writes the file only at the very end — so a failed assertion change
 
 The 17 samples that reach codegen and are blocked by exactly one refusal each, measured at
 `91312b8`. This list **is** the work queue for the backend, but **read §4's re-measurements
-first**: it is **nine** samples at `HEAD`, and eight of them report something other than what
+first**: it is **nine** samples at `624a061`, and eight of them report something other than what
 the block below says. The numbered items keep their old titles for continuity; the corrections are
 in their text.
 
@@ -1134,7 +1134,7 @@ Recommended order — cheapest first, and each one unblocks the next:
    blocker for the corpus's own `<T: Number>` spelling, and the reason a width *alias* refuses
    independently of item 9); `[T]`/`$type` returns (`stdlib/prototypes.fin` — its first refusal, and
    the last thing between that sample and an object now that its `{any, any}` parameters are not the
-   block); ~~`foreach` (`loops.fin`)~~ — **done at `HEAD` (2026-08-31); no sample moved, the corpus is
+   block); ~~`foreach` (`loops.fin`)~~ — **done at `624a061` (2026-08-31); no sample moved, the corpus is
    still 22 / 9 / 20, and `loops.fin`'s first refusal moved from `a 'foreach' loop` at `:19` to `a call
    to 'recursive'` at `:46`** (see §4, "`foreach`"); **a nested function declaration** (`loops.fin:40`
    declares `fun recursive` inside `main` and the call at `:46` refuses — that is now the sample's only
