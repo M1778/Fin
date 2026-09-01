@@ -121,7 +121,7 @@ was broken.
 | — since `4788753`, at `624a061` | **1537 / 1537 pass**, 0 skipped | `foreach`; corpus unmoved, `loops.fin` refuses 27 lines later |
 | — since `4788753`, at `418bca0` | **1564 / 1564 pass**, 0 skipped | the nested function declaration; **corpus 22 → 23** |
 | — since `4788753`, at `55674d7` | **1566 / 1566 pass**, 0 skipped | the `Error` surface's two tests; corpus unmoved (docs only) |
-| — since `4788753`, at `HEAD` | **1573 / 1573 pass**, 0 skipped | the erasure marker moved to the use; **corpus 23 → 24** |
+| — since `4788753`, at `08f8dfc` | **1573 / 1573 pass**, 0 skipped | the erasure marker moved to the use; **corpus 23 → 24** |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -996,7 +996,7 @@ both were confirmed against a build of `8f69ad5` with this unit's work stashed.
   it as a scope while the backend treats it as nothing. Same ruling as above: silence and a refusal
   are both defensible and the corpus writes neither.
 
-### The erasure marker at `HEAD` (2026-09-01) — one of item 8's seven
+### The erasure marker at `08f8dfc` (2026-09-01) — one of item 8's seven
 
 **`generics_interfaces.fin` reaches an object, so the corpus is 24 / 7 / 20.** The suite is 1573.
 Nothing else in that sample was ever a blocker: an interface-typed local already lowers to ADR
@@ -1076,8 +1076,8 @@ use that would need the check. An erasure-marked *operator* is a syntax error to
 first for want of a monomorphisation key, which is `AGenericLambdaIsRefused`'s boundary and not
 this one.
 
-**The corpus at `HEAD`, all 51 measured** — 24 OBJECT_CLEAN, 7 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
-The seven, with their first refusal re-measured here:
+**The corpus at `08f8dfc`, all 51 measured** — 24 OBJECT_CLEAN, 7 CODEGEN_REFUSED, 20
+FRONTEND_ERROR. The seven, with their first refusal re-measured here:
 
 ```
 deeptest4.fin             a call with explicit generic arguments
@@ -1372,14 +1372,14 @@ Recommended order — cheapest first, and each one unblocks the next:
    nothing; **two pre-existing module-scope findings were booked next to it and not fixed** — an
    expression statement outside a function *segfaults* `finc`, and a block outside one is silently
    dropped; lambdas and `fn` parameter types (`functions.fin`, `lambdas.fin`);
-   ~~the erasure marker (`generics_interfaces.fin`, ADR 0002)~~ — **done at `HEAD` (2026-09-01), and
-   `generics_interfaces.fin` moved: the corpus is 24 / 7 / 20 and the suite is 1573** (see §4, "The
-   erasure marker"). ADR 0002's representation is untouched and still unimplemented; the refusal
-   moved from the declaration to the three places a representation is first needed (the call, the
-   instantiation, the generic-method call), because a template nobody uses emits nothing and so
-   poses no question to refuse. **A silent miscompile was found and fixed on the way:** an
-   erasure-marked *method* type parameter had no check anywhere, so `fun peek<U: Castable>` on a
-   non-generic struct was monomorphised and ran.
+   ~~the erasure marker (`generics_interfaces.fin`, ADR 0002)~~ — **done at `08f8dfc`
+   (2026-09-01), and `generics_interfaces.fin` moved: the corpus is 24 / 7 / 20 and the suite is
+   1573** (see §4, "The erasure marker"). ADR 0002's representation is untouched and still
+   unimplemented; the refusal moved from the declaration to the three places a representation is
+   first needed (the call, the instantiation, the generic-method call), because a template nobody
+   uses emits nothing and so poses no question to refuse. **A silent miscompile was found and
+   fixed on the way:** an erasure-marked *method* type parameter had no check anywhere, so `fun
+   peek<U: Castable>` on a non-generic struct was monomorphised and ran.
    **Item 8's remaining list needs re-scoping and §4 does it:** four of the samples it names above
    are already OBJECT_CLEAN (`variables.fin`, `blame_assert.fin`, `extern_as.fin`,
    `functions.fin`), so the first three rulings no longer block the samples cited for them, and
