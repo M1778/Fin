@@ -123,7 +123,7 @@ was broken.
 | — since `4788753`, at `55674d7` | **1566 / 1566 pass**, 0 skipped | the `Error` surface's two tests; corpus unmoved (docs only) |
 | — since `4788753`, at `08f8dfc` | **1573 / 1573 pass**, 0 skipped | the erasure marker moved to the use; **corpus 23 → 24** |
 | — since `4788753`, at `b37dd86` | **1584 / 1584 pass**, 0 skipped | the generic constructor call; corpus unmoved at 24, `deeptest4.fin` re-blamed |
-| — since `4788753`, at `HEAD` | **1601 / 1601 pass**, 0 skipped | the generic lambda; **corpus 24 → 25**, `lambdas.fin` clean |
+| — since `4788753`, at `4a37c16` | **1601 / 1601 pass**, 0 skipped | the generic lambda; **corpus 24 → 25**, `lambdas.fin` clean |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -1193,7 +1193,7 @@ stdlib/prototypes.fin     a return of type '$type'
 type_annotations.fin      a variable of type 'int{64}'
 ```
 
-### The generic lambda at `HEAD` (2026-09-01) — one of item 8's seven
+### The generic lambda at `4a37c16` (2026-09-01) — one of item 8's seven
 
 **The corpus moved 24 / 7 / 20 → 25 / 6 / 20 and the suite 1584 → 1601.** `lambdas.fin` is
 OBJECT_CLEAN and runs, printing `F1 (Standard): 20` through `Adder: 30`. The two lines it moved on
@@ -1600,7 +1600,7 @@ Recommended order — cheapest first, and each one unblocks the next:
    nothing; **two pre-existing module-scope findings were booked next to it and not fixed** — an
    expression statement outside a function *segfaults* `finc`, and a block outside one is silently
    dropped; ~~lambdas and `fn` parameter types (`functions.fin`, `lambdas.fin`)~~ — **done at
-   `HEAD` (2026-09-01), and `lambdas.fin` moved: the corpus is 25 / 6 / 20 and the suite is 1601**
+   `4a37c16` (2026-09-01), and `lambdas.fin` moved: the corpus is 25 / 6 / 20 and the suite is 1601**
    (see §4, "The generic lambda"). Both halves of the title were already half-true when it was
    written: `fn` parameters and the three non-generic lambda spellings had lowered for several
    commits, and what was left was the *generic* lambda, which is now a **template** — the `let`
@@ -2128,7 +2128,7 @@ describe that and keep the two claims that are still true — a raw `&rptr<T>` c
 existing `TheSmartPointerSurfaceResolves` already covered the surface, so this half needed no
 new test, only the correction.
 
-**Two more are paid at `HEAD` (2026-09-01), both created by a rewrite the note outlived.**
+**Two more are paid at `4a37c16` (2026-09-01), both created by a rewrite the note outlived.**
 
 `docs/guide/12-standard-library-tour.md`'s `hashmap` section said `HashMap<T, U>` "is two parallel
 `Collection`s and a linear scan for the key … there is no hashing". The rewritten
