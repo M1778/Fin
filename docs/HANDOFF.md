@@ -124,7 +124,7 @@ was broken.
 | — since `4788753`, at `08f8dfc` | **1573 / 1573 pass**, 0 skipped | the erasure marker moved to the use; **corpus 23 → 24** |
 | — since `4788753`, at `b37dd86` | **1584 / 1584 pass**, 0 skipped | the generic constructor call; corpus unmoved at 24, `deeptest4.fin` re-blamed |
 | — since `4788753`, at `4a37c16` | **1601 / 1601 pass**, 0 skipped | the generic lambda; **corpus 24 → 25**, `lambdas.fin` clean |
-| — since `4788753`, at `HEAD` | **1610 / 1610 pass**, 0 skipped | container variance: widening no longer applies through a pointee or an element; corpus unmoved at 25 |
+| — since `4788753`, at `15713e4` | **1610 / 1610 pass**, 0 skipped | container variance: widening no longer applies through a pointee or an element; corpus unmoved at 25 |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -1328,7 +1328,7 @@ stdlib/prototypes.fin     a return of type '$type'
 type_annotations.fin      a variable of type 'int{64}'
 ```
 
-### Container variance at `HEAD` (2026-09-02) — a soundness fix, not a queue item
+### Container variance at `15713e4` (2026-09-02) — a soundness fix, not a queue item
 
 **The corpus did not move: 25 / 6 / 20, and the suite went 1601 → 1610.** Nothing here was on the
 queue. It was found while reading `PrimitiveType::isAssignableTo` for item 9's width work, and it
