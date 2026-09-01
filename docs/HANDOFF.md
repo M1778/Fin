@@ -122,7 +122,7 @@ was broken.
 | — since `4788753`, at `418bca0` | **1564 / 1564 pass**, 0 skipped | the nested function declaration; **corpus 22 → 23** |
 | — since `4788753`, at `55674d7` | **1566 / 1566 pass**, 0 skipped | the `Error` surface's two tests; corpus unmoved (docs only) |
 | — since `4788753`, at `08f8dfc` | **1573 / 1573 pass**, 0 skipped | the erasure marker moved to the use; **corpus 23 → 24** |
-| — since `4788753`, at `HEAD` | **1584 / 1584 pass**, 0 skipped | the generic constructor call; corpus unmoved at 24 |
+| — since `4788753`, at `b37dd86` | **1584 / 1584 pass**, 0 skipped | the generic constructor call; corpus unmoved at 24, `deeptest4.fin` re-blamed |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -1103,7 +1103,7 @@ refusals rather than the one recorded (`a variable of type 'fn<...>(T) -> T'` at
 generic lambda` at `:71`), so it will not move on one fix. What is left of item 8 with a sample
 behind it is `stdlib/prototypes.fin`'s `$type` return and `lambdas.fin`'s two.
 
-### The generic constructor call at `HEAD` (2026-09-01) — one of item 8's seven
+### The generic constructor call at `b37dd86` (2026-09-01) — one of item 8's seven
 
 **The corpus is unmoved at 24 / 7 / 20 and the suite is 1584.** `deeptest4.fin:11`,
 `let a <auto> = HashMap::<string, Data>();`, is the corpus site this unit was written for and it
