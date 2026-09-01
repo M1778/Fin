@@ -122,6 +122,7 @@ was broken.
 | — since `4788753`, at `418bca0` | **1564 / 1564 pass**, 0 skipped | the nested function declaration; **corpus 22 → 23** |
 | — since `4788753`, at `55674d7` | **1566 / 1566 pass**, 0 skipped | the `Error` surface's two tests; corpus unmoved (docs only) |
 | — since `4788753`, at `08f8dfc` | **1573 / 1573 pass**, 0 skipped | the erasure marker moved to the use; **corpus 23 → 24** |
+| — since `4788753`, at `HEAD` | **1584 / 1584 pass**, 0 skipped | the generic constructor call; corpus unmoved at 24 |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -1102,6 +1103,95 @@ refusals rather than the one recorded (`a variable of type 'fn<...>(T) -> T'` at
 generic lambda` at `:71`), so it will not move on one fix. What is left of item 8 with a sample
 behind it is `stdlib/prototypes.fin`'s `$type` return and `lambdas.fin`'s two.
 
+### The generic constructor call at `HEAD` (2026-09-01) — one of item 8's seven
+
+**The corpus is unmoved at 24 / 7 / 20 and the suite is 1584.** `deeptest4.fin:11`,
+`let a <auto> = HashMap::<string, Data>();`, is the corpus site this unit was written for and it
+does not move — its refusal changed rather than went, from `a call with explicit generic arguments`
+to `a call to 'HashMap'`. That is the answer to the question §6 item 6 left open ("what it refuses
+*after* explicit generic arguments lower is unmeasured") and it is the imported-declaration gap:
+`HashMap` is declared in `lib/std/hashmap.fin`, a module's AST lives in `ModuleLoader::astStorage`
+and only ambient `#[global]` extern prototypes are spliced into the root program, so this pass has
+never heard the name. The sample now says the same thing an imported *function* says.
+
+**What was missing was one lookup.** `visit(FunctionCall&)` looked a called name up in
+`fnTemplates_` and never in `templates_`, so a struct template with its type arguments written fell
+through to the blanket "a call with explicit generic arguments". Every other piece already existed:
+`instantiateGeneric` maps the arguments, lays the instance out and declares its methods including
+its constructor, and the non-generic constructor path allocates the object, zeroes it, passes its
+address as parameter 0 and loads the result back out. The two had never been introduced.
+
+**The instantiation goes through `literalStructName`,** which is the synthetic-`TypeNode` probe
+`Box::<int>{ val: 100 }` (`complex.fin:12`) already used, so a call and a literal are one code path
+and cannot drift: the same mangled name, the same layout, the same refusals. That last clause is
+load-bearing rather than tidy — the erasure marker is checked inside `instantiateGeneric`, so
+`M::<int>(1)` on a `struct M<T: Castable>` inherits the refusal instead of needing a second copy of
+a representation decision. `AGenericConstructorCallReachesTheSameInstanceAsALiteral` is the test
+that holds the sharing: it assigns a call's result to a literal's variable and passes a third
+spelling to `take(b: Box<int>)`, because two instantiations of one layout are two LLVM types that
+are not assignable, and a test that merely compiled each spelling would not see it. The trace half
+asserts **one** `instantiated struct Box<int>`, not two.
+
+**The tail of the old path was factored out rather than copied.** `emitNamedCall(node, name)` is
+`visit(FunctionCall&)`'s former tail taking the name as a parameter; the generic path hands it the
+*instantiation's* mangled name and the non-generic path hands it `node.name`. A second copy would
+have been a second calling convention for one spelling, and the constructor convention is the one
+place this file has three sites that must already agree (the declaration, the return, the call).
+
+**Two spellings are refused, and each names its own question.**
+
+- **`Box(7)`, inferred, and `let b <Box<int>> = Box(7);` annotated** — both refuse `a constructor
+  call on the generic struct 'Box' with no type arguments`. `unifyBinding` over the constructor's
+  parameters would answer the first and the annotation would answer the second, and implementing
+  either alone would make two spellings of one call disagree about which source of an answer wins.
+  That is the booked `StructInstantiation`-does-not-infer-from-an-annotation gap, and both halves
+  wait on the same ruling. Written as one refusal deliberately, so the two cannot be fixed apart.
+- **`Box::<int>()` on a template that declares no constructor** — `a call to 'Box<int>'`, naming the
+  *instance* rather than the template, because the instance is the thing with no constructor and the
+  template has no symbols at all. This is **not** turned into a zeroed default-construct, and that
+  is the decision the unit turned on: a constructor is the only thing that runs a field's default
+  here, so a synthesised one would hand back an object whose `= null` fields were never written —
+  an answer, and the wrong one. `Box::<int>{}` is the spelling that means the defaults, and it
+  works. It is also why the shipped `lib/std/hashmap.fin` matters: it *does* declare `HashMap()` at
+  `:373`, so the corpus's `HashMap::<string, Data>()` calls a constructor that exists, and the
+  sample is behind the imported-declaration wall and nothing else.
+
+**The blanket turbofish refusal is now conditioned on the name being known.** It reads `a call with
+explicit generic arguments to the non-generic 'plain'` and fires only when `functions_` or
+`structs_` has the name. A turbofish on a name this file has *no* declaration for is not a fact
+about turbofishes — the analyzer resolved it, so it resolved to a module's declaration — and
+falling through is what lets `deeptest4.fin` blame the gap it is actually behind.
+
+**Eleven tests.** Ten in `tests/test_codegen.cpp` and one in `tests/test_stdlib.cpp`, where the
+three imported-declaration `KnownDefect_Modules` tests already live. Each positive asserts a value:
+`Box::<int>(7)` and `Box::<char>('z')` in one program print `7 z`, so a collided table would read
+the second at `int`'s width; `Map::<string, Data>` prints `10` then `20`, and the second number is
+the one that says `__set`'s store landed in the caller's storage rather than a discarded copy;
+`Box::<Box<int>>(inner)` nests; `Box::<T>(v)` inside `Wrap<T>`'s constructor resolves `T` through
+the binding that is already active; and a field the constructor never assigns still reads its
+declared `5`.
+
+**Two shapes were measured and left alone,** both refusing for reasons this unit does not reach.
+`outer.get().get()` refuses `the receiver of a call to the method 'get' on a value with no address`
+— a method call chained onto a call's result, already booked in §7. `a["x"] = Data{...}` on a
+generic map refuses `an assignment to this target`, which is the index-operator gap
+(`KnownDefect_IndexOperator`) and is why `deeptest4.fin` would not run even with its import
+resolved.
+
+**Nothing regressed.** All 51 samples were re-measured: 24 OBJECT_CLEAN, 7 CODEGEN_REFUSED, 20
+FRONTEND, with the same seven first refusals as at `08f8dfc` except `deeptest4.fin`'s, which is the
+one this unit rewrote:
+
+```
+deeptest4.fin             a call to 'HashMap'
+interfaces.fin            a call to the method 'to_string' on struct 'User'
+lambdas.fin               a variable of type 'fn<...>(T) -> T'
+readonly.fin              the attribute 'debug' on field 'v1' of struct 'MyClass'
+stdlib/hashmap.fin        struct 'HashMapError' inheriting 'Error', which is not a struct this file lowered
+stdlib/prototypes.fin     a return of type '$type'
+type_annotations.fin      a variable of type 'int{64}'
+```
+
 ### Movement since `43b3324`
 
 `43b3324` measured 14 / 15 / 21 of 50 with a suite of 1344. The five commits between it and
@@ -1320,10 +1410,11 @@ Recommended order — cheapest first, and each one unblocks the next:
    lowered through a dot (that is separate compilation — item 3's (a)); and a file that redeclares an
    ambient name under a symbol of its own breaks the qualified spelling and the plain one alike, at
    the link, which is `#[overwrite]`'s question and must not be fixed on one side.
-   **`deeptest4.fin` was not item 5's, and had not been for some time.** Its first refusal is
-   `codegen: a call with explicit generic arguments is not lowered yet` at `:11`,
-   `let a <auto> = HashMap::<string, Data>();` — item 6's neighbourhood, with the imported-struct
-   decision behind it.
+   **`deeptest4.fin` was not item 5's, and it is item 5's after all.** It was recorded here as item
+   6's neighbourhood, refusing `a call with explicit generic arguments` at `:11`. That spelling now
+   lowers (§4, "The generic constructor call") and the sample's refusal is `a call to 'HashMap'` —
+   the imported-declaration gap, which is this item's (a) and item 3's. So it moves on the
+   separate-compilation decision and on nothing else.
 6. ~~**`::`-call type-argument inference**~~ — **done at `132aed7` (2026-08-31), and `letssee.fin` is
    OBJECT_CLEAN: the corpus is 22 / 9 / 20.** See §4, "The `::` call's type arguments".
    **This item's premise was wrong about two of its three sites.** It said the missing piece is
@@ -1334,11 +1425,13 @@ Recommended order — cheapest first, and each one unblocks the next:
    maps that node instead of the bare template. A type **parameter** is recorded as its own name, so
    one node inside a template body still resolves per instantiation; a parameter that is not in
    scope at the call is compared by **identity** and refuses rather than borrowing the caller's.
-   **The three refusals next to it are still standing and are not this item's**: a `::` turbofish
-   after the method name (`Box::make::<int>(9)`), a generic **constructor** call with a turbofish
-   (`deeptest4.fin:11`, `HashMap::<string, Data>()`), and the same with inference (`Box(7)`). All
-   three are the analyzer binding nothing — `StaticMethodCall::generic_args` is not read by this
-   inference — and the second is the only one a sample's first refusal counts.
+   **Of the three refusals recorded next to it, one is gone and two stand.** A generic
+   **constructor** call with a turbofish (`HashMap::<string, Data>()`) lowers — §4, "The generic
+   constructor call", and it did not need the analyzer to bind anything, only a lookup in
+   `templates_`. Still standing: a `::` turbofish after the method name (`Box::make::<int>(9)`,
+   `StaticMethodCall::generic_args` read by nobody) and the constructor call with **inference**
+   (`Box(7)`), which is refused naming its own question and waits with the annotation half on one
+   ruling.
    **`letssee.fin`'s printed numbers are wrong for a reason in the sample**: `@define sqrt(f: float)`
    against libm's `double sqrt(double)`. §4 has the two probes that isolate it; it is a ruling
    (§8), not a lowering.
@@ -1442,10 +1535,15 @@ turbofish binds nothing (worked around in the backend); a member assignment is n
 mutability-checked; **a `StructInstantiation` does not infer its generic arguments from the
 annotation** — `let p <Pair<int>> = Pair{one: 11};` is `Type mismatch: expected 'Pair<int>', got
 'Pair<A>'` (measured 2026-08-31 while probing item 6), so the turbofish is mandatory in a struct
-literal even where a `::` call on the same type now infers; a **method call chained onto a call's
-result** refuses in the backend, `the receiver of a call to the method '…' on a value with no
-address` for `outer.get().get()`, which is the temporary-with-no-address ruling (§8) and not a
-generics gap.
+literal even where a `::` call on the same type now infers; **the same gap in a constructor call**,
+where `Box(7)` and `let b <Box<int>> = Box(7);` both refuse `a constructor call on the generic
+struct 'Box' with no type arguments` — the arguments would answer the first by unification and the
+annotation the second, and one without the other would make two spellings of one call disagree
+about which source wins, so they are one refusal on purpose
+(`Soundness_Codegen.AGenericConstructorCallWithNoTypeArgumentsNamesTheQuestion`); a **method call
+chained onto a call's result** refuses in the backend, `the receiver of a call to the method '…'
+on a value with no address` for `outer.get().get()`, which is the temporary-with-no-address ruling
+(§8) and not a generics gap.
 
 **Unbooked parse gaps** (need `KnownDefect_*` tests written): hex literals; `fn(m: int) -> int`;
 `std::Error` in type position; `Box<int> { v: 1 }`; `{ 1: S{v:1} }`; `{}` as an empty prototype

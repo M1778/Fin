@@ -510,6 +510,25 @@ TEST(KnownDefect_Modules, AnImportedExternThatIsNotAmbientIsNotLoweredThroughADo
         << declared;
 }
 
+TEST(KnownDefect_Modules, AnImportedGenericStructsConstructorIsNotLowered) {
+    // `HashMap::<string, Data>()` -- deeptest4.fin:11, and the reason that sample is
+    // still refused now that a constructor call on a generic struct lowers. `HashMap` is
+    // declared in lib/std/hashmap.fin, so the backend has never heard the name: this is
+    // the same wall as the two tests around it and not a fact about type arguments. The
+    // refusal is therefore the one an imported *function* gets.
+    const std::string err = buildErr(
+        "import { HashMap } from hashmap::std;\n"
+        "fun main() <noret> { let a <auto> = HashMap::<string, int>(); }\n");
+    EXPECT_NE(err.find("a call to 'HashMap'"), std::string::npos)
+        << "GOOD NEWS: an imported generic struct is constructible. That is the\n"
+           "imported-declaration decision landing, not a generics fix -- check\n"
+           "deeptest4.fin's next refusal and re-census before inverting this.\n"
+        << err;
+    // And specifically not the turbofish refusal, which is what this said before the
+    // generic-constructor unit and which would now name the wrong gap.
+    EXPECT_EQ(err.find("explicit generic arguments"), std::string::npos) << err;
+}
+
 TEST(KnownDefect_Modules, AnImportedFinFunctionIsNotLoweredThroughADot) {
     // The other half of the same gap, and the larger one: a Fin function with a body in a
     // loaded module is not lowered under any spelling. Its definition stays in the

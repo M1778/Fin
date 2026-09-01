@@ -5279,25 +5279,88 @@ private:
             emitGenericCall(node, *tmpl->second);
             return;
         }
-        if (!node.generic_args.empty()) {
-            // A turbofish on something that declares no type parameters. Read by
-            // emitGenericCall for a template and by nobody here, so it is refused rather
-            // than dropped -- a written type argument that changed nothing would be a
-            // silent disagreement with whatever the writer expected it to change.
-            unsupported(node, "a call with explicit generic arguments");
+        // A constructor call on a generic struct: `HashMap::<string, Data>()`
+        // (deeptest4.fin:11), `Box::<int>(7)`. Before the turbofish refusal below and
+        // before the struct lookup, because a struct template is deliberately not in
+        // structs_ for the reason a function template is not in functions_ -- it has no
+        // layout, and therefore no constructor symbol, until this call says what its
+        // arguments are.
+        //
+        // The instantiation is built through literalStructName, which is the same
+        // synthetic-TypeNode probe `Box::<int>{ val: 100 }` (complex.fin:12) uses. One
+        // path, so a turbofish on a call and a turbofish on a literal reach the same
+        // mangled name, the same layout and the same refusals -- including the erasure
+        // marker's, which instantiateGeneric checks and this site therefore inherits.
+        auto structTmpl = templates_.find(node.name);
+        if (structTmpl != templates_.end()) {
+            if (node.generic_args.empty()) {
+                // `Box(7)`, with the arguments meant to say what T is. Refused naming
+                // the question rather than inferred, and the question is *where the
+                // arguments come from* rather than how to unify them: unifyBinding over
+                // the constructor's parameters would answer this spelling, and
+                // `let b <Box<int>> = Box(7);` -- which is the same call with the
+                // annotation carrying the answer -- would still have to reach the same
+                // instantiation by a different route. That is the booked
+                // StructInstantiation-does-not-infer-from-an-annotation gap, and half of
+                // it landing here would make two spellings of one call disagree about
+                // which of the two sources wins. `Box::<int>(7)` is the spelling that
+                // says it once.
+                unsupported(node, fmt::format("a constructor call on the generic struct "
+                                              "'{}' with no type arguments", node.name));
+                return;
+            }
+            const std::string instance =
+                literalStructName(node, node.name, node.generic_args);
+            if (instance.empty()) return;  // already reported
+            emitNamedCall(node, instance);
+            return;
+        }
+        if (!node.generic_args.empty() &&
+            (functions_.count(node.name) || structs_.count(node.name))) {
+            // A turbofish on a name this file *does* declare and that declares no type
+            // parameters. Read by emitGenericCall for a function template, by the
+            // constructor path above for a struct template, and by nobody here, so it is
+            // refused rather than dropped -- a written type argument that changed nothing
+            // would be a silent disagreement with whatever the writer expected it to
+            // change.
+            //
+            // Conditioned on the name being known, which is what stopped this from being
+            // the blanket refusal it was. A turbofish on a name this file has *no*
+            // declaration for is not a fact about turbofishes: the analyzer resolved it,
+            // so it resolved to a module's declaration, and a module's AST does not reach
+            // this pass at all (HANDOFF's imported-declaration gap). Falling through
+            // makes that say `a call to 'HashMap'` -- the same thing an imported
+            // *function* already says -- instead of blaming a spelling that now lowers.
+            unsupported(node, fmt::format("a call with explicit generic arguments to "
+                                          "the non-generic '{}'", node.name));
             return;
         }
         // `Point(7)` -- a call whose name is a struct's. It is the constructor symbol
         // declared beside the struct, and the analyzer has already selected
         // constructors[0]; this pass deliberately uses the same single-symbol rule
         // rather than inventing an overload resolution the front end does not have.
-        std::string emittedName = node.name;
-        auto asStruct = structs_.find(node.name);
+        emitNamedCall(node, node.name);
+    }
+
+    // A call to a name that is either a free function's or a struct's, once the name is
+    // settled. Split out of visit(FunctionCall&) so that `Box::<int>(7)` reaches the
+    // *same* code as `Point(7)`: the name it is given is the instantiation's mangled one
+    // rather than the written one, and nothing else about a constructor call differs.
+    // A second copy would be a second calling convention for one spelling.
+    void emitNamedCall(FunctionCall& node, const std::string& name) {
+        std::string emittedName = name;
+        auto asStruct = structs_.find(name);
         const bool isCtorCall = asStruct != structs_.end();
-        if (isCtorCall) emittedName = methodKey(node.name, "constructor");
+        if (isCtorCall) emittedName = methodKey(name, "constructor");
         auto found = functions_.find(emittedName);
         if (found == functions_.end()) {
-            unsupported(node, fmt::format("a call to '{}'", node.name));
+            // A struct with no declared constructor, or a name that is neither. Not a
+            // zeroed default-construct: a constructor is the only thing that runs field
+            // defaults here (declareStructConstructor queues the body that does), so
+            // synthesising one would hand back an object whose `= null` fields were
+            // never written -- an answer, and the wrong one. `P{}` is the spelling that
+            // means "the defaults", and it already works.
+            unsupported(node, fmt::format("a call to '{}'", name));
             return;
         }
         const FnInfo& info = found->second;
@@ -5308,13 +5371,12 @@ private:
             if (!isCtorCall || !asStruct->second.complete) {
                 // The symbol is a constructor and the name is not the struct's, which
                 // is not a spelling that exists: `Struct.constructor` is not writable.
-                unsupported(node, fmt::format("a call to the constructor '{}'", node.name));
+                unsupported(node, fmt::format("a call to the constructor '{}'", name));
                 return;
             }
             // The caller owns the object. It is allocated here, its address is passed
             // as parameter 0, and the call's value is what the constructor left in it.
-            ctorStorage = builder_.CreateAlloca(asStruct->second.llvmType, nullptr,
-                                                node.name);
+            ctorStorage = builder_.CreateAlloca(asStruct->second.llvmType, nullptr, name);
             // Zeroed first, so a field no constructor assigns reads as zero rather
             // than as whatever the frame held -- the answer a local with no
             // initialiser gets here too.
@@ -5322,13 +5384,12 @@ private:
                                  ctorStorage);
             args.push_back(ctorStorage);
         }
-        if (!emitCallArgs(node, info, node.name, argList(node.args), args)) return;
+        if (!emitCallArgs(node, info, name, argList(node.args), args)) return;
         emitCall(info, args);
         if (ctorStorage) {
             auto object = types_.structByName(asStruct->second.finName);
             if (!object) {
-                unsupported(node, fmt::format("a call to the constructor of '{}'",
-                                              node.name));
+                unsupported(node, fmt::format("a call to the constructor of '{}'", name));
                 return;
             }
             value_ = CgVal{builder_.CreateLoad(object->llvmType, ctorStorage, "constructed"),

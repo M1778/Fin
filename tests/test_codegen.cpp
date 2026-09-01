@@ -5753,6 +5753,253 @@ BACKEND_TEST(Soundness_Codegen, AGenericStructsMethodNobodyInstantiatesEmitsNoth
 
 
 // ---------------------------------------------------------------------------
+// A constructor call on a generic struct: `HashMap::<string, Data>()`
+//
+// deeptest4.fin:11 is the corpus site and it was the whole of this file's turbofish
+// refusal: `visit(FunctionCall&)` looked a called name up in `fnTemplates_` and never
+// in `templates_`, so a *struct* template with its arguments written reached the blanket
+// "a call with explicit generic arguments" and stopped there. Nothing else was missing.
+// `instantiateGeneric` already maps the arguments, lays the instance out and declares
+// its methods including its constructor, and the non-generic constructor path already
+// allocates the object, zeroes it, passes its address as parameter 0 and loads the
+// result back -- the two had simply never been introduced.
+//
+// The instantiation goes through `literalStructName`, which is the synthetic-TypeNode
+// probe `Box::<int>{ val: 100 }` (complex.fin:12) already used. That is the point of
+// these tests taken together: a call, a literal and a `let b <Box<int>>` annotation must
+// reach *one* instance, because two instances of one layout are two LLVM types that are
+// not assignable to each other, and the program that catches it is the one that assigns
+// across the spellings rather than the one that merely compiles each.
+//
+// `deeptest4.fin` does not move on this unit, and that is measured rather than assumed:
+// its `HashMap` is imported, a module's AST does not reach this pass (HANDOFF's
+// imported-declaration gap), so the sample now refuses `a call to 'HashMap'` -- the same
+// thing an imported *function* already says. The last test here is that refusal.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructsConstructorIsCalledAtItsTypeArguments) {
+    // The value, not the compile: a constructor's result is the caller's storage read
+    // back out (parameter 0), so a path that allocated the wrong instance or forgot the
+    // load would still exit 0 and print whatever the frame held.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T> = null,\n"
+        "    Box(v: T) { return new Box{val: v}; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <auto> = Box::<int>(7);\n"
+        "    let c <auto> = Box::<char>('z');\n"
+        "    printf(\"%d %c\\n\", b.val, c.val);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    // Two instantiations, so a table that collided would read `c.val` at `int`'s width.
+    EXPECT_EQ(b.out, "7 z\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericConstructorCallReachesTheSameInstanceAsALiteral) {
+    // The assignment is the assertion. `fromLit = fromCall` type-checks in the analyzer
+    // whatever this pass does; it *lowers* only if both spellings named one
+    // llvm::StructType, and the parameter of `take(b: Box<int>)` is a third spelling
+    // that has to agree with them.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T> = null,\n"
+        "    Box(v: T) { return new Box{val: v}; }\n"
+        "}\n"
+        "fun take(b: Box<int>) <int> { return b.val; }\n"
+        "fun main() <noret> {\n"
+        "    let fromCall <Box<int>> = Box::<int>(7);\n"
+        "    let fromLit <Box<int>> = Box::<int>{val: 8};\n"
+        "    fromLit = fromCall;\n"
+        "    printf(\"%d %d\\n\", take(Box::<int>(41)), fromLit.val);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "41 7\n") << b.why();
+    // And one instance rather than two with the same layout under different names,
+    // which is the failure the assignment above could not see if both were named
+    // `Box<int>` in the trace and were different types underneath.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T> = null,\n"
+        "    Box(v: T) { return new Box{val: v}; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let fromCall <Box<int>> = Box::<int>(7);\n"
+        "    let fromLit <Box<int>> = Box::<int>{val: 8};\n"
+        "}\n");
+    EXPECT_EQ(occurrences(trace, "instantiated struct Box<int>"), 1u) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoTypeArgumentsBindInDeclarationOrder) {
+    // deeptest4.fin's shape -- two parameters, the second a struct -- with the map
+    // declared here rather than imported. `T` and `U` are distinguishable in the output,
+    // so a substitution built in the order inference happened to find them would print
+    // the halves swapped or refuse the field.
+    const Built b = build(std::string(kPrintf) +
+        "struct Data { integer <int> = null, str <string> = null }\n"
+        "struct Map<T, U> {\n"
+        "    k <T> = null, v <U>,\n"
+        "    Map(key: T, value: U) { return new Map{k: key, v: value}; }\n"
+        "    pub fun __get(self: &Self, key: T) <U> { return self.v; }\n"
+        "    pub fun __set(self: &Self, key: T, value: U) <noret> { self.v = value; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <auto> = Map::<string, Data>(\"Hi\", Data{integer: 10});\n"
+        "    printf(\"%d\\n\", a.__get(\"Hi\").integer);\n"
+        "    a.__set(\"x\", Data{integer: 20});\n"
+        "    printf(\"%d\\n\", a.__get(\"x\").integer);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    // The second line is the one that matters twice over: `__set` stores through the
+    // receiver, so the object the constructor call produced has to be the caller's
+    // addressable storage and not a copy the write was discarded into.
+    EXPECT_EQ(b.out, "10\n20\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericConstructorCallNestsAsItsOwnTypeArgument) {
+    // `Box::<Box<int>>(inner)` -- functions.fin:16 nests `Result<Result<int>>` through
+    // an annotation, and this is the same nesting reached through a call. The inner
+    // instantiation has to exist before the outer one's layout can, which is what makes
+    // this more than a spelling test.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T> = null,\n"
+        "    Box(v: T) { return new Box{val: v}; }\n"
+        "    pub fun get(self: &Self) <T> { return self.val; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let inner <auto> = Box::<int>(3);\n"
+        "    let outer <Box<Box<int>>> = Box::<Box<int>>(inner);\n"
+        "    let un <Box<int>> = outer.get();\n"
+        "    printf(\"%d %d\\n\", inner.get(), un.get());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericConstructorCallResolvesTThroughTheActiveBinding) {
+    // `Box::<T>(v)` written inside `Wrap<T>`'s own constructor. The `T` in the type
+    // arguments is the *enclosing* instantiation's, so it has to be mapped in the scope
+    // that is already bound rather than treated as a name to instantiate at -- the same
+    // rule instantiateGeneric's step 1 records for a written `Node<T>`.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T> = null,\n"
+        "    Box(v: T) { return new Box{val: v}; }\n"
+        "}\n"
+        "struct Wrap<T> {\n"
+        "    inner <Box<T>>,\n"
+        "    Wrap(v: T) { return new Wrap{inner: Box::<T>(v)}; }\n"
+        "    pub fun peek(self: &Self) <T> { return self.inner.val; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let w <auto> = Wrap::<int>(11);\n"
+        "    printf(\"%d\\n\", w.peek());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "11\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericConstructorLeavesUnwrittenFieldsAtTheirDefaults) {
+    // `tag` is written by nobody: not by the call, not by the constructor's
+    // `new Box{val: v}`. It reads 5 because buildStructValue runs the declared defaults
+    // for the fields a literal left out, and the instantiation's fields carry the
+    // template's default nodes. Asserted here because the defaults are the one part of a
+    // constructor call that the receiver convention could silently skip.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T> = null,\n"
+        "    tag <int> = 5,\n"
+        "    Box(v: T) { return new Box{val: v}; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <auto> = Box::<int>(7);\n"
+        "    printf(\"%d %d\\n\", b.val, b.tag);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnErasureMarkedGenericStructRefusesItsConstructorCall) {
+    // The new path goes through instantiateGeneric, so it inherits that function's
+    // refusals rather than needing its own copy of them -- and the erasure marker is the
+    // one where a second copy would matter, because a marked instance that lowered
+    // through this route would be a representation decision made twice.
+    const Built b = build(std::string(kPrintf) +
+        "struct M<T: Castable> {\n"
+        "    v <int> = 0,\n"
+        "    M(x: T) { return new M{v: 1}; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let m <auto> = M::<int>(1);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("the erasure marker 'Castable' on 'T' of the generic "
+                                "struct 'M'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericConstructorCallWithNoTypeArgumentsNamesTheQuestion) {
+    // `Box(7)`, and `let b <Box<int>> = Box(7);` -- the same refusal, deliberately. The
+    // arguments would answer the first by unification and the annotation would answer
+    // the second, and implementing one of the two would make two spellings of one call
+    // disagree about which source of an answer wins. That is the booked
+    // StructInstantiation-does-not-infer-from-an-annotation gap, and both halves of it
+    // wait on the same ruling.
+    const char* const kBox =
+        "struct Box<T> {\n"
+        "    val <T> = null,\n"
+        "    Box(v: T) { return new Box{val: v}; }\n"
+        "}\n";
+    const Built inferred = build(std::string(kPrintf) + kBox +
+        "fun main() <noret> { let b <auto> = Box(7); }\n");
+    EXPECT_NE(inferred.compileExit, 0) << inferred.why();
+    EXPECT_NE(inferred.compileErr.find("a constructor call on the generic struct 'Box' "
+                                       "with no type arguments"),
+              std::string::npos) << inferred.why();
+
+    const Built annotated = build(std::string(kPrintf) + kBox +
+        "fun main() <noret> { let b <Box<int>> = Box(7); }\n");
+    EXPECT_NE(annotated.compileExit, 0) << annotated.why();
+    EXPECT_NE(annotated.compileErr.find("a constructor call on the generic struct 'Box' "
+                                        "with no type arguments"),
+              std::string::npos) << annotated.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericStructWithNoConstructorNamesTheInstance) {
+    // No constructor is declared, so there is no symbol to call, and this is *not*
+    // quietly turned into a zeroed default-construct: a constructor is the only thing
+    // that runs a field's default here, so a synthesised one would hand back an object
+    // whose `= null` fields were never written. `Box::<int>{}` is the spelling that
+    // means the defaults. The refusal names `Box<int>` and not `Box`, because the
+    // instance is what has no constructor -- the template has no symbols at all.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> { val <T> = null }\n"
+        "fun main() <noret> { let b <auto> = Box::<int>(); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a call to 'Box<int>'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ATurbofishOnANonGenericNameIsStillRefused) {
+    // The blanket refusal, now conditioned on the name being one this file declares.
+    // Kept rather than dropped for the reason it was written: a written type argument
+    // that changed nothing would be a silent disagreement with whatever the writer
+    // expected it to change.
+    const Built b = build(
+        "fun plain(x: int) <int> { return x; }\n"
+        "fun main() <noret> { let a <int> = plain::<int>(1); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("explicit generic arguments to the non-generic 'plain'"),
+              std::string::npos) << b.why();
+}
+
+
+// ---------------------------------------------------------------------------
 // `#[llvm_name]` on a function, and the attributes nobody was reading
 //
 // The same sweep that found the dropped method bodies found two more places where an
