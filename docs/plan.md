@@ -42,10 +42,33 @@ offset slot per required field, so a struct missing one has no offset to emit. C
 step 1 of that ADR's five.
 
 **Integer widths are a lie.** `uint{8}` and `uint{64}` are the same type; assigning one to the other
-succeeds. `resolveTypeFromAST` (`Analyzer_Core.cpp:142-146`) walks the width annotations for side
+succeeds. `resolveTypeFromAST` (`Analyzer_Core.cpp:393-397`) walks the width annotations for side
 effects and returns the *unannotated* type. `lib/std` defines `i64`, `i128`, `u64`, `u128` and
 `size_t` on top of this, so all of them currently collapse onto `int`/`uint`. Harmless until codegen
 exists, then it is wrong machine code.
+
+~~**Widening applies through a pointee and an array element.**~~ **FIXED 2026-09-02.** ADR 0022 made
+an integer assignable to a wider integer, which is right for a value and is a lie about a container:
+`PointerType::isAssignableTo` asked its pointee the *assignment* question and `ArrayType` asked its
+element, so `&int -> &long` was accepted and `let x <int> = 1; let p <*long> = &x; *p = 4294967297;`
+compiled clean, linked, and exited 139 — an eight-byte store through a four-byte slot. `&int ->
+&float` was the same mistake with a zero exit code: it printed 1069547520, 1.5's bit pattern read as
+an integer.
+
+The fix is a second predicate, `isAssignableThrough` (`src/types/Type.cpp`), which every mutable
+container asks instead — pointee, array element, prototype key and value. It is a *narrowing* of
+`isAssignableTo` and never a second opinion on it, so no conversion became possible and the value
+rule is untouched: `let y <long> = x;` still widens, which `stdlib/stdio.fin:130` and `:135` need.
+Struct-to-interface went with it, and for the representation reason rather than the width one: ADR
+0019 fixes an interface reference as `{data, vtable}`, two words, and a `&Sq` is one — `fun f(p:
+&Shape) <int> { return p.area(); }` called with `&q` compiled, linked, and exited 139 on the method
+call. No corpus file writes an interface in a pointee or an element position.
+
+One hole is kept open on the corpus's authority: `[int] -> [any]` is a representation change by the
+same argument, and `stdlib/types.fin:102` declares `resolve_arr_type(const &arr: [any])`, which is
+useless without it. It cannot produce a wrong program today — codegen refuses `[any]` outright — and
+`KnownDefect_ContainerVariance.ADynamicElementTypeStillAcceptsAConcreteOne` books it. Held by eight
+`Soundness_ContainerVariance` tests, four of which assert the exploit rather than the diagnostic.
 
 **Field declaration order is destroyed.** `StructType::fields` is
 `std::unordered_map<std::string, FieldInfo>` (`StructType.hpp:28`) and `defineField` (`:37`) is its only

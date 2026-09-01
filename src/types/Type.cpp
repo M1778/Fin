@@ -10,6 +10,84 @@ bool typesEqual(const TypePtr& a, const TypePtr& b) {
     return a->equals(*b);
 }
 
+// A mutable container's question about what it holds. See Type.hpp for why it is not
+// the same question as `isAssignableTo`.
+//
+// A narrowing of assignability and never a second opinion on it: the first line asks
+// the ordinary question, and everything after it asks what the conversion *costs*. So
+// no conversion becomes possible here that was impossible before, and the only thing
+// this can do is refuse.
+//
+// The three containers ask it of their contents -- PointerType of its pointee,
+// ArrayType of its element, PrototypeType of its key and value -- which is also what
+// makes it recursive without restating any container's own rule. `&&int -> &&long` is
+// refused two levels down, by the same line that refuses `&int -> &long`.
+//
+// NullableType deliberately does not ask. A `T?` is a value that gets copied, not an
+// object that gets a second name, so `int? -> long?` is the value question and
+// `isAssignableTo` is the right one to ask about it.
+//
+// What is permitted, and each entry is a target that stores what the source stored:
+//
+//   * The same type. Most of the corpus, and the reason this is cheap.
+//   * A void pointer in either direction, at any depth -- answered by PointerType
+//     before it consults its pointee, so it does not reach here. Every pointer is one
+//     word, so `&&int -> &&void` puts a pointer where a pointer belongs.
+//   * `any` and `object`, which the corpus demands through an array:
+//     stdlib/types.fin:102 takes `const &arr: [any]`, and
+//     Soundness_DynamicTypes.AnArrayOfAnyAcceptsAnArrayOfInt holds it. This one *is*
+//     a representation change -- docs/plan.md fixes `any` as `{i8*, i64}` and an
+//     `int` is four bytes -- so it is the one hole this function keeps open, on the
+//     corpus's authority rather than on a rule. It cannot produce a wrong program
+//     today: codegen refuses `[any]` outright (`a parameter of type '[any]' is not
+//     lowered yet`), so the conversion has nowhere to be wrong yet.
+//     KnownDefect_ContainerVariance.ADynamicElementTypeStillAcceptsAConcreteOne books
+//     it.
+//   * `auto`, which is an inference marker and not a storage type at all.
+//     Soundness_DynamicTypes.TwoArraysWithAssignableElementsAreAssignable holds
+//     `[int] -> [auto]`.
+//   * A generic parameter, which is a name for a type that substitution has not
+//     supplied yet. `fun f<T>(p: &T)` called as `f::<int>(&x)` lowers and returns 5.
+//   * `Self`, which is a second name for one struct.
+//
+// What is refused, and both were measured wrong before this existed:
+//
+//   * An integer widening. `let x <int> = 1; let p <*long> = &x; *p = 4294967297;`
+//     compiled clean and exited 139 -- an eight-byte store through a four-byte slot.
+//     `&int -> &float` did not even crash, which is worse: it printed 1069547520.
+//   * A struct to an interface it implements. ADR 0019 fixes an interface reference as
+//     `{data, vtable}`, two words, and a `&Sq` is one. `f(p: &Shape) { return
+//     p.area(); }` called with `&q` compiled clean, linked, and exited 139 on the
+//     method call. No corpus file writes an interface in a pointee or an element
+//     position, so nothing is lost by refusing it; the by-value conversion the corpus
+//     does write (love.fin:38) is untouched.
+bool isAssignableThrough(const TypePtr& from, const TypePtr& to) {
+    if (!from || !to) return false;
+
+    if (!from->isAssignableTo(*to)) return false;
+    if (typesEqual(from, to)) return true;
+
+    // A container pair answered for its contents on the way in -- the call above
+    // reached this function again, one level down -- so there is nothing left to ask
+    // about it here. Without these three lines the veto at the bottom would reject
+    // every container whose contents are not identical, including the ones the
+    // recursion just approved.
+    if (from->as<PointerType>() && to->as<PointerType>()) return true;
+    if (from->as<ArrayType>() && to->as<ArrayType>()) return true;
+    if (from->as<PrototypeType>() && to->as<PrototypeType>()) return true;
+
+    if (auto* self = from->as<SelfType>()) return isAssignableThrough(self->originalStruct, to);
+    if (auto* self = to->as<SelfType>()) return isAssignableThrough(from, self->originalStruct);
+
+    if (to->as<DynamicType>()) return true;
+    if (to->as<GenericType>()) return true;
+    if (to->toString() == "auto") return true;
+
+    // Assignable, and it changes the bytes. That is the whole of what this function
+    // exists to stop.
+    return false;
+}
+
 // --- Base Type ---
 bool Type::isAssignableTo(const Type& other) const {
     if (this->equals(other)) return true;

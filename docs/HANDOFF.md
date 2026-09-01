@@ -124,6 +124,7 @@ was broken.
 | — since `4788753`, at `08f8dfc` | **1573 / 1573 pass**, 0 skipped | the erasure marker moved to the use; **corpus 23 → 24** |
 | — since `4788753`, at `b37dd86` | **1584 / 1584 pass**, 0 skipped | the generic constructor call; corpus unmoved at 24, `deeptest4.fin` re-blamed |
 | — since `4788753`, at `4a37c16` | **1601 / 1601 pass**, 0 skipped | the generic lambda; **corpus 24 → 25**, `lambdas.fin` clean |
+| — since `4788753`, at `HEAD` | **1610 / 1610 pass**, 0 skipped | container variance: widening no longer applies through a pointee or an element; corpus unmoved at 25 |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -1326,6 +1327,120 @@ stdlib/hashmap.fin        struct 'HashMapError' inheriting 'Error', which is not
 stdlib/prototypes.fin     a return of type '$type'
 type_annotations.fin      a variable of type 'int{64}'
 ```
+
+### Container variance at `HEAD` (2026-09-02) — a soundness fix, not a queue item
+
+**The corpus did not move: 25 / 6 / 20, and the suite went 1601 → 1610.** Nothing here was on the
+queue. It was found while reading `PrimitiveType::isAssignableTo` for item 9's width work, and it
+lands first because it is a pure soundness fix that needs no owner ruling and lives in the code the
+width work has to touch.
+
+**A conversion *through* a container is a different question from an assignment, and the compiler
+asked the assignment one at all three container boundaries.** An assignment copies a value and may
+convert it on the way, so `let y <long> = x;` for an `int` `x` sign-extends four bytes into eight
+and both objects are correct afterwards. A container conversion copies nothing — a pointer, an array
+and a prototype each hand out a *second name for one object* — so a conversion that changes a
+value's width or its interpretation is a promise about memory that the source's layout does not
+keep.
+
+ADR 0022 is what made this visible. `PointerType::isAssignableTo` delegated to
+`pointee->isAssignableTo(...)` and `ArrayType` to its element, so "an integer converts to a wider
+integer" reached a position where widening cannot be sound.
+
+**Three exploits, measured before the fix, in ascending order of how bad they are:**
+
+```
+let x <int> = 1; let p <*long> = &x; *p = 4294967297;   compiled, linked, exit 139
+let x <int> = 1; let p <*float> = &x; *p = 1.5;         compiled, linked, exit 0, printed 1069547520
+fun f(p: &Shape) <int> { return p.area(); }  f(&q)      compiled, linked, exit 139 on the call
+```
+
+The middle one is the worst. A segfault is a bug report; `1069547520` is 1.5's bit pattern read as
+an integer, delivered with a zero exit code to a program that will keep running on it. The third is
+the struct-to-interface conversion (the owner ruling of 2026-08-28) reached through a pointee, and
+it fails for a *representation* reason rather than a width one: ADR 0019 fixes an interface
+reference as `{data, vtable}`, two words, and a `&Sq` is one word — so `p.area()` reads a vtable
+pointer out of whatever follows the struct.
+
+**The fix is a second predicate, and its shape is the whole point.** `isAssignableThrough(from, to)`
+in `src/types/Type.cpp` opens with `if (!from->isAssignableTo(*to)) return false;`, so it is a
+*narrowing* of assignability and never a second opinion on it. No conversion became possible; the
+only thing it can do is refuse. That is what makes the value rule provably untouched —
+`Soundness_ContainerVariance.TheSameWideningIsStillLegalByValue` asserts `int -> long` and `int ->
+ulong` still compile, which `stdlib/stdio.fin:130` and `:135` need with no cast.
+
+Three call sites, one per mutable container: `PointerType` for its pointee, `ArrayType` for its
+element, `PrototypeType` for its key and its value. `NullableType` deliberately does **not** ask — a
+`T?` is a value that gets copied, not an object that gets a second name, so `isAssignableTo` is the
+right question there and `int? -> long?` still widens.
+
+**What it permits, and every entry is a target that stores what the source stored.** The list is in
+the function's own comment; what matters here is that each one was checked against a corpus site or
+a running program rather than reasoned about.
+
+- **The same type.** Most of the corpus, and the reason the predicate is cheap.
+- **A void pointer, in either direction and at any depth.** Answered by `PointerType` *before* it
+  consults its pointee, so it never reaches the predicate — which is what makes `&&int -> &&void`
+  work where the recursion would refuse it. Every pointer is one word, so this is the one conversion
+  that changes nothing about the storage.
+- **`any` and `object`.** The one hole, and it is open on the corpus's authority — see below.
+- **`auto`**, which is an inference marker and not a storage type at all.
+- **A generic parameter.** `fun f<T>(p: &T) <T> { return *p; }` called as `f::<int>(&x)` lowers and
+  returns 5, measured.
+- **`Self`**, which is a second name for one struct.
+
+**The hole that is kept open, and why it is a `KnownDefect` rather than a refusal.** `[int] ->
+[any]` is a representation change by exactly the argument that refuses everything else:
+`docs/plan.md` fixes `any` as `{i8*, i64}`, sixteen bytes, and an `int` is four. But
+`tests/samples/stdlib/types.fin:102` declares `resolve_arr_type(const &arr: [any])`, and that
+declaration is useless if the only thing assignable to `[any]` is another `[any]` —
+`Soundness_DynamicTypes.AnArrayOfAnyAcceptsAnArrayOfInt` already holds it, and the corpus is the
+specification (ADR 0008).
+
+It cannot produce a wrong program today, which is what makes booking it honest rather than a
+deferral: codegen has no `[any]` at all. `fun take(a: [any])` reached with an `[int]` reports
+`codegen: a parameter of type '[any]' is not lowered yet`, so the conversion has nowhere to be wrong
+yet. `KnownDefect_ContainerVariance.ADynamicElementTypeStillAcceptsAConcreteOne` asserts all three
+spellings — array, pointee, prototype half — so closing one and leaving the others is visible.
+
+Closing it needs the corpus to change, so it is an owner ruling: either `resolve_arr_type` gains a
+cast or a generic parameter, or `[any]` becomes a conversion the backend performs element by element
+rather than a rename.
+
+**One prior comment was wrong and is corrected rather than deleted.** `PrototypeType`'s said
+prototypes were invariant — "`<{int, int}>` does not fit `<{int, any}>` and the reverse does not
+either" — and the first half had not been true since the `isAssignableTo` fix that
+`Soundness_Prototypes.APrototypeOfConcreteTypesFitsAPrototypeOfADynamicType` asserts. A dynamic half
+*is* covariant, and must be: `prototype_test.fin:40` writes `<{object, object}>`. The reverse is
+still refused, `expected '<{int, int}>', got '<{int, any}>'`.
+
+**Nine tests, eight `Soundness_ContainerVariance` and one `KnownDefect_`.** Four of the eight assert
+the *exploit* rather than the diagnostic, because a diagnostic is only interesting if it stops a
+real program: each names the exit code or the printed value the shape produced before the fix. The
+other four are the controls, and they are what the fix costs something —
+`TheSameWideningIsStillLegalByValue`, `AVoidPointerStillConvertsAtEveryDepth`,
+`AnArrayStillDecaysAndStillAcceptsADynamicElement` (four clauses: the decay, `[any]`, `[auto]`,
+`[T]`) and the by-value struct-to-interface conversion that `love.fin:38` writes, asserted inside
+the test that refuses the pointee form so that a veto in a container cannot reach the value rule.
+
+**Nothing regressed.** All 51 samples re-measured: 25 OBJECT_CLEAN, 6 CODEGEN_REFUSED, 20 FRONTEND,
+and the six refusals are byte-identical to `4a37c16`'s list — which is the check that matters here,
+because a veto at a container boundary would surface as a *new* refusal rather than as a worse
+bucket:
+
+```
+deeptest4.fin             a call to 'HashMap'
+interfaces.fin            a call to the method 'to_string' on struct 'User'
+readonly.fin              the attribute 'debug' on field 'v1' of struct 'MyClass'
+stdlib/hashmap.fin        struct 'HashMapError' inheriting 'Error', which is not a struct this file lowered
+stdlib/prototypes.fin     a return of type '$type'
+type_annotations.fin      a variable of type 'int{64}'
+```
+
+The suite went 1601 → 1610 across 134 → 136 suites in 48.7 s. Every sample that imports
+`stdlib/stdio.fin` still lowers, which is the corpus's own answer to whether the by-value widening
+survived: `:130` and `:135` pass an `int` to a `long` parameter with no cast, and eleven samples
+reach them.
 
 ### Movement since `43b3324`
 

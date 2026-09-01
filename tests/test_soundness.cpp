@@ -926,6 +926,271 @@ TEST(Soundness_Pointers, AVoidPointerIsAssignableInBothDirections) {
         << "&int does not fit &string\n" << stripAnsi(bad.err);
 }
 
+// ---------------------------------------------------------------------------
+// A conversion *through* a container is a different question from an assignment,
+// and until 2026-09-02 the compiler asked the assignment one at all three
+// container boundaries.
+//
+// The difference: an assignment copies a value and may convert it on the way, so
+// `let y <long> = x;` for an `int` `x` sign-extends four bytes into eight and both
+// objects are correct afterwards. A container conversion copies nothing -- a
+// pointer, an array and a prototype each hand out a second name for one object --
+// so a conversion that changes a value's width or its interpretation is a promise
+// about memory that the source's layout does not keep.
+//
+// ADR 0022's integer widening is the rule that made this visible, and the tests
+// below assert the exploit rather than the diagnostic wherever the shape reaches
+// codegen: `&int -> &long` compiled clean and exited 139, and `&int -> &float`
+// did not crash at all, which is worse -- it printed 1069547520.
+//
+// The predicate is `isAssignableThrough` (src/types/Type.cpp), a narrowing of
+// `isAssignableTo` that no container may bypass. It permits what stores what the
+// source stored -- the same type, `any`/`object`, `auto`, a generic parameter,
+// `Self` -- and a void pointer is permitted one layer above it, by PointerType,
+// because every pointer is one word.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_ContainerVariance, APointeeDoesNotWidenAndTheWideStoreIsWhy) {
+    // The exploit first, because the diagnostic is only interesting if it stops a
+    // real program. Before this rule: compiled clean, linked, exited 139 -- an
+    // eight-byte store through a four-byte slot.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let p <*long> = &x;\n"
+        "    *p = 4294967297;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << "an 8-byte store through a 4-byte slot\n" << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected '&long', got '&int'"), std::string::npos)
+        << stripAnsi(r.err);
+
+    // Both directions, because narrowing is the same lie told the other way: a
+    // `&char` promising four bytes reads three the object does not own.
+    const FincRun narrow = compile(
+        "fun main() <noret> { let x <char> = 1; let p <*int> = &x; }\n");
+    EXPECT_NE(stripAnsi(narrow.err).find("expected '&int', got '&char'"), std::string::npos)
+        << stripAnsi(narrow.err);
+
+    // And at depth, which is what makes the predicate recursive rather than a
+    // special case on one pair: the same line refuses `&&int -> &&long`.
+    const FincRun deep = compile(
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let p <&int> = &x;\n"
+        "    let q <&&long> = &p;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(deep.err).find("expected '&&long', got '&&int'"), std::string::npos)
+        << stripAnsi(deep.err);
+}
+
+TEST(Soundness_ContainerVariance, TheSameWideningIsStillLegalByValue) {
+    // The pair to the test above, and the reason the fix is a second predicate
+    // rather than a change to ADR 0022. stdlib/stdio.fin hands an `int` to a
+    // `ulong` at :130 and :135 with no cast, so the *value* conversion is load-
+    // bearing and must be untouched by anything the containers decide.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let y <long> = x;\n"
+        "    let z <ulong> = x;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ContainerVariance, APointeeDoesNotReinterpretAnIntegerAsAFloat) {
+    // The quieter half of the same defect, and the reason this is about
+    // representation rather than about width: `int -> float` is assignable by value
+    // (PrimitiveType::isAssignableTo, the one float rule the corpus needs), both are
+    // four bytes, so a width-only rule would let this through.
+    //
+    // It does not crash. `*p = 1.5;` through a `&float` aliasing an `int` compiled,
+    // linked, ran to exit 0 and printed 1069547520 -- 1.5's bit pattern read as an
+    // integer. A wrong answer with a zero exit code is worse than a segfault.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let p <*float> = &x;\n"
+        "    *p = 1.5;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected '&float', got '&int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ContainerVariance, AVoidPointerStillConvertsAtEveryDepth) {
+    // The one pointee conversion that changes nothing about the storage, and the
+    // corpus depends on it. Answered by PointerType *before* it consults its pointee,
+    // which is why it survives a predicate that refuses every other conversion --
+    // and asserted at depth here because that ordering is what makes `&&int ->
+    // &&void` work, where the recursion would refuse it.
+    for (const char* code : {
+            "fun t(p: &void) <int> { return 0; }\n"
+            "fun main() <int> { let x <int> = 1; return t(&x); }\n",
+            "fun t(p: &int) <int> { return 0; }\n"
+            "fun main() <int> { let x <int> = 1; let v <&void> = &x; return t(v); }\n",
+            "fun main() <noret> {\n"
+            "    let x <int> = 1;\n"
+            "    let p <&int> = &x;\n"
+            "    let q <&&void> = &p;\n"
+            "}\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_ContainerVariance, AnArrayElementDoesNotWiden) {
+    // The second container, and the same rule: an array conversion renames one buffer
+    // rather than copying its elements, so a `[long, 2]` view of an `[int, 2]` indexes
+    // a four-byte stride as eight and the second element is read from the first's
+    // upper half.
+    //
+    // Both extents, because they are separate arms of ArrayType::isAssignableTo: a
+    // fixed array decaying into a dynamic one goes through the element check as well.
+    for (const char* code : {
+            "fun main() <noret> { let a <[int,2]> = [1,2]; let b <[long,2]> = a; }\n",
+            "fun f(a: [long]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[int]> = [1,2]; f(v); }\n",
+            "fun f(a: [[long]]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[[int]]> = [[1,2]]; f(v); }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos)
+            << code << stripAnsi(r.err);
+    }
+
+    // The float form, which reaches codegen's own refusal today (`this conversion is
+    // not lowered yet`) rather than a wrong program -- so the front end refusing it is
+    // what makes the diagnostic name the types instead of the backend.
+    const FincRun f = compile(
+        "fun main() <noret> { let a <[int,2]> = [1,2]; let b <[float,2]> = a; }\n");
+    EXPECT_NE(stripAnsi(f.err).find("expected '[float, 2]', got '[int, 2]'"), std::string::npos)
+        << stripAnsi(f.err);
+}
+
+TEST(Soundness_ContainerVariance, AnArrayStillDecaysAndStillAcceptsADynamicElement) {
+    // Everything the array rule must keep, in one program per clause, because the
+    // predicate is a veto and a veto is one edit from refusing the corpus.
+    //
+    //   `[int, 2] -> [int]`   the decay, Soundness_Arrays covers it in full
+    //   `[int] -> [any]`      stdlib/types.fin:102, `resolve_arr_type(const &arr: [any])`
+    //   `[int] -> [auto]`     Soundness_DynamicTypes.TwoArraysWithAssignableElements-
+    //                         AreAssignable
+    //   `[int] -> [T]`        a generic parameter is a name substitution has not filled
+    for (const char* code : {
+            "fun f(a: [int]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[int,2]> = [1,2]; f(v); }\n",
+            "fun f(a: [any]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[int]> = [1,2]; f(v); }\n",
+            "fun f(a: [auto]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[int]> = [1,2]; f(v); }\n",
+            "fun f<T>(a: [T]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[int]> = [1,2]; f::<int>(v); }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_ContainerVariance, APrototypeHalfDoesNotWiden) {
+    // The third container. Its key and value were compared with `isAssignableTo` for
+    // the reason Soundness_Prototypes.APrototypeOfConcreteTypesFitsAPrototypeOfA-
+    // DynamicType gives -- `equals` accepted no literal at all -- and that fix bought
+    // ADR 0022's widening as a side effect.
+    for (const char* code : {
+            "fun f(p: <{int, long}>) <int> { return 0; }\n"
+            "fun main() <noret> { let a <{int, int}> = { 1: 2 }; f(a); }\n",
+            "fun f(p: <{long, int}>) <int> { return 0; }\n"
+            "fun main() <noret> { let a <{int, int}> = { 1: 2 }; f(a); }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos)
+            << code << stripAnsi(r.err);
+    }
+
+    // And what it keeps: a dynamic half, which prototype_test.fin:40 writes as
+    // `<{object, object}>` and its own comment calls "an expensive type but can fit
+    // any datatype in it".
+    const FincRun ok = compile(
+        "fun f(p: <{int, any}>) <int> { return 0; }\n"
+        "fun main() <noret> { let a <{int, int}> = { 1: 2 }; f(a); }\n");
+    EXPECT_EQ(errorCount(stripAnsi(ok.err)), 0u) << stripAnsi(ok.err);
+}
+
+TEST(Soundness_ContainerVariance, AStructDoesNotConvertToAnInterfaceThroughAContainer) {
+    // The struct-to-interface conversion (Type.cpp, owner ruling 2026-08-28) is a
+    // representation change and not only a permission: ADR 0019 fixes an interface
+    // reference as `{data, vtable}`, two words, and a `&Sq` is one. So a `&Shape`
+    // aliasing a `&Sq` reads its vtable pointer out of whatever follows the struct.
+    //
+    // Measured before this rule, and it is the worst of the four shapes in this
+    // block because it gets all the way to a running program: `fun f(p: &Shape) <int>
+    // { return p.area(); }` called with `&q` compiled clean, linked clean, and exited
+    // 139 on the method call.
+    const FincRun ptr = compile(
+        "interface Shape { fun area() <int>; }\n"
+        "struct Sq : <Shape> { pub s <int>, pub fun area() <int> { return self.s; } }\n"
+        "fun f(p: &Shape) <int> { return 0; }\n"
+        "fun main() <noret> { let q <Sq> = Sq{s: 1}; f(&q); }\n");
+    EXPECT_NE(stripAnsi(ptr.err).find("expected '&Shape', got '&Sq'"), std::string::npos)
+        << stripAnsi(ptr.err);
+
+    const FincRun arr = compile(
+        "interface Shape { fun area() <int>; }\n"
+        "struct Sq : <Shape> { pub s <int>, pub fun area() <int> { return self.s; } }\n"
+        "fun f(a: [Shape]) <int> { return 0; }\n"
+        "fun main() <noret> { let v <[Sq]> = [Sq{s: 1}]; f(v); }\n");
+    EXPECT_NE(stripAnsi(arr.err).find("expected '[Shape]', got '[Sq]'"), std::string::npos)
+        << stripAnsi(arr.err);
+
+    // Nothing is lost: no file in tests/samples or lib writes an interface in a
+    // pointee or an element position. The by-value conversion the corpus *does* write
+    // -- love.fin:38 hands a `Fin` to a `<Person>` parameter -- is untouched, and this
+    // asserts it here as well as at its own test, because a veto in a container must
+    // not be able to reach the value rule.
+    const FincRun byvalue = compile(
+        "interface Shape { fun area() <int>; }\n"
+        "struct Sq : <Shape> { pub s <int>, pub fun area() <int> { return self.s; } }\n"
+        "fun f(v: Shape) <int> { return 0; }\n"
+        "fun main() <noret> { let q <Sq> = Sq{s: 1}; f(q); }\n");
+    EXPECT_EQ(errorCount(stripAnsi(byvalue.err)), 0u) << stripAnsi(byvalue.err);
+}
+
+TEST(KnownDefect_ContainerVariance, ADynamicElementTypeStillAcceptsAConcreteOne) {
+    // The one hole `isAssignableThrough` keeps open, and it is open on the corpus's
+    // authority rather than by oversight. `[int] -> [any]` is a representation change
+    // by the same argument as everything the predicate refuses -- docs/plan.md fixes
+    // `any` as `{i8*, i64}`, sixteen bytes, and an `int` is four -- and
+    // stdlib/types.fin:102 declares `resolve_arr_type(const &arr: [any])`, which is
+    // useless without it.
+    //
+    // It is also mutable-container covariance, which is unsound in the ordinary way
+    // even where the representations agree: a write through the `[any]` view can put a
+    // `string` where the `[int]` name promises an integer.
+    //
+    // Not a wrong program today, which is why it is booked rather than refused: codegen
+    // has no `[any]` at all. Measured -- `fun take(a: [any])` reached with an `[int]`
+    // reports `codegen: a parameter of type '[any]' is not lowered yet`, so the
+    // conversion has nowhere to be wrong yet.
+    //
+    // Closing it needs the corpus to change, so it is an owner ruling: either
+    // `resolve_arr_type` gains a cast or a generic parameter, or `[any]` becomes a
+    // conversion the backend performs element by element rather than a rename. Whoever
+    // closes it inverts this test into Soundness_ContainerVariance beside the four
+    // above.
+    const FincRun r = compile(
+        "fun take(a: [any]) <int> { return 0; }\n"
+        "fun main() <noret> { let v <[int]> = [1, 2]; take(v); }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u)
+        << "when this fails, `[int]` no longer converts to `[any]`: invert this test\n"
+        << stripAnsi(r.err);
+
+    // The pointee and prototype spellings of the same hole, so that closing one and
+    // leaving the others is visible.
+    for (const char* code : {
+            "fun main() <noret> { let x <int> = 1; let p <*any> = &x; }\n",
+            "fun f(p: <{int, any}>) <int> { return 0; }\n"
+            "fun main() <noret> { let a <{int, int}> = { 1: 2 }; f(a); }\n"}) {
+        const FincRun d = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(d.err)), 0u) << code << stripAnsi(d.err);
+    }
+}
+
 TEST(Soundness_DynamicTypes, AnyDoesNotInferFromItsInitialiser) {
     // The distinction from `auto`, and the reason `any` cannot be implemented by
     // aliasing it. `let x <auto> = 5;` makes `x` an `int`, so the next line reports

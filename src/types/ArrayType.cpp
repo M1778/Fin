@@ -29,7 +29,14 @@ TypePtr ArrayType::substitute(const TypeMap& mapping, TypePtr selfReplacement) {
 bool ArrayType::isAssignableTo(const Type& other) const {
     if (Type::isAssignableTo(other)) return true;
     if (auto* otherArr = other.as<ArrayType>()) {
-        if (!element_type->isAssignableTo(*otherArr->element_type)) return false;
+        // Through, not to: an array conversion renames one buffer rather than copying
+        // its elements, so an element conversion that changes a value's width or its
+        // interpretation is a lie about memory the source already laid out. `[int,2] ->
+        // [long,2]` was accepted and `[int,2] -> [float,2]` with it; both would index a
+        // four-byte stride as eight and four bytes as a float. Type.hpp states the
+        // general rule and Type.cpp lists what stays permitted -- `[int] -> [any]`
+        // among it, which stdlib/types.fin:102 requires.
+        if (!isAssignableThrough(element_type, otherArr->element_type)) return false;
 
         // A fixed-size array decays into a dynamic one. Not the reverse: the size is
         // what the target promises and a dynamic source cannot promise it.

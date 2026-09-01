@@ -30,25 +30,29 @@ public:
     // ArrayType asks the base and this did not. The rule "every type fits a dynamic
     // target" is about the target, so no source may opt out of it by omission.
     //
-    // Then key and value by *assignability*, not equality. Comparing them with `equals`
-    // made a prototype fit only a prototype of exactly its own key and value types, so
-    // `<{object, object}>` -- prototype_test.fin:40's own annotation, "object type is an
-    // expensive type but can fit any datatype in it" -- accepted no literal at all.
-    // ArrayType::isAssignableTo already asks its elements this question; this is the
-    // same lesson at the second container boundary.
+    // Then key and value, and by the *container* question rather than the assignment
+    // one. Comparing them with `equals` made a prototype fit only a prototype of
+    // exactly its own key and value types, so `<{object, object}>` --
+    // prototype_test.fin:40's own annotation, "object type is an expensive type but can
+    // fit any datatype in it" -- accepted no literal at all. Comparing them with
+    // `isAssignableTo` fixed that and bought ADR 0022's integer widening with it, which
+    // a prototype must not have: `<{int, int}>` fitting `<{int, long}>` would index a
+    // four-byte value as eight. isAssignableThrough is the same predicate ArrayType and
+    // PointerType now ask, and Type.cpp lists what it permits.
     //
-    // Invariantly, deliberately: `<{int, int}>` does not fit `<{int, any}>` and the
-    // reverse does not either, both by way of the key/value checks. Prototypes are
-    // mutable containers, so a covariant value would let a write through the wider
-    // alias put a `string` where the narrower one promises `int`. `[int]` into `[any]`
-    // has the same hole and is what the corpus asks for (stdlib/types.fin:102), so it
-    // is not settled tree-wide -- but nothing in the corpus asks for it here, and the
-    // narrower rule is the one that can be widened later without breaking a program.
+    // A dynamic half is covariant and nothing else is: `<{int, int}>` fits
+    // `<{int, any}>` -- Soundness_Prototypes.APrototypeOfConcreteTypesFitsAPrototype-
+    // OfADynamicType writes exactly that and is what prototype_test.fin:40 needs -- and
+    // the reverse is refused, `expected '<{int, int}>', got '<{int, any}>'`. That
+    // direction is a real hole in a mutable container, the same one `[int]` into `[any]`
+    // has, and it is the corpus's to close: both are booked on
+    // KnownDefect_ContainerVariance.ADynamicElementTypeStillAcceptsAConcreteOne rather
+    // than fixed here, because the corpus asks for the array form and would break.
     bool isAssignableTo(const Type& other) const override {
         if (Type::isAssignableTo(other)) return true;
         if (auto* p = dynamic_cast<const PrototypeType*>(&other)) {
-            return keyType->isAssignableTo(*p->keyType) &&
-                   valueType->isAssignableTo(*p->valueType);
+            return isAssignableThrough(keyType, p->keyType) &&
+                   isAssignableThrough(valueType, p->valueType);
         }
         return false;
     }
