@@ -121,6 +121,7 @@ was broken.
 | — since `4788753`, at `624a061` | **1537 / 1537 pass**, 0 skipped | `foreach`; corpus unmoved, `loops.fin` refuses 27 lines later |
 | — since `4788753`, at `418bca0` | **1564 / 1564 pass**, 0 skipped | the nested function declaration; **corpus 22 → 23** |
 | — since `4788753`, at `55674d7` | **1566 / 1566 pass**, 0 skipped | the `Error` surface's two tests; corpus unmoved (docs only) |
+| — since `4788753`, at `HEAD` | **1573 / 1573 pass**, 0 skipped | the erasure marker moved to the use; **corpus 23 → 24** |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -995,6 +996,112 @@ both were confirmed against a build of `8f69ad5` with this unit's work stashed.
   it as a scope while the backend treats it as nothing. Same ruling as above: silence and a refusal
   are both defensible and the corpus writes neither.
 
+### The erasure marker at `HEAD` (2026-09-01) — one of item 8's seven
+
+**`generics_interfaces.fin` reaches an object, so the corpus is 24 / 7 / 20.** The suite is 1573.
+Nothing else in that sample was ever a blocker: an interface-typed local already lowers to ADR
+0027's two-word shape, and `normal_generics<T>` is monomorphic. Its only block was an *uncalled*
+`fun using_erasure_generics<T: Castable, U: Castable>` at `:8`.
+
+**Nothing about the representation changed.** ADR 0002 still stands, unaltered and unimplemented:
+erasure is selected by an erasure-marker constraint on any one parameter, and an erased generic is
+a raw pointer. A monomorphised body for one would compile and be a *different program* — it
+happens to agree wherever the argument is a scalar and disagrees wherever the erased pointer is
+what the code is about. That is still refused. What moved is **where**.
+
+**The old refusal answered a question nobody asked.** `hasErasureMarker` fired from
+`lowerableTemplate` and from `declareTopLevel`, so a marked template failed the build whether or
+not anything used it. The argument for that placement was that a marker is a property of the
+template — `maybe<int>` is not going to stop being erased — and it is true and beside the point.
+Monomorphisation means a template is a recipe and not code: `fun ident<T>(a: T)` that nothing calls
+emits nothing (`AGenericFunctionNobodyCallsLowersToNothing`, and the same inversion this unit is),
+and `struct M <T> {}` that nothing instantiates is a whole sample's worth of evidence
+(`blame_assert.fin:19`) that an uninstantiated template is not an error either. An erasure marker on
+one of those is a representation decision for code the object file does not contain. Refusing it
+withholds a correct object for a question the program never poses — which is precisely what
+`generics_interfaces.fin` was.
+
+**So the marker is checked where a representation is first needed, at three sites.** Each is a
+point at which this pass would otherwise have to lay something out:
+
+- **`emitGenericCall`** — the call to a function template, before the arguments are emitted, so a
+  refused call leaves no instructions behind for operands nothing will consume. Both spellings
+  reach it: inferred (`erased(5)`) and turbofish (`erased::<int>(5)`).
+- **`instantiateGeneric`** — the struct template's instantiation, ahead of the argument-count check
+  so that a marked template with the wrong arity names the marker rather than the arity. Placed
+  here and not at the `let`, which is what makes every path that needs the layout go through it: a
+  field of `maybe<int>`, a parameter of it, `Box<maybe<int>>` as another template's argument, and a
+  `::` call on `maybe::<int>` all refuse, and none of them is a variable declaration.
+- **`instantiateGenericMethod`** — the call to a generic *method*, which **had no check at all**
+  before this unit and is the hole the move exposed. See below.
+
+**A silent miscompile was found and fixed, not booked.** A method's type parameters are not in the
+struct's `generic_params`, so `lowerableTemplate` never saw them and neither did anything else:
+
+```fin
+struct Box {
+   val <int>,
+   pub fun peek<U: Castable>(u: U) <int> { return self.val; }
+}
+```
+
+`b.peek(3)` compiled, linked and printed `7`. It reached `declareFunction` through
+`instantiateGenericMethod`, was monomorphised at the argument's type, and ran — the exact different
+program ADR 0002 names, with none of the declaration-site refusal's accidental cover. Measured
+against the tree before this unit, so `AnErasureMarkedGenericMethodIsRefusedAtTheCall` is a
+regression test for a wrong answer that was really there rather than for a hypothetical one. Fixed
+rather than booked for the reason the width annotation was: an exit-0 compile that emits a machine
+the program did not ask for is not a missing feature.
+
+**Nine tests, of which two replace the two that existed rather than sitting beside them.**
+`AnErasureMarkedGenericFunctionIsRefused` and `AnErasureMarkedGenericStructIsRefused` asserted only
+that `Castable` appeared somewhere in the output, which passes for a declaration-site refusal and
+for a use-site one alike — so they said nothing about the thing this unit changed. They now assert
+the whole phrase (`the erasure marker 'Castable' on 'T' of the generic function 'erased'`) at the
+call and at the instantiation, and each has a negative half asserting that the *uncalled* template
+emits nothing and reaches no refusal, read off `--debug-codegen` rather than off the exit code.
+`AnUncalledErasureTemplateDoesNotCostTheRestOfTheModule` is the sample's own shape and asserts a
+**value** — `42` from the monomorphic template beside the erased one — so a build that emitted the
+wrong body fails there instead of passing for compiling.
+`OneMarkedParameterOfTwoIsEnoughAndTheFirstIsNamed` covers ADR 0002's "any one parameter" with `<T,
+U: Castable>`, where the *unmarked* parameter comes first: that is what says the check searches for
+a marker rather than looking at parameter zero.
+
+**What is not covered, and why each is out of scope rather than missed.** An erasure-marked
+*interface* (`interface Addable<T: Castable>`, `deeptest2.fin:13`) compiles clean today because an
+interface declaration reaches no layout and no vtable until a struct implements it, and
+`implements <Addable<int>>` is a **syntax error** in the parser — so there is no way to write the
+use that would need the check. An erasure-marked *operator* is a syntax error too
+(`operator +<U: Castable>` does not parse). An erasure-marked *lambda* (`lambdas.fin:69`) refuses
+first for want of a monomorphisation key, which is `AGenericLambdaIsRefused`'s boundary and not
+this one.
+
+**The corpus at `HEAD`, all 51 measured** — 24 OBJECT_CLEAN, 7 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
+The seven, with their first refusal re-measured here:
+
+```
+deeptest4.fin             a call with explicit generic arguments
+interfaces.fin            a call to the method 'to_string' on struct 'User'
+lambdas.fin               a variable of type 'fn<...>(T) -> T'
+readonly.fin              the attribute 'debug' on field 'v1' of struct 'MyClass'
+stdlib/hashmap.fin        struct 'HashMapError' inheriting 'Error', which is not a struct this file lowered
+stdlib/prototypes.fin     a return of type '$type'
+type_annotations.fin      a variable of type 'int{64}'
+```
+
+`generics_interfaces.fin` left the list and no line changed. Its object links and runs, exiting 0
+with no output — `main` declares an interface-typed local and does nothing else. **Nothing
+regressed:** no sample moved to a worse bucket, and the 23 that reached an object still do.
+
+**Item 8's remaining list is smaller than it reads, and this is the re-scoping it needs.** Four of
+the samples it names are already OBJECT_CLEAN and were before this unit: `variables.fin`,
+`blame_assert.fin`, `extern_as.fin` and `functions.fin`. So the address-of-a-value-with-no-home
+ruling, the empty-struct ruling and type aliases no longer block the samples cited for them — those
+rulings may still be worth making, but not on the corpus's evidence. `lambdas.fin` has **two**
+refusals rather than the one recorded (`a variable of type 'fn<...>(T) -> T'` at `:69`, then `a
+generic lambda` at `:71`), so it will not move on one fix. What is left of item 8 with a sample
+behind it is `stdlib/prototypes.fin`'s `$type` return and `lambdas.fin`'s two.
+
 ### Movement since `43b3324`
 
 `43b3324` measured 14 / 15 / 21 of 50 with a suite of 1344. The five commits between it and
@@ -1264,8 +1371,20 @@ Recommended order — cheapest first, and each one unblocks the next:
    enclosing *body's* scope, and a capture is refused because the corpus's one instance captures
    nothing; **two pre-existing module-scope findings were booked next to it and not fixed** — an
    expression statement outside a function *segfaults* `finc`, and a block outside one is silently
-   dropped; lambdas and `fn` parameter types (`functions.fin`, `lambdas.fin`); the erasure marker
-   (`generics_interfaces.fin`, ADR 0002).
+   dropped; lambdas and `fn` parameter types (`functions.fin`, `lambdas.fin`);
+   ~~the erasure marker (`generics_interfaces.fin`, ADR 0002)~~ — **done at `HEAD` (2026-09-01), and
+   `generics_interfaces.fin` moved: the corpus is 24 / 7 / 20 and the suite is 1573** (see §4, "The
+   erasure marker"). ADR 0002's representation is untouched and still unimplemented; the refusal
+   moved from the declaration to the three places a representation is first needed (the call, the
+   instantiation, the generic-method call), because a template nobody uses emits nothing and so
+   poses no question to refuse. **A silent miscompile was found and fixed on the way:** an
+   erasure-marked *method* type parameter had no check anywhere, so `fun peek<U: Castable>` on a
+   non-generic struct was monomorphised and ran.
+   **Item 8's remaining list needs re-scoping and §4 does it:** four of the samples it names above
+   are already OBJECT_CLEAN (`variables.fin`, `blame_assert.fin`, `extern_as.fin`,
+   `functions.fin`), so the first three rulings no longer block the samples cited for them, and
+   `lambdas.fin` has two refusals rather than one. What is left with a sample behind it is
+   `stdlib/prototypes.fin`'s `$type` return and `lambdas.fin`'s two.
 9. After the corpus: the struct ABI classifier, `blame`/`try`/`catch`, the payload-carrying
    tagged-union enum, **real** bit-width annotations (`int{64}`) — which is now a narrowing to
    implement rather than a miscompile to stop, because the annotation refuses as of `02fba4a`; it is

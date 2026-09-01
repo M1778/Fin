@@ -175,9 +175,10 @@ fun using_erasure<T: Castable, U: Castable>(a: T, b: U) <int> {
 
 An unbounded parameter is monomorphised — one instantiation per concrete type. A parameter
 bound by an erasure marker such as `Castable` is erased instead; erasure type-checks but is
-not yet lowered, so a program using a `Castable` bound will not build with `-o`. Generic
-arguments can be supplied explicitly with `::<...>` at the call site, or inferred from the
-arguments:
+not yet lowered, so **calling** one will not build with `-o`. Declaring it will: a template
+is not code until a use says what its parameters are, so `using_erasure` above is emitted as
+nothing until something calls it. Generic arguments can be supplied explicitly with `::<...>`
+at the call site, or inferred from the arguments:
 
 ```fin
 printf("%d\n", identity::<int>(7));

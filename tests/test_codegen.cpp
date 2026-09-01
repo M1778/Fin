@@ -5965,9 +5965,12 @@ BACKEND_TEST(Soundness_Codegen, AnAttributeOnAGenericStructsMemberIsRefusedAtThe
 //   old refusal landed on the signature rather than on the body.
 //
 //   `fun using_erasure_generics<T: Castable, U: Castable>` (generics_interfaces.fin:8)
-//   -- the other branch, which ADR 0002 says is a raw pointer. Still refused, by
-//   name, because a monomorphised body for it would be a different program that
-//   happens to agree on these arguments.
+//   -- the other branch, which ADR 0002 says is a raw pointer. Refused, by name,
+//   because a monomorphised body for it would be a different program that happens to
+//   agree on these arguments -- but refused at the *use* and not at the declaration,
+//   on the same argument monomorphisation makes everywhere else here: a template is a
+//   recipe, and the one in that sample is never called. Nothing is emitted for it and
+//   nothing about it can be wrong, which is why that sample now reaches an object.
 //
 // The binding is resolved *here* and not read off the analyzer, which is what makes
 // the turbofish work at all: a free function's turbofish binds nothing in
@@ -6191,31 +6194,186 @@ BACKEND_TEST(Soundness_Codegen, ATypeArgumentThatNoArgumentMentionsTakesATurbofi
     EXPECT_EQ(b.out, "1\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AnErasureMarkedGenericFunctionIsRefused) {
+BACKEND_TEST(Soundness_Codegen, AnErasureMarkedGenericFunctionIsRefusedAtTheCall) {
     // generics_interfaces.fin:8. ADR 0002: an erasure-marker constraint on any one
     // parameter selects erasure, and an erased generic is a raw pointer. That is a
     // different representation, not a different spelling, so monomorphising it would
     // compile and be a different program -- one that happens to agree here and
     // disagree wherever the erased pointer is what the program is about.
+    //
+    // At the call, which is the half of this pair that used to be the declaration. The
+    // message names the function so a reader with two templates knows which.
     const Built b = build(std::string(kPrintf) +
         "fun erased<T: Castable>(a: T) <int> { return cast<int>(a); }\n"
         "fun main() <noret> { printf(\"%d\\n\", erased(5)); }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("Castable"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("the erasure marker 'Castable' on 'T' of the generic "
+                                "function 'erased'"), std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AnErasureMarkedGenericStructIsRefused) {
+BACKEND_TEST(Soundness_Codegen, AnErasureMarkedGenericFunctionNobodyCallsLowersToNothing) {
+    // The negative half, and the reason the refusal moved. A template is a recipe and
+    // not code, so an uncalled one asks for no representation at all -- there is
+    // nothing for ADR 0002's erasure rule to be about. This is exactly
+    // AGenericFunctionNobodyCallsLowersToNothing's argument with a constraint added,
+    // and generics_interfaces.fin is the sample that argument was costing: its only
+    // blocker was an uncalled `using_erasure_generics`, and everything the file
+    // actually does is monomorphic.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "fun erased<T: Castable>(a: T) <int> { return cast<int>(a); }\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_EQ(trace.find("not lowered yet"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("declared erased"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AnErasureMarkedGenericStructIsRefusedAtTheInstantiation) {
     // nullifier.fin:10's `struct maybe<T: Castable>`, which was being monomorphised
-    // silently -- the same rule as the function's, and the same reason. Refused at
-    // the declaration, because a marker is a property of the template rather than of
-    // one instantiation.
+    // silently before it was refused at all -- the same rule as the function's, and
+    // the same reason. At `maybe<int>`, because that is the first point at which a
+    // layout is needed: the template itself has none, whatever its constraints say.
     const Built b = build(std::string(kPrintf) +
         "struct maybe<T: Castable> {\n"
         "    val <T>\n"
         "}\n"
-        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+        "fun main() <noret> {\n"
+        "    let m <maybe<int>>;\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("Castable"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("the erasure marker 'Castable' on 'T' of the generic "
+                                "struct 'maybe'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnErasureMarkedStructNobodyInstantiatesLowersToNothing) {
+    // The struct's negative half, and the corpus has written this one down: `struct M
+    // <T> {}` (blame_assert.fin:19) is a whole sample's worth of evidence that an
+    // uninstantiated template is not an error, and a constraint on it does not change
+    // what is emitted for it (nothing).
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "struct maybe<T: Castable> {\n"
+        "    val <T>\n"
+        "}\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_EQ(trace.find("not lowered yet"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("instantiated struct maybe"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AnErasureMarkedGenericMethodIsRefusedAtTheCall) {
+    // The site the move exposed, and it had no check of any kind before: a method's
+    // type parameters are not in the struct's `generic_params`, so the old
+    // declaration-site predicate never saw them. `Box` is not generic and `peek` is,
+    // so this reached declareFunction through instantiateGenericMethod, monomorphised
+    // at the argument's type and *ran* -- printing 7, which is the silently different
+    // program ADR 0002 names. Measured before the fix, so this is a regression test
+    // for a real wrong answer rather than for a hypothetical one.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box {\n"
+        "    val <int>,\n"
+        "    pub fun peek<U: Castable>(u: U) <int> { return self.val; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box>;\n"
+        "    b.val = 7;\n"
+        "    printf(\"%d\\n\", b.peek(3));\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("the erasure marker 'Castable' on 'U' of the generic "
+                                "method 'peek' of struct 'Box'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnErasureMarkedMethodNobodyCallsLowersToNothing) {
+    // The method's negative half, and it is not redundant with the function's: a
+    // method of an *instantiated* struct is declared by instantiateGeneric's step 4,
+    // which runs for `Box<int>` whether or not any call reaches the method. So this
+    // asserts that step 4 does not declare a marked one -- a generic method is a
+    // template within a template, and step 4 only registers it.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    pub fun peek<U: Castable>(u: U) <int> { return cast<int>(self.val); }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>>;\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(trace.find("instantiated struct Box<int>"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("not lowered yet"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("Box<int>.peek"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, AnErasureMarkedStructIsRefusedWhereverALayoutIsNeeded) {
+    // Three uses that are not a `let`, all reaching the one check because they all
+    // reach the mapper. Worth asserting together: the refusal moved to
+    // instantiateGeneric precisely so that every path which needs a layout goes
+    // through it, and a check placed at the `let` instead would have let a field and a
+    // parameter through -- both of which need the size just as much.
+    const char* const kTemplate =
+        "struct maybe<T: Castable> {\n"
+        "    val <T>\n"
+        "}\n";
+
+    const Built field = build(std::string(kPrintf) + kTemplate +
+        "struct Holder {\n"
+        "    m <maybe<int>>\n"
+        "}\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_NE(field.compileExit, 0) << field.why();
+    EXPECT_NE(field.compileErr.find("erasure marker"), std::string::npos) << field.why();
+
+    const Built param = build(std::string(kPrintf) + kTemplate +
+        "fun take(m: maybe<int>) <int> { return 0; }\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_NE(param.compileExit, 0) << param.why();
+    EXPECT_NE(param.compileErr.find("erasure marker"), std::string::npos) << param.why();
+
+    // Nested as another template's type argument, which is the one that would survive a
+    // check written at the outermost written type: `Box<maybe<int>>` maps its argument
+    // through the same instantiator, so the inner one refuses and the outer never
+    // completes.
+    const Built nested = build(std::string(kPrintf) + kTemplate +
+        "struct Box<T> {\n"
+        "    v <T>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<maybe<int>>>;\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(nested.compileExit, 0) << nested.why();
+    EXPECT_NE(nested.compileErr.find("erasure marker"), std::string::npos)
+        << nested.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnUncalledErasureTemplateDoesNotCostTheRestOfTheModule) {
+    // The whole point of the move, as a value rather than as an absence: an object that
+    // contains a marked template it never uses is a working object. This is
+    // generics_interfaces.fin's shape -- an uncalled `<T: Castable, U: Castable>`
+    // beside a monomorphic generic that *is* called -- and it asserts the answer the
+    // called one computes, so a build that emitted the wrong body would fail here
+    // rather than pass for compiling.
+    const Built b = build(std::string(kPrintf) +
+        "fun using_erasure_generics<T: Castable, U: Castable>(a: T, b: U) <int> {\n"
+        "    return cast<int>(a) + cast<int>(b);\n"
+        "}\n"
+        "fun normal_generics<T>(a: T) <T> { return a; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", normal_generics(41) + 1); }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, OneMarkedParameterOfTwoIsEnoughAndTheFirstIsNamed) {
+    // ADR 0002 says "on any one parameter", so the mixed case is the rule's own
+    // wording and not an edge: `<T, U: Castable>` is erased. The first marked one is
+    // named rather than all of them, because fixing either of
+    // generics_interfaces.fin:8's two alone fixes nothing -- and `T` here is *not*
+    // marked, which is what makes this test say that the search is for a marker rather
+    // than a look at parameter zero.
+    const Built b = build(std::string(kPrintf) +
+        "fun mixed<T, U: Castable>(a: T, b: U) <int> { return cast<int>(a); }\n"
+        "fun main() <noret> { printf(\"%d\\n\", mixed(1, 2)); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("'Castable' on 'U'"), std::string::npos) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AConstraintThatIsNotTheErasureMarkerStillMonomorphises) {

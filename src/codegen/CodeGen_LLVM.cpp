@@ -2411,19 +2411,22 @@ private:
     // fields, and whether it is empty). Checked at the declaration because a
     // `class Box<T>` is not going to become lowerable at `Box<int>`, and a
     // diagnostic at the declaration is where the reader can act on it.
-    bool lowerableTemplate(StructDeclaration& s) {
-        if (!lowerableStruct(s)) return false;
-        return !hasErasureMarker(s, s.generic_params, "struct");
-    }
+    //
+    // The erasure marker is deliberately not in this list, though it too is a
+    // property of the template rather than of one instantiation. It is checked at
+    // the instantiation instead, for the reason a template is registered rather
+    // than declared in the first place: a template nobody names is not code, so
+    // there is nothing about it for this pass to get wrong. See refuseIfErased.
+    bool lowerableTemplate(StructDeclaration& s) { return lowerableStruct(s); }
 
-    // `Castable` -- the erasure marker, and the reason it is refused rather than
-    // monomorphised. ADR 0002 carries two of pyprototype's lowering decisions forward
-    // deliberately: erasure is selected by the presence of an erasure-marker
-    // constraint on any one parameter, and an erased generic is represented as a raw
-    // pointer. That is a different representation and not a different spelling, so a
-    // monomorphised body for one is a *different program* -- it happens to agree
-    // wherever the argument is a scalar and disagrees wherever the erased pointer is
-    // what the code is about.
+    // `Castable` -- the erasure marker, and the reason an erased generic is refused
+    // rather than monomorphised. ADR 0002 carries two of pyprototype's lowering
+    // decisions forward deliberately: erasure is selected by the presence of an
+    // erasure-marker constraint on any one parameter, and an erased generic is
+    // represented as a raw pointer. That is a different representation and not a
+    // different spelling, so a monomorphised body for one is a *different program* --
+    // it happens to agree wherever the argument is a scalar and disagrees wherever
+    // the erased pointer is what the code is about.
     //
     // One name, because one name is what the corpus writes:
     // generics_interfaces.fin:8 (`<T: Castable, U: Castable>`), nullifier.fin:10,
@@ -2432,19 +2435,52 @@ private:
     // so there is nothing to read the marker-ness off except the name.
     static bool isErasureMarker(const std::string& name) { return name == "Castable"; }
 
-    // Refused at the declaration and not at the instantiation, because a marker is a
-    // property of the template: `maybe<int>` is not going to stop being erased.
-    bool hasErasureMarker(ASTNode& node,
-                          const std::vector<std::unique_ptr<GenericParam>>& params,
-                          const char* what) {
+    // The marked parameter, or nothing. The *first* one, because the message names one
+    // and the first is the one a reader's eye is already on: `<T: Castable, U:
+    // Castable>` (generics_interfaces.fin:8) has two and fixing either alone fixes
+    // nothing, so naming both would be two lines saying the same thing.
+    static const GenericParam* erasureMarkerOf(
+            const std::vector<std::unique_ptr<GenericParam>>& params) {
         for (auto& p : params) {
-            if (!p->constraint || !isErasureMarker(p->constraint->name)) continue;
-            unsupported(node,
-                        fmt::format("the erasure marker '{}' on '{}' of a generic {}",
-                                    p->constraint->name, p->name, what));
-            return true;
+            if (p->constraint && isErasureMarker(p->constraint->name)) return p.get();
         }
-        return false;
+        return nullptr;
+    }
+
+    // Refused at the *use* and not at the declaration, which is the ruling this
+    // predicate exists to hold to.
+    //
+    // A marker is a property of the template -- `maybe<int>` is not going to stop
+    // being erased -- and that argument once put the refusal on the declaration. It is
+    // the wrong argument, because it answers a question nobody asked. Monomorphisation
+    // means a template is a recipe and not code: `fun ident<T>(a: T)` that nothing
+    // calls emits nothing and costs nothing (AGenericFunctionNobodyCallsLowersToNothing),
+    // and `struct M <T> {}` that nothing instantiates is a whole sample's worth of
+    // evidence (blame_assert.fin:19) that an uninstantiated template is not an error
+    // either. An erasure marker on one of those is a representation decision for code
+    // this object file does not contain. Refusing it withholds a correct object for a
+    // program that never poses the question -- which is what generics_interfaces.fin
+    // was: its only blocker was an uncalled `using_erasure_generics`, and everything
+    // the file actually does is monomorphic.
+    //
+    // So the marker is checked where the representation is first needed: the call for
+    // a function template, the instantiation for a struct template, the call for a
+    // generic method. Each of those is a point at which this pass would otherwise have
+    // to lay something out, and laying it out monomorphically is the different program
+    // ADR 0002 warns about.
+    //
+    // `what` is the whole noun phrase and not a bare word, because the three sites
+    // name different things ("the generic function 'erased'", "the generic method
+    // 'peek' of struct 'Box'") and a shared format string that tried to build those
+    // from parts would be the two callers' grammar living here.
+    bool refuseIfErased(ASTNode& node,
+                        const std::vector<std::unique_ptr<GenericParam>>& params,
+                        const std::string& what) {
+        const GenericParam* p = erasureMarkerOf(params);
+        if (!p) return false;
+        unsupported(node, fmt::format("the erasure marker '{}' on '{}' of {}",
+                                      p->constraint->name, p->name, what));
+        return true;
     }
 
     // `Box<int>` -- one instantiation of one template, built the first time it is
@@ -2478,6 +2514,17 @@ private:
             return false;
         }
         StructDeclaration& tmpl = *found->second;
+
+        // At the instantiation and not at the declaration, for the same reason the
+        // function's is at the call: `struct maybe<T: Castable>` (nullifier.fin:10)
+        // that nothing names has no layout to be wrong about, and `maybe<int>` is the
+        // first point at which one is needed. Ahead of the argument count so that a
+        // marked template with the wrong arity says which of the two it is by naming
+        // the marker -- the arity is the analyzer's and this is the representation.
+        if (refuseIfErased(const_cast<TypeNode&>(node), tmpl.generic_params,
+                           fmt::format("the generic struct '{}'", tmpl.name))) {
+            return false;
+        }
 
         if (node.generics.size() != tmpl.generic_params.size()) {
             // The analyzer says "Generic count mismatch" before this, so reaching here
@@ -2853,7 +2900,10 @@ private:
                                                 fn->attributes.front()->name));
                         return;
                     }
-                    if (hasErasureMarker(*fn, fn->generic_params, "function")) return;
+                    // The erasure marker is *not* checked here, and this is where the
+                    // difference is easiest to see: registering a template emits
+                    // nothing, so a marked one that nothing calls has asked for no
+                    // representation. emitGenericCall refuses at the call instead.
                     if (fn->body != nullptr) fnTemplates_[fn->name] = fn;
                     continue;
                 }
@@ -4007,6 +4057,13 @@ private:
     // in Analyzer_Expr (booked), so a backend that trusted the analyzer's answer would
     // instantiate `ident::<long>(5)` at int.
     void emitGenericCall(FunctionCall& node, FunctionDeclaration& tmpl) {
+        // First, and at the call rather than at the declaration: this is the point at
+        // which the template stops being a recipe, and the representation ADR 0002
+        // reserves for an erased parameter is what would have to be laid out. Before
+        // the arguments are emitted, so a refused call emits no instructions for
+        // operands nothing will consume.
+        if (refuseIfErased(node, tmpl.generic_params,
+                           fmt::format("the generic function '{}'", tmpl.name))) return;
         for (auto& p : tmpl.params) {
             if (!p->is_vararg) continue;
             // No corpus site, and nothing to infer from: a `...` position has no
@@ -5587,6 +5644,23 @@ private:
             const std::vector<std::unique_ptr<GenericParam>>& genericParams,
             const std::vector<std::unique_ptr<Parameter>>& params, Block& body,
             const std::vector<CgVal>& values) {
+        // The marker, before the inference that would otherwise decide the
+        // representation for it. This site had no check at all until now and was the
+        // hole the move exposed: `fun peek<U: Castable>(u: U)` on a non-generic struct
+        // reached declareFunction through this path, monomorphised at the argument's
+        // type, and ran -- the silent different program ADR 0002 names, with none of
+        // the declaration-site refusal's cover, because a method's type parameters are
+        // not in the struct's `generic_params` and lowerableTemplate never saw them.
+        //
+        // The struct's own parameters are not re-checked here: they were checked at the
+        // instantiation that produced `owner`, so a method of `maybe<int>` is
+        // unreachable already.
+        if (refuseIfErased(node, genericParams,
+                           fmt::format("the generic method '{}' of struct '{}'", name,
+                                       owner.finName))) {
+            return {};
+        }
+
         // The written parameters, without the receiver. A written `self` is the
         // receiver and not an argument -- declareFunction drops it from the signature
         // for exactly this reason -- so it must not be unified against argument 0

@@ -204,7 +204,11 @@ Two bounds mean two different implementation strategies:
   *monomorphised* — the compiler emits one specialisation per concrete type.
 - A parameter bounded by an **erasure marker** is *erased* — one implementation, with the
   type carried at runtime. `Castable` is the erasure marker the corpus uses. Erasure
-  type-checks but is not yet lowered, so a `Castable` bound will not build with `-o`.
+  type-checks but is not yet lowered, so a `-o` build refuses at the first place the
+  representation is needed: a **call** to an erased function, an **instantiation** of an
+  erased struct, or a call to an erased method. *Declaring* one costs nothing — a template
+  is a recipe, and one nothing uses emits nothing, so the file below builds with `-o`
+  exactly as long as `erased` is never called.
 
 ```fin
 fun normal_generics<T>(a: T) <T> { return a; }                     // monomorphised
