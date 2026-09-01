@@ -120,7 +120,7 @@ was broken.
 | — since `4788753`, at `02fba4a` | **1517 / 1517 pass**, 0 skipped | the variable-refusal location, the width-annotation refusal, `prototype<K, V>`; corpus unmoved |
 | — since `4788753`, at `624a061` | **1537 / 1537 pass**, 0 skipped | `foreach`; corpus unmoved, `loops.fin` refuses 27 lines later |
 | — since `4788753`, at `418bca0` | **1564 / 1564 pass**, 0 skipped | the nested function declaration; **corpus 22 → 23** |
-| — since `4788753`, at `HEAD` | **1566 / 1566 pass**, 0 skipped | the `Error` surface's two tests; corpus unmoved (docs only) |
+| — since `4788753`, at `55674d7` | **1566 / 1566 pass**, 0 skipped | the `Error` surface's two tests; corpus unmoved (docs only) |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -1724,7 +1724,7 @@ Write the prelude ruling into `const.fin`, `interfaces.fin`, `enums.fin`, `usefu
 "module not found". Re-verify `stdlib/stdio.fin`'s `keyidof` / `getkeyid` references at lines
 57, 65, 71.
 
-**Two guide debts are paid at `HEAD` (2026-09-01), both by re-measuring rather than by
+**Two guide debts are paid at `55674d7` (2026-09-01), both by re-measuring rather than by
 re-reading the note that created them.**
 
 `docs/guide/12-standard-library-tour.md` said `Error`'s "constructor takes one argument, not
