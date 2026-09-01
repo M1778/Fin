@@ -120,6 +120,7 @@ was broken.
 | — since `4788753`, at `02fba4a` | **1517 / 1517 pass**, 0 skipped | the variable-refusal location, the width-annotation refusal, `prototype<K, V>`; corpus unmoved |
 | — since `4788753`, at `624a061` | **1537 / 1537 pass**, 0 skipped | `foreach`; corpus unmoved, `loops.fin` refuses 27 lines later |
 | — since `4788753`, at `418bca0` | **1564 / 1564 pass**, 0 skipped | the nested function declaration; **corpus 22 → 23** |
+| — since `4788753`, at `HEAD` | **1566 / 1566 pass**, 0 skipped | the `Error` surface's two tests; corpus unmoved (docs only) |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -1722,6 +1723,34 @@ Write the prelude ruling into `const.fin`, `interfaces.fin`, `enums.fin`, `usefu
 `deeptest2.fin`, `stdlib/error.fin`. `importing.fin`'s note still opens with a stale
 "module not found". Re-verify `stdlib/stdio.fin`'s `keyidof` / `getkeyid` references at lines
 57, 65, 71.
+
+**Two guide debts are paid at `HEAD` (2026-09-01), both by re-measuring rather than by
+re-reading the note that created them.**
+
+`docs/guide/12-standard-library-tour.md` said `Error`'s "constructor takes one argument, not
+the draft's two, because a defaulted parameter is still required at the call site". That was
+true when written and stopped being true at `d7a91df`; `lib/std/error.fin:65` has carried
+`Error(msg: string, err_code: int = -1)` since, and its own header says so. Both arities are
+calls, three arguments and none are `expects between 1 and 2 arguments`, and `describe()` and
+`has_code()` were undocumented. Two tests now hold it —
+`Soundness_BundledStdlib.TheErrorSurfaceResolves` and
+`TheErrorConstructorTakesOneArgumentOrTwoAndNoOther` — because seven samples import this
+struct and the arity was already wrong once in a comment nothing measured. The suite is 1566.
+
+The `stdptr` sections of chapters 12 and 9 still said "the counter is never incremented and
+ownership is not enforced against aliases", quoting a header `82cc8a8` replaced. The counters
+are `&int` handles shared between every handle over one value, so `refs()`, `borrows()`,
+`alias()`, `readonly_view()` and `weak()` exist and answer about the value; both chapters now
+describe that and keep the two claims that are still true — a raw `&rptr<T>` copied past a
+`release()` is invisible to the library, and an `rptr` does not reach an executable. The
+existing `TheSmartPointerSurfaceResolves` already covered the surface, so this half needed no
+new test, only the correction.
+
+What is still owed there: `lib/std/stdptr.fin` was rewritten at `82cc8a8`, so
+`tests/samples/stdlib/stdptr.fin`'s line 3 ("this file needs rewriting") is answered for the
+bundled module and **not** for the draft — the draft's own three remaining blockers
+(`pointer_type`, `own`'s missing return, the two constructor requirements) stand, and per ADR
+0008 the sample is not to be edited to match.
 
 ## 10. Suggested skills for the next agent
 

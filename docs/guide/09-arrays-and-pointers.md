@@ -188,22 +188,25 @@ concern. Two pieces of that are visible from here.
 extends it to program exit (chapter 4). Both parse; neither has a backend reader yet.
 
 `stdptr::std` provides `rptr<T>`, a reference-counted pointer with an ownership protocol —
-`owned`, `borrowed`, `restrict`, and the methods `set`, `own`, `borrow`, `giveback`,
-`release`:
+`owned`, `borrowed`, `restrict`, and the methods `alias`, `refs`, `borrows`, `set`, `own`,
+`borrow`, `giveback`, `release`:
 
 ```fin
 import { rptr } from stdptr::std;
 
 fun main() <noret> {
     let p <rptr<int>> = rptr(5);
+    let q <&rptr<int>> = p.alias();
+    let n <int> = p.refs();
 }
 ```
 
-Its own module comment is candid about the current state: the counter is never incremented
-and ownership is not enforced against aliases, because both need codegen and a borrow check
-that do not exist. The methods maintain the flags and no more. Nor does an `rptr` reach an
-executable — the example above type-checks and then reports `codegen: a variable of type
-'rptr<int>' is not lowered yet`.
+The reference and borrow counts are `&int` handles shared between every handle over one
+value, so an increment through one is visible through all of them and `refs()` answers a
+question about the value rather than about the handle — chapter 12 has the protocol. What
+the library still cannot see is a raw `&rptr<T>` copied past a `release()`: that needs a
+borrow check and there is none. Nor does an `rptr` reach an executable — the example above
+type-checks and then reports `codegen: a variable of type 'rptr<int>' is not lowered yet`.
 
 Bounds checking is also undecided. Nothing in the language says an index is checked against
 the length; `Collection`'s `__get` asserts with `blame` because the library chose to, not

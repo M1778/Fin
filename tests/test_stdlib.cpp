@@ -1022,6 +1022,52 @@ TEST(Soundness_BundledStdlib, ASmartPointerCallIsStillTypeChecked) {
     EXPECT_NE(err.find("expected 'string', got 'int'"), std::string::npos) << err;
 }
 
+TEST(Soundness_BundledStdlib, TheErrorSurfaceResolves) {
+    // Both arities of the constructor, and the three methods. The second parameter is the
+    // point: `Error(msg: string, err_code: int = -1)` is the draft's spelling, and it was
+    // written as one parameter for a while on the belief that a defaulted parameter was
+    // still required at a call site. That stopped being true at `d7a91df`, and seven
+    // samples import this struct, so a regression in either arity is a regression in all
+    // of them.
+    const std::string err = bundledErr(program(
+        "import { Error } from error::std;\n",
+        "  let plain <Error> = Error(\"boom\");\n"
+        "  let coded <Error> = Error(\"boom\", 7);\n"
+        "  let msg <string> = plain.format();\n"
+        "  let full <string> = coded.describe();\n"
+        "  let has <bool> = coded.has_code();\n"
+        "  let id <int> = coded.error_id;\n"
+        "  let text <string> = coded.message;\n"));
+    EXPECT_EQ(errorCount(err), 0u) << err;
+}
+
+TEST(Soundness_BundledStdlib, TheErrorConstructorTakesOneArgumentOrTwoAndNoOther) {
+    // The negative half of the arity claim, both directions. Without this the test above
+    // passes against a variadic constructor and against one that takes `any...`, and the
+    // "between 1 and 2" wording is what says the default is what makes the second one
+    // optional rather than the parameter being nullable.
+    const std::string none = bundledErr(program(
+        "import { Error } from error::std;\n",
+        "  let e <Error> = Error();\n"));
+    EXPECT_NE(none.find("expects between 1 and 2 arguments, got 0"), std::string::npos)
+        << none;
+
+    const std::string three = bundledErr(program(
+        "import { Error } from error::std;\n",
+        "  let e <Error> = Error(\"boom\", 1, 2);\n"));
+    EXPECT_NE(three.find("expects between 1 and 2 arguments, got 3"), std::string::npos)
+        << three;
+
+    // And the methods are typed. `describe()` returns the formatted string, so assigning
+    // it to an `int` has to fail -- otherwise the surface test above measures that the
+    // names exist rather than that they mean anything.
+    const std::string typed = bundledErr(program(
+        "import { Error } from error::std;\n",
+        "  let e <Error> = Error(\"boom\");\n"
+        "  let n <int> = e.describe();\n"));
+    EXPECT_NE(typed.find("expected 'int', got 'string'"), std::string::npos) << typed;
+}
+
 TEST(Soundness_BundledStdlib, TheResultSurfaceResolves) {
     // `typing.fin`'s `implements` block, reached the way a caller reaches it. The receiver
     // of a method on an enum is its first parameter (Soundness_EnumMethodReceiver), so

@@ -132,7 +132,8 @@ sentinel. `from_prototype` is empty for the same reason `Collection`'s is.
 ## `error`
 
 `Error` is the base error class — a `struct` marked `#[class]`, with a `message`, an
-`error_id` defaulting to `-1`, a one-argument constructor and a `format()`:
+`error_id` defaulting to `-1`, a two-parameter constructor, a `format()`, a `describe()`
+and a `has_code()`:
 
 ```fin
 import { Error } from error::std;
@@ -141,13 +142,25 @@ struct MyError : <Error> {}
 
 fun main() <noret> {
     let e <Error> = Error("boom");
+    let coded <Error> = Error("boom", 7);
     let msg <string> = e.format();
+    let full <string> = coded.describe();
 }
 ```
 
+Both calls are calls: `Error(msg: string, err_code: int = -1)` has a defaulted second
+parameter, and a default has been optional at the call site since `d7a91df` (chapter 5).
+An earlier version of this chapter said the constructor took one argument because a
+defaulted parameter was still required — that stopped being true, and `lib/std/error.fin`
+now carries the draft's two.
+
+`format()` returns the message unchanged; `describe()` is the formatter, producing
+`Error 7: boom` through C's `snprintf` into a buffer the caller owns — there is no
+destructor to free it on. `has_code()` asks whether a code was supplied, which is the
+comparison against `-1` a caller would otherwise write out.
+
 Subclassing it is the load-bearing use — `IOError`, `CollectionError`, `HashMapError` and
-`OwnershipError` are all `struct X : <Error> {}`. The constructor takes one argument, not the
-draft's two, because a defaulted parameter is still required at the call site (chapter 5).
+`OwnershipError` are all `struct X : <Error> {}`.
 
 ## `types`
 
@@ -220,7 +233,8 @@ Two of them describe operators the expression grammar does not have yet — `Bit
 
 ## `stdptr`
 
-`rptr<T>`, a reference-counted pointer with an explicit ownership protocol:
+`rptr<T>`, a reference-counted pointer with an explicit ownership protocol, and `wptr<T>`,
+the non-owning handle beside it:
 
 ```fin
 import { rptr } from stdptr::std;
@@ -228,20 +242,35 @@ import { rptr } from stdptr::std;
 fun main() <noret> {
     let p <rptr<int>> = rptr(5);
     let owned <bool> = p.is_owned();
+    let q <&rptr<int>> = p.alias();
+    let n <int> = p.refs();
     p.set(7);
     p.release();
 }
 ```
 
 Fields: `owned`, `borrowed`, `readonly restrict` (a readonly copy of itself), `readonly
-value`. Methods: `is_owned`, `is_borrowed`, `is_givenback`, `own`, `borrow`, `giveback`,
-`release`, `set`, `get`. The two `blame`s in `own()` are the whole discipline the module can
-express — you cannot give what you do not have, and you cannot give it away while somebody
-holds it.
+value`, and two private `&int` counters. Methods: `is_owned`, `is_borrowed`, `is_givenback`,
+`refs`, `borrows`, `alias`, `readonly_view`, `weak`, `own`, `borrow`, `giveback`, `release`,
+`set`, `get`.
 
-Its own header is candid about the rest: the counter is never incremented and ownership is
-not enforced against aliases, because both need codegen and a borrow check that do not exist.
-There is no destructor, because `~Self()` does not parse; `release()` is the explicit form.
+The count counts. `ref_counter` and `borrow_counter` are `&int` handles *shared* between
+every handle over one value, so `alias()` builds a second `rptr` over the same two cells and
+an increment through one is visible through all of them. That is what makes `refs()` and
+`borrows()` answers about the value rather than about the handle, and what lets `own()`
+refuse a move while a borrow taken through some *other* handle is outstanding. `release()`
+decrements, frees the value and both counters at zero, and raises rather than double-freeing
+if called twice. Every `blame` in the module guards a specific memory error; the module's own
+header lists them one by one.
+
+`wptr<T>` holds the value and the shared count but never increments it, so it does not keep
+the value alive, and `is_alive()` reads the count `release()` decrements.
+
+There is no working destructor, because `~Self()` does not parse and a `~rptr()` body would
+need scope exit the backend does not run — it is declared and empty, and `release()` is the
+explicit form. What no library can enforce is a raw `&rptr<T>` copied past a `release()`;
+that needs a borrow check and there is none. And none of it runs yet: an `rptr` reaches
+`codegen: a variable of type 'rptr<int>' is not lowered yet`.
 
 ## Reading the library as documentation
 
