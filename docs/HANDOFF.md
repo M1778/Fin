@@ -119,6 +119,7 @@ was broken.
 | — since `4788753`, at `132aed7` | **1481 / 1481 pass**, 0 skipped | the `::` call's type arguments; **corpus 21 → 22** |
 | — since `4788753`, at `02fba4a` | **1517 / 1517 pass**, 0 skipped | the variable-refusal location, the width-annotation refusal, `prototype<K, V>`; corpus unmoved |
 | — since `4788753`, at `624a061` | **1537 / 1537 pass**, 0 skipped | `foreach`; corpus unmoved, `loops.fin` refuses 27 lines later |
+| — since `4788753`, at `HEAD` | **1564 / 1564 pass**, 0 skipped | the nested function declaration; **corpus 22 → 23** |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -872,7 +873,126 @@ regressed:** no sample moved to a worse bucket, and the same 22 reach an object.
 `loops.fin`'s only remaining blocker and it is a unit of its own — the question is whether a nested
 function is a plain module-scope function under another name or a closure over the enclosing frame,
 and the corpus writes one that captures nothing, so the cheap answer is available but is a ruling.
+**Done at `HEAD` (2026-09-01): it is a plain function with internal linkage, the analyzer's own
+step 6 is what says so, and `loops.fin` reaches an object — the corpus is 23 / 8 / 20.** See the
+next subsection.
 Added to §6 item 8.
+
+### A nested function declaration at `HEAD` (2026-09-01) — one of item 8's seven
+
+**`loops.fin` reaches an object for the first time, so the corpus is 23 / 8 / 20.** The suite is
+1564. This was the sample's only remaining blocker after `foreach` landed, and it is the construct
+the `foreach` unit found and booked at the bottom of the previous subsection.
+
+**The lowering is derived from the front end, not chosen.** The open question was whether a nested
+`fun` is a plain function under a generated name or a closure over the enclosing frame. The
+analyzer answers it: `Analyzer_Decl.cpp`, `visit(FunctionDeclaration&)` step 6 defines the name in
+`currentScope->parent`, which for a declaration inside a body is the **enclosing body's** scope and
+not the module. So the measured behaviour of the name is that it is visible from the declaration to
+the end of that scope and nowhere else — a call written *above* it is `Undefined function or type`
+from the front end, a sibling function cannot reach it, it shadows a module-scope function or a
+global of the same spelling inside that scope, and two bodies may each declare `helper`. A body
+reached by name from one scope and by nothing else **is** a function with internal linkage; there is
+nothing else it could be. It lowers as `fin.nested.<n>.<name>`, internal, uniqued by a counter that
+only goes up and spelled with dots so no Fin program can write it — the bargain `fin.lambda.<n>`
+and `Box<int>.get` already strike.
+
+`loops.fin:40`'s `recursive` is the corpus's only nested function and it **captures nothing**: it
+reads its own parameter and calls itself. So a capture is not derived, and it is refused with the
+machinery a lambda already had (`enclosingNames_` + `refuseIfCapture`, with `captureKind_` the only
+difference between the two messages). That refusal is what entitles the representation to be a bare
+code pointer, exactly as it does for a lambda: a nested function can be handed around as an `fn`
+value, and with nothing closed over there is no second word for a pair to hold.
+
+Four details are decisions and are worth naming:
+
+- **The body is emitted at the declaration, not queued.** A queue would work and is what a method
+  uses. But a nested function may call the enclosing body's *other* nested functions, and which
+  ones those are is a property of **where it was written** — `fun early() { return later(); }` above
+  `later` is an undefined name and must stay one. Emitting here makes the visible set be the set at
+  this point in the walk.
+- **The name is registered before its own body is emitted.** That is what makes `return
+  recursive(a - 1)` find the function it is inside rather than start a second one. `loops.fin:44` is
+  that call and it is the whole of why the order matters.
+- **Two tables over one scope stack, walked in lockstep.** A local is a frame slot and a nested
+  function is a symbol, so they are kept apart; `nestedFor` walks both innermost-first and answers
+  only when the nested declaration is at least as inner as any local of the name. Reading either to
+  exhaustion first would resolve a name in a scope the analyzer did not resolve it in, which is a
+  call to the wrong thing — and it is why the nested lookup sits *before* the locals in both
+  `visit(FunctionCall&)` and `visit(Identifier&)` rather than after them.
+- **The enclosing names accumulate down the nesting.** A nested function two bodies deep cannot
+  reach `main`'s frame any more than it can reach the frame it sits directly inside, so both sets
+  are captures. Dropping the outer set would only change the *message*: `the name 'n'`, which reads
+  as a front-end bug, in place of the boundary this is.
+
+Every uncovered case refuses with its open question named:
+
+| Refused | The question behind it |
+| --- | --- |
+| a body reading an enclosing local | a bare code pointer has nowhere to put it, and the frame is gone by the time an `fn` value calls it. The day the corpus writes one is the day the closure pair has to be designed — the same boundary a lambda sits behind |
+| `fun h() <int>;` with no body, inside a body | at module scope this is a prototype for a definition elsewhere; here "elsewhere" is a scope that ends with this one. Treating it as an extern would emit a call to a symbol no object contains |
+| a nested **generic** function | a template is not code until a call binds its parameters, and `fnTemplates_` is keyed by the written name with no scope in it — so a nested template of a name the module also uses would silently be one or the other |
+| any attribute, `#[llvm_name]` included | that attribute names the symbol a declaration *publishes*, and a nested function publishes none. Honouring it would put an externally visible name on a function only one scope can call; ignoring it would drop an attribute the writer expected to change the object |
+| `pub` on one | `pub` says what a **module's** scope hands to an import, and a nested function is not in one |
+| a nested function whose name a local in the **same** scope already has | the analyzer *overwrites* the symbol, so `let h; fun h()` leaves the variable unnameable while its storage is live. One name over a slot and a symbol in one scope is a state the two tables cannot both hold. One scope apart is fine and lowers, in both directions |
+| a second nested function of one name in one scope | `declareFunction` keeps the first, so the second body would silently not be the one that runs — the reason a second method of one name is refused, one level in |
+
+**A pre-existing invalid-IR bug went with it.** `ScopedEmission` saved the builder's insert point,
+`currentFn_`, `scopes_` and `poisoned_`, but **not** `loops_` — so a `break` written inside a body
+emitted from inside a loop branched to the *enclosing function's* exit block. LLVM said `Referring
+to a basic block in another function!` and the driver reported `emitted invalid IR for
+'fin.lambda.0'`, naming a generated symbol instead of the construct the program wrote. The analyzer
+permits the spelling because it sees the enclosing loop, so this pass is where it stops: `loops_` is
+now cleared and restored with the rest, and the same program says `a 'break' outside a loop`. Four
+spellings are covered by the one fix (`break`/`continue`, in a nested function and in a lambda) and
+`BreakInsideANestedFunctionInsideALoopIsRefusedAsOutsideALoop` runs all four.
+
+**Twenty-seven tests, no existing one changed.** The suite went 1537 → 1564. Positives assert
+**values**: recursion (`15`), a factorial so a wrong answer is a wrong number (`120`), two bodies'
+own `helper` (`1 2`, plus a trace check that both symbols are `fin.nested.<n>.helper`), arguments
+and a `<noret>` body, an earlier sibling called and a later one refused, three levels of nesting
+(`11`),
+an `fn` value both into a variable and as an argument (`12 42`), a module function and a global
+shadowed (`4 9`, `1`), block scoping and shadowing in both directions (`2 1`, `9 1`), a nested
+function inside a struct method (`42`), one inside a template emitted **once per instantiation**
+(`6 8`, counted in the trace), one inside a lambda (`4`), a lambda calling one beside it (`42`), and
+a body reading a global and calling a module function (`14`). Each refusal is paired with the
+supported spelling beside it.
+
+**The corpus at `HEAD`, all 51 measured** — 23 OBJECT_CLEAN, 8 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
+The eight, with their first refusal re-measured here:
+
+```
+deeptest4.fin             a call with explicit generic arguments
+generics_interfaces.fin   the erasure marker 'Castable' on 'T' of a generic function
+interfaces.fin            a call to the method 'to_string' on struct 'User'
+lambdas.fin               a variable of type 'fn<...>(T) -> T'
+readonly.fin              the attribute 'debug' on field 'v1' of struct 'MyClass'
+stdlib/hashmap.fin        struct 'HashMapError' inheriting 'Error', which is not a struct this file lowered
+stdlib/prototypes.fin     a return of type '$type'
+type_annotations.fin      a variable of type 'int{64}'
+```
+
+`loops.fin` left the list and no line changed. **Nothing regressed:** no sample moved to a worse
+bucket, and the 22 that reached an object still do.
+
+**Two module-scope findings, booked and not fixed, both pre-existing.** Neither is this unit's and
+both were confirmed against a build of `8f69ad5` with this unit's work stashed.
+
+- **An expression statement at module scope crashes the compiler.** `printf("x\n");` or `let a
+  <int> = 1; a = 2;` written outside any function segfaults `finc` under `-c` (exit 139, no
+  diagnostic). `visit(ExpressionStatement&)` has no `!currentFn_` guard, unlike the ten statements
+  that do, so the call is emitted with no insert point. A bare `1 + 2;` exits 0 and emits nothing,
+  which is why the guard is a **ruling** rather than a one-line fix: whether a statement outside a
+  function is an error or a no-op is the same question `foreach`-at-module-scope answered one way,
+  and answering it here would change what `1 + 2;` does too.
+- **A block at module scope parses and is silently dropped.** `{ printf("ran\n"); }` outside any
+  function compiles clean and emits nothing at all — the statement never reaches `visit(Block&)`,
+  because `visit(Program&)` walks the top-level statements and a `Block` among them is accepted with
+  no function to emit into. A `fun` written inside such a block is invisible to `main`
+  (`Undefined function or type`) but visible to the block's own statements, so the front end treats
+  it as a scope while the backend treats it as nothing. Same ruling as above: silence and a refusal
+  are both defensible and the corpus writes neither.
 
 ### Movement since `43b3324`
 
@@ -979,7 +1099,7 @@ write, and writes the file only at the very end — so a failed assertion change
 
 The 17 samples that reach codegen and are blocked by exactly one refusal each, measured at
 `91312b8`. This list **is** the work queue for the backend, but **read §4's re-measurements
-first**: it is **nine** samples at `624a061`, and eight of them report something other than what
+first**: it is **eight** samples at `HEAD`, and every one of them reports something other than what
 the block below says. The numbered items keep their old titles for continuity; the corrections are
 in their text.
 
@@ -1136,10 +1256,15 @@ Recommended order — cheapest first, and each one unblocks the next:
    the last thing between that sample and an object now that its `{any, any}` parameters are not the
    block); ~~`foreach` (`loops.fin`)~~ — **done at `624a061` (2026-08-31); no sample moved, the corpus is
    still 22 / 9 / 20, and `loops.fin`'s first refusal moved from `a 'foreach' loop` at `:19` to `a call
-   to 'recursive'` at `:46`** (see §4, "`foreach`"); **a nested function declaration** (`loops.fin:40`
-   declares `fun recursive` inside `main` and the call at `:46` refuses — that is now the sample's only
-   blocker, and it was booked by nothing before this unit measured it); lambdas and `fn` parameter
-   types (`functions.fin`, `lambdas.fin`); the erasure marker (`generics_interfaces.fin`, ADR 0002).
+   to 'recursive'` at `:46`** (see §4, "`foreach`"); ~~**a nested function declaration**~~ — **done
+   at `HEAD` (2026-09-01), and `loops.fin` moved: the corpus is 23 / 8 / 20 and the suite is 1564**
+   (see §4, "A nested function declaration"). It is a plain function with internal linkage under a
+   generated name, derived from the analyzer defining a nested `fun` in the enclosing *body's*
+   scope, and a capture is refused because the corpus's one instance captures nothing; **two
+   pre-existing module-scope findings were booked next to it and not fixed** — an expression
+   statement outside a function *segfaults* `finc`, and a block outside one is silently dropped;
+   lambdas and `fn` parameter types (`functions.fin`, `lambdas.fin`); the erasure marker
+   (`generics_interfaces.fin`, ADR 0002).
 9. After the corpus: the struct ABI classifier, `blame`/`try`/`catch`, the payload-carrying
    tagged-union enum, **real** bit-width annotations (`int{64}`) — which is now a narrowing to
    implement rather than a miscompile to stop, because the annotation refuses as of `02fba4a`; it is

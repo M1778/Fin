@@ -161,9 +161,31 @@ fun main() <noret> {
 }
 ```
 
-A function may also be declared *inside* another function's body, and that form
-type-checks — but a call to a nested function is not yet lowered, so keep functions at
-module scope in anything you intend to build with `-o`.
+A function may also be declared *inside* another function's body:
+
+```fin
+fun main() <noret> {
+    fun recursive(a: int) <int> {
+        if (a == 0) {
+            return 0;
+        }
+        return recursive(a - 1);
+    }
+    let b <auto> = recursive(5);
+}
+```
+
+A nested function is a plain function with a name only one scope can write. It is
+visible from its declaration to the end of the scope it was written in and nowhere else
+— a call above it is an undefined name, a sibling function cannot reach it, and two
+bodies may each declare their own `helper`. Inside that scope it shadows a module-scope
+function, a global, or an enum member of the same spelling, and it can be handed around
+as an `fn` value like any other function.
+
+What it may *not* do is read the enclosing body's variables. It has no frame of its own
+to keep them in, so a nested function reading an enclosing local is refused rather than
+compiled — pass the value in as an argument instead. The same rule applies to a lambda,
+for the same reason.
 
 ## Lifetimes across scopes
 

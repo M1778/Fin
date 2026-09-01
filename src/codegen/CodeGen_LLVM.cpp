@@ -429,6 +429,14 @@ struct Local {
     CgType type;
 };
 
+// Where a `continue` and a `break` inside the innermost loop go. Declared out here
+// beside Local and FnInfo rather than in the Emitter, because ScopedEmission holds one
+// of these and its member declarations are read before the Emitter's own are.
+struct LoopTargets {
+    llvm::BasicBlock* continueTo = nullptr;
+    llvm::BasicBlock* breakTo = nullptr;
+};
+
 // A module-scope variable. The same pair as a Local, with the home in the object
 // file instead of a frame -- which is why everything downstream of an address
 // treats the two alike (see emitAddress).
@@ -1249,7 +1257,14 @@ private:
         std::vector<std::unordered_map<std::string, Local>> saved;
         saved.swap(scopes_);
         scopes_.emplace_back();
+        // The nested functions are put aside for the same reason the locals are: the
+        // default was written in the struct's declaration, where a function declared
+        // inside the use site's body is not a name at all.
+        std::vector<std::unordered_map<std::string, std::string>> savedNested;
+        savedNested.swap(nested_);
+        nested_.emplace_back();
         CgVal v = emitAs(expr, target);
+        nested_.swap(savedNested);
         scopes_.swap(saved);
         return v;
     }
@@ -1263,8 +1278,15 @@ private:
 
     // ---- scopes -----------------------------------------------------------
 
-    void pushScope() { scopes_.emplace_back(); }
-    void popScope() { scopes_.pop_back(); }
+    // The nested functions a scope declares live on a stack of their own, pushed and
+    // popped with the locals rather than stored beside them.
+    //
+    // Beside them would mean a Local, and a Local is a frame slot; what a nested
+    // function has is a symbol. Keeping the two apart is what lets nestedFor decide
+    // between a `let h` and a `fun h` by *depth* -- see it for why that is the only
+    // answer that matches the scope the analyzer resolved the name in.
+    void pushScope() { scopes_.emplace_back(); nested_.emplace_back(); }
+    void popScope() { scopes_.pop_back(); nested_.pop_back(); }
 
     // The names this body refused a declaration for, so that a later statement reading
     // one is not reported as a discovery of its own.
@@ -1300,6 +1322,36 @@ private:
     // no `.` in an identifier.
     unsigned lambdas_ = 0;
 
+    // The same, for `fin.nested.<n>.<name>`. The written name is kept in the symbol
+    // because the only reader of a Fin symbol name is a person reading `nm` output, and
+    // the counter is what keeps two bodies' `helper` apart -- two functions may each
+    // declare one and they are two functions.
+    unsigned nestedFns_ = 0;
+
+    // What a refused capture is a capture *by*. A lambda and a nested function are the
+    // two bodies written inside another body, neither may reach the enclosing frame, so
+    // the check is one function -- but the wording has to differ, because a reader told
+    // "a lambda capturing 'n'" about a `fun` would go looking for a lambda.
+    std::string captureKind_ = "a lambda";
+
+    // Per scope, the nested functions it declares: the written name to the symbol the
+    // body was emitted under. Pushed and popped with `scopes_`.
+    std::vector<std::unordered_map<std::string, std::string>> nested_;
+
+    // What the *next* body emitted should see as its enclosing nested functions, handed
+    // over rather than inherited: emitBodyOf takes it and clears it, so a body nobody
+    // filled it for starts with none, and only the two callers that emit a body written
+    // inside another body -- emitNestedFunction and visit(LambdaExpression&) -- fill it.
+    //
+    // One flat map and not a stack, because what crosses the boundary is the *set* of
+    // names the body may call and not which scope each came from: inside the body they
+    // are all equally outer, and the body's own scopes are pushed on top of them.
+    //
+    // Names and symbols, never slots: a symbol is reachable from anywhere and a frame is
+    // not, which is the whole reason these may cross a body boundary when a local may
+    // not.
+    std::unordered_map<std::string, std::string> nestedCarry_;
+
     bool isPoisoned(const std::string& name) const {
         for (auto& p : poisoned_) if (p == name) return true;
         return false;
@@ -1332,6 +1384,52 @@ private:
                                      "declaration was refused above", name));
             }
             failed_ = true;
+        }
+        return nullptr;
+    }
+
+    // Every nested function a body written *here* could call, flattened into the one map
+    // that crosses a body boundary: outermost scope first, so an inner declaration
+    // overwrites an outer one of the same name, and any name a local in the same scope
+    // takes is removed again. Exactly the set nestedFor would answer for, computed once
+    // because the body it is handed to gets a scope stack of its own and cannot walk
+    // this one.
+    std::unordered_map<std::string, std::string> visibleNested() const {
+        std::unordered_map<std::string, std::string> visible;
+        const size_t depth = std::min(scopes_.size(), nested_.size());
+        for (size_t i = 0; i < depth; ++i) {
+            for (const auto& entry : nested_[i]) visible[entry.first] = entry.second;
+            for (const auto& entry : scopes_[i]) visible.erase(entry.first);
+        }
+        return visible;
+    }
+
+    // The symbol a nested function was emitted under, or nothing when the name is not a
+    // nested function's -- or when a local of the same name is at least as inner as it
+    // is.
+    //
+    // The locals and the nested functions are two tables over *one* scope stack, and
+    // that is why this walks them in lockstep rather than reading one to exhaustion
+    // first. Reading the nested ones first would let a `fun h` in a block shadow a name
+    // from a scope it does not enclose; reading the locals to the bottom first would do
+    // the reverse to `let h <int> = 3; { fun h() ... h() }`, where the analyzer resolves
+    // `h` to the inner function. Neither is the scope the name was resolved in, and the
+    // difference is a call to the wrong thing rather than a missing feature.
+    //
+    // Because it answers only for a nested declaration at least as inner as any local of
+    // the name, the identifier and call paths may ask it *first* and the locals lose
+    // nothing by being second.
+    //
+    // The locals are consulted first *within* one depth, which is arbitrary and never
+    // reached: a name that is both in one scope is refused where the second of the two is
+    // declared (see emitNestedFunction).
+    const std::string* nestedFor(const std::string& name) const {
+        const size_t depth = std::min(scopes_.size(), nested_.size());
+        for (size_t i = 0; i < depth; ++i) {
+            if (scopes_[scopes_.size() - 1 - i].count(name)) return nullptr;
+            const auto& fns = nested_[nested_.size() - 1 - i];
+            auto found = fns.find(name);
+            if (found != fns.end()) return &found->second;
         }
         return nullptr;
     }
@@ -3442,6 +3540,12 @@ private:
     }
 
     void visit(FunctionDeclaration& node) override {
+        // A `fun` written inside another body is a different declaration from a
+        // module-scope one and is emitted by its own path: it publishes no module
+        // symbol, it is reached through the enclosing body's scopes, and the module
+        // pre-pass never saw it. Checked first, because everything below assumes the
+        // name was already declared by declareTopLevel.
+        if (currentFn_) { emitNestedFunction(node); return; }
         if (node.body == nullptr) return;  // a declaration only; the prototype is enough
         if (!node.generic_params.empty()) {
             // A template, and monomorphisation means a template is not code: one body
@@ -3452,6 +3556,145 @@ private:
             return;
         }
         emitBody(node, node.name);
+    }
+
+    // `fun recursive(a: int) <int> { ... }` written inside another body --
+    // tests/samples/loops.fin:40, the corpus's only nested function declaration.
+    //
+    // It lowers to an ordinary function with a name nobody outside can write. That is
+    // derived rather than chosen: the analyzer registers a nested `fun` in the enclosing
+    // *body's* scope (Analyzer_Decl.cpp step 6 defines it in `currentScope->parent`,
+    // which for a nested declaration is the enclosing body and not the module), so the
+    // name is visible from the declaration to the end of that scope and nowhere else --
+    // a sibling function cannot call it and a call written above it is "Undefined
+    // function or type". A body that is reached by name from one scope and by nothing
+    // else is a function with internal linkage; there is nothing else it could be.
+    //
+    // Its body is emitted here, at the declaration, rather than queued. A queue would
+    // work and is what a method uses, but a nested function may name the enclosing
+    // body's other nested functions and those are a property of *where* it was written;
+    // emitting it here is what makes that set be the set at this point in the walk
+    // rather than the set at the end of the body.
+    //
+    // What it may *not* do is read the enclosing frame. `loops.fin`'s one instance
+    // captures nothing -- `recursive` reads its own parameter and calls itself -- so the
+    // corpus does not say what a capture means, and a body that quietly loaded a slot
+    // from a frame that is about to be gone is the miscompile this refuses instead. It
+    // is the same rule a lambda already has and it is the same code: `enclosingNames_`
+    // and refuseIfCapture, with `captureKind_` saying which of the two a reader is
+    // looking at.
+    void emitNestedFunction(FunctionDeclaration& node) {
+        if (node.body == nullptr) {
+            // `fun h() <int>;` inside a body. At module scope this is a prototype for a
+            // definition elsewhere, and "elsewhere" is a scope that ends with this one:
+            // nothing outside can define it and nothing inside is required to. Refused
+            // rather than treated as an extern, which would emit a call to a symbol no
+            // object file contains.
+            unsupported(node, fmt::format("a nested function '{}' with no body", node.name));
+            return;
+        }
+        if (!node.generic_params.empty()) {
+            // A template, and a template is not code until a call says what its type
+            // parameters are. The module-scope path registers one in `fnTemplates_` and
+            // instantiates it at the call; that table is keyed by the written name with
+            // no scope in it, so a nested template of a name the module also uses would
+            // silently be one or the other. Refused until there is a case asking.
+            unsupported(node, fmt::format("a nested generic function '{}'", node.name));
+            return;
+        }
+        if (!node.attributes.empty()) {
+            // Not even `#[llvm_name]`, which the module-scope path does read. That
+            // attribute names the symbol this declaration publishes, and a nested
+            // function publishes none -- honouring it would put an externally visible
+            // name on a function only one scope can call, and ignoring it would drop an
+            // attribute the writer expected to change the object.
+            unsupported(node, fmt::format("the attribute '{}' on the nested function '{}'",
+                                          node.attributes.front()->name, node.name));
+            return;
+        }
+        if (node.is_public) {
+            // `pub` says what a *module's* scope hands to an import. A nested function is
+            // not in one, so there is nothing for the keyword to make public, and
+            // accepting it would be this file claiming to have honoured what nothing
+            // honoured.
+            unsupported(node, fmt::format("'pub' on the nested function '{}'", node.name));
+            return;
+        }
+        if (scopes_.empty() || nested_.empty()) {
+            // currentFn_ is set, so emitBodyOf has pushed a scope. Arriving here without
+            // one is this file disagreeing with itself.
+            unsupported(node, fmt::format("a nested function '{}' outside a scope", node.name));
+            return;
+        }
+        if (scopes_.back().count(node.name)) {
+            // `let h <int> = 3; fun h() <int> { ... }` in one scope. The analyzer's
+            // step 6 *overwrites* the symbol, so every read of `h` after this line means
+            // the function and the variable becomes unnameable while its storage is still
+            // live. One name over a slot and a symbol in the same scope is a state this
+            // file's two tables cannot both hold, and picking either one silently gets a
+            // program wrong: refused, and the corpus writes nothing like it.
+            unsupported(node, fmt::format("a nested function '{}' whose name a variable in "
+                                          "the same scope already has", node.name));
+            return;
+        }
+        if (nested_.back().count(node.name)) {
+            // Two nested functions of one name in one scope. `declareFunction` keeps the
+            // first, so the second body would silently not be the one that runs -- the
+            // same reason a second method on a struct is refused, one level in.
+            unsupported(node, fmt::format("a second nested function '{}' in one scope",
+                                          node.name));
+            return;
+        }
+
+        // `fin.nested.<n>.<name>`: internal, uniqued by a counter that only goes up, and
+        // spelled with dots so that no Fin program can write it. The written name is kept
+        // because the only reader of a Fin symbol name is a person reading `nm` output --
+        // the same bargain `fin.lambda.<n>` and `Box<int>.get` strike.
+        const std::string symbol = fmt::format("fin.nested.{}.{}", nestedFns_++, node.name);
+        declareFunction(node, symbol, symbol, node.params, node.return_type.get(),
+                        /*isVarArg=*/false, /*isExtern=*/false);
+        auto declared = functions_.find(symbol);
+        if (declared == functions_.end()) return;  // declareFunction already reported
+        declared->second.fn->setLinkage(llvm::Function::InternalLinkage);
+
+        // Registered *before* the body is emitted, which is what makes `return
+        // recursive(a - 1)` find the function it is inside rather than start a second
+        // one. loops.fin:44 is that call and it is the whole of why this order matters.
+        nested_.back()[node.name] = symbol;
+
+        // What the body may call: every nested function visible at this point, which
+        // now includes this one -- `return recursive(a - 1)` is loops.fin:44 and it is
+        // the reason the registration above happens before this line.
+        nestedCarry_ = visibleNested();
+
+        // The locals in scope here, so that a body reading one is refused as a capture
+        // instead of loading a frame that is about to be gone. Saved and put back around
+        // the body.
+        //
+        // Added to what is already there rather than replacing it: a nested function two
+        // bodies deep is as unable to read `main`'s frame as it is to read the frame of
+        // the function it sits directly inside, so both sets of names are captures and
+        // dropping the outer one only changes which *message* the read gets -- "the name
+        // 'n'", which reads as a front-end bug, in place of the boundary this actually
+        // is.
+        std::vector<std::string> enclosing = enclosingNames_;
+        for (const auto& scope : scopes_)
+            for (const auto& entry : scope) enclosing.push_back(entry.first);
+        enclosing.swap(enclosingNames_);
+        std::string kind = "a nested function";
+        kind.swap(captureKind_);
+        emitBodyOf(node, node.params, node.body.get(), nullptr, symbol);
+        kind.swap(captureKind_);
+        enclosing.swap(enclosingNames_);
+
+        if (failed_) {
+            // The body was refused, so the name has no code behind it. Taken back out of
+            // the table and poisoned, so that a call written below it is suppressed
+            // rather than reported as "a call to 'h'" -- which would send a reader to
+            // implement a call that is already implemented.
+            nested_.back().erase(node.name);
+            poison(node.name);
+        }
     }
 
     // The emitter state one function body owns, saved and put back.
@@ -3470,13 +3713,25 @@ private:
             : e_(e), block_(e.builder_.GetInsertBlock()),
               point_(block_ ? e.builder_.GetInsertPoint() : llvm::BasicBlock::iterator()),
               fn_(e.currentFn_), scopes_(std::move(e.scopes_)),
+              nested_(std::move(e.nested_)), loops_(std::move(e.loops_)),
               poisoned_(std::move(e.poisoned_)) {
             e_.scopes_.clear();
+            e_.nested_.clear();
+            // No loop, whatever the caller was in the middle of. A `break` written in
+            // a body emitted from inside a loop used to branch to that loop's exit
+            // block, which is a block in another function -- `Referring to a basic
+            // block in another function!`, an invalid-IR refusal in place of the honest
+            // one. The analyzer permits the spelling (it sees the enclosing loop), so
+            // this is the pass that has to say no, and with the loop stack empty
+            // visit(BreakStatement&) already says exactly that.
+            e_.loops_.clear();
             e_.poisoned_.clear();
             e_.currentFn_ = nullptr;
         }
         ~ScopedEmission() {
             e_.scopes_ = std::move(scopes_);
+            e_.nested_ = std::move(nested_);
+            e_.loops_ = std::move(loops_);
             e_.poisoned_ = std::move(poisoned_);
             e_.currentFn_ = fn_;
             if (block_) e_.builder_.SetInsertPoint(block_, point_);
@@ -3491,6 +3746,8 @@ private:
         llvm::BasicBlock::iterator point_;
         FnInfo* fn_;
         std::vector<std::unordered_map<std::string, Local>> scopes_;
+        std::vector<std::unordered_map<std::string, std::string>> nested_;
+        std::vector<LoopTargets> loops_;
         std::vector<std::string> poisoned_;
     };
 
@@ -3536,6 +3793,14 @@ private:
 
         currentFn_ = &found->second;
         pushScope();
+
+        // The nested functions this body may call, if it is one of the two kinds that
+        // may call any: the outermost scope of the body holds them, so the body's own
+        // declarations shadow them by sitting in a scope further in. Taken and cleared,
+        // so a body whose caller filled nothing -- a template instantiation, a queued
+        // method -- gets none rather than the last filler's.
+        nested_.back() = std::move(nestedCarry_);
+        nestedCarry_.clear();
 
         // The receiver, which the source may not have written and which is a
         // parameter all the same. It gets a slot like any other, so `self.x = v` is the
@@ -4211,6 +4476,32 @@ private:
     }
 
     void visit(Identifier& node) override {
+        // A nested function named as a value -- `let f <fn(int) -> int> = h;` with `h`
+        // declared in this body. It is an ordinary code pointer for the same reason a
+        // module-scope function is: it captures nothing, because a capture is refused.
+        //
+        // First, for the reason the call path checks it first: `nestedFor` answers only
+        // when the nested declaration is at least as inner as any local of the name, so
+        // the locals lose nothing by being asked second, and a nested `fun h` inside a
+        // block that an outer `let h` encloses resolves to the function -- which is what
+        // the analyzer resolved it to.
+        if (const std::string* symbol = nestedFor(node.name)) {
+            auto nestedFn = functions_.find(*symbol);
+            if (nestedFn != functions_.end()) {
+                std::optional<CgType> type = fnValueType(nestedFn->second);
+                if (!type) {
+                    // A nested function is neither variadic (the grammar has no `...` on
+                    // one) nor `main`, so this is unreachable rather than a case; it
+                    // refuses instead of asserting because the alternative is handing
+                    // back a Fin type the code does not have.
+                    unsupported(node, fmt::format("the nested function '{}' used as a "
+                                                  "value", node.name));
+                    return;
+                }
+                value_ = CgVal{nestedFn->second.fn, *type};
+                return;
+            }
+        }
         if (Local* local = findLocal(node.name)) {
             auto loaded = builder_.CreateLoad(local->type.llvmType, local->slot, node.name);
             value_ = CgVal{loaded, local->type, local->slot};
@@ -4304,7 +4595,7 @@ private:
     bool refuseIfCapture(ASTNode& node, const std::string& name) {
         for (const auto& n : enclosingNames_) {
             if (n != name) continue;
-            unsupported(node, fmt::format("a lambda capturing '{}'", name));
+            unsupported(node, fmt::format("{} capturing '{}'", captureKind_, name));
             return true;
         }
         return false;
@@ -4871,8 +5162,32 @@ private:
             unsupported(node, fmt::format("the compile-time call '@{}'", node.name));
             return;
         }
-        // A local of function type, which shadows a function of the same name -- and
-        // checked first for that reason, which is also the order the analyzer uses.
+        // A nested function, before the locals rather than after them. `nestedFor` is
+        // the thing that decides between the two: it walks the local and the nested
+        // tables in lockstep and answers only when the nested declaration is at least as
+        // inner as any local of the name, so asking it first costs the locals nothing and
+        // is what makes `let h <int> = 3; { fun h() <int> {...} h() }` call the function
+        // the analyzer resolved -- reaching findLocal first would find the outer variable
+        // and refuse the call as one through a non-function.
+        if (const std::string* symbol = nestedFor(node.name)) {
+            auto nestedFn = functions_.find(*symbol);
+            if (nestedFn == functions_.end()) {
+                // Registered by emitNestedFunction only once declareFunction succeeded,
+                // so a name in the table with no function is this file disagreeing with
+                // itself.
+                unsupported(node, fmt::format("a call to the nested function '{}'",
+                                              node.name));
+                return;
+            }
+            std::vector<llvm::Value*> args;
+            if (!emitCallArgs(node, nestedFn->second, node.name, argList(node.args), args))
+                return;
+            emitCall(nestedFn->second, args);
+            return;
+        }
+        // A local of function type, which shadows a *module-scope* function of the same
+        // name -- and checked before those for that reason, which is also the order the
+        // analyzer uses.
         if (Local* local = findLocal(node.name)) {
             if (!local->type.isFn()) {
                 unsupported(node, fmt::format("a call through the variable '{}' of "
@@ -7144,13 +7459,22 @@ private:
         declared->second.fn->setLinkage(llvm::Function::InternalLinkage);
 
         // The names visible *here*, snapshotted before emitBodyOf's ScopedEmission moves
-        // the scopes out of reach. Saved and restored around the body so that a lambda
-        // inside a lambda sees the outer lambda's parameters as its own enclosing names
-        // and not the outermost function's.
-        std::vector<std::string> enclosing;
+        // the scopes out of reach. Saved and restored around the body.
+        //
+        // Added to what is already there, so that a lambda inside a lambda counts the
+        // outer lambda's parameters *and* the names the outer lambda was written among:
+        // neither frame is reachable from a bare code pointer, so a read of either is the
+        // same capture and says so, instead of the innermost one being reported as an
+        // unknown name.
+        std::vector<std::string> enclosing = enclosingNames_;
         for (const auto& scope : scopes_)
             for (const auto& entry : scope) enclosing.push_back(entry.first);
         enclosing.swap(enclosingNames_);
+        // The nested functions visible here are callable from inside the lambda, for the
+        // reason a capture is not: a nested function is a symbol and calling one needs no
+        // frame. A lambda written beside `fun one()` and calling it is the same call the
+        // enclosing body would emit.
+        nestedCarry_ = visibleNested();
         emitBodyOf(node, node.params, node.body.get(), node.expression_body.get(), name);
         enclosing.swap(enclosingNames_);
         if (failed_) return;
@@ -7173,11 +7497,6 @@ private:
     void visit(ArrayTypeNode& node) override { unsupported(node, "an array type in expression position"); }
 
     // ---- state ------------------------------------------------------------
-
-    struct LoopTargets {
-        llvm::BasicBlock* continueTo = nullptr;
-        llvm::BasicBlock* breakTo = nullptr;
-    };
 
     DiagnosticEngine& diag_;
     bool debug_ = false;

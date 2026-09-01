@@ -8848,6 +8848,567 @@ BACKEND_TEST(Soundness_Codegen, AFunctionValueSurvivesAStructFieldRoundTrip) {
 }
 
 // ---------------------------------------------------------------------------
+// A `fun` written inside another body.
+//
+// It lowers to an ordinary function with internal linkage and a generated symbol,
+// `fin.nested.<n>.<name>`. That is derived from the front end rather than chosen: the
+// analyzer registers a nested declaration in the enclosing *body's* scope
+// (Analyzer_Decl.cpp, visit(FunctionDeclaration&) step 6, which defines the name in
+// `currentScope->parent`), so the name is visible from the declaration to the end of
+// that scope and nowhere else. A sibling function cannot call it, a call written
+// *above* it is "Undefined function or type" from the front end, and two bodies may
+// each declare `helper` without colliding. A body reached by name from one scope and
+// by nothing else is a function nothing outside can name; there is nothing else it
+// could be.
+//
+// So it is deliberately *not* a closure, and the second half of this slice is what
+// makes the first half safe -- the same bargain the lambdas above strike. The corpus
+// has exactly one nested function, loops.fin:40's `recursive`, and it reads its own
+// parameter and calls itself; it captures nothing. A body that read the enclosing
+// frame would be reading a frame that is gone by the time an `fn` value calls it, so
+// a read of an enclosing local is refused *as a capture* -- ANestedFunctionCapturing
+// AnEnclosingLocalIsRefused -- through the machinery a lambda already had, with
+// `captureKind_` the only difference between the two messages.
+//
+// Two tables over one scope stack, and not one: a local is a frame slot and a nested
+// function is a symbol, and `nestedFor` walks the two in lockstep innermost-first so
+// that a name resolves in the scope the analyzer resolved it in. A collision in the
+// same scope is refused in either direction, because the analyzer *overwrites* the
+// symbol there -- `let h; fun h()` leaves the variable unnameable while its storage
+// is still live -- and there is no state this file's two tables could both hold.
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionIsCalledFromTheBodyItIsWrittenIn) {
+    // loops.fin:40-46 in shape: the declaration inside `main`, the call below it. This
+    // is the sample line the unit exists for, and the whole of `loops.fin` compiles to
+    // an object for the first time because of it.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    fun recursive(a: int) <int> {\n"
+        "        if (a == 0) { return 0; }\n"
+        "        return recursive(a - 1) + a;\n"
+        "    }\n"
+        "    printf(\"%d\\n\", recursive(5));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "15\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionCallsItselfRatherThanASecondCopy) {
+    // The registration order this depends on is the one thing about the lowering that
+    // could plausibly have gone the other way: the name has to be in the table *before*
+    // its own body is emitted, or `fact(n - 1)` inside `fact` resolves to nothing and
+    // the call is refused. A factorial rather than a countdown, so a wrong answer is a
+    // wrong number and not merely a missing one.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    fun fact(n: int) <int> {\n"
+        "        if (n <= 1) { return 1; }\n"
+        "        return n * fact(n - 1);\n"
+        "    }\n"
+        "    printf(\"%d\\n\", fact(5));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "120\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoBodiesEachDeclareTheirOwnFunctionOfOneName) {
+    // The property that makes the generated symbol necessary rather than decorative.
+    // Both are called `helper` and neither is visible to the other, so publishing the
+    // written name would be a duplicate definition -- and `functions_` keeps the first
+    // declaration of a name, so the second body would silently have been the first one's
+    // code. Both values are printed, because a test that read one would pass either way.
+    const Built b = build(std::string(kPrintf) +
+        "fun a() <int> { fun helper() <int> { return 1; } return helper(); }\n"
+        "fun b() <int> { fun helper() <int> { return 2; } return helper(); }\n"
+        "fun main() <noret> { printf(\"%d %d\\n\", a(), b()); }\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2\n") << b.why();
+
+    // Internal, and under a name no Fin program can write: the lexer has no `.` in an
+    // identifier, so `fin.nested.<n>.<name>` cannot collide with anything a writer
+    // spells, and the counter only goes up.
+    const std::string trace = codegenTrace(
+        std::string(kPrintf) +
+        "fun a() <int> { fun helper() <int> { return 1; } return helper(); }\n"
+        "fun b() <int> { fun helper() <int> { return 2; } return helper(); }\n"
+        "fun main() <noret> { printf(\"%d %d\\n\", a(), b()); }\n");
+    EXPECT_NE(trace.find("declared fin.nested.0.helper"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("declared fin.nested.1.helper"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionTakesArgumentsAndReturnsAValue) {
+    // The ordinary case, which is worth measuring because the arguments go through
+    // emitCallArgs exactly as a module-scope call's do: a nested call that skipped it
+    // would pass an argument of the wrong width without saying so. The argument is a
+    // local, so this is also the pair to ANestedFunctionCapturingAnEnclosingLocalIsRefused
+    // -- passing `n` in is the supported way to write what a capture would have read.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    fun triple(x: int) <int> { return x * 3; }\n"
+        "    let n <int> = 2;\n"
+        "    printf(\"%d\\n\", triple(n));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionWithNoReturnValueLowers) {
+    // `<noret>`, and a call in statement position. The implicit tail of a nested body is
+    // the same tail every other body gets, so a missing `ret void` would be invalid IR
+    // rather than a wrong value -- which is why this is a separate test from the ones
+    // that read a result.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    fun show(x: int) <noret> { printf(\"%d\\n\", x); }\n"
+        "    show(5);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionCallsAnEarlierSiblingAndNotALaterOne) {
+    // The visible set is the set *at the declaration*, which is why the body is emitted
+    // there rather than queued to the end of the enclosing one. Both halves, because the
+    // asymmetry is the measurement: `early` calling `later` written below it is refused,
+    // and by the front end rather than here -- the analyzer defines the name at the
+    // declaration, so a call above it has no name to resolve.
+    const Built lowered = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    fun later() <int> { return 1; }\n"
+        "    fun early() <int> { return later(); }\n"
+        "    printf(\"%d\\n\", early());\n"
+        "}\n");
+    ASSERT_TRUE(lowered.ran) << lowered.why();
+    EXPECT_EQ(lowered.out, "1\n") << lowered.why();
+
+    const Built refused = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    fun early() <int> { return later(); }\n"
+        "    fun later() <int> { return 1; }\n"
+        "    printf(\"%d\\n\", early());\n"
+        "}\n");
+    EXPECT_NE(refused.compileExit, 0) << refused.why();
+    EXPECT_NE(refused.compileErr.find("Undefined function or type 'later'"),
+              std::string::npos) << refused.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionMayBeWrittenInsideANestedFunction) {
+    // Nothing in the lowering is limited to one level, and the level is where a wrong
+    // answer would hide: the inner declaration goes into the innermost scope's table, so
+    // an implementation that kept one flat table per function would still pass every
+    // single-level test and get this one's visibility wrong.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    fun a() <int> { return 1; }\n"
+        "    fun b() <int> {\n"
+        "        fun c() <int> { return a() + 10; }\n"
+        "        return c();\n"
+        "    }\n"
+        "    printf(\"%d\\n\", b());\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "11\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionIsUsedAsAFunctionValue) {
+    // A nested function is a bare code pointer for the same reason a module-scope one is,
+    // and it is the refusal of a capture that entitles it to be: with nothing closed
+    // over there is no second word for a pair to hold. Both spellings of handing one
+    // over -- into a variable of `fn` type, and as an argument to a parameter of one.
+    const Built b = build(std::string(kPrintf) +
+        "fun apply(f: fn(int) => int, v: int) <int> { return f(v); }\n"
+        "fun main() <noret> {\n"
+        "    fun dbl(x: int) <int> { return x * 2; }\n"
+        "    let g <fn(int) -> int> = dbl;\n"
+        "    printf(\"%d %d\\n\", g(6), apply(dbl, 21));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "12 42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionOutranksAModuleFunctionOfTheSameName) {
+    // The shadowing the analyzer performs, measured from out here: step 6 *overwrites*
+    // the symbol in the enclosing scope, so every read of the name inside that body means
+    // the nested one. The module-scope `helper` is still itself everywhere else, and
+    // `other()` is what proves it -- a lookup order that reached `functions_` first would
+    // print `9 9`, and one that leaked the nested table out of the body would print
+    // `4 4`.
+    const Built b = build(std::string(kPrintf) +
+        "fun helper() <int> { return 9; }\n"
+        "fun other() <int> { return helper(); }\n"
+        "fun main() <noret> {\n"
+        "    fun helper() <int> { return 4; }\n"
+        "    printf(\"%d %d\\n\", helper(), other());\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4 9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionOutranksAGlobalOfTheSameName) {
+    // The other direction of the same rule, and the one that says which of the two tables
+    // wins: a global is a symbol with storage and a nested function is a symbol with
+    // code, so a name that is both has to resolve to the inner one -- which is where the
+    // analyzer resolved it.
+    const Built b = build(std::string(kPrintf) +
+        "let n <int> = 5;\n"
+        "fun main() <noret> {\n"
+        "    fun n() <int> { return 1; }\n"
+        "    printf(\"%d\\n\", n());\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionIsScopedToTheBlockItIsWrittenIn) {
+    // A block is a scope, so a declaration in one ends with it. Both halves: the call
+    // inside the block runs, and the same call after it has no name to resolve -- which
+    // the front end says, because the analyzer's scope is the same scope.
+    const Built inside = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    {\n"
+        "        fun h() <int> { return 1; }\n"
+        "        printf(\"%d\\n\", h());\n"
+        "    }\n"
+        "}\n");
+    ASSERT_TRUE(inside.ran) << inside.why();
+    EXPECT_EQ(inside.out, "1\n") << inside.why();
+
+    const Built after = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    {\n"
+        "        fun h() <int> { return 1; }\n"
+        "    }\n"
+        "    printf(\"%d\\n\", h());\n"
+        "}\n");
+    EXPECT_NE(after.compileExit, 0) << after.why();
+    EXPECT_NE(after.compileErr.find("Undefined function or type 'h'"), std::string::npos)
+        << after.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInnerBlocksNestedFunctionShadowsAnOuterOneAndThenStops) {
+    // Shadowing in both directions across a block boundary, which is what `nestedFor`'s
+    // innermost-first walk is for. Printed as a pair in one program, because the failure
+    // this catches is a table that resolved to the outer declaration inside the block
+    // (`1 1`) or kept the inner one alive after it (`2 2`).
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    fun h() <int> { return 1; }\n"
+        "    {\n"
+        "        fun h() <int> { return 2; }\n"
+        "        printf(\"%d \", h());\n"
+        "    }\n"
+        "    printf(\"%d\\n\", h());\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AVariableInAnInnerBlockShadowsANestedFunctionOfTheName) {
+    // The reverse collision, one scope apart rather than in the same scope -- which is
+    // the case that is *not* refused, because the two tables can both hold it and the
+    // analyzer resolved it to the inner name. `nestedFor` walking the locals in lockstep
+    // is what answers this correctly; reading the nested table to exhaustion first would
+    // print `1` and call a function where the program named a variable.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    fun h() <int> { return 1; }\n"
+        "    {\n"
+        "        let h <int> = 9;\n"
+        "        printf(\"%d \", h);\n"
+        "    }\n"
+        "    printf(\"%d\\n\", h());\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionIsWrittenInsideAStructMethod) {
+    // A method body is a body, and a method arrives here from a queue rather than from
+    // the module walk -- so this is the one that checks the carried set is per-body and
+    // not a leftover from whoever filled it last. `self` is read by the *method*, and the
+    // nested function is handed the field as an argument, which is the supported shape.
+    const Built b = build(std::string(kPrintf) +
+        "struct S {\n"
+        "    v <int>,\n"
+        "    fun get(self: &Self) <int> {\n"
+        "        fun bump(x: int) <int> { return x + 1; }\n"
+        "        return bump(self.v);\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S { v: 41 };\n"
+        "    printf(\"%d\\n\", s.get());\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionInATemplateIsEmittedOncePerInstantiation) {
+    // A template's body is emitted per distinct binding, so a nested function inside one
+    // is too -- and it has to be, because its parameter type is the template's `T`. Two
+    // bindings, and the trace counts the bodies: one shared symbol would be a function
+    // whose parameter is `int` being called with a `long`.
+    const std::string code = std::string(kPrintf) +
+        "fun twice_of<T>(a: T) <T> {\n"
+        "    fun twice(x: T) <T> { return x + x; }\n"
+        "    return twice(a);\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d\\n\", twice_of(3),\n"
+        "           cast<int>(twice_of(cast<long>(4))));\n"
+        "}\n";
+    const Built b = build(code);
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "6 8\n") << b.why();
+
+    const std::string trace = codegenTrace(code);
+    EXPECT_EQ(occurrences(trace, "declared fin.nested."), 2u) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionIsWrittenInsideALambda) {
+    // A lambda's body is a body like any other, and it pushes a scope of its own -- so a
+    // `fun` written in one belongs to the lambda and not to the function the lambda sits
+    // in. The value is what says the call went to the right place.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let f <auto> = fun () <int> {\n"
+        "        fun k() <int> { return 4; }\n"
+        "        return k();\n"
+        "    };\n"
+        "    printf(\"%d\\n\", f());\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ALambdaCallsANestedFunctionBesideIt) {
+    // The pair to ALambdaCapturingALocalIsRefused, and the reason the two differ: a local
+    // is a slot in a frame the lambda's code pointer cannot reach, and a nested function
+    // is a symbol that needs no frame at all. So a lambda written beside `fun one()` emits
+    // the same call the enclosing body would, and refusing it would have been a boundary
+    // with nothing behind it.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    fun one() <int> { return 1; }\n"
+        "    let f <auto> = fun (x: int) <int> { return x + one(); };\n"
+        "    printf(\"%d\\n\", f(41));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionReadsAGlobalAndCallsAModuleFunction) {
+    // Neither is a capture, and both are worth pinning because the refusal above is
+    // written as a *name* check: a rule that had matched too eagerly would stop a body
+    // from reading a global or calling a sibling of the enclosing function, which is what
+    // lambdas.fin:58 does one construct over.
+    const Built b = build(std::string(kPrintf) +
+        "let G <int> = 6;\n"
+        "fun other() <int> { return 8; }\n"
+        "fun main() <noret> {\n"
+        "    fun h() <int> { return G + other(); }\n"
+        "    printf(\"%d\\n\", h());\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "14\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionCapturingAnEnclosingLocalIsRefused) {
+    // The boundary the bare-pointer representation sits behind, one construct over from
+    // ALambdaCapturingALocalIsRefused and refused by the same code. `n` lives in `main`'s
+    // frame; the nested function is reachable as an `fn` value that outlives no frame it
+    // can see, so lowering the read would either load a dead slot or silently pass a
+    // different value.
+    //
+    // Named as a capture and not as an unknown name, because the two send a reader
+    // somewhere different: "the name 'n'" reads as a front-end bug and this is a
+    // deliberate stop. Paired with the supported spelling, which is to pass it in.
+    const Built refused = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let n <int> = 1;\n"
+        "    fun h() <int> { return n; }\n"
+        "    printf(\"%d\\n\", h());\n"
+        "}\n");
+    EXPECT_NE(refused.compileExit, 0) << refused.why();
+    EXPECT_NE(refused.compileErr.find("a nested function capturing 'n'"),
+              std::string::npos) << refused.why();
+    // One finding and not two: the refused declaration's name is poisoned, so the call
+    // below it is suppressed rather than reported as a call that is not lowered -- which
+    // would send a reader to implement a call that already works.
+    EXPECT_EQ(occurrences(refused.compileErr, "codegen: "), 1u) << refused.why();
+
+    const Built lowered = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let n <int> = 1;\n"
+        "    fun h(v: int) <int> { return v; }\n"
+        "    printf(\"%d\\n\", h(n));\n"
+        "}\n");
+    ASSERT_TRUE(lowered.ran) << lowered.why();
+    EXPECT_EQ(lowered.out, "1\n") << lowered.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInnerNestedFunctionCapturingAnOuterBodysLocalIsRefused) {
+    // Two levels in, and still a capture: the frame `n` is in is no more reachable from
+    // the inner function than from the outer one. Said as a capture rather than as an
+    // unknown name, which is what makes this its own test -- the enclosing names have to
+    // *accumulate* down the nesting, and dropping the outer set would leave this read
+    // reported as "the name 'n'".
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let n <int> = 1;\n"
+        "    fun outer() <int> {\n"
+        "        fun inner() <int> { return n; }\n"
+        "        return inner();\n"
+        "    }\n"
+        "    printf(\"%d\\n\", outer());\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a nested function capturing 'n'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionWithNoBodyIsRefused) {
+    // `fun h() <int>;` inside a body. At module scope this is a prototype for a definition
+    // elsewhere; here "elsewhere" is a scope that ends with this one, so nothing outside
+    // can define it and nothing inside is obliged to. Treating it as an extern would emit
+    // a call to a symbol no object file contains, which is a link error for a program the
+    // compiler said was fine.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    fun h() <int>;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a nested function 'h' with no body"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedGenericFunctionIsRefused) {
+    // A template is not code until a call says what its type parameters are, and the
+    // table that holds one (`fnTemplates_`) is keyed by the written name with no scope in
+    // it -- so a nested template of a name the module also uses would silently be one or
+    // the other. Refused until a program asks; paired with the same body at module scope,
+    // which instantiates.
+    const Built refused = build(
+        "fun main() <noret> {\n"
+        "    fun g<T>(a: T) <T> { return a; }\n"
+        "}\n");
+    EXPECT_NE(refused.compileExit, 0) << refused.why();
+    EXPECT_NE(refused.compileErr.find("a nested generic function 'g'"), std::string::npos)
+        << refused.why();
+
+    const Built lowered = build(std::string(kPrintf) +
+        "fun g<T>(a: T) <T> { return a; }\n"
+        "fun main() <noret> { printf(\"%d\\n\", g(3)); }\n");
+    ASSERT_TRUE(lowered.ran) << lowered.why();
+    EXPECT_EQ(lowered.out, "3\n") << lowered.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAttributeOnANestedFunctionIsRefused) {
+    // Not even `#[llvm_name]`, which the module-scope path does read. That attribute names
+    // the symbol a declaration publishes and a nested function publishes none: honouring
+    // it would put an externally visible name on a function only one scope can call, and
+    // ignoring it would drop an attribute the writer expected to change the object.
+    // Paired with the same attribute at module scope, where it renames the symbol.
+    const Built refused = build(
+        "fun main() <noret> {\n"
+        "    #[llvm_name=\"zz\"]\n"
+        "    fun h() <int> { return 1; }\n"
+        "}\n");
+    EXPECT_NE(refused.compileExit, 0) << refused.why();
+    EXPECT_NE(refused.compileErr.find("the attribute 'llvm_name' on the nested function 'h'"),
+              std::string::npos) << refused.why();
+
+    const std::string trace = codegenTrace(
+        "#[llvm_name=\"zz\"]\n"
+        "fun h() <int> { return 1; }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(trace.find("not lowered yet"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, PubOnANestedFunctionIsRefused) {
+    // The grammar accepts it inside a body. `pub` says what a *module's* scope hands to an
+    // import, and a nested function is not in one -- so there is nothing for the keyword
+    // to make public, and accepting it would be this pass claiming to have honoured what
+    // nothing honoured. Paired with the identical body without the keyword.
+    const Built refused = build(
+        "fun main() <noret> {\n"
+        "    pub fun h() <int> { return 1; }\n"
+        "}\n");
+    EXPECT_NE(refused.compileExit, 0) << refused.why();
+    EXPECT_NE(refused.compileErr.find("'pub' on the nested function 'h'"),
+              std::string::npos) << refused.why();
+
+    const Built lowered = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    fun h() <int> { return 1; }\n"
+        "    printf(\"%d\\n\", h());\n"
+        "}\n");
+    ASSERT_TRUE(lowered.ran) << lowered.why();
+    EXPECT_EQ(lowered.out, "1\n") << lowered.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionCollidingWithALocalInTheSameScopeIsRefused) {
+    // `let h <int> = 3; fun h() <int> { ... }`, one scope. The analyzer overwrites the
+    // symbol, so every read of `h` after the declaration means the function and the
+    // variable becomes unnameable while its storage is still live. One name over a slot
+    // and a symbol in the same scope is a state the two tables here cannot both hold, and
+    // picking either silently gets a program wrong. Paired with the same two names one
+    // block apart, which AVariableInAnInnerBlockShadowsANestedFunctionOfTheName runs.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let h <int> = 3;\n"
+        "    fun h() <int> { return 1; }\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a nested function 'h' whose name a variable in the same "
+                                "scope already has"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ASecondNestedFunctionOfOneNameInOneScopeIsRefused) {
+    // `declareFunction` keeps the first declaration of a name, so the second body would
+    // silently not be the one that runs -- the same reason a second method of one name on
+    // a struct is refused, one level in. Two bodies with different values, so that a
+    // silent pick would be a wrong answer and not merely an ambiguous one.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    fun h() <int> { return 1; }\n"
+        "    fun h() <int> { return 2; }\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a second nested function 'h' in one scope"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, BreakInsideANestedFunctionInsideALoopIsRefusedAsOutsideALoop) {
+    // The loop stack belongs to the function being emitted, and a body emitted from inside
+    // one starts with none. Before this it inherited the caller's, so a `break` here
+    // branched to a block in *another function* -- `Referring to a basic block in another
+    // function!`, which surfaced as "emitted invalid IR" and named a generated symbol
+    // rather than the construct the program wrote. The analyzer permits the spelling
+    // because it sees the enclosing loop, so this pass is where it stops. Both keywords,
+    // and the lambda spelling beside the nested-function one, because one stack fix covers
+    // all four.
+    for (const char* body : {"fun h() <int> { break; return 1; }",
+                             "fun h() <int> { continue; return 1; }",
+                             "let f <auto> = fun () <int> { break; return 1; };",
+                             "let f <auto> = fun () <int> { continue; return 1; };"}) {
+        const Built b = build(std::string(kPrintf) +
+            "fun main() <noret> {\n"
+            "    let i <int> = 0;\n"
+            "    while (i < 3) {\n"
+            "        " + body + "\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "}\n");
+        EXPECT_NE(b.compileExit, 0) << body << "\n" << b.why();
+        EXPECT_NE(b.compileErr.find("outside a loop"), std::string::npos)
+            << body << "\n" << b.why();
+        EXPECT_EQ(b.compileErr.find("invalid IR"), std::string::npos)
+            << body << "\n" << b.why();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // `blame`, the assert form.
 //
 // One keyword, two statements, told apart by the operand's type and by nothing else
