@@ -109,8 +109,9 @@ the keys are dropped. Do not use it expecting the values to arrive.
 
 ## `hashmap`
 
-`HashMap<T, U>` is two parallel `Collection`s and a linear scan for the key. The name
-describes the interface, not the algorithm — there is no hashing.
+`HashMap<T, U>` is a real hash table: open addressing with linear probing over a bucket
+vector, tombstones for erasure, and a rehash at a 0.75 load factor. A key and its value share
+a *slot* in two parallel `Collection`s, and the bucket vector holds slot numbers.
 
 ```fin
 import { HashMap } from hashmap::std;
@@ -124,10 +125,26 @@ fun main() <noret> {
 }
 ```
 
-`get_index(key)` returns the index or `-1`, `exists(key)` and `len()` answer the obvious
+`get_index(key)` returns the slot or `-1`, `exists(key)` and `len()` answer the obvious
 questions, and `__get`/`__set` do the work that `operator []` and `operator []=` forward to.
-A missing key is an assertion (`blame idx >= 0, "key not found"`) rather than a returned
-sentinel. `from_prototype` is empty for the same reason `Collection`'s is.
+`remove(key)`, `clear()`, `capacity()` and `is_empty()` are there too, and
+`slot_count()`/`is_live(s)`/`key_at(s)`/`value_at(s)` are how you iterate, since `foreach` over
+a struct is not a thing the language defines. A missing key is an assertion
+(`blame idx >= 0, "key not found"`) rather than a returned sentinel, and `get_or(key, fallback)`
+is the one-call form for a caller who does not know whether the key is there.
+`from_prototype` is empty for the same reason `Collection`'s is.
+
+**The hash is over the key's machine value, and for a `string` key that is the pointer, not the
+bytes.** That is deliberate: `==` on two `string`s in this compiler compares pointers, so a
+content hash paired with a pointer equality would be the one broken combination — two keys equal
+by `==` landing in different buckets. So a `string`-keyed map works for keys that are literals or
+are kept alive by the caller. A caller who needs a different hash supplies one:
+`HashMap::with_hasher(f)` sets a `hasher <fn(any) -> int>` field that `hash_key` consults. It is a
+function field rather than a `Hashable` bound because a generic bound is not dispatched on today.
+
+Two limits worth knowing before storing much: a growth drops the old bucket vector rather than
+freeing it, and an erased entry's key and value stay in their `Collection`s forever, because
+compacting them would move every slot number the bucket vector holds.
 
 ## `error`
 

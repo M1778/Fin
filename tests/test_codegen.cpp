@@ -9138,19 +9138,299 @@ BACKEND_TEST(Soundness_Codegen, ALambdaAssigningToACapturedLocalIsRefused) {
     EXPECT_NE(b.compileErr.find("a lambda capturing 'outer'"), std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AGenericLambdaIsRefused) {
-    // lambdas.fin:69 and :71. A generic lambda is a template and a template is not
-    // code, so there is no address to take until something says which instantiation is
-    // meant -- and nothing here does, because neither of the corpus's two is ever
-    // called. Separate from the erasure question its `Castable` also raises: this
-    // refuses for want of a monomorphisation key, not for want of erasure.
-    const Built b = build(std::string(kPrintf) +
+// ---- generic lambdas -----------------------------------------------------
+//
+// `let id <auto> = fun <T>(x: T) <T> { return x; };` binds a name to a template, and
+// what follows from that is one ruling applied twice: a template is a recipe, so the
+// declaration emits nothing, and a call is where it becomes code.
+//
+// The declaration therefore allocates no slot -- which is the part worth stating,
+// because it makes `id` a name the locals do not hold and every other path that
+// resolves a name has to be told. A value use, an address, and a call all reach a
+// different table; the tests below pin each one, because a table walked in the wrong
+// order is a call to the wrong thing rather than a missing feature.
+//
+// lambdas.fin's own two are never called, so they are the case where "emits nothing" is
+// the whole answer -- and `AGenericLambdaNobodyCallsLowersToNothing` is that sample
+// reduced to its assertion.
+
+BACKEND_TEST(Soundness_Codegen, AGenericLambdaNobodyCallsLowersToNothing) {
+    // lambdas.fin:69 and :71 reduced. A template is not code, so an uncalled one is not
+    // an omission: the same rule `AGenericFunctionNobodyCallsLowersToNothing` states for
+    // a named template, one scope in. Asserted on the trace because the *absence* of a
+    // symbol is what is being claimed, and an object file has nothing to look at.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
         "fun main() <noret> {\n"
         "    let g <auto> = fun <T>(m: T) <T> { return m; };\n"
         "    printf(\"ok\\n\");\n"
         "}\n");
+    EXPECT_NE(trace.find("registered the generic lambda g"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("fin.lambda.0<"), std::string::npos) << trace;
+    EXPECT_EQ(trace.find("not lowered yet"), std::string::npos) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, ACalledGenericLambdaIsInstantiatedAtItsArgument) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <auto> = fun <T>(x: T) <T> { return x; };\n"
+        "    printf(\"%d\\n\", id(7));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericLambdaAtTwoTypesIsTwoFunctions) {
+    // Monomorphisation, and the value is what proves it: an erased single body could not
+    // return a double from the same code that returns an int. Both spellings of the
+    // lambda are exercised elsewhere; this one is about the instantiation.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <auto> = fun <T>(x: T) <T> { return x; };\n"
+        "    printf(\"%d %.1f\\n\", id(7), id(2.5));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 2.5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoCallsAtOneTypeShareOneInstance) {
+    // The other half of the previous test, and the reason the trace is asserted on a
+    // count: a template instantiated twice at one type has to be emitted once, and a
+    // test that only looked for the name would pass either way.
+    const std::string trace = codegenTrace(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <auto> = fun <T>(x: T) <T> { return x; };\n"
+        "    printf(\"%d %d\\n\", id(1), id(2));\n"
+        "}\n");
+    EXPECT_EQ(occurrences(trace, "declared fin.lambda.0<int>"), 1u) << trace;
+}
+
+BACKEND_TEST(Soundness_Codegen, TheArrowSpellingOfAGenericLambdaAlsoLowers) {
+    // `<T>(m: T) <T> => m` is lambdas.fin:69's spelling with the erasure marker removed.
+    // The expression body is the one thing an instance's emission does differently from
+    // a named template's, so it is pinned separately.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let same <auto> = <T>(m: T) <T> => m;\n"
+        "    printf(\"%d\\n\", same(41) + 1);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericFnAnnotationOnALambdaTemplateLowers) {
+    // `let id <fn<T>(x: T) -> T> = ...`. The annotation is not mapped and must not be:
+    // TypeMapper::mapFunction refuses every generic `fn` because a template has no
+    // representation, and that refusal is right about the type and wrong about the
+    // program. So the declaration path checks that the annotation *is* a generic `fn`
+    // and asks the mapper nothing.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <fn<T>(x: T) -> T> = fun <T>(x: T) <T> { return x; };\n"
+        "    printf(\"%d\\n\", id(7));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ATurbofishOnAGenericLambdaPicksTheInstance) {
+    // The same route `ident::<long>(5)` takes on a named template: the bindings are
+    // resolved at the call by this pass rather than read off the analyzer, so one
+    // inference rule serves both and a turbofish cannot mean two things.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <auto> = fun <T>(x: T) <T> { return x; };\n"
+        "    printf(\"%d\\n\", id::<int>(9));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericLambdaUsedAsAValueIsRefused) {
+    // The boundary that replaced the old blanket refusal, and it is the *position* that
+    // is refused rather than the construct: a value is one address and a template is two
+    // functions, so `let a <auto> = id;` names neither. The same message the named form
+    // gets in visit(Identifier&), one scope in.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <auto> = fun <T>(x: T) <T> { return x; };\n"
+        "    let a <auto> = id;\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a generic lambda"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("the generic lambda 'id' used as a value"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TheAddressOfAGenericLambdaIsRefused) {
+    // The same boundary through the other path, which is why the check lives in two
+    // places -- the reason a capture's does. A read goes through visit(Identifier&) and
+    // `&id` comes through emitAddress, so refusing only the read would leave this falling
+    // through to "the address of a value with no home": that names a lifetime question,
+    // and the answer here is that there is no value.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <auto> = fun <T>(x: T) <T> { return x; };\n"
+        "    let p <auto> = &id;\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("the address of the generic lambda 'id'"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericLambdasErasureMarkerIsRefusedAtTheCall) {
+    // lambdas.fin:69's `<T: Castable>`, and the reason the sample builds without this
+    // firing: the marker is checked where the representation is first needed, and nothing
+    // in the corpus calls that lambda. Same ruling as the named template's, reached
+    // through the same predicate.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <auto> = fun <T: Castable>(x: T) <T> { return x; };\n"
+        "    printf(\"%d\\n\", id(7));\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("the erasure marker 'Castable' on 'T' of the generic "
+                                "lambda 'id'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnInnerGenericLambdaShadowsAnOuterOfTheSameName) {
+    // Why the table is a stack pushed with the scopes rather than one flat map keyed by
+    // the written name. Both templates are called and each answer is different, so a flat
+    // table would be visibly wrong in one direction or the other -- and it is the failure
+    // emitNestedFunction's own generic refusal names ("keyed by the written name with no
+    // scope in it, so a nested template of a name the module also uses would silently be
+    // one or the other").
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <auto> = fun <T>(x: T) <T> { return x; };\n"
+        "    {\n"
+        "        let id <auto> = fun <T>(x: T) <int> { return 99; };\n"
+        "        printf(\"%d\\n\", id(1));\n"
+        "    }\n"
+        "    printf(\"%d\\n\", id(2));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "99\n2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ALambdaBesideAGenericLambdaCallsIt) {
+    // A template crosses a body boundary where a local may not, and for the reason a
+    // nested function does: instantiating one needs a node and a snapshot, neither of
+    // which is a frame. So `(n: int) <int> => id(n) + 1` written beside the template
+    // builds the same instance the enclosing body would.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <auto> = fun <T>(x: T) <T> { return x; };\n"
+        "    let plain <auto> = (n: int) <int> => id(n) + 1;\n"
+        "    printf(\"%d\\n\", plain(41));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ANestedFunctionBesideAGenericLambdaCallsIt) {
+    // The same carry into the other kind of body written inside a body. Both are pinned
+    // because they are two fillers of one hand-over: a body nobody filled it for has to
+    // see none rather than the last filler's set.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <auto> = fun <T>(x: T) <T> { return x; };\n"
+        "    fun helper(n: int) <int> { return id(n) * 2; }\n"
+        "    printf(\"%d\\n\", helper(21));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericLambdaInsideAGenericFunctionSeesTheOuterParameter) {
+    // `fun <U>(y: U) <S>` written inside `fun outer<S>` mentions a type parameter that is
+    // not its own. An instance built with only its own binding installed would refuse `S`
+    // as a type it does not know, so the bindings that were active at the *declaration*
+    // are snapshotted and reinstalled under the lambda's own -- under, so a lambda
+    // reusing the name shadows the outer one.
+    const Built b = build(std::string(kPrintf) +
+        "fun outer<S>(v: S) <S> {\n"
+        "    let pass <auto> = fun <U>(y: U) <S> { return y; };\n"
+        "    return pass(v);\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %.1f\\n\", outer::<int>(5), outer::<double>(2.5));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5 2.5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericLambdaReusingTheOuterTypeParameterName) {
+    // The shadowing the order above buys, and `sizeof` is what makes the two readings
+    // give different numbers: inside `outer<char>` the lambda's own `T` is bound to int by
+    // its argument, so `sizeof(T)` in its body is 4 -- and would be 1 if the outer binding
+    // won. 4 * 10 + 1.
+    const Built b = build(std::string(kPrintf) +
+        "fun outer<T>(v: T) <int> {\n"
+        "    let sz <auto> = fun <T>(x: T) <int> { return cast<int>(sizeof(T)); };\n"
+        "    return sz(1) * 10 + cast<int>(sizeof(T));\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", outer::<char>(cast<char>(3)));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "41\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AModuleScopeGenericLambdaIsRefused) {
+    // Inside a body the declaration registers a template and emits nothing; at module
+    // scope there is nowhere to register it, because the table is pushed and popped with
+    // the scopes and declareGlobals runs before any body has one. Refused with the
+    // question named, so a reader is sent to "where does a module-scope template live"
+    // rather than to the value boundary, which is not what is in the way.
+    const Built b = build(std::string(kPrintf) +
+        "let id <auto> = fun <T>(x: T) <T> { return x; };\n"
+        "fun main() <noret> { printf(\"ok\\n\"); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("the generic lambda 'id' declared at module scope"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ASecondGenericLambdaOfOneNameInOneScopeIsRefused) {
+    // One name over a slot, a symbol and a template in one scope is a state this file's
+    // tables cannot all hold, and picking either silently runs the wrong body. The same
+    // refusal emitNestedFunction gives one level along.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let id <auto> = fun <T>(x: T) <T> { return x; };\n"
+        "    let id <auto> = fun <T>(x: T) <int> { return 1; };\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a second declaration of 'id' in one scope"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AGenericLambdaCapturingALocalIsRefused) {
+    // The bare-pointer boundary is not relaxed by the lambda being a template: an
+    // instance is a function like any other and has no second word for a frame. Worth
+    // pinning because the environment an instance is emitted with is *snapshotted* at the
+    // declaration -- an instance built from the middle of a call reads that snapshot and
+    // not the caller's scopes, and a check reading the live tables would refuse the
+    // caller's locals instead of this one.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let outer <int> = 7;\n"
+        "    let id <auto> = fun <T>(x: T) <int> { return outer; };\n"
+        "    printf(\"%d\\n\", id(1));\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a lambda capturing 'outer'"), std::string::npos) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AGenericFunctionUsedAsAValueIsRefused) {

@@ -192,6 +192,17 @@ import { Addable } from operators::std;
 let g <auto> = fun <G: Addable>(a: G, b: G) <G> { return a + b; };
 ```
 
+A generic lambda is a *template*, in the same sense a generic `fun` is: the `let` declares a recipe
+and the call is what turns it into code, one instantiation per set of type arguments. So `g` is not
+a value — it cannot be passed to something taking an `fn`, and its address cannot be taken — and a
+generic one nobody calls compiles to nothing at all. Calling it builds:
+
+```fin
+let id <auto> = fun <T>(x: T) <T> { return x; };
+printf("%d\n", id(7));
+printf("%d\n", id::<int>(7));
+```
+
 ## Variadic and foreign declarations
 
 `@define` declares a function implemented outside Fin. It has a signature and no body, and

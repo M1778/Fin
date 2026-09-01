@@ -1285,8 +1285,16 @@ private:
     // function has is a symbol. Keeping the two apart is what lets nestedFor decide
     // between a `let h` and a `fun h` by *depth* -- see it for why that is the only
     // answer that matches the scope the analyzer resolved the name in.
-    void pushScope() { scopes_.emplace_back(); nested_.emplace_back(); }
-    void popScope() { scopes_.pop_back(); nested_.pop_back(); }
+    void pushScope() {
+        scopes_.emplace_back();
+        nested_.emplace_back();
+        lambdaTemplates_.emplace_back();
+    }
+    void popScope() {
+        scopes_.pop_back();
+        nested_.pop_back();
+        lambdaTemplates_.pop_back();
+    }
 
     // The names this body refused a declaration for, so that a later statement reading
     // one is not reported as a discovery of its own.
@@ -1338,6 +1346,62 @@ private:
     // body was emitted under. Pushed and popped with `scopes_`.
     std::vector<std::unordered_map<std::string, std::string>> nested_;
 
+    // A generic lambda, held as the template it is rather than as a value.
+    //
+    // `let id <auto> = fun <T>(x: T) <T> { return x; };` binds a name to a *recipe*, and
+    // ADR 0002's monomorphisation is what makes that the whole of the declaration's
+    // meaning: `id<int>` and `id<double>` are two functions, a bare `id` names neither,
+    // and there is no address for a slot to hold until a call says which is meant. So
+    // the declaration allocates nothing and this is where the name goes; the call
+    // instantiates, exactly as `fnTemplates_` does for a named `fun ident<T>`.
+    //
+    // What a named template does not need and this does: the two things a lambda body is
+    // emitted *with*. An instance is built from the middle of a call, so the scopes the
+    // lambda was written among are long gone by then -- `enclosing` is what
+    // refuseIfCapture reads, and `nested` is what the body may call. Snapshotted at the
+    // declaration because that is where they are true, and a body given the *call site's*
+    // would refuse the wrong names as captures and admit the wrong nested functions.
+    //
+    // `id` is the `fin.lambda.<n>` the instances share, taken from the same counter a
+    // non-generic lambda takes its symbol from: one template is one lambda however many
+    // instances it has, and the mangled key is that name with the substitution appended.
+    // Held by pointer to an incomplete type on purpose: the environment is a table of
+    // LambdaTemplates and a LambdaTemplate names the environment it was written in, so
+    // one of the two has to be indirect. A `shared_ptr` to a struct defined below is the
+    // spelling that is legal for both directions, and shared rather than unique because
+    // every instance of one template reads the same environment.
+    struct LambdaEnv;
+
+    struct LambdaTemplate {
+        LambdaExpression* node = nullptr;
+        unsigned id = 0;
+        std::vector<std::string> enclosing;
+        std::unordered_map<std::string, std::string> nested;
+        std::shared_ptr<LambdaEnv> visible;
+        // The type parameters that were bound where the lambda was *written*, which is a
+        // thing a named template never has: a module-scope `fun ident<T>` is written
+        // where nothing is bound, and a lambda inside `fun outer<S>` is not. `fun <U>(y:
+        // U) <S> { ... }` mentions `S` in its signature, so an instance built with only
+        // its own binding installed would refuse `S` as a type it does not know. See
+        // instantiateTemplate, which installs these under the lambda's own.
+        Substitution outer;
+    };
+
+    // The generic lambdas one body may call, which is what crosses a body boundary for
+    // the reason `nestedCarry_` does: a template is a node and a snapshot, neither of
+    // which is a frame, so it may be read from a body the writing scope no longer
+    // encloses.
+    struct LambdaEnv {
+        std::unordered_map<std::string, LambdaTemplate> table;
+    };
+
+    // Per scope, the generic lambdas it declares -- pushed and popped with `scopes_` for
+    // the reason `nested_` is: a template bound to a name in a block is out of scope
+    // after it, and a flat table keyed by the written name would make an inner one and
+    // an outer one the same entry. `emitNestedFunction` already records that as the
+    // reason a *nested* template is refused, and the shape here is the answer to it.
+    std::vector<std::unordered_map<std::string, LambdaTemplate>> lambdaTemplates_;
+
     // What the *next* body emitted should see as its enclosing nested functions, handed
     // over rather than inherited: emitBodyOf takes it and clears it, so a body nobody
     // filled it for starts with none, and only the two callers that emit a body written
@@ -1351,6 +1415,11 @@ private:
     // not, which is the whole reason these may cross a body boundary when a local may
     // not.
     std::unordered_map<std::string, std::string> nestedCarry_;
+
+    // The same, for the generic lambdas. Taken and cleared by emitBodyOf exactly as
+    // `nestedCarry_` is, so a body nobody filled it for -- a top-level function, a
+    // queued method -- sees none rather than the last filler's.
+    std::unordered_map<std::string, LambdaTemplate> lambdaCarry_;
 
     bool isPoisoned(const std::string& name) const {
         for (auto& p : poisoned_) if (p == name) return true;
@@ -1394,6 +1463,20 @@ private:
     // takes is removed again. Exactly the set nestedFor would answer for, computed once
     // because the body it is handed to gets a scope stack of its own and cannot walk
     // this one.
+    // Every generic lambda a body written *here* could call, flattened the way
+    // visibleNested flattens the nested functions and for the same three reasons:
+    // outermost first so an inner binding wins, a name a local takes removed again, and
+    // computed once because the body it is handed to gets a scope stack of its own.
+    std::unordered_map<std::string, LambdaTemplate> visibleLambdas() const {
+        std::unordered_map<std::string, LambdaTemplate> visible;
+        const size_t depth = std::min(scopes_.size(), lambdaTemplates_.size());
+        for (size_t i = 0; i < depth; ++i) {
+            for (const auto& entry : lambdaTemplates_[i]) visible[entry.first] = entry.second;
+            for (const auto& entry : scopes_[i]) visible.erase(entry.first);
+        }
+        return visible;
+    }
+
     std::unordered_map<std::string, std::string> visibleNested() const {
         std::unordered_map<std::string, std::string> visible;
         const size_t depth = std::min(scopes_.size(), nested_.size());
@@ -1430,6 +1513,25 @@ private:
             const auto& fns = nested_[nested_.size() - 1 - i];
             auto found = fns.find(name);
             if (found != fns.end()) return &found->second;
+        }
+        return nullptr;
+    }
+
+    // The generic lambda a name is bound to, or nothing.
+    //
+    // Walks the two tables in lockstep exactly as `nestedFor` does, and for the same
+    // reason: the locals and the templates are two tables over one scope stack, so a
+    // local of the name declared further in has to win. Nothing in the corpus writes
+    // that -- the analyzer refuses a call after a same-name local shadows a template
+    // (`let g <auto> = fun<T>...; let g <int> = 3; g(1)` is `Undefined function or type
+    // 'g'`) -- so this is the order that agrees with the front end rather than a case.
+    LambdaTemplate* lambdaTemplateFor(const std::string& name) {
+        const size_t depth = std::min(scopes_.size(), lambdaTemplates_.size());
+        for (size_t i = 0; i < depth; ++i) {
+            if (scopes_[scopes_.size() - 1 - i].count(name)) return nullptr;
+            auto& table = lambdaTemplates_[lambdaTemplates_.size() - 1 - i];
+            auto found = table.find(name);
+            if (found != table.end()) return &found->second;
         }
         return nullptr;
     }
@@ -2763,6 +2865,21 @@ private:
                                               var->name));
                 return;
             }
+            if (auto* lambda = dynamic_cast<LambdaExpression*>(var->initializer.get())) {
+                if (!lambda->generic_params.empty()) {
+                    // A generic lambda at module scope. Inside a body this declaration
+                    // registers a template and emits nothing; here there is nowhere to
+                    // register it -- `lambdaTemplates_` is pushed and popped with the
+                    // scopes, and this runs before any body has one. Refused with the
+                    // question named rather than left to the initialiser path, which
+                    // would say "used as a value" and send a reader to a boundary that
+                    // is not the one in the way.
+                    unsupported(*var,
+                                fmt::format("the generic lambda '{}' declared at module "
+                                            "scope", var->name));
+                    return;
+                }
+            }
 
             // `<auto>` takes the initialiser's type, as it does for a local.
             const bool isAuto = var->type && var->type->name == "auto" &&
@@ -2903,7 +3020,7 @@ private:
                     // The erasure marker is *not* checked here, and this is where the
                     // difference is easiest to see: registering a template emits
                     // nothing, so a marked one that nothing calls has asked for no
-                    // representation. emitGenericCall refuses at the call instead.
+                    // representation. emitTemplateCall refuses at the call instead.
                     if (fn->body != nullptr) fnTemplates_[fn->name] = fn;
                     continue;
                 }
@@ -3407,6 +3524,17 @@ private:
             // assignment target comes here, and only reporting the read would leave a
             // write to a captured local falling through to "this assignment target",
             // which names the wrong thing.
+            // `&id` and `id = ...` on a generic lambda. Refused here as well as in
+            // visit(Identifier&) for the reason a capture is: a read goes through the
+            // visitor and an address comes here, so reporting only the read would leave
+            // `&id` falling through to "the address of a value with no home" -- which
+            // names a lifetime question, and the answer here is that there is no value.
+            if (LambdaTemplate* tmpl = lambdaTemplateFor(id->name)) {
+                (void)tmpl;
+                unsupported(*id, fmt::format("the address of the generic lambda '{}'",
+                                             id->name));
+                return std::nullopt;
+            }
             if (refuseIfCapture(*id, id->name)) return std::nullopt;
             return std::nullopt;
         }
@@ -3716,6 +3844,9 @@ private:
         // now includes this one -- `return recursive(a - 1)` is loops.fin:44 and it is
         // the reason the registration above happens before this line.
         nestedCarry_ = visibleNested();
+        // And the generic lambdas visible here, for the reason they cross into a lambda's
+        // body: a template is instantiated, not called through a frame.
+        lambdaCarry_ = visibleLambdas();
 
         // The locals in scope here, so that a body reading one is refused as a capture
         // instead of loading a frame that is about to be gone. Saved and put back around
@@ -3763,10 +3894,11 @@ private:
             : e_(e), block_(e.builder_.GetInsertBlock()),
               point_(block_ ? e.builder_.GetInsertPoint() : llvm::BasicBlock::iterator()),
               fn_(e.currentFn_), scopes_(std::move(e.scopes_)),
-              nested_(std::move(e.nested_)), loops_(std::move(e.loops_)),
-              poisoned_(std::move(e.poisoned_)) {
+              nested_(std::move(e.nested_)), lambdas_(std::move(e.lambdaTemplates_)),
+              loops_(std::move(e.loops_)), poisoned_(std::move(e.poisoned_)) {
             e_.scopes_.clear();
             e_.nested_.clear();
+            e_.lambdaTemplates_.clear();
             // No loop, whatever the caller was in the middle of. A `break` written in
             // a body emitted from inside a loop used to branch to that loop's exit
             // block, which is a block in another function -- `Referring to a basic
@@ -3781,6 +3913,7 @@ private:
         ~ScopedEmission() {
             e_.scopes_ = std::move(scopes_);
             e_.nested_ = std::move(nested_);
+            e_.lambdaTemplates_ = std::move(lambdas_);
             e_.loops_ = std::move(loops_);
             e_.poisoned_ = std::move(poisoned_);
             e_.currentFn_ = fn_;
@@ -3797,6 +3930,7 @@ private:
         FnInfo* fn_;
         std::vector<std::unordered_map<std::string, Local>> scopes_;
         std::vector<std::unordered_map<std::string, std::string>> nested_;
+        std::vector<std::unordered_map<std::string, LambdaTemplate>> lambdas_;
         std::vector<LoopTargets> loops_;
         std::vector<std::string> poisoned_;
     };
@@ -3851,6 +3985,13 @@ private:
         // method -- gets none rather than the last filler's.
         nested_.back() = std::move(nestedCarry_);
         nestedCarry_.clear();
+
+        // The generic lambdas this body may call, by the same rule and for the same
+        // reason: a template is a node and a snapshot, so it survives the scope it was
+        // written in, and a lambda written beside `let id <auto> = fun <T>...` calling
+        // `id` is the same instantiation the enclosing body would build.
+        lambdaTemplates_.back() = std::move(lambdaCarry_);
+        lambdaCarry_.clear();
 
         // The receiver, which the source may not have written and which is a
         // parameter all the same. It gets a slot like any other, so `self.x = v` is the
@@ -3946,6 +4087,77 @@ private:
         builder_.CreateRet(out);
     }
 
+    // One function template, in the form the instantiation path reads it.
+    //
+    // Two things are templates a call may instantiate -- a named `fun ident<T>` and a
+    // generic lambda bound to a name -- and they differ in four fields and in nothing
+    // else. Passing those four rather than the node is what lets emitTemplateCall and
+    // instantiateTemplate be one copy each: a second copy would be a second inference
+    // rule and a second mangling for what is one spelling of one thing, and the two
+    // would drift at the first refusal added to either.
+    //
+    // `keyBase` is separate from `display` because they answer different questions. The
+    // key is a symbol -- `ident<int>`, `fin.lambda.3<int>` -- and a lambda's has to be
+    // one no Fin program can write, since two lambdas bound to the same name in two
+    // scopes are two templates. The display is what a diagnostic says, which is the name
+    // the program wrote.
+    struct TemplateCallee {
+        ASTNode* node = nullptr;
+        std::string display;
+        std::string keyBase;
+        const std::vector<std::unique_ptr<GenericParam>>* generics = nullptr;
+        const std::vector<std::unique_ptr<Parameter>>* params = nullptr;
+        const TypeNode* returnType = nullptr;
+        // Exactly one of these is set, and which one is the whole of the difference
+        // between a `fun` body and `=> expr`. See emitBodyOf.
+        Block* block = nullptr;
+        Expression* value = nullptr;
+        // The environment a lambda instance's body is emitted with, and null for a named
+        // function -- which has none to have, being written at module scope.
+        const LambdaTemplate* lambda = nullptr;
+        // "the generic function" or "the generic lambda". The whole noun, because the
+        // messages read `... of the generic lambda 'id'` and building that from parts
+        // would put the caller's grammar here.
+        std::string kind;
+    };
+
+    static TemplateCallee calleeOf(FunctionDeclaration& tmpl) {
+        TemplateCallee c;
+        c.node = &tmpl;
+        c.display = tmpl.name;
+        c.keyBase = tmpl.name;
+        c.generics = &tmpl.generic_params;
+        c.params = &tmpl.params;
+        c.returnType = tmpl.return_type.get();
+        c.block = tmpl.body.get();
+        c.kind = "the generic function";
+        return c;
+    }
+
+    static TemplateCallee calleeOf(const std::string& name, const LambdaTemplate& tmpl) {
+        TemplateCallee c;
+        c.node = tmpl.node;
+        c.display = name;
+        // The `fin.lambda.<n>` the template was given at its declaration, which every
+        // instance shares: one lambda is one template however many types it is called
+        // at, and `<int>` is appended to this by mangledName.
+        //
+        // The counter alone is enough to separate two enclosing instantiations, and that
+        // is a fact about *when* a template is registered rather than a property of the
+        // name: registration happens while a body is emitted, so the lambda inside
+        // `outer<int>` and the one inside `outer<double>` are two registrations and take
+        // two numbers. Folding `tmpl.outer` in as well would spell the distinction twice.
+        c.keyBase = fmt::format("fin.lambda.{}", tmpl.id);
+        c.generics = &tmpl.node->generic_params;
+        c.params = &tmpl.node->params;
+        c.returnType = tmpl.node->return_type.get();
+        c.block = tmpl.node->body.get();
+        c.value = tmpl.node->expression_body.get();
+        c.lambda = &tmpl;
+        c.kind = "the generic lambda";
+        return c;
+    }
+
     // `ident<int>` -- one instantiation of one function template, built the first time
     // it is asked for and then found.
     //
@@ -3954,20 +4166,34 @@ private:
     // to be registered before the body is emitted -- `return down(n - 1)` asks for the
     // instantiation it is inside, and finds the name step 2 put there rather than
     // starting a second one that never ends.
-    bool instantiateFunction(FunctionDeclaration& tmpl, const Substitution& substitution,
+    bool instantiateTemplate(const TemplateCallee& tmpl, const Substitution& substitution,
                              const std::string& key) {
         // 1. The bindings, stored before anything is emitted. The TypeMapper holds a
         //    pointer to them for the whole of the signature and the body, and a body
         //    may instantiate further templates into this same map -- which is why the
         //    storage is a member and not a local, and why a node-based map.
-        fnInstances_[key] = substitution;
+        // The lambda's own bindings first and the enclosing instance's after, so a lambda
+        // that reuses the name -- `fun <T>` written inside `fun outer<T>` -- resolves T to
+        // its own parameter. `boundBinding` answers with the first match, which is what
+        // makes the order the shadowing rule.
+        Substitution merged = substitution;
+        if (tmpl.lambda) {
+            for (const auto& binding : tmpl.lambda->outer) {
+                bool shadowed = false;
+                for (const auto& own : substitution) {
+                    if (own.first == binding.first) { shadowed = true; break; }
+                }
+                if (!shadowed) merged.push_back(binding);
+            }
+        }
+        fnInstances_[key] = std::move(merged);
         ScopedBindings bound(types_, &fnInstances_[key]);
 
         // 2. The signature, under the mangled name. `T` in a parameter or return
         //    position resolves through the bindings, so this is the ordinary path with
         //    the parameters substituted -- including every refusal it has, which is how
         //    an instance whose signature cannot be lowered says so at the call.
-        declareFunction(tmpl, key, key, tmpl.params, tmpl.return_type.get(),
+        declareFunction(*tmpl.node, key, key, *tmpl.params, tmpl.returnType,
                         /*isVarArg=*/false, /*isExtern=*/false);
         auto found = functions_.find(key);
         if (found == functions_.end()) return false;  // declareFunction reported
@@ -3978,10 +4204,36 @@ private:
         // template bargain: identical bodies, one copy kept, the linker picks. An
         // external definition in each would make the second a duplicate-symbol error,
         // which is a link failure for a program that is correct.
-        found->second.fn->setLinkage(llvm::GlobalValue::LinkOnceODRLinkage);
+        //
+        // A lambda instance is *internal* instead, which is not a smaller version of the
+        // same bargain but the absence of it. Weak exists because two objects can each
+        // instantiate one named template and the linker has to be told the copies are
+        // interchangeable. A lambda template is bound to a local name inside one body, so
+        // no other object can name it and there is no second copy to reconcile -- and the
+        // symbol is not one weak could be trusted with anyway: `fin.lambda.<n>` is a
+        // counter over emission order, so two objects whose instantiations ran in
+        // different orders would publish one name for two different bodies, and weak
+        // would silently keep either. Internal makes the question not arise, which is the
+        // same linkage a non-generic lambda already gets for the same reason.
+        found->second.fn->setLinkage(tmpl.lambda ? llvm::GlobalValue::InternalLinkage
+                                                 : llvm::GlobalValue::LinkOnceODRLinkage);
 
-        // 3. The body, with the parameters bound.
-        emitBody(tmpl, key);
+        // 3. The body, with the parameters bound -- and, for a lambda, with the
+        //    environment its *declaration* was written in rather than the call's. The
+        //    two are different scopes entirely: an instance is emitted from the middle
+        //    of whatever call asked for it, so reading the live tables here would refuse
+        //    the caller's locals as captures and let the body call nested functions the
+        //    lambda was never written among.
+        if (tmpl.lambda) {
+            std::vector<std::string> enclosing = tmpl.lambda->enclosing;
+            enclosing.swap(enclosingNames_);
+            nestedCarry_ = tmpl.lambda->nested;
+            if (tmpl.lambda->visible) lambdaCarry_ = tmpl.lambda->visible->table;
+            emitBodyOf(*tmpl.node, *tmpl.params, tmpl.block, tmpl.value, key);
+            enclosing.swap(enclosingNames_);
+        } else {
+            emitBodyOf(*tmpl.node, *tmpl.params, tmpl.block, tmpl.value, key);
+        }
         return !failed_;
     }
 
@@ -4056,27 +4308,27 @@ private:
     // what makes the turbofish work at all -- a free function's turbofish binds nothing
     // in Analyzer_Expr (booked), so a backend that trusted the analyzer's answer would
     // instantiate `ident::<long>(5)` at int.
-    void emitGenericCall(FunctionCall& node, FunctionDeclaration& tmpl) {
+    void emitTemplateCall(FunctionCall& node, const TemplateCallee& tmpl) {
         // First, and at the call rather than at the declaration: this is the point at
         // which the template stops being a recipe, and the representation ADR 0002
         // reserves for an erased parameter is what would have to be laid out. Before
         // the arguments are emitted, so a refused call emits no instructions for
         // operands nothing will consume.
-        if (refuseIfErased(node, tmpl.generic_params,
-                           fmt::format("the generic function '{}'", tmpl.name))) return;
-        for (auto& p : tmpl.params) {
+        if (refuseIfErased(node, *tmpl.generics,
+                           fmt::format("{} '{}'", tmpl.kind, tmpl.display))) return;
+        for (auto& p : *tmpl.params) {
             if (!p->is_vararg) continue;
             // No corpus site, and nothing to infer from: a `...` position has no
             // declared type for a binding to unify against.
-            unsupported(*p, fmt::format("'...' on the generic function '{}'", tmpl.name));
+            unsupported(*p, fmt::format("'...' on {} '{}'", tmpl.kind, tmpl.display));
             return;
         }
-        if (node.args.size() != tmpl.params.size()) {
+        if (node.args.size() != tmpl.params->size()) {
             // The analyzer already checked arity; reaching here is the two passes
             // disagreeing, so it says so rather than padding.
             unsupported(node,
                         fmt::format("a call to '{}' with {} argument(s) where it declares {}",
-                                    tmpl.name, node.args.size(), tmpl.params.size()));
+                                    tmpl.display, node.args.size(), tmpl.params->size()));
             return;
         }
 
@@ -4085,11 +4337,11 @@ private:
             // Written. Mapped in the caller's scope, exactly as a struct's type
             // arguments are -- so a `T` written inside another instance resolves through
             // the binding that is already active.
-            if (node.generic_args.size() != tmpl.generic_params.size()) {
+            if (node.generic_args.size() != tmpl.generics->size()) {
                 unsupported(node,
                             fmt::format("a call to '{}' with {} type argument(s) where it "
-                                        "declares {}", tmpl.name, node.generic_args.size(),
-                                        tmpl.generic_params.size()));
+                                        "declares {}", tmpl.display, node.generic_args.size(),
+                                        tmpl.generics->size()));
                 return;
             }
             for (size_t i = 0; i < node.generic_args.size(); ++i) {
@@ -4099,10 +4351,10 @@ private:
                     !mapped->llvmType->isSized()) {
                     if (failed_) return;  // a nested instantiation already reported
                     unsupportedType(node, arg,
-                                    fmt::format("'{}' at a type argument", tmpl.name));
+                                    fmt::format("'{}' at a type argument", tmpl.display));
                     return;
                 }
-                bindings.push_back({tmpl.generic_params[i]->name,
+                bindings.push_back({(*tmpl.generics)[i]->name,
                                     TypeBinding{*mapped, displayName(arg)}});
             }
         }
@@ -4126,9 +4378,9 @@ private:
 
         if (node.generic_args.empty()) {
             for (size_t i = 0; i < values.size(); ++i) {
-                unifyBinding(tmpl.params[i]->type.get(),
+                unifyBinding((*tmpl.params)[i]->type.get(),
                              TypeBinding{values[i].type, cgDisplay(values[i].type)},
-                             tmpl.generic_params, bindings);
+                             *tmpl.generics, bindings);
             }
         }
 
@@ -4136,7 +4388,7 @@ private:
         // from this list, and `f<A, B>(b: B, a: A)` would otherwise be two names for one
         // instantiation depending on which call site reached it first.
         Substitution ordered;
-        for (auto& p : tmpl.generic_params) {
+        for (auto& p : *tmpl.generics) {
             bool found = false;
             for (auto& b : bindings) {
                 if (b.first != p->name) continue;
@@ -4151,17 +4403,17 @@ private:
             // named is a function the program did not write. `nothing::<int>()` is how
             // this one is called.
             unsupported(node, fmt::format("a call to '{}' whose type argument '{}' no "
-                                          "argument mentions", tmpl.name, p->name));
+                                          "argument mentions", tmpl.display, p->name));
             return;
         }
 
-        const std::string key = mangledName(tmpl.name, ordered);
-        if (!functions_.count(key) && !instantiateFunction(tmpl, ordered, key)) return;
+        const std::string key = mangledName(tmpl.keyBase, ordered);
+        if (!functions_.count(key) && !instantiateTemplate(tmpl, ordered, key)) return;
         auto instance = functions_.find(key);
         if (instance == functions_.end()) return;  // already reported
         const FnInfo& info = instance->second;
         if (info.paramTypes.size() != values.size()) {
-            unsupported(node, fmt::format("a call to '{}' with too few arguments", tmpl.name));
+            unsupported(node, fmt::format("a call to '{}' with too few arguments", tmpl.display));
             return;
         }
 
@@ -4180,8 +4432,109 @@ private:
 
     void visit(DefineDeclaration& node) override { (void)node; }  // prototype only
 
+    // `let id <auto> = fun <T>(x: T) <T> { return x; };` -- a name bound to a template.
+    //
+    // The declaration emits nothing at all: no alloca, no store, and no entry in
+    // `scopes_`. That is the monomorphisation ruling applied to a lambda rather than a
+    // choice made here -- `id<int>` and `id<double>` are two functions and a bare `id`
+    // names neither, so there is no value for a slot to hold, and a template nothing
+    // calls costs nothing exactly as `AGenericFunctionNobodyCallsLowersToNothing` says
+    // for a named one. `lambdas.fin`'s two are both uncalled and this is why they are
+    // free.
+    //
+    // Returns false having already reported.
+    bool registerLambdaTemplate(VariableDeclaration& node, LambdaExpression& lambda) {
+        if (!currentFn_) {
+            // A module-scope one, which declareGlobals has already refused by name -- so
+            // this is unreachable rather than a case, and it refuses instead of asserting
+            // because there is no table here to put the template in either.
+            unsupported(node, fmt::format("the generic lambda '{}' declared outside a "
+                                          "function", node.name));
+            return false;
+        }
+        if (!node.attributes.empty()) {
+            // Not even `#[slaveof]`, which an ordinary variable's path accepts as a
+            // no-op. It is a no-op there because the attribute asks for a lifetime that
+            // this backend's storage already has; here there is no storage, so the
+            // request is not satisfied-by-construction, it is unanswerable.
+            unsupported(node, fmt::format("the attribute '{}' on the generic lambda '{}'",
+                                          node.attributes.front()->name, node.name));
+            return false;
+        }
+        if (!lambda.body && !lambda.expression_body) {
+            unsupported(node, "a generic lambda with no body");
+            return false;
+        }
+        // The annotation, which is not mapped and must not be: `fn<T>(m: T) -> T` has no
+        // representation for the same reason the template has no address, and
+        // TypeMapper::mapFunction says so by refusing every generic `fn`. What it is
+        // instead is the template's own type, so the only thing checked is that it is one
+        // -- `<auto>`, or a `fn` that declares type parameters. The front end has already
+        // matched the annotation against the lambda parameter-name for parameter-name
+        // (`fn<U>(x: U) -> U` rejects a `fun <T>` lambda), so there is nothing left here
+        // to compare.
+        if (node.type) {
+            const bool isAuto = node.type->name == "auto" && node.type->generics.empty() &&
+                                !node.type->is_array && node.type->pointer_depth == 0;
+            auto* fnType = dynamic_cast<FunctionTypeNode*>(node.type.get());
+            if (!isAuto && (!fnType || fnType->generic_params.empty())) {
+                unsupportedType(node, node.type.get(), "a generic lambda's variable");
+                return false;
+            }
+        }
+        if (scopes_.empty() || lambdaTemplates_.empty()) {
+            unsupported(node, fmt::format("the generic lambda '{}' declared outside a "
+                                          "scope", node.name));
+            return false;
+        }
+        if (scopes_.back().count(node.name) || nested_.back().count(node.name) ||
+            lambdaTemplates_.back().count(node.name)) {
+            // One name over a slot, a symbol and a template in one scope is the state
+            // this file's tables cannot all hold, and it is the same refusal
+            // emitNestedFunction gives one level along: picking either silently gets a
+            // program wrong.
+            unsupported(node, fmt::format("a second declaration of '{}' in one scope",
+                                          node.name));
+            return false;
+        }
+
+        LambdaTemplate tmpl;
+        tmpl.node = &lambda;
+        // From the same counter a non-generic lambda's symbol comes from, so a module's
+        // lambdas are numbered in one sequence and no instance can collide with a plain
+        // one: `fin.lambda.3` and `fin.lambda.3<int>` are different symbols, and 3 is
+        // spent either way.
+        tmpl.id = lambdas_++;
+        // The environment, snapshotted here because here is where it is true. An instance
+        // is emitted from the middle of a call, by which time these scopes are gone --
+        // see instantiateTemplate, which installs these three rather than reading the
+        // live tables.
+        tmpl.enclosing = enclosingNames_;
+        for (const auto& scope : scopes_)
+            for (const auto& entry : scope) tmpl.enclosing.push_back(entry.first);
+        tmpl.nested = visibleNested();
+        tmpl.visible = std::make_shared<LambdaEnv>();
+        tmpl.visible->table = visibleLambdas();
+        if (const Substitution* active = types_.bindings()) tmpl.outer = *active;
+        lambdaTemplates_.back()[node.name] = std::move(tmpl);
+        debugLog(fmt::format("registered the generic lambda {}", node.name));
+        return true;
+    }
+
     void visit(VariableDeclaration& node) override {
         if (registeredGlobals_.count(&node)) return;  // declareGlobals did it
+        // A generic lambda is not a value, so this declaration is not a declaration of
+        // one: it registers a template and emits nothing. Checked first, ahead of the
+        // attribute loop and the type mapping, because both of those would otherwise
+        // report the wrong thing -- the annotation `fn<T>(m: T) -> T` has no
+        // representation and `types_.map` would say so, which is true of the annotation
+        // and false about the program.
+        if (auto* lambda = dynamic_cast<LambdaExpression*>(node.initializer.get())) {
+            if (!lambda->generic_params.empty()) {
+                registerLambdaTemplate(node, *lambda);
+                return;
+            }
+        }
         // `#[slaveof(...)]` on a local is a no-op today, and that is a ruling rather
         // than an omission (2026-08-28).
         //
@@ -4608,6 +4961,15 @@ private:
         if (fnTemplates_.count(node.name)) {
             unsupported(node, fmt::format("the generic function '{}' used as a value",
                                          node.name));
+            return;
+        }
+        // The same refusal for a generic lambda, which is the same thing one scope in.
+        // Reached because the declaration registered no slot, so `findLocal` above missed
+        // -- and reached *after* it, so a later local of the name is read as the local it
+        // is rather than blamed on the template.
+        if (lambdaTemplateFor(node.name)) {
+            unsupported(node, fmt::format("the generic lambda '{}' used as a value",
+                                          node.name));
             return;
         }
         if (refuseIfCapture(node, node.name)) return;
@@ -5272,11 +5634,20 @@ private:
                              argList(node.args));
             return;
         }
+        // A generic lambda bound to a name in this body -- `let id <auto> = fun <T>(x:
+        // T) <T> { return x; }; id(7)`. Ahead of `fnTemplates_` because a local of the
+        // name shadows a module-scope declaration, which is the order every other name
+        // in this function uses; behind the locals for the reason the declaration
+        // allocates no slot, so `findLocal` above cannot have answered for one.
+        if (LambdaTemplate* lambda = lambdaTemplateFor(node.name)) {
+            emitTemplateCall(node, calleeOf(node.name, *lambda));
+            return;
+        }
         // Before the ordinary lookup, because a template is deliberately not in
         // functions_: it has no signature until this call says what its parameters are.
         auto tmpl = fnTemplates_.find(node.name);
         if (tmpl != fnTemplates_.end()) {
-            emitGenericCall(node, *tmpl->second);
+            emitTemplateCall(node, calleeOf(*tmpl->second));
             return;
         }
         // A constructor call on a generic struct: `HashMap::<string, Data>()`
@@ -5318,7 +5689,7 @@ private:
         if (!node.generic_args.empty() &&
             (functions_.count(node.name) || structs_.count(node.name))) {
             // A turbofish on a name this file *does* declare and that declares no type
-            // parameters. Read by emitGenericCall for a function template, by the
+            // parameters. Read by emitTemplateCall for a function template, by the
             // constructor path above for a struct template, and by nobody here, so it is
             // refused rather than dropped -- a written type argument that changed nothing
             // would be a silent disagreement with whatever the writer expected it to
@@ -6710,7 +7081,7 @@ private:
         // The arguments, emitted before the instance exists, because the parameter's
         // type is what is being inferred *from* them. So an argument that cannot be
         // typed on its own -- an array literal written at a call site -- refuses here
-        // rather than being offered a type, which is the same bargain emitGenericCall
+        // rather than being offered a type, which is the same bargain emitTemplateCall
         // strikes and for the same reason.
         std::vector<CgVal> values;
         values.reserve(node.args.size());
@@ -7566,12 +7937,18 @@ private:
             return;
         }
         if (!node.generic_params.empty()) {
-            // `<T: Castable>(m: T) <T> => m` (lambdas.fin:69). A generic lambda is a
-            // template, and a template is not code -- there is no address to take until
-            // something says which instantiation is meant. A named generic function has
-            // the same property and refuses the same way in visit(Identifier&); the
-            // difference is only that this one has no name to instantiate under.
-            unsupported(node, "a generic lambda");
+            // A generic lambda reached as a *value*, which is the one thing it cannot be.
+            // It is a template: `id<int>` and `id<double>` are two functions, a bare `id`
+            // names neither, and a value has to be one address. So the only position that
+            // lowers is the one that gives it a name to be instantiated under -- `let id
+            // <auto> = fun <T>...`, handled in visit(VariableDeclaration&) before the
+            // initialiser is ever emitted -- and everything else arrives here.
+            //
+            // The message names the position rather than the construct, because "a
+            // generic lambda" would now be false: lambdas.fin's two are lowered, as
+            // nothing, by the declaration path. What is refused is passing one, returning
+            // one, or writing one where a value is wanted.
+            unsupported(node, "a generic lambda used as a value");
             return;
         }
         if (!node.body && !node.expression_body) {
@@ -7610,6 +7987,11 @@ private:
         // frame. A lambda written beside `fun one()` and calling it is the same call the
         // enclosing body would emit.
         nestedCarry_ = visibleNested();
+        // And the generic lambdas, by the same rule: a template is a node and a snapshot,
+        // and instantiating one needs no frame, so `(n: int) <int> => id(n) + 1` written
+        // beside `let id <auto> = fun <T>...` builds the same instance the enclosing body
+        // would.
+        lambdaCarry_ = visibleLambdas();
         emitBodyOf(node, node.params, node.body.get(), node.expression_body.get(), name);
         enclosing.swap(enclosingNames_);
         if (failed_) return;

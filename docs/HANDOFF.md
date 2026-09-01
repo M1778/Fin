@@ -123,6 +123,7 @@ was broken.
 | — since `4788753`, at `55674d7` | **1566 / 1566 pass**, 0 skipped | the `Error` surface's two tests; corpus unmoved (docs only) |
 | — since `4788753`, at `08f8dfc` | **1573 / 1573 pass**, 0 skipped | the erasure marker moved to the use; **corpus 23 → 24** |
 | — since `4788753`, at `b37dd86` | **1584 / 1584 pass**, 0 skipped | the generic constructor call; corpus unmoved at 24, `deeptest4.fin` re-blamed |
+| — since `4788753`, at `HEAD` | **1601 / 1601 pass**, 0 skipped | the generic lambda; **corpus 24 → 25**, `lambdas.fin` clean |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -1192,6 +1193,140 @@ stdlib/prototypes.fin     a return of type '$type'
 type_annotations.fin      a variable of type 'int{64}'
 ```
 
+### The generic lambda at `HEAD` (2026-09-01) — one of item 8's seven
+
+**The corpus moved 24 / 7 / 20 → 25 / 6 / 20 and the suite 1584 → 1601.** `lambdas.fin` is
+OBJECT_CLEAN and runs, printing `F1 (Standard): 20` through `Adder: 30`. The two lines it moved on
+are its `:69-71`:
+
+```fin
+let case_8 <fn<T: Castable>(m: T) -> T> = <T: Castable>(m: T) <T> => m;
+let case_8_ <auto> = fun <Generic: Addable>(a: Generic, b: Generic) <Generic> { return a + b; };
+```
+
+**The ruling: a generic lambda bound to a name is a template, not a value.** `let id <auto> = fun
+<T>(x: T) <T> { ... };` emits *nothing* — no alloca, no store, not even a `scopes_` entry — and the
+call is where it becomes code, at the argument's type, exactly as `fun id<T>` does. That follows
+from ADR 0002 and from `struct_methods.fin:6`: a template is a recipe, and a recipe nobody cooks
+costs nothing. The alternative — give the name a slot and lower the lambda into it — would need a
+representation for a generic `fn` value, and there is no such machine: a function value here is a
+bare code pointer and a template has no code and so no address.
+
+**That ruling is also what moved `:69`, and it moved it without deciding anything about the
+annotation.** `:69`'s refusal was not the lambda but the *variable*: `TypeMapper::mapFunction:707`
+refused `<fn<T: Castable>(m: T) -> T>`, a generic `fn` type. The declaration path never asks the
+mapper about the annotation at all — it checks only that the annotation **is** `<auto>` or a
+`FunctionTypeNode` whose `generic_params` are non-empty, and then registers the template. So the
+generic `fn` type still has no representation, correctly and deliberately, and `mapFunction:707` was
+left untouched; what changed is that a declaration whose initialiser is a template no longer needs
+one. A generic `fn` annotation in any *other* position — a parameter, a field, a return — still
+refuses there.
+
+**`TemplateCallee` is the refactor, and it is one copy rather than two.** A named `fun ident<T>` and
+a generic lambda differ in four fields (where the type parameters live, where the body lives, the
+display name, the mangling base) and in nothing else that instantiation reads. So
+`instantiateFunction` became `instantiateTemplate(const TemplateCallee&, const Substitution&, const
+std::string& key)` and `emitGenericCall` became `emitTemplateCall(FunctionCall&, const
+TemplateCallee&)`, with two `calleeOf` overloads — one over a `FunctionDeclaration`, one over a
+`LambdaTemplate` — supplying the four. A second copy would have been a second *inference rule* and a
+second mangling for one spelling, which is the failure mode the constructor unit avoided the same
+way (`literalStructName`): two paths that must agree and no code forcing them to.
+
+**The table is a scope stack, not a flat map.** A generic lambda is bound to a name *in a body*, so
+`lambdaTemplates_` is a `std::vector<std::unordered_map<...>>` pushed and popped with `scopes_`, and
+`lambdaTemplateFor` walks the two in lockstep innermost-first, returning null the moment a *local*
+of that name is found — a `let` shadowing an outer template hides it, which is what the language
+already means. That answers the objection `emitNestedFunction`'s own generic refusal records: "that
+table is keyed by the written name with no scope in it, so a nested template of a name the module
+also uses would silently be one or the other." `AnInnerGenericLambdaShadowsAnOuterOfTheSameName`
+prints `99\n2\n` and would print `2\n2\n` if the walk were flat.
+
+**An instance is emitted from the middle of a call, so its environment is snapshotted at the
+declaration.** This is the part that is not obvious and the part that would be silently wrong if
+read live. When `id(1)` instantiates, `builder_` is inside the *caller*, whose locals and whose
+nested functions have nothing to do with the lambda's body. So `LambdaTemplate` carries four
+snapshots taken where the lambda was written:
+
+- `enclosing` — the names `refuseIfCapture` reads. Live, this would refuse the *caller's* locals as
+  captures and admit the enclosing ones.
+- `nested` — the nested functions the body may call, via `nestedCarry_`.
+- `visible` — the generic lambdas the body may instantiate, via `lambdaCarry_`. Held through a
+  `shared_ptr<LambdaEnv>` to an incomplete type on purpose: a `LambdaTemplate` names the environment
+  it was written in and an environment is a table of `LambdaTemplate`s, so one of the two must be
+  indirect.
+- `outer` — the type parameters bound where it was written. Without it, a lambda mentioning its
+  enclosing function's `S` refused `a return of type 'S' is not lowered yet`, because an instance is
+  emitted with only its own substitution installed. `instantiateTemplate` merges `outer` **under**
+  the instance's own bindings, so `boundBinding`'s first-match rule *is* the shadowing rule, and
+  `AGenericLambdaReusingTheOuterTypeParameterName` discriminates the two readings numerically
+  (`sizeof(T)` inside `outer::<char>` gives 41, not 11).
+
+`ScopedEmission` saves and restores `lambdaTemplates_` alongside `scopes_` and `nested_`, so an
+instantiation that runs from inside another body cannot see that body's names.
+
+**Instances are `internal`, not `linkonce_odr`, and here weak would be unsound rather than merely
+generous.** A function template's instance is `linkonce_odr` because its mangled name is derived
+from something every translation unit spells the same way: the written name plus the type arguments.
+A lambda's is not — `fin.lambda.<n>` is a **counter over emission order**, so two objects whose
+instantiations ran in different orders would publish one name for two different bodies, and weak
+linkage would silently keep either one. Internal linkage makes the name a local fact, which is what
+a counter can support. Measured with `nm -C`: `t fin.lambda.0<int>`, `t fin.lambda.0<double>`, `t
+fin.lambda.1<int>`.
+
+**The counter is also why the mangling did not need the enclosing bindings folded in.** Folding
+`outer` into the key produced `fin.lambda.0<int><int>`, spelling the distinction twice: registration
+happens *during body emission*, so `outer<int>` and `outer<double>` register two templates and take
+two numbers already. The plain `fin.lambda.{}` is correct and the double form was reverted.
+
+**Four refusals, each naming its own position rather than the construct.** The construct now lowers,
+so "a generic lambda is not lowered yet" would be false; what is refused is a *use* that needs the
+value a template does not have.
+
+- `a generic lambda used as a value` — a generic `LambdaExpression` reached as an expression
+  (`compute(1, 2, fun <T>...)`), i.e. anywhere but the initialiser of a `let`.
+- `the generic lambda 'id' used as a value` — the name in an expression, from `visit(Identifier&)`.
+- `the address of the generic lambda 'id'` — the same from `emitAddress`, which is a different
+  question and would otherwise fall through to `refuseIfCapture` and blame the wrong thing.
+- `the generic lambda 'id' declared at module scope` — from `declareGlobals`, which runs before any
+  body has a scope. This one is **new open ground, not a gap in the unit**: no corpus site writes a
+  module-scope generic lambda, and where one would live is a question (§6), since the table is
+  pushed and popped with the scopes. It was given its own message precisely so a reader is not sent
+  to the value question instead.
+
+The declaration path refuses three more, all at the `let`: any attribute on it, a missing body, and
+a second template of one name in one scope (`a second declaration of 'id' in one scope`, matching
+what a `let` and a nested `fun` already say).
+
+**Eighteen tests**, replacing `Soundness_Codegen.AGenericLambdaIsRefused`, which asserted the exact
+boundary this unit removes. Each positive asserts a **value**, and three assert the trace instead
+because what they measure is an *absence* or a *count*:
+`AGenericLambdaNobodyCallsLowersToNothing` (the template registers, `fin.lambda.0<` never appears,
+nothing refuses); `TwoCallsAtOneTypeShareOneInstance` (exactly one `declared fin.lambda.0<int>`, so
+two calls are not two bodies); `AGenericLambdaAtTwoTypesIsTwoFunctions` (`7 2.5` — a collided table
+would read the second at `int`'s width). The rest cover the three spellings (`fun`, arrow-block,
+arrow-expression), the generic `fn` annotation, a turbofish, the erasure marker refused at the call
+and not the declaration, the shadowing walk, a plain lambda and a nested function each calling a
+template, a template inside a generic function at two enclosing types, and the capture refusal —
+which asserts `a lambda capturing 'outer'`, so it pins the *snapshot* rather than the live tables.
+
+**Four front-end edges were confirmed to be unchanged**, which is how this unit knows it did not
+widen anything the analyzer holds: `let id <int> = fun <T>...` is still `Type mismatch: expected
+'int', got 'fn(T) -> T'`; `id = 3` still mismatches; `id(1, 2)` still reports `expects 1 arguments,
+got 2`; and a call after the declaring scope closes is still `Undefined function or type 'id'`. The
+backend is never asked any of them.
+
+**Nothing regressed.** All 51 samples re-measured: 25 OBJECT_CLEAN, 6 CODEGEN_REFUSED, 20 FRONTEND,
+with `lambdas.fin` gone from the refusal list and the other six unchanged:
+
+```
+deeptest4.fin             a call to 'HashMap'
+interfaces.fin            a call to the method 'to_string' on struct 'User'
+readonly.fin              the attribute 'debug' on field 'v1' of struct 'MyClass'
+stdlib/hashmap.fin        struct 'HashMapError' inheriting 'Error', which is not a struct this file lowered
+stdlib/prototypes.fin     a return of type '$type'
+type_annotations.fin      a variable of type 'int{64}'
+```
+
 ### Movement since `43b3324`
 
 `43b3324` measured 14 / 15 / 21 of 50 with a suite of 1344. The five commits between it and
@@ -1464,7 +1599,20 @@ Recommended order — cheapest first, and each one unblocks the next:
    enclosing *body's* scope, and a capture is refused because the corpus's one instance captures
    nothing; **two pre-existing module-scope findings were booked next to it and not fixed** — an
    expression statement outside a function *segfaults* `finc`, and a block outside one is silently
-   dropped; lambdas and `fn` parameter types (`functions.fin`, `lambdas.fin`);
+   dropped; ~~lambdas and `fn` parameter types (`functions.fin`, `lambdas.fin`)~~ — **done at
+   `HEAD` (2026-09-01), and `lambdas.fin` moved: the corpus is 25 / 6 / 20 and the suite is 1601**
+   (see §4, "The generic lambda"). Both halves of the title were already half-true when it was
+   written: `fn` parameters and the three non-generic lambda spellings had lowered for several
+   commits, and what was left was the *generic* lambda, which is now a **template** — the `let`
+   emits nothing and the call instantiates, so a generic `fn` annotation on the declaration needs
+   no representation and still has none anywhere else. `instantiateFunction`/`emitGenericCall`
+   were refactored to `instantiateTemplate`/`emitTemplateCall` over a `TemplateCallee`, so a named
+   template and a lambda template share one inference rule and one mangling. **One new question
+   was booked rather than answered:** a **module-scope** generic lambda refuses `the generic lambda
+   'id' declared at module scope`, because the template table is pushed and popped with the scopes
+   and `declareGlobals` runs before any body has one. No corpus site writes one, so where a
+   module-scope template lives is the owner's (§8), alongside the two module-scope findings the
+   nested-function unit booked;
    ~~the erasure marker (`generics_interfaces.fin`, ADR 0002)~~ — **done at `08f8dfc`
    (2026-09-01), and `generics_interfaces.fin` moved: the corpus is 24 / 7 / 20 and the suite is
    1573** (see §4, "The erasure marker"). ADR 0002's representation is untouched and still
@@ -1476,8 +1624,9 @@ Recommended order — cheapest first, and each one unblocks the next:
    **Item 8's remaining list needs re-scoping and §4 does it:** four of the samples it names above
    are already OBJECT_CLEAN (`variables.fin`, `blame_assert.fin`, `extern_as.fin`,
    `functions.fin`), so the first three rulings no longer block the samples cited for them, and
-   `lambdas.fin` has two refusals rather than one. What is left with a sample behind it is
-   `stdlib/prototypes.fin`'s `$type` return and `lambdas.fin`'s two.
+   `lambdas.fin` had two refusals rather than one — **both now gone, and the sample is
+   OBJECT_CLEAN.** What is left with a sample behind it is `stdlib/prototypes.fin`'s `$type`
+   return, and that is design-only until ADR 0024.
 9. After the corpus: the struct ABI classifier, `blame`/`try`/`catch`, the payload-carrying
    tagged-union enum, **real** bit-width annotations (`int{64}`) — which is now a narrowing to
    implement rather than a miscompile to stop, because the annotation refuses as of `02fba4a`; it is
@@ -1914,6 +2063,22 @@ where marked:
   specification, so nobody may edit those three lines to settle it.** Blocking nothing today: the
   sample is OBJECT_CLEAN either way, and this is about what it *prints*.
 
+- **Where does a module-scope template live?** — **new 2026-09-01, and no corpus site asks.** A
+  generic lambda written outside any function refuses `the generic lambda 'id' declared at module
+  scope`. The mechanism is not the obstacle: a template's table is pushed and popped with
+  `scopes_`, because a lambda is bound to a name *in a body* and shadowing has to work
+  (§4, "The generic lambda"), while `declareGlobals` runs before any body has a scope. So a
+  module-scope one needs a table with no scope in it, which is exactly the flat-table shape a
+  nested template was refused for. Three readings and they differ in what a name means:
+  **(a)** it is a module-level template like `fun id<T>`, and the two spellings become synonyms —
+  which then asks whether it is exported and how, since a `fun` is and a `let` is not;
+  **(b)** it is a `let` and so a value, so a generic one is an error at module scope for the same
+  reason it is an error as an argument; **(c)** it is file-local, a template visible to the file's
+  bodies and to nothing else. Nothing in `tests/samples/` or `lib/std/` writes one — measured — so
+  there is no corpus evidence and none can be had without you. Blocking nothing: the refusal is by
+  name and no sample reaches it. It sits next to the two module-scope findings the nested-function
+  unit booked (§4), which are the same question asked about statements rather than templates.
+
 ### A warning about this section itself
 
 Two entries here were wrong in a way that cost real work, and both failures were the same
@@ -1962,6 +2127,30 @@ describe that and keep the two claims that are still true — a raw `&rptr<T>` c
 `release()` is invisible to the library, and an `rptr` does not reach an executable. The
 existing `TheSmartPointerSurfaceResolves` already covered the surface, so this half needed no
 new test, only the correction.
+
+**Two more are paid at `HEAD` (2026-09-01), both created by a rewrite the note outlived.**
+
+`docs/guide/12-standard-library-tour.md`'s `hashmap` section said `HashMap<T, U>` "is two parallel
+`Collection`s and a linear scan for the key … there is no hashing". The rewritten
+`lib/std/hashmap.fin` contradicts every clause: it is open addressing with linear probing over a
+bucket vector, tombstones and a 0.75-load rehash, the two `Collection`s hold *slots* rather than
+being the search structure, and `hash_of<T>` folds the key's machine value through two primes. The
+section now describes that, adds the surface the rewrite gained (`remove`, `clear`, `capacity`,
+`get_or`, and the `slot_count`/`is_live`/`key_at`/`value_at` iteration `foreach` cannot do), and
+carries the two things a caller must know before storing much: **a `string` key hashes by pointer,
+not by bytes**, because `==` on `string` compares pointers and the mixed pair is the one broken
+combination; and a growth leaks the old bucket vector while an erased entry's key and value stay in
+their `Collection`s. `HashMap::with_hasher` is documented as the extension point, and why it is a
+function field rather than a `Hashable` bound. No new test: `TheHashMapSurfaceResolves` and
+`AHashMapCallIsStillCheckedAgainstItsSignature` already hold the surface, and the section asserts no
+algorithm the suite could check.
+
+`docs/guide/05-functions.md`'s generic-lambda paragraph showed `let g <auto> = fun <G: Addable>(a:
+G, b: G) <G> { return a + b; };` and said nothing about what it compiles to, which was fair while
+nothing compiled. It now says a generic lambda is a **template** in the same sense a generic `fun`
+is — the `let` is a recipe, the call is the code, one instantiation per set of type arguments — that
+it is therefore not a value (not passable as an `fn`, no address), and that an uncalled one emits
+nothing. The two-line example was built and run: it prints `7` twice.
 
 What is still owed there: `lib/std/stdptr.fin` was rewritten at `82cc8a8`, so
 `tests/samples/stdlib/stdptr.fin`'s line 3 ("this file needs rewriting") is answered for the
