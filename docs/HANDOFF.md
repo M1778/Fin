@@ -119,7 +119,7 @@ was broken.
 | — since `4788753`, at `132aed7` | **1481 / 1481 pass**, 0 skipped | the `::` call's type arguments; **corpus 21 → 22** |
 | — since `4788753`, at `02fba4a` | **1517 / 1517 pass**, 0 skipped | the variable-refusal location, the width-annotation refusal, `prototype<K, V>`; corpus unmoved |
 | — since `4788753`, at `624a061` | **1537 / 1537 pass**, 0 skipped | `foreach`; corpus unmoved, `loops.fin` refuses 27 lines later |
-| — since `4788753`, at `HEAD` | **1564 / 1564 pass**, 0 skipped | the nested function declaration; **corpus 22 → 23** |
+| — since `4788753`, at `418bca0` | **1564 / 1564 pass**, 0 skipped | the nested function declaration; **corpus 22 → 23** |
 | `fin_tests`, `FIN_WITH_LLVM=OFF` | **1391 ran: 1022 pass / 369 skip / 0 fail** | a second build dir |
 | Samples that lower to an object | **20 of 51** | see below |
 | Samples blocked in codegen | **11** | see below |
@@ -868,17 +868,17 @@ Only `loops.fin`'s line changed from `02fba4a`, and it changed *within* the same
 regressed:** no sample moved to a worse bucket, and the same 22 reach an object.
 
 **A nested function declaration is not lowered, and nothing booked it.** `loops.fin:40` declares
-`fun recursive(a: int) <int>` *inside* `main` and calls it at `:46`; the call refuses with `a call to
-'recursive'`, because a function declared inside a body is never declared to the module. That is now
-`loops.fin`'s only remaining blocker and it is a unit of its own — the question is whether a nested
-function is a plain module-scope function under another name or a closure over the enclosing frame,
-and the corpus writes one that captures nothing, so the cheap answer is available but is a ruling.
-**Done at `HEAD` (2026-09-01): it is a plain function with internal linkage, the analyzer's own
-step 6 is what says so, and `loops.fin` reaches an object — the corpus is 23 / 8 / 20.** See the
-next subsection.
+`fun recursive(a: int) <int>` *inside* `main` and calls it at `:46`; the call refuses with `a call
+to 'recursive'`, because a function declared inside a body is never declared to the module. That is
+now `loops.fin`'s only remaining blocker and it is a unit of its own — the question is whether a
+nested function is a plain module-scope function under another name or a closure over the enclosing
+frame, and the corpus writes one that captures nothing, so the cheap answer is available but is a
+ruling. **Done at `418bca0` (2026-09-01): it is a plain function with internal linkage, the
+analyzer's own step 6 is what says so, and `loops.fin` reaches an object — the corpus is 23 / 8 /
+20.** See the next subsection.
 Added to §6 item 8.
 
-### A nested function declaration at `HEAD` (2026-09-01) — one of item 8's seven
+### A nested function declaration at `418bca0` (2026-09-01) — one of item 8's seven
 
 **`loops.fin` reaches an object for the first time, so the corpus is 23 / 8 / 20.** The suite is
 1564. This was the sample's only remaining blocker after `foreach` landed, and it is the construct
@@ -959,8 +959,8 @@ function inside a struct method (`42`), one inside a template emitted **once per
 a body reading a global and calling a module function (`14`). Each refusal is paired with the
 supported spelling beside it.
 
-**The corpus at `HEAD`, all 51 measured** — 23 OBJECT_CLEAN, 8 CODEGEN_REFUSED, 20 FRONTEND_ERROR.
-The eight, with their first refusal re-measured here:
+**The corpus at `418bca0`, all 51 measured** — 23 OBJECT_CLEAN, 8 CODEGEN_REFUSED, 20
+FRONTEND_ERROR. The eight, with their first refusal re-measured here:
 
 ```
 deeptest4.fin             a call with explicit generic arguments
@@ -1098,10 +1098,10 @@ write, and writes the file only at the very end — so a failed assertion change
 ## 6. What to do next
 
 The 17 samples that reach codegen and are blocked by exactly one refusal each, measured at
-`91312b8`. This list **is** the work queue for the backend, but **read §4's re-measurements
-first**: it is **eight** samples at `HEAD`, and every one of them reports something other than what
-the block below says. The numbered items keep their old titles for continuity; the corrections are
-in their text.
+`91312b8`. This list **is** the work queue for the backend, but **read §4's re-measurements first**:
+it is **eight** samples at `418bca0`, and every one of them reports something other than what the
+block below says. The numbered items keep their old titles for continuity; the corrections are in
+their text.
 
 ```
 arrays_enums.fin          a variable of type '[int]'
@@ -1254,16 +1254,16 @@ Recommended order — cheapest first, and each one unblocks the next:
    blocker for the corpus's own `<T: Number>` spelling, and the reason a width *alias* refuses
    independently of item 9); `[T]`/`$type` returns (`stdlib/prototypes.fin` — its first refusal, and
    the last thing between that sample and an object now that its `{any, any}` parameters are not the
-   block); ~~`foreach` (`loops.fin`)~~ — **done at `624a061` (2026-08-31); no sample moved, the corpus is
-   still 22 / 9 / 20, and `loops.fin`'s first refusal moved from `a 'foreach' loop` at `:19` to `a call
-   to 'recursive'` at `:46`** (see §4, "`foreach`"); ~~**a nested function declaration**~~ — **done
-   at `HEAD` (2026-09-01), and `loops.fin` moved: the corpus is 23 / 8 / 20 and the suite is 1564**
-   (see §4, "A nested function declaration"). It is a plain function with internal linkage under a
-   generated name, derived from the analyzer defining a nested `fun` in the enclosing *body's*
-   scope, and a capture is refused because the corpus's one instance captures nothing; **two
-   pre-existing module-scope findings were booked next to it and not fixed** — an expression
-   statement outside a function *segfaults* `finc`, and a block outside one is silently dropped;
-   lambdas and `fn` parameter types (`functions.fin`, `lambdas.fin`); the erasure marker
+   block); ~~`foreach` (`loops.fin`)~~ — **done at `624a061` (2026-08-31); no sample moved, the
+   corpus is still 22 / 9 / 20, and `loops.fin`'s first refusal moved from `a 'foreach' loop` at
+   `:19` to `a call to 'recursive'` at `:46`** (see §4, "`foreach`"); ~~**a nested function
+   declaration**~~ — **done at `418bca0` (2026-09-01), and `loops.fin` moved: the corpus is 23 / 8 /
+   20 and the suite is 1564** (see §4, "A nested function declaration"). It is a plain function with
+   internal linkage under a generated name, derived from the analyzer defining a nested `fun` in the
+   enclosing *body's* scope, and a capture is refused because the corpus's one instance captures
+   nothing; **two pre-existing module-scope findings were booked next to it and not fixed** — an
+   expression statement outside a function *segfaults* `finc`, and a block outside one is silently
+   dropped; lambdas and `fn` parameter types (`functions.fin`, `lambdas.fin`); the erasure marker
    (`generics_interfaces.fin`, ADR 0002).
 9. After the corpus: the struct ABI classifier, `blame`/`try`/`catch`, the payload-carrying
    tagged-union enum, **real** bit-width annotations (`int{64}`) — which is now a narrowing to
