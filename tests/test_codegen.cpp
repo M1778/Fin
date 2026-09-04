@@ -1771,6 +1771,75 @@ BACKEND_TEST(Soundness_Codegen, APrototypeRemovesByKeyAndKeepsTheOrder) {
     EXPECT_EQ(b.out, "1 0\n2 2 1 3\n10 30\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, DeleteThroughAPrototypeSubscriptRemovesTheEntry) {
+    // `delete &a[10]` -- tests/samples/prototype_test.fin:23, whose comment calls it "the
+    // manual way" against `a.rm("b")` on 24 as "the functional way". Two spellings of one
+    // operation, so this is a removal and not a `free`: a value slot's address points
+    // into the values buffer, and handing that to libc would free a block it never
+    // allocated. Asserted by what is left afterwards rather than by exit 0, because a
+    // `free` of an interior pointer aborts on some allocators and passes on others.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, int}> = { 1: 10, 2: 20, 3: 30 };\n"
+        "    delete &p[2];\n"
+        "    printf(\"%d %d %d\\n\", p.0.length, p.0[0], p.0[1]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 1 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, DeleteThroughAPrototypeReachesItWhereverItLives) {
+    // The subject is found the same way every other prototype operation finds one, so a
+    // field of a struct and an element of an array both work. `delete &a[i]` on an
+    // *array* is still the `free` it always was -- the third build -- which is the pair
+    // that says the new path is matched on the prototype and not on the spelling.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box { pub t <{string, int}> }\n"
+        "fun main() <noret> {\n"
+        "    let b <Box> = Box { t: { \"a\": 1, \"b\": 2 } };\n"
+        "    delete &b.t[\"a\"];\n"
+        "    let ps <[{int, int}]> = [{ 1: 10, 2: 20 }];\n"
+        "    let i <int> = 0;\n"
+        "    delete &ps[i][1];\n"
+        "    printf(\"%d %d %d\\n\", b.t.0.length, b.t.contains(\"b\"), ps[0].0.length);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 1 1\n") << b.why();
+
+    const Built twice = build(
+        "fun bump(c: [int]) <int> { c[0] = c[0] + 1; return 0; }\n"
+        "fun main() <noret> {\n"
+        "    let calls <[int]> = [0];\n"
+        "    let ps <[{int, int}]> = [{ 1: 10 }];\n"
+        "    delete &ps[bump(calls)][1];\n"
+        "}\n");
+    EXPECT_NE(twice.compileExit, 0) << twice.why();
+    EXPECT_NE(twice.compileErr.find("cannot be evaluated twice"), std::string::npos)
+        << twice.why();
+
+    const Built array = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int]> = new [int, 3];\n"
+        "    delete &a[0];\n"
+        "    printf(\"freed\\n\");\n"
+        "}\n");
+    ASSERT_TRUE(array.ran) << array.why();
+    EXPECT_EQ(array.out, "freed\n") << array.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TheAddressOfAPrototypeValueStaysRefused) {
+    // `&p[1]` on its own. The slot is interior to the values buffer and an appending
+    // store reallocs that buffer, so the pointer would dangle with nothing to tell its
+    // holder. `delete &p[1]` is lowered as a whole statement precisely so this can stay
+    // refused; if this ever starts compiling, the two have come apart.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <{int, int}> = { 1: 10 };\n"
+        "    let q <&int> = &p[1];\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, APrototypeGetAndContainsAnswerTheSameSearch) {
     // `get` is `p[k]` under another name -- one shared scan (emitPrototypeScan) underlies
     // the subscript, `get`, `contains` and `remove` precisely so the four cannot come to

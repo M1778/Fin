@@ -6970,9 +6970,88 @@ private:
     // `delete` reaching here provably has nothing to run. The day destructors lower is
     // the day this line has to grow one, and ADR 0016 (destructors compose) is where
     // the order comes from.
+    // Can this expression's address be taken twice without the program noticing?
+    //
+    // Asked by the one caller that has to try an address, may not like what it finds, and
+    // then hand the same expression to a path that will address it again
+    // (emitPrototypeDelete, whose fall-through is `delete &a[i]` on an array). A slot, a
+    // GEP off one and a load are all repeatable; a call in an index is not, so
+    // `delete &tables[next()][k]` would run `next()` twice.
+    //
+    // Repeatable rather than emits-nothing: a dynamic array's element address loads the
+    // pair, and loading it twice asks the same question twice. What must not repeat is an
+    // effect.
+    //
+    // Conservative in the safe direction: an unknown form answers false, and the caller
+    // refuses rather than lowering it twice.
+    static bool addressIsRepeatable(Expression& expr) {
+        if (dynamic_cast<Identifier*>(&expr)) return true;
+        if (auto* member = dynamic_cast<MemberAccess*>(&expr)) {
+            return !member->is_static && member->object &&
+                   addressIsRepeatable(*member->object);
+        }
+        if (auto* access = dynamic_cast<ArrayAccess*>(&expr)) {
+            return access->array && access->index &&
+                   addressIsRepeatable(*access->array) && isRepeatableIndex(*access->index);
+        }
+        return false;
+    }
+
+    // An index expression whose evaluation is worth nothing to repeat: a constant, or a
+    // name read out of a slot. Deliberately a short list -- everything else, arithmetic
+    // included, could contain a call.
+    static bool isRepeatableIndex(Expression& expr) {
+        if (dynamic_cast<Literal*>(&expr)) return true;
+        if (dynamic_cast<Identifier*>(&expr)) return true;
+        if (auto* member = dynamic_cast<MemberAccess*>(&expr)) {
+            return !member->is_static && member->object &&
+                   addressIsRepeatable(*member->object);
+        }
+        return false;
+    }
+
+    // `delete &p[key]` -- tests/samples/prototype_test.fin:23, whose comment calls it "the
+    // manual way" against `a.rm("b")` on the next line as "the functional way". One
+    // operation with two spellings, so this is emitPrototypeRemove and not a `free`.
+    //
+    // Matched as a whole statement rather than by giving `&p[key]` an address that
+    // `delete` then frees, and that is a correctness point and not a style one: a value
+    // slot's address points *into* the values buffer, so handing it to `free` would give
+    // libc a block it never allocated. The bare `&p[key]` stays refused for that reason
+    // and one more -- an appending store reallocs both buffers, which leaves any such
+    // pointer dangling with nothing to warn its holder.
+    //
+    // Returns false for anything that is not this shape, including a `&x[i]` on an array,
+    // which is the `free` the rest of visit(DeleteStatement&) lowers.
+    bool emitPrototypeDelete(DeleteStatement& node) {
+        auto* unary = dynamic_cast<UnaryOp*>(node.expr.get());
+        if (!unary || unary->op != ASTTokenKind::AMPERSAND || unary->is_postfix ||
+            !unary->operand) return false;
+        auto* access = dynamic_cast<ArrayAccess*>(unary->operand.get());
+        if (!access || !access->array || !access->index) return false;
+        if (!addressIsRepeatable(*access->array)) {
+            // The shape is right and the base cannot be addressed twice, so this cannot
+            // be answered by trying the prototype path and falling back. Refused with the
+            // reason, rather than reported as "no home" by the `&` that follows.
+            unsupported(node, "a 'delete' whose subject is indexed through an expression "
+                              "that cannot be evaluated twice");
+            return true;
+        }
+        auto base = baseOf(emitAddress(*access->array), CgType::Kind::Prototype);
+        if (failed_) return true;
+        if (!base) return false;
+        CgVal key = emit(*access->index);
+        if (failed_ || !key.ok()) return true;
+        // The bool says whether anything was there. A statement has nobody to tell, and
+        // removing a key that is absent is not an error -- the same rule `rm` follows.
+        emitPrototypeRemove(node, *base, key);
+        return true;
+    }
+
     void visit(DeleteStatement& node) override {
         if (!currentFn_) { unsupported(node, "'delete' outside a function"); return; }
         if (!node.expr) { unsupported(node, "'delete' with no operand"); return; }
+        if (emitPrototypeDelete(node)) return;
         CgVal v = emit(*node.expr);
         if (failed_) return;
         if (!v.ok()) {
