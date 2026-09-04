@@ -1931,7 +1931,12 @@ BACKEND_TEST(Soundness_Codegen, AForeachIndexTakesAnyIntegerWidth) {
     // `char` index over a three-element array is the narrowest case the corpus makes
     // reachable, and a conversion that sign-extended the wrong way or truncated the
     // wrong end would show up here rather than in a wide one.
-    for (const char* type : {"int", "long", "uint", "ulong", "char"}) {
+    //
+    // `int{8}` is here rather than in AForeachIndexBindingThatIsNotAnIntegerIsRefused
+    // because it is the same eight bits `char` names, and a width that held a position
+    // when spelled one way and not the other would be two types.
+    for (const char* type : {"int", "long", "uint", "ulong", "char",
+                             "int{8}", "uint{16}", "int{64}"}) {
         const Built b = build(std::string(kPrintf) +
             "fun main() <noret> {\n"
             "    let a <[int, 3]> = [4, 5, 6];\n"
@@ -2130,8 +2135,10 @@ BACKEND_TEST(Soundness_Codegen, AForeachIndexBindingThatIsNotAnIntegerIsRefused)
     // as 0.0, 1.0, ... and compare equal against an `int` index by conversion, which is a
     // rule this file would have invented; a `bool` would be true for every element but
     // the first. Refused rather than converted, and paired with the widths that do work
-    // in AForeachIndexTakesAnyIntegerWidth.
-    for (const char* type : {"float", "double", "bool", "string", "int{8}"}) {
+    // in AForeachIndexTakesAnyIntegerWidth -- `int{8}` moved to that list when the
+    // width became real, and `int{7}` is here in its place because a width this
+    // compiler cannot represent holds no position either.
+    for (const char* type : {"float", "double", "bool", "string", "int{7}"}) {
         const Built b = build(
             "fun main() <noret> {\n"
             "    let a <[int, 3]> = [1, 2, 3];\n"
@@ -8817,41 +8824,56 @@ BACKEND_TEST(KnownDefect_Codegen, AnAliasedGlobalIsRefusedWhereTheNewNameIsRead)
 }
 
 // ---------------------------------------------------------------------------
-// Bit-width annotations: refused, not dropped.
+// Bit-width annotations: lowered at the width that was written.
 //
-// `int{64}` is a written width, and nothing in the compiler honours it. The parser
-// attaches the expression to the TypeNode (`base_type LBRACE expression_list
-// RBRACE`), the analyzer walks it for its own side effects and hands back the
-// *unannotated* type (Analyzer_Core.cpp:393), and the layout pass and this backend
-// both then answer about the base name -- so `uint{8}` accepts -1, lays out as four
-// bytes, and used to emit an i32. Those front-end halves are booked as
-// KnownDefect_IntegerWidths (test_soundness.cpp) and
-// KnownDefect_Layout.AWidthAnnotationDoesNotChangeTheSize (test_layout.cpp).
+// `int{64}` is a written width and it is the type, so this backend emits an i64 for
+// it and an i8 for `uint{8}`. What stood here refused every annotated type, and the
+// argument was that nothing upstream honoured the annotation: the analyzer walked it
+// for its side effects and handed back the unannotated type, so lowering `int{64}`
+// as an i32 gave a program a *machine* it did not ask for, silently, on a compile
+// that succeeded. That is fixed at the source rather than papered over here -- the
+// width is on the type now (Analyzer_Core.cpp reads it through the same constant
+// reader an array extent goes through, Layout.cpp sizes it) -- so this file reads it
+// the way it reads every other width, through scalarByName.
 //
-// The backend half was different in kind, which is why it is fixed here rather than
-// booked beside them. A front end that does not narrow gives a program a value it
-// did not ask for; a backend that lowers `int{64}` as an i32 gives it a *machine*
-// it did not ask for, silently, on a compile that succeeds -- and this suite's
-// founding rule is that a construct the backend cannot lower is refused and never
-// skipped. Honouring the width end to end is a unit of its own (docs/HANDOFF.md §6
-// item 9); until it lands, refusing is the only honest answer.
+// Each test still pairs the annotated form against the bare one, and the pairs are
+// the point rather than a leftover from the refusals. `int{64}` and `long` are one
+// type, so the two halves must produce the same number; a lowering that honoured the
+// annotation *differently* from the name would pass a test that only asked whether
+// the annotated form compiles. The numbers themselves are all measured from the
+// base-name half first, which is why there is no row here whose value was computed
+// by hand.
 //
-// Each of these pairs the annotated form against the bare one, because "refused" is
-// only interesting next to evidence that the same shape without the annotation
-// lowers and runs: a refusal both ways would mean the annotation was not what
-// stopped it. When widths land, every negative here inverts into a positive that
-// asserts the width itself, and the pairs are already written to hold that.
+// Two kinds of annotated type are still refused, and they are refused for one reason
+// rather than for the old blanket one: the program asked for a width and did not get
+// it, so lowering the base type would answer a question nobody asked while looking
+// like it had answered theirs.
+//
+//   * A width this compiler cannot represent -- `int{7}`, `int{128}`. Layout.hpp
+//     names four widths and these are not among them. The front end deliberately
+//     does not diagnose one, because "Fin has no 128-bit integer" is a ruling nobody
+//     has made and tests/samples/stdlib/types.fin:47 writes `i128` on purpose, so
+//     "this compiler does not lower it yet" is the true sentence and it is this
+//     file's to say. The refusal names the four, because a reader who wrote `int{7}`
+//     needs to know what the set is and not only that 7 is outside it.
+//   * A written annotation that yielded no width at all -- `int{8 * 8}`, whose value
+//     is not a constant, and `float{128}`, `T{8}` or `(*int){8}`, whose base type has
+//     nowhere to put one. Refused for exactly the reason above, which is also why
+//     `T{8}` is here: a type parameter bound to `int` is not an integer *name*, and
+//     whether a width written on a parameter applies to what it was bound to is a
+//     question nobody has ruled.
 // ---------------------------------------------------------------------------
 
-BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAVariableIsRefused) {
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAVariableLowersAtThatWidth) {
+    // Was AWidthAnnotationOnAVariableIsRefused. `%ld` and not `%d`, which is where
+    // the claim lives: an i32 read as a long by va_arg prints whatever follows it in
+    // the register file, so the format string is what makes this a statement about
+    // the width rather than about the value.
     const Built b = build(std::string(kPrintf) +
-        "fun main() <noret> { let x <int{64}> = 10; printf(\"%d\\n\", x); }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    // The annotation is in the spelling, because the `int` half of this type is not
-    // the problem -- a refusal reading "a variable of type 'int'" would point the
-    // reader at the one part of the line that lowers.
-    EXPECT_NE(b.compileErr.find("a variable of type 'int{64}'"), std::string::npos)
-        << b.why();
+        "fun main() <noret> { let x <int{64}> = 10; printf(\"%ld\\n\", x); }\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, TheSameVariableWithoutTheAnnotationLowers) {
@@ -8861,103 +8883,445 @@ BACKEND_TEST(Soundness_Codegen, TheSameVariableWithoutTheAnnotationLowers) {
     EXPECT_EQ(b.out, "10\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, ANarrowWidthWrapsAtItsOwnWidthAndNotTheBaseNames) {
+    // The strongest evidence available that the width reached the machine, and the
+    // one assertion no amount of correct-looking IR can fake: 100 + 100 in eight
+    // signed bits is -56, and in `int`'s thirty-two it is 200. Had the annotated form
+    // been lowered at the base width instead of refused, it would have printed 200
+    // and every other test in this section would still have passed.
+    //
+    // `printf` sees an i32 either way -- promoteVararg extends anything narrower than
+    // 32 bits, which is what C's va_arg reads -- so the wrap has already happened in
+    // eight bits by the time the value is widened. That ordering is the whole claim,
+    // and `char` is the measured twin: the same program spelled with the name prints
+    // the same -56.
+    const Built narrow = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <int{8}> = 100;\n"
+        "    let b <int{8}> = 100;\n"
+        "    printf(\"%d\\n\", a + b);\n"
+        "}\n");
+    ASSERT_TRUE(narrow.ran) << narrow.why();
+    EXPECT_EQ(narrow.out, "-56\n") << narrow.why();
+
+    const Built named = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <char> = 100;\n"
+        "    let b <char> = 100;\n"
+        "    printf(\"%d\\n\", a + b);\n"
+        "}\n");
+    ASSERT_TRUE(named.ran) << named.why();
+    EXPECT_EQ(named.out, "-56\n") << named.why();
+
+    const Built wide = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <int> = 100;\n"
+        "    let b <int> = 100;\n"
+        "    printf(\"%d\\n\", a + b);\n"
+        "}\n");
+    ASSERT_TRUE(wide.ran) << wide.why();
+    EXPECT_EQ(wide.out, "200\n") << wide.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationAndItsNameProduceTheSameProgram) {
+    // The identity claim run rather than inspected: for each width that has a name,
+    // the annotated spelling and the name produce the same output. `int{32}` against
+    // `int` is the row that catches a lowering which treated *any* annotation as a
+    // special case, and `uint{8}` has no row of its own to be paired with -- eight
+    // unsigned bits is `byte` in cgDisplay's table and in lib/std/types.fin:82, and
+    // Analyzer_Core.cpp registers no such name -- so it is asserted alone, zero
+    // extended by promoteVararg the way `ushort` is measured to be.
+    struct Case { const char* type; const char* fmt; const char* value; const char* out; };
+    const std::vector<Case> cases{
+        {"int{8}",   "%d",  "100", "100\n"},  {"char",   "%d",  "100", "100\n"},
+        {"int{16}",  "%d",  "100", "100\n"},  {"short",  "%d",  "100", "100\n"},
+        {"int{32}",  "%d",  "100", "100\n"},  {"int",    "%d",  "100", "100\n"},
+        {"int{64}",  "%ld", "100", "100\n"},  {"long",   "%ld", "100", "100\n"},
+        {"uint{16}", "%d",  "200", "200\n"},  {"ushort", "%d",  "200", "200\n"},
+        {"uint{32}", "%u",  "200", "200\n"},  {"uint",   "%u",  "200", "200\n"},
+        {"uint{64}", "%lu", "200", "200\n"},  {"ulong",  "%lu", "200", "200\n"},
+        {"uint{8}",  "%d",  "200", "200\n"},
+    };
+    for (const Case& c : cases) {
+        const Built b = build(std::string(kPrintf) +
+            "fun main() <noret> { let x <" + c.type + "> = " + c.value +
+            "; printf(\"" + c.fmt + "\\n\", x); }\n");
+        ASSERT_TRUE(b.ran) << c.type << "\n" << b.why();
+        EXPECT_EQ(b.out, c.out) << c.type << "\n" << b.why();
+    }
+}
+
+BACKEND_TEST(Soundness_Codegen, SizeofAWrittenWidthIsThatWidthInBytes) {
+    // `sizeof` reads the module's own DataLayout, so these are LLVM's numbers for the
+    // types this file built and not a restatement of Layout.hpp's. Both are asserted
+    // -- Soundness_Layout.EveryRepresentableWidthHasItsOwnSize computes the same four
+    // in LayoutEngine -- because two passes that agree today are two passes that
+    // disagree after one edit, and that disagreement is an ABI split in which every
+    // program still compiles and runs.
+    //
+    // It also fixes the refusal this expression used to get. `sizeof(int{64})` said
+    // "'sizeof' of 'int' is not lowered yet", building its text from the node's bare
+    // name -- naming the one half of the type that was never the problem.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d %d %d %d %d\\n\", sizeof(int{8}), sizeof(uint{8}),\n"
+        "           sizeof(int{16}), sizeof(int{32}), sizeof(int{64}),\n"
+        "           sizeof(uint{64}));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 1 2 4 8 8\n") << b.why();
+
+    // The same six through the names, which is SizeofAScalarIsItsWidth's measurement
+    // read back in this section's terms: 1 2 4 8 is the table and not this expression.
+    const Built named = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d %d %d\\n\", sizeof(char), sizeof(short), sizeof(int),\n"
+        "           sizeof(long));\n"
+        "}\n");
+    ASSERT_TRUE(named.ran) << named.why();
+    EXPECT_EQ(named.out, "1 2 4 8\n") << named.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAParameterLowersAtThatWidth) {
+    const Built b = build(std::string(kPrintf) +
+        "fun f(x: int{64}) <void> { printf(\"%ld\\n\", x); }\n"
+        "fun main() <noret> { let n <long> = 7; f(n); }\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAReturnLowersAtThatWidth) {
+    // A return is the one role where a wrong width is invisible at the call site as
+    // well as at the definition: the caller reads whatever the ABI says the return
+    // register holds, which for an i32 returned where an i64 was declared is the
+    // low half and thirty-two bits of whatever was there. 4294967297 is 2^32 + 1, so
+    // a truncated return prints 1 -- a plausible number, which is why the value is
+    // this and not the 7 the parameter test uses.
+    const Built b = build(std::string(kPrintf) +
+        "fun f() <int{64}> { return 4294967297; }\n"
+        "fun main() <noret> { printf(\"%ld\\n\", f()); }\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4294967297\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAStructFieldIsThatManyBytes) {
+    // The shape test_layout.cpp measures as a field and this asserts as an ABI: a
+    // `uint{8}` is one byte written and used to be four laid out. A struct is where
+    // that is observable from inside the program -- through sizeof, and through the
+    // offset of every field after it -- rather than only in a value.
+    //
+    // Two structs and not one, because a size alone does not distinguish a narrow
+    // field from a narrow struct. `{uint{8}, uint{8}}` is two bytes, which is the
+    // number that says the fields are one byte each; `{uint{8}, int{64}}` is sixteen,
+    // of which seven are the padding the one-byte field forces, and reading `b` back
+    // as 4294967297 is what says the eight-byte field sits where that padding puts it.
+    // `{ushort, ushort}` and `{ushort, long}` measure 4 and 16, so the first number
+    // is this section's and the second is the alignment's.
+    const Built b = build(std::string(kPrintf) +
+        "struct Narrow { pub a <uint{8}>, pub b <uint{8}>, }\n"
+        "struct Padded { pub a <uint{8}>, pub b <int{64}>, }\n"
+        "fun main() <noret> {\n"
+        "    let n <Narrow>;\n"
+        "    n.a = 200;\n"
+        "    n.b = 1;\n"
+        "    let p <Padded>;\n"
+        "    p.b = 4294967297;\n"
+        "    printf(\"%d %d %d %d %ld\\n\", sizeof(Narrow), sizeof(Padded),\n"
+        "           n.a, n.b, p.b);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 16 200 1 4294967297\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAPointeeLowersAtThatWidth) {
+    // tests/samples/type_annotations.fin:11 as repaired: `let p <*int{64}> = &x;` over
+    // an `int{64}`, where the sample wrote `*int{32}` over an `int{64}` and so asked
+    // for a pointer whose pointee is half its target. The mapper reaches an annotated
+    // pointee through mapPointer rather than at the top, so this is the case a width
+    // read only for an undecorated type would miss.
+    //
+    // The store is what makes it a claim about the pointee's width rather than about
+    // the pointer's: 4294967297 written through a four-byte slot writes four bytes and
+    // leaves the high half of `x` as it was, so the two readings disagree. Reading `x`
+    // back through the variable and `*p` through the pointer is what compares them.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int{64}> = 1;\n"
+        "    let p <*int{64}> = &x;\n"
+        "    *p = 4294967297;\n"
+        "    printf(\"%ld %ld\\n\", x, *p);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4294967297 4294967297\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAnArrayElementIsTheStride) {
+    // Reached through mapArray's element, the other decorated door into the mapper.
+    // An array is where a dropped width is worst: the element width is the stride, so
+    // an `[int{64}, 2]` emitted as two i32s reserves half the memory the program asked
+    // for and then indexes it at the wrong scale, which is a read of somebody else's
+    // bytes rather than a narrow value.
+    //
+    // Both extents are asserted and the last element is read back, because a stride
+    // can be wrong in a way a total size is not: four i32s and two i64s are both
+    // sixteen bytes. `[long, 2]` measures 16 and `[ushort, 4]` measures 8, so 4 for
+    // `[uint{8}, 4]` is this section's number.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int{64}, 2]> = [4294967297, 8589934593];\n"
+        "    let n <[uint{8}, 4]>;\n"
+        "    n[3] = 200;\n"
+        "    printf(\"%d %d %ld %ld %d\\n\", sizeof([int{64}, 2]),\n"
+        "           sizeof([uint{8}, 4]), a[0], a[1], n[3]);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "16 4 4294967297 8589934593 200\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnACastTargetTruncatesToThatWidth) {
+    // A cast is the one role where the width is the entire request: `cast<int{8}>(x)`
+    // asks for eight bits and nothing else, so lowering it as an i32 answered a
+    // question nobody asked while looking like it had answered theirs. The numbers are
+    // `cast<char>`, `cast<short>` and `cast<ushort>`'s measured answers -- 44, -31073
+    // and 4464 -- which is what makes the annotated cast the same cast rather than a
+    // second one that agrees with it.
+    const Built annotated = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d %d %ld\\n\", cast<int{8}>(300), cast<int{16}>(99999),\n"
+        "           cast<uint{16}>(70000), cast<int{64}>(1));\n"
+        "}\n");
+    EXPECT_EQ(annotated.compileExit, 0) << annotated.why();
+    ASSERT_TRUE(annotated.ran) << annotated.why();
+    EXPECT_EQ(annotated.out, "44 -31073 4464 1\n") << annotated.why();
+
+    const Built named = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d %d %ld\\n\", cast<char>(300), cast<short>(99999),\n"
+        "           cast<ushort>(70000), cast<long>(1));\n"
+        "}\n");
+    ASSERT_TRUE(named.ran) << named.why();
+    EXPECT_EQ(named.out, annotated.out) << named.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAGlobalLowersAtThatWidth) {
+    // A global's width is in the object file rather than in a frame, so this is the
+    // one role where the wrong answer is linkable: another translation unit reading
+    // `g` reads the bytes the initialiser reserved, and a four-byte `g` declared as
+    // eight is a read of whatever follows it.
+    const Built b = build(std::string(kPrintf) +
+        "let g <int{64}> = 4294967297;\n"
+        "let n <uint{8}> = 200;\n"
+        "fun main() <noret> { printf(\"%ld %d\\n\", g, n); }\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4294967297 200\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAConstLowersAtThatWidth) {
+    // A `const` is a global whose mutability the analyzer checks, so it reaches the
+    // same emitter -- asserted rather than assumed because a constant initialiser is
+    // built from the type before any store exists to be widened.
+    const Built b = build(std::string(kPrintf) +
+        "const N <int{64}> = 4294967297;\n"
+        "fun main() <noret> { printf(\"%ld\\n\", N); }\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4294967297\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AWidthTheTableDoesNotNameIsRefusedAndTheSetIsNamed) {
+    // Eight, sixteen, thirty-two and sixty-four are the widths Layout.hpp's table
+    // holds, and a well-formed width outside them has no representation here. It is
+    // refused in every role, from one place -- the mapper is where a written type
+    // becomes a machine type, so each role's refusal is that one failure reported with
+    // the role's own noun.
+    //
+    // The set is in the message. A reader who wrote `int{7}` has been told that 7 is
+    // wrong and needs to be told what is right, and there is nowhere else to learn it:
+    // the layout pass says the same sentence (Soundness_Layout.AWidthThisCompilerCannot
+    // RepresentHasNoLayout) but LayoutEngine has no caller in the compiler yet, so this
+    // refusal is the only one a program actually receives.
+    struct Case { const char* role; const char* spelled; std::string code; };
+    const std::vector<Case> cases{
+        {"a variable", "'int{7}'", "fun main() <noret> { let x <int{7}> = 1; }\n"},
+        {"a variable", "'int{128}'", "fun main() <noret> { let x <int{128}> = 1; }\n"},
+        {"a variable", "'uint{24}'", "fun main() <noret> { let x <uint{24}> = 1; }\n"},
+        {"a parameter", "'int{7}'",
+         "fun f(x: int{7}) <void> { }\nfun main() <noret> { }\n"},
+        {"a return", "'int{7}'",
+         "fun f() <int{7}> { return 1; }\nfun main() <noret> { }\n"},
+        {"a struct field", "'int{128}'",
+         "struct S { pub a <int{128}>, }\nfun main() <noret> { let s <S>; }\n"},
+        {"a variable", "'&int{7}'", "fun main() <noret> { let p <*int{7}> = null; }\n"},
+        {"a variable", "'[int{7}, 2]'", "fun main() <noret> { let a <[int{7}, 2]>; }\n"},
+        {"a cast", "'int{7}'",
+         "fun main() <noret> { let y <int> = cast<int{7}>(1); }\n"},
+        {"a global", "'int{7}'", "let g <int{7}> = 1;\nfun main() <noret> { }\n"},
+    };
+    for (const Case& c : cases) {
+        const Built b = build(c.code);
+        EXPECT_NE(b.compileExit, 0) << c.code << b.why();
+        EXPECT_NE(b.compileErr.find(std::string(c.role) + " of type " + c.spelled),
+                  std::string::npos)
+            << "the refusal names the role and the type as written\n"
+            << c.code << b.why();
+        EXPECT_NE(b.compileErr.find("8, 16, 32 or 64"), std::string::npos)
+            << "the refusal must name the set it is refusing against\n"
+            << c.code << b.why();
+    }
+
+    // The same ten with a width the table does name, so what is being refused above is
+    // the number and not the annotation.
+    for (const char* code : {
+             "fun main() <noret> { let x <int{16}> = 1; }\n",
+             "fun f(x: int{16}) <void> { }\nfun main() <noret> { }\n",
+             "fun f() <int{16}> { return 1; }\nfun main() <noret> { }\n",
+             "struct S { pub a <int{16}>, }\nfun main() <noret> { let s <S>; }\n",
+             "fun main() <noret> { let p <*int{16}> = null; }\n",
+             "fun main() <noret> { let a <[int{16}, 2]>; }\n",
+             "fun main() <noret> { let y <int> = cast<int{16}>(1); }\n",
+             "let g <int{16}> = 1;\nfun main() <noret> { }\n"}) {
+        const Built b = build(code);
+        EXPECT_EQ(b.compileExit, 0) << "a representable width lowers here:\n"
+                                    << code << b.why();
+    }
+}
+
 BACKEND_TEST(Soundness_Codegen, ANonConstantWidthAnnotationIsRefusedAndSaidToBeOne) {
     // tests/samples/type_annotations.fin:8 -- `let z <int{8 * 8}> = 42;`. The width is
     // an arithmetic expression, folded nowhere, so there is no number to print and the
-    // spelling says `{...}`: the same thing ASTPrinter says, for the same reason. It
-    // still distinguishes an annotated type from a bare one, which is what the reader
-    // needs from it here.
-    const Built b = build(
-        "fun main() <noret> { let z <int{8 * 8}> = 42; }\n");
+    // spelling says `{...}`: the same thing ASTPrinter says, for the same reason. The
+    // front end accepts it and hands back plain `int` (Soundness_IntegerWidths
+    // .AnArithmeticWidthIsNotAConstantAndIsNotRefusedHere), so the type that arrives
+    // here is lowerable -- and lowering it would give the program 32 bits where it
+    // asked for something it never got an answer about. Refused for that reason and
+    // not for the set's, which is why no set is named.
+    const Built b = build("fun main() <noret> { let z <int{8 * 8}> = 42; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("a variable of type 'int{...}'"), std::string::npos)
         << b.why();
+    EXPECT_EQ(b.compileErr.find("8, 16, 32 or 64"), std::string::npos)
+        << "the set is not what this refusal is about\n" << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAParameterIsRefused) {
-    const Built b = build(std::string(kPrintf) +
-        "fun f(x: int{64}) <void> { printf(\"%d\\n\", x); }\n"
-        "fun main() <noret> { f(7); }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a parameter of type 'int{64}'"), std::string::npos)
-        << b.why();
+BACKEND_TEST(Soundness_Codegen, AWidthOnATypeThatCannotCarryOneIsRefused) {
+    // A width is a count of value bits on an integer. Written on anything else it is
+    // read by the front end, checked, and then dropped -- deliberately, so that
+    // tests/samples/type_annotations.fin:14's `{int{64}, float{128}}` keeps resolving
+    // (Soundness_IntegerWidths.AWidthOnANonIntegerIsStillNotAType). Dropped means the
+    // program asked for something and got no answer, which is this section's refusal
+    // rather than a new one, so no set is named here either.
+    //
+    // The parenthesised forms are the same case reached through a different node.
+    // `(*int){8}` puts the annotation on the pointer, not on the pointee, and a
+    // pointer is one machine word whatever is written after it. It is spelled with the
+    // parentheses the program wrote, because `&int{8}` is a different type -- a
+    // pointer to eight bits, which lowers.
+    struct Case { const char* spelled; std::string code; };
+    const std::vector<Case> cases{
+        {"'float{128}'", "fun main() <noret> { let x <float{128}> = 1.5; }\n"},
+        {"'double{32}'",
+         "fun main() <noret> { let x <double{32}> = cast<double>(1.5); }\n"},
+        {"'bool{1}'", "fun main() <noret> { let x <bool{1}> = true; }\n"},
+        {"'string{8}'", "fun main() <noret> { let x <string{8}> = \"s\"; }\n"},
+        {"'S{8}'",
+         "struct S { pub a <int>, }\nfun main() <noret> { let x <S{8}>; }\n"},
+        {"'any{8}'", "fun main() <noret> { let x <any{8}>; }\n"},
+        {"'(&int){8}'",
+         "fun main() <noret> { let x <int> = 1; let p <(*int){8}> = &x; }\n"},
+        {"'([int, 2]){8}'", "fun main() <noret> { let a <([int, 2]){8}>; }\n"},
+    };
+    for (const Case& c : cases) {
+        const Built b = build(c.code);
+        EXPECT_NE(b.compileExit, 0) << c.code << b.why();
+        EXPECT_NE(b.compileErr.find(c.spelled), std::string::npos)
+            << "the refusal must name the type as written\n" << c.code << b.why();
+    }
+
+    // Each of those without its annotation, so the refusals above are about the
+    // annotation and not about the base type. `any` is left out: it has no
+    // representation either way and is refused on its own account.
+    for (const char* code : {
+             "fun main() <noret> { let x <float> = 1.5; }\n",
+             "fun main() <noret> { let x <double> = cast<double>(1.5); }\n",
+             "fun main() <noret> { let x <bool> = true; }\n",
+             "fun main() <noret> { let x <string> = \"s\"; }\n",
+             "struct S { pub a <int>, }\nfun main() <noret> { let x <S>; }\n",
+             "fun main() <noret> { let x <int> = 1; let p <*int> = &x; }\n",
+             "fun main() <noret> { let a <[int, 2]>; }\n"}) {
+        const Built b = build(code);
+        EXPECT_EQ(b.compileExit, 0) << "the base type lowers:\n" << code << b.why();
+    }
 }
 
-BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAReturnIsRefused) {
-    const Built b = build(std::string(kPrintf) +
-        "fun f() <int{64}> { return 7; }\n"
-        "fun main() <noret> { printf(\"%d\\n\", f()); }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a return of type 'int{64}'"), std::string::npos)
-        << b.why();
-}
+BACKEND_TEST(Soundness_Codegen, AWidthOnATypeParameterIsRefusedAndNotTakenFromTheBinding) {
+    // The live miscompile this unit closed, and the reason the check has to sit inside
+    // boundBinding rather than beside the refusals above: a bare `T` is replaced by
+    // whatever the instantiation bound it to *before* anything looks at the
+    // annotation, so `T{8}` bound to `int` lowered as a plain i32 and each of these
+    // printed 300 -- a value that does not fit eight bits, out of a program that asked
+    // for eight bits, on a compile that reported success.
+    //
+    // Refused rather than honoured, because "a width written on a type parameter
+    // applies to whatever the parameter was bound to" is a rule nobody has stated, and
+    // `T{8}` where T is a struct or a `[int]` has no reading at all. The three
+    // positions are three different paths through the mapper -- a parameter, a field
+    // and a return -- and all three were measured printing 300 before this.
+    struct Case { const char* what; std::string code; };
+    const std::vector<Case> cases{
+        {"a parameter",
+         "fun id<T>(x: T{8}) <void> { printf(\"%d\\n\", x); }\n"
+         "fun main() <noret> { id::<int>(300); }\n"},
+        {"a struct field",
+         "struct Box<T> { pub v <T{8}>, }\n"
+         "fun main() <noret> { let b <Box<int>>; b.v = 300;\n"
+         "                     printf(\"%d\\n\", b.v); }\n"},
+        {"a return",
+         "fun id<T>(x: T) <T{8}> { return x; }\n"
+         "fun main() <noret> { printf(\"%d\\n\", id::<int>(300)); }\n"},
+    };
+    for (const Case& c : cases) {
+        const Built b = build(std::string(kPrintf) + c.code);
+        EXPECT_NE(b.compileExit, 0)
+            << "a width on a type parameter was lowered at the binding's width: "
+            << c.what << "\n" << c.code << b.why();
+        EXPECT_NE(b.compileErr.find("'T{8}'"), std::string::npos)
+            << "the refusal names the parameter and the width, not the binding\n"
+            << c.code << b.why();
+    }
 
-BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAStructFieldIsRefused) {
-    // The shape tests/samples/enums.fin:8 writes as a payload and test_layout.cpp:806
-    // measures as a field: `uint{8}` is one byte written and four bytes laid out.
-    // Refusing the field is what stops a struct from being *emitted* at that wrong
-    // size, which a program can observe through sizeof and through every offset after
-    // it -- an ABI, not a value.
-    const Built b = build(std::string(kPrintf) +
-        "struct S { pub a <uint{8}>, }\n"
-        "fun main() <noret> { let s <S>; printf(\"ok\\n\"); }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a struct field of type 'uint{8}'"), std::string::npos)
-        << b.why();
-}
-
-BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAPointeeIsRefused) {
-    // tests/samples/type_annotations.fin:11 -- `let p <*int{32}> = &x;`. The mapper
-    // reaches an annotated pointee through mapPointer rather than at the top, so this
-    // is the case a check written only for an undecorated type would miss. `&` is how
-    // the spelling renders every pointer, `*int{32}` included.
-    const Built b = build(
-        "fun main() <noret> { let x <int> = 1; let p <*int{32}> = &x; }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a variable of type '&int{32}'"), std::string::npos)
-        << b.why();
-}
-
-BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAnArrayElementIsRefused) {
-    // Reached through mapArray's element, the other decorated door into the mapper.
-    // An array is where a dropped width is worst: the element width is the stride, so
-    // an `[int{64}, 2]` emitted as two i32s is not merely narrow, it is a different
-    // amount of memory than the program reserved.
-    const Built b = build(
-        "fun main() <noret> { let a <[int{64}, 2]>; }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a variable of type '[int{64}, 2]'"), std::string::npos)
-        << b.why();
-}
-
-BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnACastTargetIsRefused) {
-    // A cast is the one role where the width is the entire request: `cast<int{64}>(x)`
-    // asks for a 64-bit value and nothing else, so lowering it as an i32 answered a
-    // question nobody asked while looking like it had answered theirs.
-    const Built b = build(std::string(kPrintf) +
-        "fun main() <noret> { let x <int> = 1; printf(\"%d\\n\", cast<int{64}>(x)); }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a cast of type 'int{64}'"), std::string::npos) << b.why();
-}
-
-BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAGlobalIsRefused) {
-    const Built b = build(std::string(kPrintf) +
-        "let g <int{64}> = 7;\n"
-        "fun main() <noret> { printf(\"%d\\n\", g); }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a global of type 'int{64}'"), std::string::npos)
-        << b.why();
+    // The same three with the parameter written bare, which is what makes the refusals
+    // above about the annotation. 300 is the right answer for an `int`.
+    for (const char* code : {
+             "fun id<T>(x: T) <void> { printf(\"%d\\n\", x); }\n"
+             "fun main() <noret> { id::<int>(300); }\n",
+             "struct Box<T> { pub v <T>, }\n"
+             "fun main() <noret> { let b <Box<int>>; b.v = 300;\n"
+             "                     printf(\"%d\\n\", b.v); }\n",
+             "fun id<T>(x: T) <T> { return x; }\n"
+             "fun main() <noret> { printf(\"%d\\n\", id::<int>(300)); }\n"}) {
+        const Built b = build(std::string(kPrintf) + code);
+        ASSERT_TRUE(b.ran) << code << b.why();
+        EXPECT_EQ(b.out, "300\n") << code << b.why();
+    }
 }
 
 BACKEND_TEST(Soundness_Codegen, ARefusedWidthAnnotationWritesNoObject) {
     // The rule the refusal exists to keep: a program whose widths the backend cannot
     // honour produces nothing, so no later build step can pick up an object that
-    // computes in the wrong precision.
+    // computes in the wrong precision. `int{128}` rather than the `int{64}` this test
+    // used to carry -- 64 is lowered now, and the property under test needs a width
+    // that is still refused.
     fs::path src = uniqueTempPath("fin_ann", ".fin");
     fs::path obj = uniqueTempPath("fin_ann", ".o");
     {
         std::ofstream f(src, std::ios::binary);
-        f << "fun main() <noret> { let x <int{64}> = 10; }\n";
+        f << "fun main() <noret> { let x <int{128}> = 10; }\n";
     }
     const FincRun r = runFinc({"-c", src.string(), "-o", obj.string()});
     EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);

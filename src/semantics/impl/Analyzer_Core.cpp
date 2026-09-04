@@ -3,6 +3,7 @@
 #include "../../ast/types/Attribute.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../../utils/IntegerConstant.hpp"
+#include "../../types/Layout.hpp"
 #include <algorithm>
 #include <fmt/core.h>
 #include <fmt/color.h>
@@ -89,16 +90,32 @@ bool SemanticAnalyzer::constantFitsType(const ASTNode& node, const Type& target)
     const auto* prim = target.as<PrimitiveType>();
     if (!prim) return false;
 
-    // The magnitude is not checked, and that is a decision rather than an
-    // oversight: Fin has not said how wide `short` or `char` is, and the `{N}`
-    // annotation that would say is erased by resolveTypeFromAST before anything
-    // can read it. A range check today would be inventing the widths.
-    // KnownDefect_IntegerWidths.AConstantTooLargeForItsTargetIsAccepted records
-    // the hole and is where the check goes when the widths become real.
-    if (isFloatingName(prim->name)) return true;
-    if (isSignedIntegerName(prim->name)) return true;
-    if (isUnsignedIntegerName(prim->name)) return !negative;
-    return false;  // bool, string, void, auto and every named type: unchanged
+    const auto info = scalarOf(*prim);
+    if (!info) return false;
+    if (info->kind == ScalarKind::Float) return true;
+    if (info->kind != ScalarKind::Int || info->bits == 0) return false;
+
+    if (negative) {
+        if (!info->isSigned) return false;
+        int64_t value = 0;
+        if (readSignedConstant(node, value) != ConstantRead::Ok) return false;
+        if (info->bits >= 64) return true;
+        const int64_t minimum = -(int64_t{1} << (info->bits - 1));
+        return value >= minimum;
+    }
+
+    uint64_t value = 0;
+    if (readConstant(node, value) != ConstantRead::Ok) return false;
+    if (info->isSigned) {
+        const uint64_t maximum = info->bits >= 64
+            ? static_cast<uint64_t>(INT64_MAX)
+            : (uint64_t{1} << (info->bits - 1)) - 1;
+        return value <= maximum;
+    }
+    const uint64_t maximum = info->bits >= 64
+        ? UINT64_MAX
+        : (uint64_t{1} << info->bits) - 1;
+    return value <= maximum;
 }
 
 SemanticAnalyzer::SemanticAnalyzer(DiagnosticEngine& d, bool debug) 
@@ -390,9 +407,108 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
         }
     }
     
+    // 6. The written width: `int{64}`.
+    //
+    // Resolved *into* the type, the way section 2 resolves an array's extent, and
+    // for the same reason: until this the annotation was walked for its own
+    // diagnostics and the value went nowhere, so `int{8}` and `int` were one
+    // semantic type. That single missing number is three defects -- a narrowing
+    // assignment with nothing narrower to refuse, a layout pass answering four
+    // bytes for a one-byte field, and `expected 'uint'` shown to someone who wrote
+    // `uint{8}` -- and PrimitiveType::bits is where it now lives.
+    //
+    // The annotation is still walked whatever it is written on, so a malformed
+    // width is a diagnostic on `float{-8}` as much as on `int{-8}`; what depends on
+    // the base type is only whether there is anywhere to *put* the number. A width
+    // on a non-integer is dropped, because a width is a count of value bits, an
+    // IEEE format is not built from one, and Fin has ruled on no floating-point
+    // format but the two the table names -- so `float{128}` is `float`, which is
+    // what tests/samples/type_annotations.fin:14 needs to keep resolving.
+    //
+    // Nothing reaches here from a pointer, an array, a function type or a
+    // prototype: each of those returns above, so `(*int){32}` and `{int, float}{8}`
+    // keep resolving with their annotation unread. That is the state those
+    // spellings were already in and not a decision this section makes.
     if (type && !node->annotations.empty()) {
         for (auto& ann : node->annotations) {
             ann->accept(*this);
+        }
+
+        // Every annotation walked first, so `int{"a", "b"}` reports both of its own
+        // mismatches, and then the count -- which is the array extent's ordering
+        // read onto a list that may hold more than one thing.
+        if (node->annotations.size() > 1) {
+            error(*node, "A type takes one bit width");
+            return type;
+        }
+
+        Expression& ann = *node->annotations[0];
+        // Checked against `int` like any other expression, which is what reports
+        // `expected 'int', got 'string'` for `int{"a"}`; the width diagnostic below
+        // then says what it was written *as*. Two messages about different things,
+        // exactly as `[int, "x"]` reports both.
+        auto intType = currentScope->resolveType("int");
+        // Keep an unrepresentable magnitude on the width-reading path. If it
+        // became a normal type mismatch first, checkType would suppress the
+        // width-specific diagnostic below.
+        uint64_t writtenWidth = 0;
+        if (readExtent(ann, writtenWidth) == ExtentRead::TooLarge) {
+            error(ann, "A bit width is too large to represent");
+            return type;
+        }
+        bool integral = true;
+        if (lastExprType) {
+            if (!checkType(ann, lastExprType, intType)) {
+                error(ann, "A bit width must be an integer");
+                integral = false;
+            }
+        }
+        if (!integral) return type;
+
+        uint64_t width = 0;
+        switch (readExtent(ann, width)) {
+            case ExtentRead::Ok:
+                if (width == 0) {
+                    // Separated from Negative because they are different mistakes and
+                    // 0 is the one a reader can talk themselves into: a zero-bit
+                    // integer holds no values, so there is nothing for it to be.
+                    error(ann, "A bit width cannot be zero");
+                    return type;
+                }
+                break;
+            case ExtentRead::Negative:
+                error(ann, "A bit width cannot be negative");
+                return type;
+            case ExtentRead::TooLarge:
+                error(ann, "A bit width is too large to represent");
+                return type;
+            case ExtentRead::NotConstant:
+                // Not a diagnostic, and this is the one case where a width differs
+                // from an extent. tests/samples/type_annotations.fin:8 writes
+                // `let z <int{8 * 8}> = 42;` in an `//@ ok` sample, and Fin has no
+                // constant folder on purpose (utils/IntegerConstant.hpp: folding
+                // arithmetic would answer an open language question by accident for
+                // whichever subset happens to be foldable). So there is no width
+                // here to store -- not a wrong one, none -- and the base name stands.
+                // The backend still refuses the program, because a written annotation
+                // that yielded no width is a width the program asked for and did not
+                // get.
+                return type;
+        }
+
+        // Only where the number has a meaning. `width` is a count of value bits, so
+        // it needs an integer scalar to count the bits of; scalarByName is asked
+        // rather than a list of names being restated, which is the same "one table"
+        // rule ADR 0022 states for the widening itself.
+        //
+        // A fresh type rather than a mutation: `currentScope->resolveType("int")`
+        // hands back the one registered `int`, and writing a width onto it would
+        // make every unannotated `int` in the program 64 bits wide.
+        if (auto* prim = type->as<PrimitiveType>()) {
+            const auto info = scalarByName(prim->name);
+            if (info && info->kind == ScalarKind::Int) {
+                type = std::make_shared<PrimitiveType>(prim->name, static_cast<unsigned>(width));
+            }
         }
     }
 
@@ -497,7 +613,40 @@ bool SemanticAnalyzer::checkType(ASTNode& node, std::shared_ptr<Type> actual, st
         }
     }
 
-    if (!actual->isAssignableTo(*expected)) {
+    // Widening is normally enough to make an integer assignment legal, but a
+    // constant still has to fit the target. Check this successful path too;
+    // the narrowing path below uses the same rule without double-reporting.
+    bool constantNegative = false;
+    const bool isConstant = integerConstant(node, constantNegative);
+    const bool assignable = actual->isAssignableTo(*expected);
+    const auto* expectedPrim = expected->as<PrimitiveType>();
+    const auto expectedInfo = expectedPrim ? scalarOf(*expectedPrim)
+                                           : std::optional<ScalarInfo>{};
+    const bool numericTarget = expectedInfo &&
+        (expectedInfo->kind == ScalarKind::Int || expectedInfo->kind == ScalarKind::Float);
+    if (assignable && isConstant && numericTarget) {
+        bool fits = constantFitsType(node, *expected);
+        if (!fits) {
+            const auto* prim = expected->as<PrimitiveType>();
+            const auto info = prim ? scalarOf(*prim) : std::optional<ScalarInfo>{};
+            bool negative = false;
+            integerConstant(node, negative);
+            uint64_t magnitude = 0;
+            const auto read = negative
+                ? ConstantRead::NotConstant
+                : readConstant(node, magnitude);
+            if (info && info->kind == ScalarKind::Int && !negative &&
+                !info->isSigned && info->bits >= 64 && read == ConstantRead::TooLarge) {
+                error(node, "An integer constant is too large to represent");
+            } else {
+                error(node, fmt::format("Type mismatch: expected '{}', got '{}'",
+                                        expected->toString(), actual->toString()));
+            }
+            return false;
+        }
+    }
+
+    if (!assignable) {
         if (constantFitsType(node, *expected)) return true;
         error(node, fmt::format("Type mismatch: expected '{}', got '{}'", expected->toString(), actual->toString()));
         return false;

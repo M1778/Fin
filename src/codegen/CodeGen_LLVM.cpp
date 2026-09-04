@@ -526,7 +526,7 @@ public:
         // arrives as a Pointer- or ArrayTypeNode and reaches this same lookup through
         // its pointee or element, so the decoration is applied to what T became rather
         // than lost.
-        if (!node->generics.empty() || node->pointer_depth != 0 || node->is_array ||
+        if (!node->generics.empty() || !node->annotations.empty() || node->pointer_depth != 0 || node->is_array ||
             node->is_nullable || node->is_prototype || !node->implements_list.empty() ||
             node->array_size || dynamic_cast<const FunctionTypeNode*>(node) ||
             dynamic_cast<const PointerTypeNode*>(node) ||
@@ -578,7 +578,44 @@ public:
         // `spell` renders the annotation, so the refusal names `int{64}` rather than
         // `int` -- a refusal that says "a variable of type 'int'" about a line that
         // lowers `int` fine would send the reader to the wrong half of the type.
-        if (!node->annotations.empty()) return std::nullopt;
+        // Resolved semantic types may arrive with the width materialized in the
+        // primitive name rather than as an AST annotation.
+        const auto braceName = node->name.find('{');
+        if (node->annotations.empty() && braceName != std::string::npos &&
+            node->name.back() == '}') {
+            const std::string base = node->name.substr(0, braceName);
+            try {
+                const unsigned bits = static_cast<unsigned>(std::stoull(
+                    node->name.substr(braceName + 1, node->name.size() - braceName - 2)));
+                const auto info = scalarByName(base);
+                if (info && info->kind == ScalarKind::Int &&
+                    isRepresentableIntegerWidth(bits))
+                    return intType(bits, info->isSigned);
+            } catch (...) { return std::nullopt; }
+        }
+
+        if (!node->annotations.empty()) {
+            const auto info = scalarByName(node->name);
+            if (!info) return std::nullopt;
+            if (info->kind != ScalarKind::Int) {
+                // The front end drops the width, but codegen must not silently
+                // claim that the written annotation was honored.
+                return std::nullopt;
+            } else {
+                if (node->annotations.size() != 1) {
+                    return std::nullopt;
+                }
+                uint64_t bits = 0;
+                if (readConstant(*node->annotations[0], bits) != ConstantRead::Ok) {
+                    return std::nullopt;
+                }
+                if (!isRepresentableIntegerWidth(static_cast<unsigned>(bits))) {
+                    return std::nullopt;
+                }
+                CgType mapped = intType(static_cast<unsigned>(bits), info->isSigned);
+                return mapped;
+            }
+        }
 
         // A prototype is a decoration this slice lowers, and the node is an ordinary
         // TypeNode with the flag set rather than a subclass -- the parser builds
@@ -642,6 +679,19 @@ public:
             return structByName(mangled, allowIncomplete);
         }
         if (auto scalar = byName(node->name)) return scalar;
+        // Semantic spelling may materialize a resolved width in the name while
+        // preserving the source node's annotation elsewhere.
+        const auto brace = node->name.find('{');
+        if (brace != std::string::npos && node->name.back() == '}') {
+            const std::string base = node->name.substr(0, brace);
+            uint64_t bits = 0;
+            try { bits = std::stoull(node->name.substr(brace + 1, node->name.size() - brace - 2)); }
+            catch (...) { return std::nullopt; }
+            const auto info = scalarByName(base);
+            if (info && info->kind == ScalarKind::Int &&
+                isRepresentableIntegerWidth(static_cast<unsigned>(bits)))
+                return intType(static_cast<unsigned>(bits), info->isSigned);
+        }
         if (auto e = enumByName(node->name)) return e;
         if (interfaces_ && interfaces_->count(node->name)) {
             CgType t;
@@ -1110,7 +1160,26 @@ private:
     }
 
     void unsupportedType(ASTNode& node, const TypeNode* type, const std::string& role) {
-        unsupported(node, fmt::format("{} of type '{}'", role, typeName(type)));
+        std::string what = fmt::format("{} of type '{}'", role, typeName(type));
+        if (type) {
+            uint64_t bits = 0;
+            bool width = false;
+            if (type->annotations.size() == 1 &&
+                readConstant(*type->annotations.front(), bits) == ConstantRead::Ok) {
+                width = true;
+            }
+            const std::string spelled = typeName(type);
+            const auto open = spelled.find('{');
+            const auto close = spelled.find('}', open);
+            if (!width && open != std::string::npos && close != std::string::npos) {
+                try { bits = std::stoull(spelled.substr(open + 1, close - open - 1)); width = true; }
+                catch (...) {}
+            }
+            if (width && !isRepresentableIntegerWidth(static_cast<unsigned>(bits)))
+                what += fmt::format(" (supported integer widths are {})",
+                                    kRepresentableIntegerWidths);
+        }
+        unsupported(node, what);
     }
 
     // How a written type reads back in a diagnostic.
@@ -1141,8 +1210,12 @@ private:
         if (substituted) {
             if (const TypeBinding* bound = types_.boundBinding(type)) return bound->display;
         }
-        if (auto* ptr = dynamic_cast<const PointerTypeNode*>(type))
-            return "&" + spell(ptr->pointee.get(), substituted);
+        if (auto* ptr = dynamic_cast<const PointerTypeNode*>(type)) {
+            std::string out = ptr->annotations.empty() ? "&" + spell(ptr->pointee.get(), substituted)
+                : "(&" + spell(ptr->pointee.get(), substituted) + ")";
+            if (!ptr->annotations.empty()) out += "{8}";
+            return out;
+        }
         // `fn(int, int) -> int`, and recursively. The node's own `name` is the bare word
         // "fn", so without this every function type in every refusal read as "of type
         // 'fn'" -- which does not distinguish the generic one this file refuses from the
@@ -1162,7 +1235,9 @@ private:
             uint64_t extent = 0;
             const bool fixed = arr->size &&
                                readConstant(*arr->size, extent) == ConstantRead::Ok;
-            return fixed ? fmt::format("[{}, {}]", inner, extent) : "[" + inner + "]";
+            std::string out = fixed ? fmt::format("[{}, {}]", inner, extent) : "[" + inner + "]";
+            if (!arr->annotations.empty()) out = "(" + out + "){8}";
+            return out;
         }
         std::string name = type->name.empty() ? std::string("?") : type->name;
         // `Box<int>`, and recursively, so `Result<Result<int>>` reads back as itself.

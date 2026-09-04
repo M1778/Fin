@@ -91,7 +91,11 @@ bool isAssignableTarget(const Expression* expr) {
 bool isAnyIntegerType(const TypePtr& type) {
     auto* prim = dynamic_cast<const PrimitiveType*>(type.get());
     if (!prim) return false;
-    const auto info = scalarByName(prim->name);
+    // scalarOf, so a written width is read where the name is: the kind is the same
+    // either way here, and asking the same question of the type everywhere is what
+    // keeps `int{64}` from being a different integer depending on which predicate
+    // asked.
+    const auto info = scalarOf(*prim);
     return info && info->kind == ScalarKind::Int;
 }
 
@@ -117,7 +121,7 @@ TypePtr widerInteger(const TypePtr& a, const TypePtr& b) {
 bool isUnsignedInteger(const TypePtr& t) {
     auto* prim = dynamic_cast<const PrimitiveType*>(t.get());
     if (!prim) return false;
-    const auto info = scalarByName(prim->name);
+    const auto info = scalarOf(*prim);
     return info && info->kind == ScalarKind::Int && !info->isSigned;
 }
 
@@ -626,12 +630,36 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         //
         // Integers only, so nothing is decided about an `int` against a `float`, for
         // which the corpus writes no site.
+        // A comparison has two operand targets; report an overflowing literal
+        // against the opposite operand before the ordinary compatibility check.
+        bool leftNegative = false;
+        bool rightNegative = false;
+        const bool leftConstant = integerConstant(*node.left, leftNegative);
+        const bool rightConstant = integerConstant(*node.right, rightNegative);
+        if (!nullComparison && leftConstant &&
+            !constantFitsType(*node.left, *rightType)) {
+            checkType(*node.left, leftType, rightType);
+        }
+        if (!nullComparison && rightConstant &&
+            !constantFitsType(*node.right, *leftType)) {
+            checkType(*node.right, rightType, leftType);
+        }
         if (!nullComparison &&
             !constantFitsType(*node.right, *leftType) &&
             !constantFitsType(*node.left, *rightType) &&
             !(widerInteger(leftType, rightType) &&
               !negativeConstantAgainstUnsigned(*node.left, leftType,
-                                               *node.right, rightType))) {
+                                               *node.right, rightType) &&
+              ([&] {
+                  bool negative = false;
+                  return !integerConstant(*node.left, negative) ||
+                         constantFitsType(*node.left, *rightType);
+              })() &&
+              ([&] {
+                  bool negative = false;
+                  return !integerConstant(*node.right, negative) ||
+                         constantFitsType(*node.right, *leftType);
+              })())) {
             checkType(*node.right, rightType, leftType);
         }
         lastExprType = currentScope->resolveType("bool");
@@ -939,7 +967,12 @@ std::unique_ptr<TypeNode> spellType(const TypePtr& t) {
         // The names the layout table already answers to (`int`, `float`, `string`), so
         // the round trip goes through scalarByName rather than through a second table
         // written here that would have to be kept in step with it.
-        return std::make_unique<TypeNode>(prim->name);
+        auto node = std::make_unique<TypeNode>(prim->name);
+        if (prim->bits != 0) {
+            node->annotations.push_back(std::make_unique<Literal>(
+                std::to_string(prim->bits), ASTTokenKind::INTEGER));
+        }
+        return node;
     }
     if (auto* ptr = t->as<PointerType>()) {
         auto pointee = spellType(ptr->pointee);

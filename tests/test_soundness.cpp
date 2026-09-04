@@ -3193,53 +3193,380 @@ TEST(Soundness_InterfaceConstructors, AnInterfaceThatRequiresNoneIsNotGivenOne) 
 }
 
 // ---------------------------------------------------------------------------
-// Integer widths are a lie.
+// Integer widths.
 //
-// resolveTypeFromAST (Analyzer_Core.cpp) walks the `{N}` width annotation for
-// side effects and returns the unannotated type, so uint{8} and uint{64} are one
-// type. lib/std builds i64, i128, u64, u128 and size_t on top of this. Harmless
-// exactly as long as there is no codegen, and wrong machine code the day there is.
+// `int{64}` is a written width, and it is the type. The parser attaches the
+// expression to the TypeNode (parser.y, `base_type LBRACE expression_list
+// RBRACE`), resolveTypeUnwrapped reads it through the one shared constant reader
+// and stores it on the PrimitiveType, and from there the width is what every
+// later question is answered from: identity, assignability, the diagnostic text,
+// the layout pass, and the machine type the backend emits. Before this unit the
+// annotation was walked for its side effects and dropped, so `uint{8}` and
+// `uint{64}` were one type -- plain `uint` -- which accepted -1, laid out as four
+// bytes and lowered as an i32.
+//
+// The division of labour is the compiler's usual one, and it is what these tests
+// are arranged around. The front end decides *well-formedness*: a width is one
+// positive integer constant, and anything else is a diagnostic here. The layout
+// pass decides *representation*, and it has four widths -- 8, 16, 32 and 64, the
+// ones scalarByName already names. `int{7}` and `int{128}` are therefore
+// well-formed types that this compiler cannot lower, refused by name at the
+// backend exactly as a dynamic `[T]` or an `any` is, and covered in
+// test_codegen.cpp rather than here.
+//
+// That split is a ruling and the alternative was measured before being rejected.
+// Refusing an unrepresentable width in the front end would say "Fin has no
+// 128-bit integer", and nobody has decided that: tests/samples/stdlib/types.fin
+// :47 and :50 write `i128` and `u128` deliberately, in a normative sample, as
+// part of the standard library's number tower, and docs/plan.md:3175 reserves the
+// ABI for the owner. "This compiler does not lower it yet" is the true sentence,
+// and it is the one the backend already knows how to say.
+//
+// Why four and not "every width LLVM can build": LLVM's DataLayout rounds an
+// integer's store size up to a power of two, so i17 and i24 both allocate four
+// bytes and i33 through i56 all allocate eight, while sizeOfScalar computes
+// `(bits + 7) / 8`. The two agree for 1-16, 25-32 and 57-64 and disagree
+// everywhere else. A language whose widths are that set is not one anyone
+// designed -- it is the intersection of two rounding rules, with holes at 17-24
+// and 33-56 that no rule explains. Four named widths is a set the table states,
+// and Soundness_Codegen.TheLayoutTableAgreesWithLLVM is what holds it to LLVM.
 // ---------------------------------------------------------------------------
 
-TEST(KnownDefect_IntegerWidths, AWiderValueAssignsToANarrowerBinding) {
-    auto r = compile(
-        "fun main() <void> {\n"
-        "  let a <uint{8}>;\n"
-        "  let b <uint{64}> = a;\n"
-        "}\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: width annotations now produce distinct types. Widening may well "
-           "be legal by a language decision — if so, keep this as Soundness and "
-           "record the decision; the narrowing test below is the one that must reject.";
+TEST(Soundness_IntegerWidths, AWrittenWidthIsTheType) {
+    // The identity claim: a width and the name that means the same width are one
+    // type, so `long` initialises an `int{64}` and vice versa, with no conversion
+    // and no diagnostic. The name supplies the kind and the sign; the annotation
+    // supplies the bits.
+    //
+    // This is what makes the rest of the section a statement about widths rather
+    // than about annotations. Were `int{64}` merely *assignable* to `long`, the
+    // two would still be different types and every question below -- a pointee, a
+    // field, an argument, a layout -- would need an answer of its own.
+    for (const char* code : {
+             "fun main() <noret> { let a <int{64}> = 1; let b <long> = a; }\n",
+             "fun main() <noret> { let a <long> = 1; let b <int{64}> = a; }\n",
+             "fun main() <noret> { let a <int{32}> = 1; let b <int> = a; }\n",
+             "fun main() <noret> { let a <int> = 1; let b <int{32}> = a; }\n",
+             "fun main() <noret> { let a <uint{16}> = 1; let b <ushort> = a; }\n",
+             "fun main() <noret> { let a <char{8}> = 1; let b <char> = a; }\n",
+             "fun main() <noret> { let a <int{16}> = 1; let b <short> = a; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "a written width and the name for that width are one type:\n"
+            << code << stripAnsi(r.err);
+    }
 }
 
-TEST(KnownDefect_IntegerWidths, ANarrowerParameterAcceptsAWiderArgument) {
-    // This is the direction that cannot be excused by any implicit-conversion
-    // rule: passing uint{64} where uint{8} was asked for truncates.
-    auto r = compile(
+TEST(Soundness_IntegerWidths, AWrittenWidthWidensLikeAName) {
+    // ADR 0022 unchanged, read through the annotation: an integer reaches a wider
+    // integer, and an equal width passes only when the sign agrees. Was
+    // KnownDefect_IntegerWidths.AWiderValueAssignsToANarrowerBinding, which
+    // asserted this same exit 0 for the opposite reason -- the two types were
+    // literally one type, so there was nothing for the rule to be true about.
+    for (const char* code : {
+             "fun main() <noret> { let a <uint{8}>; let b <uint{64}> = a; }\n",
+             "fun main() <noret> { let a <int{8}>; let b <int{16}> = a; }\n",
+             "fun main() <noret> { let a <uint{8}>; let b <uint{8}> = a; }\n",
+             "fun main() <noret> { let a <int{16}>; let b <long> = a; }\n",
+             "fun main() <noret> { let a <ushort>; let b <uint{32}> = a; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << "a widening:\n" << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidths, ANarrowerTargetIsRefusedThroughTheWidth) {
+    // The direction no implicit-conversion rule excuses, and the one this unit
+    // exists for: before it every one of these compiled, because both sides were
+    // the base name and the base name was all there was.
+    struct Case { const char* code; const char* text; };
+    const std::vector<Case> cases{
+        {"fun main() <noret> { let a <uint{64}>; let b <uint{8}> = a; }\n",
+         "expected 'uint{8}', got 'uint{64}'"},
+        {"fun main() <noret> { let a <int{64}>; let b <int{32}> = a; }\n",
+         "expected 'int{32}', got 'int{64}'"},
+        {"fun main() <noret> { let a <long>; let b <int{16}> = a; }\n",
+         "expected 'int{16}', got 'long'"},
+        {"fun main() <noret> { let a <int{16}>; let b <char> = a; }\n",
+         "expected 'char', got 'int{16}'"},
+        {"fun main() <noret> { let a <uint{32}>; let b <int{32}> = a; }\n",
+         "expected 'int{32}', got 'uint{32}'"},
+    };
+    for (const Case& c : cases) {
+        const FincRun r = compile(c.code);
+        EXPECT_NE(r.exitCode, 0) << "a narrowing:\n" << c.code << stripAnsi(r.err);
+        EXPECT_NE(stripAnsi(r.err).find(c.text), std::string::npos)
+            << c.code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidths, ANarrowerParameterRefusesAWiderArgument) {
+    // Was KnownDefect_IntegerWidths.ANarrowerParameterAcceptsAWiderArgument. Kept
+    // as a test of its own rather than folded into the loop above because a
+    // parameter is checked at the call and a binding at its initialiser: the
+    // defect this inverts was reachable through both, and only one was written.
+    const FincRun r = compile(
         "fun f(x: uint{8}) <void> {}\n"
         "fun main() <void> {\n"
         "  let big <uint{64}>;\n"
         "  f(big);\n"
         "}\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a narrowing argument is now rejected. Invert and move to "
-           "Soundness_IntegerWidths.";
+    EXPECT_NE(r.exitCode, 0) << "passing a uint{64} where uint{8} was asked for "
+                                "truncates\n" << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'uint{8}', got 'uint{64}'"),
+              std::string::npos) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_IntegerWidths, TheWidthIsAbsentFromDiagnosticText) {
-    // Evidence for the *cause* rather than the symptom, and the reason this one is
-    // worth its own test: the annotation is gone by the time anything can see it,
-    // so a diagnostic about `uint{8}` says plain `uint`. That also makes the fix
-    // observable without codegen — when the type carries its width, this text
-    // changes, and a user reading `expected 'uint'` while having written
-    // `uint{8}` is being told something untrue today.
-    auto r = compile("fun main() <void> { let a <uint{8}> = -1; }\n");
-    ASSERT_NE(r.exitCode, 0) << "expected a signedness mismatch here: " << r.err;
+TEST(Soundness_IntegerWidths, TheWidthIsInTheDiagnosticText) {
+    // Was KnownDefect_IntegerWidths.TheWidthIsAbsentFromDiagnosticText, whose
+    // whole argument was that a user reading `expected 'uint'` while having
+    // written `uint{8}` is being told something untrue. The width reaches
+    // toString now, so a diagnostic names what the program wrote.
+    const FincRun r = compile("fun main() <void> { let a <uint{8}> = -1; }\n");
+    ASSERT_NE(r.exitCode, 0) << "a negative constant is not an unsigned value: "
+                             << stripAnsi(r.err);
     const std::string err = stripAnsi(r.err);
-    EXPECT_NE(err.find("expected 'uint'"), std::string::npos) << err;
-    EXPECT_EQ(err.find("uint{8}'"), std::string::npos)
-        << "FIXED: the diagnostic now names the annotated width. " << err;
+    EXPECT_NE(err.find("expected 'uint{8}'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << "one diagnostic, about the sign\n" << err;
+}
+
+TEST(Soundness_IntegerWidths, AWidthMustBeAPositiveConstant) {
+    // The four readings of a malformed width, and the messages are the array
+    // extent's four with one word changed. That is deliberate: an extent and a
+    // width are the same syntactic question -- a constant written inside a type --
+    // read through the same reader (utils/IntegerConstant.hpp), so a reader who
+    // has seen one diagnostic can predict the other.
+    struct Case { const char* code; const char* text; };
+    const std::vector<Case> cases{
+        {"fun main() <noret> { let a <int{-8}>; }\n",
+         "A bit width cannot be negative"},
+        {"fun main() <noret> { let a <int{0}>; }\n",
+         "A bit width cannot be zero"},
+        {"fun main() <noret> { let a <int{18446744073709551616}>; }\n",
+         "A bit width is too large to represent"},
+        {"fun main() <noret> { let a <int{64, 32}>; }\n",
+         "A type takes one bit width"},
+    };
+    for (const Case& c : cases) {
+        const FincRun r = compile(c.code);
+        EXPECT_NE(r.exitCode, 0) << c.code << stripAnsi(r.err);
+        EXPECT_NE(stripAnsi(r.err).find(c.text), std::string::npos)
+            << c.code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidths, AWidthThatIsNotAnIntegerIsSaidToBeOne) {
+    // Two diagnostics and not one, and the count is asserted because it is the
+    // part that looks like a bug and is not. The annotation is an expression: it
+    // is walked and checked against `int` like any other, which reports the type
+    // mismatch, and then read as a width, which reports that a width has to be an
+    // integer. The array extent behaves identically -- `[int, "a"]` reports both
+    // `expected 'int', got 'string'` and `Array size must be an integer` -- and
+    // the two messages are about different things. One says what was written; the
+    // other says what it was written *as*.
+    for (const char* code : {"fun main() <noret> { let a <int{\"a\"}>; }\n",
+                             "fun main() <noret> { let a <int{1.5}>; }\n",
+                             "fun main() <noret> { let a <int{true}>; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << code << stripAnsi(r.err);
+        const std::string err = stripAnsi(r.err);
+        EXPECT_NE(err.find("A bit width must be an integer"), std::string::npos)
+            << code << err;
+        EXPECT_EQ(errorCount(err), 2u)
+            << "the mismatch and the width, as the array extent reports both\n"
+            << code << err;
+    }
+}
+
+TEST(Soundness_IntegerWidths, AnArithmeticWidthIsNotAConstantAndIsNotRefusedHere) {
+    // tests/samples/type_annotations.fin:8 writes `let z <int{8 * 8}> = 42;` in a
+    // `//@ ok` sample, so this must not become a front-end diagnostic. Fin has no
+    // constant folder and deliberately so (utils/IntegerConstant.hpp: folding
+    // arithmetic would answer an open language question by accident for whichever
+    // subset happens to be foldable), which means there is no width here to store
+    // -- not a wrong one, none. The base name stands and the type is `int`.
+    //
+    // The backend still refuses it, because a written annotation that yielded no
+    // width is a width the program asked for and did not get:
+    // Soundness_Codegen.ANonConstantWidthAnnotationIsRefusedAndSaidToBeOne.
+    const FincRun r = compile("fun main() <noret> { let z <int{8 * 8}> = 42; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+
+    // And what makes that a statement about folding rather than about `int{64}`:
+    // the same program with the width written out is a 64-bit type, so `long`
+    // reaches it and `int{8 * 8}` -- being plain `int` -- does not.
+    const FincRun folded = compile(
+        "fun main() <noret> { let a <long> = 1; let b <int{8 * 8}> = a; }\n");
+    EXPECT_NE(folded.exitCode, 0)
+        << "`int{8 * 8}` is `int`, so a `long` narrows into it\n"
+        << stripAnsi(folded.err);
+}
+
+TEST(Soundness_IntegerWidths, AWidthOnANonIntegerIsStillNotAType) {
+    // tests/samples/type_annotations.fin:14 writes `{int{64}, float{128}}` in a
+    // `//@ ok` sample, so `float{128}` must keep resolving. It resolves to plain
+    // `float`, which is the honest answer available: a width is a count of value
+    // bits, an IEEE format is not built from one, and Fin has ruled on no
+    // floating-point format but the two the table names. Inventing `float{128}`
+    // as a fifth would be inventing an ABI.
+    //
+    // So the annotation stays where it was on every non-integer: read for its own
+    // side effects, then dropped, with the backend refusing the type by name.
+    // Asserted rather than left implicit because "widths are real now" invites the
+    // reading that every `{N}` is one.
+    for (const char* code : {
+             "fun main() <noret> { let a <float{128}> = 1.5; let b <float> = a; }\n",
+             "fun main() <noret> { let a <float> = 1.5; let b <float{128}> = a; }\n",
+             "fun main() <noret> { let a <bool{1}> = true; let b <bool> = a; }\n",
+             "fun main() <noret> { let a <string{8}> = \"s\"; let b <string> = a; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "a width on a non-integer is the base type, unchanged:\n"
+            << code << stripAnsi(r.err);
+    }
+    // The prototype the sample actually writes, whole.
+    const FincRun sample = compile(
+        "fun main() <noret> { let prot <{int{64}, float{128}}> = { 10: 123244.2 }; }\n");
+    EXPECT_EQ(sample.exitCode, 0)
+        << "tests/samples/type_annotations.fin:14\n" << stripAnsi(sample.err);
+}
+
+TEST(Soundness_IntegerWidths, AnAliasToAWidthIsThatWidth) {
+    // What lib/std/types.fin:68-81 and tests/samples/stdlib/memory.fin:8 are for:
+    // `i8`, `u8`, `i16`, `u16`, `i64`, `u64`, `usize`, `isize`, `byte` and
+    // `size_t` are all `type X = <integer>{N};`, and an alias that dropped the
+    // width would make all ten of them plain `int` or `uint`. Front-end only --
+    // an alias is not lowered at all yet (codegen: "a variable of type 'I64' is
+    // not lowered yet"), which is booked separately and is not about widths.
+    const FincRun ok = compile(
+        "type I64 = int{64};\n"
+        "fun main() <noret> { let a <I64> = 1; let b <long> = a; }\n");
+    EXPECT_EQ(ok.exitCode, 0) << "an alias carries its width\n" << stripAnsi(ok.err);
+
+    const FincRun narrowing = compile(
+        "type U8 = uint{8};\n"
+        "fun main() <noret> { let big <uint{64}>; let a <U8> = big; }\n");
+    EXPECT_NE(narrowing.exitCode, 0)
+        << "an alias narrows like the width it names\n" << stripAnsi(narrowing.err);
+    EXPECT_NE(stripAnsi(narrowing.err).find("got 'uint{64}'"), std::string::npos)
+        << stripAnsi(narrowing.err);
+}
+
+TEST(Soundness_IntegerWidths, AWidthIsAcceptedInEveryTypePosition) {
+    // The width is read in resolveTypeUnwrapped, which every written type goes
+    // through, so this holds by construction -- and it is asserted because "by
+    // construction" is exactly the claim a second reader somewhere else would
+    // quietly falsify. Each of these is a position the corpus writes a width in
+    // or is one node away from one: a parameter and a return (lib/std/types.fin's
+    // number tower), a struct field (test_layout.cpp:806), an enum payload
+    // (tests/samples/enums.fin:8), a pointee and an array element
+    // (tests/samples/type_annotations.fin:11), a cast target, a global, an alias.
+    struct Case { const char* what; const char* code; };
+    const std::vector<Case> cases{
+        {"a binding",
+         "fun main() <noret> { let a <int{64}> = 1; let b <long> = a; }\n"},
+        {"a parameter",
+         "fun f(x: int{64}) <void> {}\n"
+         "fun main() <noret> { let a <long> = 1; f(a); }\n"},
+        {"a return",
+         "fun f() <int{64}> { return 1; }\n"
+         "fun main() <noret> { let a <long> = f(); }\n"},
+        {"a struct field",
+         "struct S { pub a <uint{8}>, }\n"
+         "fun main() <noret> { let s <S>; let b <uint{64}> = s.a; }\n"},
+        {"an enum payload",
+         "enum Color { RGB(uint{8}, uint{8}, uint{8}) }\n"
+         "fun main() <noret> { let c <Color> = Color::RGB(1, 2, 3); }\n"},
+        {"a pointee",
+         "fun main() <noret> { let x <int{64}> = 1; let p <*int{64}> = &x; }\n"},
+        {"an array element",
+         "fun main() <noret> { let a <[int{64}, 2]> = [1, 2]; }\n"},
+        {"a cast target",
+         "fun main() <noret> { let a <int> = 1; let b <long> = cast<int{64}>(a); }\n"},
+        {"a global",
+         "let g <int{64}> = 1;\nfun main() <noret> { let b <long> = g; }\n"},
+        {"a nullable binding",
+         "fun main() <noret> { let a? <int{64}>; }\n"},
+        {"a const",
+         "const N <int{64}> = 1;\nfun main() <noret> { let b <long> = N; }\n"},
+        {"a prototype half",
+         "fun main() <noret> { let p <{int{64}, int{64}}> = { 1: 2 }; }\n"},
+    };
+    for (const Case& c : cases) {
+        const FincRun r = compile(c.code);
+        EXPECT_EQ(r.exitCode, 0) << "a width in this position: " << c.what << "\n"
+                                 << c.code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidths, APointeeWidthIsCheckedThroughThePointer) {
+    // The rule ADR 0022's pointer half exists for, now reachable through a written
+    // width. `*int{32}` over an `int{64}` object is an eight-byte slot addressed
+    // four bytes at a time, which is the shape Soundness_Pointers's own comment
+    // records as "compiled clean and exited 139" before pointee assignability was
+    // narrowed. isAssignableThrough asks the pointees, and the pointees now differ.
+    //
+    // tests/samples/type_annotations.fin:11 wrote exactly this -- `let p <*int{32}>
+    // = &x;` over `let x <int{64}>` -- and it is repaired to `*int{64}` in the same
+    // commit as this test, under the standing grant that a defect in a sample's own
+    // text may be fixed rather than booked. So this is also the test that says the
+    // repair was a repair and not a workaround: the old text has to be refused.
+    const FincRun narrow = compile(
+        "fun main() <noret> { let x <int{64}> = 1; let p <*int{32}> = &x; }\n");
+    EXPECT_NE(narrow.exitCode, 0)
+        << "an eight-byte object addressed as four bytes\n" << stripAnsi(narrow.err);
+    EXPECT_NE(stripAnsi(narrow.err).find("expected '&int{32}', got '&int{64}'"),
+              std::string::npos) << stripAnsi(narrow.err);
+
+    // The sample as repaired.
+    const FincRun ok = compile(
+        "fun main() <noret> { let x <int{64}> = 1; let p <*int{64}> = &x; }\n");
+    EXPECT_EQ(ok.exitCode, 0) << "tests/samples/type_annotations.fin:11 as repaired\n"
+                              << stripAnsi(ok.err);
+}
+
+TEST(Soundness_IntegerWidths, AWidthOnANonNumberIsNotADiagnosticEither) {
+    // Every remaining shape a `{N}` can be written on, all of which resolved at
+    // exit 0 before this unit and must keep doing so: the annotation is dropped on
+    // anything that is not an integer primitive, and dropping it is not the same
+    // decision as accepting it. `S{8}` and `E{8}` are a struct and an enum, `T{8}`
+    // a generic parameter, `any{8}` and `auto{8}` the two type-inference names, and
+    // the parenthesised forms are a pointer, an array and a function type wearing a
+    // width the type system has nowhere to put.
+    //
+    // None of them is *ruled* on here. What is asserted is that making integer
+    // widths real did not turn any of them into a front-end error, because that is
+    // the regression this unit could plausibly cause and a sample would catch it
+    // only if a sample happened to write one -- and none does.
+    for (const char* code : {
+             "struct S { pub a <int>, }\nfun main() <noret> { let a <S{8}>; }\n",
+             "enum E { A }\nfun main() <noret> { let a <E{8}>; }\n",
+             "fun f<T>(x: T{8}) <void> {}\nfun main() <noret> { f::<int>(1); }\n",
+             "fun main() <noret> { let a <any{8}>; }\n",
+             "fun main() <noret> { let a <auto{8}> = 1; }\n",
+             "fun main() <noret> { let x <int> = 1; let a <(*int){32}> = &x; }\n",
+             "fun main() <noret> { let a <([int, 2]){8}>; }\n",
+             "fun main() <noret> { let a <(fn(int) -> int){8}>; }\n",
+             "fun main() <noret> { let a <{int, float}{8}>; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "a width on a non-integer resolves to the base type:\n"
+            << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidths, AWidthMustBeWrittenInsideTheType) {
+    // Two spellings the grammar refuses, pinned so that the width work is not
+    // mistaken for having created them and so that a future grammar edit that
+    // starts accepting either has to say so. `int{}` has nothing between the
+    // braces, and `int{64}?` puts the nullable marker outside them where the
+    // grammar wants `<int{64}?>` to read the `?` off the declaration.
+    for (const char* code : {"fun main() <noret> { let a <int{}>; }\n",
+                             "fun main() <noret> { let a <int{64}?>; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << code << stripAnsi(r.err);
+        EXPECT_NE(stripAnsi(r.err).find("syntax error"), std::string::npos)
+            << code << stripAnsi(r.err);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4733,10 +5060,11 @@ TEST(Soundness_TypeResolution, AnUnresolvedParameterDoesNotChangeTheReportedArit
 // is a question about the syntax rather than about a value flowing through the
 // analyzer.
 //
-// What is deliberately NOT admitted, each with its own test below: an `int`-typed
-// *expression* assigned to an unsigned type (a language decision, not a defect --
-// see KnownDefect_IntegerConstants), and a constant too large for its target (the
-// widths do not exist yet; KnownDefect_IntegerWidths owns that line).
+// What is deliberately NOT admitted: an `int`-typed *expression* assigned to an
+// unsigned type, which is a language decision rather than a defect and is booked
+// as KnownDefect_IntegerConstants below. A constant too large for its target used
+// to be on that list for want of widths; the widths are real now, so it is
+// checked instead -- AConstantMustFitItsTarget.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -5187,6 +5515,115 @@ TEST(Soundness_IntegerConstants, AConstantIsStillNotABoolOrAString) {
     }
 }
 
+TEST(Soundness_IntegerConstants, AConstantMustFitItsTarget) {
+    // Was KnownDefect_IntegerWidths.AConstantTooLargeForItsTargetIsAccepted. The
+    // constant rule checked a constant's *sign* against its target and not its
+    // magnitude, and its own note said why: Fin had not said how wide `short` or
+    // `char` was, and the `{N}` annotation that would say was erased before
+    // anything could read it, so a range check would have been inventing the
+    // widths rather than enforcing them. The widths are real now, so it enforces.
+    //
+    // The bound is the target's, both ends, and both ends are needed: a signed
+    // target has a negative half a magnitude check alone would let through, and
+    // an unsigned one has no negative half at all -- which is the older rule, kept
+    // (Soundness_IntegerConstants.ANegativeConstantIsNotUnsigned), and is why this
+    // test's unsigned cases are all positive overflows.
+    //
+    // What this changed for real programs, measured before it landed: `let x
+    // <short> = 99999;` compiled and printed -31073, and `let x <int> =
+    // 9000000000;` compiled and printed 410065408. Both were silent, both ran, and
+    // a truncation nobody wrote is exactly the class of bug a checked constant is
+    // for. Nothing in the corpus or in this suite writes a constant that does not
+    // fit its target -- every large literal in tests/samples and lib/std lands in
+    // an `int` or a `double` it fits (lib/std/math.fin:69 and :72 are `double`),
+    // and every one in this suite is `long`-targeted -- so this rule refuses
+    // nothing that was previously written and correct.
+    struct Case { const char* code; const char* text; };
+    const std::vector<Case> cases{
+        // A declaration, in each of the four widths, signed and unsigned.
+        {"fun main() <noret> { let x <char> = 300; }\n", "'char'"},
+        {"fun main() <noret> { let x <uint{8}> = 300; }\n", "'uint{8}'"},
+        {"fun main() <noret> { let x <short> = 99999; }\n", "'short'"},
+        {"fun main() <noret> { let x <ushort> = 99999; }\n", "'ushort'"},
+        {"fun main() <noret> { let x <int> = 9000000000; }\n", "'int'"},
+        {"fun main() <noret> { let x <uint> = 9000000000; }\n", "'uint'"},
+        {"fun main() <noret> { let x <long> = 99999999999999999999; }\n", "'long'"},
+        // A written width, which is the same question asked the other way round:
+        // the target says 8 bits and the constant needs more than 8.
+        {"fun main() <noret> { let x <int{8}> = 300; }\n", "'int{8}'"},
+        {"fun main() <noret> { let x <uint{16}> = 99999; }\n", "'uint{16}'"},
+        // The negative half of a signed target, which a magnitude check misses.
+        {"fun main() <noret> { let x <char> = -300; }\n", "'char'"},
+        {"fun main() <noret> { let x <short> = -99999; }\n", "'short'"},
+        // The other positions that check a constant against a type. Each is a
+        // separate checkType call site -- see
+        // Soundness_IntegerConstants.TheConstantIsAcceptedInEveryPositionThatChecks
+        // AType, which holds the ten of them open for a constant that fits.
+        {"fun main() <noret> { let x <short> = 1; x = 99999; }\n", "'short'"},
+        {"fun main() <noret> { let x <short> = 1; x += 99999; }\n", "'short'"},
+        {"fun main() <noret> { let x <short> = 1; blame x == 99999; }\n", "'short'"},
+        {"fun main() <noret> { let x <short> = 1; blame 99999 == x; }\n", "'short'"},
+        {"fun f(x: short) <void> {}\nfun main() <noret> { f(99999); }\n", "'short'"},
+        {"fun f() <short> { return 99999; }\nfun main() <noret> { }\n", "'short'"},
+        {"struct S { pub a <short> = 99999, }\nfun main() <noret> { }\n", "'short'"},
+        {"const N <short> = 99999;\nfun main() <noret> { }\n", "'short'"},
+        {"fun main() <noret> { for (i: short = 99999; i > 1; i++) { } }\n", "'short'"},
+        {"fun main() <noret> { let a <[short, 2]> = [99999, 1]; }\n", "'short'"},
+        // Both branches are the same type, because a ternary whose branches
+        // differ is refused for that reason instead and would pass this test
+        // before the range check existed.
+        {"fun main() <noret> { let a <short> = 0;\n"
+         "                     let b <short> = true : 99999 ? a; }\n", "'short'"},
+        // Larger than any target, which is a different reading of the same
+        // question: 2^63 needs a uint64 and 2^64 needs more than readConstant
+        // has, so the first fits `ulong` and only `ulong` while the second fits
+        // nothing. Both used to compile as anything.
+        {"fun main() <noret> { let x <long> = 9223372036854775808; }\n", "'long'"},
+        {"fun main() <noret> { let x <ulong> = 18446744073709551616; }\n",
+         "too large to represent"},
+    };
+    for (const Case& c : cases) {
+        const FincRun r = compile(c.code);
+        EXPECT_NE(r.exitCode, 0)
+            << "a constant that does not fit its target truncates silently:\n"
+            << c.code << stripAnsi(r.err);
+        EXPECT_NE(stripAnsi(r.err).find(c.text), std::string::npos)
+            << "the diagnostic must name the target\n" << c.code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerConstants, AConstantAtTheEdgeOfItsTargetFits) {
+    // The other side of the bound, and the reason it is a separate test: a range
+    // check written with the wrong comparison passes every case above and rejects
+    // every value here. Each of these is the largest or smallest value its type
+    // holds, so an off-by-one in either direction shows up as a failure.
+    //
+    // The two asymmetric ones are the point. A signed type's negative bound is one
+    // further out than its positive bound, so `char` holds -128 and not 128, and
+    // `long` holds -9223372036854775808 while 9223372036854775808 does not fit --
+    // the one case readSignedConstant spells out rather than negating.
+    for (const char* code : {
+             "fun main() <noret> { let x <char> = 127; }\n",
+             "fun main() <noret> { let x <char> = -128; }\n",
+             "fun main() <noret> { let x <short> = 32767; }\n",
+             "fun main() <noret> { let x <short> = -32768; }\n",
+             "fun main() <noret> { let x <ushort> = 65535; }\n",
+             "fun main() <noret> { let x <int> = 2147483647; }\n",
+             "fun main() <noret> { let x <int> = -2147483648; }\n",
+             "fun main() <noret> { let x <uint> = 4294967295; }\n",
+             "fun main() <noret> { let x <long> = 9223372036854775807; }\n",
+             "fun main() <noret> { let x <long> = -9223372036854775808; }\n",
+             "fun main() <noret> { let x <ulong> = 18446744073709551615; }\n",
+             "fun main() <noret> { let x <int{8}> = 127; }\n",
+             "fun main() <noret> { let x <uint{8}> = 255; }\n",
+             "fun main() <noret> { let x <ulong> = 0; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "this constant is exactly representable in its target:\n"
+            << code << stripAnsi(r.err);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // What the constant rule does not reach, booked rather than built.
 // ---------------------------------------------------------------------------
@@ -5209,28 +5646,6 @@ TEST(KnownDefect_IntegerConstants, AnIntTypedExpressionIsNotUnsigned) {
         << "FIXED or RULED: an int-typed expression now converts to unsigned. If that "
            "was the ruling, record it and invert this test.";
     EXPECT_NE(stripAnsi(r.err).find("expected 'uint', got 'int'"), std::string::npos) << r.err;
-}
-
-TEST(KnownDefect_IntegerWidths, AConstantTooLargeForItsTargetIsAccepted) {
-    // Introduced by the constant rule and recorded here in the same commit, which is
-    // the whole point of this suite: the rule checks the *sign* of a constant and not
-    // its magnitude, because Fin has not said how wide `short` or `char` is. The
-    // `{N}` annotation that would say is erased before anything can read it (see
-    // TheWidthIsAbsentFromDiagnosticText above), so a magnitude check today would be
-    // inventing the widths rather than enforcing them.
-    //
-    // Rejecting every constant was the alternative and it is strictly worse: it makes
-    // `let p <ulong> = 0;` unwritable. When the widths become real this is where the
-    // range check goes, and this test inverts into
-    // Soundness_IntegerConstants.AConstantMustFitItsTarget.
-    for (const char* code : {"fun main() <noret> { let x <short> = 99999; }\n",
-                             "fun main() <noret> { let x <char> = 300; }\n"}) {
-        const FincRun r = compile(code);
-        EXPECT_EQ(r.exitCode, 0)
-            << "FIXED: the constant's magnitude is now checked against its target. "
-               "Invert this and name the widths in the ADR that decided them.\n"
-            << code << r.err;
-    }
 }
 
 TEST(Soundness_Arrays, AFixedListInitialisesADynamicArrayOfTheSameElementType) {
@@ -5257,7 +5672,7 @@ TEST(Soundness_Arrays, AFixedListInitialisesADynamicArrayOfTheSameElementType) {
 // the analyser resolved no member on any non-struct type whatsoever.
 //
 // Typed `int`, and that is forced rather than chosen. Fin converts between no two
-// integer types at all (KnownDefect_IntegerWidths.AnIntIsNotAssignableToAnUnsigned),
+// integer types at all (KnownDefect_IntegerConstants.AnIntTypedExpressionIsNotUnsigned),
 // so whatever width `.length` returns is the *only* width it can be compared with --
 // and all five corpus sites compare it against an `int`: `array.length <= 1`,
 // `i < a.length - 1` with `i: int` declared in the same header, `path.length == 10`.

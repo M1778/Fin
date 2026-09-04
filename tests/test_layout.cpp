@@ -73,6 +73,12 @@ TypePtr typeFromSource(const std::string& source, const std::string& name) {
 
 TypePtr prim(const std::string& n) { return std::make_shared<PrimitiveType>(n); }
 
+// `int{8}` -- the name plus a written width, which is a distinct type from the
+// name alone unless the width is the one the name already means.
+TypePtr primWidth(const std::string& n, unsigned bits) {
+    return std::make_shared<PrimitiveType>(n, bits);
+}
+
 // A layout that must exist. Fails the test with the refusal rather than
 // dereferencing a type that has none.
 TypeLayout must(const LayoutResult& r) {
@@ -791,23 +797,240 @@ TEST(Soundness_Layout, AFixedArrayOfAStructWithNoLayoutIsRefusedThroughTheField)
     EXPECT_NE(r.refusal.find("field 'xs'"), std::string::npos) << r.refusal;
 }
 
-// --- known defects ---------------------------------------------------------
+// --- written widths ---------------------------------------------------------
+//
+// `int{64}` is a written width and it is the type, so the layout pass answers
+// from the width rather than from the base name. This section is small because
+// the change was: `scalarOf` applies a PrimitiveType's width to the ScalarInfo
+// `scalarByName` returns, and everything downstream -- sizeOfScalar,
+// alignOfScalar, the struct walk, the array stride -- was already written in
+// terms of `bits` and needed nothing.
+//
+// The set is the four widths the table names: 8, 16, 32 and 64. A well-formed
+// width outside it (`uint{7}`, `int{128}`) has no layout and says so, which is
+// this file's usual third outcome rather than a special case -- and it is a
+// refusal here rather than a diagnostic in the front end because "Fin has no
+// 128-bit integer" is a sentence nobody has ruled, while "this compiler does not
+// represent one" is true and is what a refusal says. tests/samples/stdlib/
+// types.fin:47 and :50 write `i128` and `u128` on purpose.
+//
+// Why not every width LLVM can build, which would be 1 to 2^23: LLVM's
+// DataLayout rounds an integer's *store* size up to a power of two while
+// sizeOfScalar computes `(bits + 7) / 8`, so the two agree at 1-16, 25-32 and
+// 57-64 and disagree at 17-24, 33-56 and 65 up -- an i17 allocates four bytes
+// where this file would say three, and an i128 sixteen where this file would say
+// sixteen with an alignment of eight rather than sixteen. Measured against
+// LLVM 22 on x86_64-pc-linux-gnu before the set was chosen. A language whose
+// widths are that agreement set is not one anyone designed; four named widths is
+// a set the table states, and Soundness_Codegen.TheLayoutTableAgreesWithLLVM is
+// what holds those four to LLVM.
 
-TEST(KnownDefect_Layout, AWidthAnnotationDoesNotChangeTheSize) {
-    // docs/plan.md, "Integer widths are a lie": resolveTypeFromAST walks
-    // `uint{8}`'s width annotation for side effects and hands back the
-    // *unannotated* type, so `uint{8}` and `uint{64}` are both `uint`. lib/std
-    // defines i64, u64, size_t on top of that.
-    //
-    // The layout pass inherits the lie exactly rather than papering over it: it is
-    // handed a `uint` and answers four. Papering over it would mean guessing which
-    // width was written, at the one place in the compiler where a guess becomes an
-    // ABI. Whoever makes widths real should invert this.
+TEST(Soundness_Layout, AWrittenWidthIsTheSize) {
+    // Was KnownDefect_Layout.AWidthAnnotationDoesNotChangeTheSize, whose argument
+    // was that resolveTypeFromAST walked `uint{8}`'s annotation for side effects
+    // and handed back the unannotated type, so this pass was handed a `uint` and
+    // answered four. It said papering over that would mean guessing which width
+    // was written "at the one place in the compiler where a guess becomes an ABI".
+    // Nothing is guessed now: the width is on the type.
     auto narrow = typeFromSource("struct S { pub a <uint{8}>, }\n", "S");
     ASSERT_TRUE(narrow != nullptr);
     LayoutEngine e;
     auto layout = must(e.layoutOf(narrow));
     ASSERT_EQ(layout.fields.size(), 1u);
-    EXPECT_EQ(layout.fields[0].size, 4u) << "one byte is what was written";
-    EXPECT_EQ(layout.size, 4u);
+    EXPECT_EQ(layout.fields[0].size, 1u) << "one byte is what was written";
+    EXPECT_EQ(layout.fields[0].align, 1u);
+    EXPECT_EQ(layout.size, 1u);
+    EXPECT_EQ(layout.align, 1u);
+}
+
+TEST(Soundness_Layout, EveryRepresentableWidthHasItsOwnSize) {
+    // The four widths, both signs, asked of the layout pass directly. Literal
+    // numbers for the same reason the scalar table above uses them: a suite that
+    // recomputes `(bits + 7) / 8` agrees with any bug in `(bits + 7) / 8`.
+    //
+    // A width and the name that means it produce the same two numbers, which is
+    // the whole claim -- `int{64}` is `long`, not something that converts to one --
+    // so each row asserts against the name's row in EveryScalarHasTheWidthThe-
+    // BackendEmits rather than against a formula.
+    LayoutEngine e;
+    struct Case { const char* name; unsigned bits; uint64_t size; uint64_t align; };
+    const Case cases[] = {
+        {"char", 8, 1, 1},   {"byte", 8, 1, 1},
+        {"short", 16, 2, 2}, {"ushort", 16, 2, 2},
+        {"int", 32, 4, 4},   {"uint", 32, 4, 4},
+        {"long", 64, 8, 8},  {"ulong", 64, 8, 8},
+        // A width that is not the name's own. This is the row the old defect could
+        // not have: `int{8}` and `int` were one type, so one of these two numbers
+        // was necessarily wrong whichever way the pass answered.
+        {"int", 8, 1, 1},    {"int", 16, 2, 2},   {"int", 64, 8, 8},
+        {"uint", 8, 1, 1},   {"uint", 16, 2, 2},  {"uint", 64, 8, 8},
+        {"long", 8, 1, 1},   {"char", 64, 8, 8},
+    };
+    for (const auto& c : cases) {
+        auto layout = must(e.layoutOf(primWidth(c.name, c.bits)));
+        EXPECT_EQ(layout.size, c.size) << c.name << "{" << c.bits << "}";
+        EXPECT_EQ(layout.align, c.align) << c.name << "{" << c.bits << "}";
+        EXPECT_TRUE(layout.fields.empty()) << c.name << "{" << c.bits << "}";
+        EXPECT_TRUE(layout.pointers.empty()) << c.name << "{" << c.bits << "}";
+    }
+}
+
+TEST(Soundness_Layout, AWidthThisCompilerCannotRepresentHasNoLayout) {
+    // The third outcome, and the reason the front end does not refuse these: they
+    // are well-formed types -- one positive integer constant, exactly as `int{64}`
+    // is -- that this pass has no representation for. So they get a refusal that
+    // names the width, and a program that writes one is told what is missing
+    // rather than told it wrote something illegal.
+    //
+    // 7 and 17 are inside LLVM's range and outside this table's; 128 is what
+    // tests/samples/stdlib/types.fin:47 writes and docs/plan.md:3175 reserves the
+    // ABI for; 24 is the one a reader is most likely to assume works, because
+    // three bytes is a shape hardware has.
+    LayoutEngine e;
+    struct Case { const char* name; unsigned bits; };
+    const Case cases[] = {
+        {"uint", 7}, {"int", 7}, {"int", 17}, {"uint", 24},
+        {"int", 1}, {"int", 63}, {"int", 128}, {"uint", 128},
+    };
+    for (const auto& c : cases) {
+        const LayoutResult r = e.layoutOf(primWidth(c.name, c.bits));
+        ASSERT_FALSE(r.ok()) << c.name << "{" << c.bits << "} has a size of "
+                             << r.layout.size;
+        // The type as written, so the reader sees the width they typed.
+        EXPECT_NE(r.refusal.find(std::string(c.name) + "{" + std::to_string(c.bits) + "}"),
+                  std::string::npos) << r.refusal;
+        // And the set, because "no layout" without it sends the reader here rather
+        // than to the four widths that do work.
+        EXPECT_NE(r.refusal.find("8, 16, 32 or 64"), std::string::npos) << r.refusal;
+    }
+}
+
+TEST(Soundness_Layout, AnUnrepresentableWidthIsRefusedThroughTheField) {
+    // Reached through a struct rather than asked about directly, which is the
+    // path a program takes: the field's refusal has to name the field *and* carry
+    // the width's, because a struct three levels up is what the caller asked about
+    // and "no layout" on its own would name neither.
+    auto s = typeFromSource("struct S { pub a <int>, pub b <uint{7}>, }\n", "S");
+    ASSERT_TRUE(s != nullptr);
+    LayoutEngine e;
+    const LayoutResult r = e.layoutOf(s);
+    ASSERT_FALSE(r.ok());
+    EXPECT_NE(r.refusal.find("field 'b'"), std::string::npos) << r.refusal;
+    EXPECT_NE(r.refusal.find("uint{7}"), std::string::npos) << r.refusal;
+}
+
+TEST(Soundness_Layout, AWidthChangesAStructsSizeAndItsOffsets) {
+    // What makes a dropped width an ABI bug rather than a value bug, asserted as
+    // a pair: the same two fields, one struct written with widths and one with the
+    // base names, are different shapes. Before this unit both were the second one.
+    auto narrow = typeFromSource("struct N { pub a <uint{8}>, pub b <uint{8}>, }\n", "N");
+    auto wide = typeFromSource("struct W { pub a <uint>, pub b <uint>, }\n", "W");
+    ASSERT_TRUE(narrow != nullptr);
+    ASSERT_TRUE(wide != nullptr);
+    LayoutEngine e;
+    const TypeLayout n = must(e.layoutOf(narrow));
+    ASSERT_EQ(n.fields.size(), 2u);
+    EXPECT_EQ(n.fields[1].offset, 1u);
+    EXPECT_EQ(n.size, 2u);
+    EXPECT_EQ(n.align, 1u);
+    const TypeLayout w = must(e.layoutOf(wide));
+    ASSERT_EQ(w.fields.size(), 2u);
+    EXPECT_EQ(w.fields[1].offset, 4u);
+    EXPECT_EQ(w.size, 8u);
+    EXPECT_EQ(w.align, 4u);
+}
+
+TEST(Soundness_Layout, AWidthedFieldPadsAndAlignsLikeTheNameForThatWidth) {
+    // A narrow field followed by a wide one, so the width is load-bearing twice:
+    // once for `a`'s own byte and once for the seven bytes of padding it forces
+    // before `b`. `uint{8}` then `int{64}` is `byte` then `long`, and the numbers
+    // are the ones Soundness_Layout.PaddingIsWhereTheAlignmentRuleSaysItIs
+    // already asserts for that pair of names.
+    auto s = typeFromSource("struct S { pub a <uint{8}>, pub b <int{64}>, }\n", "S");
+    ASSERT_TRUE(s != nullptr);
+    LayoutEngine e;
+    const TypeLayout l = must(e.layoutOf(s));
+    ASSERT_EQ(l.fields.size(), 2u);
+    EXPECT_EQ(l.fields[0].offset, 0u);
+    EXPECT_EQ(l.fields[0].size, 1u);
+    EXPECT_EQ(l.fields[1].offset, 8u);
+    EXPECT_EQ(l.fields[1].size, 8u);
+    EXPECT_EQ(l.size, 16u);
+    EXPECT_EQ(l.align, 8u);
+}
+
+TEST(Soundness_Layout, AWidthedElementIsTheArrayStride) {
+    // The array case, and the reason it is worth its own test: the stride is the
+    // element's size, so a dropped width in an element position is not a narrow
+    // value but a different amount of memory than the program reserved. Four
+    // `uint{8}`s are four bytes; four `uint`s are sixteen.
+    LayoutEngine e;
+    auto narrow = std::make_shared<ArrayType>(primWidth("uint", 8), uint64_t{4});
+    const TypeLayout n = must(e.layoutOf(narrow));
+    EXPECT_EQ(n.size, 4u);
+    EXPECT_EQ(n.align, 1u);
+    auto wide = std::make_shared<ArrayType>(prim("uint"), uint64_t{4});
+    const TypeLayout w = must(e.layoutOf(wide));
+    EXPECT_EQ(w.size, 16u);
+    EXPECT_EQ(w.align, 4u);
+    // And an element with no representation refuses through the element, the way
+    // AFixedArrayWhoseElementHasNoLayoutIsRefusedAndSaysWhy does for an interface.
+    const LayoutResult refused =
+        e.layoutOf(std::make_shared<ArrayType>(primWidth("int", 128), uint64_t{2}));
+    ASSERT_FALSE(refused.ok());
+    EXPECT_NE(refused.refusal.find("int{128}"), std::string::npos) << refused.refusal;
+}
+
+TEST(Soundness_Layout, AWidthOnANonIntegerDoesNotChangeItsSize) {
+    // A width is a count of value bits, an IEEE format is not built from one, and
+    // Fin has ruled on no floating-point format but the two in the table -- so
+    // `float{128}` is `float`, which is what tests/samples/type_annotations.fin:14
+    // needs to keep resolving. `bool{1}` and `string{8}` are here for the same
+    // reason: the front end drops a width on anything that is not an integer
+    // scalar, and this is the assertion that dropping it left the size alone
+    // rather than producing a sixteen-byte float or a one-byte string.
+    struct Case { const char* source; uint64_t size; uint64_t align; };
+    const Case cases[] = {
+        {"struct S { pub a <float{128}>, }\n", 4, 4},
+        {"struct S { pub a <double{32}>, }\n", 8, 8},
+        {"struct S { pub a <bool{1}>, }\n", 1, 1},
+        {"struct S { pub a <bool{64}>, }\n", 1, 1},
+        {"struct S { pub a <string{8}>, }\n", 8, 8},
+    };
+    for (const auto& c : cases) {
+        auto s = typeFromSource(c.source, "S");
+        ASSERT_TRUE(s != nullptr) << c.source;
+        LayoutEngine e;
+        const TypeLayout l = must(e.layoutOf(s));
+        ASSERT_EQ(l.fields.size(), 1u) << c.source;
+        EXPECT_EQ(l.fields[0].size, c.size) << c.source;
+        EXPECT_EQ(l.size, c.size) << c.source;
+        EXPECT_EQ(l.align, c.align) << c.source;
+    }
+}
+
+TEST(Soundness_Layout, AWidthSurvivesCloneAndSubstitute) {
+    // The two operations that rebuild a PrimitiveType from its parts, and the two
+    // places a width is silently lost if it is added as a field and not threaded:
+    // `clone()` is what an alias and a macro expansion go through, and
+    // `substitute()` is monomorphisation. Both used to construct
+    // `PrimitiveType(name)` and drop everything else, which for a type whose only
+    // member was `name` was correct.
+    auto original = primWidth("int", 8);
+    LayoutEngine e;
+    EXPECT_EQ(must(e.layoutOf(original->clone())).size, 1u) << "clone dropped the width";
+    TypeMap empty;
+    EXPECT_EQ(must(e.layoutOf(original->substitute(empty))).size, 1u)
+        << "substitute dropped the width";
+    // And the width is part of type identity, not decoration on it: two widths of
+    // one name are two types, which is what makes the narrowing rule in
+    // test_soundness.cpp have something to be true about.
+    EXPECT_FALSE(primWidth("int", 8)->equals(*prim("int")));
+    EXPECT_FALSE(primWidth("int", 8)->equals(*primWidth("int", 16)));
+    EXPECT_TRUE(primWidth("int", 8)->equals(*primWidth("int", 8)));
+    EXPECT_TRUE(primWidth("int", 32)->equals(*prim("int")))
+        // `int{32}` is `int` -- the annotation states the width the name already
+        // means, so writing it changes nothing. Anything else would make `int{32}`
+        // a fifth integer type that happens to have int's size.
+        << "a width that matches the name is the name";
 }

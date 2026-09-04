@@ -53,6 +53,28 @@ std::optional<ScalarInfo> scalarByName(const std::string& name) {
     return std::nullopt;
 }
 
+std::optional<ScalarInfo> scalarOf(const PrimitiveType& type) {
+    auto info = scalarByName(type.name);
+    if (!info) return info;
+    // No width written: the name is the whole answer, which is every type in the
+    // corpus that does not spell one.
+    if (type.bits == 0) return info;
+    // A width on anything that is not an integer scalar is dropped, and the front
+    // end drops it too (Analyzer_Core.cpp's annotation tail stores a width only for
+    // an integer). Two passes agreeing by accident would be two passes to keep in
+    // step, so the rule is stated once, here, and the front end's copy is an
+    // optimisation of it rather than a second opinion: a `float{128}` that reached
+    // this function anyway -- through clone(), through a test that builds the type
+    // directly -- is still `float`.
+    if (info->kind != ScalarKind::Int) return info;
+    info->bits = type.bits;
+    return info;
+}
+
+bool isRepresentableIntegerWidth(unsigned bits) {
+    return bits == 8 || bits == 16 || bits == 32 || bits == 64;
+}
+
 uint64_t sizeOfScalar(const ScalarInfo& info, const TargetLayout& target) {
     switch (info.kind) {
         case ScalarKind::Void: return 0;
@@ -193,7 +215,7 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
     const Type& t = *type;
 
     if (auto* prim = t.as<PrimitiveType>()) {
-        auto info = scalarByName(prim->name);
+        auto info = scalarOf(*prim);
         if (!info) {
             // `auto`, and the four `$` meta-types. Not scalars of unknown size:
             // names with no run-time value at all.
@@ -210,6 +232,20 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
         }
         if (info->kind == ScalarKind::Void) {
             return {{}, refuse(t, "void has no size")};
+        }
+        // A written width outside the four this compiler represents. A refusal and
+        // not a diagnostic, because `int{128}` is a well-formed type -- one positive
+        // integer constant, exactly as `int{64}` is -- that this pass has no
+        // representation for: "Fin has no 128-bit integer" is a sentence nobody has
+        // ruled, while "this compiler does not represent one" is true and is what a
+        // refusal says. tests/samples/stdlib/types.fin:47 and :50 write `i128` and
+        // `u128` on purpose.
+        //
+        // The set is named in the refusal because "no layout" without it sends the
+        // reader here rather than to the four widths that work.
+        if (info->kind == ScalarKind::Int && !isRepresentableIntegerWidth(info->bits)) {
+            return {{}, refuse(t, std::string("this compiler represents integer widths ") +
+                                      kRepresentableIntegerWidths + " only")};
         }
         TypeLayout out;
         out.size = sizeOfScalar(*info, target_);

@@ -4,13 +4,54 @@
 
 namespace fin {
 
+std::string PrimitiveType::toString() const {
+    // The spelling the program wrote, width included, because every diagnostic
+    // about a width is built from this: `expected 'uint{8}', got 'uint{64}'` is two
+    // calls to this function, and the version that answered `uint` for both was
+    // telling a reader who had written `uint{8}` something untrue.
+    //
+    // A width that matches the name is still printed. `int{32}` *is* `int` --
+    // equals() says so -- but it is not what the program typed, and a diagnostic
+    // that silently renamed it would send its reader looking for a second `int`.
+    if (bits == 0) return name;
+    return name + "{" + std::to_string(bits) + "}";
+}
+
 bool PrimitiveType::equals(const Type& other) const {
-    if (auto* o = other.as<PrimitiveType>()) return name == o->name;
+    if (auto* o = other.as<PrimitiveType>()) {
+        if (name != o->name) return false;
+        // The widths as the table reads them, so a redundant one is not a second
+        // type: `int{32}` and `int` are one type because the annotation states the
+        // width the name already means. Anything else would make `int{32}` a fifth
+        // integer type that happens to have int's size, and every `let a <int{32}>
+        // = 1;` in the corpus would need a conversion rule to explain it.
+        //
+        // Both sides go through scalarOf rather than through `bits`, which is also
+        // what makes a width on a non-integer weigh nothing here: `float{128}` and
+        // `float` are one type for the same reason the layout pass gives them one
+        // size, and neither of the two files has to trust the other for it.
+        const auto a = scalarOf(*this);
+        const auto b = scalarOf(*o);
+        // Two spellings of a name that is not a scalar at all -- `auto`, the `$`
+        // meta-types -- where a width has nothing to mean.
+        if (!a || !b) return true;
+        // The name fixes the kind and the sign, so bits is all that can differ.
+        return a->bits == b->bits;
+    }
     return false;
 }
 bool PrimitiveType::isAssignableTo(const Type& other) const {
     if (Type::isAssignableTo(other)) return true;
-    if (name == "int" && other.toString() == "float") return true;
+    // The one float rule the corpus needs. Read off the *name* rather than the
+    // spelling, because a spelling now carries a width and `float{128}` is still
+    // `float` -- scalarOf drops a width on anything that is not an integer, so a
+    // toString() comparison here would have been the only place in the compiler
+    // where it was not.
+    if (name == "int") {
+        if (auto* o = other.as<PrimitiveType>()) {
+            if (o->name == "float") return true;
+        }
+    }
 
     // An integer converts implicitly to a wider integer (ADR 0022).
     //
@@ -71,8 +112,12 @@ bool PrimitiveType::isAssignableTo(const Type& other) const {
     // about integers and the one float rule the corpus needs is the `int` -> `float`
     // line above.
     if (auto* o = other.as<PrimitiveType>()) {
-        const auto from = scalarByName(name);
-        const auto to = scalarByName(o->name);
+        // scalarOf and not scalarByName: a written width is the type, so it is the
+        // width the rule is about. `let a <int{64}>; let b <int{32}> = a;` narrows
+        // and is refused, which is the whole of what the annotation buys -- through
+        // scalarByName both sides were `int` and there was nothing to refuse.
+        const auto from = scalarOf(*this);
+        const auto to = scalarOf(*o);
         if (from && to && from->kind == ScalarKind::Int && to->kind == ScalarKind::Int) {
             if (to->bits > from->bits) return true;
             if (to->bits == from->bits && to->isSigned == from->isSigned) return true;
