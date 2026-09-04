@@ -1744,17 +1744,174 @@ BACKEND_TEST(Soundness_Codegen, APrototypeGlobalWithALiteralInitialiserIsRefused
     EXPECT_EQ(bare.compileExit, 0) << bare.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, APrototypesMethodsAreRefusedByTheFrontEnd) {
-    // `a.rm("b")` from tests/samples/prototype_test.fin:24. The analyzer says a prototype
-    // does not have methods, so this never reaches codegen -- asserted here because the
-    // backend's projection path reads `.0` and `.1` and a method name is neither: a
-    // positional test that accepted `rm` would GEP by a position parsed out of nothing.
+BACKEND_TEST(Soundness_Codegen, APrototypeRemovesByKeyAndKeepsTheOrder) {
+    // `a.rm("b")` from tests/samples/prototype_test.fin:24, which calls it "the functional
+    // way" -- the same operation `delete &a[10]` spells manually. This test used to assert
+    // the opposite (that the front end refused every prototype method) and was correct
+    // when the analyzer had no method list; ADR 0028's initial API is now checked in
+    // SemanticAnalyzer::checkPrototypeMethod and lowered in emitPrototypeMethod, so the
+    // refusal it protected has moved to an unknown *name* -- kept below, because that is
+    // the part that mattered: a name must never reach the `.0`/`.1` positional path and
+    // GEP by a position parsed out of nothing.
+    //
+    // Three facts here. The removal shifts rather than swaps with the last entry, so 1
+    // and 3 stay in the order they were written -- insertion order is the data structure,
+    // not an accident of how the last hole was filled. The removal answers `true`, and
+    // removing the same key twice answers `false` without failing, because an absent key
+    // is not an error to remove. And both halves shrink together: the length after is the
+    // one length, read back off `.0`.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, int}> = { 1: 10, 2: 20, 3: 30 };\n"
+        "    printf(\"%d %d\\n\", p.rm(2), p.rm(2));\n"
+        "    printf(\"%d %d %d %d\\n\", p.0.length, p.1.length, p.0[0], p.0[1]);\n"
+        "    printf(\"%d %d\\n\", p[1], p[3]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 0\n2 2 1 3\n10 30\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeGetAndContainsAnswerTheSameSearch) {
+    // `get` is `p[k]` under another name -- one shared scan (emitPrototypeScan) underlies
+    // the subscript, `get`, `contains` and `remove` precisely so the four cannot come to
+    // disagree about which key is present. `contains` is the one that answers about a
+    // missing key without failing; `get` on the same key blames (below).
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, int}> = { 10: 1, 20: 2 };\n"
+        "    printf(\"%d %d %d %d\\n\", p.get(20), p.get(10), p.contains(10), p.contains(11));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 1 1 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeGetBlamesAMissingKey) {
+    // ADR 0028 says `get` fails at run time when the key is absent and `try_get` is the
+    // non-throwing spelling. Same blame as the subscript, because it is the same lookup.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <{int, int}> = { 10: 1 };\n"
+        "    let v <int> = p.get(11);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_NE(b.runExit, 0) << b.why();
+    EXPECT_NE(b.out.find(":3: Fin blames this lookup because the key is not in the prototype"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeMethodNameOutsideTheApiIsRefused) {
+    // What APrototypesMethodsAreRefusedByTheFrontEnd was really protecting: the API is a
+    // closed set, so a name that is not in it is a diagnostic and not a position. The
+    // message names the set, because the reader of it is looking for the right spelling.
     const Built b = build(
         "fun main() <noret> {\n"
         "    let p <{int, float}> = { 1: 1.0 };\n"
-        "    p.rm(1);\n"
+        "    p.nope(1);\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("has no method 'nope'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeTryGetIsRefusedUntilOptionsAreLowered) {
+    // `try_get` type-checks -- its result is `V?` -- and does not lower, because a
+    // nullable local does not lower at all yet. Refused rather than answered with the
+    // `get` lowering, which would blame on the one call that asked safely.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <{int, int}> = { 1: 1 };\n"
+        "    p.try_get(1);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("try_get"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeReadingMethodTakesAValueReceiver) {
+    // `mk().get(2)` -- a prototype that never had a home. The reading methods take one
+    // because a search reads the same answer out of a copy as out of the original;
+    // `remove` writes a shorter length back, so on a value it refuses rather than editing
+    // a table nobody can name.
+    const Built b = build(std::string(kPrintf) +
+        "fun mk() <{int, int}> {\n"
+        "    let p <{int, int}> = { 1: 10, 2: 20 };\n"
+        "    return p;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d %d\\n\", mk().get(2), mk().contains(1), mk().contains(9));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "20 1 0\n") << b.why();
+
+    const Built write = build(
+        "fun mk() <{int, int}> { let p <{int, int}> = { 1: 10 }; return p; }\n"
+        "fun main() <noret> { mk().rm(1); }\n");
+    EXPECT_NE(write.compileExit, 0) << write.why();
+    EXPECT_NE(write.compileErr.find("with no address"), std::string::npos) << write.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeMethodEmitsItsReceiverOnce) {
+    // `p[next()].get(...)` cannot be written -- a prototype of prototypes needs a
+    // prototype key -- so the receiver with a side effect is an array element. The
+    // regression this pins is real and was live in the first draft: the prototype path
+    // asked for an address, and when the name turned out not to be a prototype method the
+    // struct path asked for one again, emitting the index expression twice.
+    const Built b = build(std::string(kPrintf) +
+        "fun bump(c: [int]) <int> { c[0] = c[0] + 1; return 0; }\n"
+        "fun main() <noret> {\n"
+        "    let calls <[int]> = [0];\n"
+        "    let ps <[{int, int}]> = [{ 1: 10 }];\n"
+        "    printf(\"%d %d\\n\", ps[bump(calls)].get(1), calls[0]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStringKeyComparesItsBytesNotItsAddress) {
+    // lib/std/memory.fin:32 writes `info["MemoryCardModel"] = ...` and reads it back
+    // elsewhere; two identical literals are not required to be the same pointer, and the
+    // second one here is a `strdup` of the first, so it certainly is not. Raw-byte or
+    // by-address key equality passes the first assertion and fails this one.
+    const Built b = build(std::string(kPrintf) +
+        "@define strdup(s: string) <string>;\n"
+        "fun main() <noret> {\n"
+        "    let p <{string, int}> = { \"alpha\": 1 };\n"
+        "    p[\"beta\"] = 2;\n"
+        "    let copy <string> = strdup(\"beta\");\n"
+        "    printf(\"%d %d %d\\n\", p[\"alpha\"], p.get(copy), p.contains(\"gamma\"));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStructKeyComparesFieldByField) {
+    // Derived structural equality, recursively: a struct key is equal when every field
+    // is, which is not the same as its bytes being equal -- padding between the fields is
+    // undefined, so a memcmp here would answer from uninitialised memory.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point { x <int>, y <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <{Point, int}> = { Point { x: 1, y: 2 }: 12 };\n"
+        "    p[Point { x: 3, y: 4 }] = 34;\n"
+        "    let probe <Point> = Point { x: 3, y: 4 };\n"
+        "    printf(\"%d %d %d\\n\", p[Point { x: 1, y: 2 }], p.get(probe),\n"
+        "           p.contains(Point { x: 1, y: 4 }));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "12 34 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADynamicArrayKeyIsRefusedRatherThanComparedByPointer) {
+    // `{[int], [{int, string}]}` at tests/samples/prototype_test.fin:41, which is booked
+    // unimplemented. Structural equality of a dynamic array needs a run-time loop over a
+    // length; comparing the two pointers instead would be a silent answer to a different
+    // question, so the key is refused with the reason.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <{[int], int}>;\n"
+        "    let k <[int]> = [1];\n"
+        "    let v <int> = p[k];\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("dynamic array"), std::string::npos) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, APositionPastAPrototypesTwoHalvesIsRefused) {

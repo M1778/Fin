@@ -3744,7 +3744,16 @@ private:
     // emitting it here would be emitting it twice, once for the address that failed
     // and once for the value that worked.
     std::optional<Addr> baseAddress(Expression& object, CgType::Kind want) {
-        auto direct = emitAddress(object);
+        return baseOf(emitAddress(object), want);
+    }
+
+    // The pointer hop on its own, for a caller that already holds the address.
+    //
+    // Split out for exactly one reason: emitAddress *emits*. `p[i++].get()`'s index runs
+    // when its address is taken, so a caller that asked for an address, did not like the
+    // kind, and asked again would run the increment twice. visit(MethodCall&) asks twice
+    // -- once for a prototype and once for a struct -- and asks through this.
+    std::optional<Addr> baseOf(std::optional<Addr> direct, CgType::Kind want) {
         if (!direct) return std::nullopt;
         if (direct->type.kind == want) return direct;
         if (direct->type.isPointer() && direct->type.pointee &&
@@ -5414,6 +5423,96 @@ private:
         value_ = CgVal{phi, boolType};
     }
 
+    // What a key search found. `index` and `found` are loads from slots the loop wrote
+    // rather than phis, so both are live in whatever block the caller goes on to build
+    // -- and the caller is left standing in the join block, with the loop behind it.
+    struct PrototypeScan {
+        llvm::Value* found = nullptr;       // i1
+        llvm::Value* index = nullptr;       // i32, meaningful only where found is true
+        llvm::Value* keysData = nullptr;
+        llvm::Value* valuesData = nullptr;
+        llvm::Value* length = nullptr;      // i32, the length as it was before any edit
+    };
+
+    // The one linear scan every prototype operation is built on. `p[k]`, `p[k] = v`,
+    // `get`, `contains` and `remove` all begin by asking where a key is, if it is here
+    // at all, and one copy of that loop is what keeps them agreeing: insertion order is
+    // the data structure, so a second traversal written differently would be a second
+    // answer to the same question.
+    //
+    // Linear on purpose. ADR 0028 stages this -- a correct baseline before an optimised
+    // table -- and what replaces it is the hashing trait behind the intrinsic boundary,
+    // not a rewrite of these callers.
+    //
+    // Returns nullopt having already reported.
+    std::optional<PrototypeScan> emitPrototypeScan(ASTNode& node, const CgType& proto,
+                                                   llvm::Value* pair, const CgVal& key,
+                                                   const char* what) {
+        if (!currentFn_) {
+            unsupported(node, fmt::format("{} outside a function", what));
+            return std::nullopt;
+        }
+        if (!proto.keys || !proto.values || !proto.keys->element ||
+            !proto.values->element || !pair || !key.value) {
+            unsupported(node, fmt::format("{} with an incomplete prototype "
+                                          "representation", what));
+            return std::nullopt;
+        }
+        const CgType& keyType = *proto.keys->element;
+        if (key.type.kind != keyType.kind || key.type.llvmType != keyType.llvmType) {
+            unsupported(node, fmt::format("{} with an incompatible key", what));
+            return std::nullopt;
+        }
+
+        PrototypeScan scan;
+        llvm::Value* keysPair = builder_.CreateExtractValue(pair, {0}, "prototype.keys");
+        llvm::Value* valuesPair = builder_.CreateExtractValue(pair, {1}, "prototype.values");
+        scan.keysData = builder_.CreateExtractValue(keysPair, {0}, "prototype.keys.data");
+        scan.length = builder_.CreateExtractValue(keysPair, {1}, "prototype.keys.len");
+        scan.valuesData = builder_.CreateExtractValue(valuesPair, {0}, "prototype.values.data");
+
+        auto* fn = currentFn_->fn;
+        auto* indexSlot = builder_.CreateAlloca(builder_.getInt32Ty(), nullptr,
+                                                "prototype.index");
+        auto* foundSlot = builder_.CreateAlloca(builder_.getInt1Ty(), nullptr,
+                                                "prototype.found");
+        builder_.CreateStore(builder_.getInt32(0), indexSlot);
+        builder_.CreateStore(builder_.getInt1(false), foundSlot);
+
+        auto* loop = llvm::BasicBlock::Create(ctx_, "prototype.scan", fn);
+        auto* body = llvm::BasicBlock::Create(ctx_, "prototype.scan.body", fn);
+        auto* hit  = llvm::BasicBlock::Create(ctx_, "prototype.scan.hit", fn);
+        auto* next = llvm::BasicBlock::Create(ctx_, "prototype.scan.next", fn);
+        auto* done = llvm::BasicBlock::Create(ctx_, "prototype.scan.done", fn);
+        builder_.CreateBr(loop);
+
+        builder_.SetInsertPoint(loop);
+        auto* i = builder_.CreateLoad(builder_.getInt32Ty(), indexSlot, "prototype.i");
+        builder_.CreateCondBr(builder_.CreateICmpULT(i, scan.length, "prototype.more"),
+                              body, done);
+
+        builder_.SetInsertPoint(body);
+        auto* kp = builder_.CreateInBoundsGEP(keyType.llvmType, scan.keysData, i,
+                                              "prototype.key.ptr");
+        auto* candidate = builder_.CreateLoad(keyType.llvmType, kp, "prototype.key");
+        llvm::Value* equal = emitKeyEquality(node, keyType, candidate, key.value);
+        if (!equal) return std::nullopt;
+        builder_.CreateCondBr(equal, hit, next);
+
+        builder_.SetInsertPoint(hit);
+        builder_.CreateStore(builder_.getInt1(true), foundSlot);
+        builder_.CreateBr(done);
+
+        builder_.SetInsertPoint(next);
+        builder_.CreateStore(builder_.CreateAdd(i, builder_.getInt32(1)), indexSlot);
+        builder_.CreateBr(loop);
+
+        builder_.SetInsertPoint(done);
+        scan.index = builder_.CreateLoad(builder_.getInt32Ty(), indexSlot, "prototype.at");
+        scan.found = builder_.CreateLoad(builder_.getInt1Ty(), foundSlot, "prototype.hit");
+        return scan;
+    }
+
     // Store through a prototype subscript. The baseline representation has no
     // capacity word, so a new key grows both parallel arrays with realloc; existing
     // keys update only the value slot. This keeps insertion order and the key/value
@@ -5430,54 +5529,30 @@ private:
         const CgType& valueType = *proto.values->element;
         CgVal key = emit(*access.index);
         if (failed_ || !key.ok()) return true;
-        if (key.type.kind != keyType.kind || key.type.llvmType != keyType.llvmType) {
-            unsupported(access, "a prototype store with an incompatible key");
-            return true;
-        }
+
         llvm::Value* pair = builder_.CreateLoad(proto.llvmType, base->ptr, "prototype");
-        llvm::Value* keysPair = builder_.CreateExtractValue(pair, {0});
-        llvm::Value* valuesPair = builder_.CreateExtractValue(pair, {1});
-        llvm::Value* keysData = builder_.CreateExtractValue(keysPair, {0});
-        llvm::Value* keysLen = builder_.CreateExtractValue(keysPair, {1});
-        llvm::Value* valuesData = builder_.CreateExtractValue(valuesPair, {0});
-        auto* fn = currentFn_->fn;
-        auto* index = builder_.CreateAlloca(builder_.getInt32Ty(), nullptr, "prototype.store.index");
-        builder_.CreateStore(builder_.getInt32(0), index);
-        auto* loop = llvm::BasicBlock::Create(ctx_, "prototype.store", fn);
-        auto* body = llvm::BasicBlock::Create(ctx_, "prototype.store.body", fn);
-        auto* hit = llvm::BasicBlock::Create(ctx_, "prototype.store.hit", fn);
-        auto* next = llvm::BasicBlock::Create(ctx_, "prototype.store.next", fn);
-        auto* append = llvm::BasicBlock::Create(ctx_, "prototype.store.append", fn);
-        auto* done = llvm::BasicBlock::Create(ctx_, "prototype.store.done", fn);
-        builder_.CreateBr(loop);
-        builder_.SetInsertPoint(loop);
-        auto* i = builder_.CreateLoad(builder_.getInt32Ty(), index);
-        builder_.CreateCondBr(builder_.CreateICmpULT(i, keysLen), body, append);
-        builder_.SetInsertPoint(body);
-        auto* kp = builder_.CreateInBoundsGEP(keyType.llvmType, keysData, i);
-        auto* candidate = builder_.CreateLoad(keyType.llvmType, kp);
-        llvm::Value* equal = nullptr;
-        if (keyType.kind == CgType::Kind::Int || keyType.kind == CgType::Kind::Ptr)
-            equal = builder_.CreateICmpEQ(candidate, key.value);
-        else if (keyType.kind == CgType::Kind::Float)
-            equal = builder_.CreateFCmpOEQ(candidate, key.value);
-        else { unsupported(access, "a prototype key type without structural equality"); return true; }
-        builder_.CreateCondBr(equal, hit, next);
-        builder_.SetInsertPoint(hit);
+        auto scan = emitPrototypeScan(access, proto, pair, key, "a prototype store");
+        if (!scan) return true;
+        // Converted once, in the block the scan left us in, so the value is evaluated
+        // exactly once whichever way the store goes -- an update and an append store
+        // the same value and must not be two evaluations of the right-hand side.
         llvm::Value* stored = convert(node, rhs, valueType);
         if (!stored) return true;
-        auto* vp = builder_.CreateInBoundsGEP(valueType.llvmType, valuesData, i);
-        builder_.CreateStore(stored, vp);
-        value_ = CgVal{stored, valueType};
+
+        auto* fn = currentFn_->fn;
+        auto* update = llvm::BasicBlock::Create(ctx_, "prototype.store.update", fn);
+        auto* append = llvm::BasicBlock::Create(ctx_, "prototype.store.append", fn);
+        auto* done   = llvm::BasicBlock::Create(ctx_, "prototype.store.done", fn);
+        builder_.CreateCondBr(scan->found, update, append);
+
+        builder_.SetInsertPoint(update);
+        builder_.CreateStore(stored, builder_.CreateInBoundsGEP(valueType.llvmType,
+                                                                scan->valuesData,
+                                                                scan->index));
         builder_.CreateBr(done);
-        builder_.SetInsertPoint(next);
-        builder_.CreateStore(builder_.CreateAdd(i, builder_.getInt32(1)), index);
-        builder_.CreateBr(loop);
+
         builder_.SetInsertPoint(append);
-        stored = convert(node, rhs, valueType);
-        if (!stored) return true;
-        auto* one = builder_.getInt32(1);
-        auto* newLen = builder_.CreateAdd(keysLen, one);
+        auto* newLen = builder_.CreateAdd(scan->length, builder_.getInt32(1));
         auto* i64 = builder_.CreateZExt(newLen, builder_.getInt64Ty());
         auto* keyBytes = builder_.CreateMul(i64, llvm::ConstantExpr::getSizeOf(keyType.llvmType));
         auto* valueBytes = builder_.CreateMul(i64, llvm::ConstantExpr::getSizeOf(valueType.llvmType));
@@ -5485,26 +5560,36 @@ private:
                                                    {llvm::PointerType::get(ctx_, 0), builder_.getInt64Ty()}, false);
         auto reallocFn = runtimeFn(access, "realloc", reallocTy, "prototype growth");
         if (!reallocFn) return true;
-        auto* newKeysRaw = builder_.CreateCall(reallocFn, {keysData, keyBytes});
-        auto* newValuesRaw = builder_.CreateCall(reallocFn, {valuesData, valueBytes});
-        auto* newKeys = builder_.CreateBitCast(newKeysRaw, keyType.llvmType->getPointerTo());
-        auto* newValues = builder_.CreateBitCast(newValuesRaw, valueType.llvmType->getPointerTo());
-        builder_.CreateStore(key.value, builder_.CreateInBoundsGEP(keyType.llvmType, newKeys, keysLen));
-        builder_.CreateStore(stored, builder_.CreateInBoundsGEP(valueType.llvmType, newValues, keysLen));
-        llvm::Value* newKeysPair = llvm::UndefValue::get(proto.keys->llvmType);
-        newKeysPair = builder_.CreateInsertValue(newKeysPair, newKeys, {0});
-        newKeysPair = builder_.CreateInsertValue(newKeysPair, newLen, {1});
-        llvm::Value* newValuesPair = llvm::UndefValue::get(proto.values->llvmType);
-        newValuesPair = builder_.CreateInsertValue(newValuesPair, newValues, {0});
-        newValuesPair = builder_.CreateInsertValue(newValuesPair, newLen, {1});
-        llvm::Value* newPair = llvm::UndefValue::get(proto.llvmType);
-        newPair = builder_.CreateInsertValue(newPair, newKeysPair, {0});
-        newPair = builder_.CreateInsertValue(newPair, newValuesPair, {1});
-        builder_.CreateStore(newPair, base->ptr);
-        value_ = CgVal{stored, valueType};
+        auto* newKeysRaw = builder_.CreateCall(reallocFn, {scan->keysData, keyBytes});
+        auto* newValuesRaw = builder_.CreateCall(reallocFn, {scan->valuesData, valueBytes});
+        auto* newKeys = builder_.CreateBitCast(newKeysRaw, llvm::PointerType::get(ctx_, 0));
+        auto* newValues = builder_.CreateBitCast(newValuesRaw, llvm::PointerType::get(ctx_, 0));
+        builder_.CreateStore(key.value, builder_.CreateInBoundsGEP(keyType.llvmType, newKeys, scan->length));
+        builder_.CreateStore(stored, builder_.CreateInBoundsGEP(valueType.llvmType, newValues, scan->length));
+        builder_.CreateStore(prototypePair(proto, newKeys, newValues, newLen), base->ptr);
         builder_.CreateBr(done);
+
         builder_.SetInsertPoint(done);
+        value_ = CgVal{stored, valueType};
         return true;
+    }
+
+    // The `{ {keys,len}, {values,len} }` value, rebuilt from its parts. One place that
+    // knows the shape, because the two lengths are one number -- key i pairs with value
+    // i is the whole invariant -- and a caller that inserted them separately could set
+    // one and forget the other.
+    llvm::Value* prototypePair(const CgType& proto, llvm::Value* keysData,
+                               llvm::Value* valuesData, llvm::Value* length) {
+        llvm::Value* keysPair = llvm::UndefValue::get(proto.keys->llvmType);
+        keysPair = builder_.CreateInsertValue(keysPair, keysData, {0});
+        keysPair = builder_.CreateInsertValue(keysPair, length, {1});
+        llvm::Value* valuesPair = llvm::UndefValue::get(proto.values->llvmType);
+        valuesPair = builder_.CreateInsertValue(valuesPair, valuesData, {0});
+        valuesPair = builder_.CreateInsertValue(valuesPair, length, {1});
+        llvm::Value* pair = llvm::UndefValue::get(proto.llvmType);
+        pair = builder_.CreateInsertValue(pair, keysPair, {0});
+        pair = builder_.CreateInsertValue(pair, valuesPair, {1});
+        return pair;
     }
 
     void emitAssignment(BinaryOp& node) {
@@ -7166,7 +7251,34 @@ private:
         // `o.inner.get()` on a field. One primitive for all three, which is what keeps
         // "Fin automatically handles -> logic with ." true of a call as well as of a
         // field (deeptest3.fin:39).
-        auto receiver = baseAddress(*node.object, CgType::Kind::Struct);
+        //
+        // Taken once and asked about twice. A prototype's methods are answered by this
+        // file rather than found in a `methods` table, and a prototype is not a struct,
+        // so the address has two questions to answer -- but only one emission, because
+        // taking the address of `p[i++]` runs the increment.
+        auto direct = emitAddress(*node.object);
+        if (failed_) return;
+        if (auto proto = baseOf(direct, CgType::Kind::Prototype)) {
+            if (emitPrototypeMethod(node, &*proto, nullptr)) return;
+        }
+        // A prototype with no home -- `mk().get(1)`, whose receiver is a returned value.
+        // Emitting it is safe here and only here: `direct` is empty, so nothing of the
+        // receiver has been emitted yet, and the name is checked first so an ordinary
+        // method call does not evaluate its receiver twice on the way to the struct path.
+        //
+        // Reading one is honest where a struct's method is not (see the refusal below):
+        // `get` and `contains` do not write, so a copy answers exactly what the original
+        // would. `remove` does write, and refuses inside emitPrototypeMethod rather than
+        // editing a table nobody can name.
+        if (!direct && isPrototypeMethodName(node.method_name)) {
+            CgVal object = emit(*node.object);
+            if (failed_) return;
+            if (object.ok() && object.type.isPrototype() &&
+                emitPrototypeMethod(node, nullptr, &object)) {
+                return;
+            }
+        }
+        auto receiver = baseOf(direct, CgType::Kind::Struct);
         if (failed_) return;
         if (receiver && receiver->type.isInterface && receiver->type.interfaceInfo) {
             auto object = builder_.CreateLoad(receiver->type.llvmType, receiver->ptr, "interface");
@@ -7230,6 +7342,68 @@ private:
         std::vector<llvm::Value*> args{receiver->ptr};
         if (!emitCallArgs(node, info, node.method_name, argList(node.args), args)) return;
         emitCall(info, args);
+    }
+
+    // The names a prototype answers for, ADR 0028's initial API and the analyzer's list
+    // (SemanticAnalyzer::checkPrototypeMethod). Asked before a receiver is emitted, so
+    // it must not depend on the receiver.
+    static bool isPrototypeMethodName(const std::string& name) {
+        return name == "get" || name == "try_get" || name == "contains" ||
+               name == "remove" || name == "rm";
+    }
+
+    // `p.get(k)`, `p.contains(k)`, `p.remove(k)` / `p.rm(k)` on a prototype.
+    //
+    // The analyzer has already decided that the name is one of these and that the
+    // argument is the key's type (checkPrototypeMethod), so what is left here is which
+    // primitive to reach for.
+    //
+    // Exactly one of `base` and `value` is given. An address is what `remove` needs --
+    // it writes a shorter length back -- and the reading methods take either, because a
+    // search reads the same answer out of a copy as out of the original.
+    //
+    // Returns false when the name is not a prototype's, so a struct that declares its
+    // own `get` -- lib/std/collection.fin does -- falls through untouched.
+    bool emitPrototypeMethod(MethodCall& node, const Addr* base, const CgVal* value) {
+        const std::string& name = node.method_name;
+        if (!isPrototypeMethodName(name)) return false;
+        const bool mutates = name == "remove" || name == "rm";
+        if (mutates && !base) {
+            unsupported(node, fmt::format("a call to '{}' on a prototype with no address",
+                                          name));
+            return true;
+        }
+        if (node.args.size() != 1 || !node.args[0]) {
+            unsupported(node, fmt::format("a call to '{}' on a prototype without a key",
+                                          name));
+            return true;
+        }
+        CgVal key = emit(*node.args[0]);
+        if (failed_ || !key.ok()) return true;
+
+        if (mutates) {
+            value_ = emitPrototypeRemove(node, *base, key);
+            return true;
+        }
+        if (name == "try_get") {
+            // `V?`, and a nullable value is not lowered by this slice at all -- there is
+            // no representation for "a V or nothing" yet, and inventing one here would be
+            // choosing the option representation in the backend, ahead of the stdlib
+            // boundary ADR 0028 puts it behind. Refused rather than answered with the
+            // `get` lowering, which would blame on a key the program asked about safely.
+            unsupported(node, "a call to 'try_get' on a prototype, whose optional result "
+                              "has no representation yet");
+            return true;
+        }
+        CgVal object = value ? *value
+                             : CgVal{builder_.CreateLoad(base->type.llvmType, base->ptr,
+                                                          "prototype"), base->type};
+        if (name == "contains") {
+            value_ = emitPrototypeContains(node, object, key);
+            return true;
+        }
+        value_ = emitPrototypeLookup(node, object, key, "a prototype 'get'");
+        return true;
     }
 
     // `d.get_a()` where `get_a` is declared on `d`'s base -- deeptest2.fin:67-79 and
@@ -7889,83 +8063,216 @@ private:
         }
         value_ = CgVal{aggregate, type};
     }
+    // Are these two keys the same key? ADR 0028's structural equality, derived
+    // recursively and explicitly rather than taken from raw memory.
+    //
+    // Raw bytes would be shorter and would be wrong: a struct's padding is undefined,
+    // so two keys a program built from the same field values could compare unequal, and
+    // a string compares as an address rather than as text -- which is the case
+    // stdlib/memory.fin:32 writes, `info["MemoryCardModel"] = ...`, where the key is a
+    // literal in one place and a literal in another and the two are not one pointer.
+    //
+    // What is derivable is listed here and nothing else is: integers and bools by
+    // value, floats by IEEE equality, strings by their bytes, other pointers by
+    // identity, structs field by field, and fixed arrays element by element. A dynamic
+    // array key needs a run-time length loop, and `object` needs a run-time type, so
+    // both are refused at compile time with a reason rather than answered wrongly.
+    //
+    // Returns null having already reported.
+    llvm::Value* emitKeyEquality(ASTNode& node, const CgType& keyType,
+                                 llvm::Value* a, llvm::Value* b) {
+        switch (keyType.kind) {
+            case CgType::Kind::Int:
+                // Bools included: a bool is an i1 here, and `true == true` is the same
+                // instruction `1 == 1` is.
+                return builder_.CreateICmpEQ(a, b, "key.eq");
+            case CgType::Kind::Float:
+                // Ordered equality, so a NaN key never matches -- itself included. ADR
+                // 0028 reserves the NaN and signed-zero ruling for the hashing trait;
+                // until that lands this is the one behaviour that cannot silently claim
+                // two different values are one.
+                return builder_.CreateFCmpOEQ(a, b, "key.eq");
+            case CgType::Kind::Ptr: {
+                if (keyType.pointee) {
+                    // A real pointer. Identity is the only equality a `&T` has here:
+                    // comparing pointees would be a load through a key the program may
+                    // have freed, and Fin has no ruling that two addresses holding equal
+                    // values are one key.
+                    return builder_.CreateICmpEQ(a, b, "key.eq");
+                }
+                // A string: the bytes, through libc's own comparison. Address equality
+                // would make two spellings of the same key two keys.
+                llvm::FunctionCallee cmp = runtimeFn(
+                    node, "strcmp",
+                    llvm::FunctionType::get(builder_.getInt32Ty(),
+                                            {llvm::PointerType::getUnqual(ctx_),
+                                             llvm::PointerType::getUnqual(ctx_)}, false),
+                    "a string key comparison");
+                if (!cmp) return nullptr;
+                llvm::Value* diff = builder_.CreateCall(cmp, {a, b}, "key.strcmp");
+                return builder_.CreateICmpEQ(diff, builder_.getInt32(0), "key.eq");
+            }
+            case CgType::Kind::Struct: {
+                if (!keyType.structInfo) {
+                    unsupported(node, "a struct key with no fields to compare");
+                    return nullptr;
+                }
+                if (keyType.structInfo->fields.empty()) {
+                    // A fieldless struct is one value, so every one of them is the same
+                    // key. tests/samples/prototype_test.fin:37 keys a prototype on
+                    // exactly that (`struct CustomDT {}`), and saying `true` here is the
+                    // honest answer rather than a refusal: there is nothing to differ.
+                    return builder_.getInt1(true);
+                }
+                llvm::Value* equal = builder_.getInt1(true);
+                for (size_t i = 0; i < keyType.structInfo->fields.size(); ++i) {
+                    const CgType& field = keyType.structInfo->fields[i].type;
+                    llvm::Value* fa = builder_.CreateExtractValue(a, {(unsigned)i});
+                    llvm::Value* fb = builder_.CreateExtractValue(b, {(unsigned)i});
+                    llvm::Value* one = emitKeyEquality(node, field, fa, fb);
+                    if (!one) return nullptr;
+                    equal = builder_.CreateAnd(equal, one, "key.eq");
+                }
+                return equal;
+            }
+            case CgType::Kind::Array: {
+                if (keyType.isDynamicArray || !keyType.element) {
+                    // `[int]` as a key. Its length is a run-time value, so the
+                    // comparison is a loop and not an expression -- and a loop here
+                    // would have to be built in the caller's blocks, which is a unit of
+                    // its own. prototype_test.fin:41 writes one and is booked as
+                    // unimplemented; refused rather than compared by pointer, which
+                    // would make two equal arrays two keys.
+                    unsupported(node, "a dynamic array as a prototype key, whose "
+                                      "structural equality needs a run-time loop");
+                    return nullptr;
+                }
+                llvm::Value* equal = builder_.getInt1(true);
+                for (uint64_t i = 0; i < keyType.extent; ++i) {
+                    llvm::Value* ea = builder_.CreateExtractValue(a, {(unsigned)i});
+                    llvm::Value* eb = builder_.CreateExtractValue(b, {(unsigned)i});
+                    llvm::Value* one = emitKeyEquality(node, *keyType.element, ea, eb);
+                    if (!one) return nullptr;
+                    equal = builder_.CreateAnd(equal, one, "key.eq");
+                }
+                return equal;
+            }
+            default:
+                unsupported(node, fmt::format("{} as a prototype key, which has no "
+                                              "derived structural equality",
+                                              describe(keyType)));
+                return nullptr;
+        }
+    }
+
     // A prototype subscript is a key search, never an array offset. The current
     // representation stores parallel dynamic arrays, so this baseline scans them in
     // insertion order. The intrinsic boundary can later replace this body with a hash
     // table without changing the prototype type or its source syntax.
-    CgVal emitPrototypeLookup(ArrayAccess& node, const CgVal& object, const CgVal& key) {
+    // `p[key]` and `p.get(key)`: the value at a key, and a blame when there is none.
+    //
+    // ADR 0028 rules out a sentinel outright -- a generic V has no value that means
+    // "absent" -- so the missing branch does not return, and the caller downstream is
+    // reached only on the found path.
+    CgVal emitPrototypeLookup(ASTNode& node, const CgVal& object, const CgVal& key,
+                              const char* what) {
         const CgType& proto = object.type;
-        if (!proto.keys || !proto.values || !proto.keys->element ||
-            !proto.values->element || !object.value || !key.value) {
-            unsupported(node, "a prototype lookup with incomplete representation");
+        if (!proto.values || !proto.values->element || !object.value) {
+            unsupported(node, fmt::format("{} with an incomplete prototype "
+                                          "representation", what));
             return CgVal{};
         }
-        const CgType& keyType = *proto.keys->element;
         const CgType& valueType = *proto.values->element;
-        if (key.type.kind != keyType.kind || key.type.llvmType != keyType.llvmType) {
-            unsupported(node, "a prototype lookup with an incompatible key");
-            return CgVal{};
-        }
-        llvm::Value* keyPair = builder_.CreateExtractValue(object.value, {0}, "prototype.keys");
-        llvm::Value* valuePair = builder_.CreateExtractValue(object.value, {1}, "prototype.values");
-        llvm::Value* keysData = builder_.CreateExtractValue(keyPair, {0}, "prototype.keys.data");
-        llvm::Value* keysLen = builder_.CreateExtractValue(keyPair, {1}, "prototype.keys.len");
-        llvm::Value* valuesData = builder_.CreateExtractValue(valuePair, {0}, "prototype.values.data");
+        auto scan = emitPrototypeScan(node, proto, object.value, key, what);
+        if (!scan) return CgVal{};
 
-        auto* function = currentFn_->fn;
-        auto* index = builder_.CreateAlloca(builder_.getInt32Ty(), nullptr, "prototype.index");
-        auto* result = builder_.CreateAlloca(valueType.llvmType, nullptr, "prototype.result");
-        builder_.CreateStore(builder_.getInt32(0), index);
-        auto* loop = llvm::BasicBlock::Create(ctx_, "prototype.lookup", function);
-        auto* body = llvm::BasicBlock::Create(ctx_, "prototype.lookup.body", function);
-        auto* hit = llvm::BasicBlock::Create(ctx_, "prototype.lookup.hit", function);
-        auto* next = llvm::BasicBlock::Create(ctx_, "prototype.lookup.next", function);
-        auto* missing = llvm::BasicBlock::Create(ctx_, "prototype.lookup.missing", function);
-        auto* done = llvm::BasicBlock::Create(ctx_, "prototype.lookup.done", function);
-        builder_.CreateBr(loop);
-
-        builder_.SetInsertPoint(loop);
-        auto* i = builder_.CreateLoad(builder_.getInt32Ty(), index, "prototype.i");
-        auto* more = builder_.CreateICmpULT(i, keysLen, "prototype.more");
-        builder_.CreateCondBr(more, body, missing);
-
-        builder_.SetInsertPoint(body);
-        auto* kp = builder_.CreateInBoundsGEP(keyType.llvmType, keysData, i, "prototype.key.ptr");
-        auto* candidate = builder_.CreateLoad(keyType.llvmType, kp, "prototype.key");
-        llvm::Value* equal = nullptr;
-        if (keyType.kind == CgType::Kind::Int)
-            equal = builder_.CreateICmpEQ(candidate, key.value, "prototype.equal");
-        else if (keyType.kind == CgType::Kind::Float)
-            equal = builder_.CreateFCmpOEQ(candidate, key.value, "prototype.equal");
-        else if (keyType.kind == CgType::Kind::Ptr)
-            equal = builder_.CreateICmpEQ(candidate, key.value, "prototype.equal");
-        else {
-            unsupported(node, "a prototype key type without structural equality");
-            return CgVal{};
-        }
-        builder_.CreateCondBr(equal, hit, next);
-
-        builder_.SetInsertPoint(hit);
-        auto* vp = builder_.CreateInBoundsGEP(valueType.llvmType, valuesData, i,
-                                              "prototype.value.ptr");
-        builder_.CreateStore(builder_.CreateLoad(valueType.llvmType, vp, "prototype.value"), result);
-        builder_.CreateBr(done);
-
-        builder_.SetInsertPoint(next);
-        builder_.CreateStore(builder_.CreateAdd(i, builder_.getInt32(1)), index);
-        builder_.CreateBr(loop);
+        auto* fn = currentFn_->fn;
+        auto* hit = llvm::BasicBlock::Create(ctx_, "prototype.lookup.hit", fn);
+        auto* missing = llvm::BasicBlock::Create(ctx_, "prototype.lookup.missing", fn);
+        builder_.CreateCondBr(scan->found, hit, missing);
 
         builder_.SetInsertPoint(missing);
-        // ADR 0028: a read of an absent key is a blame and never a sentinel value. The
-        // reason names the operation the program wrote, so the author reads their own
+        // The reason names the operation the program wrote, so the author reads their own
         // subscript back rather than a word about the table's internals.
         if (!emitRuntimeBlame(node, "this lookup because the key is not in the prototype",
                               "a missing prototype key"))
             return CgVal{};
 
+        builder_.SetInsertPoint(hit);
+        auto* vp = builder_.CreateInBoundsGEP(valueType.llvmType, scan->valuesData,
+                                              scan->index, "prototype.value.ptr");
+        return CgVal{builder_.CreateLoad(valueType.llvmType, vp, "prototype.value"),
+                     valueType};
+    }
+
+    // `p.contains(key)` -- the scan's own answer, with nothing else to compute.
+    CgVal emitPrototypeContains(ASTNode& node, const CgVal& object, const CgVal& key) {
+        auto scan = emitPrototypeScan(node, object.type, object.value, key,
+                                      "a prototype 'contains'");
+        if (!scan) return CgVal{};
+        return CgVal{scan->found, *types_.byName("bool")};
+    }
+
+    // `p.remove(key)` and `p.rm(key)` -- prototype_test.fin:24 writes the second and
+    // calls it "the functional way".
+    //
+    // Removal closes the gap by shifting every later entry down one, in both arrays
+    // together, and shortens the length. That is what insertion order costs: a swap with
+    // the last entry would be one store instead of a loop and would reorder the table,
+    // and ADR 0028 makes iteration order part of what a prototype *is*. The buffers keep
+    // their allocation -- a shorter length is what "removed" means here, and shrinking
+    // them would be a second realloc for no observable difference.
+    //
+    // Answers with whether anything was removed, so `if (p.remove(k))` is a question a
+    // program can ask; a key that was not there is not an error.
+    CgVal emitPrototypeRemove(ASTNode& node, const Addr& base, const CgVal& key) {
+        const CgType& proto = base.type;
+        if (!proto.keys || !proto.values || !proto.keys->element ||
+            !proto.values->element) {
+            unsupported(node, "a prototype removal with an incomplete representation");
+            return CgVal{};
+        }
+        const CgType& keyType = *proto.keys->element;
+        const CgType& valueType = *proto.values->element;
+        llvm::Value* pair = builder_.CreateLoad(proto.llvmType, base.ptr, "prototype");
+        auto scan = emitPrototypeScan(node, proto, pair, key, "a prototype removal");
+        if (!scan) return CgVal{};
+
+        auto* fn = currentFn_->fn;
+        auto* shift = llvm::BasicBlock::Create(ctx_, "prototype.remove.shift", fn);
+        auto* move  = llvm::BasicBlock::Create(ctx_, "prototype.remove.move", fn);
+        auto* close = llvm::BasicBlock::Create(ctx_, "prototype.remove.close", fn);
+        auto* done  = llvm::BasicBlock::Create(ctx_, "prototype.remove.done", fn);
+
+        auto* cursor = builder_.CreateAlloca(builder_.getInt32Ty(), nullptr,
+                                             "prototype.remove.at");
+        builder_.CreateStore(scan->index, cursor);
+        auto* last = builder_.CreateSub(scan->length, builder_.getInt32(1),
+                                        "prototype.remove.last");
+        builder_.CreateCondBr(scan->found, shift, done);
+
+        builder_.SetInsertPoint(shift);
+        auto* at = builder_.CreateLoad(builder_.getInt32Ty(), cursor, "prototype.remove.i");
+        builder_.CreateCondBr(builder_.CreateICmpULT(at, last), move, close);
+
+        builder_.SetInsertPoint(move);
+        auto* from = builder_.CreateAdd(at, builder_.getInt32(1));
+        auto* keyFrom = builder_.CreateInBoundsGEP(keyType.llvmType, scan->keysData, from);
+        auto* keyTo = builder_.CreateInBoundsGEP(keyType.llvmType, scan->keysData, at);
+        builder_.CreateStore(builder_.CreateLoad(keyType.llvmType, keyFrom), keyTo);
+        auto* valueFrom = builder_.CreateInBoundsGEP(valueType.llvmType, scan->valuesData, from);
+        auto* valueTo = builder_.CreateInBoundsGEP(valueType.llvmType, scan->valuesData, at);
+        builder_.CreateStore(builder_.CreateLoad(valueType.llvmType, valueFrom), valueTo);
+        builder_.CreateStore(from, cursor);
+        builder_.CreateBr(shift);
+
+        builder_.SetInsertPoint(close);
+        builder_.CreateStore(prototypePair(proto, scan->keysData, scan->valuesData, last),
+                             base.ptr);
+        builder_.CreateBr(done);
+
         builder_.SetInsertPoint(done);
-        return CgVal{builder_.CreateLoad(valueType.llvmType, result,
-                                          "prototype.lookup.result"), valueType};
+        return CgVal{scan->found, *types_.byName("bool")};
     }
 
     void visit(ArrayAccess& node) override {
@@ -7976,7 +8283,7 @@ private:
         if (object.ok() && object.type.isPrototype()) {
             CgVal key = emit(*node.index);
             if (failed_) return;
-            value_ = emitPrototypeLookup(node, object, key);
+            value_ = emitPrototypeLookup(node, object, key, "a prototype lookup");
             return;
         }
         if (auto addr = emitAddress(node)) {

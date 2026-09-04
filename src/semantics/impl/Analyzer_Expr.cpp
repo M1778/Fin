@@ -1466,6 +1466,15 @@ void SemanticAnalyzer::visit(MethodCall& node) {
         return;
     }
 
+    // A call on a prototype. Before getStructType, which comes back empty for one --
+    // a prototype is not struct-shaped and has no `methods` table to look in -- so
+    // without this branch `a.rm("b")` (prototype_test.fin:24) reported
+    // `Type '<{object, object}>' does not have methods` about a call the language has.
+    if (auto* proto = dynamic_cast<const PrototypeType*>(objType.get())) {
+        checkPrototypeMethod(node, *proto);
+        return;
+    }
+
     auto structType = getStructType(objType, currentScope);
 
     if (!structType) {
@@ -1502,6 +1511,62 @@ void SemanticAnalyzer::visit(MethodCall& node) {
         for (auto& arg : node.args) arg->accept(*this);
         lastExprType = methodType;
     }
+}
+
+// The methods a prototype has. ADR 0028's initial API, and a closed set: a prototype
+// declares nothing, so every name here is one the compiler answers for and a name that
+// is not here is a diagnostic rather than a lookup somewhere else.
+//
+// Each is given a real FunctionType and checked through checkCallArguments, so a
+// prototype method gets the arity and argument checking every other call gets -- and
+// gets the same words for it. Writing the checks out by hand here would be a fourth
+// copy of the logic the header's contract exists to prevent.
+//
+// `rm` is `remove` under the name the corpus writes: prototype_test.fin:24 is
+// `a.rm("b")` and its own comment calls it "the functional way". Two spellings of one
+// operation, and both are kept because the corpus is the specification (ADR 0008) and
+// the ADR's own list says `remove`. Neither is preferred here; whoever rules on one
+// canonical spelling owns this paragraph.
+//
+// `try_get` returns `V?` and not a sentinel, which is the ADR's rule and the reason
+// the type is a NullableType rather than V: a generic V has no value that means absent.
+// Nothing lowers a nullable local yet, so a program that calls it type-checks and then
+// refuses in the backend -- which is the honest staging, and better than answering with
+// a V the table does not have.
+//
+// `entries` is deliberately absent. It yields `Entry<K, V>` values, and that type has
+// to exist before a signature can name it -- it is the stdlib boundary the ADR stages
+// after this, so the diagnostic here says which names a prototype does answer for
+// instead of pretending the method is unknown for a different reason.
+void SemanticAnalyzer::checkPrototypeMethod(MethodCall& node, const PrototypeType& proto) {
+    auto boolType = currentScope->resolveType("bool");
+    const std::string& name = node.method_name;
+
+    std::shared_ptr<Type> result;
+    if (name == "get") {
+        result = proto.valueType;
+    } else if (name == "try_get") {
+        result = std::make_shared<NullableType>(proto.valueType);
+    } else if (name == "contains" || name == "remove" || name == "rm") {
+        // A removal answers whether it removed anything, so `if (p.remove(k))` is a
+        // question a program can ask. A key that was not there is not an error: the
+        // subscript that grows a prototype does not refuse an absent key either.
+        result = boolType;
+    } else {
+        error(node, fmt::format("Prototype '{}' has no method '{}'. A prototype has "
+                                "'get', 'try_get', 'contains', 'remove' and 'rm'",
+                                proto.toString(), name));
+        // The arguments are still walked, so an undefined name inside one is reported
+        // here rather than surviving into a later pass.
+        for (auto& arg : node.args) arg->accept(*this);
+        lastExprType = nullptr;
+        return;
+    }
+
+    // Every one of them takes the key and nothing else.
+    FunctionType sig({proto.keyType}, result);
+    checkCallArguments(node, "Method", name, sig, node.args);
+    lastExprType = result;
 }
 
 // Whether a *constant* subscript is inside a *known* extent.

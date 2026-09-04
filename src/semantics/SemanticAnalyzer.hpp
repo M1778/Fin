@@ -21,6 +21,7 @@ class ModuleLoader; // Forward declaration
 class FunctionType;
 class StructType; // buildOperatorSignature takes the owner, to look a method up in it
 class ArrayType;  // checkIndexInBounds reads its extent
+class PrototypeType; // checkPrototypeMethod reads its key and value types
 class NamespaceType; // lowerModuleCall names the qualifier it resolved through
 
 struct AnalysisContext {
@@ -390,6 +391,12 @@ private:
     // allocation's extent. Returns true when the index is acceptable -- or already
     // failed to type -- which is also the caller's signal to run the bounds check.
     bool checkIntegerIndex(ASTNode& node, const std::shared_ptr<Type>& idxType);
+
+    // The fixed set of methods a prototype has, ADR 0028's initial API. Reports and
+    // types the call; never falls through to the struct path, because a prototype is
+    // not struct-shaped and `getStructType` on one comes back empty. See the definition
+    // for which names are recognised and why `rm` is among them.
+    void checkPrototypeMethod(MethodCall& node, const PrototypeType& proto);
 
     // Whether a constant subscript is inside a known extent. Both halves of that are
     // the rule: a run-time index and a dynamic array are both normal, and neither is
