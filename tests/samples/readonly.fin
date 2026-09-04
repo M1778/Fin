@@ -33,7 +33,7 @@ interface UnchanableString {
 // A struct using `UnchanableString` interface:
 struct ChangableSomehow: <UnchanableString> {
     pub:
-      readonly value <string>
+      readonly value <string>,
 
       fun force_change_string(new_str: string) <noret> {
           self.value = new_str;
@@ -45,11 +45,9 @@ fun main() <noret> {
 
     let copy_v1 <int> = a.v1; // readonly members can be copied and we can tweak the copied version but not the members themselves since they are readonly
 
-    try {
-        a.v1 = 5; // this will blame an error
-    } catch (Error as err) {
-        printf("ERROR: cannot change value of readonly members");
-      }
+    // An outside write to a readonly field is a compile-time error.
+    // The invalid form is covered by the dedicated negative test rather than
+    // being placed in this successful sample.
 
     // we can change the value of v1 using public methods
     a.change_v1(1024);

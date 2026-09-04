@@ -385,7 +385,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         }
         // Defined even when the type did not resolve, so `s.field` says nothing
         // further: the annotation is the diagnostic, not every use of the field.
-        structType->defineField(member->name, memberType, member->is_public);
+        structType->defineField(member->name, memberType, member->is_public, member->is_readonly);
         // The default is NOT walked here. PASS 2 below walks it again, with
         // currentStructContext set and the field type read back from the struct,
         // and both walks reported -- `pub v <int> = nosuchvar` said
@@ -687,7 +687,7 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
         // `implements()` walks methods, operators, constructors and the destructor, and
         // never fields. Registering the member is what makes a read type-check; the
         // requirement is a separate rule with its own test.
-        if (memberType) ifaceType->defineField(member->name, memberType, member->is_public);
+        if (memberType) ifaceType->defineField(member->name, memberType, member->is_public, member->is_readonly);
         // literal_interface.fin:21 gives an interface member a default
         // (`pub picked_first <bool> = true;`), so a default on one is part of the
         // language and is checked exactly as a struct member's is (pass 2 step 1 of
@@ -1287,7 +1287,7 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
         }
         // Defined even when the type did not resolve, so `s.field` says nothing
         // further: the annotation is the diagnostic, not every use of the field.
-        structType->defineField(member->name, memberType, member->is_public);
+        structType->defineField(member->name, memberType, member->is_public, member->is_readonly);
         // The default is NOT walked here. PASS 2 below walks it again, with
         // currentStructContext set and the field type read back from the struct,
         // and both walks reported -- `pub v <int> = nosuchvar` said

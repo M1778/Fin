@@ -568,6 +568,28 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
             }
         }
 
+        // Readonly is a static property of a field, not a runtime exception. The
+        // declaring type's methods may initialize or update their own field; every
+        // other write is rejected before code generation, so try/catch cannot turn
+        // an avoidable violation into a valid program.
+        if (auto* member = dynamic_cast<MemberAccess*>(node.left.get())) {
+            auto savedObject = lastExprType;
+            member->object->accept(*this);
+            auto objectType = lastExprType;
+            lastExprType = savedObject;
+            auto owner = objectType ? getStructType(objectType, currentScope) : nullptr;
+            if (owner) {
+                const auto* field = owner->findField(member->member);
+                const bool internal = currentStructContext &&
+                                      currentStructContext->equals(*owner);
+                if (field && field->is_readonly && !internal) {
+                    error(node, fmt::format(
+                        "Cannot assign to readonly field '{}' of struct '{}'",
+                        member->member, owner->name));
+                }
+            }
+        }
+
         checkType(*node.right, rightType, leftType);
         lastExprType = leftType;
         return;

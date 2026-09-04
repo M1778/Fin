@@ -145,7 +145,7 @@ TypePtr StructType::clone() const {
     auto s = std::make_shared<StructType>(name, newArgs);
     // In order, so the copy lays out the way the original does. defineField rebuilds
     // field_index as it goes, which is why the index is never copied directly.
-    for(const auto& f : fields) s->defineField(f.name, f.type->clone(), f.is_public);
+    for(const auto& f : fields) s->defineField(f.name, f.type->clone(), f.is_public, f.is_readonly);
     for(auto& kv : methods) s->defineMethod(kv.first, kv.second->clone());
     for(auto& kv : operators) s->defineOperator(kv.first, kv.second->clone());
     for(const auto& p : parents) s->parents.push_back(p->clone());
@@ -176,7 +176,7 @@ TypePtr StructType::substitute(const TypeMap& mapping, TypePtr selfReplacement) 
 
     // In order: `Pair<int, string>` laid out differently from `Pair<T, U>` would be
     // an ABI split between a generic function and its caller.
-    for(const auto& f : fields) newStruct->defineField(f.name, f.type->substitute(mapping, nextSelf), f.is_public);
+    for(const auto& f : fields) newStruct->defineField(f.name, f.type->substitute(mapping, nextSelf), f.is_public, f.is_readonly);
     for(auto& kv : methods) newStruct->defineMethod(kv.first, kv.second->substitute(mapping, nextSelf));
     for(auto& kv : operators) newStruct->defineOperator(kv.first, kv.second->substitute(mapping, nextSelf));
     for(const auto& p : parents) newStruct->parents.push_back(p->substitute(mapping, nextSelf));

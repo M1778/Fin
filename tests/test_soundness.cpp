@@ -7849,19 +7849,16 @@ TEST(Soundness_TryCatch, AnUnknownCatchTypeIsReportedAsAType) {
 // accepts this" is a thing a future readonly-enforcement change would silently break.
 // Whoever adds static enforcement has to come past this test and past readonly.fin.
 
-TEST(Soundness_Readonly, AWriteToAReadonlyMemberFromOutsideIsNotACompileTimeError) {
-    // readonly.fin:49 in miniature, minus the try/catch, which is not what makes it
-    // legal -- a `try` does not license its contents.
+TEST(Soundness_Readonly, AWriteToAReadonlyMemberFromOutsideIsACompileTimeError) {
+    // readonly.fin keeps invalid writes out of its successful sample. The rule is
+    // static: try/catch cannot make an avoidable readonly violation legal.
     const FincRun r = compile(
         "struct S {\n"
         "  pub readonly v <int>,\n"
         "}\n"
         "fun main() <noret> { let a <S> = S{v: 10}; a.v = 5; }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "readonly.fin:49 requires this to compile -- the violation there is caught at "
-           "run time by `catch (Error as err)`, so static rejection would make a "
-           "normative sample unwritable. If enforcement is ruled to be static after all, "
-           "that ruling owns this test and readonly.fin:48-52.\n"
+    EXPECT_NE(r.exitCode, 0)
+        << "a write through a readonly field from outside its declaring type must be rejected\n"
         << r.err;
 }
 
