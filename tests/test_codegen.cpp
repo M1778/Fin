@@ -1616,19 +1616,23 @@ BACKEND_TEST(Soundness_Codegen, APrototypeLiteralWithNoDeclaredTypeIsRefused) {
               std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AKeyLookupOnAPrototypeIsRefused) {
-    // `a[10]` on a prototype is a *search*: it needs an equality over an arbitrary key
-    // type and a walk of the keys. tests/samples/prototype_test.fin calls it prototype
-    // access and it is a unit of its own. What must not happen is answering with element
-    // 10 of the keys array, which is what the ordinary index path would do if a prototype
-    // reached it -- so this refuses rather than compiling to the wrong load.
+BACKEND_TEST(Soundness_Codegen, APrototypeLookupUsesTheKeyNotTheArrayIndex) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let p <{int, int}> = { 10: 1, 20: 2 };\n"
+        "    printf(\"%d %d\\n\", p[20], p[10]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AKeyLookupOnAPrototypeUsesTheKey) {
     const Built b = build(
         "fun main() <noret> {\n"
         "    let p <{int, float}> = { 10: 1.5 };\n"
         "    let v <float> = p[10];\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+    EXPECT_EQ(b.compileExit, 0) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AKeyStoreOnAPrototypeIsRefused) {

@@ -7747,7 +7747,96 @@ private:
         }
         value_ = CgVal{aggregate, type};
     }
+    // A prototype subscript is a key search, never an array offset. The current
+    // representation stores parallel dynamic arrays, so this baseline scans them in
+    // insertion order. The intrinsic boundary can later replace this body with a hash
+    // table without changing the prototype type or its source syntax.
+    CgVal emitPrototypeLookup(ArrayAccess& node, const CgVal& object, const CgVal& key) {
+        const CgType& proto = object.type;
+        if (!proto.keys || !proto.values || !proto.keys->element ||
+            !proto.values->element || !object.value || !key.value) {
+            unsupported(node, "a prototype lookup with incomplete representation");
+            return CgVal{};
+        }
+        const CgType& keyType = *proto.keys->element;
+        const CgType& valueType = *proto.values->element;
+        if (key.type.kind != keyType.kind || key.type.llvmType != keyType.llvmType) {
+            unsupported(node, "a prototype lookup with an incompatible key");
+            return CgVal{};
+        }
+        llvm::Value* keyPair = builder_.CreateExtractValue(object.value, {0}, "prototype.keys");
+        llvm::Value* valuePair = builder_.CreateExtractValue(object.value, {1}, "prototype.values");
+        llvm::Value* keysData = builder_.CreateExtractValue(keyPair, {0}, "prototype.keys.data");
+        llvm::Value* keysLen = builder_.CreateExtractValue(keyPair, {1}, "prototype.keys.len");
+        llvm::Value* valuesData = builder_.CreateExtractValue(valuePair, {0}, "prototype.values.data");
+
+        auto* function = currentFn_->fn;
+        auto* index = builder_.CreateAlloca(builder_.getInt32Ty(), nullptr, "prototype.index");
+        auto* result = builder_.CreateAlloca(valueType.llvmType, nullptr, "prototype.result");
+        builder_.CreateStore(builder_.getInt32(0), index);
+        auto* loop = llvm::BasicBlock::Create(ctx_, "prototype.lookup", function);
+        auto* body = llvm::BasicBlock::Create(ctx_, "prototype.lookup.body", function);
+        auto* hit = llvm::BasicBlock::Create(ctx_, "prototype.lookup.hit", function);
+        auto* next = llvm::BasicBlock::Create(ctx_, "prototype.lookup.next", function);
+        auto* missing = llvm::BasicBlock::Create(ctx_, "prototype.lookup.missing", function);
+        auto* done = llvm::BasicBlock::Create(ctx_, "prototype.lookup.done", function);
+        builder_.CreateBr(loop);
+
+        builder_.SetInsertPoint(loop);
+        auto* i = builder_.CreateLoad(builder_.getInt32Ty(), index, "prototype.i");
+        auto* more = builder_.CreateICmpULT(i, keysLen, "prototype.more");
+        builder_.CreateCondBr(more, body, missing);
+
+        builder_.SetInsertPoint(body);
+        auto* kp = builder_.CreateInBoundsGEP(keyType.llvmType, keysData, i, "prototype.key.ptr");
+        auto* candidate = builder_.CreateLoad(keyType.llvmType, kp, "prototype.key");
+        llvm::Value* equal = nullptr;
+        if (keyType.kind == CgType::Kind::Int)
+            equal = builder_.CreateICmpEQ(candidate, key.value, "prototype.equal");
+        else if (keyType.kind == CgType::Kind::Float)
+            equal = builder_.CreateFCmpOEQ(candidate, key.value, "prototype.equal");
+        else if (keyType.kind == CgType::Kind::Ptr)
+            equal = builder_.CreateICmpEQ(candidate, key.value, "prototype.equal");
+        else {
+            unsupported(node, "a prototype key type without structural equality");
+            return CgVal{};
+        }
+        builder_.CreateCondBr(equal, hit, next);
+
+        builder_.SetInsertPoint(hit);
+        auto* vp = builder_.CreateInBoundsGEP(valueType.llvmType, valuesData, i,
+                                              "prototype.value.ptr");
+        builder_.CreateStore(builder_.CreateLoad(valueType.llvmType, vp, "prototype.value"), result);
+        builder_.CreateBr(done);
+
+        builder_.SetInsertPoint(next);
+        builder_.CreateStore(builder_.CreateAdd(i, builder_.getInt32(1)), index);
+        builder_.CreateBr(loop);
+
+        builder_.SetInsertPoint(missing);
+        llvm::FunctionCallee stop = runtimeFn(
+            node, "abort", llvm::FunctionType::get(builder_.getVoidTy(), false),
+            "a missing prototype key");
+        if (!stop) return CgVal{};
+        builder_.CreateCall(stop, {});
+        builder_.CreateUnreachable();
+
+        builder_.SetInsertPoint(done);
+        return CgVal{builder_.CreateLoad(valueType.llvmType, result,
+                                          "prototype.lookup.result"), valueType};
+    }
+
     void visit(ArrayAccess& node) override {
+        // Prototype indexing searches by key. Do this before the ordinary address
+        // path, whose GEP semantics are correct for arrays but wrong for dictionaries.
+        CgVal object = emit(*node.array);
+        if (failed_) return;
+        if (object.ok() && object.type.isPrototype()) {
+            CgVal key = emit(*node.index);
+            if (failed_) return;
+            value_ = emitPrototypeLookup(node, object, key);
+            return;
+        }
         if (auto addr = emitAddress(node)) {
             value_ = CgVal{builder_.CreateLoad(addr->type.llvmType, addr->ptr, "load"),
                            addr->type};
