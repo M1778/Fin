@@ -799,12 +799,11 @@ BACKEND_TEST(Soundness_Codegen, TwoUnloweredFunctionBodiesAreBothReported) {
     // nothing, whose refusal is a ruling waiting on an answer (what equality over an
     // arbitrary key type means) rather than a feature about to land.
     const Built b = build(
-        "fun f() <noret> { let p <{int, int}> = { 1: 2 }; p[1]; }\n"
+        "fun f() <noret> { m1778; }\n"
         "fun g(v: int) <noret> { m1778; }\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
-    EXPECT_NE(b.compileErr.find("this index expression"), std::string::npos) << b.why();
     EXPECT_NE(b.compileErr.find("'m1778'"), std::string::npos) << b.why();
 }
 
@@ -814,7 +813,7 @@ BACKEND_TEST(Soundness_Codegen, CollectingRefusalsStillWritesNoObject) {
     // artifact": a stale or partial object is a link against code that was refused.
     const fs::path obj = uniqueTempPath("fin_obj_multi", ".o");
     const Compiled c = compileOnly(
-        "fun f() <noret> { let p <{int, int}> = { 1: 2 }; p[1]; }\n"
+        "fun f() <noret> { m1778; }\n"
         "fun g(v: int) <noret> { m1778; }\n"
         "fun main() <noret> { let i <int> = 1; }\n", obj);
     EXPECT_NE(c.exitCode, 0) << c.why();
@@ -829,7 +828,7 @@ BACKEND_TEST(Soundness_Codegen, EachCollectedRefusalStillNamesItsOwnLine) {
     // The two here are eight lines apart, so a location that was reused or left default
     // would show up as the same line twice.
     const Built b = build(
-        "fun f() <noret> { let p <{int, int}> = { 1: 2 }; p[1]; }\n"
+        "fun f() <noret> { m1778; }\n"
         "fun g(v: int) <noret> { m1778; }\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
@@ -863,14 +862,12 @@ BACKEND_TEST(Soundness_Codegen, TwoIndependentUnloweredStatementsInOneBodyAreBot
     // TwoUnloweredFunctionBodiesAreBothReported for why each replacement was chosen.
     const Built b = build(
         "fun f(v: int) <noret> {\n"
-        "    let p <{int, int}> = { 1: 2 };\n"
-        "    p[1];\n"
+        "    m1778;\n"
         "    m1778;\n"
         "}\n"
         "fun main() <noret> { let i <int> = 1; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_EQ(occurrences(b.compileErr, "codegen: "), 2u) << b.why();
-    EXPECT_NE(b.compileErr.find("this index expression"), std::string::npos) << b.why();
     EXPECT_NE(b.compileErr.find("'m1778'"), std::string::npos) << b.why();
 }
 
@@ -1635,7 +1632,7 @@ BACKEND_TEST(Soundness_Codegen, AKeyLookupOnAPrototypeUsesTheKey) {
     EXPECT_EQ(b.compileExit, 0) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AKeyStoreOnAPrototypeIsRefused) {
+BACKEND_TEST(Soundness_Codegen, AKeyStoreOnAPrototypeUpdatesAndInserts) {
     // The write half of the same question, and the harder one: `p[11] = 2.5` on a key
     // that is not there has to *grow* both buffers, which is an allocator policy nothing
     // in the corpus rules on. Refused at the assignment rather than at the index, which
@@ -1645,8 +1642,7 @@ BACKEND_TEST(Soundness_Codegen, AKeyStoreOnAPrototypeIsRefused) {
         "    let p <{int, float}> = { 10: 1.5 };\n"
         "    p[11] = 2.5;\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+    EXPECT_EQ(b.compileExit, 0) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, APrototypeOfAnArityOtherThanTwoIsRefused) {

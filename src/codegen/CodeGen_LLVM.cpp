@@ -5414,7 +5414,107 @@ private:
         value_ = CgVal{phi, boolType};
     }
 
+    // Store through a prototype subscript. The baseline representation has no
+    // capacity word, so a new key grows both parallel arrays with realloc; existing
+    // keys update only the value slot. This keeps insertion order and the key/value
+    // index invariant without inventing a sentinel or a second storage format.
+    bool emitPrototypeStore(ArrayAccess& access, const CgVal& rhs, BinaryOp& node) {
+        auto* baseExpr = access.array.get();
+        if (!baseExpr) return false;
+        auto base = emitAddress(*baseExpr);
+        if (failed_ || !base || !base->type.isPrototype() || !base->type.keys ||
+            !base->type.values || !base->type.keys->element ||
+            !base->type.values->element) return false;
+        const CgType& proto = base->type;
+        const CgType& keyType = *proto.keys->element;
+        const CgType& valueType = *proto.values->element;
+        CgVal key = emit(*access.index);
+        if (failed_ || !key.ok()) return true;
+        if (key.type.kind != keyType.kind || key.type.llvmType != keyType.llvmType) {
+            unsupported(access, "a prototype store with an incompatible key");
+            return true;
+        }
+        llvm::Value* pair = builder_.CreateLoad(proto.llvmType, base->ptr, "prototype");
+        llvm::Value* keysPair = builder_.CreateExtractValue(pair, {0});
+        llvm::Value* valuesPair = builder_.CreateExtractValue(pair, {1});
+        llvm::Value* keysData = builder_.CreateExtractValue(keysPair, {0});
+        llvm::Value* keysLen = builder_.CreateExtractValue(keysPair, {1});
+        llvm::Value* valuesData = builder_.CreateExtractValue(valuesPair, {0});
+        auto* fn = currentFn_->fn;
+        auto* index = builder_.CreateAlloca(builder_.getInt32Ty(), nullptr, "prototype.store.index");
+        builder_.CreateStore(builder_.getInt32(0), index);
+        auto* loop = llvm::BasicBlock::Create(ctx_, "prototype.store", fn);
+        auto* body = llvm::BasicBlock::Create(ctx_, "prototype.store.body", fn);
+        auto* hit = llvm::BasicBlock::Create(ctx_, "prototype.store.hit", fn);
+        auto* next = llvm::BasicBlock::Create(ctx_, "prototype.store.next", fn);
+        auto* append = llvm::BasicBlock::Create(ctx_, "prototype.store.append", fn);
+        auto* done = llvm::BasicBlock::Create(ctx_, "prototype.store.done", fn);
+        builder_.CreateBr(loop);
+        builder_.SetInsertPoint(loop);
+        auto* i = builder_.CreateLoad(builder_.getInt32Ty(), index);
+        builder_.CreateCondBr(builder_.CreateICmpULT(i, keysLen), body, append);
+        builder_.SetInsertPoint(body);
+        auto* kp = builder_.CreateInBoundsGEP(keyType.llvmType, keysData, i);
+        auto* candidate = builder_.CreateLoad(keyType.llvmType, kp);
+        llvm::Value* equal = nullptr;
+        if (keyType.kind == CgType::Kind::Int || keyType.kind == CgType::Kind::Ptr)
+            equal = builder_.CreateICmpEQ(candidate, key.value);
+        else if (keyType.kind == CgType::Kind::Float)
+            equal = builder_.CreateFCmpOEQ(candidate, key.value);
+        else { unsupported(access, "a prototype key type without structural equality"); return true; }
+        builder_.CreateCondBr(equal, hit, next);
+        builder_.SetInsertPoint(hit);
+        llvm::Value* stored = convert(node, rhs, valueType);
+        if (!stored) return true;
+        auto* vp = builder_.CreateInBoundsGEP(valueType.llvmType, valuesData, i);
+        builder_.CreateStore(stored, vp);
+        value_ = CgVal{stored, valueType};
+        builder_.CreateBr(done);
+        builder_.SetInsertPoint(next);
+        builder_.CreateStore(builder_.CreateAdd(i, builder_.getInt32(1)), index);
+        builder_.CreateBr(loop);
+        builder_.SetInsertPoint(append);
+        stored = convert(node, rhs, valueType);
+        if (!stored) return true;
+        auto* one = builder_.getInt32(1);
+        auto* newLen = builder_.CreateAdd(keysLen, one);
+        auto* i64 = builder_.CreateZExt(newLen, builder_.getInt64Ty());
+        auto* keyBytes = builder_.CreateMul(i64, llvm::ConstantExpr::getSizeOf(keyType.llvmType));
+        auto* valueBytes = builder_.CreateMul(i64, llvm::ConstantExpr::getSizeOf(valueType.llvmType));
+        auto reallocTy = llvm::FunctionType::get(llvm::PointerType::get(ctx_, 0),
+                                                   {llvm::PointerType::get(ctx_, 0), builder_.getInt64Ty()}, false);
+        auto reallocFn = runtimeFn(access, "realloc", reallocTy, "prototype growth");
+        if (!reallocFn) return true;
+        auto* newKeysRaw = builder_.CreateCall(reallocFn, {keysData, keyBytes});
+        auto* newValuesRaw = builder_.CreateCall(reallocFn, {valuesData, valueBytes});
+        auto* newKeys = builder_.CreateBitCast(newKeysRaw, keyType.llvmType->getPointerTo());
+        auto* newValues = builder_.CreateBitCast(newValuesRaw, valueType.llvmType->getPointerTo());
+        builder_.CreateStore(key.value, builder_.CreateInBoundsGEP(keyType.llvmType, newKeys, keysLen));
+        builder_.CreateStore(stored, builder_.CreateInBoundsGEP(valueType.llvmType, newValues, keysLen));
+        llvm::Value* newKeysPair = llvm::UndefValue::get(proto.keys->llvmType);
+        newKeysPair = builder_.CreateInsertValue(newKeysPair, newKeys, {0});
+        newKeysPair = builder_.CreateInsertValue(newKeysPair, newLen, {1});
+        llvm::Value* newValuesPair = llvm::UndefValue::get(proto.values->llvmType);
+        newValuesPair = builder_.CreateInsertValue(newValuesPair, newValues, {0});
+        newValuesPair = builder_.CreateInsertValue(newValuesPair, newLen, {1});
+        llvm::Value* newPair = llvm::UndefValue::get(proto.llvmType);
+        newPair = builder_.CreateInsertValue(newPair, newKeysPair, {0});
+        newPair = builder_.CreateInsertValue(newPair, newValuesPair, {1});
+        builder_.CreateStore(newPair, base->ptr);
+        value_ = CgVal{stored, valueType};
+        builder_.CreateBr(done);
+        builder_.SetInsertPoint(done);
+        return true;
+    }
+
     void emitAssignment(BinaryOp& node) {
+        if (node.op == ASTTokenKind::EQUAL) {
+            if (auto* access = dynamic_cast<ArrayAccess*>(node.left.get())) {
+                CgVal rhs = emit(*node.right);
+                if (failed_) return;
+                if (emitPrototypeStore(*access, rhs, node)) return;
+            }
+        }
         // One address, used by both halves of a compound assignment. An index or a
         // dereference on the left still has none -- those are their own units -- but
         // a local and any chain of field names off one now do.

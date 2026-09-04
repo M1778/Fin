@@ -1,6 +1,6 @@
-@define printf(fmt: string, ...) <noret>;
 //@ normative
 //@ ok
+@define printf(fmt: string, ...) <noret>;
 interface Printable {
     pub fun to_string() <string>;
 }

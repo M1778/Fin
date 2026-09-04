@@ -163,7 +163,6 @@ TEST(SemanticAnalyzer, InterfacesSampleStillReachesTheAnalyzer) {
     ASSERT_FALSE(src.empty());
     auto a = analyze(src);
     EXPECT_TRUE(a.parsed) << "interfaces.fin is the only sample that parses AND analyses";
-    EXPECT_TRUE(a.analyzerFlag || a.engineErrors)
-        << "interfaces.fin carries `//@ unimplemented`; if it now analyses clean, "
-           "promote that expectation to `//@ ok`";
+    EXPECT_FALSE(a.analyzerFlag || a.engineErrors)
+        << "interfaces.fin is expected to analyse clean after implementing Printable";
 }
