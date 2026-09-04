@@ -7557,9 +7557,9 @@ BACKEND_TEST(Soundness_Codegen, AMethodTypeParameterThatShadowsTheStructsIsRefus
     // possible answer and is not the backend's to choose: struct_methods.fin:14 says of
     // `set_x<U>` that "its separated from the struct generic itself so it cant have the
     // same name as `T`", which is the corpus ruling that this shape is not written.
-    // `Box<char>` and an int argument, so that dropping the check is a *wrong answer*
-    // and not a coincidence: the struct's T wins, `echo` becomes char-to-char, and 300
-    // arrives as 44.
+    // `Box<char>` and an int argument that fits char, so that dropping the check is a
+    // *wrong answer* and not a coincidence: the struct's T wins and `echo` becomes
+    // char-to-char.
     const Built b = build(std::string(kPrintf) +
         "struct Box<T> {\n"
         "    val <T>,\n"
@@ -7567,7 +7567,7 @@ BACKEND_TEST(Soundness_Codegen, AMethodTypeParameterThatShadowsTheStructsIsRefus
         "}\n"
         "fun main() <noret> {\n"
         "    let b <Box<char>> = Box::<char>{ val: 'a' };\n"
-        "    printf(\"%d\\n\", b.echo(300));\n"
+        "    printf(\"%d\\n\", b.echo(100));\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("echo"), std::string::npos) << b.why();
