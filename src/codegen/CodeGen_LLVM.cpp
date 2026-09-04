@@ -7020,6 +7020,48 @@ private:
         builder_.SetInsertPoint(okBB);
     }
 
+    // A runtime Fin blame with a fixed reason: print `<file>:<line>: Fin blames
+    // <reason>` on stderr, then abort. This is the shared shape ADR 0028 asks for when
+    // an operation fails at run time for a reason the program itself did not write --
+    // a missing prototype key is the first of them -- and it is deliberately the same
+    // stream, the same location and the same abort a failed `blame` uses, so a reader
+    // learns one diagnostic form and not two.
+    //
+    // The reason is a compile-time constant of this file's own, and it still goes
+    // through `%s` rather than being the format string: a reason is text, and text that
+    // reaches printf as a format is a vararg read waiting to happen the first time one
+    // of them contains a `%`.
+    //
+    // Terminates the block with `unreachable`, because `abort` does not return and a
+    // block without a terminator is invalid IR. Returns false having already reported.
+    bool emitRuntimeBlame(ASTNode& node, const std::string& reason, const char* what) {
+        llvm::Type* ptrTy = llvm::PointerType::getUnqual(ctx_);
+        llvm::Type* i32Ty = llvm::Type::getInt32Ty(ctx_);
+        llvm::GlobalVariable* errStream = module_.getGlobalVariable("stderr");
+        if (!errStream) {
+            errStream = new llvm::GlobalVariable(
+                module_, ptrTy, /*isConstant=*/false,
+                llvm::GlobalValue::ExternalLinkage, /*Initializer=*/nullptr, "stderr");
+        }
+        llvm::FunctionCallee report = runtimeFn(
+            node, "fprintf",
+            llvm::FunctionType::get(i32Ty, {ptrTy, ptrTy}, /*isVarArg=*/true), what);
+        if (!report) return false;
+        llvm::FunctionCallee stop = runtimeFn(
+            node, "abort", llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_), false),
+            what);
+        if (!stop) return false;
+        llvm::Value* stream = builder_.CreateLoad(ptrTy, errStream, "stderr");
+        llvm::Value* format = builder_.CreateGlobalString("%s:%d: Fin blames %s\n");
+        llvm::Value* file = builder_.CreateGlobalString(sourceName_);
+        llvm::Value* line = llvm::ConstantInt::get(i32Ty, node.loc.begin.line);
+        llvm::Value* text = builder_.CreateGlobalString(reason);
+        builder_.CreateCall(report, {stream, format, file, line, text});
+        builder_.CreateCall(stop, {});
+        builder_.CreateUnreachable();
+        return true;
+    }
+
     // The failing path: print, then abort. Returns false having already reported.
     //
     // The message is emitted *here*, inside the failing block, and not beside the
@@ -7914,12 +7956,12 @@ private:
         builder_.CreateBr(loop);
 
         builder_.SetInsertPoint(missing);
-        llvm::FunctionCallee stop = runtimeFn(
-            node, "abort", llvm::FunctionType::get(builder_.getVoidTy(), false),
-            "a missing prototype key");
-        if (!stop) return CgVal{};
-        builder_.CreateCall(stop, {});
-        builder_.CreateUnreachable();
+        // ADR 0028: a read of an absent key is a blame and never a sentinel value. The
+        // reason names the operation the program wrote, so the author reads their own
+        // subscript back rather than a word about the table's internals.
+        if (!emitRuntimeBlame(node, "this lookup because the key is not in the prototype",
+                              "a missing prototype key"))
+            return CgVal{};
 
         builder_.SetInsertPoint(done);
         return CgVal{builder_.CreateLoad(valueType.llvmType, result,

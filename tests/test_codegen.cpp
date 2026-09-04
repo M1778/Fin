@@ -1632,6 +1632,36 @@ BACKEND_TEST(Soundness_Codegen, AKeyLookupOnAPrototypeUsesTheKey) {
     EXPECT_EQ(b.compileExit, 0) << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, AMissingKeyBlamesRatherThanReturningASentinel) {
+    // ADR 0028: an absent key is never a value. A generic `V` has no sentinel that is
+    // not also a legal value, so the read fails loudly at the line that wrote it.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <{int, int}> = { 10: 1 };\n"
+        "    let v <int> = p[11];\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_NE(b.runExit, 0) << b.why();
+    EXPECT_NE(b.out.find(":3: Fin blames this lookup because the key is not in the prototype"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeStoreKeepsInsertionOrderAndUpdatesInPlace)  {
+    // Two facts in one program, because they are the same invariant seen twice: key i
+    // belongs to value i, and a store to a key already there rewrites that value rather
+    // than appending a second entry with the same key.
+    const Built b = build(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "fun main() <noret> {\n"
+        "    let p <{int, int}> = { 10: 1 };\n"
+        "    p[20] = 2;\n"
+        "    p[10] = 7;\n"
+        "    printf(\"%d %d %d %d\\n\", p[10], p[20], p.0[0], p.1[1]);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7 2 10 2\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AKeyStoreOnAPrototypeUpdatesAndInserts) {
     // The write half of the same question, and the harder one: `p[11] = 2.5` on a key
     // that is not there has to *grow* both buffers, which is an allocator policy nothing
