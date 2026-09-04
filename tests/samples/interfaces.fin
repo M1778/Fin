@@ -1,3 +1,4 @@
+@define printf(fmt: string, ...) <noret>;
 //@ normative
 //@ ok
 interface Printable {
