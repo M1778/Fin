@@ -230,9 +230,6 @@
 /*                                    TYPES                                   */
 /* ========================================================================== */
 
-%type <std::vector<fin::MacroRule>> macro_rules
-%type <fin::MacroRule> macro_rule
-
 /* Core */
 %type <std::unique_ptr<fin::Program>> program
 %type <std::vector<std::unique_ptr<fin::Statement>>> statements block_stmts statement_group namespace_block attribute_block
@@ -1412,31 +1409,37 @@ extern_params:
 
 /* --- MACROS --- */
 
+/* One declaration form, and the `@` is not optional (ADR 0023).
+
+   The arms form -- `macro name { (x) => { ... } }`, the shape
+   tests/samples/macro_definitions.fin:9 sketches -- is deleted rather than kept as a
+   refused construct, and the `macro_rules`/`macro_rule` nonterminals and the
+   `MacroRule` node field go with it. Three reasons, in the order they matter:
+
+     * It could not hold what it parsed. `MacroRule::pattern` was one
+       `std::string`, filled from a bare IDENTIFIER, a STRING_LITERAL or nothing, so
+       `$x:expr` had nowhere to put a fragment kind and `$(...),*` had no token, no
+       production and no node. The form was a shell around a pattern language that
+       does not exist.
+     * It crashed on invocation. The rules constructor left `body` null, and
+       MacroExpander read `def->body->statements`, so a four-line program with one
+       call exited 139 -- not one of the four codes ADR 0009 gives finc. That was
+       guarded first, but a guard on a form nothing can express is a diagnostic
+       nobody should be able to reach.
+     * It disagreed with itself about the `@`. This production forbade `AT` and the
+       parameter form required it, so `macro_definitions.fin:9`'s own `@macro my_vec {`
+       matched neither and reported `unexpected LBRACE, expecting LPAREN`. `@` is how
+       every other declaration modifier in Fin is spelled -- `@define`, `@special`,
+       `@implements` -- so the `@` stays and the bare spelling goes with the form that
+       wanted it.
+
+   `macro name { ... }` is now a syntax error. Nothing in the corpus writes one
+   outside the `[WIP]` comment block in `macro_definitions.fin`, so nothing
+   regresses. */
 macro_declaration:
     AT KW_MACRO IDENTIFIER LPAREN macro_param_list RPAREN block {
         $$ = std::make_unique<fin::MacroDeclaration>($3, std::move($5), std::move($7));
         $$->setLoc(@$);
-    }
-    | KW_MACRO IDENTIFIER LBRACE macro_rules RBRACE {
-        $$ = std::make_unique<fin::MacroDeclaration>($2, std::move($4));
-        $$->setLoc(@$);
-    }
-    ;
-
-macro_rules:
-    macro_rules macro_rule { $1.push_back(std::move($2)); $$ = std::move($1); }
-    | macro_rule { std::vector<fin::MacroRule> v; v.push_back(std::move($1)); $$ = std::move(v); }
-    ;
-
-macro_rule:
-    LPAREN IDENTIFIER RPAREN ARROW block { 
-        $$ = fin::MacroRule{$2, std::move($5)}; 
-    }
-    | LPAREN STRING_LITERAL RPAREN ARROW block { 
-        $$ = fin::MacroRule{$2, std::move($5)}; 
-    }
-    | LPAREN RPAREN ARROW block {
-        $$ = fin::MacroRule{"", std::move($4)};
     }
     ;
 

@@ -176,9 +176,6 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
             auto& n = static_cast<MacroDeclaration&>(node);
             emitAll(out, n.attributes);
             emit(out, n.body.get());
-            for (const MacroRule& rule : n.rules) {
-                emit(out, rule.expansion.get());
-            }
             return;
         }
 

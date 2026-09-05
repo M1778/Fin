@@ -14,22 +14,23 @@ struct MacroParam {
     bool is_vararg = false; 
 };
 
-struct MacroRule {
-    std::string pattern; // Simplified pattern
-    std::unique_ptr<ASTNode> expansion;
-};
-
+// One form: named parameters and a body that returns one `quote`d expression
+// (ADR 0023). `MacroRule` and the `rules`/`is_rust_style` fields were the arms form's
+// half of this node and are deleted with its grammar -- a `pattern` that was one
+// `std::string` could not hold `$x:expr`, and the constructor that filled it left
+// `body` null, which is what made an invocation a segfault rather than a diagnostic.
+//
+// `body` is null only for a bodyless declaration -- `@define format!(...) <string>;`,
+// a macro the compiler implements -- and MacroExpander refuses to expand one, because
+// there is no template to substitute into.
 class MacroDeclaration : public Statement {
 public:
     std::string name;
-    std::vector<MacroParam> params; // For legacy @macro
-    std::unique_ptr<Block> body;    // For legacy @macro
-    std::vector<MacroRule> rules;   // For new Rust-like macros
-    bool is_rust_style = false;
+    std::vector<MacroParam> params;
+    std::unique_ptr<Block> body;
     std::vector<std::unique_ptr<Attribute>> attributes;
 
     MacroDeclaration(std::string n, std::vector<MacroParam> p, std::unique_ptr<Block> b);
-    MacroDeclaration(std::string n, std::vector<MacroRule> r);
     void accept(Visitor& v) override;
 };
 

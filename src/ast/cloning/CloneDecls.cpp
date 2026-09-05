@@ -121,23 +121,16 @@ void CloneVisitor::visit(DefineDeclaration& node) {
 }
 
 void CloneVisitor::visit(MacroDeclaration& node) {
-    if (node.is_rust_style) {
-        std::vector<MacroRule> rules;
-        for (const auto& r : node.rules) {
-            rules.push_back({r.pattern, clone(r.expansion.get())});
-        }
-        auto res = std::make_unique<MacroDeclaration>(node.name, std::move(rules));
-        res->setLoc(node.loc);
-        result = std::move(res);
-    } else {
-        auto res = std::make_unique<MacroDeclaration>(
-            node.name,
-            node.params, 
-            clone(node.body.get())
-        );
-        res->setLoc(node.loc);
-        result = std::move(res);
-    }
+    // `clone(nullptr)` gives null, which is what a bodyless declaration
+    // (`@define format!(...) <string>;`) needs: the clone is bodyless too.
+    auto res = std::make_unique<MacroDeclaration>(
+        node.name,
+        node.params,
+        clone(node.body.get())
+    );
+    res->attributes = cloneVector(node.attributes);
+    res->setLoc(node.loc);
+    result = std::move(res);
 }
 
 void CloneVisitor::visit(OperatorDeclaration& node) {

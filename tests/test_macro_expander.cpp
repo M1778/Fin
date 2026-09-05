@@ -107,22 +107,52 @@ TEST(MacroExpander, RejectsAMacroWhoseBodyDoesNotReturnAQuote) {
     EXPECT_NE(e.firstMessage.find("quote"), std::string::npos) << e.firstMessage;
 }
 
-TEST(MacroExpander, InvokingARulesFormMacroIsRefusedRatherThanCrashing) {
-    // `macro f { () => { ... } }` is the rules form. MacroDecl.cpp's two constructors are
-    // disjoint -- the rules one sets `rules` and leaves `body` null -- and the expander
-    // read `def->body->statements` with no guard, so invoking one dereferenced null and
-    // finc exited 139. That is not one of the four codes ADR 0009 gives it, so a script
-    // checking the status learned neither that the build succeeded nor that it was
-    // rejected. Declaring one and never calling it was always fine, which is why the
-    // corpus never found this: no sample calls a rules-form macro.
+TEST(MacroExpander, TheArmsFormIsASyntaxErrorRatherThanACrash) {
+    // `macro f { () => { ... } }` was the arms form, and this test used to assert that
+    // *invoking* one was refused rather than crashing. It crashed before that: the arms
+    // constructor filled `rules` and left `body` null, the expander read
+    // `def->body->statements` with no guard, and finc exited 139 -- not one of the four
+    // codes ADR 0009 gives it, so a script reading the status learned neither that the
+    // build succeeded nor that it was rejected. Declaring one and never calling it was
+    // always fine, which is why no sample found it: none calls one.
     //
-    // The assertion is that it *refuses*. Expanding to nothing would drop the call.
+    // ADR 0023 step 1 deletes the form rather than refusing it, so the guard this test
+    // was written against is gone and the refusal moved a pass earlier. What it protects
+    // is unchanged and is the only thing that ever mattered: a program with this text in
+    // it does not crash the compiler. It is now rejected at the point the text is read,
+    // which is strictly better -- a diagnostic at the declaration rather than at whatever
+    // call site happened to reach it -- and `parsed` being false is what says so.
+    //
+    // The form was deleted rather than kept because `MacroRule::pattern` was one
+    // `std::string` and could hold neither `$x:expr` nor `$(...),*`: it was a shell
+    // around a pattern language that does not exist. See the comment on
+    // `macro_declaration` in parser.y.
     auto e = expand(
         "macro f { () => { 1; } }\n"
         "fun main() <noret> { f!(); }\n");
-    ASSERT_TRUE(e.parsed);
+    EXPECT_FALSE(e.parsed) << "the arms form no longer parses";
     EXPECT_TRUE(e.errors);
-    EXPECT_NE(e.firstMessage.find("rules form"), std::string::npos) << e.firstMessage;
+}
+
+TEST(MacroExpander, AMacroDeclarationWithoutTheAtIsASyntaxError) {
+    // The `@` is mandatory (ADR 0023 step 2), and until the arms form went, the grammar
+    // disagreed with itself about it: the parameter form required `AT KW_MACRO` and the
+    // arms form forbade it, so `macro_definitions.fin:9`'s own `@macro my_vec {` matched
+    // neither production and reported `unexpected LBRACE, expecting LPAREN`. With the
+    // arms form deleted there is one macro-declaration production and it requires the
+    // `@`, which is how every other declaration modifier in Fin is spelled.
+    auto bare = expand(
+        "macro twice(a) { return quote { $a + $a; }; }\n"
+        "fun main() <noret> { let x <int> = twice!(3); }\n");
+    EXPECT_FALSE(bare.parsed) << "a macro declaration needs the `@`";
+
+    // The same text with the `@` is accepted, so what the case above measures is the
+    // sigil and not something else in the line.
+    auto marked = expand(
+        "@macro twice(a) { return quote { $a + $a; }; }\n"
+        "fun main() <noret> { let x <int> = twice!(3); }\n");
+    ASSERT_TRUE(marked.parsed);
+    EXPECT_FALSE(marked.errors) << marked.firstMessage;
 }
 
 TEST(MacroExpander, SubstitutesTheArgumentIntoTheExpansion) {

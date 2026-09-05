@@ -59,23 +59,26 @@ void MacroExpander::visit(MacroInvocation& node) {
     
     // 3. Find quote
     //
-    // Guarded, because a macro does not always have a body. MacroDecl.cpp's two
-    // constructors are disjoint: the parameter form takes a `Block` and the rules form
-    // takes `rules` and leaves `body` null. Reaching `def->body->statements` with one of
-    // those dereferenced null, so `macro f { () => { 1; } }` invoked as `f!()` did not
-    // refuse -- it crashed, exit 139, which is not one of the four codes ADR 0009 gives
-    // finc, so a caller reading the status saw neither success nor a diagnostic.
-    // Declaring one and never calling it was always fine, which is why this sat on the
-    // invocation path alone and no sample found it.
+    // Guarded, because a macro does not always have a body. A bodyless declaration --
+    // `@define format!(fmt: string, ...) <string>;` -- is a macro the *compiler*
+    // implements (ADR 0023), so there is no template here to substitute into and the
+    // expander is not the pass that answers the call. The analyzer's builtin table is.
     //
-    // Refused rather than skipped. Returning quietly would drop the call and leave the
-    // program a statement short, which is the miscompile this compiler refuses
-    // everywhere else. What the rules form should eventually *mean* is a separate
-    // question and is not decided here.
+    // No form the grammar accepts builds a MacroDeclaration without a block today: the
+    // arms form that did -- whose constructor filled `rules` and left `body` null -- is
+    // deleted with `MacroRule`, so this is unreachable rather than a refusal a program
+    // can provoke. It stays because what it prevents is a crash and not a mistake:
+    // `def->body->statements` on a null body exited 139, which is not one of the four
+    // codes ADR 0009 gives finc, so a caller reading the status learned neither that
+    // the build succeeded nor that it was rejected.
+    //
+    // ADR 0023 step 5 makes it reachable and changes the answer: a bodyless
+    // `@define format!(fmt: string, ...) <string>;` is a macro the *compiler*
+    // implements, so the call is answered downstream and this pass leaves it alone.
+    // Until that exists, a bodyless macro is a macro with nothing to expand.
     if (!def->body) {
         diag.reportError(node.loc,
-            fmt::format("Macro '{}' is declared in the rules form, which is not expanded yet",
-                        node.name));
+            fmt::format("Macro '{}' has no body to expand", node.name));
         return;
     }
 
