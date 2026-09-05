@@ -13064,6 +13064,11 @@ TEST(Soundness_GlobalAttribute, GlobalOutsideStdIsRefusedOnEveryDeclarationFormT
         "#[global] type T = int;",
         "#[global] import { printf } from stdio;",
         "#[global] @special sp() <int> { return 1; }",
+        // Added when ADR 0023 step 1 left one macro-declaration production. The note
+        // below this group used to say there was nothing to write here, because the
+        // arms-form `@macro m { ... }` took no leading attribute and the parameter form
+        // was unreachable behind it.
+        "#[global] @macro m(a) { return quote { $a; }; }",
     };
     for (const char* form : forms) {
         const auto r = compile(std::string(form) + "\nfun main() <noret> {}\n");
@@ -13084,6 +13089,7 @@ TEST(Soundness_GlobalAttribute, GlobalInsideStdIsAccepted) {
         "namespace std { #[global] @define pf(fmt: string) <noret>; }",
         "namespace std { #[global] import { printf } from stdio; }",
         "namespace std { #[global] fun f() <noret> {} }",
+        "namespace std { #[global] @macro m(a) { return quote { $a; }; } }",
     };
     for (const char* form : forms) {
         const auto r = compile(std::string(form) + "\nfun main() <noret> {}\n");
@@ -13139,14 +13145,20 @@ TEST(Soundness_GlobalAttribute, AnUnrelatedAttributeIsNotTouched) {
         << stripAnsi(r.err);
 }
 
-// A note on the one form not covered above: the rules-form `@macro` (the shape
-// tests/samples/macro_definitions.fin:9 writes) takes no leading attribute in the
-// grammar today -- `#[export] @macro m { ... }` is a syntax error at the brace,
-// with or without an attribute, so there is nothing to write a case against.
-// MacroDeclaration's attributes are emitted by the walk anyway, because
-// `decl_fields_of` in parser.y gives it an attributes vector and the two lists
-// disagreeing is exactly how the `@define` gap happened. ADR 0023 has the `@macro`
-// form as design-only, so the case goes in when the syntax does.
+// The `@macro` form is in both groups above now, and it is worth recording why it was
+// not. This note used to read "the rules-form `@macro` takes no leading attribute in
+// the grammar today -- `#[export] @macro m { ... }` is a syntax error at the brace, with
+// or without an attribute, so there is nothing to write a case against". The premise was
+// right and the conclusion did not follow: the syntax error was the *arms* form's, and
+// `#[export] @macro m(a) { ... }` -- the parameter form, the one the grammar has always
+// had -- parsed and took the attribute the whole time. Two declaration forms shared one
+// keyword and only one of them was probed.
+//
+// ADR 0023 step 1 deleted the arms form, which is what made the remaining form the only
+// reading of `@macro` and the omission visible. MacroDeclaration's attributes were
+// already emitted by the walk, because `decl_fields_of` in parser.y gives it an
+// attributes vector and the two lists disagreeing is exactly how the `@define` gap
+// happened -- so the stamp reached the node, was validated, and no test read it.
 
 // ===========================================================================
 // The other half of `#[global]`: a marked declaration resolves with no import
@@ -13260,5 +13272,269 @@ TEST(Soundness_GlobalAttribute, AnUnmarkedDeclarationBesideAMarkedOneIsNotPublis
                            "  @define local(fmt: string) <noret>;\n"
                            "}\n"
                            "fun main() <noret> { pf(\"x\"); local(\"y\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// ===========================================================================
+// The bracket that delimits a macro call shapes its argument (ADR 0023).
+//
+// Three call forms, and the bracket is the whole difference:
+//
+//   name!(a, b)    positional, one argument per expression
+//   name![a, b]    ONE argument: `{0: a, 1: b}`
+//   name!{k => v}  ONE argument: `{k: v}`
+//
+// The braced and bracketed forms used to flatten. `macro_arg_item` turned `k => v` and
+// `k : v` into two positional arguments each, and its own comment justified that: "so a
+// macro body reads `$0`/`$1` for the first pair either way and no argument is dropped".
+// Both halves were false. `$0` is `syntax error, unexpected INTEGER, expecting
+// IDENTIFIER` -- an unquote is `DOLLAR IDENTIFIER` and SubstitutionVisitor keys on
+// parameter names, of which `0` can never be one -- so there was no spelling for the
+// arguments the flattening produced. And no argument was dropped but the *pairing* was:
+// `map!{"alex" => 10, "robot" => 20}` arrived as four expressions of two types, from
+// which no single-expression body can rebuild two pairs.
+//
+// The shape is not a convenience. It is what removes the need for repetition, fragment
+// specifiers and a block-expression form -- the three features `macro_definitions.fin`'s
+// commented sketch needs and Fin does not have. With it, both macros the corpus asks for
+// are one call each into a constructor that already exists:
+//
+//   @macro coll(items) { return quote { std.Collection::from_prototype($items); }; }
+//   @macro map(pairs)  { return quote { std.HashMap::from_prototype($pairs); };   }
+//
+// `Collection::from_prototype` takes `{int, T}` (lib/std/collection.fin:111), which is
+// exactly what a bracketed list supplies when the positions are the keys, and
+// prototype_test.fin:30 writes that prototype by hand today.
+//
+// Asserted through the types the argument checks against, because that is the only
+// reader of the expanded tree available from a process boundary -- `m![1,2,3]` against
+// `<{int, int}>` accepts and against `<{string, int}>` reports the keys. A test that
+// only checked "it parses" would have passed against the flattening too.
+// ===========================================================================
+
+TEST(Soundness_Macros, ABracketedCallArrivesAsOnePrototype) {
+    // ADR 0023 step 3's verification clause, first half, verbatim: "an `@macro m(p)`
+    // whose body is `$p` called as `m![1,2,3]` type-checks against `<{int, int}>`".
+    const auto r = compile("@macro m(p) { return quote { $p; }; }\n"
+                           "fun main() <noret> { let a <{int, int}> = m![1, 2, 3]; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABracedCallArrivesAsOnePrototype) {
+    // The second half: "and as `m!{\"a\" => 1}` against `<{string, int}>`".
+    const auto r = compile("@macro m(p) { return quote { $p; }; }\n"
+                           "fun main() <noret> { let a <{string, int}> = m!{\"a\" => 1}; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABracketedCallsKeysAreItsPositions) {
+    // The keys are `0..n-1` and not the items, which is the half that makes
+    // `coll![1,2,3]` reach a `{int, T}` parameter. Both directions, because "it built a
+    // prototype" and "it built the right one" are different claims: a shaper that used
+    // the items as their own keys would pass the test above for `m![1,2,3]`, where the
+    // items happen to be ints too.
+    const auto keyed = compile("@macro m(p) { return quote { $p; }; }\n"
+                              "fun main() <noret> { let a <{int, string}> = m![\"a\", \"b\"]; }\n");
+    EXPECT_EQ(keyed.exitCode, 0) << "the keys are the positions:\n" << stripAnsi(keyed.err);
+
+    const auto bad = compile("@macro m(p) { return quote { $p; }; }\n"
+                             "fun main() <noret> { let a <{string, string}> = m![\"a\", \"b\"]; }\n");
+    EXPECT_NE(bad.exitCode, 0) << "the items are not their own keys";
+    EXPECT_EQ(errorCount(stripAnsi(bad.err)), 2u)
+        << "one per position, reported at the position:\n" << stripAnsi(bad.err);
+}
+
+TEST(Soundness_Macros, BothPairSeparatorsAreAcceptedInABracedCall) {
+    // `k => v` is what useful_macros.fin:8-9 writes; `k : v` is the prototype literal's
+    // own spelling (prototype_test.fin:27). A call whose argument *is* a prototype must
+    // not disagree with a prototype literal about how a pair is written, and the
+    // flattening accepted both too -- this is the case that says the replacement did not
+    // narrow the grammar on its way past.
+    const auto arrow = compile("@macro m(p) { return quote { $p; }; }\n"
+                               "fun main() <noret> { let a <{int, string}> = m!{1 => \"x\"}; }\n");
+    EXPECT_EQ(arrow.exitCode, 0) << stripAnsi(arrow.err);
+
+    const auto colon = compile("@macro m(p) { return quote { $p; }; }\n"
+                               "fun main() <noret> { let a <{int, string}> = m!{1 : \"x\"}; }\n");
+    EXPECT_EQ(colon.exitCode, 0) << stripAnsi(colon.err);
+}
+
+TEST(Soundness_Macros, ATrailingCommaIsAcceptedInBothBracketedForms) {
+    // useful_macros.fin:9 has a trailing comma inside `map!{ ... }`, and a prototype
+    // literal does not accept one (`{"a": 1,}` is `syntax error, unexpected RBRACE`).
+    // That inconsistency is the entire reason the node is hand-built in a parser action
+    // rather than reached through `prototype_literal`, so it is the thing to pin: if
+    // someone later routes the shaping through the literal, this goes red and names why.
+    const auto braced = compile("@macro m(p) { return quote { $p; }; }\n"
+                                "fun main() <noret> { let a <{string, int}> = m!{\"a\" => 1,}; }\n");
+    EXPECT_EQ(braced.exitCode, 0) << stripAnsi(braced.err);
+
+    const auto bracketed = compile("@macro m(p) { return quote { $p; }; }\n"
+                                   "fun main() <noret> { let a <{int, int}> = m![1, 2,]; }\n");
+    EXPECT_EQ(bracketed.exitCode, 0) << stripAnsi(bracketed.err);
+}
+
+TEST(Soundness_Macros, TheTrailingCommaAsymmetryWithAPrototypeLiteralIsRecorded) {
+    // The other side of the case above, asserted rather than left as a comment. ADR 0023
+    // lists this under what it does not solve -- "the prototype trailing-comma
+    // inconsistency stays" -- and a recorded asymmetry that nothing measures is how a
+    // reader ends up believing the grammar is uniform. When a corpus site asks for a
+    // trailing comma in a literal, this is the test that says which of the two spellings
+    // moved.
+    const auto r = compile("fun main() <noret> { let a <{int, int}> = {1 : 2,}; }\n");
+    EXPECT_NE(r.exitCode, 0) << "a prototype literal still refuses one";
+    EXPECT_NE(stripAnsi(r.err).find("unexpected RBRACE"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, AShapedArgumentIsOneArgumentForArity) {
+    // The arity count is what a flattening would have gotten wrong most visibly, and it
+    // is the check a macro body can actually rely on. `two![1, 2]` passes ONE argument to
+    // a two-parameter macro, so it is refused -- under the flattening it was accepted,
+    // and the body then read two unrelated expressions as if they were a pair.
+    const auto one = compile("@macro two(a, b) { return quote { $a; }; }\n"
+                             "fun main() <noret> { let x <int> = two![1, 2]; }\n");
+    EXPECT_NE(one.exitCode, 0);
+    EXPECT_NE(stripAnsi(one.err).find("expects exactly 2 args, got 1"), std::string::npos)
+        << stripAnsi(one.err);
+
+    // And the braced form with two pairs is still one argument, not four. Four is the
+    // number the old flattening produced for exactly this text, which is what made
+    // `map!` unwritable: `@macro map(pairs)` was refused for arity, and a four-parameter
+    // macro could not rebuild the pairing.
+    const auto four = compile("@macro four(a, b, c, d) { return quote { $a; }; }\n"
+                              "fun main() <noret> { let x <int> = four!{\"a\" => 1, \"b\" => 2}; }\n");
+    EXPECT_NE(four.exitCode, 0);
+    EXPECT_NE(stripAnsi(four.err).find("expects exactly 4 args, got 1"), std::string::npos)
+        << stripAnsi(four.err);
+}
+
+TEST(Soundness_Macros, TheShapedArgumentReachesAPrototypeParameterThroughTheBody) {
+    // The whole point, end to end: the two macros ADR 0023 says the corpus needs are one
+    // call each into a `from_prototype`, with the shaped argument forwarded by `$p`. The
+    // constructor here is a local stand-in for `Collection::from_prototype` so the case
+    // needs no library import, and the parameter type is the real one --
+    // lib/std/collection.fin:111 takes `{int, T}`.
+    const auto positional = compile(
+        "fun from_prototype(p: {int, string}) <int> { return 0; }\n"
+        "@macro coll(items) { return quote { from_prototype($items); }; }\n"
+        "fun main() <noret> { let n <int> = coll![\"a\", \"b\"]; }\n");
+    EXPECT_EQ(positional.exitCode, 0) << stripAnsi(positional.err);
+
+    const auto keyed = compile(
+        "fun from_prototype(p: {string, int}) <int> { return 0; }\n"
+        "@macro map(pairs) { return quote { from_prototype($pairs); }; }\n"
+        "fun main() <noret> { let n <int> = map!{\"alex\" => 10, \"robot\" => 20,}; }\n");
+    EXPECT_EQ(keyed.exitCode, 0) << stripAnsi(keyed.err);
+}
+
+TEST(Soundness_Macros, ADiagnosticAboutTheArgumentUnderlinesTheBracketedListAndNotTheName) {
+    // The location handed to the literal is the bracketed span and not `@$`, which would
+    // start at the macro's name. A reader who is told `got '<{int, int}>'` needs the caret
+    // on the thing that has that type; `m!` underlined with it says the call is wrong
+    // rather than the argument.
+    const auto r = compile("// line 1\n"
+                           "@macro m(p) { return quote { $p; }; }\n"
+                           "fun main() <noret> { let a <int> = m![7, 8]; }\n");
+    EXPECT_NE(r.exitCode, 0);
+    const std::string err = stripAnsi(r.err);
+    // Column 38 is the `[`, which is where `@3` starts. The macro name begins at 36.
+    EXPECT_NE(err.find(":3:38"), std::string::npos)
+        << "the caret starts at the bracket, not at the name:\n" << err;
+    EXPECT_NE(err.find("^^^^^^ here"), std::string::npos)
+        << "and spans `[7, 8]`, six characters:\n" << err;
+}
+
+TEST(Soundness_Macros, AnEmptyShapedCallCannotInferItsTypesAndSaysSo) {
+    // `m![]` and `m!{}` are the only way to write an empty prototype literal: `{}` is
+    // `syntax error, unexpected RBRACE` in the language proper, because
+    // `prototype_elements` requires at least one entry. Bracket shaping builds the node
+    // directly, so it can build an empty one, and ADR 0023 lists this under what it does
+    // not solve -- "an empty collection literal has no expansion target" -- predicting a
+    // syntax error at the call.
+    //
+    // What happened instead was silence. Both halves of the type fell through to the
+    // sentinel, which absorbs every subsequent comparison, so `let a <string> = m![];`
+    // compiled clean: an untyped value assignable to anything, which is the category the
+    // plan puts first. The sentinel is right for an element that *failed to type* and
+    // wrong for a literal that is merely empty, and this is the case that separates them.
+    const auto unannotated = compile("@macro m(p) { return quote { $p; }; }\n"
+                                     "fun main() <noret> { let a <string> = m![]; }\n");
+    EXPECT_NE(unannotated.exitCode, 0) << "an empty prototype fits nothing on its own";
+    EXPECT_NE(stripAnsi(unannotated.err).find("Empty prototype literal cannot infer"),
+              std::string::npos)
+        << stripAnsi(unannotated.err);
+
+    const auto braced = compile("@macro m(p) { return quote { $p; }; }\n"
+                                "fun main() <noret> { let a <int> = m!{}; }\n");
+    EXPECT_NE(braced.exitCode, 0) << stripAnsi(braced.err);
+}
+
+TEST(Soundness_Macros, AnEmptyShapedCallTakesItsTypesFromTheAnnotation) {
+    // The other direction, and the same rule the empty array literal has: the annotation
+    // is the only thing that can say what an empty container holds, and when one says it
+    // the literal is that type. Without this half, the refusal above would just be a ban
+    // on the empty form.
+    const auto annotated = compile("@macro m(p) { return quote { $p; }; }\n"
+                                   "fun main() <noret> { let a <{int, int}> = m![]; }\n");
+    EXPECT_EQ(annotated.exitCode, 0) << stripAnsi(annotated.err);
+
+    // And through a parameter rather than a `let`, which is the shape `coll![]` takes.
+    const auto viaParam = compile(
+        "fun from_prototype(p: {int, string}) <int> { return 0; }\n"
+        "@macro coll(items) { return quote { from_prototype($items); }; }\n"
+        "fun main() <noret> { let n <int> = coll![]; }\n");
+    EXPECT_EQ(viaParam.exitCode, 0) << stripAnsi(viaParam.err);
+}
+
+TEST(Soundness_Macros, AParenthesisedCallIsStillPositional) {
+    // The control on the reach of the shaping: `name!(a, b)` is two arguments and stays
+    // two. A shaper that keyed on `!` rather than on the bracket would make every macro
+    // one-parameter, and every test above would still pass.
+    const auto r = compile("@macro two(a, b) { return quote { $a + $b; }; }\n"
+                           "fun main() <noret> { let x <int> = two!(1, 2); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, AShapedCallIsReachableWhereABareBraceWouldBeABlock) {
+    // `no_struct_expression` is the half of the grammar used where a `{` would open a
+    // block -- an `if`/`while` condition, a `for` header. Both shaped forms have to work
+    // there too, because a macro call is not a struct instantiation and there is nothing
+    // ambiguous about `!` followed by a bracket.
+    const auto r = compile(
+        "fun g(p: {int, int}) <bool> { return true; }\n"
+        "@macro m(p) { return quote { $p; }; }\n"
+        "fun main() <noret> {\n"
+        "  if (g(m![1, 2])) { }\n"
+        "  while (g(m!{3 : 4})) { break; }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ASpreadReachesAMacroCallInANoStructPosition) {
+    // The two copies of the parenthesised macro-call production had drifted: `expression`
+    // used `arguments` and `no_struct_expression` used a macro-specific list that had no
+    // spread in it, so `format!(fmt, ...objects)` -- which is
+    // tests/samples/stdlib/stdio.fin:36 exactly -- was a syntax error in an `if`
+    // condition and legal on the right of an `=`. One production reachable from two
+    // places must not be two grammars.
+    const auto r = compile(
+        "@macro mk(fmt, rest...) { return quote { $fmt; }; }\n"
+        "fun f(fmt: bool, ...objects: [int]) <noret> {\n"
+        "  while (mk!(fmt, ...objects)) { break; }\n"
+        "  for (i: int = 0; mk!(fmt, ...objects); i++) { break; }\n"
+        "}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, AShapedArgumentNestsInsideAnother) {
+    // A shaped argument is an ordinary expression once built, so one nests in another.
+    // Worth a case because the two shapers are separate productions calling separate
+    // helpers, and a value position that took only a primary expression would have
+    // passed everything above.
+    const auto r = compile(
+        "@macro m(p) { return quote { $p; }; }\n"
+        "fun main() <noret> { let a <{string, {int, int}}> = m!{\"k\" => m![7, 8]}; }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }

@@ -301,7 +301,36 @@ void SemanticAnalyzer::visit(PrototypeLiteral& node) {
     // And once a side is the sentinel it stays the sentinel: the widening below must not
     // overwrite it, or `{ nosuchvar : 1, 5 : 2 }` would see `<error>` and `int` disagree,
     // widen to `object`, and put the cascade back with a different type in it.
+
+    // An empty literal, which `m![]` and `m!{}` are the only way to write. There is no
+    // spelling for one in the language proper -- `{}` is `syntax error, unexpected
+    // RBRACE`, because `prototype_elements` requires at least one entry -- and ADR 0023
+    // step 3's bracket-shaping productions build the node directly rather than through
+    // that nonterminal, precisely so they can accept a trailing comma, which is also
+    // what lets them build one with nothing in it.
     //
+    // Same rule as the empty array literal at the sibling container: the annotation is
+    // the only thing that can say what an empty container holds, and without one there
+    // is nothing to infer from. What must *not* happen is the sentinel, which is what
+    // happened before this branch existed. It is the right answer for an element that
+    // failed to type, because absorbing the second comparison is exactly what is wanted
+    // there -- and it is the wrong answer for a literal that is merely empty, because
+    // absorbing the comparison is then the whole diagnostic: `let a <string> = m![];`
+    // compiled clean and reported nothing, an untyped value assignable to anything.
+    //
+    // ADR 0023 predicted a syntax error at the call for this case ("the failure mode is
+    // honest either way") and building the node directly gave silence instead, so the
+    // honesty is owed here.
+    if (node.elements.empty()) {
+        if (!wantedKey || !wantedValue) {
+            error(node, "Empty prototype literal cannot infer its key and value types.");
+            lastExprType = nullptr;
+            return;
+        }
+        lastExprType = std::make_shared<PrototypeType>(wantedKey, wantedValue);
+        return;
+    }
+
     // Each half is offered its type and then checked against it, at the entry, so the
     // caret lands on the key or the value that is wrong rather than on the brace. Where
     // nothing offered one the widening below is exactly what it always was.
@@ -329,8 +358,11 @@ void SemanticAnalyzer::visit(PrototypeLiteral& node) {
         else if (!vType->equals(*valueType)) valueType = currentScope->resolveType("object");
     }
 
-    // Unreachable while `{}` is a syntax error (`unexpected RBRACE`), and a total guard
-    // rather than an assertion because the parser is the only thing keeping it that way.
+    // Unreachable, and now for a reason that does not depend on the grammar: the
+    // empty-literal branch above returns, and every entry sets both halves to something
+    // non-null (an element that did not type becomes the sentinel rather than nothing).
+    // It stays as a total guard rather than an assertion because it costs one branch.
+    //
     // It is the sentinel and not a fabricated `PrimitiveType("any")`, which is what
     // stood here: `any` is a registered DynamicType now, so a hand-built primitive of
     // the same spelling would print as `any` and behave as none of it.

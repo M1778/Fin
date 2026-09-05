@@ -60,6 +60,53 @@
         return {};
     }
 
+    // The single argument a braced or bracketed macro call passes (ADR 0023).
+    //
+    // `name!{k => v}` and `name![a, b]` each arrive as ONE `PrototypeLiteral`, not as a
+    // flattened run of positional expressions. The flattening these replace justified
+    // itself in its own comment -- "so a macro body reads `$0`/`$1` for the first pair
+    // either way and no argument is dropped" -- and both halves of that were wrong. `$0`
+    // is `syntax error, unexpected INTEGER, expecting IDENTIFIER`, because an unquote is
+    // `DOLLAR IDENTIFIER` and `SubstitutionVisitor` keys on parameter names, of which `0`
+    // can never be one. And while no argument was dropped, the *pairing* was:
+    // `map!{"alex" => 10, "robot" => 20}` arrived as four expressions of two types, from
+    // which no single-expression body can rebuild two pairs.
+    //
+    // What the shape buys is that `coll!` and `map!` need no repetition, no block
+    // expression and no invented library name -- one call each, into the two
+    // `from_prototype` constructors the corpus already writes at
+    // tests/samples/prototype_test.fin:27 and :30.
+    std::vector<std::unique_ptr<fin::Expression>> one_prototype_arg(
+            std::vector<std::pair<std::unique_ptr<fin::Expression>,
+                                  std::unique_ptr<fin::Expression>>> elements,
+            const fin::location& loc) {
+        auto proto = std::make_unique<fin::PrototypeLiteral>(std::move(elements));
+        proto->setLoc(loc);
+        std::vector<std::unique_ptr<fin::Expression>> args;
+        args.push_back(std::move(proto));
+        return args;
+    }
+
+    // The bracketed form's keys are its positions. `coll![1,2,3,4,5]` is
+    // `{0: 1, 1: 2, 2: 3, 3: 4, 4: 5}`, which is exactly what
+    // `Collection::from_prototype` takes -- `{int, T}`, lib/std/collection.fin:111 --
+    // and what prototype_test.fin:30 writes by hand. Each key literal carries the
+    // element's own location, so a diagnostic about the third entry points at the third
+    // entry rather than at the bracket.
+    std::vector<std::unique_ptr<fin::Expression>> positional_prototype_arg(
+            std::vector<std::unique_ptr<fin::Expression>> items,
+            const fin::location& loc) {
+        std::vector<std::pair<std::unique_ptr<fin::Expression>,
+                              std::unique_ptr<fin::Expression>>> elements;
+        for (size_t i = 0; i < items.size(); ++i) {
+            auto key = std::make_unique<fin::Literal>(std::to_string(i),
+                                                      fin::ASTTokenKind::INTEGER);
+            if (items[i]) key->setLoc(items[i]->loc);
+            elements.push_back({std::move(key), std::move(items[i])});
+        }
+        return one_prototype_arg(std::move(elements), loc);
+    }
+
     // Moves an attribute list onto a declaration. Silent when the node has no
     // attribute field, which is the pre-existing behaviour of the chain this
     // replaces.
@@ -280,7 +327,8 @@
 
 /* Control Flow */
 %type <std::unique_ptr<fin::TypeNode>> implements_opt
-%type <std::vector<std::unique_ptr<fin::Expression>>> macro_arg_item macro_arg_list_body macro_arguments
+%type <std::vector<std::unique_ptr<fin::Expression>>> macro_list_items macro_list_body
+%type <std::vector<std::pair<std::unique_ptr<fin::Expression>, std::unique_ptr<fin::Expression>>>> macro_dict_elements macro_dict_body
 %type <std::unique_ptr<fin::Statement>> if_statement while_loop for_loop foreach_loop try_catch_statement blame_statement return_statement expression_statement
 %type <std::unique_ptr<fin::Statement>> control_statement delete_statement
 
@@ -2386,24 +2434,34 @@ expression:
        existed only in `no_struct_expression`, the half of the grammar used where a
        bare `{` would be a block, so a dict-shaped macro was a syntax error in every
        initialiser: "unexpected LBRACE, expecting LPAREN". No ambiguity with struct
-       instantiation, which is `IDENTIFIER LBRACE` with no `!`. */
-    | expression NOT LBRACE macro_arguments RBRACE {
+       instantiation, which is `IDENTIFIER LBRACE` with no `!`.
+
+       Each passes ONE prototype argument (ADR 0023) -- see `one_prototype_arg` in the
+       prologue for why the pairing is kept rather than flattened. The location handed
+       to the literal is the bracketed span (@3 through @5), not @$: @$ would start at
+       the macro's name, so a diagnostic about the argument would point at `map!` and
+       underline the whole call. */
+    | expression NOT LBRACE macro_dict_elements RBRACE {
         std::string name = flatten_macro_name($1.get());
         if (name.empty()) {
             error(@1, "Invalid macro name");
             $$ = nullptr;
         } else {
-            $$ = std::make_unique<fin::MacroInvocation>(name, std::move($4));
+            fin::location span = @3; span.end = @5.end;
+            $$ = std::make_unique<fin::MacroInvocation>(
+                name, one_prototype_arg(std::move($4), span));
             $$->setLoc(@$);
         }
     }
-    | expression NOT LBRACKET macro_arguments RBRACKET {
+    | expression NOT LBRACKET macro_list_items RBRACKET {
         std::string name = flatten_macro_name($1.get());
         if (name.empty()) {
             error(@1, "Invalid macro name");
             $$ = nullptr;
         } else {
-            $$ = std::make_unique<fin::MacroInvocation>(name, std::move($4));
+            fin::location span = @3; span.end = @5.end;
+            $$ = std::make_unique<fin::MacroInvocation>(
+                name, positional_prototype_arg(std::move($4), span));
             $$->setLoc(@$);
         }
     }
@@ -2612,7 +2670,12 @@ no_struct_expression:
         $$->setLoc(@$);
     }
 
-    | no_struct_expression NOT LPAREN macro_arguments RPAREN {
+    /* `arguments` and not a macro-specific list, which is what the `expression` copy
+       of this production above always used. The two spellings had drifted: this one
+       could not carry `format!(fmt, ...objects)` -- tests/samples/stdlib/stdio.fin:36,
+       inside an `if` condition or any other no-struct position -- because the spread
+       lives in `expression_list`. */
+    | no_struct_expression NOT LPAREN arguments RPAREN {
         std::string name = flatten_macro_name($1.get());
         if (name.empty()) {
             error(@1, "Invalid macro name");
@@ -2622,23 +2685,27 @@ no_struct_expression:
             $$->setLoc(@$);
         }
     }
-    | no_struct_expression NOT LBRACE macro_arguments RBRACE {
+    | no_struct_expression NOT LBRACE macro_dict_elements RBRACE {
         std::string name = flatten_macro_name($1.get());
         if (name.empty()) {
             error(@1, "Invalid macro name");
             $$ = nullptr;
         } else {
-            $$ = std::make_unique<fin::MacroInvocation>(name, std::move($4));
+            fin::location span = @3; span.end = @5.end;
+            $$ = std::make_unique<fin::MacroInvocation>(
+                name, one_prototype_arg(std::move($4), span));
             $$->setLoc(@$);
         }
     }
-    | no_struct_expression NOT LBRACKET macro_arguments RBRACKET {
+    | no_struct_expression NOT LBRACKET macro_list_items RBRACKET {
         std::string name = flatten_macro_name($1.get());
         if (name.empty()) {
             error(@1, "Invalid macro name");
             $$ = nullptr;
         } else {
-            $$ = std::make_unique<fin::MacroInvocation>(name, std::move($4));
+            fin::location span = @3; span.end = @5.end;
+            $$ = std::make_unique<fin::MacroInvocation>(
+                name, positional_prototype_arg(std::move($4), span));
             $$->setLoc(@$);
         }
     }
@@ -2899,42 +2966,68 @@ expression_list:
     }
     ;
 
-macro_arg_item:
-    expression {
-        std::vector<std::unique_ptr<fin::Expression>> v;
-        v.push_back(std::move($1));
+/* The braced macro call's entries, as pairs. Both separators are accepted:
+   `k => v` is what tests/samples/useful_macros.fin:8-9 writes and `k : v` is the
+   prototype literal's own spelling (prototype_test.fin:27), and a macro call whose
+   argument IS a prototype should not disagree with a prototype literal about how a
+   pair is written.
+
+   A trailing comma is allowed here and is not allowed in a prototype literal
+   (`{"a": 1,}` is `syntax error, unexpected RBRACE`), which is the one reason the
+   node is built by hand in the prologue rather than reached through
+   `prototype_literal`: useful_macros.fin:9 has that trailing comma. Whoever makes the
+   literal accept one can delete `macro_dict_body` and this note with it.
+
+   Empty is accepted -- `m!{}` -- and produces a prototype literal with no entries.
+   The analyzer types that from its hint or reports that it cannot; nothing here needs
+   to know which. */
+macro_dict_elements:
+    macro_dict_body { $$ = std::move($1); }
+    | macro_dict_body COMMA { $$ = std::move($1); }
+    | %empty {
+        $$ = std::vector<std::pair<std::unique_ptr<fin::Expression>,
+                                   std::unique_ptr<fin::Expression>>>();
+    }
+    ;
+
+macro_dict_body:
+    macro_dict_body COMMA expression ARROW expression {
+        $1.push_back({std::move($3), std::move($5)}); $$ = std::move($1);
+    }
+    | macro_dict_body COMMA expression COLON expression {
+        $1.push_back({std::move($3), std::move($5)}); $$ = std::move($1);
+    }
+    | expression ARROW expression {
+        std::vector<std::pair<std::unique_ptr<fin::Expression>,
+                              std::unique_ptr<fin::Expression>>> v;
+        v.push_back({std::move($1), std::move($3)});
         $$ = std::move(v);
     }
     | expression COLON expression {
-        std::vector<std::unique_ptr<fin::Expression>> v;
-        v.push_back(std::move($1));
-        v.push_back(std::move($3));
-        $$ = std::move(v);
-    }
-    /* `"alex" => 10` inside a macro call -- tests/samples/useful_macros.fin:6-7.
-       The pair is flattened into two arguments, exactly as the `key: value` form
-       above it already is, so a macro body reads `$0`/`$1` for the first pair
-       either way and no argument is dropped. */
-    | expression ARROW expression {
-        std::vector<std::unique_ptr<fin::Expression>> v;
-        v.push_back(std::move($1));
-        v.push_back(std::move($3));
+        std::vector<std::pair<std::unique_ptr<fin::Expression>,
+                              std::unique_ptr<fin::Expression>>> v;
+        v.push_back({std::move($1), std::move($3)});
         $$ = std::move(v);
     }
     ;
 
-macro_arg_list_body:
-    macro_arg_list_body COMMA macro_arg_item {
-        for(auto& e : $3) $1.push_back(std::move(e));
-        $$ = std::move($1);
-    }
-    | macro_arg_item { $$ = std::move($1); }
-    ;
-
-macro_arguments:
-    macro_arg_list_body { $$ = std::move($1); }
-    | macro_arg_list_body COMMA { $$ = std::move($1); }
+/* The bracketed macro call's items, positionally. A trailing comma for the same
+   reason as above; `coll![1,2,3,4,5]` (useful_macros.fin:12) does not write one but
+   `m![1,2,]` is the same shape as the braced form and refusing it here would be an
+   asymmetry with no reason behind it. */
+macro_list_items:
+    macro_list_body { $$ = std::move($1); }
+    | macro_list_body COMMA { $$ = std::move($1); }
     | %empty { $$ = std::vector<std::unique_ptr<fin::Expression>>(); }
+    ;
+
+macro_list_body:
+    macro_list_body COMMA expression { $1.push_back(std::move($3)); $$ = std::move($1); }
+    | expression {
+        std::vector<std::unique_ptr<fin::Expression>> v;
+        v.push_back(std::move($1));
+        $$ = std::move(v);
+    }
     ;
 
 field_assignments:
