@@ -869,6 +869,33 @@ void SemanticAnalyzer::visit(ImportModule& node) {
                 currentScope->defineType(target, type); // Copy type
                 found = true;
             }
+            // And the third table. A `Scope` has three maps -- `symbols`, `types`,
+            // `macros` -- and this check read two of them, so `import { magic_add } from
+            // "sub/mymacros.fin";` reported `does not export 'magic_add'` about a macro
+            // the module does export and the *expander* had already bound
+            // (ExpanderDecls.cpp, the same named-import case). Two passes disagreed and
+            // the analyzer won, so a program whose macro expanded correctly was rejected
+            // for importing it.
+            //
+            // A macro carries no visibility marker -- `pub @macro` is `syntax error,
+            // unexpected AT` -- so "declared in this module" is the only export rule
+            // available and nothing narrower is expressible. ADR 0023 rules that a named
+            // import carries a macro, on the ground that the expander already does the
+            // work and there is no argument for the asymmetry.
+            //
+            // Defined into this scope's macro map rather than only counted as found. The
+            // analyzer never reads it -- expansion is a finished pass by the time this
+            // runs -- but a scope that answered `resolveMacro` differently from the one
+            // the expander built is the disagreement above with the sides swapped.
+            //
+            // `import * from m` is not covered here and is not an oversight: the expander
+            // does not carry macros through a star either (its named-import case looks up
+            // a target literally named `*`), and ADR 0023 rules only on the named form.
+            // Whoever rules the star changes both passes together.
+            if (auto* macro = moduleScope->resolveMacro(target)) {
+                currentScope->defineMacro(target, macro);
+                found = true;
+            }
             if (!found) error(node, "Module '" + node.source + "' does not export '" + target + "'");
             allBound = allBound && found;
         }

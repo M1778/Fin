@@ -1523,20 +1523,47 @@ private:
     fs::path libs_;
 };
 
-// One module, two kinds of declaration, one of them not public. `inner` exists so
+// One module, three kinds of declaration, one of them not public. `inner` exists so
 // that what `m` re-exports can be told apart from what `m` declares.
+//
+// Two macros, because a `Scope` has three maps -- `symbols`, `types`, `macros` -- and
+// the import cases below are about which of them an import reads. One macro would say
+// whether a named import finds anything; two say whether it finds *the one it names*,
+// which is the assertion that separates reading the third map from copying it.
+// No `pub` on either: `pub @macro` is `syntax error, unexpected AT`, so "declared in
+// this module" is the only export rule a macro can express (ADR 0023).
 const std::vector<std::pair<std::string, std::string>> kStarLibs = {
     {"inner.fin", "pub fun inner_fn() <int> { return 7; }\n"
                   "pub struct InnerType { pub v <int>, }\n"},
     {"m.fin",     "import { inner_fn } from inner;\n"
                   "pub fun m_fn() <int> { return 1; }\n"
                   "fun m_private() <int> { return 2; }\n"
-                  "pub struct MType { pub v <int>, }\n"},
+                  "pub struct MType { pub v <int>, }\n"
+                  "@macro m_twice(v) { return quote { $v + $v; }; }\n"
+                  "@macro m_thrice(v) { return quote { $v + $v + $v; }; }\n"},
 };
 
 FincRun runStar(const std::string& appBody) {
     TempLibSet p(appBody, kStarLibs);
     return runFinc({p.app(), "--fin-libs=" + p.libs()}, noFinLibs());
+}
+
+// Just the diagnostic messages, one per line. test_soundness.cpp keeps the same
+// helper under the same name and for the same reason: every rendered diagnostic
+// echoes the source line it points at, so a substring search over raw stderr finds
+// the *program's* text as readily as the compiler's. A test asserting that a name is
+// not implicated cannot be written against the raw output at all -- the name is in the
+// echoed line, one row above the caret.
+std::string messagesOnly(const std::string& stripped) {
+    std::string out;
+    for (size_t i = 0; i < stripped.size();) {
+        size_t eol = stripped.find('\n', i);
+        if (eol == std::string::npos) eol = stripped.size();
+        if (stripped.compare(i, 7, "error: ") == 0 || stripped.compare(i, 9, "warning: ") == 0)
+            out.append(stripped, i, eol - i).append("\n");
+        i = eol + 1;
+    }
+    return out;
 }
 
 } // namespace
@@ -1622,6 +1649,117 @@ TEST(Soundness_Imports, ImportStarFromAMissingModuleReportsTheModule) {
     const std::string err = stripAnsi(r.err);
     EXPECT_NE(r.exitCode, 0);
     EXPECT_NE(err.find("module not found: nosuchmod"), std::string::npos) << err;
+}
+
+// --- The third map -----------------------------------------------------------
+//
+// `Scope` keeps values in `symbols`, types in `types` and macros in `macros`, and the
+// export check read the first two. So `import { m_twice } from m;` reported
+// `Module 'm' does not export 'm_twice'` about a macro the module does export -- and
+// one the *macro expander* had already bound, through its own copy of this same
+// named-import case (ExpanderDecls.cpp). Two passes disagreed about what a module
+// exports and the analyzer won, so a program whose macro expanded correctly was
+// rejected for importing it.
+//
+// The ruling is ADR 0023's: a named import carries a macro, because the expander
+// already does the work and there is no argument for the asymmetry. It also settles
+// half of docs/plan.md's "should a named import or `import *` carry macros?" -- the
+// named half, yes; the star half is the KnownDefect below.
+//
+// These sit beside the star tests rather than in test_stdlib.cpp because they are the
+// same question about the same function, and the split the star tests were written
+// against is the point: copying one map is a complete-looking fix that leaves the
+// others broken, and that argument now runs three ways rather than two.
+
+TEST(Soundness_Imports, ANamedImportBindsTheMacroItNames) {
+    const auto r = runStar("import { m_twice } from m;\n"
+                           "fun main() <noret> { let x <int> = m_twice!(4); }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "a module exports its macros by declaring them, and a named import must find\n"
+           "one: before this, the export check read two of `Scope`'s three maps\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Imports, ANamedImportOfAMacroDoesNotBlameTheCall) {
+    // The cascade, asserted separately for the reason the star version of this test
+    // gives: what a user reports is not "the import form is unimplemented" but "the
+    // compiler says my macro is undefined". A fix that silenced the export message
+    // without binding anything would leave this red.
+    //
+    // Both spellings, because they come from different passes and mean different
+    // things: `does not export` is the analyzer's export check, `Undefined macro` is
+    // the expander failing to resolve the call. Before the fix only the first appeared
+    // -- the expander binds the macro through its own named-import case, so the call
+    // expanded fine and the import was refused anyway, which is the disagreement in
+    // one program.
+    const auto r = runStar("import { m_twice } from m;\n"
+                           "fun main() <noret> { let x <int> = m_twice!(4); }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(err.find("does not export 'm_twice'"), std::string::npos)
+        << "the macro is declared in `m`, so `m` exports it\n" << err;
+    EXPECT_EQ(err.find("Undefined macro 'm_twice!'"), std::string::npos)
+        << "the import bound the macro and then the call was blamed for it\n" << err;
+}
+
+TEST(Soundness_Imports, ANamedImportOfAMacroBindsOnlyTheOneItNames) {
+    // Reading the third map, not copying it. `m` declares two macros and this imports
+    // one, so `m_thrice` must stay unresolved -- an implementation that merged the
+    // module's `macros` wholesale would pass every other case here and quietly make
+    // every macro in a module reachable through an import of any one of them.
+    //
+    // The expander is what enforces this half, and that it already does is the
+    // measurement: the analyzer's binding is a second copy of a fact the expander
+    // holds, so this is the case that says the two now agree rather than the analyzer
+    // having become the looser of the two.
+    const auto r = runStar("import { m_twice } from m;\n"
+                           "fun main() <noret> { let x <int> = m_twice!(4); "
+                           "let y <int> = m_thrice!(4); }\n");
+    const std::string msgs = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(msgs.find("Undefined macro 'm_thrice!'"), std::string::npos)
+        << "a named import binds the names it names\n" << msgs;
+    // Against the messages and not the raw output: both calls are on one line, so the
+    // echoed source under the caret names `m_twice` whatever the compiler thinks of it.
+    EXPECT_EQ(msgs.find("m_twice"), std::string::npos)
+        << "the macro that was imported must not be implicated\n" << msgs;
+}
+
+TEST(Soundness_Imports, ANameNoMapHasIsStillReportedAsUnexported) {
+    // The refusal has to survive the fix. Three lookups now answer "found", and a
+    // check whose last branch stopped saying no would turn every misspelled import
+    // into silence followed by an `Undefined ...` at each use -- the cascade the star
+    // tests above exist to keep out.
+    const auto r = runStar("import { m_nope } from m;\n"
+                           "fun main() <noret> {}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(err.find("Module 'm' does not export 'm_nope'"), std::string::npos) << err;
+}
+
+TEST(KnownDefect_Imports, ImportStarDoesNotBindAMacro) {
+    // The other half of plan.md's question, and it is booked rather than fixed because
+    // the two passes agree here: the expander's star case does not carry macros either
+    // (its named-import loop looks up a target literally named `*`), so both passes say
+    // no and nothing disagrees. ADR 0023 rules on the named form only.
+    //
+    // Not a one-line change, which is why it is not made here. The analyzer's star
+    // branch copies a name only when this scope does not already have one -- explicit
+    // beats wildcard, ImportStarDoesNotShadowTheImportersOwnDeclaration -- and `Scope`
+    // has no `resolveMacro`-shaped guard to write the same rule against a macro without
+    // ruling what happens when a file declares a macro the star would bring in. And
+    // whoever rules it has to move the expander in the same commit: a star that bound
+    // macros in the analyzer alone would report `Undefined macro` from the expander on
+    // a program the analyzer had just accepted, which is the defect this file's
+    // Soundness_Imports block was written about, with the sides swapped.
+    const auto r = runStar("import * from m;\n"
+                           "fun main() <noret> { let x <int> = m_twice!(4); }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("Undefined macro 'm_twice!'"), std::string::npos)
+        << "GOOD NEWS: `import *` now carries macros. Check that the *expander* carries\n"
+           "them too -- if only the analyzer does, a call still fails to expand and the\n"
+           "two passes disagree again. Then invert this into\n"
+           "Soundness_Imports.ImportStarBindsEveryMacroTheModuleDeclares.\n"
+        << err;
 }
 
 // Two holes in the same function, both real, neither fixable without a ruling.

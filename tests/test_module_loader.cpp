@@ -311,3 +311,34 @@ TEST(ModuleLoader, AnImportOfASymbolTheModuleDoesNotExportIsNotConsumed) {
     EXPECT_EQ(r.importsAfter, 1)
         << "one unexported name leaves the whole import in the tree";
 }
+
+TEST(ModuleLoader, ANamedImportOfAMacroIsConsumedAndLeavesTheTree) {
+    // The export check reads a `Scope`'s macro map, and this is the case that says so
+    // with no macro expander in the run at all. `analyzeWithLoader` builds a
+    // SemanticAnalyzer and nothing else; the module's own macros are in its scope
+    // because `ModuleLoader::loadModule` expands the module it loads (step 6) and
+    // merges `macroScope->macros` into the scope it publishes (step 8). So the only
+    // thing under test here is the root file's import, and before the fix it reported
+    // `Module 'lib' does not export 'doubled'` -- about a macro the module does export,
+    // and one the *expander* binds through the same named-import case
+    // (ExpanderDecls.cpp). Two passes disagreed and the analyzer won, so a program
+    // whose macro expanded correctly was rejected for importing it.
+    //
+    // The consumption half is not decoration. `node.consumed` is `allBound`, so a
+    // refused name leaves the whole statement in the tree
+    // (AnImportOfASymbolTheModuleDoesNotExportIsNotConsumed, just above) -- which means
+    // a macro-only import used to reach the backend as an unconsumed statement as well
+    // as a diagnostic. Both halves move together and only if the macro is really found.
+    TempModuleDir d;
+    d.write("lib.fin", "@macro doubled(n) { return quote { $n + $n; }; }\n");
+
+    auto r = analyzeWithLoader("import { doubled } from lib;\n"
+                               "fun main() <noret> {}\n",
+                               d.path());
+    ASSERT_TRUE(r.parsed);
+    EXPECT_EQ(r.importsBefore, 1);
+    EXPECT_EQ(r.errorCount, 0)
+        << "a module exports its macros, and a named import must find one: a `Scope` has"
+           " three maps and this check read two of them";
+    EXPECT_EQ(r.importsAfter, 0);
+}
