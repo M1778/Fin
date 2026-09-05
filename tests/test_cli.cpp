@@ -1815,6 +1815,247 @@ TEST(KnownDefect_Imports, ANonPublicSymbolCanBeImportedByName) {
         << stripAnsi(r.err);
 }
 
+// --- A location from one file, rendered against another ----------------------
+//
+// finc died. Not "reported badly" -- aborted, with libstdc++'s
+// `Assertion '__pos <= size()' failed` on stderr and exit 134, on a two-file program
+// with nothing unusual in it: a library module declaring one macro, and a caller
+// importing it. ADR 0009 gives finc four exit codes and 134 is not one of them, so a
+// caller reading the status learned neither that the program compiled nor that it was
+// rejected -- and a `//@ unimplemented` expectation would have read it as
+// "unimplemented, as documented".
+//
+// The cause is one fact about the engine and one about `fin::location`. Expansion runs
+// before analysis (Driver.cpp:174-194), so a diagnostic about the *expansion* of a
+// macro declared elsewhere carries a location the module's own parse produced -- and a
+// location cannot say which file it came from, because `reset_lexer_location()` does
+// `loc.initialize(nullptr, 1, 1)` (lexer.l:34) and nothing ever sets the filename. The
+// root file's engine therefore renders a column belonging to the module against a line
+// belonging to the caller. When the caller's line is the shorter of the two,
+// `getPreviousWordLoc` began its backward word scan past the end of the line it was
+// scanning and indexed a `std::string` out of bounds.
+//
+// Not a macro bug and not new: the same shape reaches it through `import m;` plus
+// `m.c!(1)`, and it aborts at `f4952f1^`, before any of ADR 0023.
+//
+// This is why the existing coverage could not have caught it. Soundness_MachineContract
+// .NoSampleTerminatesTheCompilerBySignal sweeps every sample for precisely this and was
+// green throughout: a sample is one file, and this needs two. And it is not the bug
+// Soundness_ModuleDiagnostics.AnImportedModulesErrorPointsAtItsOwnLine fixed -- a
+// module's *own* body is analysed under a `DiagnosticEngine` of its own, holding its own
+// source, so those diagnostics render correctly. An expansion is spliced into the root's
+// AST and analysed in the root's pass, so the root's engine is the one holding the pen.
+//
+// Three claims, three tests, because they have three different fixes: that a verdict is
+// reached (fixed, below), that a location the engine cannot make sense of does not
+// produce a confident guess (fixed, below), and that the render names the right file
+// (still wrong, booked as the KnownDefect at the end of this block -- it needs a
+// location that carries its file, which is a change to the lexer and to every engine
+// that renders one, not to a bounds guard).
+
+namespace {
+
+// A library module and a caller that imports it, both written by the caller of this
+// helper: the geometry of the two files is what each test's claim rests on, so no test
+// here inherits it from a shared fixture.
+class TempMacroProject {
+public:
+    TempMacroProject(const std::string& moduleBody, const std::string& appBody) {
+        libs_ = uniqueTempPath("fin_macbody", "_libs");
+        proj_ = uniqueTempPath("fin_macbody", "_proj");
+        std::error_code ec;
+        fs::create_directories(libs_, ec);
+        fs::create_directories(proj_, ec);
+        std::ofstream(libs_ / "mac.fin", std::ios::binary) << moduleBody;
+        std::ofstream(proj_ / "app.fin", std::ios::binary) << appBody;
+    }
+    ~TempMacroProject() {
+        std::error_code ec;
+        fs::remove_all(libs_, ec);
+        fs::remove_all(proj_, ec);
+    }
+    std::string app() const { return (proj_ / "app.fin").string(); }
+    std::string libs() const { return libs_.string(); }
+
+private:
+    fs::path libs_;
+    fs::path proj_;
+};
+
+// `undeclared_name` is declared nowhere, so expanding the macro produces a diagnostic
+// located at that word -- at a column inside `mac.fin`.
+const char* kMacroNamingNothing =
+    "@macro names_nothing(v) { return quote { undeclared_name + $v; }; }\n";
+
+const char* kImportsThatMacro =
+    "import { names_nothing } from mac;\n"
+    "fun main() <noret> { let x <int> = names_nothing!(1); }\n";
+
+// 1-based column of a needle, and the length of the first line. The crash needs the
+// first to exceed the second; asserting that rather than assuming it is what stops
+// these tests from going quiet if either string above is ever edited.
+int columnOfNeedle(const std::string& text, const std::string& needle) {
+    const size_t at = text.find(needle);
+    return at == std::string::npos ? -1 : (int)at + 1;
+}
+int firstLineLength(const std::string& text) {
+    const size_t nl = text.find('\n');
+    return (int)(nl == std::string::npos ? text.size() : nl);
+}
+
+// The `= help:` rows only. The typo hint quotes the word it found, and that same word
+// is in the echoed source line one row above the caret, so a search over raw output
+// cannot tell the compiler's guess from the program's own text.
+std::string helpsOnly(const std::string& stripped) {
+    std::string out;
+    for (size_t i = 0; i < stripped.size();) {
+        size_t eol = stripped.find('\n', i);
+        if (eol == std::string::npos) eol = stripped.size();
+        const std::string row = stripped.substr(i, eol - i);
+        const size_t at = row.find_first_not_of(" \t");
+        if (at != std::string::npos && row.compare(at, 7, "= help:") == 0)
+            out.append(row, at, std::string::npos).append("\n");
+        i = eol + 1;
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(Soundness_Diagnostics, ADiagnosticFromAnImportedMacroBodyReachesAVerdict) {
+    // The fixture's premise, checked first: the offending word sits at a column the
+    // caller's line 1 does not have. Without this the test can pass for the wrong
+    // reason -- the columns happening to line up -- and never exercise the scan again.
+    const int col = columnOfNeedle(kMacroNamingNothing, "undeclared_name");
+    ASSERT_GT(col, firstLineLength(kImportsThatMacro))
+        << "this test needs a module column past the end of the caller's first line, "
+           "which is the geometry that made the engine scan out of bounds";
+
+    TempMacroProject p(kMacroNamingNothing, kImportsThatMacro);
+    const auto r = runFinc({p.app(), "--fin-libs=" + p.libs(), "--color=never"}, noFinLibs());
+
+    // Measured at exit 134 before the guard, on this exact fixture.
+    EXPECT_EQ(r.exitCode, 1)
+        << "the compiler must decide, and 1 is the code for 'decided, with diagnostics'. "
+           "134 is SIGABRT: the engine indexed a source line out of bounds while "
+           "rendering a location that belongs to another file (ADR 0009 defines four "
+           "codes and this is not one of them).\n"
+        << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Undefined variable 'undeclared_name'"),
+              std::string::npos)
+        << "and it must say what it decided: an abort that happened to exit 1 is no "
+           "better than one that exits 134.\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Diagnostics, ADiagnosticFromAnImportedMacroBodyStillEmitsItsJsonSummary) {
+    // The JSON stream is the half a tool reads, and it is the half an abort truncates
+    // worst: the summary object is written by `emitSummary` at the end of the run, so a
+    // process that dies mid-render emits diagnostics with no summary and a consumer
+    // waiting for one sees a well-formed prefix and no terminator. `finn` is that
+    // consumer. Asserted separately from the human render because the two paths are
+    // separate functions and only this one has a framing contract to keep.
+    TempMacroProject p(kMacroNamingNothing, kImportsThatMacro);
+    const auto r = runFinc({p.app(), "--fin-libs=" + p.libs(), "--diagnostics=json"},
+                           noFinLibs());
+    ASSERT_EQ(r.exitCode, 1) << r.err;
+
+    const auto diags = jsonDiagnostics(r.err);
+    EXPECT_EQ(diags.size(), 1u)
+        << "one undeclared name, one diagnostic\n" << r.err;
+    EXPECT_NE(r.err.find("\"kind\":\"summary\""), std::string::npos)
+        << "the stream ended without its summary object\n" << r.err;
+    EXPECT_NE(r.err.find("\"exitCode\":1"), std::string::npos)
+        << "the summary must carry the code the process actually returns\n" << r.err;
+}
+
+TEST(Soundness_Diagnostics, AnOutOfRangeLocationDoesNotProduceAConfidentTypoHint) {
+    // Why the fix is a guard and not a clamp. `reportError` falls back to the word
+    // *before* the location when the offending token is not itself a near-miss, and a
+    // clamp to the line end would find one -- in a line the location has nothing to do
+    // with. Both variants were built and measured on this fixture: the clamp offers
+    // `did you mean 'return'?` about a `retrn` in the caller's trailing comment, for a
+    // diagnostic whose subject is a name in another file entirely. The guard offers
+    // nothing.
+    //
+    // A wrong hint is worse than no hint. The hint is a heuristic and declining to
+    // guess costs a user nothing, while a confident pointer at unrelated text sends
+    // them to edit a line that is not the problem.
+    const std::string moduleBody =
+        std::string(40, ' ') + kMacroNamingNothing;
+    const char* appWithNearKeywordInAComment =
+        "import { names_nothing } from mac; // retrn\n"
+        "fun main() <noret> { let x <int> = names_nothing!(1); }\n";
+
+    // The bait has to be reachable by a clamped scan: past the caller's line 1, which
+    // is where a clamp would land, and `retrn` has to be the last word on it.
+    ASSERT_GT(columnOfNeedle(moduleBody, "undeclared_name"),
+              firstLineLength(appWithNearKeywordInAComment));
+
+    TempMacroProject p(moduleBody, appWithNearKeywordInAComment);
+    const auto r = runFinc({p.app(), "--fin-libs=" + p.libs(), "--color=never"}, noFinLibs());
+    ASSERT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+
+    // Against the help rows only: `retrn` is in the echoed source line too, one row
+    // above the caret, so raw stderr contains it either way.
+    EXPECT_EQ(helpsOnly(stripAnsi(r.err)), "")
+        << "the engine guessed about text the location does not point at\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Diagnostics, TheTypoHintStillWorksWhenTheLocationIsInRange) {
+    // The other side of the guard, and the reason it is written as "does this column
+    // point into this line at all" rather than as anything stricter: a guard that
+    // silenced the hint whenever it was unsure would pass the test above by never
+    // hinting, and nothing else here would notice. `column - 1` is the 0-based index of
+    // the location's first character and equals `size()` for a location beginning
+    // exactly at end-of-line, so every location that does fit its line is untouched.
+    TempFin f("fun main() <noret> { retrn 1; }\n", "typohint");
+    const auto r = runFinc({f.str(), "--color=never"}, noFinLibs());
+    ASSERT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(helpsOnly(stripAnsi(r.err)).find("Did you mean 'return'?"), std::string::npos)
+        << "the hint is gone for a location that is perfectly in range\n"
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_Diagnostics, ADiagnosticFromAnImportedMacroBodyIsRenderedAgainstTheCaller) {
+    // What the guard does not fix, asserted so that fixing it cannot pass unnoticed.
+    // The diagnostic is right about the program and wrong about where to look: the
+    // `-->` names the caller, the line number is the caller's, and the snippet under
+    // the caret is the caller's source with the caret placed at a column that belongs
+    // to the module. The user is sent to a line that has nothing wrong with it.
+    //
+    // Blocked on a change with a much wider blast radius than the crash was. A
+    // `fin::location` has a `filename` field -- `position::filename`, a
+    // `std::string*` -- and Fin never sets it: `reset_lexer_location()` passes
+    // `nullptr`. Setting it means owning those strings for as long as any location
+    // outlives the parse that made it (an expansion's locations outlive it by a whole
+    // pass), and it means the render path choosing an engine by the location's file
+    // rather than using the one it was called on. Neither is a change to make while
+    // chasing an abort.
+    //
+    // Until then the honest reading of this output is "an undeclared name reached the
+    // program through an expansion, somewhere". The message names the right word, and
+    // that word does not appear in the file being pointed at, which is at least a
+    // detectable inconsistency.
+    TempMacroProject p(kMacroNamingNothing, kImportsThatMacro);
+    const auto r = runFinc({p.app(), "--fin-libs=" + p.libs(), "--color=never"}, noFinLibs());
+    ASSERT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    const std::string err = stripAnsi(r.err);
+
+    EXPECT_NE(err.find("app.fin:1:"), std::string::npos)
+        << "GOOD NEWS: the diagnostic no longer claims to be on the caller's line 1. If a\n"
+           "location now carries its file, invert this test into Soundness_Diagnostics\n"
+           ".ADiagnosticFromAnImportedMacroBodyNamesTheModule asserting `mac.fin:1:42`,\n"
+           "and check the snippet is the macro's own line -- the two halves of this render\n"
+           "are separately wrong and a fix could land one without the other.\n"
+        << err;
+    EXPECT_NE(err.find("import { names_nothing } from mac;"), std::string::npos)
+        << "GOOD NEWS: the snippet is no longer the caller's line. See above.\n" << err;
+    EXPECT_EQ(err.find("mac.fin"), std::string::npos)
+        << "GOOD NEWS: the module is named somewhere in the render. See above.\n" << err;
+}
+
 // --- Two stated invariants, swept out of the comments and checked ------------
 //
 // Neither of these found a defect. They are here because both claims are made in

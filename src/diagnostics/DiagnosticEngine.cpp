@@ -243,9 +243,42 @@ std::string DiagnosticEngine::extractTokenText(const fin::location& loc) {
     return "";
 }
 
+// The two scans below walk *backwards* from a location's first column, which is only
+// meaningful if that column is inside the line the engine holds. Both indexed
+// `line[cursor]` with `cursor = column - 2` and no upper bound, so a location whose
+// column runs past the end of its line read out of bounds -- `std::string::operator[]`
+// asserts on this toolchain, and finc died with
+// `Assertion '__pos <= size()' failed` and exit 134.
+//
+// That is reachable from a .fin file today. A diagnostic about an expansion of a macro
+// declared in another module carries the *module's* location and is rendered by the
+// *root file's* engine, so the column belongs to one file and the line to another; when
+// the root line is the shorter of the two, the scan starts past its end. Measured
+// (`import { c } from m; ... c!(1)` where `m`'s body names an undeclared `zz`): abort at
+// column 35 against a 23-character line, and the same text with twenty characters of
+// padding on the caller's line 1 renders instead. It is not new and not about macros --
+// the qualified `m.c!(1)` route does it at `f4952f1^`, before any of ADR 0023 -- and it
+// is not one of the four codes ADR 0009 gives finc, so a caller reading the status
+// learned neither that the build succeeded nor that it was rejected.
+//
+// The guard is "does this column point into this line at all", not a clamp to the line
+// end. Scanning back from the end of an unrelated line would find a word and hand it to
+// `checkTypo`, so a wrong location would produce a confident `did you mean` about text
+// the location has nothing to do with. There is no previous word here, and saying so is
+// the honest answer: the hint is a heuristic and declining to guess costs nothing.
+//
+// `column - 1` is the 0-based index of the location's first character and equals
+// `size()` for a location that begins exactly at end-of-line, so every location that
+// does fit is untouched.
+//
+// What this does NOT fix is the mis-render itself -- the line, and the file named in the
+// `-->`, still come from the root when the location came from a module. That needs a
+// location that carries its file, and is booked as
+// `KnownDefect_Diagnostics.ADiagnosticFromAnImportedMacroBodyIsRenderedAgainstTheCaller`.
 std::string DiagnosticEngine::getPreviousWord(const fin::location& loc) {
     std::string line = getLine(loc.begin.line);
     if (line.empty()) return "";
+    if (loc.begin.column - 1 > (int)line.size()) return "";
 
     int cursor = loc.begin.column - 2;
     while (cursor >= 0 && std::isspace((unsigned char)line[cursor])) cursor--;
@@ -257,9 +290,14 @@ std::string DiagnosticEngine::getPreviousWord(const fin::location& loc) {
     return line.substr(cursor + 1, end - (cursor + 1));
 }
 
+// The same guard, for the same reason. This is the one with a caller
+// (`reportError`), so this is the copy the abort came through; `getPreviousWord` has
+// none today and is fixed rather than deleted because the bug in it is identical and
+// whoever calls it next would inherit it.
 fin::location DiagnosticEngine::getPreviousWordLoc(const fin::location& loc) {
     std::string line = getLine(loc.begin.line);
     if (line.empty()) return loc;
+    if (loc.begin.column - 1 > (int)line.size()) return loc;
 
     int cursor = loc.begin.column - 2;
     while (cursor >= 0 && std::isspace((unsigned char)line[cursor])) cursor--;
