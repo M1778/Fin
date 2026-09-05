@@ -3211,9 +3211,14 @@ module does not declare an error or a no-op? (Twelve stdlib samples open with `n
 imports name `::std`; today the block has no effect and the tail is discarded.) Is `pub` required to export
 — and if so, is `structs.fin:3` wrong, or are quoted-path file imports exempt from visibility while library
 imports are gated, or is `pub` advisory? (`#[export]` on a `%{ ... }%` block is a third spelling of the same
-intent and must be answered in the same breath.) Should a named import or `import *` carry macros? Does a
-quoted import mean one thing or two — a path relative to the importing file, or to the working directory?
-(The corpus documents both meanings.)
+intent and must be answered in the same breath.) *Struck, the named half:* a named import carries a macro,
+ADR 0023, and it does — `import { shout } from mm;` binds the macro `mm` declares. A macro has no
+visibility marker (`pub @macro` is a syntax error), so "declared in this module" is the only export rule
+expressible and there was nothing narrower to rule on. `import *` still does not carry one, and it is
+booked as `KnownDefect_Imports.ImportStarDoesNotBindAMacro` rather than answered: the macro expander's
+star case does not carry macros either, so the two passes agree there and whoever rules on it moves both
+in one commit. Does a quoted import mean one thing or two — a path relative to the importing file, or to
+the working directory? (The corpus documents both meanings.)
 
 **Generic bounds.** Does a primitive satisfy an interface bound? `checkConstraint` now runs -- the bound is
 stored on the `GenericType` at last -- and reports only when the argument is itself a struct, so `S<int>`
@@ -3221,9 +3226,15 @@ still satisfies `<T: I>`. `Castable` and `Any` are erasure markers (ADR 0018) sp
 primitive must satisfy, so rejecting every non-struct argument is not obviously the answer. Three lines
 behind one ruling.
 
-**Syntax not yet settled.** Is the `@macro name { (pattern) => { body } }` form final?
-`macro_definitions.fin:8` says of it "NOT DECIDED YET", and it does not parse in any spelling tried, so no
-macro can be declared at all and the macro-import question above cannot even be measured. In
+**Syntax not yet settled.** *Struck, the macro half:* the `@macro name { (pattern) => { body } }` form is
+not final and is not adopted — ADR 0023 rules against it, and its grammar is deleted, so
+`macro name { ... }` is a syntax error rather than a construct that parses and cannot be expanded. The
+form that exists is `@macro name(a, b) { return quote { $a + $b; }; }`: named parameters, a body that is
+one quoted expression, and the delimiting bracket of a *call* shaping its argument (`name!(a, b)`
+positional, `name![a, b]` and `name!{k => v}` one prototype each). `macro_definitions.fin:8`'s
+"NOT DECIDED YET" is stale in the direction nobody expected — the form was decided *against* — and that
+sample's line is due an update to point at the ADR. Two things the old note said cannot be measured now
+can: a macro *can* be declared, and the macro-import question above is measured and half answered. In
 `preprocessor.fin:23`, which operand order does the ternary `cond : then ? else` take under nesting?
 
 *Struck:* what `fun?` means. `nullifier.fin:23` answers it — "Automatically returns null even without an

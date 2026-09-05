@@ -57,17 +57,48 @@ Three brackets can delimit a macro call, and the choice is meaningful rather tha
 The corpus names the three uses in its own comments: "funccall like macro", "List like
 macro", "dict like macro".
 
-The bracket forms are the specified behaviour and the parenthesised form is what is
-implemented. Today `one![1, 2]` on a one-parameter macro reports
-`Macro 'one' expects exactly 1 args, got 2` — the pair and list forms still arrive flattened
-into positional arguments rather than as one prototype. Until that changes, write
-parenthesised calls.
+All three are implemented. A one-parameter macro takes `m![1, 2]` and `m!{"a" => 1}` because
+each is *one* argument — a prototype literal — so the arity check sees one either way:
 
-Two other current limits: a macro declaration is not lowered to machine code, so a file
-declaring one type-checks and does not build with `-o`; and a macro crosses a module boundary
-only through the qualified form. After `import "mm.fin";`, the macros in that file are reached
-as `mm.shout!(1)` — a bare `shout!(1)` reports `Undefined macro`, and `import { shout } from
-"mm.fin";` reports that the module does not export it.
+```fin
+@macro m(p) {
+    return quote { $p; };
+}
+
+fun main() <noret> {
+    let list <{int, string}> = m!["a", "b"];    // keys 0 and 1
+    let dict <{string, int}> = m!{"a" => 1};    // key "a"
+}
+```
+
+Both `=>` and `:` separate a pair, and a trailing comma is accepted in either bracketed form
+— which a prototype literal written directly does not accept, so `m![1, 2,]` compiles where
+`{0: 1, 1: 2,}` is a syntax error.
+
+An empty shaped call, `m![]` or `m!{}`, is the only way to write an empty prototype literal:
+it takes its key and value types from the annotation, and reports
+`Empty prototype literal cannot infer its key and value types.` when there is nothing to take
+them from.
+
+One current limit: a macro declaration is not lowered to machine code, so a file declaring one
+type-checks and does not build with `-o`.
+
+### Macros across a module boundary
+
+A module exports the macros it declares, and both spellings reach them:
+
+```fin
+import { shout } from "mm.fin";     // the macro by name
+import "mm.fin";                    // the module, as `mm`
+```
+
+so `shout!(1)` works after the first and `mm.shout!(1)` after the second. `import * from mm;`
+does **not** carry macros — a call then reports `Undefined macro` — and a bare `shout!(1)`
+after a whole-module import reports the same, because that form binds the module's name rather
+than its contents.
+
+A macro carries no visibility marker: `pub @macro` is a syntax error. Declaring a macro in a
+module is what exports it, and there is no narrower rule to write.
 
 `format!` is *not* a `@macro`. It is compiler-implemented, because one call site in the
 standard library passes a runtime `string` as the format — which a macro taking a literal
