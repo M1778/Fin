@@ -8,6 +8,8 @@
 
 namespace fin {
 
+class Scope;
+
 struct MacroParam {
     std::string name;
     std::string type; // "expr", "block", "ident"
@@ -29,6 +31,25 @@ public:
     std::vector<MacroParam> params;
     std::unique_ptr<Block> body;
     std::vector<std::unique_ptr<Attribute>> attributes;
+
+    // The scope of the module that declared this macro, or null for a macro declared in
+    // the file being compiled (ADR 0023 step 4).
+    //
+    // A body's non-`$` names resolve here and not at the call site: `coll!` spelling
+    // `Collection::from_prototype` has to work in a caller that never imported
+    // `Collection`, because it is `lib/std/collection.fin` that imported what the body
+    // needs. Under call-site resolution such a macro works only by luck of its caller's
+    // imports, which is ADR 0020's C-preprocessor failure arriving unmodified.
+    //
+    // `Scope*` and not `shared_ptr<Scope>`, because what this points at is
+    // `ModuleLoader::moduleCache`'s entry -- the analyzer scope, kept for the life of
+    // the loader -- and the loader outlives every expansion. The expander's own
+    // `macroScope` is the pointer that would dangle: it dies at the return of
+    // `loadModule`, so `visit(ImportModule&)` stores the scope `loadModule` *returned*
+    // and never the one it made. A shared_ptr here would put a strong edge from an AST
+    // node into a scope graph that already owns AST nodes back (`Scope::macros` holds
+    // `MacroDeclaration*`), which is a cycle rather than safety.
+    Scope* declaringScope = nullptr;
 
     MacroDeclaration(std::string n, std::vector<MacroParam> p, std::unique_ptr<Block> b);
     void accept(Visitor& v) override;

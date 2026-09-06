@@ -1,6 +1,8 @@
 #include "../MacroExpander.hpp"
 #include "../SubstitutionVisitor.hpp"
 #include "../../ast/CloneVisitor.hpp"
+#include "../../ast/StructuralWalk.hpp"
+#include "../../ast/types/TypeNode.hpp"
 #include "../../types/NamespaceType.hpp"
 // <fmt/format.h> and not <fmt/core.h>, because fmt::format is used below and this
 // is the header that declares it.  From fmt 11 core.h carries only the base API
@@ -13,6 +15,42 @@
 #include <fmt/format.h>
 
 namespace fin {
+
+namespace {
+
+// Writes the declaring module onto every type in a macro's expansion (ADR 0023 step 4).
+//
+// The expansion is a clone of the quote body, so these nodes are new and unshared and
+// the stamp reaches nothing a programmer wrote. It is what lets `Held::make($n)` in
+// `lib/std`'s macro name `Held` in a caller that never imported it: the analyzer looks
+// the name up where the macro was written rather than where it was called, which is the
+// difference between a library macro and a C macro.
+//
+// Only unstamped types are written. A macro whose body invokes another macro expands the
+// inner one first, so the inner expansion arrives already carrying *its* declaring
+// module -- the nearer answer, and the right one.
+//
+// Run before substitution, never after: the arguments are the caller's own expressions
+// and their types resolve where the caller wrote them. Stamping the merged tree would
+// hand the callee's imports to the caller's types, which is the mirror of the bug this
+// closes.
+class DeclaringScopeStamp : public StructuralWalk {
+public:
+    explicit DeclaringScopeStamp(Scope* scope) : scope(scope) {}
+
+protected:
+    bool enter(ASTNode& node) override {
+        if (auto* type = dynamic_cast<TypeNode*>(&node)) {
+            if (!type->declaringScope) type->declaringScope = scope;
+        }
+        return true;
+    }
+
+private:
+    Scope* scope;
+};
+
+} // namespace
 
 // --- Lookup Helper ---
 MacroDeclaration* MacroExpander::resolveMacro(const std::string& name) {
@@ -133,7 +171,16 @@ void MacroExpander::visit(MacroInvocation& node) {
         return;
     }
     
-    // 6. Substitute
+    // 6. Stamp the declaring module, then substitute
+    //
+    // Nothing to stamp for a macro declared in the file being compiled: `declaringScope`
+    // is null there, its body already resolves where it was written, and a stamp would
+    // only add a fallback that changes no answer.
+    if (def->declaringScope) {
+        DeclaringScopeStamp stamp(def->declaringScope);
+        stamp.walk(*resultExpr);
+    }
+
     SubstitutionVisitor subVisitor(argsMap);
     resultExpr->accept(subVisitor);
     if (subVisitor.replacementExpr) {

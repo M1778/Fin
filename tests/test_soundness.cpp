@@ -13411,19 +13411,24 @@ TEST(Soundness_Macros, AShapedArgumentIsOneArgumentForArity) {
 
 TEST(Soundness_Macros, TheShapedArgumentReachesAPrototypeParameterThroughTheBody) {
     // The whole point, end to end: the two macros ADR 0023 says the corpus needs are one
-    // call each into a `from_prototype`, with the shaped argument forwarded by `$p`. The
-    // constructor here is a local stand-in for `Collection::from_prototype` so the case
-    // needs no library import, and the parameter type is the real one --
-    // lib/std/collection.fin:111 takes `{int, T}`.
+    // call each into a `from_prototype`, with the shaped argument forwarded by `$p`. `C`
+    // here is a local stand-in for `Collection` so the case needs no library import, and
+    // the parameter type is the real one -- lib/std/collection.fin:111 takes `{int, T}`.
+    //
+    // Qualified as `C::from_prototype` and not as a free `from_prototype`, because step 4's
+    // hygiene rule refuses a bare name in a body: a free call would bind whatever the call
+    // site happened to have. ADR 0023 spells both macros as `Collection::from_prototype`
+    // and `HashMap::from_prototype` for the same reason, so the qualifier is the shape the
+    // real ones take rather than a workaround for the test.
     const auto positional = compile(
-        "fun from_prototype(p: {int, string}) <int> { return 0; }\n"
-        "@macro coll(items) { return quote { from_prototype($items); }; }\n"
+        "struct C { pub fun from_prototype(p: {int, string}) <int> { return 0; } }\n"
+        "@macro coll(items) { return quote { C::from_prototype($items); }; }\n"
         "fun main() <noret> { let n <int> = coll![\"a\", \"b\"]; }\n");
     EXPECT_EQ(positional.exitCode, 0) << stripAnsi(positional.err);
 
     const auto keyed = compile(
-        "fun from_prototype(p: {string, int}) <int> { return 0; }\n"
-        "@macro map(pairs) { return quote { from_prototype($pairs); }; }\n"
+        "struct C { pub fun from_prototype(p: {string, int}) <int> { return 0; } }\n"
+        "@macro map(pairs) { return quote { C::from_prototype($pairs); }; }\n"
         "fun main() <noret> { let n <int> = map!{\"alex\" => 10, \"robot\" => 20,}; }\n");
     EXPECT_EQ(keyed.exitCode, 0) << stripAnsi(keyed.err);
 }
@@ -13480,9 +13485,10 @@ TEST(Soundness_Macros, AnEmptyShapedCallTakesItsTypesFromTheAnnotation) {
     EXPECT_EQ(annotated.exitCode, 0) << stripAnsi(annotated.err);
 
     // And through a parameter rather than a `let`, which is the shape `coll![]` takes.
+    // Qualified for the reason the test above is.
     const auto viaParam = compile(
-        "fun from_prototype(p: {int, string}) <int> { return 0; }\n"
-        "@macro coll(items) { return quote { from_prototype($items); }; }\n"
+        "struct C { pub fun from_prototype(p: {int, string}) <int> { return 0; } }\n"
+        "@macro coll(items) { return quote { C::from_prototype($items); }; }\n"
         "fun main() <noret> { let n <int> = coll![]; }\n");
     EXPECT_EQ(viaParam.exitCode, 0) << stripAnsi(viaParam.err);
 }

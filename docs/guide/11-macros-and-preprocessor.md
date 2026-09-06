@@ -100,6 +100,56 @@ than its contents.
 A macro carries no visibility marker: `pub @macro` is a syntax error. Declaring a macro in a
 module is what exports it, and there is no narrower rule to write.
 
+### Hygiene: a body may only spell qualified names
+
+A body may spell `$param` unquotes, literals, operators and module-qualified paths. A bare
+unqualified identifier is refused, and refused at the declaration rather than at a call:
+
+```fin
+@macro f(a) { return quote { tmp + $a; }; }
+```
+
+```
+error: macro 'f' names 'tmp' with no qualifier
+```
+
+The reason is capture. A bare `tmp` in a body is a name looked up wherever the macro lands, so
+it collides with a caller's `tmp` and binds whatever that caller happened to have — the C
+preprocessor's failure, which `@macro` exists to not repeat. The rule costs very little
+because a body is one expression and so cannot declare a binding of its own; there is no
+`let tmp` for the ban to get in the way of.
+
+Refused at the declaration means the author of a library learns about it from their own build,
+which is the only place the body can be fixed. A macro nobody calls is still refused.
+
+Qualified paths are what a body reaches other code through:
+
+```fin
+@macro mk(n) { return quote { Held::make($n); }; }
+@macro lim()  { return quote { Held::LIMIT; }; }
+```
+
+A free call is refused too — `from_prototype($items)` names something in no namespace — so the
+two collection macros ADR 0023 sketches are spelled `Collection::from_prototype($items)` and
+`HashMap::from_prototype($pairs)`.
+
+Those names resolve **in the module that declared the macro**, not at the call site. So the
+`Held` above is the `Held` that *`mac.fin`* imported, and a caller writing `mk!(3)` need not
+import it, or know that the macro names it at all:
+
+```fin
+// libs/mac.fin
+import { Held } from holder;
+@macro mk(n) { return quote { Held::make($n); }; }
+
+// app.fin -- imports the macro and nothing else
+import { mk } from mac;
+fun main() <noret> { let x <int> = mk!(3); }
+```
+
+The call site is consulted first, so a caller that has its own `Held` keeps it: the macro asked
+for a type by that name, and shadowing a name stays the caller's prerogative.
+
 `format!` is *not* a `@macro`. It is compiler-implemented, because one call site in the
 standard library passes a runtime `string` as the format — which a macro taking a literal
 cannot serve. It is not registered yet, so `format!(...)` reports `Undefined macro`.

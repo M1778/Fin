@@ -12,6 +12,10 @@ void CloneVisitor::visit(TypeNode& node) {
     if (node.array_size) {
         res->array_size = clone(node.array_size.get());
     }
+    // The declaring module travels with the clone (ADR 0023 step 4): the expander clones
+    // a macro's quote body rather than consuming it, so a stamp dropped here is a stamp
+    // that never reaches an expansion at all.
+    res->declaringScope = node.declaringScope;
     res->setLoc(node.loc);
     result = std::move(res);
 }

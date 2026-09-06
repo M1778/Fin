@@ -129,6 +129,11 @@ void CloneVisitor::visit(MacroDeclaration& node) {
         clone(node.body.get())
     );
     res->attributes = cloneVector(node.attributes);
+    // The declaring module travels with the clone (ADR 0023 step 4). A clone that
+    // dropped it would be a macro whose body resolves at the call site again -- the
+    // hygiene hole this pointer closes -- and it would do so silently, because a body
+    // that happens to spell only names the caller also has still expands.
+    res->declaringScope = node.declaringScope;
     res->setLoc(node.loc);
     result = std::move(res);
 }

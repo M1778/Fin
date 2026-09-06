@@ -8,6 +8,7 @@
 namespace fin {
 
 class GenericParam;
+class Scope;
 
 class TypeNode : public ASTNode {
 public:
@@ -39,6 +40,31 @@ public:
     // nothing about `string`.
     std::vector<std::unique_ptr<TypeNode>> implements_list;
     std::unique_ptr<Expression> array_size = nullptr;
+
+    // The scope this name resolves in when it does not resolve where it is written --
+    // set only on the types inside a macro expansion, and only to the scope of the
+    // module that declared the macro (ADR 0023 step 4).
+    //
+    // Null everywhere else, which is every type a programmer wrote directly: those
+    // resolve where they are written and nowhere else, and a fallback on them would
+    // widen name resolution for the whole language.
+    //
+    // This is the field that makes a library macro a library macro. `coll!` spells
+    // `Collection::from_prototype`; under call-site resolution that works only in a
+    // caller that happens to import `Collection`, which is a macro that works by luck of
+    // its caller's imports. With this, it works because `lib/std/collection.fin`
+    // imported what its own body needs. The hygiene refusal above it is what keeps the
+    // set of names reaching here small enough to be sound: a body may spell no bare
+    // unqualified name, so the only cross-module name in an expansion is a type
+    // qualifier, and a type can never be a caller's local -- `Scope` keeps types in a
+    // map of their own.
+    //
+    // A raw pointer for the reason `MacroDeclaration::declaringScope` is one: it is
+    // `ModuleLoader::moduleCache`'s entry, which outlives every expansion, and a strong
+    // edge from the AST into the scope graph would close a cycle rather than prevent a
+    // dangle.
+    Scope* declaringScope = nullptr;
+
     TypeNode(std::string n);
     void accept(Visitor& v) override;
 };

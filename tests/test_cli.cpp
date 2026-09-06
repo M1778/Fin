@@ -1860,7 +1860,12 @@ namespace {
 // here inherits it from a shared fixture.
 class TempMacroProject {
 public:
-    TempMacroProject(const std::string& moduleBody, const std::string& appBody) {
+    // `holderBody` is a second library module, written only when non-empty. It exists for
+    // ADR 0023 step 4's positive clause, which needs a type that `mac.fin` imports and
+    // `app.fin` does not -- a type declared in `mac.fin` itself would not distinguish
+    // declaring-module resolution from ordinary export.
+    TempMacroProject(const std::string& moduleBody, const std::string& appBody,
+                     const std::string& holderBody = "") {
         libs_ = uniqueTempPath("fin_macbody", "_libs");
         proj_ = uniqueTempPath("fin_macbody", "_proj");
         std::error_code ec;
@@ -1868,6 +1873,8 @@ public:
         fs::create_directories(proj_, ec);
         std::ofstream(libs_ / "mac.fin", std::ios::binary) << moduleBody;
         std::ofstream(proj_ / "app.fin", std::ios::binary) << appBody;
+        if (!holderBody.empty())
+            std::ofstream(libs_ / "holder.fin", std::ios::binary) << holderBody;
     }
     ~TempMacroProject() {
         std::error_code ec;
@@ -1882,10 +1889,18 @@ private:
     fs::path proj_;
 };
 
-// `undeclared_name` is declared nowhere, so expanding the macro produces a diagnostic
-// located at that word -- at a column inside `mac.fin`.
+// `Undeclared` is declared nowhere, so expanding the macro produces a diagnostic located
+// at that word -- at a column inside `mac.fin`.
+//
+// A type qualifier and not a bare `undeclared_name`, which is what this fixture used to
+// spell. ADR 0023 step 4's hygiene rule refuses a bare unqualified name in a macro body at
+// the declaration, so the old text is now rejected before it ever expands and this fixture
+// would be measuring the refusal instead of the render. A name that is qualified but
+// undeclared still reaches the analyzer through the expansion, which is the geometry these
+// four tests need: a location whose column belongs to the module and whose file, today,
+// does not.
 const char* kMacroNamingNothing =
-    "@macro names_nothing(v) { return quote { undeclared_name + $v; }; }\n";
+    "@macro names_nothing(v) { return quote { Undeclared::f($v); }; }\n";
 
 const char* kImportsThatMacro =
     "import { names_nothing } from mac;\n"
@@ -1926,7 +1941,7 @@ TEST(Soundness_Diagnostics, ADiagnosticFromAnImportedMacroBodyReachesAVerdict) {
     // The fixture's premise, checked first: the offending word sits at a column the
     // caller's line 1 does not have. Without this the test can pass for the wrong
     // reason -- the columns happening to line up -- and never exercise the scan again.
-    const int col = columnOfNeedle(kMacroNamingNothing, "undeclared_name");
+    const int col = columnOfNeedle(kMacroNamingNothing, "Undeclared");
     ASSERT_GT(col, firstLineLength(kImportsThatMacro))
         << "this test needs a module column past the end of the caller's first line, "
            "which is the geometry that made the engine scan out of bounds";
@@ -1941,7 +1956,7 @@ TEST(Soundness_Diagnostics, ADiagnosticFromAnImportedMacroBodyReachesAVerdict) {
            "rendering a location that belongs to another file (ADR 0009 defines four "
            "codes and this is not one of them).\n"
         << stripAnsi(r.err);
-    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Undefined variable 'undeclared_name'"),
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Undefined type 'Undeclared'"),
               std::string::npos)
         << "and it must say what it decided: an abort that happened to exit 1 is no "
            "better than one that exits 134.\n"
@@ -1989,7 +2004,7 @@ TEST(Soundness_Diagnostics, AnOutOfRangeLocationDoesNotProduceAConfidentTypoHint
 
     // The bait has to be reachable by a clamped scan: past the caller's line 1, which
     // is where a clamp would land, and `retrn` has to be the last word on it.
-    ASSERT_GT(columnOfNeedle(moduleBody, "undeclared_name"),
+    ASSERT_GT(columnOfNeedle(moduleBody, "Undeclared"),
               firstLineLength(appWithNearKeywordInAComment));
 
     TempMacroProject p(moduleBody, appWithNearKeywordInAComment);
@@ -2054,6 +2069,84 @@ TEST(KnownDefect_Diagnostics, ADiagnosticFromAnImportedMacroBodyIsRenderedAgains
         << "GOOD NEWS: the snippet is no longer the caller's line. See above.\n" << err;
     EXPECT_EQ(err.find("mac.fin"), std::string::npos)
         << "GOOD NEWS: the module is named somewhere in the render. See above.\n" << err;
+}
+
+// --- A macro body resolves in the module that declared it (ADR 0023 step 4) ---
+
+TEST(Soundness_Macros, AMacroBodyNamesATypeOnlyItsOwnModuleImported) {
+    // ADR 0023 step 4's first verification clause, verbatim: "a macro in module A whose
+    // body names a type A imports expands in a caller that does not import it".
+    //
+    // This is the difference between a library macro and a C macro. `coll!` spells
+    // `Collection::from_prototype`; under call-site-only resolution that works in a caller
+    // that happens to import `Collection` and fails in one that does not, so the macro
+    // works by luck of its caller's imports and a user who reads the failure is told about
+    // a name that is not in their file. Measured before the fix on this exact fixture:
+    // `error: Undefined type 'Held'` at the caller's `mk!(3)`.
+    //
+    // Through the process boundary and not the expander, because it takes two library
+    // modules and a real module loader: `mac.fin` imports `Held` from `holder.fin` and
+    // `app.fin` imports only the macro.
+    const char* holder =
+        "pub struct Held {\n"
+        "    pub v <int>,\n"
+        "    pub fun make(n: int) <int> { return n; }\n"
+        "}\n";
+    const char* macroModule =
+        "import { Held } from holder;\n"
+        "@macro mk(n) { return quote { Held::make($n); }; }\n";
+    const char* app =
+        "import { mk } from mac;\n"
+        "fun main() <noret> { let x <int> = mk!(3); }\n";
+
+    TempMacroProject p(macroModule, app, holder);
+    const auto r = runFinc({p.app(), "--fin-libs=" + p.libs(), "--color=never"}, noFinLibs());
+    EXPECT_EQ(r.exitCode, 0)
+        << "the caller never imported `Held`, and does not have to: the module that wrote "
+           "the macro did\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ACallerOwnTypeOfTheSameNameStillWins) {
+    // The declaring module is consulted second, so a caller that has its own `Held` keeps
+    // it. The macro asked for a type by that name and shadowing a name is the caller's
+    // prerogative; a fallback that ran first would silently retarget a call the caller
+    // wrote on purpose, and nothing in the render would say which `Held` was used.
+    //
+    // Asserted through the arity: the caller's `make` takes two arguments, so if this call
+    // resolved against the library's one-argument `make` it would compile.
+    const char* holder =
+        "pub struct Held {\n"
+        "    pub v <int>,\n"
+        "    pub fun make(n: int) <int> { return n; }\n"
+        "}\n";
+    const char* macroModule =
+        "import { Held } from holder;\n"
+        "@macro mk(n) { return quote { Held::make($n); }; }\n";
+    const char* app =
+        "import { mk } from mac;\n"
+        "struct Held { pub v <int>, pub fun make(a: int, b: int) <int> { return a + b; } }\n"
+        "fun main() <noret> { let x <int> = mk!(3); }\n";
+
+    TempMacroProject p(macroModule, app, holder);
+    const auto r = runFinc({p.app(), "--fin-libs=" + p.libs(), "--color=never"}, noFinLibs());
+    EXPECT_NE(r.exitCode, 0)
+        << "the caller's own `Held` must be the one the expansion names\n"
+        << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("make"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABareUnqualifiedNameInAMacroBodyIsRefusedInTheLibraryItself) {
+    // The hygiene refusal reaches a library on its own, with nothing importing it. The
+    // refusal is a property of the declaration (ADR 0023 step 4), so the author of a macro
+    // learns about it from their own build rather than from a stranger's -- which is the
+    // only place the fix can be made.
+    TempFin f("@macro f(a) { return quote { tmp + $a; }; }\n", "hygiene");
+    const auto r = runFinc({f.str(), "--color=never"}, noFinLibs());
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("names 'tmp' with no qualifier"),
+              std::string::npos)
+        << stripAnsi(r.err);
 }
 
 // --- Two stated invariants, swept out of the comments and checked ------------

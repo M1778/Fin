@@ -396,6 +396,23 @@ void DiagnosticEngine::reportError(const fin::location& loc, const std::string& 
     emit(d);
 }
 
+void DiagnosticEngine::reportError(const fin::location& loc, const std::string& msg,
+                                   const std::string& help) {
+    Diagnostic d;
+    d.severity = DiagnosticSeverity::Error;
+    d.message = msg;
+    d.file = filename;
+    d.line = loc.begin.line;
+    d.column = loc.begin.column;
+    d.endLine = loc.end.line;
+    d.endColumn = loc.end.column;
+    // No `checkTypo` pass. The caller supplied the explanation, so the heuristic has
+    // nothing to add and one row to lose it in.
+    d.help = help;
+    errorCount++;
+    emit(d);
+}
+
 void DiagnosticEngine::reportError(const std::string& msg) {
     Diagnostic d;
     d.severity = DiagnosticSeverity::Error;

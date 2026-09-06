@@ -354,6 +354,21 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
 
     auto type = currentScope->resolveType(node->name);
     if (!type) {
+        // The declaring module, for a type inside a macro expansion (ADR 0023 step 4).
+        // A library's macro spelling `Held::make($n)` names `Held` because the module that
+        // wrote the macro imported it; the caller need not have, and under call-site-only
+        // resolution never could without knowing the macro's body, which is ADR 0020's
+        // objection to the C preprocessor.
+        //
+        // Second and not first, so a caller's own name still wins where both have one --
+        // the macro asked for the type by that name, and shadowing it is the caller's
+        // prerogative. Set on nothing a programmer wrote, so this line is unreachable for
+        // every type outside an expansion.
+        if (node->declaringScope) {
+            type = node->declaringScope->resolveType(node->name);
+        }
+    }
+    if (!type) {
         error(*node, "Undefined type '" + node->name + "'");
         return nullptr;
     }
