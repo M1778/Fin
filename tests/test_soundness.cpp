@@ -13082,7 +13082,12 @@ TEST(Soundness_GlobalAttribute, GlobalOutsideStdIsRefusedOnEveryDeclarationFormT
         // because it is a separate production reaching the same node, and it reaches it
         // with `body` null -- an attribute walk that dereferenced the body to find the
         // attributes would pass the line above and abort here.
-        "#[global] @define m!(a: int) <int>;",
+        //
+        // `format!` and not a made-up name, since step 6: a bodyless declaration claims
+        // the compiler implements the macro, and a claim about a name the compiler does
+        // not implement is refused on its own. This entry has to fail for being outside
+        // std and for nothing else, or it stops measuring the rule it is filed under.
+        "#[global] @define format!(fmt: string, ...) <string>;",
     };
     for (const char* form : forms) {
         const auto r = compile(std::string(form) + "\nfun main() <noret> {}\n");
@@ -13104,7 +13109,10 @@ TEST(Soundness_GlobalAttribute, GlobalInsideStdIsAccepted) {
         "namespace std { #[global] import { printf } from stdio; }",
         "namespace std { #[global] fun f() <noret> {} }",
         "namespace std { #[global] @macro m(a) { return quote { $a; }; } }",
-        "namespace std { #[global] @define m!(a: int) <int>; }",
+        // The signature is `format!`'s because it has to be: a bodyless declaration
+        // names a macro the compiler implements, and `builtinmacros::all()` has one row
+        // (ADR 0023 step 6). This is the line `lib/std/stdio.fin` will carry.
+        "namespace std { #[global] @define format!(fmt: string, ...) <string>; }",
     };
     for (const char* form : forms) {
         const auto r = compile(std::string(form) + "\nfun main() <noret> {}\n");
@@ -13599,16 +13607,131 @@ TEST(Soundness_Macros, ABodylessDeclarationIsAMacroNodeWithNoBody) {
     EXPECT_NE(out.find("Param: ...: expr..."), std::string::npos) << out;
 }
 
-TEST(Soundness_Macros, ABodylessMacroHasNothingToExpandAndSaysSo) {
-    // Until step 6's builtin table answers the call, a bodyless macro is a macro with no
-    // template, and the expander says exactly that. Recorded because it is the state of
-    // the tree between two steps and the message a user gets today: this is not silence,
-    // and it is not `Undefined macro` either -- the declaration was found.
+// --- The builtin macro table (ADR 0023 step 6) -----------------------------
+
+TEST(Soundness_Macros, ABuiltinMacroResolvesWithNoImport) {
+    // The clause the whole step turns on. `deeptest2.fin` and `stdlib/error.fin` write
+    // zero import lines between them and both call `format!`, so ADR 0021 ruled it a
+    // compiler builtin on that evidence rather than as a convenience. A builtin is in no
+    // scope, which is what makes bare resolution fall out instead of being arranged: the
+    // expander does not find it, does not mind, and leaves the invocation for the
+    // analyzer.
+    //
+    // No declaration of any kind in this program -- not an import, not a `@define`.
+    const auto r = compile(
+        "fun main() <noret> { let x <int> = 7; let s <string> = format!(\"{}\", x); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABuiltinMacroTypesAsItsDeclaredReturn) {
+    // `format!` is a `<string>`, and the annotation is what proves it: a call whose type
+    // stayed null -- which is what an unexpanded macro invocation used to be -- would
+    // pass through an annotation unchecked and be indistinguishable from this. So the
+    // negative half is the assertion that matters, and it is the second one.
+    const auto ok = compile(
+        "fun main() <noret> { let s <string> = format!(\"hello\"); }\n");
+    EXPECT_EQ(ok.exitCode, 0) << stripAnsi(ok.err);
+
+    const auto bad = compile(
+        "fun main() <noret> { let n <int> = format!(\"hello\"); }\n");
+    EXPECT_NE(bad.exitCode, 0)
+        << "a `<string>` assigned to an `<int>` was accepted, so the invocation's type is "
+           "still null rather than the table's\n"
+        << stripAnsi(bad.err);
+    EXPECT_NE(messagesOnly(stripAnsi(bad.err)).find("expected 'int', got 'string'"),
+              std::string::npos)
+        << stripAnsi(bad.err);
+}
+
+TEST(Soundness_Macros, ABuiltinMacroIsRefusedForArity) {
+    // `format!()` passes no format string. Checked in the analyzer and not the expander,
+    // because the expander does not reach a builtin at all -- and checked by hand rather
+    // than through `checkCallArity`, which skips the count entirely for a variadic
+    // signature and would have accepted this.
+    const auto r = compile("fun main() <noret> { let s <string> = format!(); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    const std::string msg = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(msg.find("Macro 'format!' expects at least 1 argument, got 0"),
+              std::string::npos) << stripAnsi(r.err);
+    // The signature is in the help row, because "expects at least 1" does not say what
+    // the one has to be and the programmer's next move needs to know.
+    EXPECT_NE(stripAnsi(r.err).find("format!(fmt: string, ...) <string>"),
+              std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABuiltinMacroChecksItsFixedArgumentTypes) {
+    // `format!(1, 2)`: the first argument is the format string and an `int` is not one.
+    // The variadic tail is deliberately unchecked -- `2` here is fine, and the second
+    // program below is what says so -- because what a formatted value may be is the
+    // lowering's question (step 7) and not a type this table could name.
+    const auto bad = compile("fun main() <noret> { let s <string> = format!(1, 2); }\n");
+    EXPECT_NE(bad.exitCode, 0) << stripAnsi(bad.err);
+    EXPECT_NE(messagesOnly(stripAnsi(bad.err)).find("expected 'string', got 'int'"),
+              std::string::npos) << stripAnsi(bad.err);
+
+    const auto ok = compile(
+        "fun main() <noret> {\n"
+        "  let n <int> = 1;\n"
+        "  let f <float> = 2.5;\n"
+        "  let s <string> = format!(\"{} {} {}\", n, f, \"three\");\n"
+        "}\n");
+    EXPECT_EQ(ok.exitCode, 0)
+        << "the variadic tail takes any type, one call at a time\n" << stripAnsi(ok.err);
+}
+
+TEST(Soundness_Macros, ABodylessDeclarationOfAMacroTheCompilerDoesNotImplementIsRefused) {
+    // The other half of the table: it says what a bodyless declaration is allowed to
+    // claim. `@define frobnicate!(a: int) <int>;` says the compiler implements a macro it
+    // has never heard of, and the alternative to refusing it is a declaration that parses,
+    // type-checks and then answers nothing at every call.
+    //
+    // At the declaration, with no call site in the program -- the same rule as step 4's
+    // hygiene refusal, and for the same reason: a library whose macro nobody calls is
+    // still a library with a broken declaration in it.
+    const auto r = compile("@define frobnicate!(a: int) <int>;\n"
+                           "fun main() <noret> { return; }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err))
+                  .find("The compiler implements no macro named 'frobnicate!'"),
+              std::string::npos) << stripAnsi(r.err);
+    // The help row lists what it does implement. A refusal that names only what is wrong
+    // leaves the reader to guess the legal set, and the legal set is one row long.
+    EXPECT_NE(stripAnsi(r.err).find("format!(fmt: string, ...) <string>"),
+              std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABodylessDeclarationOfABuiltinIsAcceptedAndTheCallStillWorks) {
+    // The line `lib/std/stdio.fin` gains in step 8, written here ahead of it: a library
+    // may declare a builtin, and declaring it changes nothing about how the call is
+    // answered. This is the case that used to report `Macro 'format' has no body to
+    // expand` -- the honest answer for exactly one step, between the declaration form
+    // landing and the table landing.
     const auto r = compile("@define format!(fmt: string, ...) <string>;\n"
                            "fun main() <noret> { let s <string> = format!(\"x\"); }\n");
-    EXPECT_NE(r.exitCode, 0);
-    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Macro 'format' has no body to expand"),
-              std::string::npos)
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+
+    // And the checks are still the analyzer's, not the declaration's. A count taken from
+    // the declaration as well would report this twice.
+    const auto few = compile("@define format!(fmt: string, ...) <string>;\n"
+                             "fun main() <noret> { let s <string> = format!(); }\n");
+    EXPECT_NE(few.exitCode, 0) << stripAnsi(few.err);
+    const std::string msg = messagesOnly(stripAnsi(few.err));
+    EXPECT_EQ(msg.find("Macro 'format' expects"), std::string::npos)
+        << "the expander checked arity for a macro it does not implement, so one mistake "
+           "is reported twice\n" << stripAnsi(few.err);
+    EXPECT_NE(msg.find("Macro 'format!' expects at least 1 argument, got 0"),
+              std::string::npos) << stripAnsi(few.err);
+}
+
+TEST(Soundness_Macros, AProgramsOwnMacroOfABuiltinNameStillExpands) {
+    // A builtin name is not a reserved word. This program's `format` takes one argument
+    // and returns it, and the expansion is what answers the call -- asserted through the
+    // type, which is `int` here and would be `string` if the table had won.
+    const auto r = compile(
+        "@macro format(a) { return quote { $a; }; }\n"
+        "fun main() <noret> { let n <int> = format!(7); }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "a local macro with a body did not shadow the builtin of the same name\n"
         << stripAnsi(r.err);
 }
 

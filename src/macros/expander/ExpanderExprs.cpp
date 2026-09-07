@@ -4,6 +4,7 @@
 #include "../../ast/StructuralWalk.hpp"
 #include "../../ast/types/TypeNode.hpp"
 #include "../../types/NamespaceType.hpp"
+#include "../../semantics/BuiltinMacros.hpp"
 // <fmt/format.h> and not <fmt/core.h>, because fmt::format is used below and this
 // is the header that declares it.  From fmt 11 core.h carries only the base API
 // and fmt::format is behind FMT_DEPRECATED_HEAVY_CORE, so `#include <fmt/core.h>`
@@ -79,7 +80,32 @@ MacroDeclaration* MacroExpander::resolveMacro(const std::string& name) {
 void MacroExpander::visit(MacroInvocation& node) {
     // 1. Find Macro using helper
     MacroDeclaration* def = resolveMacro(node.name);
-    
+
+    // This pass expands templates, and two macros have none (ADR 0023 step 6).
+    //
+    // A bodyless declaration -- `@define format!(fmt: string, ...) <string>;` -- says
+    // the *compiler* implements the macro, so there is nothing here to substitute into
+    // and the invocation is left standing for the analyzer to answer. Whether that
+    // claim is true is checked where the claim is written: the analyzer refuses a
+    // bodyless declaration whose name is not in `builtinmacros::all()`, and one
+    // diagnostic at the bad declaration beats one there and one at every call.
+    //
+    // The second is a name that resolves to nothing and is a builtin anyway. A builtin
+    // is in no scope, so `resolveMacro` was always going to fail and failing is not an
+    // error: that is what "resolves with no import" means, and it is a requirement
+    // rather than a convenience -- `deeptest2.fin` and `stdlib/error.fin` write zero
+    // import lines between them and both call `format!`.
+    //
+    // Tested after `resolveMacro` rather than before it, so a program that writes its
+    // own `@macro format(a) { ... }` -- with a body -- still expands its own. A builtin
+    // name is not a reserved word.
+    //
+    // Arity is deliberately not checked before returning. ADR 0023 puts arity and the
+    // first argument's type in the analyzer, "because that is the first pass that knows
+    // a type", and a count checked in both passes reports one mistake twice.
+    if (def && !def->body) return;
+    if (!def && builtinmacros::find(node.name)) return;
+
     if (!def) {
         diag.reportError(node.loc, "Undefined macro '" + node.name + "!'");
         return;
@@ -97,29 +123,13 @@ void MacroExpander::visit(MacroInvocation& node) {
     
     // 3. Find quote
     //
-    // Guarded, because a macro does not always have a body. A bodyless declaration --
-    // `@define format!(fmt: string, ...) <string>;` -- is a macro the *compiler*
-    // implements (ADR 0023), so there is no template here to substitute into and the
-    // expander is not the pass that answers the call. The analyzer's builtin table is.
-    //
-    // No form the grammar accepts builds a MacroDeclaration without a block today: the
-    // arms form that did -- whose constructor filled `rules` and left `body` null -- is
-    // deleted with `MacroRule`, so this is unreachable rather than a refusal a program
-    // can provoke. It stays because what it prevents is a crash and not a mistake:
-    // `def->body->statements` on a null body exited 139, which is not one of the four
-    // codes ADR 0009 gives finc, so a caller reading the status learned neither that
-    // the build succeeded nor that it was rejected.
-    //
-    // ADR 0023 step 5 makes it reachable and changes the answer: a bodyless
-    // `@define format!(fmt: string, ...) <string>;` is a macro the *compiler*
-    // implements, so the call is answered downstream and this pass leaves it alone.
-    // Until that exists, a bodyless macro is a macro with nothing to expand.
-    if (!def->body) {
-        diag.reportError(node.loc,
-            fmt::format("Macro '{}' has no body to expand", node.name));
-        return;
-    }
-
+    // `def->body` is non-null from here down: the bodyless case returned above. It was
+    // a reported error for one step -- "Macro 'x' has no body to expand", which was the
+    // honest answer between step 5 landing the declaration and step 6 landing the table
+    // -- and before step 5 it was a guard against a crash, because `def->body->statements`
+    // on a null body exited 139 and 139 is not one of the four codes ADR 0009 gives
+    // finc. Both readings are now wrong for the same reason: a bodyless declaration is
+    // a claim about who implements the macro, and this pass is not the implementer.
     QuoteExpression* quote = nullptr;
     for (auto& stmt : def->body->statements) {
         if (auto* ret = dynamic_cast<ReturnStatement*>(stmt.get())) {

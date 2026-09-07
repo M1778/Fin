@@ -132,3 +132,44 @@ as "ADR 0021" in `docs/HANDOFF.md` and in `docs/adr/0023`'s own text for a day b
 existed, which is the failure this file closes. A number cited with nothing behind it is a
 dangling reference, and the next reader spends their time discovering that rather than reading
 the decision.
+
+## The macro half is met by a table, not by `#[global]`, and the joint held anyway
+
+The prediction above was right about the joint and wrong about which mechanism spans it. A
+symbol-table-only `#[global]` would indeed have failed the day `format!` arrived — but so would
+a three-map one. `#[global]` is read by `publishIfGlobal`
+(`src/semantics/impl/Analyzer_Decl.cpp:1023`), which runs during **semantic analysis**, and macro
+invocations are resolved by the expander, which runs **before** it (`src/driver/Driver.cpp:174`
+against `:189`). A macro published into an ambient scope by the analyzer would be written after
+the only pass that had a use for it, so `resolveMacro` would still fail and the call would still
+report `Undefined macro`. Extending `publishIfGlobal` to `defineMacro` would have compiled,
+passed a test that asserted the map entry, and changed nothing about a call.
+
+So ADR 0023 step 6 spans it the other way: a table of compiler-implemented macros
+(`src/semantics/BuiltinMacros.cpp`), and a name in the table needs no scope at all. The expander
+treats a failed `resolveMacro` of a table name as not-an-error and leaves the invocation
+standing; the analyzer answers it. `format!` therefore resolves in a file that imports nothing
+*and* in a compilation where `lib/std` is not on the search path at all — measured: `finc f.fin
+--fin-libs <empty dir>` over a file whose only content is `return format!("{}", 1);` exits 0,
+where the same conditions give `printf` an `Undefined function or type 'printf'`. That is a
+stronger property than ambience, and it is the honest one: nothing about `format!` depends on a
+library being present, because nothing about `format!` is in a library.
+
+This does not weaken "one mechanism beats two" — it is that argument applied one level down.
+`format!`'s signature lives in one place, the table, and the `@define` line ADR 0023 step 8 puts
+in `lib/std/stdio.fin` is documentation for a reader rather than the definition the compiler
+consults. The check that keeps them honest is partial and should be described as such: the
+declaration's *name* is verified against the table and an unlisted one is refused where it is
+written, but its signature is not compared, because the parser keeps a macro parameter's name
+and not its declared type. So `@define format!(fmt: int) <int>;` in `lib/std` would be accepted
+and would say something false. ADR 0023 named that risk and named the mitigation — a test
+comparing the two texts — and it is owed with the line that creates it.
+
+What remains true of the three-map observation is the part about `#[global]`'s *scope*. The
+attribute is legal on a macro declaration and is enforced there — `#[global] @define
+format!(fmt: string, ...) <string>;` outside `namespace std` is refused by
+`refuseMisplacedGlobals` (`Analyzer_Core.cpp:882`), which walks attributes rather than declaration
+shapes and so caught the macro form without being told about it. Two `Soundness_GlobalAttribute`
+tests carry that exact line, inside `std` and outside it. The mark on a macro is inert as
+publication and live as a placement rule, which is a coherent position: the rule about who may
+mint an ambient name does not stop applying to a declaration whose ambience comes from elsewhere.

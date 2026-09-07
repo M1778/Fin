@@ -2,6 +2,7 @@
 #include "../../types/TypeImpl.hpp"
 #include "../../utils/IntegerConstant.hpp"
 #include "../../types/Layout.hpp"
+#include "../BuiltinMacros.hpp"
 #include <fmt/core.h>
 #include <fmt/color.h>
 
@@ -1759,11 +1760,69 @@ void SemanticAnalyzer::visit(MacroCall& node) {
 }
 
 void SemanticAnalyzer::visit(MacroInvocation& node) {
-    // Similar to MacroCall
+    // An invocation that is still an invocation here is one the expander did not
+    // answer, and there are exactly two ways to be that (ADR 0023 step 6).
+    //
+    // It names a macro the compiler implements, and this is the pass that implements it:
+    // arity and the fixed parameters' types are checked below and the invocation takes
+    // the table's return type. Checked here and not in the expander because a type is
+    // the thing being checked and the expander does not know one -- it runs before this
+    // pass and has no scope to resolve `string` in.
+    //
+    // Or it names nothing the compiler knows, in which case something upstream has
+    // already refused it: the expander reported `Undefined macro` for an unresolvable
+    // name, and `visit(MacroDeclaration&)` reported a bodyless declaration of a name the
+    // compiler does not implement. Silence here is what keeps one mistake to one
+    // diagnostic. The type stays null, which is the same answer an unexpanded macro gave
+    // before this table existed.
+    const auto* builtin = builtinmacros::find(node.name);
+
+    // The arguments are walked either way, and their types collected as they are, so a
+    // mistake inside one is reported even when the call itself is not a builtin's.
+    // `lastExprType` is overwritten by every walk, so it is read immediately or lost.
+    std::vector<std::shared_ptr<Type>> argTypes;
+    argTypes.reserve(node.args.size());
     for (auto& arg : node.args) {
         arg->accept(*this);
+        argTypes.push_back(lastExprType);
     }
-    lastExprType = nullptr;
+
+    if (!builtin) {
+        lastExprType = nullptr;
+        return;
+    }
+
+    // Arity. A variadic builtin still has required parameters, so this cannot go through
+    // `checkCallArity`: that helper checks nothing at all when `is_vararg` is set, which
+    // is why `format!()` needs its own count here. The `!` is written into the name
+    // because that is how the program spelled the call.
+    const size_t required = builtinmacros::minArgs(*builtin);
+    if (node.args.size() < required ||
+        (!builtin->is_variadic && node.args.size() > required)) {
+        error(node,
+              fmt::format("Macro '{}!' expects {} {} argument{}, got {}", node.name,
+                          builtin->is_variadic ? "at least" : "exactly", required,
+                          required == 1 ? "" : "s", node.args.size()),
+              fmt::format("its signature is `{}`", builtinmacros::signatureOf(*builtin)));
+        lastExprType = currentScope->resolveType(builtin->return_type);
+        return;
+    }
+
+    // The fixed parameters' types. The variadic tail is not checked, by design rather
+    // than omission: `format!("{} {}", n, name)` passes an `int` and a `string` to one
+    // call, and what a formatted value may be is codegen's question (step 7).
+    for (size_t i = 0; i < builtin->params.size(); ++i) {
+        auto expected = currentScope->resolveType(builtin->params[i].type);
+        if (expected && argTypes[i]) {
+            checkType(*node.args[i], argTypes[i], expected);
+        }
+    }
+
+    // The call's type, and the reason `let s <string> = format!("{}", x);` type-checks.
+    // Resolved through the scope rather than held as a `Type` in the table so that
+    // `string` here is the same `string` a program writes -- there is no second type
+    // system behind the builtins.
+    lastExprType = currentScope->resolveType(builtin->return_type);
 }
 
 void SemanticAnalyzer::visit(TypeLiteralExpression& node) {

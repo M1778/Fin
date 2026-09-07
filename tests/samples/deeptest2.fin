@@ -1,9 +1,9 @@
 //@ aspirational
-//@ unimplemented "`format!(...)` at 26:16 -- \"Undefined macro 'format!'\"; no file in the corpus or lib/std defines a formatting macro. \"There is no prelude\" was the wrong reason to give: the prelude question was about names reached without an import, it has since been split in two and answered (see tests/samples/enums.fin's note), and neither half touches this line, because ambience cannot make visible a macro nobody wrote and `#[global]` marks declarations rather than creating them. `format!` waits on the `@macro` declaration form instead, which the owner ruled on 2026-08-27 is to be designed before any code -- the same gap error.fin:19, stdio.fin:36 and useful_macros.fin:14 report. The constructor member-initialiser list on line 40 parses now"
+//@ ok
 @define printf(fmt: string, ...) <noret>;
 @define free(ptr: &void ) <noret>;
-
-
+// Promoted, ADR 0023 step 6. The three `Undefined macro 'format!'` diagnostics this file carried -- 26:16, 63 and 79 -- are gone: `format!` is a macro the compiler implements, listed in src/semantics/BuiltinMacros.cpp and answered by the analyzer rather than by an expansion, so it resolves here with no import and this file writes none. The withdrawn note gave "there is no prelude" as the reason and then corrected itself: the prelude question was about names reached without an import, and this was never that -- ambience cannot make visible a macro nobody wrote. The macro is now written, in the compiler. It type-checks and does not yet lower, so `finc -c` on this file still refuses -- at line 29's `operator +(self: &Self, ...)`, which is a different gap -- and `//@ ok` is a statement about diagnostics (ADR 0008).
+// The constructor member-initialiser list on line 40 parses, and did before this.
 // Case 1: Interfaces
 interface Printable { // A simple printable interface which only needs to declare a to_string
                       // function that returns a string

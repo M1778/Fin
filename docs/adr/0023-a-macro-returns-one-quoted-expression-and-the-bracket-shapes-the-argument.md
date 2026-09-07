@@ -436,4 +436,77 @@ expands to nothing.
 namespace, or `#[global]` against the prelude ruling's "`printf` alone", or three sample repairs. And
 whether `@define` on a macro is the right spelling for "the compiler implements this", or whether that
 deserves a marker of its own; this ADR takes the first because it invents no attribute, and the cost
-is the two-places-the-truth-lives risk named above.
+is the two-places-the-truth-lives risk named above. The first of the two is now ruled — ADR 0021
+took it, and "Step 6 as landed" below records the mechanism; the second still stands.
+
+## Step 6 as landed
+
+The visibility question the plan defers is settled, and settled in ADR 0021 rather than here: a
+compiler builtin resolves bare because it is in **no scope**, so `resolveMacro` failing is not an
+error for a table name. Ambient publication was the alternative and is not merely unnecessary but
+unimplementable — `publishIfGlobal` runs during analysis and macro invocations are resolved by the
+expander, which runs before it, so a macro written into an ambient scope would be written after
+the only pass with a use for it. ADR 0021 carries the measurement.
+
+The table is `src/semantics/BuiltinMacros.{hpp,cpp}`, one row, in `CompilerApi.hpp`'s style: data
+the analyzer reads, so the second builtin is a row and not a branch. Membership has two
+consequences and they are checked in two places. The **expander** waves a table name through — a
+failed lookup returns silently instead of reporting `Undefined macro` — and also waves through
+*every* bodyless declaration, because a bodyless declaration is a claim about who implements the
+macro and this pass is not the implementer. The **analyzer** answers the invocation: arity, then
+the fixed parameters' types, then `lastExprType` from the declared return. Arity is hand-written
+rather than delegated to `checkCallArity`, which skips the count entirely for a variadic
+signature.
+
+The declaration's legality is checked at the declaration: `@define frobnicate!(a: int) <int>;`
+reports `The compiler implements no macro named 'frobnicate!'` with no call site present, and the
+help row lists the signatures the compiler does implement. One diagnostic at the bad declaration
+beats one there and one at every call. A bodied `@macro format(a) { ... }` of a builtin's name
+still expands, because the table is consulted only after `resolveMacro` — a builtin name is not a
+reserved word.
+
+The signature is **not** compared against the table's. Step 5's parser keeps a `MacroParam` of a
+name and a fragment kind and drops the declared parameter types, so a check could compare arity,
+vararg-ness, names and return type — three of a signature's four parts — and would read as a
+check over all four. Measured: `@define format!(fmt: int) <int>;` is accepted, and a call still
+types as `<string>` from the table. The mitigation this ADR names is a text-comparison test, and
+it belongs with step 8, which is what writes the line into `lib/std/stdio.fin`.
+
+The import-export clause needed no work: `Analyzer_Decl.cpp:929-932` already consults
+`moduleScope->resolveMacro` on a named import, landed with `b2870c0` (*A named import carries a
+macro*) before this step was reached. Its comment there is worth reading beside this step, because
+it records the same pass-ordering fact from the other side: the analyzer defines the macro into
+its own scope's macro map and then never reads it, "because expansion is a finished pass by the
+time this runs".
+
+`SemanticAnalyzer::error` gains a help-carrying overload beside the two-argument one. The existing
+located `reportError` fills the `= help:` row from the typo heuristic, and a rule the compiler can
+state outright is worth more than a guess at what the programmer meant.
+
+The corpus arithmetic came out as the plan predicted, and step 6 forced three of step 9's edits
+early because the samples stopped failing the moment the table landed: `deeptest2.fin` rc=1 n=3 →
+rc=0 n=0 and `stdlib/error.fin` rc=1 n=1 → rc=0 n=0, both promoted to `//@ ok`;
+`useful_macros.fin` 3 → 2, still `unimplemented` on `map!` and `coll!`, which wait on step 8;
+`stdlib/stdio.fin` 12 → 11 and its note drops `format!`. **TOTAL 64 → 58 diagnostics over 51
+samples.** The clause's "five" is the count in the three files it names — three, one and one —
+and `stdlib/stdio.fin`'s sixth is booked separately in step 9, so six diagnostics leave and the
+snapshot moved by exactly six. The arithmetic checks.
+
+Two documents the count falsified are corrected here rather than left: `test_expectations.cpp`'s
+tally read "16 ok, 33 unimplemented", which is a count from long enough ago that the two numbers
+had swapped ends — measured now at 33 `ok`, 17 `unimplemented`, 1 `error`. And `deeptest2.fin`'s
+`//@ ok` is a statement about diagnostics under ADR 0008, not about a build: `finc -c` still
+refuses at its line 29.
+
+Seven `Soundness_Macros` tests replace step 5's interim `ABodylessMacroHasNothingToExpandAndSaysSo`:
+bare resolution with no declaration of any kind; the return type asserted through a negative
+(`let n <int> = format!("hello")` must report `expected 'int', got 'string'`, or a null type would
+pass a positive); arity with the signature in the help row; a fixed-argument type refusal beside a
+three-of-mixed-types acceptance, which is what pins the variadic tail as unchecked; a bodyless
+declaration of an unlisted name refused with no call; a bodyless declaration of a builtin accepted
+*and* asserted not to produce the expander's wording, which is the one-mistake-one-diagnostic
+property; and a program's own bodied `format` winning. 1695 pass.
+
+Lowering is untouched, so a `format!` call type-checks and `-o` reports `codegen: a macro
+invocation (macro expansion did not consume it) is not lowered yet`. That is step 7, and the plan
+already says a checker-only build is green after step 6.

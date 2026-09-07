@@ -241,6 +241,13 @@ private:
 
     void error(ASTNode& node, const std::string& msg);
 
+    // The same, with an explanation the compiler is sure of. It occupies the `= help:`
+    // row and so displaces the typo heuristic, which is the point: a rule the compiler
+    // can state outright is worth more than a guess at what the programmer meant. Added
+    // for the builtin-macro table (ADR 0023 step 6), where the useful half of the
+    // diagnostic is the list of macros the compiler does implement.
+    void error(ASTNode& node, const std::string& msg, const std::string& help);
+
     // Nesting depth of the quiet pre-passes below. `error` returns before it reports
     // and before it sets hasError while this is non-zero.
     int quietDepth = 0;

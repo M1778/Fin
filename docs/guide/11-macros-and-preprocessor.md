@@ -169,9 +169,59 @@ A macro has no linker symbol, so the compiler is the only possible implementer a
 is needed to name one. The `!` is the whole difference between the two forms: without it the
 name is an extern, with it the name is a macro and is not callable without the `!`.
 
-The declaration parses and type-checks. Calling one still reports `Macro 'format' has no body
-to expand` — the builtin table that answers the call is the next step, and until it lands
-`format!` is a name with a signature and no implementation.
+The declaration is optional, and that is the point of it being the compiler's. `format!`
+resolves with no import and with no declaration in sight, because a builtin is in no scope:
+the lookup fails and failing is not an error for a name the compiler implements. That is a
+requirement rather than a convenience — `tests/samples/deeptest2.fin` and
+`tests/samples/stdlib/error.fin` write zero import lines between them and both call
+`format!`. The `@define` line still belongs in `lib/std/stdio.fin`, so that the signature is
+written down somewhere a reader can find it.
+
+A call type-checks as the declared return type, and arity and the fixed arguments' types
+are checked against the signature:
+
+```fin
+let s <string> = format!("{} and {}", 1, "two");
+```
+
+Both checks happen in the analyzer rather than during expansion, because a type is what is
+being checked and expansion runs before any type is known. Too few arguments names the
+signature:
+
+```
+error: Macro 'format!' expects at least 1 argument, got 0
+   = help: its signature is `format!(fmt: string, ...) <string>`
+```
+
+and a first argument that is not a `string` — `format!(1, 2)` — reports `Type mismatch:
+expected 'string', got 'int'`, pointed at the `1`.
+
+The variadic tail is not type-checked: `format!("{} {} {}", n, f, "three")` takes an `int`,
+a `float` and a `string` in one call. Which conversion each value needs is a question for
+the code that builds the string, not for the call.
+
+A bodyless declaration of a name the compiler does *not* implement is refused, and refused
+at the declaration rather than at a call, because the declaration is where the claim is made:
+
+```fin
+@define frobnicate!(a: int) <int>;
+```
+
+```
+error: The compiler implements no macro named 'frobnicate!'
+```
+
+The help row under it lists the macros the compiler does implement — one, today — and points
+out that a macro of your own needs a body.
+
+A builtin name is not a reserved word. A program that writes its own `@macro format(a) { ...
+}` — with a body — gets its own, because a macro that resolves to a body is expanded before
+the table is ever consulted.
+
+One current limit: `format!` is not lowered yet, so a file calling it type-checks and does
+not build with `-o` — `codegen: a macro invocation (macro expansion did not consume it) is
+not lowered yet`. The `@define ... !` line is a macro declaration, so it carries the same
+limit the `@macro` form does above.
 
 ## The C-style preprocessor
 

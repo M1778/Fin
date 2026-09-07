@@ -586,6 +586,13 @@ void SemanticAnalyzer::error(ASTNode& node, const std::string& msg) {
     hasError = true;
 }
 
+void SemanticAnalyzer::error(ASTNode& node, const std::string& msg,
+                             const std::string& help) {
+    if (quietDepth) return;
+    diag.reportError(node.loc, msg, help);
+    hasError = true;
+}
+
 bool SemanticAnalyzer::checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected) {
     if (!actual || !expected) return false;
 

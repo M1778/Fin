@@ -1,6 +1,7 @@
 #include "../SemanticAnalyzer.hpp"
 #include "../../utils/ModuleLoader.hpp"
 #include "../../types/TypeImpl.hpp"
+#include "../BuiltinMacros.hpp"
 #include <fmt/core.h>
 #include <fmt/color.h>
 #include <filesystem>
@@ -628,8 +629,41 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
 
 void SemanticAnalyzer::visit(MacroDeclaration& node) {
     debugLog(fg(fmt::color::magenta), "[INFO] Registering macro '{}'\n", node.name);
-    // Macros are handled in a separate expansion pass.
-    // Validate no symbol clashes that it doesn't clash with existing symbols if we wanted to.
+
+    // A macro with a body is the expander's, and it has already run: by the time this
+    // node is reached its every invocation has been replaced by the expansion, so there
+    // is nothing left here to check that expansion did not already answer.
+    //
+    // A macro without one is this pass's, and the check is whether the claim it makes
+    // is true (ADR 0023 step 6). `@define name!(...) <T>;` says the compiler implements
+    // `name!`; if the compiler does not, the declaration is a promise nothing keeps.
+    // Refused here rather than at a call, because a library whose macro nobody calls is
+    // still a library with a broken declaration in it -- the same reason the hygiene
+    // refusal of step 4 fires with no call site present.
+    if (!node.body) {
+        if (!builtinmacros::find(node.name)) {
+            std::string implemented;
+            for (const auto& b : builtinmacros::all()) {
+                if (!implemented.empty()) implemented += ", ";
+                implemented += builtinmacros::signatureOf(b);
+            }
+            error(node,
+                  fmt::format("The compiler implements no macro named '{}!'", node.name),
+                  fmt::format("a macro declared without a body claims the compiler "
+                              "implements it. The ones it does: {}. A macro of your own "
+                              "needs a body: `@macro {}(a) {{ return quote {{ ... }}; }}`",
+                              implemented, node.name));
+        }
+        // The declared signature is not compared against the table's here. What the
+        // node kept is the parameter *names*, their order and the trailing `...`; the
+        // declared parameter types were dropped at the parse, because `MacroParam` holds
+        // a name and a fragment kind and cannot hold a type. A check over three of a
+        // signature's four parts would read as a check over all four, which is worse
+        // than no check: ADR 0023 names the mitigation and it is a test that reads both
+        // spellings as text -- `lib/std/stdio.fin`'s line and this table's row -- in the
+        // shape `Soundness_Codegen.TheNoBackendHelpNamesThePinnedLlvmMajor` already uses
+        // for the pinned LLVM major. That test arrives with the library line, in step 8.
+    }
 }
 
 void SemanticAnalyzer::visit(ConstructorDeclaration& node) {
