@@ -218,10 +218,46 @@ A builtin name is not a reserved word. A program that writes its own `@macro for
 }` — with a body — gets its own, because a macro that resolves to a body is expanded before
 the table is ever consulted.
 
-One current limit: `format!` is not lowered yet, so a file calling it type-checks and does
-not build with `-o` — `codegen: a macro invocation (macro expansion did not consume it) is
-not lowered yet`. The `@define ... !` line is a macro declaration, so it carries the same
-limit the `@macro` form does above.
+### What `format!` builds
+
+`format!` lowers, so a file calling it builds with `-o` and runs. It returns a `string`, and
+each `{}` in the format string consumes the next argument, formatted by the type the analyzer
+recorded for it:
+
+```fin
+@define printf(fmt: string, ...) <noret>;
+@define format!(fmt: string, ...) <string>;
+
+fun main() <noret> {
+    let n <int> = 7;
+    let name <string> = "fin";
+    printf("%s\n", format!("{} squared is {}", n, n * n));
+    printf("%s\n", format!("{} at {}%", name, 100));
+}
+```
+
+prints `7 squared is 49` and `fin at 100%`. A `%` in the format string is text, not a
+conversion — the placeholder Fin spells is `{}` and only `{}`, so `{0}` or `{:x}` reports
+`codegen: a 'format!' placeholder that is not '{}' is not lowered yet`. A count that does not
+match the arguments is refused at compile time rather than read off the stack:
+`codegen: a 'format!' with 2 '{}' and 1 value is not lowered yet`.
+
+Integers print as integers, signed or unsigned by their own type, and a `char` prints as a
+number because it shares its representation with `int8`. Floats print the short way, so
+`format!("{}", 1.5)` reads `1.5` rather than `1.500000`. A `string` prints its bytes and any
+other pointer prints as an address. An aggregate has no one spelling and is refused:
+`codegen: a struct formatted by 'format!' is not lowered yet`, and likewise for an array, an
+interface reference, a prototype and a function value.
+
+Two current limits. The format string must be a literal at the call site, so a function that
+takes a `fmt: string` parameter and passes it along reports `codegen: a 'format!' whose format
+string is not a literal is not lowered yet` — which is why `lib/std/stdio.fin` cannot yet
+write its own `format!(fmt, ...objects)`. And the returned `string` is never freed: it
+outlives the function that built it, which is what makes returning one safe, and reclaiming it
+waits on the collector of ADR 0003.
+
+A `@define` line for a macro the compiler implements lowers to nothing, so declaring one costs
+no code. A `@macro` with a body still carries the limit the section above describes.
 
 ## The C-style preprocessor
 

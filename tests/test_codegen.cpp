@@ -11040,3 +11040,282 @@ BACKEND_TEST(Soundness_Codegen, ABlameAbortsRatherThanFallingThroughToLaterCode)
     EXPECT_NE(b.runExit, 0) << b.why();
     EXPECT_EQ(b.out.find("REACHED"), std::string::npos) << b.why();
 }
+
+// ---------------------------------------------------------------------------
+// `format!`, the one macro the compiler implements.
+//
+// ADR 0023 step 7. Everything above it is a front end: the analyzer type-checks a
+// `format!` call against a signature it holds in a table (BuiltinMacros.cpp) and the
+// expander deliberately leaves the invocation standing, because a macro with no body
+// has no template to substitute into. So the node arrives here, and this file is the
+// implementation -- which is the whole argument the ADR makes for `format!` not being
+// a `@macro`: expansion runs before any type is known, and `{}` needs a conversion
+// chosen per argument.
+//
+// The lowering is C's own idiom. `snprintf(null, 0, fmt, ...)` measures, `malloc`
+// takes the length plus a NUL, `snprintf(buf, size, fmt, ...)` fills. The arguments
+// are emitted once and the two calls share the values, because emitting an argument
+// twice would run its side effects twice -- `format!("{}", next())` must advance once.
+// `snprintf` and `malloc` are declared on demand through `runtimeFn`, the same channel
+// `blame` reaches `fprintf`/`abort` through and `new` reaches `malloc` through.
+//
+// The conversion for each `{}` comes from the CgType the argument emitted to, and that
+// is a deviation from the step's own wording worth stating: the ADR says "the type the
+// analyzer recorded", and there is no such record -- `MacroInvocation` (MiscExpr.hpp:78)
+// holds a name and a list of arguments and nothing else. The backend types every
+// argument anyway, by emitting it, and that CgType is what selects the instruction. A
+// second copy on the node could only ever disagree with it.
+//
+// Three details of the conversions are decisions rather than transcriptions:
+//
+//   - They must match the *promoted* value, not the written type. `promoteVararg` is
+//     the C variadic convention -- float becomes double, anything narrower than an int
+//     becomes an i32 -- so a `float` takes `%g` and an `int{8}` takes `%d`.
+//   - 64-bit takes `%lld`, never `%ld`. A C `long` is 32 bits on Windows and 64 on
+//     Linux; `long long` is 64 everywhere. The corpus writes `printf("%ld", n)` and
+//     gets away with it on this platform; a format string the compiler writes itself
+//     does not get to be that loose.
+//   - `char` and `int8` are one row of Layout.cpp:39 (Int/8/signed), so nothing here
+//     can tell them apart, and `%d` is the reading that never invents a character.
+//     `format!("{}", 'A')` is "65". Print a character with `printf`, which is told the
+//     conversion by the author.
+//
+// `%s` versus `%p` is decided by `CgType::pointee`, and that works because a `string`
+// is the one pointer this backend builds with no pointee at all (byName's Pointer
+// scalar; a bare `null` is the only other). Every other pointer goes through
+// `mapPointer`/`pointerTo`, which set it. No new flag was needed.
+//
+// Nobody frees the buffer. A Fin `string` is an `i8*` with no owner and no length
+// (ADR 0003), and deeptest2.fin:63 writes `return format!(...)` out of a method -- so a
+// stack buffer would dangle at the return, and freeing at the right moment is what the
+// tracing collector is for. The leak is deliberate and it is the same shape as `new`,
+// which also never frees.
+//
+// One thing the language allows and this lowering does not: a format string that is
+// not a literal. Translating `{}` is type-directed, so it happens at compile time and
+// needs the text then; a runtime format would have to carry the conversions into a
+// runtime loop as data. `tests/samples/stdlib/stdio.fin:36` is the only site in the
+// corpus, in a sample the front end stops for other reasons, and it is refused by name
+// here rather than silently printing a `{}` -- the third obligation of this suite is
+// that a construct the backend cannot lower is refused and never skipped.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AFormatCallBuildsAStringThatRuns) {
+    // The step's verification clause, and nothing more: a `-o` build of a `format!`
+    // call runs and prints. Two placeholders from one value, because reusing an
+    // argument is what a format string is for and a lowering that consumed each
+    // value positionally as it scanned would fail exactly here.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let n <int> = 42;\n"
+        "    let s <string> = format!(\"n = {}, again {}\", n, n);\n"
+        "    printf(\"%s\\n\", s);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "n = 42, again 42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFormatDispatchesOnEachArgumentsOwnType) {
+    // Seven types in one call, which is the per-argument half of the step. Read the
+    // expected string carefully: `9000000000` is the `%lld` that `%ld` would also
+    // print on Linux and would not on Windows, `1.5` is a float promoted to a double
+    // and taking `%g`, `65` is `char` sharing a Layout row with `int8`, and `1` is a
+    // `bool` widened to an int. Each of those is a decision the banner above argues
+    // for, so each is pinned as an observable byte.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let i <int> = -7;\n"
+        "    let u <uint> = 7;\n"
+        "    let l <long> = 9000000000;\n"
+        "    let f <float> = 1.5;\n"
+        "    let t <string> = \"Ada\";\n"
+        "    let c <char> = 'A';\n"
+        "    let y <bool> = true;\n"
+        "    let s <string> = format!(\"{} {} {} {} {} {} {}\", i, u, l, f, t, c, y);\n"
+        "    printf(\"%s\\n\", s);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "-7 7 9000000000 1.5 Ada 65 1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APointerFormatsAsAnAddressAndAStringAsItsBytes) {
+    // The `pointee ? "%p" : "%s"` rule, from both sides in one program. Only the
+    // string half can be pinned exactly -- an address is whatever the loader chose --
+    // so the pointer half asserts the shape a `%p` produces and, more to the point,
+    // that the program did not walk an integer as if it were a character array.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let p <&int> = &x;\n"
+        "    let s <string> = format!(\"[{}]\", p);\n"
+        "    printf(\"%s\\n\", s);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out.substr(0, 3), "[0x") << b.why();
+    EXPECT_EQ(b.out.substr(b.out.size() - 2), "]\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APercentInAFormatStringIsText) {
+    // A Fin format string is text, and text handed to snprintf as a format is a
+    // vararg read the caller never made: `format!("{}%")` with the `%` passed
+    // through would read a value off the stack that no argument put there. Same
+    // reasoning as `blame`'s message going through `%s` rather than being the format.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let s <string> = format!(\"{}% done\", 100);\n"
+        "    printf(\"%s\\n\", s);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "100% done\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFormatWithNoPlaceholdersIsStillAString) {
+    // The degenerate call, worth a test because the lowering still has to allocate:
+    // returning the literal's own global would hand back a pointer into read-only
+    // memory, and every other `format!` result is a `malloc`'d buffer. One shape out,
+    // whatever went in.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let s <string> = format!(\"no placeholders\");\n"
+        "    printf(\"%s\\n\", s);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "no placeholders\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFormatResultOutlivesTheFunctionThatBuiltIt) {
+    // deeptest2.fin:63's shape -- `return format!(...)` out of a method -- and the
+    // reason the buffer comes from `malloc` rather than from an `alloca`. A stack
+    // buffer passes this test's `printf` about as often as it does not, which is why
+    // it is written as a return across a call boundary and not as a same-frame read.
+    const Built b = build(std::string(kPrintf) +
+        "fun describe(n: int) <string> { return format!(\"n=<{}>\", n); }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%s\\n\", describe(5));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "n=<5>\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFormatArgumentMayBeAnotherFormat) {
+    // A `format!` is an expression of type `string`, so it is an argument to one --
+    // and the inner call is a `string` with no pointee, which is what makes the outer
+    // `{}` a `%s`. The recursion is in `emit`, and the two calls' argument vectors
+    // must not share a builder position: an inner emission that left the insert point
+    // somewhere else would put the outer `snprintf` in the wrong block.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let s <string> = format!(\"nested: {}\", format!(\"{}\", 3));\n"
+        "    printf(\"%s\\n\", s);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "nested: 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADeclarationOfABuiltinMacroLowersToNothing) {
+    // `lib/std/stdio.fin` writes the signature down so a reader can find it (ADR 0023
+    // step 8), and a program that imports the standard library therefore has the
+    // declaration in its AST. It must emit nothing and refuse nothing.
+    //
+    // Nothing is not a skip. `@define printf` emits an extern because it names a
+    // linker symbol; a macro has none -- which is the ADR's argument for the compiler
+    // being its only possible implementer -- so there is no declaration to write and
+    // no definition being omitted.
+    const Built b = build(std::string(kPrintf) +
+        "@define format!(fmt: string, ...) <string>;\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%s\\n\", format!(\"{}\", 1));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMacroWithABodyIsStillRefused) {
+    // The other half of the guard, and the reason it reads `!node.body && find(name)`
+    // rather than `find(name)`. A program may write its own `@macro format(a)` with a
+    // body and get its own (chapter 11), and such a declaration is an ordinary
+    // `@macro` -- unlowered, like every other. Matching the table on the name alone
+    // would make this file silently drop it, which is a skip wearing a builtin's name.
+    const Built b = build(
+        "@macro format(a) { return quote { $a; }; }\n"
+        "fun main() <noret> { let v <int> = format!(1); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a macro declaration (macro expansion did not consume it)"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFormatWhoseFormatStringIsRuntimeTextIsRefused) {
+    // The known gap, refused by name. `tests/samples/stdlib/stdio.fin:36` writes
+    // `format!(fmt, ...objects)` with `fmt` a parameter, and it type-checks -- the
+    // analyzer only requires a `string`. Printing the `{}` through instead would
+    // produce a program that runs and lies, which is the one outcome this suite
+    // treats as worse than a refusal.
+    const Built b = build(std::string(kPrintf) +
+        "fun show(fmt: string) <string> { return format!(fmt, 1); }\n"
+        "fun main() <noret> { printf(\"%s\\n\", show(\"{}\")); }\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a 'format!' whose format string is not a literal"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFormatPlaceholderWithAnythingInsideIsRefused) {
+    // `{}` is the whole placeholder syntax the ADR specifies. `{0}`, `{name}` and
+    // `{:>8}` are all real syntax in other languages and none of them is read here, so
+    // an unread `{0}` copied through would silently print itself while the value it
+    // named went to the following placeholder or to nowhere.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let s <string> = format!(\"{0}\", 1);\n"
+        "    printf(\"%s\\n\", s);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a 'format!' placeholder that is not '{}'"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFormatWhosePlaceholdersAndValuesDisagreeIsRefused) {
+    // Both directions, and they are not symmetric bugs: too few values makes snprintf
+    // read a vararg nobody passed, too many makes a value vanish. Neither is checked
+    // by the analyzer -- ADR 0023 leaves the variadic tail untyped on purpose, because
+    // which conversion a value needs is a question for the code that builds the string
+    // -- so this file is the only place the count can be counted.
+    //
+    // The message carries both numbers, which is why the scan keeps counting past the
+    // last available conversion instead of refusing the moment it runs out: a partial
+    // count in a diagnostic is worse than no count.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let s <string> = format!(\"{} {}\", 1);\n"
+        "    printf(\"%s\\n\", s);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a 'format!' with 2 '{}' and 1 value"),
+              std::string::npos) << b.why();
+
+    const Built c = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let s <string> = format!(\"{}\", 1, 2);\n"
+        "    printf(\"%s\\n\", s);\n"
+        "}\n");
+    EXPECT_NE(c.compileExit, 0) << c.why();
+    EXPECT_NE(c.compileErr.find("a 'format!' with 1 '{}' and 2 values"),
+              std::string::npos) << c.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAggregateFormattedByFormatIsRefused) {
+    // `promoteVararg` refuses an aggregate at the C variadic boundary already, but it
+    // would refuse it as "a variadic argument" -- and the honest diagnostic names what
+    // the author wrote. A struct has no conversion specifier, and inventing one (a
+    // field-by-field walk, an address) would be this file deciding what `{}` means for
+    // a user's type, which is a language question and not a lowering one.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point { x <int>, y <int> }\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point{x: 1, y: 2};\n"
+        "    let s <string> = format!(\"{}\", p);\n"
+        "    printf(\"%s\\n\", s);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a struct formatted by 'format!'"),
+              std::string::npos) << b.why();
+}

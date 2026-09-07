@@ -507,6 +507,51 @@ declaration of an unlisted name refused with no call; a bodyless declaration of 
 *and* asserted not to produce the expander's wording, which is the one-mistake-one-diagnostic
 property; and a program's own bodied `format` winning. 1695 pass.
 
-Lowering is untouched, so a `format!` call type-checks and `-o` reports `codegen: a macro
-invocation (macro expansion did not consume it) is not lowered yet`. That is step 7, and the plan
-already says a checker-only build is green after step 6.
+Lowering was untouched at that point, so a `format!` call type-checked and `-o` reported
+`codegen: a macro invocation (macro expansion did not consume it) is not lowered yet`. That was
+step 7, recorded below, and the plan already said a checker-only build is green after step 6.
+
+## Step 7 as landed
+
+`format!` lowers to two calls to C's `snprintf` around one `malloc`: the first measures with a null
+buffer, the second writes into the buffer that measurement sized. Measuring rather than guessing a
+capacity is the whole reason `snprintf` and not `sprintf` is the runtime this leans on — a fixed
+buffer would make the longest value a program can print a property of this file.
+
+The conversion per argument is read off the **promoted** value, after `promoteVararg`, because that
+is the value C actually receives: a `float` has already become a `double` and takes `%g`, and a
+sub-int integer has already widened. Four of those choices are visible bytes and each is pinned as
+one: `%g` rather than `%f`, so `format!("{}", 1.5)` reads `1.5` and not `1.500000`; `%lld` rather
+than `%ld`, which agrees with `%ld` on Linux and would disagree on Windows, where C's `long` is 32
+bits; signedness taken from the argument's own type rather than the placeholder, since `{}` carries
+no type; and a `char` printing as a number, which is not a decision so much as a consequence —
+`char` shares its Layout row with `int8`, so there is nothing left at this level to tell them apart.
+
+The placeholder scan happens at compile time, and that is what fixes the shape of the feature. `{}`
+is the only placeholder; `%` is literal text and becomes `%%`; a count that disagrees with the
+arguments is a compile error rather than a read off the stack; and an aggregate is refused by name
+(`a struct formatted by 'format!'`, and likewise an array, an interface reference, a prototype and
+a function value) rather than given an invented spelling, because what `{}` means for a user's type
+is a language question and not a lowering one. `promoteVararg` would already refuse an aggregate at
+the C variadic boundary, but it would call it "a variadic argument"; the refusal here names what the
+author wrote.
+
+The one thing the language allows that the lowering does not is a format string that is not a
+literal. `lib/std/stdio.fin`'s note records the consequence: a `printf` forwarding its own `fmt` is
+exactly the shape that needs a runtime formatter, and it reports `a 'format!' whose format string is
+not a literal` instead. Nobody frees the returned buffer either — which is what makes returning one
+from a function safe, and what `lib/std/error.fin` now gives as the reason `describe()` keeps its
+`snprintf` body: that body hands the caller a buffer to free, and trading a stated ownership rule
+for a silent leak is a swap that belongs with ADR 0003's collector.
+
+The names live in one place: codegen reads the same `builtinmacros::find` the analyzer does, so
+`visit(MacroInvocation&)` dispatches on the table rather than on a string spelled twice (ADR 0008).
+A bodyless declaration of a table name lowers to nothing; a macro with a body still reports `a macro
+declaration (macro expansion did not consume it)`, since expansion should have consumed it.
+
+Thirteen `Soundness_Codegen` tests, eight of them executed programs rather than compilations: the
+step's own verification clause, a seven-type dispatch in one call, a pointer beside a string, a `%`,
+a placeholder-free format string, a result returned out of the function that built it, a `format!`
+nested as another's argument, and a bodyless declaration linking and running with no code emitted
+for it. 1708 pass, and the corpus snapshot is byte-identical to
+step 6's — this step adds no diagnostic to a checker-only build.

@@ -3,6 +3,12 @@
 #include "../ast/ASTNode.hpp"   // the master AST include
 #include "../ast/Visitor.hpp"
 #include "../diagnostics/DiagnosticEngine.hpp"
+// The list of macros the compiler implements, read here for the same reason the
+// analyzer reads it: an invocation that survives expansion is either a builtin's
+// -- lowered below -- or a pass that did not run, and one table is what keeps the
+// two apart. A second copy of the names in this file would be a second place the
+// truth lives, which is the failure ADR 0008 rejects by name.
+#include "../semantics/BuiltinMacros.hpp"
 #include "../types/Layout.hpp"
 #include "../utils/IntegerConstant.hpp"
 
@@ -6751,9 +6757,36 @@ private:
     // A macro or an import that survives to codegen is a pass that did not run:
     // MacroExpander consumes the first, ModuleLoader the second. Saying so names
     // the pipeline stage rather than the syntax.
-    void visit(MacroDeclaration& node) override { unsupported(node, "a macro declaration (macro expansion did not consume it)"); }
+    //
+    // Two macros survive it legitimately, and both are the compiler's own (ADR 0023
+    // step 7). A bodyless `@define format!(fmt: string, ...) <string>;` has no template
+    // to substitute into, so the expander leaves the declaration and the invocation
+    // standing on purpose; the table is what says so.
+    //
+    // The declaration emits nothing, and that is not a skip. `@define printf` emits an
+    // extern because it names a linker symbol; a macro has none -- which is the whole
+    // argument ADR 0023 makes for the compiler being its only possible implementer --
+    // so there is no declaration for this file to write and no definition to omit. A
+    // bodyless declaration of a name *not* in the table never reaches here: the
+    // analyzer refuses it where it is written.
+    void visit(MacroDeclaration& node) override {
+        if (!node.body && builtinmacros::find(node.name)) return;
+        unsupported(node, "a macro declaration (macro expansion did not consume it)");
+    }
     void visit(MacroCall& node) override { unsupported(node, "a macro call (macro expansion did not consume it)"); }
-    void visit(MacroInvocation& node) override { unsupported(node, "a macro invocation (macro expansion did not consume it)"); }
+    void visit(MacroInvocation& node) override {
+        const auto* builtin = builtinmacros::find(node.name);
+        if (!builtin) {
+            unsupported(node, "a macro invocation (macro expansion did not consume it)");
+            return;
+        }
+        // One row, one lowering, matched by name. A second row added to the table
+        // without a lowering here would otherwise fall through to `format!`'s, which
+        // would build a string for a macro that promised something else -- so the
+        // dispatch is explicit and the unimplemented row refuses by its own name.
+        if (builtin->name == "format") { emitFormatMacro(node); return; }
+        unsupported(node, fmt::format("the compiler-implemented macro '{}!'", node.name));
+    }
     void visit(QuoteExpression& node) override { unsupported(node, "a quote"); }
     void visit(ImportModule& node) override { unsupported(node, "an import (the module loader did not consume it)"); }
 
@@ -7298,6 +7331,234 @@ private:
         // assertion.
         builder_.CreateUnreachable();
         return true;
+    }
+
+    // The C conversion one Fin value needs inside a `format!`, or null for a value
+    // this cannot format.
+    //
+    // Read off the *promoted* value, because that is what reaches the callee:
+    // promoteVararg widens a float to a double and anything narrower than an int to an
+    // int, so `%g` and `%d` are the conversions those two become and not the ones their
+    // Fin types would suggest.
+    //
+    // `%lld` and not `%ld` for a 64-bit integer. A C `long` is 32 bits on Windows and
+    // 64 on Linux, and a `long long` is 64 everywhere it exists -- and this string is
+    // the compiler's own rather than a program's, so it does not get to be as loose as
+    // the corpus's `printf("%ld", n)` (Layout.hpp records that spelling as the reason
+    // `long` is i64 in the first place).
+    //
+    // `%g` and not `%f` for a float, because `{}` asks for the value and `%f` asks for
+    // six decimal places: `format!("{}", 1.5)` reads "1.5" and not "1.500000". Which is
+    // a choice about what `{}` *means* and not about what a double is -- the corpus
+    // writes `printf("%.2f", x)` when it wants a width, and `{}` has no syntax for one.
+    //
+    // A `char` prints as a number. It shares its representation with `int8` exactly --
+    // one 8-bit signed integer, from one row of Layout.cpp's table -- so this cannot
+    // tell them apart, and `%c` for both would print a byte for a small number. No
+    // corpus site formats a char, so the reading that never invents a character wins.
+    //
+    // A pointer with a pointee is an address and prints as one. A pointer *without* one
+    // is a `string` or a bare `null` -- the only two pointee-less pointers this file
+    // builds (byName's Pointer scalar and visit(Literal&)'s KW_NULL) -- so `%s` reads
+    // the bytes, which is what `printf("%s", s)` already does with the same value. A
+    // `null` there prints "(null)" on glibc; it is not a shape the analyzer can refuse,
+    // since the variadic tail is unchecked by design, and it is not a shape any corpus
+    // site writes.
+    static const char* conversionFor(const CgType& t) {
+        switch (t.kind) {
+            case CgType::Kind::Int:
+                if (t.bits < 32) return "%d";      // promoted to an int
+                if (t.bits == 32) return t.isSigned ? "%d" : "%u";
+                if (t.bits == 64) return t.isSigned ? "%lld" : "%llu";
+                return nullptr;
+            case CgType::Kind::Float:
+                return "%g";
+            case CgType::Kind::Ptr:
+                return t.pointee ? "%p" : "%s";
+            default:
+                return nullptr;
+        }
+    }
+
+    // What to call a value `format!` cannot format, for the refusal that names it.
+    //
+    // A phrase and not a type spelling: a CgType has no name -- the written type is a
+    // TypeNode somewhere upstream of the value, and an argument's may be an expression
+    // with no written type at all -- and the kind is what the refusal turns on.
+    static const char* unformattableKind(const CgType& t) {
+        if (t.isInterface) return "an interface reference";
+        if (t.isStruct()) return "a struct";
+        if (t.isArray()) return "an array";
+        if (t.isPrototype()) return "a prototype";
+        if (t.isFn()) return "a function value";
+        return "a value of no type";
+    }
+
+    // `format!("{} and {}", a, b)` -- the one macro the compiler implements (ADR 0023
+    // step 7), and the only expression in this file whose shape a compile-time string
+    // decides.
+    //
+    // Lowered as the C idiom for building a string whose length nobody knows until the
+    // values are formatted: `snprintf` into no buffer to measure, `malloc` that many
+    // bytes plus the NUL, `snprintf` again to fill it. The arguments are emitted once
+    // and handed to both calls -- emitting them twice would run the `next()` in
+    // `format!("{}", next())` twice, which is a wrong program rather than a slow one.
+    //
+    // `snprintf` and `malloc` are declared on demand through runtimeFn, on the footing
+    // the `fprintf` and `abort` of a `blame` and the `malloc` of a dynamic array are
+    // already on: a libc entry point this file needs, shared with a Fin program that
+    // declared it itself rather than colliding with it.
+    //
+    // Nobody frees the buffer, and that is not a decision available here. `string` is
+    // `i8*` with no length and no owner -- ADR 0003 leaves the representation to the
+    // library -- and the corpus writes `return format!(...)` out of a method
+    // (deeptest2.fin:63), so a stack buffer would be dangling before the caller read
+    // it. Freeing it needs the tracing collector ADR 0003 commits to, which is a wave
+    // of its own and not this step.
+    //
+    // The conversion per argument comes from the type the *backend* emitted. ADR 0023
+    // says "the type the analyzer recorded" and there is no separate record to read:
+    // the analyzer's answer reaches this file the way every other type does, through
+    // the value, and a second copy attached to the node could only ever disagree with
+    // the CgType that selects the instruction.
+    void emitFormatMacro(MacroInvocation& node) {
+        if (!currentFn_) { unsupported(node, "a 'format!' outside a function"); return; }
+        if (node.args.empty()) {
+            // The analyzer reported this already -- "expects at least 1 argument, got
+            // 0" -- so reaching it is the two passes disagreeing and not a program's
+            // mistake arriving unreported.
+            unsupported(node, "a 'format!' with no format string");
+            return;
+        }
+
+        // The format has to be a literal *here*, and this is the one thing the language
+        // allows that this lowering does not do.
+        //
+        // `{}` is type-directed -- which conversion it becomes depends on the value
+        // beside it -- so translating it needs the text at compile time.
+        // `tests/samples/stdlib/stdio.fin:36` writes `format!(fmt, ...objects)` with
+        // `fmt` a runtime parameter, and that call is the reason `format!` is a builtin
+        // at all rather than a macro pasting a literal into a template (ADR 0023). It
+        // still does not lower: the translation would have to run at run time, over a
+        // format the compiler never sees, with the conversions carried into that loop as
+        // data -- which is a runtime routine and not a format string, and no corpus site
+        // reaches codegen needing it. Refused by name rather than mislowered, because
+        // the alternative is handing `{}` to snprintf as literal text and printing the
+        // placeholder.
+        auto* literal = dynamic_cast<Literal*>(node.args[0].get());
+        if (!literal || literal->kind != ASTTokenKind::STRING_LITERAL) {
+            unsupported(node, "a 'format!' whose format string is not a literal");
+            return;
+        }
+
+        // The values, emitted in written order before the format is translated: each
+        // `{}` becomes the conversion its own value's type asks for, so there is nothing
+        // to translate until the values exist.
+        std::vector<llvm::Value*> values;
+        std::vector<const char*> conversions;
+        for (size_t i = 1; i < node.args.size(); ++i) {
+            if (!node.args[i]) { unsupported(node, "a 'format!' argument with no value"); return; }
+            CgVal v = emit(*node.args[i]);
+            if (failed_) return;
+            if (!v.ok()) { unsupported(node, "this 'format!' argument"); return; }
+            const char* conversion = conversionFor(v.type);
+            if (!conversion) {
+                unsupported(node, fmt::format("{} formatted by 'format!'",
+                                              unformattableKind(v.type)));
+                return;
+            }
+            llvm::Value* promoted = promoteVararg(node, v);
+            if (!promoted) return;
+            values.push_back(promoted);
+            conversions.push_back(conversion);
+        }
+
+        // The C format string, built here and never at run time. Three things in one
+        // pass: `{}` becomes the conversion its argument needs, a `%` the program wrote
+        // becomes `%%`, and everything else is copied.
+        //
+        // The `%%` is not a nicety. A Fin format string is text -- `format!("100% of
+        // {}", n)` is a program somebody will write -- and text handed to snprintf as a
+        // format is a vararg read the caller never made. The same reasoning that sends
+        // a `blame` message through `%s` instead of making it the format.
+        std::string cFormat;
+        size_t placeholders = 0;
+        const std::string text = decodeLiteral(literal->value);
+        for (size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == '%') { cFormat += "%%"; continue; }
+            if (text[i] != '{') { cFormat += text[i]; continue; }
+            // `{` opens a placeholder and opens nothing else. `{0}`, `{name}` and
+            // `{:>8}` are all forms `format!` could grow and none of them is written
+            // anywhere in the corpus, so each is refused rather than copied through: a
+            // program that printed `{0}` literally would be this file guessing that the
+            // author meant text.
+            if (i + 1 >= text.size() || text[i + 1] != '}') {
+                unsupported(node, "a 'format!' placeholder that is not '{}'");
+                return;
+            }
+            ++i;
+            if (placeholders < conversions.size()) cFormat += conversions[placeholders];
+            ++placeholders;
+        }
+
+        // Counted against each other rather than trusted, and counted here because here
+        // is where both numbers exist. The analyzer checks `format!`'s fixed parameter
+        // and leaves the variadic tail alone by design, and the tail is what these
+        // placeholders consume -- so a missing value would be a vararg read that was
+        // never pushed, and a spare one would be a value the program formatted into
+        // nothing.
+        if (placeholders != conversions.size()) {
+            unsupported(node, fmt::format("a 'format!' with {} '{{}}' and {} value{}",
+                                          placeholders, conversions.size(),
+                                          conversions.size() == 1 ? "" : "s"));
+            return;
+        }
+
+        llvm::PointerType* ptrTy = llvm::PointerType::getUnqual(ctx_);
+        llvm::Type* i32Ty = llvm::Type::getInt32Ty(ctx_);
+        llvm::Type* i64Ty = llvm::Type::getInt64Ty(ctx_);
+        llvm::FunctionCallee write = runtimeFn(
+            node, "snprintf",
+            llvm::FunctionType::get(i32Ty, {ptrTy, i64Ty, ptrTy}, /*isVarArg=*/true),
+            "a 'format!'");
+        if (!write) return;
+        llvm::FunctionCallee alloc = runtimeFn(
+            node, "malloc", llvm::FunctionType::get(ptrTy, {i64Ty}, false), "a 'format!'");
+        if (!alloc) return;
+
+        llvm::Value* format = builder_.CreateGlobalString(cFormat);
+
+        // `snprintf(null, 0, ...)` returns the length it *would* have written, which is
+        // the measurement this idiom rests on: it is defined to write nothing when the
+        // size is zero, and defined to return the full length rather than the truncated
+        // one.
+        std::vector<llvm::Value*> measure{llvm::ConstantPointerNull::get(ptrTy),
+                                          llvm::ConstantInt::get(i64Ty, 0), format};
+        measure.insert(measure.end(), values.begin(), values.end());
+        llvm::Value* length = builder_.CreateCall(write, measure, "format.len");
+
+        // A negative return is an encoding error, and clamping it to zero costs two
+        // instructions and buys the invariant that matters: the buffer is at least one
+        // byte and the second call NUL-terminates it. Without the clamp a negative
+        // length would allocate nothing and leave an unterminated pointer typed
+        // `string`, which every reader downstream would walk off the end of.
+        llvm::Value* zero = llvm::ConstantInt::get(i32Ty, 0);
+        llvm::Value* written = builder_.CreateSelect(
+            builder_.CreateICmpSLT(length, zero), zero, length, "format.written");
+        llvm::Value* size = builder_.CreateAdd(builder_.CreateSExt(written, i64Ty),
+                                               llvm::ConstantInt::get(i64Ty, 1),
+                                               "format.size");
+        llvm::Value* buffer = builder_.CreateCall(alloc, {size}, "format.buf");
+
+        // Not checked against null, exactly as the `malloc` of a `new` and of a dynamic
+        // array are not: a failed allocation is a runtime story this language has not
+        // told yet, and inventing a check here would be one of three sites behaving
+        // differently.
+        std::vector<llvm::Value*> fill{buffer, size, format};
+        fill.insert(fill.end(), values.begin(), values.end());
+        builder_.CreateCall(write, fill);
+
+        value_ = CgVal{buffer, *types_.byName("string")};
     }
 
     // `p.get()`, and `q.get()` where q is a `&Point`.

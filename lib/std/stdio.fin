@@ -50,8 +50,14 @@
 //     exported directly and the alias is dropped.
 //   * The draft's second, generic, `#[overwrite(printf)]` `printf` calls
 //     `format!(fmt, ...objects)`, which type-checks now: `format!` is a macro the compiler
-//     implements (ADR 0023 step 6), measured on that exact body. What is left is that
-//     nothing reads `#[overwrite]` and that a `format!` call does not lower yet.
+//     implements (ADR 0023 step 6), measured on that exact body. `format!` also lowers as
+//     of step 7 -- but not this call. The lowering reads the placeholders out of the format
+//     string at compile time to pick a conversion per value, so the string has to be a
+//     literal where the call is written, and `fmt` here is a parameter: the body reports
+//     `codegen: a 'format!' whose format string is not a literal is not lowered yet`
+//     (measured 2026-09-07). A `printf` that forwards its own `fmt` is exactly the shape
+//     that needs the runtime formatter this lowering does not have. That, and nothing
+//     reading `#[overwrite]`, is what is left.
 //   * `print`/`println` are bound `<X: Printable>`, not `<X: Any<Printable>>`. The bound
 //     written through the alias loses the interface and the body then reports `Type 'X'
 //     does not have methods` (KnownDefect_TypeAliases.GenericArgumentsOnANonGenericAlias-

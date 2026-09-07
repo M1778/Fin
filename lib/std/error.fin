@@ -22,13 +22,16 @@
 // a pointer is not lowered yet`), so the shorter form is the one that could run.
 //
 // `format()` returns the message, and `describe()` is the formatter the draft wanted.
-// The draft writes `format!("Error: {}", self.message)`, which type-checks as of ADR 0023
-// step 6 -- `format!` is a macro the compiler implements -- but does not lower, and this
-// file is measured as a linked executable, so it still cannot be written here. `describe()`
-// does the same job through C's `snprintf` -- measured end to end, not merely
-// type-checked: an `error_id` of 7 and a message of "boom" prints `Error 7: boom` from a
-// linked executable. `format()` keeps its name and its one-line body because it is the
-// name the library's own subclasses inherit and nothing in the corpus calls either.
+// The draft writes `format!("Error: {}", self.message)`, and as of ADR 0023 step 7 that
+// spelling lowers: measured 2026-09-07, the same two bodies in a linked executable print
+// `Error: boom` and `Error 7: boom`. So the reason `describe()` still reaches for C's
+// `snprintf` is no longer that `format!` cannot run -- it is ownership. `describe()`
+// hands back a buffer the caller frees, which the GAPS note below is the only place in
+// the tree to say; a `format!` string is never freed by anyone, because reclaiming it
+// waits on ADR 0003's collector. Swapping the body would trade a stated ownership rule
+// for a silent leak, so the swap belongs with the collector and not with the lowering.
+// `format()` keeps its name and its one-line body because it is the name the library's
+// own subclasses inherit and nothing in the corpus calls either.
 //
 // GAPS hit while writing this:
 //
