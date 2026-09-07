@@ -71,6 +71,15 @@ FincRun compile(const std::string& code) {
     return runFinc({s.str()});
 }
 
+// The same, with extra flags. For the handful of cases where the assertion is about what
+// finc *renders* rather than what it accepts -- `--debug-ast`, chiefly.
+FincRun compileWith(const std::vector<std::string>& flags, const std::string& code) {
+    Src s(code);
+    std::vector<std::string> argv{s.str()};
+    argv.insert(argv.end(), flags.begin(), flags.end());
+    return runFinc(argv);
+}
+
 // The diagnostic message lines, and nothing else.
 //
 // This exists because searching all of stderr for an identifier is not evidence that
@@ -13069,6 +13078,11 @@ TEST(Soundness_GlobalAttribute, GlobalOutsideStdIsRefusedOnEveryDeclarationFormT
         // arms-form `@macro m { ... }` took no leading attribute and the parameter form
         // was unreachable behind it.
         "#[global] @macro m(a) { return quote { $a; }; }",
+        // The bodyless form (ADR 0023 step 5). A separate entry from the one above
+        // because it is a separate production reaching the same node, and it reaches it
+        // with `body` null -- an attribute walk that dereferenced the body to find the
+        // attributes would pass the line above and abort here.
+        "#[global] @define m!(a: int) <int>;",
     };
     for (const char* form : forms) {
         const auto r = compile(std::string(form) + "\nfun main() <noret> {}\n");
@@ -13090,6 +13104,7 @@ TEST(Soundness_GlobalAttribute, GlobalInsideStdIsAccepted) {
         "namespace std { #[global] import { printf } from stdio; }",
         "namespace std { #[global] fun f() <noret> {} }",
         "namespace std { #[global] @macro m(a) { return quote { $a; }; } }",
+        "namespace std { #[global] @define m!(a: int) <int>; }",
     };
     for (const char* form : forms) {
         const auto r = compile(std::string(form) + "\nfun main() <noret> {}\n");
@@ -13543,4 +13558,74 @@ TEST(Soundness_Macros, AShapedArgumentNestsInsideAnother) {
         "@macro m(p) { return quote { $p; }; }\n"
         "fun main() <noret> { let a <{string, {int, int}}> = m!{\"k\" => m![7, 8]}; }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// --- A bodyless macro declaration (ADR 0023 step 5) ------------------------
+
+TEST(Soundness_Macros, ABodylessMacroDeclarationParses) {
+    // ADR 0023 step 5's verification clause: `@define format!(fmt: string, ...) <string>;`
+    // parses. `@define` and not a new keyword because `@define` already means "declared
+    // here, implemented elsewhere" -- `@define printf(fmt: string, ...) <noret>;` reaches C
+    // through `#[llvm_name]` -- and the `!` says which elsewhere. A macro has no linker
+    // symbol, so the compiler is the only possible implementer and no attribute is needed
+    // to name one.
+    const auto r = compile("@define format!(fmt: string, ...) <string>;\n"
+                           "fun main() <noret> { return; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABodylessDeclarationIsAMacroNodeWithNoBody) {
+    // The other half of the clause: `--debug-ast` shows a MacroDeclaration with no body.
+    // Asserted through the render rather than the node because this suite runs the real
+    // compiler, and the render is what a reader of `--debug-ast` sees. `Macro 'format'`
+    // is the node kind; `-> string` is the declared return type, which only a bodyless
+    // declaration has; and the absence of a `Block` under it is the missing body.
+    const auto r = compile("@define format!(fmt: string, ...) <string>;\n"
+                           "fun main() <noret> { return; }\n");
+    ASSERT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+
+    const auto ast = compileWith({"--debug-ast"},
+                                 "@define format!(fmt: string, ...) <string>;\n"
+                                 "fun main() <noret> { return; }\n");
+    const std::string out = stripAnsi(ast.err) + stripAnsi(ast.out);
+    EXPECT_NE(out.find("Macro 'format'"), std::string::npos)
+        << "a bodyless declaration is a MacroDeclaration, not a DefineDeclaration\n" << out;
+    EXPECT_NE(out.find("-> string"), std::string::npos)
+        << "and it carries the return type it declared\n" << out;
+    // The parameters are the ones written, in order, with the `...` kept as a vararg: a
+    // builtin's arity is checkable from this and a diagnostic can name the parameter it
+    // means.
+    EXPECT_NE(out.find("Param: fmt"), std::string::npos) << out;
+    EXPECT_NE(out.find("Param: ...: expr..."), std::string::npos) << out;
+}
+
+TEST(Soundness_Macros, ABodylessMacroHasNothingToExpandAndSaysSo) {
+    // Until step 6's builtin table answers the call, a bodyless macro is a macro with no
+    // template, and the expander says exactly that. Recorded because it is the state of
+    // the tree between two steps and the message a user gets today: this is not silence,
+    // and it is not `Undefined macro` either -- the declaration was found.
+    const auto r = compile("@define format!(fmt: string, ...) <string>;\n"
+                           "fun main() <noret> { let s <string> = format!(\"x\"); }\n");
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Macro 'format' has no body to expand"),
+              std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, TheBangIsWhatSeparatesTheTwoDefineForms) {
+    // The control on the new production's reach: `@define` without the `!` is still an
+    // extern, and one token of lookahead is the whole difference. Asserted through what
+    // each one *is* rather than through parsing, which both do: an extern with a body-
+    // shaped call is a function call, so it lowers and reports nothing; a macro name
+    // reached without `!` is not in the symbol namespace at all (`Scope` keeps the two
+    // apart), so it reports an undefined variable.
+    const auto extern_ = compile("@define pf(fmt: string) <noret>;\n"
+                                 "fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_EQ(extern_.exitCode, 0) << stripAnsi(extern_.err);
+
+    const auto macro = compile("@define pf!(fmt: string) <noret>;\n"
+                               "fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_NE(macro.exitCode, 0)
+        << "`pf!` declares a macro, and a macro is not callable without the `!`\n"
+        << stripAnsi(macro.err);
 }

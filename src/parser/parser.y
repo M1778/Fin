@@ -1441,9 +1441,51 @@ super_expression:
 
 /* --- EXTERN / DEFINE --- */
 
+/* `@define` declares something whose implementation is elsewhere, and the `!` says where.
+
+   Without it, the implementer is a linker symbol: `@define printf(fmt: string, ...) <noret>;`
+   with `#[llvm_name="c_printf"]` reaches C (stdlib/stdio.fin:11).
+
+   With it, the implementer is the compiler: `@define format!(fmt: string, ...) <string>;`
+   (ADR 0023 step 5). A macro has no linker symbol, so there is no other possible
+   implementer and no attribute is needed to name one.
+
+   The `!` and not a new keyword or an attribute, because `!` is already how every macro is
+   spelled at its call site -- `format!(...)` -- so the declaration reads as the thing being
+   declared. One token of lookahead past the IDENTIFIER separates the two forms, and NOT is
+   in neither's follow set otherwise.
+
+   The node is a MacroDeclaration with a null `body`, which is what makes this step small:
+   `resolveMacro` already finds it, `visit(MacroInvocation&)` already refuses to expand it
+   (there is no template to substitute into), and `CloneVisitor`, `ASTPrinter` and
+   `StructuralWalk` already tolerate the null. The parameter list is dropped rather than
+   converted, because a MacroParam holds a name and a fragment kind and cannot hold a type:
+   what a builtin's arguments must be is the builtin table's business (step 6), and the
+   analyzer is the first pass that knows a type at all. The names are kept in declaration
+   order, so arity is checkable here and a diagnostic can name the parameter it means. */
 define_declaration:
     AT KW_DEFINE IDENTIFIER LPAREN extern_params RPAREN LT type GT SEMICOLON {
         $$ = std::make_unique<fin::DefineDeclaration>($3, std::move($5.first), std::move($8), $5.second);
+        $$->setLoc(@$);
+    }
+    | AT KW_DEFINE IDENTIFIER NOT LPAREN extern_params RPAREN LT type GT SEMICOLON {
+        std::vector<fin::MacroParam> params;
+        for (auto& p : $6.first) {
+            params.push_back(fin::MacroParam{p->name, "expr", p->is_vararg});
+        }
+        if ($6.second) {
+            // `...` with no name of its own. A vararg parameter is how MacroParam spells
+            // one, and `...` is the name the corpus writes for the rest of the arguments
+            // at every `format!` call site.
+            params.push_back(fin::MacroParam{"...", "expr", true});
+        }
+        auto decl = std::make_unique<fin::MacroDeclaration>($3, std::move(params), nullptr);
+        // The declared return type, kept where the analyzer can compare it against the
+        // builtin table's (step 6). Not on MacroDeclaration before this production
+        // existed, because a macro with a body has no return type to declare: what it
+        // expands to is an expression whose type is whatever the analyzer makes of it.
+        decl->declared_return_type = std::move($9);
+        $$ = std::move(decl);
         $$->setLoc(@$);
     }
     ;

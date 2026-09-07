@@ -175,6 +175,10 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
         case NodeKind::MacroDeclaration: {
             auto& n = static_cast<MacroDeclaration&>(node);
             emitAll(out, n.attributes);
+            // Null for a macro with a body, and the body is null for the bodyless
+            // declaration that has one (ADR 0023 step 5), so exactly one of the two
+            // emits. `emit` skips nulls, which is why this needs no branch.
+            emit(out, n.declared_return_type.get());
             emit(out, n.body.get());
             return;
         }

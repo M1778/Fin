@@ -2,6 +2,7 @@
 #include "../nodes/ASTNode.hpp"
 #include "../stmts/Statement.hpp" // For Block
 #include "../types/Attribute.hpp"
+#include "../types/TypeNode.hpp"
 #include <vector>
 #include <string>
 #include <memory>
@@ -31,6 +32,17 @@ public:
     std::vector<MacroParam> params;
     std::unique_ptr<Block> body;
     std::vector<std::unique_ptr<Attribute>> attributes;
+
+    // The `<string>` of `@define format!(fmt: string, ...) <string>;`, and null for every
+    // macro with a body (ADR 0023 step 5).
+    //
+    // A macro with a body declares no return type and cannot: it expands to an expression,
+    // and what that expression's type is depends on the arguments -- which is the whole
+    // reason `let v <string> = twice!(3);` reports a mismatch rather than the macro being
+    // wrong. A bodyless declaration is the opposite case. The compiler implements it, so
+    // the signature is a contract between the library that writes this line and the
+    // builtin table that answers it (step 6), and the two are checked against each other.
+    std::unique_ptr<TypeNode> declared_return_type;
 
     // The scope of the module that declared this macro, or null for a macro declared in
     // the file being compiled (ADR 0023 step 4).

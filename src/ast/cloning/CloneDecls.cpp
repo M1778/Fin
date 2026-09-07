@@ -129,6 +129,8 @@ void CloneVisitor::visit(MacroDeclaration& node) {
         clone(node.body.get())
     );
     res->attributes = cloneVector(node.attributes);
+    // Null for a macro with a body; `clone(nullptr)` gives null (ADR 0023 step 5).
+    res->declared_return_type = clone(node.declared_return_type.get());
     // The declaring module travels with the clone (ADR 0023 step 4). A clone that
     // dropped it would be a macro whose body resolves at the call site again -- the
     // hygiene hole this pointer closes -- and it would do so silently, because a body

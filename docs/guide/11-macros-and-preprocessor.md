@@ -150,9 +150,28 @@ fun main() <noret> { let x <int> = mk!(3); }
 The call site is consulted first, so a caller that has its own `Held` keeps it: the macro asked
 for a type by that name, and shadowing a name stays the caller's prerogative.
 
+### A macro the compiler implements
+
 `format!` is *not* a `@macro`. It is compiler-implemented, because one call site in the
 standard library passes a runtime `string` as the format — which a macro taking a literal
-cannot serve. It is not registered yet, so `format!(...)` reports `Undefined macro`.
+cannot serve, and expansion happens before any type is known so a body could not choose a
+conversion per argument either.
+
+Such a macro is *declared* rather than written, with `@define` and a `!`:
+
+```fin
+@define format!(fmt: string, ...) <string>;
+```
+
+`@define` already means "declared here, implemented elsewhere" — `@define printf(fmt: string,
+...) <noret>;` reaches C through `#[llvm_name="c_printf"]` — and the `!` says which elsewhere.
+A macro has no linker symbol, so the compiler is the only possible implementer and no attribute
+is needed to name one. The `!` is the whole difference between the two forms: without it the
+name is an extern, with it the name is a macro and is not callable without the `!`.
+
+The declaration parses and type-checks. Calling one still reports `Macro 'format' has no body
+to expand` — the builtin table that answers the call is the next step, and until it lands
+`format!` is a name with a signature and no implementation.
 
 ## The C-style preprocessor
 
