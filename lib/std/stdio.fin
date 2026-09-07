@@ -49,9 +49,9 @@
 //     side as a *type*, so it reports `Undefined type 'printf'`. The `@define` is
 //     exported directly and the alias is dropped.
 //   * The draft's second, generic, `#[overwrite(printf)]` `printf` calls
-//     `format!(fmt, ...objects)`. `format!` is not a registered macro (`Undefined macro
-//     'format!'`), ADR 0021 rules it a compiler builtin rather than a declared one, and
-//     nothing reads `#[overwrite]`. The variadic C `printf` is the only one here.
+//     `format!(fmt, ...objects)`, which type-checks now: `format!` is a macro the compiler
+//     implements (ADR 0023 step 6), measured on that exact body. What is left is that
+//     nothing reads `#[overwrite]` and that a `format!` call does not lower yet.
 //   * `print`/`println` are bound `<X: Printable>`, not `<X: Any<Printable>>`. The bound
 //     written through the alias loses the interface and the body then reports `Type 'X'
 //     does not have methods` (KnownDefect_TypeAliases.GenericArgumentsOnANonGenericAlias-

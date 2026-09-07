@@ -22,9 +22,9 @@
 // a pointer is not lowered yet`), so the shorter form is the one that could run.
 //
 // `format()` returns the message, and `describe()` is the formatter the draft wanted.
-// The draft writes `format!("Error: {}", self.message)`; `format!` is not a registered
-// macro (`Undefined macro 'format!'`) and ADR 0021 records that it is to be a compiler
-// builtin rather than a declared one, so it cannot be written here at all. `describe()`
+// The draft writes `format!("Error: {}", self.message)`, which type-checks as of ADR 0023
+// step 6 -- `format!` is a macro the compiler implements -- but does not lower, and this
+// file is measured as a linked executable, so it still cannot be written here. `describe()`
 // does the same job through C's `snprintf` -- measured end to end, not merely
 // type-checked: an `error_id` of 7 and a message of "boom" prints `Error 7: boom` from a
 // linked executable. `format()` keeps its name and its one-line body because it is the

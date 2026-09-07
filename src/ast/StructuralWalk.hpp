@@ -48,7 +48,7 @@ using ChildCallback = std::function<void(ASTNode&)>;
 // `ImportModule` each carried an `attributes` vector that this function did not
 // emit, so every consumer walking for an attribute silently missed `@define`,
 // `@macro` and `import` -- and `#[global]`, whose one intended target is the
-// `@define` of `printf` at lib/std/stdio.fin:72, could not work at all.  Found
+// `@define` of `printf` at lib/std/stdio.fin:111, could not work at all.  Found
 // only because a refusal written against the walk refused nothing.
 //
 // Soundness_StructuralWalk.EveryNodeWithAnAttributesFieldEmitsIt is the guard.

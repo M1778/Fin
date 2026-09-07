@@ -13053,7 +13053,7 @@ TEST(Soundness_ArrayBounds, APrototypeKeyIsNotAnIndex) {
 //
 // That is not hypothetical. StructuralWalk did *not* emit the `attributes` vector
 // for DefineDeclaration, MacroDeclaration or ImportModule, so the walk found
-// nothing on a `@define` -- and `printf` at lib/std/stdio.fin:72 is a `@define`,
+// nothing on a `@define` -- and `printf` at lib/std/stdio.fin:111 is a `@define`,
 // which is to say `#[global]` could not work on the one declaration it exists
 // for. `forEachChild`'s UnregisteredNodeError does not catch that class of bug: the
 // node type *was* registered, only some of its children were missing.
