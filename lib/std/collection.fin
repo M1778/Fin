@@ -287,4 +287,15 @@ pub struct Collection<T> : <Index, IndexAssign> {
       }
   }
 
+// The list-shaped call `coll![1, 2, 3]`, which useful_macros.fin:12 writes and ADR 0023
+// step 8 asks for here. The bracket does the work the body would otherwise have to: step 3
+// makes `[...]` arrive as one prototype keyed `0..n-1`, which is precisely
+// `from_prototype`'s parameter, so this macro is a rename and not a construction. `$p` is
+// the whole bracket and `Collection::` is qualified because a body may spell nothing else
+// (ADR 0020, ADR 0023) -- an unqualified `from_prototype` would bind whatever the caller
+// happened to have. It carries `from_prototype`'s limit with it: the keys are dropped
+// because nothing in the language can walk a prototype yet, so `coll![1, 2, 3]` type-checks
+// as a `Collection<int>` and is empty at runtime.
+@macro coll(p) { return quote { Collection::from_prototype($p); }; }
+
 }

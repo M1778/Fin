@@ -116,6 +116,14 @@ namespace std {
 #[export]
 @define printf(fmt: string, ...) <noret>;
 
+// The other formatter, and the only one that is not C's. `format!` is implemented by the
+// compiler rather than by a body (ADR 0023 steps 6 and 7), which is what the `!` says: the
+// line declares the signature and nothing here supplies the code. It needs no `#[global]`,
+// and could not use one -- a builtin resolves bare because it is in no scope at all, so
+// there is nothing for publication to add. The declaration is here because this is the
+// module that owns formatted output and a reader looking for the signature looks here.
+@define format!(fmt: string, ...) <string>;
+
 // The rest of C's I/O that this module needs. None of these is `#[global]`: the marked set
 // is two names and minting a third would be a hole in the module system rather than a
 // convenience. So none of them is *callable* from a program that imports this module, and

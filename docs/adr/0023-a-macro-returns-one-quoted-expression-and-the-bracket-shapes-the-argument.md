@@ -555,3 +555,40 @@ a placeholder-free format string, a result returned out of the function that bui
 nested as another's argument, and a bodyless declaration linking and running with no code emitted
 for it. 1708 pass, and the corpus snapshot is byte-identical to
 step 6's — this step adds no diagnostic to a checker-only build.
+
+## Steps 8 and 9 as landed
+
+Step 8 puts the declarations where the plan said: `@define format!` into `lib/std/stdio.fin`, `@macro
+coll(p)` into `lib/std/collection.fin`, `@macro map(p)` into `lib/std/hashmap.fin`, and `@macro
+magic_add(a, b)` into `tests/samples/macros.fin`.
+
+`coll!` and `map!` are one-line renames: because step 3 shapes bracketed calls into prototype
+literals (`[...]` keyed `0..n-1`, `{...}` with written keys), the argument arrives matching the
+`from_prototype` signatures the two collection libraries already declared. Both bodies qualify their
+call paths (`Collection::from_prototype`, `HashMap::from_prototype`) because ADR 0020 and step 4
+forbid unqualified names in macro quotes. Both carry `from_prototype`'s limit with them: the keys are
+dropped because nothing in the language can walk a prototype yet, but the calls type-check as
+`Collection<int>` and `HashMap<string, int>`.
+
+In `tests/samples/macros.fin`, adding `@macro magic_add(a, b) { return quote { $a + $b; }; }`
+resolves the qualified macro call `macros.magic_add!(10, 20)` in `tests/samples/importing.fin:23:20`.
+`macros.fin` line 5's historical comment "Truncated (Rust-Like upcoming...)" is corrected to record
+that the Rust-like arms form was refused by step 1, and the file is no longer truncated.
+
+Step 9 settles the corpus expectations:
+  * `useful_macros.fin` promotes from `//@ unimplemented` to `//@ ok`. Its two `Undefined macro`
+    diagnostics for `map!` and `coll!` are gone. Lines 3-4 are repaired to name `map` and `coll` in
+    their imports (`import { HashMap, map }`, `import { Collection, coll }`), following the rule that
+    a named import carries only the names it spells. The previous note is preserved verbatim.
+  * `stdlib/stdio.fin`'s note is updated: the count was corrected from 13 to 12 (measured before step
+    6), and with `format!` resolved in step 6 the count is now 11 diagnostics.
+  * `importing.fin`'s note is updated: line 23:20's `macros.magic_add!` is resolved; its remaining
+    four diagnostics (`module not found: somelib`, `Failed to load module 'somelib'`) are preserved
+    and documented as following the intentional deletion of `lib/std/somelib` in `4d79ae7`.
+  * `deeptest2.fin`'s note is updated to record that `format!` now lowers as of step 7.
+  * `tests/test_expectations.cpp` reflects the new tally: 34 `//@ ok`, 16 `//@ unimplemented`, 1
+    `//@ error`.
+
+The corpus snapshot shows total diagnostics dropping from 58 to 55 across 51 samples. All 1708 ctest
+checks pass.
+

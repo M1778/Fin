@@ -250,10 +250,12 @@ TEST_P(SampleExpectation, MatchesCompilerBehaviour) {
 // produces. They are also nearly all the coverage of the `//@ error` form, which
 // exactly one sample uses — `undefined_behavior.fin`. Every other failing sample
 // fails because a construct is unbuilt, not because the sample is invalid Fin,
-// which is why the corpus is 33 `//@ ok`, 17 `//@ unimplemented` and that one --
-// counted at ADR 0023 step 6, and the split moves every time a step promotes a
-// sample. It read "16 ok, 33 unimplemented" until this count was taken, which is
-// a tally from long enough ago that the two numbers had swapped ends.
+// which is why the corpus is 34 `//@ ok`, 16 `//@ unimplemented` and that one --
+// counted at ADR 0023 step 9, and the split moves every time a step promotes a
+// sample: step 9 promoted `useful_macros.fin`, which is the one that moved since
+// step 6 counted 33 and 17. It read "16 ok, 33 unimplemented" until step 6's
+// count, which was a tally from long enough ago that the two numbers had swapped
+// ends.
 
 namespace {
 

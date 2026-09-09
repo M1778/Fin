@@ -376,4 +376,14 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
       }
   }
 
+// The dictionary-shaped call `map!{"a" => 1}`, which useful_macros.fin:7 writes and ADR 0023
+// step 8 asks for here. `{...}` arrives as one prototype with the written keys (step 3), so
+// the body hands it straight to `from_prototype` and the macro is a rename rather than a
+// construction. The brace form also accepts a trailing comma where a prototype literal
+// written directly does not, which is why useful_macros.fin:9 can end in one. `HashMap::` is
+// qualified because a body may spell nothing but qualified paths and `$` unquotes (ADR 0020,
+// ADR 0023). It inherits `from_prototype`'s limit: the entries are dropped until something
+// can walk a prototype, so the call types as a `HashMap<string, int>` and is empty.
+@macro map(p) { return quote { HashMap::from_prototype($p); }; }
+
 }
