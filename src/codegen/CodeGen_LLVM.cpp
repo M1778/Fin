@@ -6742,24 +6742,10 @@ private:
     void visit(Parameter& node) override { unsupported(node, "a parameter"); }
 
     // A macro or an import that survives to codegen is a pass that did not run:
-    // MacroExpander consumes the first, ModuleLoader the second. Saying so names
-    // the pipeline stage rather than the syntax.
-    //
-    // Two macros survive it legitimately, and both are the compiler's own (ADR 0023
-    // step 7). A bodyless `@define format!(fmt: string, ...) <string>;` has no template
-    // to substitute into, so the expander leaves the declaration and the invocation
-    // standing on purpose; the table is what says so.
-    //
-    // The declaration emits nothing, and that is not a skip. `@define printf` emits an
-    // extern because it names a linker symbol; a macro has none -- which is the whole
-    // argument ADR 0023 makes for the compiler being its only possible implementer --
-    // so there is no declaration for this file to write and no definition to omit. A
-    // bodyless declaration of a name *not* in the table never reaches here: the
-    // analyzer refuses it where it is written.
-    void visit(MacroDeclaration& node) override {
-        if (!node.body && builtinmacros::find(node.name)) return;
-        unsupported(node, "a macro declaration (macro expansion did not consume it)");
-    }
+    // Macro declarations are compile-time definitions. They have no runtime symbol
+    // or storage to emit, so imported macro libraries and standalone macro files can
+    // both leave the declaration in the AST.
+    void visit(MacroDeclaration&) override {}
     void visit(MacroCall& node) override { unsupported(node, "a macro call (macro expansion did not consume it)"); }
     void visit(MacroInvocation& node) override {
         const auto* builtin = builtinmacros::find(node.name);

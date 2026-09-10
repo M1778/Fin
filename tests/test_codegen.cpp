@@ -11230,18 +11230,12 @@ BACKEND_TEST(Soundness_Codegen, ADeclarationOfABuiltinMacroLowersToNothing) {
     EXPECT_EQ(b.out, "1\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AMacroWithABodyIsStillRefused) {
-    // The other half of the guard, and the reason it reads `!node.body && find(name)`
-    // rather than `find(name)`. A program may write its own `@macro format(a)` with a
-    // body and get its own (chapter 11), and such a declaration is an ordinary
-    // `@macro` -- unlowered, like every other. Matching the table on the name alone
-    // would make this file silently drop it, which is a skip wearing a builtin's name.
+BACKEND_TEST(Soundness_Codegen, AMacroWithABodyIsCompileTimeOnly) {
+    // A user macro has no runtime representation; its declaration emits no symbol.
     const Built b = build(
         "@macro format(a) { return quote { $a; }; }\n"
         "fun main() <noret> { let v <int> = format!(1); }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a macro declaration (macro expansion did not consume it)"),
-              std::string::npos) << b.why();
+    ASSERT_EQ(b.compileExit, 0) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AFormatWhoseFormatStringIsRuntimeTextIsRefused) {
