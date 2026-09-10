@@ -3683,7 +3683,10 @@ private:
                 return std::nullopt;
             }
             if (refuseIfCapture(*id, id->name)) return std::nullopt;
-            return std::nullopt;
+            // Last: a bare field of the receiver (implicitSelfField). Every
+            // scope-level name won above, matching the analyzer's order, so a
+            // miss here is a name nothing owns and "no home" stays honest.
+            return implicitSelfField(id->name);
         }
         if (auto* unary = dynamic_cast<UnaryOp*>(&expr)) {
             // The address of `*p` is the value of `p`. That one line is what makes
@@ -3831,10 +3834,34 @@ private:
         if (direct->type.isPointer() && direct->type.pointee &&
             direct->type.pointee->kind == want) {
             llvm::Value* p = builder_.CreateLoad(direct->type.llvmType, direct->ptr,
-                                                 "deref");
+                                                  "deref");
             return Addr{p, *direct->type.pointee};
         }
         return std::nullopt;
+    }
+
+    // A bare field name where a receiver is in scope means `self`'s field -- the
+    // analyzer's "Implicit Field Access" (Analyzer_Expr.cpp visit(Identifier&)),
+    // which is why the front end is silent about `delete &name` in `~Person()`
+    // (deeptest2.fin:50). The address is the one `self.<name>` computes: load
+    // the receiver out of its slot and GEP the field, so a read, a write and
+    // `&` all agree with the qualified form. A name that is a local, a global,
+    // or anything else the callers already resolved never reaches here, which
+    // is what keeps a shadowing name shadowing.
+    std::optional<Addr> implicitSelfField(const std::string& name) {
+        Local* self = findLocal("self");
+        if (!self || failed_) return std::nullopt;
+        if (!self->type.isPointer() || !self->type.pointee ||
+            !self->type.pointee->isStruct() || !self->type.pointee->structInfo)
+            return std::nullopt;
+        const StructInfo* info = self->type.pointee->structInfo;
+        size_t index = 0;
+        if (!info->find(name, index)) return std::nullopt;
+        llvm::Value* receiver =
+            builder_.CreateLoad(self->type.llvmType, self->slot, "self.ptr");
+        llvm::Value* ptr = builder_.CreateStructGEP(info->llvmType, receiver,
+                                                     (unsigned)index, name);
+        return Addr{ptr, info->fields[index].type};
     }
 
     // A condition is a truth value whatever it was written as.
@@ -5129,6 +5156,16 @@ private:
             return;
         }
         if (refuseIfCapture(node, node.name)) return;
+        // Last, for the same reason as in emitAddress: a bare field of the
+        // receiver, after every scope-level name. The addressed path first, so
+        // this reads exactly what `self.<name>` would -- one GEP and one load.
+        if (auto addr = implicitSelfField(node.name)) {
+            value_ = CgVal{
+                builder_.CreateLoad(addr->type.llvmType, addr->ptr, node.name),
+                addr->type};
+            return;
+        }
+        if (failed_) return;
         unsupported(node, fmt::format("the name '{}'", node.name));
     }
 

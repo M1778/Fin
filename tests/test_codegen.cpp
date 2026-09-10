@@ -5949,6 +5949,71 @@ BACKEND_TEST(Soundness_Codegen, AConstructorMayReturnALiteralOfItsOwnStruct) {
     EXPECT_EQ(b.out, "6\n") << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// A bare field name in a body with a receiver means `self`'s field.
+//
+// The analyzer resolves it that way (Analyzer_Expr.cpp's "Implicit Field
+// Access"), so a backend that refuses the name disagrees with the front end
+// about one program. deeptest2.fin:50-51 writes `delete &name;` in `~Person()`,
+// which needs the address half; a read needs the value half.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, ABareFieldNameReadsThroughTheReceiver) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Box {\n"
+        "    val <int>,\n"
+        "    fun get() <int> { return val; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box> = Box{ val: 3 };\n"
+        "    printf(\"%d\\n\", b.get());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABareFieldNameHasAnAddressThroughTheReceiver) {
+    // `*(&val) = 9` is the address half without `delete`'s freeing semantics:
+    // one address, computed once, stored through.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box {\n"
+        "    val <int>,\n"
+        "    fun setthru() <noret> { *(&val) = 9; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box> = Box{ val: 3 };\n"
+        "    b.setthru();\n"
+        "    printf(\"%d\\n\", b.val);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADestructorBodyMayDeleteABareField) {
+    // deeptest2.fin:49-52 verbatim in shape: `~Person()` deletes its fields by
+    // their bare names. Nothing runs the destructor yet (no implicit scope-exit
+    // rule), so this asserts the body lowers -- the symbol is emitted and the
+    // file compiles -- rather than a value.
+    const std::string prog = std::string(kPrintf) +
+        "struct Person {\n"
+        "    name <string>,\n"
+        "    age <int>,\n"
+        "    ~Person() {\n"
+        "        delete &name;\n"
+        "        delete &age;\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n";
+    const Built b = build(prog);
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_NE(codegenTrace(prog).find("declared Person.destructor"),
+              std::string::npos);
+}
+
 BACKEND_TEST(KnownDefect_Codegen, ConstructorOverloadsAreRefusedRatherThanResolved) {
     // The booked defect (docs/HANDOFF.md §7): the analyzer resolves `constructors[0]`
     // and no more. One symbol per struct is what this file declares to match it, so a
