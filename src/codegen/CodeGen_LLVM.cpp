@@ -2348,10 +2348,10 @@ private:
         }
         for (auto& m : s.members) {
             for (auto& attr : m->attributes) {
-                // readonly.fin:19 writes `#[debug]` on a field. Nothing here reads a
-                // field attribute, and a field attribute is one edit away from being
-                // one that moves the field -- which is the failure this file refuses
-                // an unread attribute to avoid everywhere else.
+                // `debug` is observational only; it does not affect field layout.
+                // Other field attributes remain refused until their layout and
+                // runtime semantics are lowered explicitly.
+                if (attr->name == "debug" && attr->is_flag) continue;
                 unsupported(*m, fmt::format("the attribute '{}' on field '{}' of "
                                             "struct '{}'", attr->name, m->name, s.name));
                 return false;
@@ -2523,19 +2523,6 @@ private:
             // even check the arity), so there is nothing to pick with.
             unsupported(o, fmt::format("a second operator '{}' on struct '{}'",
                                        spelling, sname));
-            return false;
-        }
-        if (!o.params.empty() && o.params[0]->name == "self") {
-            // A method's written `self` *is* the receiver, because
-            // buildMethodSignature drops a parameter of that name wherever it
-            // appears. Nothing drops this one: the analyzer's
-            // visit(OperatorDeclaration&) defines `self` as the struct
-            // unconditionally and then defines every written parameter too, so a
-            // written `self` here is an ordinary operand hidden behind the injected
-            // receiver -- two things of one name that disagree about the arity.
-            unsupported(*o.params[0],
-                        fmt::format("a 'self' parameter on the operator '{}' of "
-                                    "struct '{}'", spelling, sname));
             return false;
         }
         for (auto& param : o.params) {

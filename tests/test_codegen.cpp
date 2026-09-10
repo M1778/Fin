@@ -6427,10 +6427,10 @@ BACKEND_TEST(Soundness_Codegen, ALocalWithNoAttributesStillLowers) {
     EXPECT_EQ(b.out, "3\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AnAttributeOnAStructMemberIsRefused) {
+BACKEND_TEST(Soundness_Codegen, AnUnknownAttributeOnAStructMemberIsRefused) {
     const Built b = build(std::string(kPrintf) +
         "struct S {\n"
-        "    #[debug]\n"
+        "    #[layout]\n"
         "    v <int>\n"
         "}\n"
         "fun main() <noret> {\n"
@@ -6438,20 +6438,20 @@ BACKEND_TEST(Soundness_Codegen, AnAttributeOnAStructMemberIsRefused) {
         "    printf(\"%d\\n\", s.v);\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("debug"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("layout"), std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AnAttributeOnAGenericStructsMemberIsRefusedAtTheTemplate) {
+BACKEND_TEST(Soundness_Codegen, AnUnknownAttributeOnAGenericStructsMemberIsRefusedAtTheTemplate) {
     // At the declaration and not once per instantiation, for the reason the method
     // refusal gives: it will not become lowerable at `Box<int>`.
     const Built b = build(std::string(kPrintf) +
         "struct Box<T> {\n"
-        "    #[debug]\n"
+        "    #[layout]\n"
         "    val <T>\n"
         "}\n"
         "fun main() <noret> { printf(\"ok\\n\"); }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("debug"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("layout"), std::string::npos) << b.why();
 }
 
 // --- a generic function ------------------------------------------------------
