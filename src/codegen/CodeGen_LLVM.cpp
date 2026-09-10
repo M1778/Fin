@@ -2134,12 +2134,13 @@ private:
 
         if (info.decl->destructor) {
             const std::string key = methodKey(info.finName, "destructor");
-            declareFunction(*info.decl->destructor, key, key, {}, nullptr,
+            static const std::vector<std::unique_ptr<Parameter>> noParams;
+            declareFunction(*info.decl->destructor, key, key, noParams, nullptr,
                             /*isVarArg=*/false, /*isExtern=*/false, &receiver);
             auto declared = functions_.find(key);
             if (declared == functions_.end()) return false;
             declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
-            pendingBodies_.push_back(PendingBody{info.decl->destructor.get(), nullptr,
+            pendingBodies_.push_back(PendingBody{info.decl->destructor.get(), &noParams,
                                                  info.decl->destructor->body.get(), key,
                                                  &info.methodBindings});
         }
