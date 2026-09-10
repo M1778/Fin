@@ -7306,6 +7306,18 @@ private:
         builder_.SetInsertPoint(okBB);
     }
 
+    // The C error stream's linker symbol, which is not spelled one way
+    // everywhere. glibc exposes `stderr`; macOS defines `stderr` as a macro
+    // for `__stderrp` and exports only the latter, so an extern `stderr`
+    // links on Linux and nowhere Apple. Keyed off the module triple, which
+    // is the native target. Windows' UCRT hides it behind `__acrt_iob_func`
+    // instead -- still open, and still untested, because no Windows job has
+    // linked a `blame` program yet.
+    const char* stderrSymbol() const {
+        if (llvm::Triple(module_.getTargetTriple()).isOSDarwin()) return "__stderrp";
+        return "stderr";
+    }
+
     // A runtime Fin blame with a fixed reason: print `<file>:<line>: Fin blames
     // <reason>` on stderr, then abort. This is the shared shape ADR 0028 asks for when
     // an operation fails at run time for a reason the program itself did not write --
@@ -7323,11 +7335,12 @@ private:
     bool emitRuntimeBlame(ASTNode& node, const std::string& reason, const char* what) {
         llvm::Type* ptrTy = llvm::PointerType::getUnqual(ctx_);
         llvm::Type* i32Ty = llvm::Type::getInt32Ty(ctx_);
-        llvm::GlobalVariable* errStream = module_.getGlobalVariable("stderr");
+        llvm::GlobalVariable* errStream = module_.getGlobalVariable(stderrSymbol());
         if (!errStream) {
             errStream = new llvm::GlobalVariable(
                 module_, ptrTy, /*isConstant=*/false,
-                llvm::GlobalValue::ExternalLinkage, /*Initializer=*/nullptr, "stderr");
+                llvm::GlobalValue::ExternalLinkage, /*Initializer=*/nullptr,
+                stderrSymbol());
         }
         llvm::FunctionCallee report = runtimeFn(
             node, "fprintf",
@@ -7378,14 +7391,15 @@ private:
             message = m.value;
         }
 
-        // `stderr` is an external `FILE*`, which is what it is on every libc this
-        // compiler has a target for. Declared as one machine word with no pointee,
-        // because nothing here looks inside it -- it is loaded and passed straight on.
-        llvm::GlobalVariable* errStream = module_.getGlobalVariable("stderr");
+        // The error stream (stderrSymbol): an external `FILE*`, loaded and
+        // passed straight on. Declared as one machine word with no pointee,
+        // because nothing here looks inside it.
+        llvm::GlobalVariable* errStream = module_.getGlobalVariable(stderrSymbol());
         if (!errStream) {
             errStream = new llvm::GlobalVariable(
                 module_, ptrTy, /*isConstant=*/false,
-                llvm::GlobalValue::ExternalLinkage, /*Initializer=*/nullptr, "stderr");
+                llvm::GlobalValue::ExternalLinkage, /*Initializer=*/nullptr,
+                stderrSymbol());
         }
 
         llvm::FunctionCallee report = runtimeFn(
