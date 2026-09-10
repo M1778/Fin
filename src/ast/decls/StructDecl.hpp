@@ -16,7 +16,7 @@ public:
     std::string name;
     std::unique_ptr<TypeNode> type;
     std::unique_ptr<Expression> default_value;
-    bool is_public;
+    bool is_public = false;
     // `readonly v1 <int>` -- readable from anywhere, assignable only from
     // inside the declaring type (tests/samples/readonly.fin:9, :20, :29, :36 and
     // stdlib/stdptr.fin:16). Nothing enforces it yet; the parser records it so
@@ -38,7 +38,7 @@ public:
     std::vector<std::unique_ptr<GenericParam>> generic_params;
     std::vector<std::unique_ptr<Attribute>> attributes;
     std::vector<std::unique_ptr<TypeNode>> parents;
-    bool is_public;
+    bool is_public = false;
     bool is_class = false; // True if declared with 'class' keyword
     // `struct Stream;` -- the name is declared and the body comes later
     // (tests/samples/stdlib/stdio.fin:42). Distinguishes a forward declaration
@@ -71,7 +71,7 @@ public:
     
     std::vector<std::unique_ptr<Attribute>> attributes;
     std::vector<std::unique_ptr<GenericParam>> generic_params;
-    bool is_public;
+    bool is_public = false;
     bool label_public = true; // see StructDeclaration::label_public
     
     InterfaceDeclaration(std::string n, 
@@ -110,7 +110,7 @@ public:
     std::string name;
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> values;
     std::vector<std::unique_ptr<Attribute>> attributes;
-    bool is_public;
+    bool is_public = false;
     // `pub enum Result <T: Any<...>, U: ErrorLike>` -- tests/samples/stdlib/typing.fin:14.
     std::vector<std::unique_ptr<GenericParam>> generic_params;
     // One entry per member, in the same order as `values`, so member i's payload

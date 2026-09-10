@@ -18,7 +18,7 @@ public:
     std::vector<std::unique_ptr<Parameter>> params;
     std::unique_ptr<TypeNode> return_type;
     std::unique_ptr<Block> body;
-    bool is_public;
+    bool is_public = false;
     bool is_static = false;
     std::vector<std::unique_ptr<GenericParam>> generic_params;
     std::vector<std::unique_ptr<Attribute>> attributes;
@@ -33,7 +33,7 @@ public:
     std::vector<std::unique_ptr<Parameter>> params;
     std::unique_ptr<TypeNode> return_type;
     std::unique_ptr<Block> body;
-    bool is_public;
+    bool is_public = false;
     std::vector<std::unique_ptr<GenericParam>> generic_params;
 
     std::unique_ptr<TypeNode> implements_type;

@@ -10868,7 +10868,15 @@ BACKEND_TEST(Soundness_Codegen, AFailedBlameNamesAFileAndALine) {
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_NE(b.runExit, 0) << b.why();
-    EXPECT_EQ(b.out, b.srcPath + ":3: assertion failed: n must be positive\n") << b.why();
+    // The program's own bytes, pinned whole. The shell running the executable
+    // may append its own signal report after them -- "Aborted", with
+    // "(core dumped)" when the platform dumps one -- and whether it does
+    // depends on the shell and the core pattern, neither of which is this
+    // compiler's contract. Only those two epilogues are excused.
+    const std::string pinned = b.srcPath + ":3: assertion failed: n must be positive\n";
+    EXPECT_TRUE(b.out == pinned || b.out == pinned + "Aborted\n" ||
+                b.out == pinned + "Aborted (core dumped)\n")
+        << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AFailedBlameGoesToStderrAndNotToStdout) {

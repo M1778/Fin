@@ -7,6 +7,7 @@
 #include "../macros/MacroExpander.hpp"
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <filesystem>
 #include <fmt/core.h>
 #include <fmt/color.h>
