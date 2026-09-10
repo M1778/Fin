@@ -2132,6 +2132,18 @@ private:
             }
         }
 
+        if (info.decl->destructor) {
+            const std::string key = methodKey(info.finName, "destructor");
+            declareFunction(*info.decl->destructor, key, key, {}, nullptr,
+                            /*isVarArg=*/false, /*isExtern=*/false, &receiver);
+            auto declared = functions_.find(key);
+            if (declared == functions_.end()) return false;
+            declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+            pendingBodies_.push_back(PendingBody{info.decl->destructor.get(), nullptr,
+                                                 info.decl->destructor->body.get(), key,
+                                                 &info.methodBindings});
+        }
+
         // The operators, on the same terms. An operator is a method with a spelled name:
         // the receiver is the same pointer, the body is deferred to the same queue, the
         // linkage is weak for the same reason, and an instantiation gets its own copy
@@ -2315,11 +2327,14 @@ private:
         // A class is represented by the same StructDeclaration path as a struct (ADR
         // 0026), so it reaches this check here and receives the same layout rules.
         if (s.destructor) {
-            // A destructor runs implicitly at the end of a scope. Lowering the
-            // struct as plain data and emitting no call is not an unimplemented
-            // feature, it is a program that silently does not free.
-            unsupported(*s.destructor, fmt::format("a destructor on struct '{}'", s.name));
-            return false;
+            // A destructor is lowered as an explicit function the program calls.
+            // Fin has not ruled that one runs implicitly at scope exit -- memory
+            // management is a library (ADR 0003) and nothing here makes storage
+            // die -- so emitting the body without wiring it to any scope is honest:
+            // the destructor exists, is callable, and nothing silently skips it.
+            // The day an implicit scope-exit rule exists, the wire-up goes where the
+            // rule is written and this stays the body.
+            if (!lowerableDestructor(*s.destructor, s.name)) return false;
         }
         if (!lowerableMethods(s)) return false;
         if (!lowerableOperators(s)) return false;
@@ -2425,6 +2440,14 @@ private:
     // One method's share of lowerableMethods, so a method written in an `implements`
     // block is checked by the same code and not by a copy of it. `seen` is the caller's,
     // so a block's methods and the struct's own share one namespace.
+    bool lowerableDestructor(DestructorDeclaration& d, const std::string& sname) {
+        if (!d.body) {
+            unsupported(d, fmt::format("a destructor declaration on struct '{}'", sname));
+            return false;
+        }
+        return true;
+    }
+
     bool lowerableMethod(FunctionDeclaration& m, const std::string& sname,
                          std::set<std::string>& seen) {
         // An attribute this file does not read may be the one that decides
