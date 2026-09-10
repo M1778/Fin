@@ -1,3 +1,5 @@
+> **Current-status note (2026-09-11):** Active status and measurements live in [`docs/HANDOFF.md`](HANDOFF.md); this file is historical and must be remeasured before use.
+
 # Plan: finish the Fin compiler
 
 Goal: `finc hello.fin -o hello && ./hello` prints. Everything below is ordered toward that.
