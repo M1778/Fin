@@ -1,6 +1,7 @@
 #include "Layout.hpp"
 
 #include <algorithm>
+#include <set>
 
 #include "TypeImpl.hpp"
 
@@ -15,6 +16,34 @@ namespace {
 // to the decision that is missing.
 std::string refuse(const Type& type, const std::string& reason) {
     return "'" + type.toString() + "' has no layout: " + reason;
+}
+
+// ADR 0029's chain diamond: `MultiInherit: <Person, Student>` where
+// `Student: <Person>` shares the ancestor once. Two spellings of one
+// declaration are one type, whether they are one object or two.
+bool sameStruct(const StructType* a, const StructType* b) {
+    if (!a || !b) return false;
+    if (a == b) return true;
+    return !a->name.empty() && a->name == b->name;
+}
+
+// Strict transitive ancestry through struct parents. Interfaces are skipped:
+// they contribute no bytes, so they never carry anyone's fields.
+bool isAncestorOf(const StructType* ancestor, const StructType* descendant) {
+    if (!ancestor || !descendant || sameStruct(ancestor, descendant)) return false;
+    std::vector<const StructType*> stack{descendant};
+    std::set<const StructType*> seen{descendant};
+    while (!stack.empty()) {
+        const StructType* cur = stack.back();
+        stack.pop_back();
+        for (const auto& parent : cur->parents) {
+            auto ps = std::dynamic_pointer_cast<StructType>(parent);
+            if (!ps || ps->is_interface) continue;
+            if (sameStruct(ancestor, ps.get())) return true;
+            if (seen.insert(ps.get()).second) stack.push_back(ps.get());
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -453,7 +482,15 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
     // inheritance's ABI trick -- a pointer to the derived type already is a
     // pointer to the base, so an upcast emits no instruction -- and any other
     // order would make it emit an addition.
-    const StructType* base = nullptr;
+    //
+    // ADR 0029's chain diamond shares one ancestor: a direct base that is a
+    // strict transitive ancestor of another direct base arrives through the
+    // descendant, so it is skipped and its bytes appear once. Anything else
+    // with two bases -- unrelated, or a fork sharing a grandparent -- still
+    // refuses: where the second base's bytes go is a second-base ABI nobody
+    // has ruled, and the reverted backend-only deduplication segfaulted.
+    std::vector<std::shared_ptr<StructType>> directBases;
+    std::vector<TypePtr> directBasePtrs;
     for (const auto& parent : st->parents) {
         if (!parent) continue;
         auto parentStruct = std::dynamic_pointer_cast<StructType>(parent);
@@ -466,12 +503,35 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
                                       "' is not a struct, so there is nothing to inherit a "
                                       "layout from")};
         }
-        if (base) {
-            return {{}, refuse(t, "it has more than one base struct, and where a second "
-                                  "base's fields go -- and whether an upcast to it stays "
-                                  "free -- is undecided")};
+        directBases.push_back(parentStruct);
+        directBasePtrs.push_back(parent);
+    }
+    std::vector<size_t> effective;
+    for (size_t i = 0; i < directBases.size(); ++i) {
+        bool skip = false;
+        for (size_t j = 0; j < directBases.size(); ++j) {
+            if (i == j) continue;
+            if (sameStruct(directBases[i].get(), directBases[j].get())) {
+                if (j < i) {
+                    skip = true;
+                    break;
+                }
+                continue;
+            }
+            if (isAncestorOf(directBases[i].get(), directBases[j].get())) {
+                skip = true;
+                break;
+            }
         }
-        base = parentStruct.get();
+        if (!skip) effective.push_back(i);
+    }
+    if (effective.size() > 1) {
+        return {{}, refuse(t, "it has more than one base struct, and where a second "
+                              "base's fields go -- and whether an upcast to it stays "
+                              "free -- is undecided")};
+    }
+    if (!effective.empty()) {
+        const TypePtr& parent = directBasePtrs[effective[0]];
         auto baseLayout = layoutOf(parent);
         if (!baseLayout.ok()) {
             return {{}, refuse(t, "its base '" + parent->toString() + "' has none -- " +

@@ -1668,6 +1668,34 @@ private:
         return interfaceNames_.count(parent.name) > 0;
     }
 
+    // ADR 0029's chain diamond, the backend's half. `MultiInherit: <Person,
+    // Student>` where `Student: <Person>` lays out as `Student` plus its own
+    // fields: a direct base that is a strict transitive ancestor of another
+    // direct base arrives through the descendant, so it is skipped and its
+    // bytes appear once. By name, because that is the only witness the AST
+    // carries (parentIsInterface, above). A base whose declaration this file
+    // did not see answers false -- unknown ancestry is not shared ancestry,
+    // and the field loop below refuses the duplicate it produces.
+    bool baseIsAncestorOf(const std::string& ancestor,
+                          const std::string& descendant) const {
+        if (ancestor.empty() || descendant.empty() || ancestor == descendant)
+            return false;
+        std::vector<std::string> stack{descendant};
+        std::set<std::string> seen{descendant};
+        while (!stack.empty()) {
+            std::string cur = stack.back();
+            stack.pop_back();
+            auto found = structs_.find(cur);
+            if (found == structs_.end() || !found->second.decl) continue;
+            for (auto& parent : found->second.decl->parents) {
+                if (!parent || parentIsInterface(*parent)) continue;
+                if (parent->name == ancestor) return true;
+                if (seen.insert(parent->name).second) stack.push_back(parent->name);
+            }
+        }
+        return false;
+    }
+
     // Every module-scope `implements` block, filed under the name of the struct it
     // writes members for.
     //
@@ -1876,8 +1904,35 @@ private:
             // A base declared *below* its derived struct cannot arrive here at all:
             // the analyzer reports `Undefined type 'Base'` first (measured), so the
             // ordering problem the third pass exists to solve does not apply.
-            for (auto& parent : s->parents) {
+            //
+            // ADR 0029's chain diamond shares one ancestor: a direct base that is
+            // a strict transitive ancestor of another direct base arrives through
+            // the descendant, so it is skipped and its bytes appear once at
+            // offset 0. A duplicate spelling keeps its first occurrence. Any
+            // other second base lays out sequentially as before -- unrelated
+            // bases still refuse downstream (a second field, a misread method),
+            // never silently.
+            for (size_t pi = 0; pi < s->parents.size(); ++pi) {
+                auto& parent = s->parents[pi];
                 if (!parent || parentIsInterface(*parent)) continue;
+                bool shared = false;
+                for (size_t oi = 0; oi < s->parents.size(); ++oi) {
+                    if (oi == pi) continue;
+                    auto& other = s->parents[oi];
+                    if (!other || parentIsInterface(*other)) continue;
+                    if (other->name == parent->name) {
+                        if (oi < pi) {
+                            shared = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    if (baseIsAncestorOf(parent->name, other->name)) {
+                        shared = true;
+                        break;
+                    }
+                }
+                if (shared) continue;
                 auto base = structs_.find(parent->name);
                 if (base == structs_.end()) {
                     // lowerableStruct refuses a base it cannot classify, so reaching

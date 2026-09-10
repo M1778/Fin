@@ -285,6 +285,46 @@ TEST(Soundness_Layout, AnImplementedInterfaceContributesNoBytes) {
     EXPECT_EQ(layout.size, 4u);
 }
 
+TEST(Soundness_Layout, ADiamondBaseIsSharedOnce) {
+    // ADR 0029: `MultiInherit: <Person, Student>` where `Student: <Person>`
+    // shares the ancestor. `Person`'s bytes appear once at offset 0 via
+    // `Student`, so both upcasts stay free and `name` names one slot.
+    auto t = typeFromSource(
+        "struct Person { pub name <int>, pub age <int>, }\n"
+        "struct Student : <Person> { pub grade <int>, }\n"
+        "struct MultiInherit : <Person, Student> { pub tag <int>, }\n",
+        "MultiInherit");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto layout = must(e.layoutOf(t));
+    ASSERT_EQ(layout.fields.size(), 4u);
+    EXPECT_EQ(layout.fields[0].name, "name");
+    EXPECT_EQ(layout.fields[0].offset, 0u);
+    EXPECT_TRUE(layout.fields[0].inherited);
+    EXPECT_EQ(layout.fields[1].name, "age");
+    EXPECT_EQ(layout.fields[2].name, "grade");
+    EXPECT_EQ(layout.fields[3].name, "tag");
+    EXPECT_FALSE(layout.fields[3].inherited);
+    EXPECT_EQ(layout.field("name")->offset, 0u);
+}
+
+TEST(Soundness_Layout, TwoUnrelatedBasesAreStillRefused) {
+    // ADR 0029's explicit no: sharing covers transitive ancestry only. Two
+    // unrelated bases have no ruled placement, so the second base refuses
+    // rather than guessing an ABI.
+    auto t = typeFromSource(
+        "struct P { pub p <int>, }\n"
+        "struct Q { pub q <int>, }\n"
+        "struct Both : <P, Q> { pub z <int>, }\n",
+        "Both");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto r = e.layoutOf(t);
+    EXPECT_FALSE(r.ok());
+    EXPECT_NE(r.refusal.find("more than one base struct"), std::string::npos)
+        << r.refusal;
+}
+
 TEST(Soundness_Layout, AFieldIsFoundByName) {
     auto t = typeFromSource("struct S { pub a <char>, pub b <long>, }\n", "S");
     ASSERT_TRUE(t != nullptr);
