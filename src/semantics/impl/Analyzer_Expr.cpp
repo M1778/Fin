@@ -2338,7 +2338,8 @@ void SemanticAnalyzer::visit(ArrayLiteral& node) {
     // reported anyway. Where the elements disagree with the hint they have already said
     // so, once each, at the element (AnUnrelatedAnnotationDoesNotBecomeTheElementType);
     // adopting the type they were checked against is what keeps that the whole report.
-    lastExprType = std::make_shared<ArrayType>(expected, node.elements.size());
+    lastExprType = std::make_shared<ArrayType>(
+        expected, static_cast<uint64_t>(node.elements.size()));
 }
 
 void SemanticAnalyzer::visit(SizeofExpression& node) {

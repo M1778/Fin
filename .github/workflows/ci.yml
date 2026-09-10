@@ -87,11 +87,13 @@ jobs:
           - name: windows-x86_64
             runner: windows-2022
             conan_arch: x86_64
+            tar_arch: x86_64
             generator: Visual Studio 17 2022
             vs_platform: x64
           - name: windows-arm64
             runner: windows-11-arm
             conan_arch: armv8
+            tar_arch: aarch64
             generator: Visual Studio 17 2022
             vs_platform: ARM64
 
@@ -216,11 +218,14 @@ jobs:
           # no libraries and no lib/cmake/llvm at all -- find_package(LLVM CONFIG)
           # cannot see it.  The tarball is the same build re-installed with that
           # flag OFF, and the release script proves llvm-config runs in it.
-          case "${{ matrix.conan_arch }}" in
-            x86_64) tar_arch=x86_64 ;;
-            armv8)  tar_arch=aarch64 ;;
-            *) echo "::error::no LLVM tarball mapping for ${{ matrix.conan_arch }}"; exit 1 ;;
-          esac
+          # The tarball arch comes from the matrix rather than a case
+          # statement, so there is no mapping to fall through: a row without
+          # tar_arch fails with an empty URL at curl, not a wrong artefact.
+          tar_arch="${{ matrix.tar_arch }}"
+          if [ -z "$tar_arch" ]; then
+            echo "::error::matrix row ${{ matrix.name }} names no LLVM tarball arch"
+            exit 1
+          fi
           name="clang+llvm-$FIN_LLVM_VERSION-$tar_arch-pc-windows-msvc"
           url="https://github.com/llvm/llvm-project/releases/download/llvmorg-$FIN_LLVM_VERSION/$name.tar.xz"
           curl -fL --retry 3 --retry-all-errors -o llvm.tar.xz "$url"
