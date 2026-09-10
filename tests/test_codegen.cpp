@@ -8270,20 +8270,15 @@ BACKEND_TEST(Soundness_Codegen, ASecondOperatorForOneTokenIsRefused) {
     EXPECT_NE(b.compileErr.find("second operator"), std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AnOperatorWithAWrittenSelfIsRefused) {
-    // visit(OperatorDeclaration&) in the analyzer defines `self` unconditionally and
-    // keeps every written parameter, so a written `self` here is an ordinary parameter
-    // shadowed by the injected receiver -- two things of one name, disagreeing about
-    // arity. A method's written `self` is a receiver because buildMethodSignature drops
-    // it; nothing drops this one.
+BACKEND_TEST(Soundness_Codegen, AnOperatorWithAWrittenSelfIsAccepted) {
+    // An explicitly written self parameter is the receiver, matching method lowering.
     const Built b = build(std::string(kPrintf) +
         "struct V {\n"
         "    x <int>,\n"
         "    pub operator + (self: &Self, o: V) <int> { return self.x + o.x; }\n"
         "}\n"
         "fun main() <noret> { printf(\"ok\\n\"); }\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("self"), std::string::npos) << b.why();
+    ASSERT_EQ(b.compileExit, 0) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AnOperatorWithTheWrongArityIsRefusedWhereItIsWritten) {
