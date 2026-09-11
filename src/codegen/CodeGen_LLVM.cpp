@@ -6864,14 +6864,20 @@ private:
                 return;
             }
         }
+        // A constructor *requirement* (`Self();`) is not code, any more than a
+        // bodiless method requirement is: it emits nothing, and conformance is
+        // the analyzer's question. A body on one is code in a place that holds
+        // requirements, and stays refused like a method body.
         for (auto& c : node.constructors) {
-            if (c) {
-                unsupported(*c, fmt::format("a constructor in interface '{}'", node.name));
+            if (c && c->body) {
+                unsupported(*c, fmt::format("a constructor body in interface '{}'", node.name));
                 return;
             }
         }
-        if (node.destructor) {
-            unsupported(*node.destructor, fmt::format("a destructor in interface '{}'", node.name));
+        // The destructor requirement (`~Self();`) on the same terms: bodiless
+        // is a requirement and emits nothing, a body is code and is refused.
+        if (node.destructor && node.destructor->body) {
+            unsupported(*node.destructor, fmt::format("a destructor body in interface '{}'", node.name));
             return;
         }
         // A member's *default* is an expression, and which implementor evaluates it is

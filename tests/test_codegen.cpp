@@ -6078,6 +6078,24 @@ BACKEND_TEST(Soundness_Codegen, ASelfCallConstructsTheEnclosingStruct) {
     EXPECT_EQ(b.out, "1\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, ABodilessInterfaceConstructorLowersToNothing) {
+    // deeptest2.fin:104-108 verbatim in shape: `HasConstructor` requires a
+    // constructor and a destructor without giving either a body. A requirement
+    // is not code -- bodiless method requirements already emit nothing -- so
+    // neither is a refusal. A body on either stays refused.
+    const Built b = build(std::string(kPrintf) +
+        "interface HasConstructor {\n"
+        "    Self();\n"
+        "    ~Self();\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
 BACKEND_TEST(KnownDefect_Codegen, ConstructorOverloadsAreRefusedRatherThanResolved) {
     // The booked defect (docs/HANDOFF.md §7): the analyzer resolves `constructors[0]`
     // and no more. One symbol per struct is what this file declares to match it, so a
