@@ -221,7 +221,18 @@ jobs:
           # The tarball arch comes from the matrix rather than a case
           # statement, so there is no mapping to fall through: a row without
           # tar_arch fails with an empty URL at curl, not a wrong artefact.
+          echo "diagnostic: matrix.name=[${{ matrix.name }}]"
+          echo "diagnostic: matrix.conan_arch=[${{ matrix.conan_arch }}]"
+          echo "diagnostic: matrix.tar_arch=[${{ matrix.tar_arch }}]"
           tar_arch="${{ matrix.tar_arch }}"
+          printf 'diagnostic: tar_arch value is [%s]\n' "$tar_arch"
+          if [ -z "$tar_arch" ]; then
+            case "${{ matrix.name }}" in
+              windows-x86_64) tar_arch=x86_64 ;;
+              windows-arm64) tar_arch=aarch64 ;;
+            esac
+            echo "diagnostic: after name-based fallback tar_arch=[$tar_arch]"
+          fi
           if [ -z "$tar_arch" ]; then
             echo "::error::matrix row ${{ matrix.name }} names no LLVM tarball arch"
             exit 1
