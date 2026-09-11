@@ -2492,6 +2492,11 @@ private:
         }
         for (auto& attr : s.attributes) {
             if (attr->name == "llvm_name" && !attr->is_flag) continue;  // read below
+            // Flag-form `#[export]` is import-visibility only (ADR 0033): the
+            // module system already decided who may name this, and emission
+            // stays shared, so there is nothing here to honour beyond not
+            // dropping it silently.
+            if (attr->name == "export" && attr->is_flag) continue;
             // An attribute this file does not read may be one that changes the
             // layout. Ignoring it is the failure mode that produces a working
             // program with the wrong offsets. `#[llvm_name]` in its flag form lands
@@ -2810,10 +2815,11 @@ private:
                     continue;
                 if (fnTemplates_.count(fn->name))
                     return fnTemplates_[fn->name];
-                if (!fn->attributes.empty()) {
+                for (auto& attr : fn->attributes) {
+                    if (attr->name == "export" && attr->is_flag) continue;
                     unsupported(*fn,
                                 fmt::format("the attribute '{}' on a generic function",
-                                            fn->attributes.front()->name));
+                                            attr->name));
                     return nullptr;
                 }
                 if (fn->body == nullptr) return nullptr;
@@ -3249,10 +3255,15 @@ private:
                     // function's name *is* its symbol: one name over two instances is
                     // either a duplicate definition or a silent `fin_ident.1` that
                     // nobody can call.
-                    if (!fn->attributes.empty()) {
+                    //
+                    // Flag-form `#[export]` is accepted as import-visibility only
+                    // (ADR 0033), on the same terms as a struct template's: the
+                    // instance keeps shared linkage.
+                    for (auto& attr : fn->attributes) {
+                        if (attr->name == "export" && attr->is_flag) continue;
                         unsupported(*fn,
                                     fmt::format("the attribute '{}' on a generic function",
-                                                fn->attributes.front()->name));
+                                                attr->name));
                         return;
                     }
                     // The erasure marker is *not* checked here, and this is where the
