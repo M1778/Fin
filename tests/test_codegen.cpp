@@ -3559,19 +3559,23 @@ BACKEND_TEST(Soundness_Codegen, ADefaultThatNamesAnotherFieldIsRefused) {
     EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, ADefaultOfNullForANonNullableFieldIsRefused) {
-    // tests/samples/deeptest4.fin:6 writes `integer <int> = null` and the front end
-    // takes it. There is no null int -- 0 is a value the program did not write and
-    // the analyzer would not have accepted it as one -- so the backend refuses
-    // instead of picking the bit pattern that looks most like nothing.
+BACKEND_TEST(Soundness_Codegen, ADefaultOfNullForAScalarIsZero) {
+    // Was ADefaultOfNullForANonNullableFieldIsRefused. tests/samples/deeptest4.fin:6
+    // writes `integer <int> = null`, the sample is normative, and the front end
+    // takes it -- so the backend saying "no null int" was the compiler
+    // disagreeing with the language, not caution. A `null` default on a scalar
+    // is zero: exactly what omitting the field produces (the literal starts
+    // from null and inserts what is written), so spelling the nothing changes
+    // nothing. Pointers keep the null itself; anything else still refuses.
     const Built b = build(std::string(kPrintf) +
         "struct P { x <int> = null }\n"
         "fun main() <noret> {\n"
         "    let p <P> = P { };\n"
         "    printf(\"%d\\n\", p.x);\n"
         "}\n");
-    EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, ADefaultedFieldStillCrossesACall) {

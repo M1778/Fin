@@ -3700,6 +3700,20 @@ private:
 
     llvm::Value* convert(ASTNode& node, const CgVal& from, const CgType& to) {
         if (!from.ok()) return nullptr;
+        // `null` into a scalar is zero: `integer <int> = null`
+        // (deeptest4.fin:6) is normative and the front end takes it, and zero
+        // is exactly what omitting the field produces -- the literal starts
+        // from null and inserts what is written -- so spelling the nothing
+        // changes nothing. Into a pointer it is the null pointer itself.
+        // Anything else still refuses below: there is no zero struct, and a
+        // function slot takes null through its own branch, not this one.
+        if (llvm::isa<llvm::ConstantPointerNull>(from.value)) {
+            if (to.kind == CgType::Kind::Int)
+                return llvm::ConstantInt::get(to.llvmType, 0);
+            if (to.kind == CgType::Kind::Float)
+                return llvm::ConstantFP::get(to.llvmType, 0.0);
+            if (to.isPointer()) return from.value;
+        }
         // An `any` blob converts to and from nothing but itself: there is no
         // boxing into one and no reading out of one, so any other pair is a
         // value the program cannot have produced. Blob-to-blob is a 16-byte
