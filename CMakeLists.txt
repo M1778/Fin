@@ -73,23 +73,27 @@ if(FIN_WITH_LLVM)
     # LLVM_BUILD_LLVM_DYLIB -- which LLVM refuses to do under MSVC at any
     # version: llvm/CMakeLists.txt sets CAN_BUILD_LLVM_DYLIB OFF when MSVC, and
     # llvm/tools/llvm-shlib/CMakeLists.txt raises "Generating libLLVM is not
-    # supported on MSVC".  So on Windows find_package succeeds, the check above
-    # passes, and the *link* then fails for want of LLVM.lib -- a message that
-    # says nothing about why, several minutes later, in another tool's output.
+    # supported on MSVC".
     #
-    # Say it here instead.  This is not a fallback and does not pick a second
-    # link strategy: whether to link the component static libraries via
-    # llvm_map_components_to_libnames on that platform is an open ruling
-    # (docs/HANDOFF.md §8), and guessing it is how a build acquires a
-    # configuration nobody has ever run.
+    # So on Windows find_package succeeds, the check above passes, and there
+    # is no monolith to link.  ADR 0031 rules the fallback: the component
+    # static libraries via llvm_map_components_to_libnames, which is also what
+    # the `TARGET LLVM` branch below yields to -- if LLVM's MSVC story ever
+    # grows a dylib, that branch prefers it with no edit here.
     if(NOT TARGET LLVM)
-        message(FATAL_ERROR
-            "LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR} does not export the "
-            "monolithic `LLVM` target that fin_core links.  It was built without "
-            "LLVM_BUILD_LLVM_DYLIB, which LLVM does not allow under MSVC at any "
-            "version -- so this is not a version mismatch and a different major "
-            "will not help.  Linking LLVM's component libraries instead is an "
-            "open ruling; see section 8 of docs/HANDOFF.md.")
+        if(NOT MSVC)
+            message(FATAL_ERROR
+                "LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR} does not export "
+                "the monolithic `LLVM` target that fin_core links, and this "
+                "is not MSVC, so ADR 0031's component fallback does not "
+                "apply -- this is a version mismatch or a dylib-less build "
+                "where one was expected.")
+        endif()
+        llvm_map_components_to_libnames(fin_llvm_libs
+            Core Support BitWriter BitReader MC
+            nativecodegen nativeasmparser)
+        message(STATUS "No monolithic LLVM target (MSVC); linking components: "
+            "${fin_llvm_libs}")
     endif()
     message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
 else()
@@ -209,7 +213,12 @@ endif()
 target_link_libraries(fin_core PUBLIC fmt::fmt)
 
 if(FIN_WITH_LLVM)
-    target_link_libraries(fin_core PUBLIC LLVM)
+    if(TARGET LLVM)
+        target_link_libraries(fin_core PUBLIC LLVM)
+    else()
+        # MSVC only (see above): the component static libraries.
+        target_link_libraries(fin_core PUBLIC ${fin_llvm_libs})
+    endif()
     target_include_directories(fin_core PUBLIC ${LLVM_INCLUDE_DIRS})
     # PUBLIC so tests/CMakeLists.txt can key its backend tests off the same
     # switch without repeating the find_package result.
