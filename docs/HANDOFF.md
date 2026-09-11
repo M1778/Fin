@@ -79,9 +79,8 @@ Run each sample with `build/finc -c <sample>` and fix the first refusal, then re
 1. **`tests/samples/deeptest4.fin`** (normative)
    - Current refusal: `an undeclared operator '==' on struct 'Data'`, from
      `Collection<Data>` method bodies (every body lowers, called or not).
-   - HELD RULING: struct equality stays refused (field-wise vs identity vs
-     declared-only is undecided; the stdlib header documents the refusal as the
-     contract). Revisit only by deliberate language decision.
+   - HELD RULING (ADR 0036): equality is declared, not synthesized; eager
+     bodies stay eager. Revisit only by deliberate language decision.
 
 2. **`tests/samples/useful_macros.fin`** (check label before treating as blocking)
    - Current refusal: boxing a pointer into `any` (`f(key)` needs string→`any`).
