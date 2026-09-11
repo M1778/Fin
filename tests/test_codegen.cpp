@@ -6443,6 +6443,27 @@ BACKEND_TEST(Soundness_Codegen, AnImportedConcreteStructServesAsABase) {
     fs::remove_all(dir, ec);
 }
 
+BACKEND_TEST(Soundness_Codegen, AClassAttributeDoesNotChangeLayout) {
+    // ADR 0026: a class lowers exactly as a struct. The attribute is accepted
+    // and ignored for layout -- which is what lets a `#[class]` base from
+    // another module (lib/std/error.fin's `Error`) splice its fields in.
+    const Built b = build(std::string(kPrintf) +
+        "#[class]\n"
+        "struct C {\n"
+        "    v <int>\n"
+        "}\n"
+        "struct D : <C> {\n"
+        "    w <int>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let d <D> = D{ v: 1, w: 2 };\n"
+        "    printf(\"%d\\n\", d.v + d.w);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the
