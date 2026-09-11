@@ -221,18 +221,7 @@ jobs:
           # The tarball arch comes from the matrix rather than a case
           # statement, so there is no mapping to fall through: a row without
           # tar_arch fails with an empty URL at curl, not a wrong artefact.
-          echo "diagnostic: matrix.name=[${{ matrix.name }}]"
-          echo "diagnostic: matrix.conan_arch=[${{ matrix.conan_arch }}]"
-          echo "diagnostic: matrix.tar_arch=[${{ matrix.tar_arch }}]"
           tar_arch="${{ matrix.tar_arch }}"
-          printf 'diagnostic: tar_arch value is [%s]\n' "$tar_arch"
-          if [ -z "$tar_arch" ]; then
-            case "${{ matrix.name }}" in
-              windows-x86_64) tar_arch=x86_64 ;;
-              windows-arm64) tar_arch=aarch64 ;;
-            esac
-            echo "diagnostic: after name-based fallback tar_arch=[$tar_arch]"
-          fi
           if [ -z "$tar_arch" ]; then
             echo "::error::matrix row ${{ matrix.name }} names no LLVM tarball arch"
             exit 1
@@ -240,7 +229,9 @@ jobs:
           name="clang+llvm-$FIN_LLVM_VERSION-$tar_arch-pc-windows-msvc"
           url="https://github.com/llvm/llvm-project/releases/download/llvmorg-$FIN_LLVM_VERSION/$name.tar.xz"
           curl -fL --retry 3 --retry-all-errors -o llvm.tar.xz "$url"
-          dest="$RUNNER_TEMP/llvm"
+          # A POSIX path: RUNNER_TEMP arrives in native `D:\...` form, which
+          # Git Bash's mkdir tolerates but tar cannot open as a -C directory.
+          dest="$(cygpath -u "$RUNNER_TEMP")/llvm"
           mkdir -p "$dest"
           tar -xf llvm.tar.xz -C "$dest" --strip-components=1
           "$dest/bin/llvm-config.exe" --version
