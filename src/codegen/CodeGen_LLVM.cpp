@@ -5668,7 +5668,46 @@ private:
         // answer; refusing is not.
         if (lhs.type.isPointer() || rhs.type.isPointer()) {
             const bool comparison = op == ASTTokenKind::EQEQ || op == ASTTokenKind::NOTEQ;
-            if (!comparison || !lhs.type.isPointer() || !rhs.type.isPointer()) {
+            if (!comparison) {
+                unsupported(node, "an operator on a pointer");
+                return CgVal{};
+            }
+            // `== null` where the other side holds a pointer word: a dynamic
+            // array (its buffer -- element 0 of the `{ptr, len}` pair) or a
+            // function value (its code address). A null buffer is what an
+            // absent one is, so this compares that word and nothing else --
+            // the guards `if (self._arr == null)` and
+            // `if (self.hasher == null)` the standard library initializes
+            // through. Only the null constant pairs this way: a runtime
+            // pointer is not proven null, and two non-null arrays compare
+            // contents, not identity, which is a rule nobody has written.
+            const bool lNull = lhs.value &&
+                               llvm::isa<llvm::ConstantPointerNull>(lhs.value);
+            const bool rNull = rhs.value &&
+                               llvm::isa<llvm::ConstantPointerNull>(rhs.value);
+            if (lNull || rNull) {
+                const CgVal& other = lNull ? rhs : lhs;
+                const CgVal& nil = lNull ? lhs : rhs;
+                llvm::Value* word = nullptr;
+                if (other.value) {
+                    if (other.type.isPointer() || other.type.isFn())
+                        word = other.value;
+                    else if (other.type.isDynamicArray)
+                        word = builder_.CreateExtractValue(other.value, {0},
+                                                           "buf");
+                }
+                if (!word) {
+                    unsupported(node, "an operator on a pointer");
+                    return CgVal{};
+                }
+                CgType boolType = *types_.byName("bool");
+                llvm::Value* out =
+                    op == ASTTokenKind::EQEQ
+                        ? builder_.CreateICmpEQ(word, nil.value)
+                        : builder_.CreateICmpNE(word, nil.value);
+                return CgVal{out, boolType};
+            }
+            if (!lhs.type.isPointer() || !rhs.type.isPointer()) {
                 unsupported(node, "an operator on a pointer");
                 return CgVal{};
             }

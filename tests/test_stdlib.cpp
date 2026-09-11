@@ -530,12 +530,13 @@ TEST(Soundness_Modules, AnImportedGenericStructInstantiatesOnDemand) {
     // Was KnownDefect_Modules.AnImportedGenericStructsConstructorIsNotLowered,
     // then AnImportedGenericStructTemplateIsFoundAndChecked: `HashMap::<string,
     // int>()` refused first with "a call to 'HashMap'", then with `#[export]`,
-    // then with the `fn(any) -> int` field. Each landing moved the refusal one
-    // step further in: the template is now found, checked, and instantiated --
-    // transitively, with Collection<string/int/bool> and HashMap's methods --
-    // and what refuses is a body the instantiation queued, pointer arithmetic
-    // inside a method. Lazy per use, as designed: nothing here instantiates
-    // what the root never names.
+    // then with the `fn(any) -> int` field, then with pointer operators in
+    // method bodies. Each landing moved the refusal one step further in: the
+    // template is now found, checked, and instantiated -- transitively, with
+    // Collection<string/int/bool> and HashMap's methods -- and what refuses is
+    // a bare `Collection{...}` literal inside a body, which names no type
+    // arguments for the instantiation to use. Lazy per use, as designed:
+    // nothing here instantiates what the root never names.
     const std::string prog =
         "import { HashMap } from hashmap::std;\n"
         "fun main() <noret> { let a <auto> = HashMap::<string, int>(); }\n";
@@ -545,7 +546,8 @@ TEST(Soundness_Modules, AnImportedGenericStructInstantiatesOnDemand) {
         << "the imported template must instantiate, not merely be found\n"
         << trace;
     const std::string err = buildErr(prog);
-    EXPECT_NE(err.find("an operator on a pointer"), std::string::npos) << err;
+    EXPECT_NE(err.find("a literal of struct 'Collection'"), std::string::npos)
+        << err;
     // And specifically none of the old misses, any of which would mean the
     // registry lookup regressed rather than the work moved on.
     EXPECT_EQ(err.find("a call to 'HashMap'"), std::string::npos) << err;
@@ -553,6 +555,7 @@ TEST(Soundness_Modules, AnImportedGenericStructInstantiatesOnDemand) {
               std::string::npos)
         << err;
     EXPECT_EQ(err.find("of type 'fn(any) -> int'"), std::string::npos) << err;
+    EXPECT_EQ(err.find("an operator on a pointer"), std::string::npos) << err;
     // And specifically not the turbofish refusal, which is what this said before the
     // generic-constructor unit and which would now name the wrong gap.
     EXPECT_EQ(err.find("explicit generic arguments"), std::string::npos) << err;

@@ -6196,6 +6196,49 @@ BACKEND_TEST(Soundness_Codegen, ASizeofAnyIsRefused) {
         << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// `== null` on a dynamic array or function value compares the buffer.
+//
+// A dynamic array is a `{ptr, len}` pair and a function value is a code
+// pointer: in both cases null is a word the value can hold, so the comparison
+// reads that word and nothing else. What it does *not* do is compare contents
+// (two arrays) or order pointers (a claim about allocator order): those stay
+// refused, as does any non-comparison operator on a pointer.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, ADynamicArrayComparedToNullReadsItsBuffer) {
+    // An omitted dynamic-array field starts life zeroed, so its buffer is
+    // null: the guard `if (self._arr == null)` in lib/std/collection.fin:96
+    // is what this shape serves.
+    const Built b = build(std::string(kPrintf) +
+        "struct Wrap {\n"
+        "    xs <[int]>,\n"
+        "    n <int>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let w <Wrap> = Wrap{ n: 3 };\n"
+        "    printf(\"%d %d %d\\n\", w.xs == null, w.xs != null, w.n);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 0 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AFunctionValueComparedToNullReadsItsAddress) {
+    // `if (self.hasher == null)` in lib/std/hashmap.fin:144, plus the
+    // non-null and reversed spellings, which take the same path.
+    const Built b = build(std::string(kPrintf) +
+        "fun dummy(x: int) <int> { return x + 1; }\n"
+        "fun main() <noret> {\n"
+        "    let f <fn(int) -> int> = null;\n"
+        "    let g <fn(int) -> int> = dummy;\n"
+        "    printf(\"%d %d %d %d\\n\", f == null, f != null, g == null, null == g);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 0 0 0\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the
