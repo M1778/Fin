@@ -74,6 +74,7 @@ rm -f *.o tests/samples/*.o tests/samples/stdlib/*.o
 ## Remaining object/codegen blockers
 
 Run each sample with `build/finc -c <sample>` and fix the first refusal, then remeasure.
+32 of 51 samples compile; the only two codegen refusals left are both held rulings:
 
 1. **`tests/samples/deeptest4.fin`** (normative)
    - Current refusal: `an undeclared operator '==' on struct 'Data'`, from
@@ -87,11 +88,10 @@ Run each sample with `build/finc -c <sample>` and fix the first refusal, then re
    - HELD RULING: `any` values stay refused (ADR 0034); full boxing (typeids,
      box/unbox, conversions) is its own workstream.
 
-3. **`tests/samples/stdlib/error.fin`** (normative)
-   - Current first refusal: `#[uncastable]` (then `#[stderror]`); struct attributes
-     refused by `canLowerStruct`. Existing soundness tests intentionally require
-     unread attributes to be refused — add semantics and invert tests only when
-     the implementation is real. Untouched this session.
+3. **`tests/samples/stdlib/error.fin`** — DONE since this handoff: `#[uncastable]`
+   excludes casts to/from the type (checked on the cast expression, not in
+   conversions), `#[stderror]` is accepted as a documented marker, `@special`
+   declarations emit nothing, scalar-vs-null compares against zero. Compiles.
 
 4. **Frontend blockers still visible in the corpus** (not codegen failures; do not
    turn a documented sample typo into a compiler feature):
