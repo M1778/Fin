@@ -6239,6 +6239,50 @@ BACKEND_TEST(Soundness_Codegen, AFunctionValueComparedToNullReadsItsAddress) {
     EXPECT_EQ(b.out, "1 0 0 0\n") << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// Indexing through `operator []` / `[]=`: a subscript on a struct is a call.
+//
+// The analyzer already routes a subscript on a struct declaring the operator
+// through it (and an assignment target visits the subscript first, so it
+// needs the read operator declared too). The backend lowers each form to the
+// operator call with the base's address as receiver: the assign form is a
+// call, not a store, because there is no address that `a[k]` names.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AnIndexAssignLowersToTheAssignOperator) {
+    // deeptest4.fin:13 verbatim in shape: `a["Hi"] = Data{...}`. Here with
+    // integers, so the only new machinery is the call form itself.
+    const Built b = build(std::string(kPrintf) +
+        "struct Map {\n"
+        "    v <int>,\n"
+        "    operator [](key: <int>) <int> { return self.v; }\n"
+        "    operator []=(key: <int>, value: <int>) <noret> { self.v = value; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let m <Map> = Map{ v: 1 };\n"
+        "    m[9] = 2;\n"
+        "    printf(\"%d\\n\", m.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnIndexReadLowersToTheReadOperator) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Map {\n"
+        "    v <int>,\n"
+        "    operator [](key: <int>) <int> { return self.v + key; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let m <Map> = Map{ v: 10 };\n"
+        "    printf(\"%d\\n\", m[5]);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "15\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the

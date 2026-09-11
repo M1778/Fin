@@ -6010,12 +6010,143 @@ private:
         return pair;
     }
 
+    // `base[idx]` / `base[idx] = value` where base names a local or global
+    // struct declaring the operator: the receiver, the provider and the
+    // function, for the read and the store to share. Only identifier bases
+    // are served: resolving any other base would emit its address here and
+    // again on the array path below, running an index expression twice. A
+    // base that is not a struct -- an array, a prototype, a pointer -- is
+    // not applicable rather than wrong, and falls through to the paths that
+    // own those. Null when not applicable; reports when applicable but
+    // unlowerable.
+    struct IndexOperatorTarget {
+        const StructInfo* owner;
+        const StructInfo* provider;
+        const FnInfo* fn;
+        Addr receiver;
+        std::string key;
+    };
+    std::optional<IndexOperatorTarget> indexOperatorCall(ASTNode& node,
+                                                         Expression& base,
+                                                         ASTTokenKind op) {
+        auto* id = dynamic_cast<Identifier*>(&base);
+        if (!id) return std::nullopt;
+        // Pure table lookup, no emission: locals then globals, mirroring scope.
+        const CgType* baseType = nullptr;
+        if (Local* local = findLocal(id->name)) {
+            baseType = &local->type;
+        } else {
+            auto g = globals_.find(id->name);
+            if (g == globals_.end()) {
+                if (failed_) return std::nullopt;
+                return std::nullopt;
+            }
+            baseType = &g->second.type;
+        }
+        if (failed_) return std::nullopt;
+        // Unwrap `&S` the way the analyzer's getStructType does, so a pointer
+        // receiver reaches the operator rather than pointer arithmetic.
+        const StructInfo* owner = nullptr;
+        if (baseType->isStruct() && baseType->structInfo) {
+            owner = baseType->structInfo;
+        } else if (baseType->isPointer() && baseType->pointee &&
+                   baseType->pointee->isStruct() &&
+                   baseType->pointee->structInfo) {
+            owner = baseType->pointee->structInfo;
+        }
+        if (!owner) return std::nullopt;
+        const std::string spelling = spellOperator(op);
+        const OperatorDeclaration* declared = findOperator(*owner, op);
+        const StructInfo* provider = owner;
+        if (!declared) {
+            const StructInfo* inherited = operatorProvider(node, *owner, op);
+            if (failed_) return std::nullopt;
+            if (inherited && inherited != owner) {
+                if (!baseSharesLayout(*owner, *inherited)) {
+                    unsupported(node, fmt::format("an operator '{}' inherited from '{}', "
+                                                  "whose fields are not at the offsets "
+                                                  "they have in '{}'",
+                                                  spelling, inherited->finName,
+                                                  owner->finName));
+                    return std::nullopt;
+                }
+                provider = inherited;
+                declared = findOperator(*provider, op);
+            }
+        }
+        if (!declared) {
+            unsupported(node, fmt::format("an undeclared operator '{}' on struct '{}'",
+                                          spelling, owner->finName));
+            return std::nullopt;
+        }
+        const std::string key = operatorKey(provider->finName, op);
+        auto found = functions_.find(key);
+        if (found == functions_.end()) {
+            // A generic index operator has no per-binding emission the way a
+            // generic arithmetic one does (emitGenericOperator is written
+            // against BinaryOp), and a bodiless one has no body at all. Both
+            // refuse rather than reaching for a symbol that was never defined.
+            if (!declared->generic_params.empty() && declared->body) {
+                unsupported(node, fmt::format("a generic operator '{}' on struct '{}'",
+                                              spelling, owner->finName));
+                return std::nullopt;
+            }
+            reportMissingOperator(node, *provider, op);
+            return std::nullopt;
+        }
+        auto receiver = baseAddress(base, CgType::Kind::Struct);
+        if (failed_) return std::nullopt;
+        if (!receiver) {
+            unsupported(node, fmt::format("an operator '{}' on '{}' with no address",
+                                          spelling, owner->finName));
+            return std::nullopt;
+        }
+        return IndexOperatorTarget{owner, provider, &found->second, *receiver,
+                                   key};
+    }
+
     void emitAssignment(BinaryOp& node) {
         if (node.op == ASTTokenKind::EQUAL) {
             if (auto* access = dynamic_cast<ArrayAccess*>(node.left.get())) {
                 CgVal rhs = emit(*node.right);
                 if (failed_) return;
                 if (emitPrototypeStore(*access, rhs, node)) return;
+                // `a[k] = v` through `operator[]=`: a call, not a store,
+                // because there is no address that `a[k]` names. The value
+                // was already emitted above, so both arguments are converted
+                // here rather than re-emitted through emitCallArgs -- emitting
+                // the source twice would run it twice.
+                if (auto target = indexOperatorCall(node, *access->array,
+                                                    ASTTokenKind::INDEX_ASSIGN)) {
+                    const FnInfo& info = *target->fn;
+                    // Receiver, key, value: the operator's own arity, checked
+                    // rather than assumed. An `[]=` of any other shape is a
+                    // program the analyzer accepted and this slice cannot call.
+                    if (info.paramTypes.size() != 3) {
+                        unsupported(node, fmt::format("operator '[]=' on struct '{}' "
+                                                      "with {} parameter(s)",
+                                                      target->owner->finName,
+                                                      info.paramTypes.size() - 1));
+                        return;
+                    }
+                    CgVal key = emitAs(*access->index, info.paramTypes[1]);
+                    if (failed_) return;
+                    if (!key.ok()) {
+                        unsupported(node, "this index");
+                        return;
+                    }
+                    llvm::Value* k = convert(node, key, info.paramTypes[1]);
+                    if (!k) return;
+                    llvm::Value* stored =
+                        convert(node, rhs, info.paramTypes[2]);
+                    if (!stored) return;
+                    emitCall(info, {target->receiver.ptr, k, stored});
+                    // The assignment's value is the value stored, as on the
+                    // plain path below.
+                    value_ = CgVal{stored, info.paramTypes[2]};
+                    return;
+                }
+                if (failed_) return;
             }
         }
         // One address, used by both halves of a compound assignment. An index or a
@@ -9125,6 +9256,20 @@ private:
             value_ = emitPrototypeLookup(node, object, key, "a prototype lookup");
             return;
         }
+        // `a[k]` where `a` names a struct with `operator[]`: the call the
+        // assignment form shares. Before the address path, whose GEP semantics
+        // are correct for arrays but wrong for dictionaries -- and only for
+        // identifier bases, so resolving the base emits nothing twice.
+        if (auto target = indexOperatorCall(node, *node.array,
+                                            ASTTokenKind::INDEX)) {
+            const FnInfo& info = *target->fn;
+            std::vector<llvm::Value*> args{target->receiver.ptr};
+            if (!emitCallArgs(node, info, target->key, {node.index.get()}, args))
+                return;
+            emitCall(info, args);
+            return;
+        }
+        if (failed_) return;
         if (auto addr = emitAddress(node)) {
             value_ = CgVal{builder_.CreateLoad(addr->type.llvmType, addr->ptr, "load"),
                            addr->type};
