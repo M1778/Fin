@@ -6014,6 +6014,51 @@ BACKEND_TEST(Soundness_Codegen, ADestructorBodyMayDeleteABareField) {
               std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// `super::<Parent>::member` names the parent and reaches through `self`.
+//
+// deeptest2.fin:71-73 writes field stores and a method call in this form. The
+// parent's fields sit at the offsets they have in the parent (declareStructs'
+// splice, ADR 0029's sharing), so the qualifier selects an implementation
+// without moving any bytes.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, ASuperQualifiedFieldStoreReachesThroughSelf) {
+    const Built b = build(std::string(kPrintf) +
+        "struct P {\n"
+        "    p <int>\n"
+        "}\n"
+        "struct S : <P> {\n"
+        "    fun setp(n: int) <noret> { super::<P>::p = n; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S{ p: 1 };\n"
+        "    s.setp(2);\n"
+        "    printf(\"%d\\n\", s.p);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ASuperQualifiedMethodCallUsesSelfAsReceiver) {
+    const Built b = build(std::string(kPrintf) +
+        "struct P {\n"
+        "    p <int>,\n"
+        "    fun get() <int> { return self.p; }\n"
+        "}\n"
+        "struct S : <P> {\n"
+        "    fun getp() <int> { return super::<P>::get(); }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S{ p: 7 };\n"
+        "    printf(\"%d\\n\", s.getp());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
 BACKEND_TEST(KnownDefect_Codegen, ConstructorOverloadsAreRefusedRatherThanResolved) {
     // The booked defect (docs/HANDOFF.md §7): the analyzer resolves `constructors[0]`
     // and no more. One symbol per struct is what this file declares to match it, so a

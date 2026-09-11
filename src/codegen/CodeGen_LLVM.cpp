@@ -3709,7 +3709,16 @@ private:
         }
         if (auto* member = dynamic_cast<MemberAccess*>(&expr)) {
             // `Type::name` is an enum member or a static, not a field of an object.
-            if (member->is_static) return std::nullopt;
+            if (member->is_static) {
+                // `super::<P>::x` names the parent and reaches through `self`
+                // (superTarget); anything else static has no object to address.
+                if (auto* sup = dynamic_cast<SuperExpression*>(
+                        member->object.get())) {
+                    if (!sup->is_qualifier) return std::nullopt;
+                    return superFieldAddr(*member, *sup, member->member);
+                }
+                return std::nullopt;
+            }
 
             // `p.0` and `p.1` are the prototype's two halves, and they have addresses
             // for the same reason a struct field does: the prototype is a struct here,
@@ -3862,6 +3871,88 @@ private:
         llvm::Value* ptr = builder_.CreateStructGEP(info->llvmType, receiver,
                                                      (unsigned)index, name);
         return Addr{ptr, info->fields[index].type};
+    }
+
+    // `super::<P>::...` -- the parent qualifier (parser.y's fourth
+    // super_expression form, deeptest2.fin:71-73). Names the parent P and
+    // reaches through `self`: P's fields sit at the offsets they have in P
+    // (declareStructs' splice, ADR 0029's sharing), so the qualifier selects
+    // an implementation without moving any bytes.
+    struct SuperTarget {
+        const StructInfo* self;
+        const StructInfo* parent;
+        Addr receiver;
+    };
+    // The qualifier's parent and the receiver, or nullopt. Reports when the
+    // shape is answerable and the answer is no: an unknown or generic parent,
+    // or a parent whose fields are not where the parent puts them
+    // (baseSharesLayout) -- a second base sitting elsewhere would otherwise
+    // read the wrong field silently, the outcome emitInheritedMethodCall
+    // refuses for the same reason. Silent nullopt only when there is no
+    // receiver at all, which the analyzer already refuses upstream.
+    std::optional<SuperTarget> superTarget(ASTNode& node, SuperExpression& sup) {
+        Local* self = findLocal("self");
+        if (!self || failed_) return std::nullopt;
+        if (!self->type.isPointer() || !self->type.pointee ||
+            !self->type.pointee->isStruct() || !self->type.pointee->structInfo)
+            return std::nullopt;
+        auto found = structs_.find(sup.parent_name);
+        if (found == structs_.end() || !found->second.complete) {
+            unsupported(node, fmt::format("a 'super' qualifier naming '{}', which "
+                                          "this file did not lower",
+                                          sup.parent_name));
+            return std::nullopt;
+        }
+        // Genericness lives on the parent's declaration, not on the qualifier:
+        // `super::<P>` always spells P as a type argument (parser.y), generic
+        // or not, so the qualifier's own list cannot tell the two apart.
+        if (found->second.decl && !found->second.decl->generic_params.empty()) {
+            unsupported(node, "a 'super' qualifier naming a generic parent");
+            return std::nullopt;
+        }
+        const StructInfo* selfInfo = self->type.pointee->structInfo;
+        const StructInfo* parentInfo = &found->second;
+        if (!baseSharesLayout(*selfInfo, *parentInfo)) {
+            unsupported(node, fmt::format("a 'super' qualifier naming '{}', whose "
+                                          "fields are not at the offsets they have "
+                                          "in '{}'",
+                                          parentInfo->finName, selfInfo->finName));
+            return std::nullopt;
+        }
+        llvm::Value* receiver =
+            builder_.CreateLoad(self->type.llvmType, self->slot, "self.ptr");
+        return SuperTarget{selfInfo, parentInfo,
+                           Addr{receiver, *self->type.pointee}};
+    }
+
+    // The address of `super::<P>::field`: the field at the index it has in
+    // *self*, whose offset baseSharesLayout (checked by superTarget) proves
+    // equal to the parent's. Indexed by the parent for existence and by self
+    // for the GEP, because the two LLVM struct types are distinct even when
+    // their first bytes agree.
+    std::optional<Addr> superFieldAddr(ASTNode& node, SuperExpression& sup,
+                                       const std::string& member) {
+        auto target = superTarget(node, sup);
+        if (!target) return std::nullopt;
+        size_t parentIndex = 0;
+        if (!target->parent->find(member, parentIndex)) {
+            unsupported(node, fmt::format("the field '{}', which struct '{}' does "
+                                          "not have",
+                                          member, target->parent->finName));
+            return std::nullopt;
+        }
+        size_t selfIndex = 0;
+        if (!target->self->find(member, selfIndex)) {
+            unsupported(node, fmt::format("the field '{}' of '{}', which '{}' does "
+                                          "not carry",
+                                          member, target->parent->finName,
+                                          target->self->finName));
+            return std::nullopt;
+        }
+        llvm::Value* ptr = builder_.CreateStructGEP(
+            target->self->llvmType, target->receiver.ptr, (unsigned)selfIndex,
+            member);
+        return Addr{ptr, target->self->fields[selfIndex].type};
     }
 
     // A condition is a truth value whatever it was written as.
@@ -7692,6 +7783,42 @@ private:
                                           "generic arguments", node.method_name));
             return;
         }
+        // `super::<P>::f()` calls P's method with `self` as the receiver: the
+        // qualifier selects the implementation, and superTarget has already
+        // proved P's fields sit where P puts them, so the receiver needs no
+        // adjustment -- exactly what emitInheritedMethodCall checks once more
+        // on the way in. Before the prototype probe below, whose name list
+        // would otherwise read the qualifier as a receiver with no address.
+        if (auto* sup = dynamic_cast<SuperExpression*>(node.object.get())) {
+            if (!sup->is_qualifier) {
+                unsupported(node, "'super'");
+                return;
+            }
+            auto target = superTarget(node, *sup);
+            if (failed_) return;
+            if (!target) {
+                unsupported(node, "'super' with no receiver in scope");
+                return;
+            }
+            auto found =
+                functions_.find(methodKey(target->parent->finName, node.method_name));
+            if (found == functions_.end()) {
+                reportMissingMethod(node, *target->parent, node.method_name);
+                return;
+            }
+            const FnInfo& info = found->second;
+            if (!info.hasReceiver) {
+                std::vector<llvm::Value*> args;
+                if (!emitCallArgs(node, info, node.method_name, argList(node.args),
+                                  args))
+                    return;
+                emitCall(info, args);
+                return;
+            }
+            emitInheritedMethodCall(node, *target->self, *target->parent,
+                                    target->receiver);
+            return;
+        }
         // The receiver is an address, and the same address a field access would take:
         // `p.get()` on a value, `q.get()` on a `&Point` with one load in between,
         // `o.inner.get()` on a field. One primitive for all three, which is what keeps
@@ -8030,6 +8157,24 @@ private:
                         return;
                     }
                 }
+            }
+            // `super::<P>::x` reads the parent's field through `self`, by the
+            // same address a store would use -- one GEP, one load.
+            if (auto* sup = dynamic_cast<SuperExpression*>(node.object.get())) {
+                if (!sup->is_qualifier) {
+                    unsupported(node, "'super'");
+                    return;
+                }
+                auto addr = superFieldAddr(node, *sup, node.member);
+                if (failed_) return;
+                if (!addr) {
+                    unsupported(node, "'super' with no receiver in scope");
+                    return;
+                }
+                value_ = CgVal{builder_.CreateLoad(addr->type.llvmType, addr->ptr,
+                                                   node.member),
+                               addr->type};
+                return;
             }
             // A `::` that is not an enum member: a static method, a namespaced symbol,
             // an associated constant. Each needs a mangling scheme.
