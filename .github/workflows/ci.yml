@@ -62,6 +62,12 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    # The Windows rows are experimental: the MSVC-published LLVM has no
+    # monolithic `LLVM` target and CMakeLists.txt refuses to guess the
+    # component-library link instead (an open ruling), so these jobs cannot
+    # pass yet. They still run to show how far the platform gets, without
+    # painting every push red and hiding real regressions in the noise.
+    continue-on-error: ${{ startsWith(matrix.name, 'windows-') }}
     strategy:
       # Every platform reports, because "which platforms are broken" is the
       # question this matrix exists to answer.
