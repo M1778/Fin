@@ -2775,6 +2775,16 @@ private:
             // exactly as a struct and differs in inheritance alone), so there
             // is likewise nothing to honour here beyond not dropping it.
             if (attr->name == "class" && attr->is_flag) continue;
+            // Flag-form `#[uncastable]` opts the type out of casts
+            // (stdlib/error.fin): enforced where casts lower
+            // (visit(CastExpression&)), so here it is recorded, not dropped.
+            if (attr->name == "uncastable" && attr->is_flag) continue;
+            // Flag-form `#[stderror]` marks the standard error class. It asks
+            // nothing of emission -- there is no error plumbing in this
+            // backend to steer -- so accepting it claims nothing further,
+            // exactly as for `export` on an alias. What would give it teeth
+            // (uniqueness, default handlers) is unruled.
+            if (attr->name == "stderror" && attr->is_flag) continue;
             // An attribute this file does not read may be one that changes the
             // layout. Ignoring it is the failure mode that produces a working
             // program with the wrong offsets. `#[llvm_name]` in its flag form lands
@@ -5949,6 +5959,28 @@ private:
                     else if (other.type.isDynamicArray)
                         word = builder_.CreateExtractValue(other.value, {0},
                                                            "buf");
+                    else if ((other.type.kind == CgType::Kind::Int ||
+                              other.type.kind == CgType::Kind::Float) &&
+                             other.type.llvmType) {
+                        // A scalar against null compares against zero: null
+                        // converts to zero for every scalar kind (the
+                        // null-default rule), so this is that conversion made
+                        // explicit at the comparison (`err_code == null` in
+                        // stdlib/error.fin:12). Only `==` and `!=` reach here;
+                        // ordering against null stays refused above.
+                        llvm::Value* zero = llvm::Constant::getNullValue(
+                            other.type.llvmType);
+                        const bool fp =
+                            other.type.kind == CgType::Kind::Float;
+                        CgType boolType = *types_.byName("bool");
+                        llvm::Value* out =
+                            op == ASTTokenKind::EQEQ
+                                ? (fp ? builder_.CreateFCmpOEQ(other.value, zero)
+                                      : builder_.CreateICmpEQ(other.value, zero))
+                                : (fp ? builder_.CreateFCmpONE(other.value, zero)
+                                      : builder_.CreateICmpNE(other.value, zero));
+                        return CgVal{out, boolType};
+                    }
                 }
                 if (!word) {
                     unsupported(node, "an operator on a pointer");
@@ -7408,12 +7440,41 @@ private:
         return v.value;
     }
 
+    // Whether this struct's declaration carries the flag attribute. The
+    // analyzer does not read declaration attributes, so the backend answers
+    // from the declaration it registered -- root or imported alike, since
+    // layout registration keeps the declaration pointer.
+    bool structHasFlag(const StructInfo& info, const char* attr) const {
+        if (!info.decl) return false;
+        for (auto& a : info.decl->attributes) {
+            if (a->name == attr && a->is_flag) return true;
+        }
+        return false;
+    }
+
     void visit(CastExpression& node) override {
         auto target = types_.map(node.target_type.get());
         if (!target) { unsupportedType(node, node.target_type.get(), "a cast"); return; }
         CgVal v = emit(*node.expr);
         if (failed_) return;
         if (!v.ok()) { unsupported(node, "this cast operand"); return; }
+        // `#[uncastable]` (stdlib/error.fin) excludes casts to and from the
+        // type -- including same-type and generic/dynamic-mediated ones the
+        // analyzer otherwise admits, which is why the check lives on the cast
+        // expression rather than in conversions: an implicit copy is not a
+        // cast. Addresses are not values: a pointer to one still converts.
+        if (v.type.isStruct() && v.type.structInfo &&
+            structHasFlag(*v.type.structInfo, "uncastable")) {
+            unsupported(node, fmt::format("a cast from uncastable '{}'",
+                                          v.type.structInfo->finName));
+            return;
+        }
+        if (target->isStruct() && target->structInfo &&
+            structHasFlag(*target->structInfo, "uncastable")) {
+            unsupported(node, fmt::format("a cast to uncastable '{}'",
+                                          target->structInfo->finName));
+            return;
+        }
         llvm::Value* out = convert(node, v, *target);
         if (out) value_ = CgVal{out, *target};
     }
@@ -7582,7 +7643,14 @@ private:
     void visit(OperatorDeclaration& node) override { unsupported(node, "an operator declaration"); }
     void visit(ConstructorDeclaration& node) override { unsupported(node, "a constructor"); }
     void visit(DestructorDeclaration& node) override { unsupported(node, "a destructor"); }
-    void visit(SpecialDeclaration& node) override { unsupported(node, "a '@special' declaration"); }
+    void visit(SpecialDeclaration& node) override {
+        // A `@special` runs at compile time; its declaration -- attributes,
+        // grants and body included -- has no runtime meaning, so emitting
+        // nothing for it is lowering it completely. The same state an
+        // interface declaration is in, and not the skip the refusal rule
+        // forbids.
+        (void)node;
+    }
     // Six statements wear this one node (src/ast/decls/TypeDef.hpp): a type alias
     // `type Integer = int;`, a union alias `type Number = int | uint;`, the erasure
     // marker `type Any<...> = any implements <...>`, a symbol resolution

@@ -5749,27 +5749,29 @@ BACKEND_TEST(Soundness_Codegen, TwoInstantiationsUnderOneLlvmNameKeepDistinctLay
 }
 
 BACKEND_TEST(Soundness_Codegen, AnAttributeThisFileDoesNotReadIsStillRefused) {
-    // stdlib/error.fin:3 writes `#[uncastable]`, and what it excludes is a cast --
-    // a rule about the type, not about its name. Honouring `llvm_name` must not turn
-    // the attribute check into "attributes are decoration".
+    // `#[future]` stands in for any attribute with no reader: what it would
+    // exclude is unknown, so honouring `llvm_name` must not turn the attribute
+    // check into "attributes are decoration". (`#[uncastable]` served here
+    // until it gained a reader -- refusing casts -- at which point the fixture
+    // moved to one that still has none.)
     const Built b = build(std::string(kPrintf) +
-        "#[uncastable]\n"
+        "#[future]\n"
         "struct S { v <int> }\n"
         "fun main() <noret> {\n"
         "    let s <S> = S{ v: 1 };\n"
         "    printf(\"%d\\n\", s.v);\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("uncastable"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("future"), std::string::npos) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AnLlvmNameBesideAnUnreadAttributeIsStillRefused) {
-    // stdlib/error.fin:2-5 is exactly this: `#[llvm_name="Error"] #[uncastable]
-    // #[stderror] #[class]`. Reading one of the four is not permission to drop the
-    // other three.
+    // `#[llvm_name="Error"] #[future]`: reading one of the two is not
+    // permission to drop the other. (Was `#[uncastable]` second; it has a
+    // reader now, so the fixture moved to one that does not.)
     const Built b = build(std::string(kPrintf) +
         "#[llvm_name=\"Error\"]\n"
-        "#[uncastable]\n"
+        "#[future]\n"
         "struct S { v <int> }\n"
         "fun main() <noret> {\n"
         "    let s <S> = S{ v: 1 };\n"
@@ -6571,6 +6573,117 @@ BACKEND_TEST(Soundness_Codegen, AnExportOnAnAliasIsVacuous) {
     ASSERT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// `#[uncastable]` excludes casts; `#[stderror]` marks the standard error.
+//
+// `uncastable` is a rule about the type, not about a single spelling: no
+// cast to or from the type lowers, including same-type and
+// generic/dynamic-mediated ones the analyzer otherwise admits (which is why
+// the check lives on the cast expression rather than in conversions -- an
+// implicit copy is not a cast). `stderror` marks the standard error class;
+// it asks nothing of emission (like `export` on an alias), and is accepted
+// as documented.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, ACastOfAnUncastableTypeIsRefused) {
+    // Even same-type: `cast<Secret>(s)` is written as a cast, and the
+    // attribute excludes casts, not just converting ones.
+    const Built b = build(std::string(kPrintf) +
+        "#[uncastable]\n"
+        "struct Secret {\n"
+        "    v <int>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <Secret> = Secret{ v: 1 };\n"
+        "    let t <Secret> = cast<Secret>(s);\n"
+        "    printf(\"%d\\n\", t.v);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a cast from uncastable 'Secret'"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ACastIntoAnUncastableTypeIsRefused) {
+    // Dynamic-mediated: the analyzer admits `cast<Secret>(a)` for `a: any`
+    // (a cast overrides the checker), so the backend is what keeps the
+    // attribute's promise. In a never-called body -- bodies lower eagerly,
+    // so reachability is not the question.
+    const Built b = build(
+        "#[uncastable]\n"
+        "struct Secret {\n"
+        "    v <int>\n"
+        "}\n"
+        "fun f(a: any) <Secret> { return cast<Secret>(a); }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a cast to uncastable 'Secret'"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnUncastableStructStillLowers) {
+    // The attribute excludes casts, not the struct: declaration, fields,
+    // copies and reads all lower as for any struct.
+    const Built b = build(std::string(kPrintf) +
+        "#[uncastable]\n"
+        "struct Secret {\n"
+        "    v <int>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let s <Secret> = Secret{ v: 7 };\n"
+        "    let t <Secret> = s;\n"
+        "    printf(\"%d\\n\", t.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStderrorMarkIsAccepted) {
+    const Built b = build(std::string(kPrintf) +
+        "#[stderror]\n"
+        "struct E {\n"
+        "    v <int>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let e <E> = E{ v: 4 };\n"
+        "    printf(\"%d\\n\", e.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "4\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ASpecialDeclarationEmitsNothing) {
+    // A `@special` runs at compile time; its declaration has no runtime
+    // meaning, so emitting nothing for it is lowering it completely -- the
+    // same state an interface declaration is in, and not the skip the
+    // refusal rule forbids.
+    const Built b = build(std::string(kPrintf) +
+        "@special(pub) const_true() <bool> { return true; }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AScalarComparedToNullReadsZero) {
+    // `err_code == null` in stdlib/error.fin:12: null converts to zero for
+    // every scalar kind (the null-default rule), so the comparison reads
+    // against zero rather than refusing. Only `==` and `!=`: ordering
+    // against null is a claim about where nothing sits.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 5;\n"
+        "    let z <int> = 0;\n"
+        "    printf(\"%d %d %d\\n\", x == null, x != null, z == null);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0 1 1\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
