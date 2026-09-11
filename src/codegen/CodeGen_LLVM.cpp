@@ -2197,7 +2197,7 @@ private:
             declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
             pendingBodies_.push_back(PendingBody{info.decl->destructor.get(), &noParams,
                                                  info.decl->destructor->body.get(), key,
-                                                 &info.methodBindings});
+                                                 &info.methodBindings, info.finName});
         }
 
         // The operators, on the same terms. An operator is a method with a spelled name:
@@ -2288,7 +2288,7 @@ private:
         // function's body, where emitting straight away would mean nesting two
         // insert points for no reason.
         pendingBodies_.push_back(PendingBody{&m, &m.params, m.body.get(), key,
-                                             &info.methodBindings});
+                                             &info.methodBindings, info.finName});
         return true;
     }
 
@@ -2316,7 +2316,7 @@ private:
         declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
         declared->second.isConstructor = true;
         pendingBodies_.push_back(PendingBody{&c, &c.params, c.body.get(), key,
-                                             &info.methodBindings});
+                                             &info.methodBindings, info.finName});
         return true;
     }
 
@@ -2342,7 +2342,7 @@ private:
         if (declared == functions_.end()) return false;  // declareFunction reported
         declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
         pendingBodies_.push_back(PendingBody{&o, &o.params, o.body.get(), key,
-                                             &info.methodBindings});
+                                             &info.methodBindings, info.finName});
         return true;
     }
 
@@ -2360,6 +2360,10 @@ private:
         Block* body = nullptr;
         std::string key;
         const Substitution* bindings = nullptr;
+        // The member's struct, for `Self`. A name rather than a pointer: draining
+        // can instantiate a template, which inserts into structs_ while this
+        // queue is being read.
+        std::string structName;
     };
 
     // Emits every queued body, including the ones queued while emitting them.
@@ -2370,7 +2374,10 @@ private:
         for (size_t i = 0; i < pendingBodies_.size(); ++i) {
             PendingBody job = pendingBodies_[i];
             ScopedBindings bound(types_, job.bindings);
+            std::string savedStruct = std::move(currentStructName_);
+            currentStructName_ = job.structName;
             emitBody(*job.node, *job.params, *job.body, job.key);
+            currentStructName_ = std::move(savedStruct);
         }
         // Cleared, because run() drains more than once and a second entry block on a
         // function that already has one is invalid IR rather than a duplicate.
@@ -6170,6 +6177,19 @@ private:
         // declared beside the struct, and the analyzer has already selected
         // constructors[0]; this pass deliberately uses the same single-symbol rule
         // rather than inventing an overload resolution the front end does not have.
+        //
+        // `Self()` is the same call spelled through the enclosing struct
+        // (deeptest2.fin:92): the analyzer resolved it against that struct, and
+        // draining member bodies tracks it (currentStructName_), so the name is
+        // replaced rather than looked up. A `Self` nobody declared -- a free
+        // function, a type argument, or a program-level `fun Self` shadowing it
+        // -- falls through to the refusal below, exactly as an unknown name.
+        if (node.name == "Self" && node.generic_args.empty() &&
+            !currentStructName_.empty() && !functions_.count(node.name) &&
+            !structs_.count(node.name)) {
+            emitNamedCall(node, currentStructName_);
+            return;
+        }
         emitNamedCall(node, node.name);
     }
 
@@ -9337,6 +9357,13 @@ private:
     std::set<const VariableDeclaration*> registeredGlobals_;
     std::vector<LoopTargets> loops_;
     FnInfo* currentFn_ = nullptr;
+    // The struct whose member body is being emitted, for `Self`. Set while
+    // draining each queued member body (drainPendingBodies) and empty
+    // everywhere else -- in particular a free function never sees one, so a
+    // `Self` there still refuses rather than naming whatever ran last. A name
+    // rather than a pointer: draining can instantiate a template, which
+    // inserts into structs_ while bodies are being read.
+    std::string currentStructName_;
     CgVal value_;
 };
 

@@ -6059,6 +6059,25 @@ BACKEND_TEST(Soundness_Codegen, ASuperQualifiedMethodCallUsesSelfAsReceiver) {
     EXPECT_EQ(b.out, "7\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, ASelfCallConstructsTheEnclosingStruct) {
+    // deeptest2.fin:91-93 verbatim in shape: a static returning `Self()`.
+    // `Self` is the enclosing struct, so this is the constructor call the
+    // analyzer already selected -- spelled through the struct, not invented.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box {\n"
+        "    v <int>,\n"
+        "    Box() { self.v = 1; }\n"
+        "    static fun make() <Self> { return Self(); }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box> = Box::make();\n"
+        "    printf(\"%d\\n\", b.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
+}
+
 BACKEND_TEST(KnownDefect_Codegen, ConstructorOverloadsAreRefusedRatherThanResolved) {
     // The booked defect (docs/HANDOFF.md §7): the analyzer resolves `constructors[0]`
     // and no more. One symbol per struct is what this file declares to match it, so a
