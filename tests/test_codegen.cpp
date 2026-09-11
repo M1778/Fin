@@ -6322,6 +6322,79 @@ BACKEND_TEST(Soundness_Codegen, ACastFromAPointerReadsItsAddressBits) {
     EXPECT_EQ(b.out, "1 7\n") << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// Postfix `?` (denullify): a checked read of a nullable function value.
+//
+// `x?` reads a nullable as its underlying type, failing if it is absent. A
+// nullable `fn` is null when absent, so this emits the null check the
+// spelling promises and blames on the failing edge -- the panic the analyzer
+// books for the null case. A `?` on a non-nullable value is the analyzer's
+// identity and emits nothing extra.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, ADenullifiedPresentFunctionPassesThrough) {
+    // A present nullable reads through: the check passes and the value -- a
+    // real function address -- calls.
+    const Built b = build(std::string(kPrintf) +
+        "fun dummy(x: int) <int> { return x * 2; }\n"
+        "struct Holder {\n"
+        "    h? <fn(int) -> int>,\n"
+        "    v <int>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let h <Holder> = Holder{ v: 0 };\n"
+        "    h.h = dummy;\n"
+        "    let f <fn(int) -> int> = h.h?;\n"
+        "    printf(\"%d\\n\", f(21));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADenullifiedAbsentFunctionBlames) {
+    // An absent nullable fails loudly rather than calling null: the check
+    // trips and the program blames with the read's location, then aborts.
+    // (`find`, not equality: the shell may append its own signal report after
+    // the program's bytes, and that epilogue is the shell's, not the test's.)
+    const Built b = build(std::string(kPrintf) +
+        "struct Holder {\n"
+        "    h? <fn(int) -> int>,\n"
+        "    v <int>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let h <Holder> = Holder{ v: 0 };\n"
+        "    let f <fn(int) -> int> = h.h?;\n"
+        "    printf(\"%d\\n\", f(1));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_NE(b.runExit, 0) << b.why();
+    EXPECT_NE(b.out.find("denullify of an absent value"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADenullifyOfNonNullableIsIdentity) {
+    // The analyzer's rule for `?` on a value that was never nullable: the
+    // read is that value, with no check emitted. `h` here is a plain field
+    // defaulting null (not `h?`), so `h.h?` passes its null straight through.
+    const Built b = build(std::string(kPrintf) +
+        "fun dummy(x: int) <int> { return x * 2; }\n"
+        "struct Holder {\n"
+        "    h <fn(int) -> int> = null,\n"
+        "    v <int>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let h <Holder> = Holder{ v: 0 };\n"
+        "    h.h = dummy;\n"
+        "    let f <fn(int) -> int> = h.h?;\n"
+        "    printf(\"%d\\n\", f(21));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the

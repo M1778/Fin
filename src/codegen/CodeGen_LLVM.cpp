@@ -194,6 +194,11 @@ struct CgType {
     // about what a value in it means. Carried so value sites -- conversions,
     // operators, `sizeof` -- can refuse what the type mapping allowed.
     bool isAny = false;
+    // A value read through a nullable spelling (`fn?`). Only function types
+    // map nullable at all, so only they ever carry this -- and only `?`
+    // reads it. Anything else holding it is this file disagreeing with
+    // itself.
+    bool isNullable = false;
 
     // Set for Kind::Ptr when this file knows what is at the other end, and null
     // when it does not.
@@ -813,6 +818,10 @@ public:
         // function pointer was never a distinct type in the IR anyway.
         t.llvmType = llvm::PointerType::getUnqual(ctx_);
         t.result = std::make_shared<CgType>(*ret);
+        // Nullable in, nullable out: whether `?` was written travels with the
+        // value so the denullify has something to read. Nothing else sets it
+        // because nothing else maps nullable.
+        t.isNullable = node.is_nullable;
 
         std::vector<llvm::Type*> llvmParams;
         for (auto& p : node.param_types) {
@@ -6403,6 +6412,49 @@ private:
                 value_ = CgVal{builder_.CreateLoad(v.type.pointee->llvmType, v.value,
                                                    "deref"),
                                *v.type.pointee};
+                return;
+            }
+            case ASTTokenKind::QUESTION: {
+                // Postfix `?` (denullify): read a nullable as its underlying
+                // type, failing if it is absent. Only nullable function values
+                // arrive flaggable -- nothing else maps nullable -- so a
+                // flagged `fn` emits the null check the spelling promises and
+                // blames on the failing edge (the panic the analyzer books for
+                // the null case). Anything else is the analyzer's identity: a
+                // `?` on a non-nullable value is that value, and a nullable
+                // that is not a function is this file disagreeing with itself.
+                if (!node.is_postfix) break;
+                if (!v.ok()) { unsupported(node, "this operand"); return; }
+                if (v.type.isNullable && !v.type.isFn()) {
+                    unsupported(node, "denullify of a nullable non-function");
+                    return;
+                }
+                if (v.type.isFn() && v.type.isNullable) {
+                    if (!currentFn_) {
+                        unsupported(node, "denullify outside a function");
+                        return;
+                    }
+                    llvm::Value* isNull = builder_.CreateICmpEQ(
+                        v.value,
+                        llvm::ConstantPointerNull::get(
+                            llvm::PointerType::getUnqual(ctx_)),
+                        "absent");
+                    auto* failBB = llvm::BasicBlock::Create(ctx_, "denull.fail",
+                                                            currentFn_->fn);
+                    auto* okBB = llvm::BasicBlock::Create(ctx_, "denull.ok",
+                                                          currentFn_->fn);
+                    builder_.CreateCondBr(isNull, failBB, okBB);
+                    builder_.SetInsertPoint(failBB);
+                    if (!emitRuntimeBlame(node, "denullify of an absent value",
+                                          "a denullify"))
+                        return;
+                    builder_.SetInsertPoint(okBB);
+                    CgType t = v.type;
+                    t.isNullable = false;
+                    value_ = CgVal{v.value, t};
+                    return;
+                }
+                value_ = v;
                 return;
             }
             default:
