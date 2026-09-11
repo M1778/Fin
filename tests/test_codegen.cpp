@@ -6287,6 +6287,41 @@ BACKEND_TEST(Soundness_Codegen, AnIndexReadLowersToTheReadOperator) {
     EXPECT_EQ(b.out, "15\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, ABareLiteralOfTheEnclosingTemplateUsesThatInstance) {
+    // Self-family like `Self()` calls: a bare `Box{...}` inside `Box<T>`'s own
+    // method is the enclosing instantiation, with its bindings -- not a use
+    // the annotation-inference gap owns, which is about call sites with no
+    // enclosing instance to answer from.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    v <T>,\n"
+        "    fun dup() <Self> { return Box{ v: self.v }; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box::<int>{ v: 3 };\n"
+        "    let c <Box<int>> = b.dup();\n"
+        "    printf(\"%d\\n\", c.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ACastFromAPointerReadsItsAddressBits) {
+    // What `cast<int>(key)` in lib/std/hashmap.fin:91 means: the address as an
+    // integer, truncated to the target width. Asserted as self-equality rather
+    // than a value, because addresses vary run to run and only equal pointers
+    // must hash equal -- which is also the invariant `==` on strings keeps.
+    const Built b = build(std::string(kPrintf) +
+        "fun id_hash(s: string) <int> { return cast<int>(s); }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d\\n\", id_hash(\"abc\") == id_hash(\"abc\"), cast<int>(7));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 7\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the

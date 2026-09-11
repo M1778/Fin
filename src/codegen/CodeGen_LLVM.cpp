@@ -3714,6 +3714,21 @@ private:
                 return llvm::ConstantFP::get(to.llvmType, 0.0);
             if (to.isPointer()) return from.value;
         }
+        // A pointer into a non-bool integer is its address bits: what
+        // `cast<int>(key)` means for the default hasher
+        // (lib/std/hashmap.fin:91), where equal pointers must hash equal.
+        // Truncated or zero-extended to the target width through the integer
+        // path below. `bool` is excluded: truncating an address to one bit
+        // answers "is the low bit set", not "is it null" -- that question is
+        // `== null`, which the comparison path already serves.
+        if (from.type.isPointer() && to.kind == CgType::Kind::Int &&
+            !to.isBool) {
+            const unsigned ptrBits =
+                module_.getDataLayout().getPointerSizeInBits();
+            llvm::Value* asInt = builder_.CreatePtrToInt(
+                from.value, llvm::IntegerType::get(ctx_, ptrBits), "addr");
+            return convert(node, CgVal{asInt, types_.intType(ptrBits, false)}, to);
+        }
         // An `any` blob converts to and from nothing but itself: there is no
         // boxing into one and no reading out of one, so any other pair is a
         // value the program cannot have produced. Blob-to-blob is a 16-byte
@@ -8772,7 +8787,20 @@ private:
     std::string literalStructName(
         ASTNode& node, const std::string& writtenName,
         const std::vector<std::unique_ptr<TypeNode>>& args) {
-        if (args.empty()) return writtenName;
+        if (args.empty()) {
+            // A bare `Collection{...}` inside `Collection<T>`'s own method
+            // bodies: the enclosing instantiation (Self-family, like `Self()`
+            // calls), with the bindings the body is being emitted under. The
+            // name must be the template's own: any other bare generic name is
+            // a use the annotation-inference gap owns, not this.
+            if (!currentStructName_.empty()) {
+                auto cur = structs_.find(currentStructName_);
+                if (cur != structs_.end() && cur->second.decl &&
+                    cur->second.decl->name == writtenName)
+                    return currentStructName_;
+            }
+            return writtenName;
+        }
 
         TypeNode probe(writtenName);
         probe.setLoc(node.loc);
