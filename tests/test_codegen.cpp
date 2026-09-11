@@ -1693,20 +1693,24 @@ BACKEND_TEST(Soundness_Codegen, APrototypeOfAnArityOtherThanTwoIsRefused) {
               std::string::npos) << three.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, APrototypeWithAnErasedHalfIsRefused) {
+BACKEND_TEST(Soundness_Codegen, APrototypeWithAnObjectHalfIsRefused) {
     // `{object, object}` is what tests/samples/prototype_test.fin:40 writes, and it
     // refuses for the same reason a bare `let v <object>;` does: there is no
     // representation for a value whose type is unknown at compile time, so there is
-    // none for an array of them either. (`any` maps as an opaque blob since, but a
-    // half of it stays refused for want of boxing.) This is the half of item 7 that
-    // stays refused until `any` has values.
+    // none for an array of them either.
     const Built b = build("fun main() <noret> { let p <{object, object}>; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("prototype<object, object>"), std::string::npos) << b.why();
+}
 
-    const Built one = build("fun main() <noret> { let p <{int, any}>; }\n");
-    EXPECT_NE(one.compileExit, 0) << one.why();
-    EXPECT_NE(one.compileErr.find("prototype<int, any>"), std::string::npos) << one.why();
+BACKEND_TEST(Soundness_Codegen, APrototypeWithAnAnyHalfDeclaresStorage) {
+    // Was the second half of APrototypeWithAnErasedHalfIsRefused: `{int, any}`
+    // refused with it until halves of `any` mapped. Storage needs no boxing
+    // rule -- only element reads and writes do, and those refuse downstream
+    // (AStoreIntoAnAnyHalfIsRefused) -- so the declaration lowers.
+    const Built b = build("fun main() <noret> { let p <{int, any}>; }\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, APrototypeOnAnExternBoundaryIsRefused) {
@@ -6175,15 +6179,33 @@ BACKEND_TEST(Soundness_Codegen, ACallThroughAnAnyParameterIsRefused) {
               std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, APrototypeHalfOfAnyIsRefused) {
-    // Halves stay refused even though the type maps: a prototype of `any`
-    // elements would need boxing on every store, which is the same missing
-    // rule as the assignment above, one level in.
-    const Built b = build(
+BACKEND_TEST(Soundness_Codegen, APrototypeWithAnAnyHalfTakesShape) {
+    // The halves of a prototype are storage shapes, and storage of `any`
+    // needs no boxing rule: only READS and WRITES of elements do, and those
+    // refuse downstream (a conversion into `any`, below). This is the
+    // parameter shape stdlib/prototypes.fin:10 writes, `prtp: {T, any}`.
+    const Built b = build(std::string(kPrintf) +
+        "fun first(prtp: {int, any}) <[int]> { return prtp.0; }\n"
         "fun main() <noret> {\n"
-        "    let p <{any, int}>;\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AStoreIntoAnAnyHalfIsRefused) {
+    // The other half of the shape above: reading the `[int]` half is values
+    // out, but storing an integer into the `any` half would box it, and
+    // there is no boxing rule. The store refuses; the shape does not.
+    const Built b = build(std::string(kPrintf) +
+        "fun fill(p: {string, any}) <noret> { p[\"k\"] = 5; }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"ok\\n\");\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a conversion from 'an integer' to 'any'"),
+              std::string::npos) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, ASizeofAnyIsRefused) {
@@ -6462,6 +6484,93 @@ BACKEND_TEST(Soundness_Codegen, AClassAttributeDoesNotChangeLayout) {
     ASSERT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "3\n") << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// Meta-types map to opaque words; `resolve_type*` evaluate at compile time.
+//
+// A `$type` value only ever comes from the `resolve_type`/`resolve_arr_type`
+// intrinsics (bodiless lib/std declarations): nothing else in the language
+// produces one. Each of the four meta-types maps to its own named word type,
+// so they stay distinct without claiming anything about what the word means;
+// the intrinsics answer from the argument's static type, which is the only
+// thing visible at compile time. The word's content is unobserved -- nothing
+// compares, prints, or branches on one -- so numbering is per compilation.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AMetaTypeReturnLowers) {
+    // tests/samples/stdlib/prototypes.fin:19-21 verbatim in shape: a function
+    // returning `$type`. Nothing calls it here; the declaration lowering is
+    // the gap (it refused before any body was read).
+    const Built b = build(std::string(kPrintf) +
+        "import { resolve_type } from types::std;\n"
+        "pub fun typeof_it(v: int) <$type> { return resolve_type(v); }\n"
+        "fun main() <noret> {\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AResolveTypeCallLowersToATypeId) {
+    // The value is unobservable -- nothing compares or prints a `$type` --
+    // so this pins that the call lowers rather than what number it yields.
+    const std::string prog = std::string(kPrintf) +
+        "import { resolve_type } from types::std;\n"
+        "fun main() <noret> {\n"
+        "    let t <$type> = resolve_type(5);\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n";
+    const Built first = build(prog);
+    ASSERT_EQ(first.compileExit, 0) << first.why();
+    ASSERT_TRUE(first.ran) << first.why();
+    EXPECT_EQ(first.out, "ok\n") << first.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AllFourMetaTypesMapDistinctly) {
+    // `$type`, `$struct`, `$interface` and `$enum_member` are four types, not
+    // one (CONTEXT.md): a `$struct` parameter must not accept a `$type`
+    // argument, in either direction, so each maps to its own word.
+    const Built b = build(
+        "fun a(t: $type) <$type> { return t; }\n"
+        "fun b(t: $struct) <$struct> { return t; }\n"
+        "fun c(t: $interface) <$interface> { return t; }\n"
+        "fun d(t: $enum_member) <$enum_member> { return t; }\n"
+        "fun main() <noret> {}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ASizeofMetaTypeIsRefused) {
+    // The word has 8 bytes, but the shared layout model answers "no layout"
+    // for a meta-type until a declaration owns the representation -- and a
+    // `sizeof` that disagreed with that model would be two passes with two
+    // sizes for one type. Same rule as `sizeof(any)`.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", sizeof($type));\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("the size of '$type'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnExportOnAnAliasIsVacuous) {
+    // stdlib/prototypes.fin:6 writes `#[export]` above `type listarray`. An
+    // alias emits nothing -- no symbol, no storage -- so there is nothing to
+    // rename or relink, and import-visibility (what `export` means, ADR 0033)
+    // was already honoured by the analyzer resolving the import. Accepting it
+    // claims nothing further. Any other attribute still refuses: `#[llvm_name]`
+    // on an alias would be a naming request silently dropped.
+    const Built b = build(std::string(kPrintf) +
+        "#[export]\n"
+        "type listarray = {any, any};\n"
+        "fun main() <noret> {\n"
+        "    printf(\"ok\\n\");\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "ok\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {

@@ -564,6 +564,33 @@ public:
 
     // `allowIncomplete` admits a struct whose body is not set yet, and is passed
     // by exactly one caller: a pointer, for its immediate pointee. See mapPointer.
+    // The four meta-types (`$type`, `$struct`, `$interface`,
+    // `$enum_member`): four types, not one. The analyzer resolves all four;
+    // anything else starting with `$` is not a type this function knows.
+    static bool isMetaTypeName(const std::string& name) {
+        return name == "$type" || name == "$struct" || name == "$interface" ||
+               name == "$enum_member";
+    }
+
+    // One named word type per meta-type name: `fin.type`, `fin.struct`, and
+    // so on. Named, so no two meta-types -- and no user struct of the same
+    // shape -- ever compare equal in convert()'s `llvmType ==` fast path;
+    // one word, because the content is a type id the intrinsics produce.
+    std::optional<CgType> mapMetaType(const std::string& name) const {
+        if (!isMetaTypeName(name)) return std::nullopt;
+        auto found = metaTypes_.find(name);
+        if (found == metaTypes_.end()) {
+            llvm::StructType* word =
+                llvm::StructType::create(ctx_, "fin." + name.substr(1));
+            word->setBody({llvm::Type::getInt64Ty(ctx_)}, /*isPacked=*/false);
+            found = metaTypes_.emplace(name, word).first;
+        }
+        CgType t;
+        t.kind = CgType::Kind::Struct;
+        t.llvmType = found->second;
+        return t;
+    }
+
     std::optional<CgType> map(const TypeNode* node, bool allowIncomplete = false) const {
         if (!node) return voidType();
 
@@ -765,6 +792,9 @@ public:
             t.llvmType = anyType_;
             return t;
         }
+        // A meta-type is none of the above and not a struct either: each maps
+        // to its own opaque word (mapMetaType), so the four stay distinct.
+        if (isMetaTypeName(node->name)) return mapMetaType(node->name);
         return std::nullopt;
     }
 
@@ -931,14 +961,13 @@ public:
             auto inner = map(written);
             if (!inner) return std::nullopt;
             // `object` maps to nothing, so it is already refused by the line
-            // above. `any` maps to its blob since the opaque-type ruling, but a
-            // prototype of `any` elements would need boxing on every store --
-            // the same missing rule as an assignment into one -- so a half of
-            // it stays refused here rather than passing as sized storage.
-            // Void is a name that maps to something and is still not a value,
-            // which is why it is named separately.
-            if (inner->isAny || inner->isVoid() || !inner->llvmType ||
-                !inner->llvmType->isSized()) {
+            // above. `any` maps to its blob since the opaque-type ruling, and
+            // a half of blobs is storage like any other: reads hand out blobs
+            // whose uses refuse downstream, and a store into one needs boxing
+            // -- which refuses at the conversion, not here. Void is a name
+            // that maps to something and is still not a value, which is why
+            // it is named separately.
+            if (inner->isVoid() || !inner->llvmType || !inner->llvmType->isSized()) {
                 return std::nullopt;
             }
             CgType arr;
@@ -1084,11 +1113,14 @@ private:
     std::function<bool(const TypeNode&, std::string&)> instantiate_;
     std::function<bool(const std::string&)> ensureConcrete_;
     const Substitution* bindings_ = nullptr;
-    // The one `any` blob type, created on first mapping (mapAny). Cached
+    // The one `any` blob type, created on first mapping. Cached
     // because every `any` in the program must be the same llvm::Type: the
     // name is what keeps it distinct from any user struct of the same shape,
     // and creating it twice would make two.
     mutable llvm::StructType* anyType_ = nullptr;
+    // One named word per meta-type, created on first mapping (mapMetaType),
+    // for the same reason: every `$type` in the program is one llvm::Type.
+    mutable std::unordered_map<std::string, llvm::StructType*> metaTypes_;
 };
 
 // Decodes one Fin string or character literal into the bytes it denotes.
@@ -1936,6 +1968,77 @@ private:
     // A concrete struct declaration with this name in a loaded module, or null.
     // Templates are never this: they register through ensureTemplate, and a
     // generic base needs an instantiation, not a layout.
+    // A function declaration with this name in a loaded module, or null.
+    // Any shape: generic or not, bodied or bodiless -- the caller decides
+    // which of those it can serve.
+    FunctionDeclaration* findModuleFunction(const std::string& name) {
+        for (const Program* unit : modules_) {
+            if (!unit) continue;
+            for (auto& stmt : unit->statements) {
+                auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get());
+                if (fn && fn->name == name) return fn;
+            }
+        }
+        return nullptr;
+    }
+
+    // The per-compilation id of a static type, for the `resolve_type*`
+    // intrinsics below. Same spelling, same number, twice; numbering starts
+    // at 1 so 0 stays "no type".
+    int64_t typeIdOf(const CgType& type) {
+        const std::string key = cgDisplay(type);
+        auto found = typeIds_.find(key);
+        if (found != typeIds_.end()) return found->second;
+        const int64_t id = nextTypeId_++;
+        typeIds_[key] = id;
+        return id;
+    }
+
+    // `resolve_type(v)` / `resolve_arr_type(arr)`: the two bodiless lib/std
+    // declarations, evaluated at compile time to the argument's static type.
+    // True when handled (lowered or refused). A definition anywhere visible
+    // wins: a same-file one never reaches here (functions_ hit first), and a
+    // WITH-body one in a module refuses -- its body is never emitted, so
+    // calling it would link against a symbol this object never defines. Only
+    // the bodiless intrinsic declarations evaluate.
+    //
+    // The argument is still emitted: a call is a call, and dropping its
+    // effects to answer "statically" would be skipping runtime code. What is
+    // static is only where the ANSWER comes from.
+    bool tryMetaIntrinsic(FunctionCall& node, const std::string& name) {
+        if (name != "resolve_type" && name != "resolve_arr_type") return false;
+        if (!node.generic_args.empty() || node.args.size() != 1) return false;
+        FunctionDeclaration* decl = findModuleFunction(name);
+        if (!decl) return false;
+        if (decl->body) {
+            unsupported(node, fmt::format("a call to '{}', which is defined in "
+                                          "another module",
+                                          name));
+            return true;
+        }
+        CgVal arg = emit(*node.args[0]);
+        if (failed_) return true;
+        if (!arg.ok()) {
+            unsupported(node, "this argument");
+            return true;
+        }
+        // `resolve_arr_type` answers for the element type, statically: the
+        // draft reads the first element at run time, but an empty array has
+        // no first element and the intrinsic only ever sees static types.
+        CgType subject = arg.type;
+        if (name == "resolve_arr_type" && subject.element) subject = *subject.element;
+        std::optional<CgType> meta = types_.mapMetaType("$type");
+        if (!meta) return false;
+        llvm::Value* value = llvm::UndefValue::get(meta->llvmType);
+        value = builder_.CreateInsertValue(
+            value,
+            llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_),
+                                   static_cast<uint64_t>(typeIdOf(subject))),
+            {0u}, "typeid");
+        value_ = CgVal{value, *meta};
+        return true;
+    }
+
     StructDeclaration* findModuleStruct(const std::string& name) {
         for (const Program* unit : modules_) {
             if (!unit) continue;
@@ -6756,6 +6859,10 @@ private:
             // synthesising one would hand back an object whose `= null` fields were
             // never written -- an answer, and the wrong one. `P{}` is the spelling that
             // means "the defaults", and it already works.
+            //
+            // Before that refusal: the `resolve_type*` intrinsics, which have no
+            // body anywhere by design and evaluate at compile time instead.
+            if (!isCtorCall && tryMetaIntrinsic(node, name)) return;
             unsupported(node, fmt::format("a call to '{}'", name));
             return;
         }
@@ -7511,7 +7618,13 @@ private:
     // on an alias would be a naming request silently dropped -- the same reasoning that
     // refuses an attribute on a global above.
     void visit(TypeDefinition& node) override {
-        if (!node.attributes.empty()) {
+        for (auto& attr : node.attributes) {
+            // Flag-form `#[export]` is import-visibility only (ADR 0033), and
+            // an alias emits nothing to rename or relink -- so there is
+            // nothing here to honour beyond not dropping it. Any other
+            // attribute still refuses: `#[llvm_name]` on an alias would be a
+            // naming request silently dropped.
+            if (attr->name == "export" && attr->is_flag) continue;
             unsupported(node, fmt::format("an attribute on the alias '{}'", node.name));
             return;
         }
@@ -9702,6 +9815,12 @@ private:
             unsupported(node, "the size of 'any'");
             return;
         }
+        if (type && TypeMapper::isMetaTypeName(node.type_target->name)) {
+            // The word has 8 bytes, but the shared layout model answers "no
+            // layout" for a meta-type -- same rule as `sizeof(any)` above.
+            unsupported(node, fmt::format("the size of '{}'", node.type_target->name));
+            return;
+        }
         if (!type || type->isVoid() || !type->llvmType || !type->llvmType->isSized()) {
             // Named as `sizeof`'s own refusal and not as "a variable of type X": the
             // program asked for a number, and what is missing is the representation
@@ -9959,6 +10078,14 @@ private:
     // rather than a pointer: draining can instantiate a template, which
     // inserts into structs_ while bodies are being read.
     std::string currentStructName_;
+    // Per-compilation type ids for the `resolve_type*` intrinsics, keyed by
+    // the type's display spelling (cgDisplay): the same static type settles
+    // on the same number twice, and numbering starts at 1 so 0 stays "no
+    // type". Unobserved beyond that -- nothing compares, prints, or branches
+    // on one -- which is what makes a per-compilation table honest rather
+    // than guessed: there is no cross-object identity to keep.
+    std::unordered_map<std::string, int64_t> typeIds_;
+    int64_t nextTypeId_ = 1;
     CgVal value_;
 };
 
