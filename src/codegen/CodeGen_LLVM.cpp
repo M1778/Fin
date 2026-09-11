@@ -1083,7 +1083,13 @@ public:
         });
     }
 
-    bool run(Program& program) {
+    // The root program plus the loader's successfully analysed modules
+    // (ADR 0032), borrowed: the driver owns the loader for the whole run, so
+    // these outlive this emitter. Registration reads out of them; emission
+    // never does -- the object file contains the root's definitions and the
+    // instantiations it asked for, and nothing a module declares for itself.
+    bool run(Program& program, const std::vector<const Program*>& modules = {}) {
+        modules_ = modules;
         // Before the structs, because a field may be of enum type -- and before
         // anything else for the same reason declareStructs runs early: a name has to
         // have a representation before a signature that mentions it is built.
@@ -1640,18 +1646,29 @@ private:
     // twice; doing it *here* instead would report it before the structs, where a
     // reader would see an interface's fault blamed for a struct that never got read.
     void declareInterfaces(Program& program) {
-        for (auto& stmt : program.statements) {
-            if (auto* i = dynamic_cast<InterfaceDeclaration*>(stmt.get())) {
-                interfaceNames_.insert(i->name);
-                InterfaceInfo info;
-                info.finName = i->name;
-                for (const auto& m : i->members) {
-                    if (!m || !m->type) continue;
-                    auto mapped = types_.map(m->type.get(), true);
-                    if (mapped) info.fields.push_back({m->name, *mapped, nullptr});
+        // The root first, then every loaded module (ADR 0032): a name the root
+        // declares wins over a module's, matching Scope's first-wins rule.
+        // No refusal here can fire on a module's account -- this pass only
+        // records names and member types -- so walking modules eagerly is
+        // sound where walking their structs would not be.
+        std::vector<const Program*> units{&program};
+        for (const Program* m : modules_)
+            if (m) units.push_back(m);
+        for (const Program* unit : units) {
+            for (auto& stmt : unit->statements) {
+                if (auto* i = dynamic_cast<InterfaceDeclaration*>(stmt.get())) {
+                    if (interfaceNames_.count(i->name)) continue;
+                    interfaceNames_.insert(i->name);
+                    InterfaceInfo info;
+                    info.finName = i->name;
+                    for (const auto& m : i->members) {
+                        if (!m || !m->type) continue;
+                        auto mapped = types_.map(m->type.get(), true);
+                        if (mapped) info.fields.push_back({m->name, *mapped, nullptr});
+                    }
+                    for (const auto& m : i->methods) if (m) info.methods.push_back(m.get());
+                    interfaces_[i->name] = std::move(info);
                 }
-                for (const auto& m : i->methods) if (m) info.methods.push_back(m.get());
-                interfaces_[i->name] = std::move(info);
             }
         }
     }
@@ -1713,16 +1730,25 @@ private:
     // declare a function from, so it stays refused as the whole block rather than half
     // consumed.
     void collectImplementsBlocks(Program& program) {
-        for (auto& stmt : program.statements) {
-            auto* b = dynamic_cast<ImplementsBlock*>(stmt.get());
-            if (!b) continue;
-            if (b->target_type.empty()) continue;
-            if (!b->overwrite_member.empty()) continue;  // refused whole, see above
-            StructExtras& extras = implementsExtras_[b->target_type];
-            extras.blocks.push_back(b);
-            for (auto& m : b->methods) if (m) extras.methods.push_back(m.get());
-            for (auto& o : b->operators) if (o) extras.operators.push_back(o.get());
-            for (auto& c : b->constructors) if (c) extras.constructors.push_back(c.get());
+        // Root and modules alike (ADR 0032): blocks are additive facts about a
+        // name, so a module's block for a root struct -- or a root block for a
+        // module template -- collects beside the others rather than replacing
+        // them. Collection never refuses (see above), so modules are safe here.
+        std::vector<const Program*> units{&program};
+        for (const Program* m : modules_)
+            if (m) units.push_back(m);
+        for (const Program* unit : units) {
+            for (auto& stmt : unit->statements) {
+                auto* b = dynamic_cast<ImplementsBlock*>(stmt.get());
+                if (!b) continue;
+                if (b->target_type.empty()) continue;
+                if (!b->overwrite_member.empty()) continue;  // refused whole, see above
+                StructExtras& extras = implementsExtras_[b->target_type];
+                extras.blocks.push_back(b);
+                for (auto& m : b->methods) if (m) extras.methods.push_back(m.get());
+                for (auto& o : b->operators) if (o) extras.operators.push_back(o.get());
+                for (auto& c : b->constructors) if (c) extras.constructors.push_back(c.get());
+            }
         }
     }
 
@@ -2739,6 +2765,65 @@ private:
         return true;
     }
 
+    // A template from a loaded module, registered on first use (ADR 0032).
+    // Modules are walked only here -- eagerly registering every template in
+    // every import would refuse the build on declarations nothing instantiates
+    // (an unlowerable shape in an unused corner of the standard library),
+    // while a template nothing asks for needs no layout at all. The root wins
+    // a name both declare: templates_ is consulted first, so a module copy is
+    // reached only when the root declares no such template. Reports
+    // lowerability failures itself; silent null when no module declares the
+    // name, which the caller reports as the use it was.
+    StructDeclaration* ensureTemplate(const std::string& name) {
+        auto found = templates_.find(name);
+        if (found != templates_.end()) return found->second;
+        for (const Program* unit : modules_) {
+            if (!unit) continue;
+            for (auto& stmt : unit->statements) {
+                auto* s = dynamic_cast<StructDeclaration*>(stmt.get());
+                if (!s || s->name != name || s->generic_params.empty())
+                    continue;
+                if (templates_.count(s->name)) return templates_[s->name];
+                if (!lowerableTemplate(*s)) return nullptr;
+                templates_[s->name] = s;
+                registerImplementsBlocks(s->name);
+                registered_.insert(s);
+                return s;
+            }
+        }
+        return nullptr;
+    }
+
+    // A generic function from a loaded module, registered on first call on
+    // the same terms as declareTopLevel registers a root one (ADR 0032): any
+    // attribute refuses, a bodiless one is skipped, and the root wins a name
+    // both declare. Silent null when no module declares it, which the caller
+    // reports as the call it was.
+    FunctionDeclaration* ensureFnTemplate(const std::string& name) {
+        auto found = fnTemplates_.find(name);
+        if (found != fnTemplates_.end()) return found->second;
+        for (const Program* unit : modules_) {
+            if (!unit) continue;
+            for (auto& stmt : unit->statements) {
+                auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get());
+                if (!fn || fn->name != name || fn->generic_params.empty())
+                    continue;
+                if (fnTemplates_.count(fn->name))
+                    return fnTemplates_[fn->name];
+                if (!fn->attributes.empty()) {
+                    unsupported(*fn,
+                                fmt::format("the attribute '{}' on a generic function",
+                                            fn->attributes.front()->name));
+                    return nullptr;
+                }
+                if (fn->body == nullptr) return nullptr;
+                fnTemplates_[fn->name] = fn;
+                return fn;
+            }
+        }
+        return nullptr;
+    }
+
     // `Box<int>` -- one instantiation of one template, built the first time it is
     // asked for and then found.
     //
@@ -2759,8 +2844,8 @@ private:
     // own instantiation while its own fields are being mapped, and finds the
     // incomplete name that step 2 put there.
     bool instantiateGeneric(const TypeNode& node, std::string& out) {
-        auto found = templates_.find(node.name);
-        if (found == templates_.end()) {
+        StructDeclaration* tmpl = ensureTemplate(node.name);
+        if (!tmpl) {
             // Not a template. Either a plain struct with arguments written on it,
             // which the analyzer has already refused, or a generic the front end
             // knows and this file does not -- an alias, an interface, an enum. Silent,
@@ -2769,7 +2854,6 @@ private:
             // which of those it is.
             return false;
         }
-        StructDeclaration& tmpl = *found->second;
 
         // At the instantiation and not at the declaration, for the same reason the
         // function's is at the call: `struct maybe<T: Castable>` (nullifier.fin:10)
@@ -2777,19 +2861,19 @@ private:
         // first point at which one is needed. Ahead of the argument count so that a
         // marked template with the wrong arity says which of the two it is by naming
         // the marker -- the arity is the analyzer's and this is the representation.
-        if (refuseIfErased(const_cast<TypeNode&>(node), tmpl.generic_params,
-                           fmt::format("the generic struct '{}'", tmpl.name))) {
+        if (refuseIfErased(const_cast<TypeNode&>(node), tmpl->generic_params,
+                           fmt::format("the generic struct '{}'", tmpl->name))) {
             return false;
         }
 
-        if (node.generics.size() != tmpl.generic_params.size()) {
+        if (node.generics.size() != tmpl->generic_params.size()) {
             // The analyzer says "Generic count mismatch" before this, so reaching here
             // is the two passes disagreeing. Refused rather than padded with defaults:
             // a missing argument has no representation to guess at.
             unsupported(const_cast<TypeNode&>(node),
                         fmt::format("'{}' with {} type argument(s) where it declares {}",
                                     node.name, node.generics.size(),
-                                    tmpl.generic_params.size()));
+                                    tmpl->generic_params.size()));
             return false;
         }
 
@@ -2816,13 +2900,13 @@ private:
                 return false;
             }
             substitution.push_back(
-                {tmpl.generic_params[i]->name, TypeBinding{*mapped, displayName(arg)}});
+                {tmpl->generic_params[i]->name, TypeBinding{*mapped, displayName(arg)}});
         }
 
         // 2. The name. One name per distinct argument list, so asking twice finds the
         //    first one -- which is what makes `Box<int>` assignable to `Box<int>`
         //    (two named llvm::StructTypes with identical bodies are still two types).
-        out = mangledName(tmpl.name, substitution);
+        out = mangledName(tmpl->name, substitution);
         auto existing = structs_.find(out);
         if (existing != structs_.end()) {
             // Complete, or in the middle of being built (the self-referential case).
@@ -2834,7 +2918,7 @@ private:
 
         StructInfo info;
         info.finName = out;
-        info.llvmType = llvm::StructType::create(ctx_, llvmNameOf(tmpl, out));
+        info.llvmType = llvm::StructType::create(ctx_, llvmNameOf(*tmpl, out));
         info.substitution = substitution;
         structs_[out] = info;
 
@@ -2845,7 +2929,7 @@ private:
         ScopedBindings bound(types_, &structs_[out].substitution);
         std::vector<llvm::Type*> members;
         StructInfo& live = structs_[out];
-        for (auto& m : tmpl.members) {
+        for (auto& m : tmpl->members) {
             auto t = types_.map(m->type.get());
             if (!t) {
                 if (!failed_) unsupportedType(*m, m->type.get(),
@@ -2885,13 +2969,13 @@ private:
         //    signature to lower. It is also why `Box<int>.get` and `Box<char>.get` are
         //    two functions -- they are two bodies over two representations, the same
         //    as a generic free function's instances.
-        live.decl = &tmpl;
+        live.decl = tmpl;
         // The blocks written on the template are this instantiation's: `Result<T, U>
         // implements <IResult>` (stdlib/typing.fin:27) is filed under `Result`, and
         // `Result<int, string>` is what a method of it is declared for. Keyed by the
         // written name for exactly this reason -- a block cannot be written on a
         // mangled name, because nobody writes one.
-        live.extras = extrasFor(tmpl.name);
+        live.extras = extrasFor(tmpl->name);
         bindMethodTypes(live);
         // Nested inside `bound` above, and replacing it for the duration: a method
         // signature needs `Self` and the template's bare name as well as `T`, and
@@ -6112,7 +6196,12 @@ private:
         }
         // Before the ordinary lookup, because a template is deliberately not in
         // functions_: it has no signature until this call says what its parameters are.
+        // A generic function from a loaded module registers on first call, on
+        // the same terms as a root one (ADR 0032) -- including the attribute
+        // refusal, which is what an `#[export]` on one reports.
         auto tmpl = fnTemplates_.find(node.name);
+        if (tmpl == fnTemplates_.end() && ensureFnTemplate(node.name))
+            tmpl = fnTemplates_.find(node.name);
         if (tmpl != fnTemplates_.end()) {
             emitTemplateCall(node, calleeOf(*tmpl->second));
             return;
@@ -6129,8 +6218,12 @@ private:
         // path, so a turbofish on a call and a turbofish on a literal reach the same
         // mangled name, the same layout and the same refusals -- including the erasure
         // marker's, which instantiateGeneric checks and this site therefore inherits.
-        auto structTmpl = templates_.find(node.name);
-        if (structTmpl != templates_.end()) {
+        //
+        // Imported templates register here on first call (ensureTemplate),
+        // which is what makes `HashMap::<string, Data>()` reach the branch
+        // below rather than the "a call to 'HashMap'" refusal past it.
+        StructDeclaration* structTmpl = ensureTemplate(node.name);
+        if (structTmpl) {
             if (node.generic_args.empty()) {
                 // `Box(7)`, with the arguments meant to say what T is. Refused naming
                 // the question rather than inferred, and the question is *where the
@@ -8549,7 +8642,9 @@ private:
         llvm::Value* raw = builder_.CreateCall(mallocFn, {builder_.CreateZExt(byteCount, llvm::Type::getInt64Ty(ctx_))});
         llvm::Value* data = builder_.CreateBitCast(raw, elemTy->getPointerTo());
         for (size_t i = 0; i < elements.size(); ++i) {
-            if (!elements[i]) { unsupported(node, "an array element with no value"); return nullptr; }
+            if (!elements[i]) { unsupported(node, "an array element with no value");         return nullptr;
+    }
+
             // Each element gets the *element's* type as its own hint, which is what
             // visit(ArrayLiteral&)'s fixed branch does and what makes a nested literal
             // lower: an `[[int]]`'s elements are array literals, and a
@@ -9299,6 +9394,9 @@ private:
     // Which StructDeclaration nodes declareStructs actually took, so that one it
     // never saw is refused rather than assumed handled.
     std::set<const StructDeclaration*> registered_;
+    // The loader's module Programs (ADR 0032), borrowed for registration only.
+    // Set by run() before any pass reads it.
+    std::vector<const Program*> modules_;
 
     // What each module-scope `implements` block added, by the name of the struct it
     // names. Filled by collectImplementsBlocks before declareStructs and never written
@@ -9378,7 +9476,8 @@ private:
 bool backendAvailable() { return true; }
 
 bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngine& diag,
-                    int optLevel, bool debugCodegen, const std::string& sourceName) {
+                    int optLevel, bool debugCodegen, const std::string& sourceName,
+                    const std::vector<const Program*>& modules) {
     // The target comes first, before a single instruction is emitted, because the
     // module's DataLayout is an *input* to emission and not a stamp applied to the
     // result: `sizeof` folds to a number the layout decides, and a module laid out
@@ -9426,7 +9525,7 @@ bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngin
     // a different fact.
     module.setSourceFileName(sourceName);
 
-    if (!emitter.run(ast)) return false;
+    if (!emitter.run(ast, modules)) return false;
 
     // Verified before anything is written. An invalid module that reaches the
     // object writer is an assertion failure deep in LLVM, which reads as a

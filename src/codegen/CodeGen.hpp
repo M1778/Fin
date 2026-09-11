@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace fin {
 
@@ -52,9 +53,15 @@ class DiagnosticEngine;
 // existing caller compiling and makes the degraded output honest rather than
 // invented: a driver that has the path passes it, and one that does not says so in
 // the words the rest of the compiler already uses.
+// `modules` are the successfully analysed Programs the imports loaded
+// (ADR 0032), borrowed for registration only: templates, interfaces, enums
+// and `implements` blocks the root instantiates or inherits are read out of
+// them, while emission stays root-only. Empty by default, which is also what
+// a caller with no loader passes.
 bool generateObject(Program& ast, const std::string& objectPath,
                     DiagnosticEngine& diag, int optLevel, bool debugCodegen,
-                    const std::string& sourceName = "<input>");
+                    const std::string& sourceName = "<input>",
+                    const std::vector<const Program*>& modules = {});
 
 // False in a build configured with FIN_WITH_LLVM=OFF, where generateObject
 // always refuses. Separate from the call so the driver can say "this build has

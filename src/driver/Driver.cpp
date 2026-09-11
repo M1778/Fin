@@ -219,7 +219,11 @@ int Driver::compile() {
 
     // 5. CodeGen
     if (!options.skipCodegen) {
-        if (!runCodeGen(*ast, diag)) {
+        // Borrowed views: the loader (and its astStorage) outlives this call,
+        // which is what makes the backend's registration borrowing sound.
+        std::vector<const Program*> modules;
+        for (const auto& m : loader.modulePrograms()) modules.push_back(m.get());
+        if (!runCodeGen(*ast, diag, modules)) {
             return finish(ExitCode::Diagnostics);
         }
     }
@@ -288,7 +292,8 @@ static bool hasEntryPoint(const Program& ast) {
     return false;
 }
 
-bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag) {
+bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag,
+                       const std::vector<const Program*>& modules) {
     // No `-o` and no `-c`, no artifact. `finc x.fin` is a check, and making it
     // build would mean every diagnostic test and every corpus snapshot linked an
     // executable -- and would turn "the backend cannot lower this yet" into a
@@ -333,7 +338,7 @@ bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag) {
         // The stub says this too, but saying it here means the message does not
         // depend on having reached a node the emitter refuses.
         return generateObject(ast, objectPath, diag, options.optLevel,
-                              options.debugCodegen, options.inputFile);
+                              options.debugCodegen, options.inputFile, modules);
     }
 
     std::error_code ec;
@@ -345,7 +350,7 @@ bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag) {
     std::filesystem::remove(options.compileOnly ? objectPath : options.outputPath, ec);
 
     if (!generateObject(ast, objectPath, diag, options.optLevel, options.debugCodegen,
-                        options.inputFile)) {
+                        options.inputFile, modules)) {
         std::filesystem::remove(objectPath, ec);
         return false;
     }

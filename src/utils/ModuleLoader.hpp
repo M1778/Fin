@@ -43,6 +43,16 @@ public:
     void loadGlobalModuleIfPresent(const std::string& importPath, bool isPackage);
     std::shared_ptr<Scope> sharedGlobalScope() const { return globalScope; }
 
+    // Every module that parsed and analysed cleanly, in load order (ADR 0032).
+    // Borrowed: the loader owns them for the whole compilation, so a backend
+    // that registers templates out of them must not outlive this loader --
+    // which is the driver's ordering to keep, not the caller's to check.
+    // Only successfully analysed modules are here; failed ones leave nothing
+    // behind but their diagnostics.
+    const std::vector<std::unique_ptr<Program>>& modulePrograms() const {
+        return astStorage;
+    }
+
     // The codegen half of `#[global]` (ADR 0021). Publishing an ambient name into the
     // shared scope makes a call to it type-check; it does not make the call *link*,
     // because the declaration that named the C symbol lives in a module whose AST

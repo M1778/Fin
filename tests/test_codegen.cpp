@@ -6096,6 +6096,51 @@ BACKEND_TEST(Soundness_Codegen, ABodilessInterfaceConstructorLowersToNothing) {
     EXPECT_EQ(b.out, "ok\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
+    // ADR 0032: the module loader keeps every loaded Program and the backend
+    // registers templates out of them, so `Box::<int>` below instantiates the
+    // `Box<T>` the import published -- the same instantiation a same-file
+    // template gets (complex.fin:12). Emission stays root-only: the module's
+    // own declarations never become symbols of this object.
+    const fs::path dir = uniqueTempPath("fin_impmod", "");
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    ASSERT_TRUE(fs::is_directory(dir)) << ec.message();
+    {
+        std::ofstream f(dir / "boxlib.fin", std::ios::binary);
+        f << "pub struct Box<T> {\n"
+             << "    val <T>,\n"
+             << "}\n";
+    }
+    const fs::path src = uniqueTempPath("fin_impmod_root", ".fin");
+    const fs::path exe = uniqueTempPath("fin_impmod_exe");
+    {
+        std::ofstream f(src, std::ios::binary);
+        f << std::string(kPrintf)
+          << "import { Box } from boxlib;\n"
+          << "fun main() <noret> {\n"
+          << "    let b <auto> = Box::<int>{ val: 3 };\n"
+          << "    printf(\"%d\\n\", b.val);\n"
+          << "}\n";
+    }
+    const FincRun c =
+        runFinc({src.string(), "-o", exe.string(), "-I", dir.string()});
+    EXPECT_EQ(c.exitCode, 0) << stripAnsi(c.err);
+    std::string out;
+    if (c.exitCode == 0 && fs::exists(exe)) {
+        const fs::path outPath = uniqueTempPath("fin_impmod_out");
+        const std::string cmd = shellQuoteLocal(exe.string()) + " > " +
+                                shellQuoteLocal(outPath.string()) + " 2>&1";
+        std::system(cmd.c_str());
+        out = readWholeFile(outPath.string());
+        fs::remove(outPath, ec);
+    }
+    EXPECT_EQ(out, "3\n") << stripAnsi(c.err);
+    fs::remove(src, ec);
+    fs::remove(exe, ec);
+    fs::remove_all(dir, ec);
+}
+
 BACKEND_TEST(KnownDefect_Codegen, ConstructorOverloadsAreRefusedRatherThanResolved) {
     // The booked defect (docs/HANDOFF.md §7): the analyzer resolves `constructors[0]`
     // and no more. One symbol per struct is what this file declares to match it, so a

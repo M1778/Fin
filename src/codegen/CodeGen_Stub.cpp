@@ -28,7 +28,8 @@ bool backendAvailable() { return false; }
 
 bool generateObject(Program& ast, const std::string& objectPath,
                     DiagnosticEngine& diag, int optLevel, bool debugCodegen,
-                    const std::string& sourceName) {
+                    const std::string& sourceName,
+                    const std::vector<const Program*>& modules) {
     (void)ast;
     (void)objectPath;
     (void)optLevel;
@@ -37,6 +38,7 @@ bool generateObject(Program& ast, const std::string& objectPath,
     // has nothing to put a source name into. Named in the signature all the same,
     // because the two definitions of one declaration have to agree.
     (void)sourceName;
+    (void)modules;
     diag.reportError(
         "codegen: this finc was built without a backend",
         "configure with -DFIN_WITH_LLVM=ON and an LLVM 22 development install; "
