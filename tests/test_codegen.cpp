@@ -6395,6 +6395,54 @@ BACKEND_TEST(Soundness_Codegen, ADenullifyOfNonNullableIsIdentity) {
     EXPECT_EQ(b.out, "42\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, AnImportedConcreteStructServesAsABase) {
+    // ADR 0032's concrete half: a non-generic struct from a loaded module
+    // registers its layout (never its methods or bodies) so a root struct can
+    // inherit it -- the base's fields splice in at offset 0 exactly as for a
+    // same-file base. Calls into the base's methods still refuse: no body is
+    // emitted for them anywhere in this object.
+    const fs::path dir = uniqueTempPath("fin_impbase", "");
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    ASSERT_TRUE(fs::is_directory(dir)) << ec.message();
+    {
+        std::ofstream f(dir / "baselib.fin", std::ios::binary);
+        f << "pub struct Base {\n"
+             << "    x <int>,\n"
+             << "}\n";
+    }
+    const fs::path src = uniqueTempPath("fin_impbase_root", ".fin");
+    const fs::path exe = uniqueTempPath("fin_impbase_exe");
+    {
+        std::ofstream f(src, std::ios::binary);
+        f << std::string(kPrintf)
+          << "import { Base } from baselib;\n"
+          << "struct Derived : <Base> {\n"
+          << "    y <int>,\n"
+          << "}\n"
+          << "fun main() <noret> {\n"
+          << "    let d <Derived> = Derived{ x: 1, y: 2 };\n"
+          << "    printf(\"%d\\n\", d.x + d.y);\n"
+          << "}\n";
+    }
+    const FincRun c =
+        runFinc({src.string(), "-o", exe.string(), "-I", dir.string()});
+    EXPECT_EQ(c.exitCode, 0) << stripAnsi(c.err);
+    std::string out;
+    if (c.exitCode == 0 && fs::exists(exe)) {
+        const fs::path outPath = uniqueTempPath("fin_impbase_out");
+        const std::string cmd = shellQuoteLocal(exe.string()) + " > " +
+                                shellQuoteLocal(outPath.string()) + " 2>&1";
+        std::system(cmd.c_str());
+        out = readWholeFile(outPath.string());
+        fs::remove(outPath, ec);
+    }
+    EXPECT_EQ(out, "3\n") << stripAnsi(c.err);
+    fs::remove(src, ec);
+    fs::remove(exe, ec);
+    fs::remove_all(dir, ec);
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the

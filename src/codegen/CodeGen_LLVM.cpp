@@ -513,6 +513,14 @@ public:
         instantiate_ = std::move(fn);
     }
 
+    // How a concrete struct from a loaded module gets a layout: same shape as
+    // bindInstantiator, for the same reason. The mapper asks by name when a
+    // struct it knows nothing about is needed as a base, a field, or a
+    // variable -- and gets it registered, or nothing, exactly as for a miss.
+    void bindConcreteEnsurer(std::function<bool(const std::string&)> fn) {
+        ensureConcrete_ = std::move(fn);
+    }
+
     // The parameters currently in scope, or empty. Set for exactly as long as one
     // template's body is being mapped, and restored after -- see
     // Emitter::instantiateGeneric, which is the only caller, and the ScopedBinding
@@ -1029,6 +1037,13 @@ public:
                                        bool allowIncomplete = false) const {
         if (!structs_) return std::nullopt;
         auto it = structs_->find(name);
+        if (it == structs_->end() && ensureConcrete_) {
+            // A concrete struct from a loaded module, laid out on first need
+            // (the Emitter's ensureConcreteStruct): a base, a field, or a
+            // variable the root names but no root declaration defines.
+            if (!ensureConcrete_(name)) return std::nullopt;
+            it = structs_->find(name);
+        }
         if (it == structs_->end()) return std::nullopt;
         if (!it->second.complete && !allowIncomplete) return std::nullopt;
         CgType t;
@@ -1067,6 +1082,7 @@ private:
     const std::unordered_map<std::string, EnumInfo>* enums_ = nullptr;
     const std::unordered_map<std::string, InterfaceInfo>* interfaces_ = nullptr;
     std::function<bool(const TypeNode&, std::string&)> instantiate_;
+    std::function<bool(const std::string&)> ensureConcrete_;
     const Substitution* bindings_ = nullptr;
     // The one `any` blob type, created on first mapping (mapAny). Cached
     // because every `any` in the program must be the same llvm::Type: the
@@ -1142,6 +1158,9 @@ public:
         types_.bindInterfaces(&interfaces_);
         types_.bindInstantiator([this](const TypeNode& node, std::string& out) {
             return instantiateGeneric(node, out);
+        });
+        types_.bindConcreteEnsurer([this](const std::string& name) {
+            return ensureConcreteStruct(name);
         });
     }
 
@@ -1914,6 +1933,64 @@ private:
     // is the safe direction -- a struct declaration that is quietly skipped is a
     // type that later resolves to nothing, and "resolves to nothing" is how a field
     // read turns into a read of some other field.
+    // A concrete struct declaration with this name in a loaded module, or null.
+    // Templates are never this: they register through ensureTemplate, and a
+    // generic base needs an instantiation, not a layout.
+    StructDeclaration* findModuleStruct(const std::string& name) {
+        for (const Program* unit : modules_) {
+            if (!unit) continue;
+            for (auto& stmt : unit->statements) {
+                auto* s = dynamic_cast<StructDeclaration*>(stmt.get());
+                if (s && s->name == name && s->generic_params.empty()) return s;
+            }
+        }
+        return nullptr;
+    }
+
+    // A concrete struct from a loaded module, laid out on first need
+    // (ADR 0032): as a base (declareStructBody), a field, or a variable the
+    // root names but no root declaration defines. Layout only: no methods are
+    // declared and no bodies queued, so a call into one still refuses at the
+    // call site instead of linking against a symbol this object never
+    // defines. The root wins a name both declare. True when registered (or
+    // already); false silent when no module declares it (the caller reports
+    // the use) or loud when the declaration is unlowerable.
+    bool ensureConcreteStruct(const std::string& name) {
+        if (structs_.count(name)) return true;
+        StructDeclaration* decl = findModuleStruct(name);
+        if (!decl) return false;
+        if (structs_.count(name)) return true;
+        if (fillingStructs_.count(name)) {
+            unsupported(*decl, fmt::format("struct '{}' inheriting itself through "
+                                           "another module struct",
+                                           name));
+            return false;
+        }
+        fillingStructs_.insert(name);
+        if (!lowerableStruct(*decl)) {
+            fillingStructs_.erase(name);
+            return false;
+        }
+        if (decl->is_forward_declaration && decl->members.empty()) {
+            // As in the first pass: a name whose size nothing knows is left
+            // unregistered, so a use of it refuses rather than being given a
+            // size this file invented.
+            fillingStructs_.erase(name);
+            return false;
+        }
+        StructInfo info;
+        info.finName = decl->name;
+        info.llvmType = llvm::StructType::create(ctx_, llvmNameOf(*decl, decl->name));
+        info.decl = decl;
+        info.extras = extrasFor(decl->name);
+        structs_[decl->name] = info;
+        registered_.insert(decl);
+        declareStructBody(decl);
+        fillingStructs_.erase(name);
+        auto it = structs_.find(name);
+        return it != structs_.end() && it->second.complete;
+    }
+
     void declareStructs(Program& program) {
         std::vector<StructDeclaration*> decls;
         for (auto& stmt : program.statements) {
@@ -1973,135 +2050,9 @@ private:
         }
 
         for (StructDeclaration* s : decls) {
-            StructInfo& info = structs_[s->name];
-            std::vector<llvm::Type*> members;
-            // The base's fields first, at the indices they had in the base. That is
-            // the owner's ruling -- "the parent's fields splice in at offset 0" -- and
-            // it is what makes a pointer to the derived struct a valid pointer to the
-            // base, so an upcast emits no instruction. src/types/Layout.cpp:428-451
-            // already computes exactly this for the collector; this is the backend
-            // catching up rather than deciding.
-            //
-            // The base is looked up in `structs_`, which the first pass has finished
-            // filling, so a base declared anywhere at module scope is found. Its
-            // *body* may not be set yet (this pass sets bodies in `decls` order), which
-            // is why the fields are copied from `StructInfo::fields` rather than from
-            // the llvm::StructType -- the CgTypes are complete after pass one even
-            // when the LLVM bodies are not.
-            //
-            // A base declared *below* its derived struct cannot arrive here at all:
-            // the analyzer reports `Undefined type 'Base'` first (measured), so the
-            // ordering problem the third pass exists to solve does not apply.
-            //
-            // ADR 0029's chain diamond shares one ancestor: a direct base that is
-            // a strict transitive ancestor of another direct base arrives through
-            // the descendant, so it is skipped and its bytes appear once at
-            // offset 0. A duplicate spelling keeps its first occurrence. Any
-            // other second base lays out sequentially as before -- unrelated
-            // bases still refuse downstream (a second field, a misread method),
-            // never silently.
-            for (size_t pi = 0; pi < s->parents.size(); ++pi) {
-                auto& parent = s->parents[pi];
-                if (!parent || parentIsInterface(*parent)) continue;
-                bool shared = false;
-                for (size_t oi = 0; oi < s->parents.size(); ++oi) {
-                    if (oi == pi) continue;
-                    auto& other = s->parents[oi];
-                    if (!other || parentIsInterface(*other)) continue;
-                    if (other->name == parent->name) {
-                        if (oi < pi) {
-                            shared = true;
-                            break;
-                        }
-                        continue;
-                    }
-                    if (baseIsAncestorOf(parent->name, other->name)) {
-                        shared = true;
-                        break;
-                    }
-                }
-                if (shared) continue;
-                auto base = structs_.find(parent->name);
-                if (base == structs_.end()) {
-                    // lowerableStruct refuses a base it cannot classify, so reaching
-                    // here means the base was registered and then dropped -- the two
-                    // passes disagreeing, not a program error.
-                    unsupported(*s, fmt::format("struct '{}' inheriting '{}', which "
-                                                "this file did not lower",
-                                                s->name, parent->name));
-                    return;
-                }
-                for (const StructField& f : base->second.fields) {
-                    if (info.indexByName.count(f.name)) {
-                        // Two bases with a field of the same name, or a base and this
-                        // struct. Which one `d.x` means is a language question, and
-                        // answering it by declaration order would answer it silently.
-                        unsupported(*s, fmt::format("struct '{}' inheriting a second "
-                                                    "field '{}' from '{}'",
-                                                    s->name, f.name, parent->name));
-                        return;
-                    }
-                    StructField carried = f;
-                    carried.inherited = true;
-                    info.indexByName[f.name] = info.fields.size();
-                    info.fields.push_back(carried);
-                    members.push_back(f.type.llvmType);
-                }
-            }
-            for (auto& m : s->members) {
-                auto t = types_.map(m->type.get());
-                if (!t) { unsupportedType(*m, m->type.get(), "a struct field"); return; }
-                if (t->isVoid()) {
-                    unsupported(*m, fmt::format("a field of type 'void' in struct '{}'",
-                                                s->name));
-                    return;
-                }
-                if (info.indexByName.count(m->name)) {
-                    unsupported(*m, fmt::format("a second field '{}' in struct '{}'",
-                                                m->name, s->name));
-                    return;
-                }
-                info.indexByName[m->name] = info.fields.size();
-                // The default is recorded and not evaluated: it is an expression,
-                // and where it runs (each literal that omits the field) is not
-                // here. Nothing is checked about it at the declaration either --
-                // a struct nobody instantiates never runs its defaults, so a
-                // default this file could not lower is not a reason to refuse the
-                // type. The refusal lands at the literal that needs it.
-                info.fields.push_back(StructField{m->name, *t, m->default_value.get()});
-                members.push_back(t->llvmType);
-            }
-            if (members.empty()) {
-                // One byte, which is C's answer and not LLVM's.
-                //
-                // The choice was open and is now settled, and the deciding argument is
-                // not aesthetics: LLVM's `{}` is zero bytes, so two distinct values of
-                // an empty struct can be given the same address, and `&a != &b` then
-                // reads false for two variables the program declared separately. C
-                // gives an empty struct one byte precisely so that cannot happen, C++
-                // inherits it, and finc is written in C++ and interoperates with it --
-                // an empty Fin struct crossing into a C++ translation unit has to have
-                // the size that side already believes it has. A surprise about object
-                // identity surfaces very far from its cause, so the byte is cheaper.
-                //
-                // The byte is padding and not a field: `fields` and `indexByName` stay
-                // empty, so `m.anything` still refuses as an unknown member rather than
-                // reaching a member the compiler invented. Nothing needs to be added to
-                // the literal path either, because a literal starts from
-                // `Constant::getNullValue` of the whole type and inserts one value per
-                // *declared* field -- zero of them here -- so `M {}` is `{ i8 0 }`
-                // without a special case.
-                members.push_back(llvm::Type::getInt8Ty(ctx_));
-            }
-            // isPacked=false, which is the same choice src/types/Layout.hpp makes
-            // and what Soundness_Codegen.AStructsLayoutMatchesWhatLLVMWouldChoose
-            // compares against. A packed body here would agree with a padded layout
-            // pass on every field at offset 0 and on nothing else.
-            info.llvmType->setBody(members, /*isPacked=*/false);
-            info.complete = true;
-            debugLog("declared struct " + s->name + llvmNameNote(*info.llvmType, s->name));
+            declareStructBody(s);
+            if (failed_) return;
         }
-
         // A third pass, for the methods, after every body above is set.
         //
         // Third and not folded into the second because a method's signature may name
@@ -2117,6 +2068,158 @@ private:
             if (!declareStructMethods(info)) return;
         }
     }
+
+    // Second pass for one struct: splice base fields, map own members, set the
+    // body. The name entry must already exist (first pass); methods are a later
+    // pass and never run here, which is what makes this usable for imported
+    // structs (ensureConcreteStruct) as well as root ones.
+    void declareStructBody(StructDeclaration* s) {
+        StructInfo& info = structs_[s->name];
+        std::vector<llvm::Type*> members;
+        // The base's fields first, at the indices they had in the base. That is
+        // the owner's ruling -- "the parent's fields splice in at offset 0" -- and
+        // it is what makes a pointer to the derived struct a valid pointer to the
+        // base, so an upcast emits no instruction. src/types/Layout.cpp:428-451
+        // already computes exactly this for the collector; this is the backend
+        // catching up rather than deciding.
+        //
+        // The base is looked up in `structs_`, which the first pass has finished
+        // filling, so a base declared anywhere at module scope is found. Its
+        // *body* may not be set yet (this pass sets bodies in `decls` order), which
+        // is why the fields are copied from `StructInfo::fields` rather than from
+        // the llvm::StructType -- the CgTypes are complete after pass one even
+        // when the LLVM bodies are not.
+        //
+        // A base declared *below* its derived struct cannot arrive here at all:
+        // the analyzer reports `Undefined type 'Base'` first (measured), so the
+        // ordering problem the third pass exists to solve does not apply.
+        //
+        // ADR 0029's chain diamond shares one ancestor: a direct base that is
+        // a strict transitive ancestor of another direct base arrives through
+        // the descendant, so it is skipped and its bytes appear once at
+        // offset 0. A duplicate spelling keeps its first occurrence. Any
+        // other second base lays out sequentially as before -- unrelated
+        // bases still refuse downstream (a second field, a misread method),
+        // never silently.
+        for (size_t pi = 0; pi < s->parents.size(); ++pi) {
+            auto& parent = s->parents[pi];
+            if (!parent || parentIsInterface(*parent)) continue;
+            bool shared = false;
+            for (size_t oi = 0; oi < s->parents.size(); ++oi) {
+                if (oi == pi) continue;
+                auto& other = s->parents[oi];
+                if (!other || parentIsInterface(*other)) continue;
+                if (other->name == parent->name) {
+                    if (oi < pi) {
+                        shared = true;
+                        break;
+                    }
+                    continue;
+                }
+                if (baseIsAncestorOf(parent->name, other->name)) {
+                    shared = true;
+                    break;
+                }
+            }
+                if (shared) continue;
+                auto base = structs_.find(parent->name);
+                if (base == structs_.end()) {
+                    // A base from a loaded module lays out on first need
+                    // (ensureConcreteStruct): a root struct can inherit it,
+                    // and its fields splice in here exactly as a same-file
+                    // base's do. Anything ensure leaves out -- unknown names,
+                    // templates, forward declarations -- is still this
+                    // refusal, where the inheritance is written.
+                    if (ensureConcreteStruct(parent->name))
+                        base = structs_.find(parent->name);
+                    if (base == structs_.end()) {
+                        unsupported(*s, fmt::format("struct '{}' inheriting '{}', which "
+                                                    "this file did not lower",
+                                                    s->name, parent->name));
+                        return;
+                    }
+                }
+                if (!base->second.complete &&
+                    fillingStructs_.count(parent->name)) {
+                    // A base cycle through modules: the entry exists because
+                    // laying it out is already underway further down this same
+                    // stack, so its fields are not there to splice.
+                    unsupported(*s, fmt::format("struct '{}' inheriting '{}', which "
+                                                "is still being laid out",
+                                                s->name, parent->name));
+                    return;
+                }
+            for (const StructField& f : base->second.fields) {
+                if (info.indexByName.count(f.name)) {
+                    // Two bases with a field of the same name, or a base and this
+                    // struct. Which one `d.x` means is a language question, and
+                    // answering it by declaration order would answer it silently.
+                    unsupported(*s, fmt::format("struct '{}' inheriting a second "
+                                                "field '{}' from '{}'",
+                                                s->name, f.name, parent->name));
+                    return;
+                }
+                StructField carried = f;
+                carried.inherited = true;
+                info.indexByName[f.name] = info.fields.size();
+                info.fields.push_back(carried);
+                members.push_back(f.type.llvmType);
+            }
+        }
+        for (auto& m : s->members) {
+            auto t = types_.map(m->type.get());
+            if (!t) { unsupportedType(*m, m->type.get(), "a struct field"); return; }
+            if (t->isVoid()) {
+                unsupported(*m, fmt::format("a field of type 'void' in struct '{}'",
+                                            s->name));
+                return;
+            }
+            if (info.indexByName.count(m->name)) {
+                unsupported(*m, fmt::format("a second field '{}' in struct '{}'",
+                                            m->name, s->name));
+                return;
+            }
+            info.indexByName[m->name] = info.fields.size();
+            // The default is recorded and not evaluated: it is an expression,
+            // and where it runs (each literal that omits the field) is not
+            // here. Nothing is checked about it at the declaration either --
+            // a struct nobody instantiates never runs its defaults, so a
+            // default this file could not lower is not a reason to refuse the
+            // type. The refusal lands at the literal that needs it.
+            info.fields.push_back(StructField{m->name, *t, m->default_value.get()});
+            members.push_back(t->llvmType);
+        }
+        if (members.empty()) {
+            // One byte, which is C's answer and not LLVM's.
+            //
+            // The choice was open and is now settled, and the deciding argument is
+            // not aesthetics: LLVM's `{}` is zero bytes, so two distinct values of
+            // an empty struct can be given the same address, and `&a != &b` then
+            // reads false for two variables the program declared separately. C
+            // gives an empty struct one byte precisely so that cannot happen, C++
+            // inherits it, and finc is written in C++ and interoperates with it --
+            // an empty Fin struct crossing into a C++ translation unit has to have
+            // the size that side already believes it has. A surprise about object
+            // identity surfaces very far from its cause, so the byte is cheaper.
+            //
+            // The byte is padding and not a field: `fields` and `indexByName` stay
+            // empty, so `m.anything` still refuses as an unknown member rather than
+            // reaching a member the compiler invented. Nothing needs to be added to
+            // the literal path either, because a literal starts from
+            // `Constant::getNullValue` of the whole type and inserts one value per
+            // *declared* field -- zero of them here -- so `M {}` is `{ i8 0 }`
+            // without a special case.
+            members.push_back(llvm::Type::getInt8Ty(ctx_));
+        }
+        // isPacked=false, which is the same choice src/types/Layout.hpp makes
+        // and what Soundness_Codegen.AStructsLayoutMatchesWhatLLVMWouldChoose
+        // compares against. A packed body here would agree with a padded layout
+        // pass on every field at offset 0 and on nothing else.
+        info.llvmType->setBody(members, /*isPacked=*/false);
+        info.complete = true;
+        debugLog("declared struct " + s->name + llvmNameNote(*info.llvmType, s->name));
+    }
+
 
     // `Struct.method`, and `Box<int>.method` for an instantiation.
     //
@@ -2545,7 +2648,13 @@ private:
             // this file did not itself lower -- a template, a class, or a struct
             // refused for one of the shapes above -- because splicing in fields from a
             // shape this file declined to give a layout would be inventing one.
-            if (!structs_.count(parent->name)) {
+            //
+            // A base a loaded module declares concretely is neither lowered nor
+            // refused here: it lays out on first need (ensureConcreteStruct),
+            // which the body pass below triggers. Deciding here would need the
+            // layout in hand, and one cannot be computed for a struct whose own
+            // bases may not be laid out yet.
+            if (!structs_.count(parent->name) && !findModuleStruct(parent->name)) {
                 unsupported(s, fmt::format("struct '{}' inheriting '{}', which is not a "
                                            "struct this file lowered",
                                            s.name, parent->name));
@@ -2559,6 +2668,10 @@ private:
             // stays shared, so there is nothing here to honour beyond not
             // dropping it silently.
             if (attr->name == "export" && attr->is_flag) continue;
+            // Flag-form `#[class]` is layout-neutral (ADR 0026: a class lowers
+            // exactly as a struct and differs in inheritance alone), so there
+            // is likewise nothing to honour here beyond not dropping it.
+            if (attr->name == "class" && attr->is_flag) continue;
             // An attribute this file does not read may be one that changes the
             // layout. Ignoring it is the failure mode that produces a working
             // program with the wrong offsets. `#[llvm_name]` in its flag form lands
@@ -9771,6 +9884,10 @@ private:
     // The loader's module Programs (ADR 0032), borrowed for registration only.
     // Set by run() before any pass reads it.
     std::vector<const Program*> modules_;
+    // Concrete module structs currently being laid out, by name: a base cycle
+    // through modules re-enters ensureConcreteStruct, and an entry that exists
+    // but is not complete yet is a cycle, not a layout to splice.
+    std::set<std::string> fillingStructs_;
 
     // What each module-scope `implements` block added, by the name of the struct it
     // names. Filled by collectImplementsBlocks before declareStructs and never written
