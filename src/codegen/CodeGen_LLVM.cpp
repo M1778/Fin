@@ -190,6 +190,10 @@ struct CgType {
     // Interface references are fat values: {data, vtable}.
     bool isInterface = false;
     std::string interfaceName;
+    // An `any` blob (mapAny): the plan-fixed `{i8*, i64}` shape with no claim
+    // about what a value in it means. Carried so value sites -- conversions,
+    // operators, `sizeof` -- can refuse what the type mapping allowed.
+    bool isAny = false;
 
     // Set for Kind::Ptr when this file knows what is at the other end, and null
     // when it does not.
@@ -663,10 +667,16 @@ public:
         // A function type is the third decoration this slice lowers. Before the
         // catch-all below, which used to reject every FunctionTypeNode outright.
         if (auto* fn = dynamic_cast<const FunctionTypeNode*>(node)) {
-            if (node->pointer_depth != 0 || node->is_array || node->is_nullable ||
-                node->array_size) {
+            if (node->pointer_depth != 0 || node->is_array || node->array_size) {
                 return std::nullopt;
             }
+            // `is_nullable` is allowed through: `null` is already a value of
+            // every function type (convert() takes a null constant into a
+            // function slot, and stdlib/collection.fin:18 defaults one), so a
+            // nullable `fn` is representationally identical to a plain one --
+            // absent is null, with no discriminant to rule. Every other
+            // nullable still refuses below: only a pointer has a null that is
+            // not one of its values' own.
             return mapFunction(*fn);
         }
         if (node->pointer_depth != 0 || node->is_array || node->is_nullable ||
@@ -709,7 +719,40 @@ public:
                 llvm::PointerType::get(ctx_, 0), llvm::PointerType::get(ctx_, 0)});
             return t;
         }
-        return structByName(node->name, allowIncomplete);
+        if (auto s = structByName(node->name, allowIncomplete)) return s;
+        // `any` maps to its plan-fixed shape, `{i8*, i64}` (payload, typeid),
+        // as an opaque blob: big enough to hold, with no claim about what a
+        // value in it means. Only the TYPE maps -- boxing a value into one,
+        // converting either way, comparing, sizing, and calling through it
+        // all refuse where values are handled, because none of those has a
+        // rule yet. `object` stays unmapped: it is a distinct DynamicType
+        // whose meaning is even less settled.
+        //
+        // After the struct lookup, so a user declaration of the name still
+        // wins -- mirroring scope resolution, where a shadowing declaration
+        // beats the global dynamic type. The analyzer reserves the name, so
+        // reaching here with a shadowing struct is a program the front end
+        // already refused.
+        //
+        // A named type, created once: LLVM uniques literal structs by shape,
+        // and a user struct of two words must never compare equal to this one
+        // in convert()'s `llvmType ==` fast path. LayoutEngine still refuses
+        // DynamicType -- the collector's pointer map for a payload word is
+        // unruled, and that pass must not learn a shape from this one.
+        if (node->name == "any" && node->generics.empty()) {
+            if (!anyType_) {
+                anyType_ = llvm::StructType::create(ctx_, "fin.any");
+                anyType_->setBody({llvm::PointerType::getUnqual(ctx_),
+                                   llvm::Type::getInt64Ty(ctx_)},
+                                  /*isPacked=*/false);
+            }
+            CgType t;
+            t.kind = CgType::Kind::Struct;
+            t.isAny = true;
+            t.llvmType = anyType_;
+            return t;
+        }
+        return std::nullopt;
     }
 
     // `&T` becomes one machine word, whatever T is, plus the pointee recorded
@@ -870,10 +913,15 @@ public:
             if (!written) return std::nullopt;
             auto inner = map(written);
             if (!inner) return std::nullopt;
-            // `any` and `object` map to nothing here, so they are already refused by
-            // the line above; void is a name that maps to something and is still not a
-            // value, which is why it is named separately.
-            if (inner->isVoid() || !inner->llvmType || !inner->llvmType->isSized()) {
+            // `object` maps to nothing, so it is already refused by the line
+            // above. `any` maps to its blob since the opaque-type ruling, but a
+            // prototype of `any` elements would need boxing on every store --
+            // the same missing rule as an assignment into one -- so a half of
+            // it stays refused here rather than passing as sized storage.
+            // Void is a name that maps to something and is still not a value,
+            // which is why it is named separately.
+            if (inner->isAny || inner->isVoid() || !inner->llvmType ||
+                !inner->llvmType->isSized()) {
                 return std::nullopt;
             }
             CgType arr;
@@ -1011,6 +1059,11 @@ private:
     const std::unordered_map<std::string, InterfaceInfo>* interfaces_ = nullptr;
     std::function<bool(const TypeNode&, std::string&)> instantiate_;
     const Substitution* bindings_ = nullptr;
+    // The one `any` blob type, created on first mapping (mapAny). Cached
+    // because every `any` in the program must be the same llvm::Type: the
+    // name is what keeps it distinct from any user struct of the same shape,
+    // and creating it twice would make two.
+    mutable llvm::StructType* anyType_ = nullptr;
 };
 
 // Decodes one Fin string or character literal into the bytes it denotes.
@@ -3505,6 +3558,7 @@ private:
     // rather than in full, because "a conversion from 'fn(int) -> int' to a struct" says
     // what went wrong and a full struct spelling would not say more.
     std::string describe(const CgType& t) const {
+        if (t.isAny) return "any";
         switch (t.kind) {
             case CgType::Kind::Void:   return "void";
             case CgType::Kind::Struct: return "a struct";
@@ -3646,6 +3700,16 @@ private:
 
     llvm::Value* convert(ASTNode& node, const CgVal& from, const CgType& to) {
         if (!from.ok()) return nullptr;
+        // An `any` blob converts to and from nothing but itself: there is no
+        // boxing into one and no reading out of one, so any other pair is a
+        // value the program cannot have produced. Blob-to-blob is a 16-byte
+        // copy, which is all two values of one opaque type can mean.
+        if (from.type.isAny || to.isAny) {
+            if (from.type.isAny && to.isAny) return from.value;
+            unsupported(node, fmt::format("a conversion from '{}' to '{}'",
+                                          describe(from.type), describe(to)));
+            return nullptr;
+        }
         // Before the identity shortcut below, and that is the whole point of putting it
         // here. Every function value is a `ptr`, so `from.type.llvmType ==
         // to.llvmType` is true for *any* pair of them -- and for a `&int` against an
@@ -5431,6 +5495,15 @@ private:
         CgVal lhs = emit(*node.left);
         if (failed_) return;
 
+        // `any` has no operator semantics: blob equality (payloads? typeids?
+        // deep values?) is three programs, and arithmetic on an unboxed value
+        // is none. Refused before the struct-operator dispatch below, which
+        // would otherwise report it as an ordinary struct without one.
+        if (lhs.type.isAny) {
+            unsupported(node, "an operator on 'any'");
+            return;
+        }
+
         // A declared operator, if the left operand is a struct.
         //
         // The left operand and not either one: `v + 1` looks on V, and `1 + v` does not
@@ -5449,6 +5522,10 @@ private:
         CgVal rhs = emit(*node.right);
         if (failed_) return;
         if (!lhs.ok() || !rhs.ok()) { unsupported(node, "this operand"); return; }
+        if (rhs.type.isAny) {
+            unsupported(node, "an operator on 'any'");
+            return;
+        }
         value_ = emitArithmetic(node, node.op, lhs, rhs);
     }
 
@@ -9226,6 +9303,14 @@ private:
         }
 
         auto type = types_.map(node.type_target.get());
+        if (type && type->isAny) {
+            // The blob has 16 bytes, but the shared layout model answers "no
+            // layout" for `any` until a lib/std declaration owns the
+            // representation -- and a `sizeof` that disagreed with that model
+            // would be two passes with two sizes for one type.
+            unsupported(node, "the size of 'any'");
+            return;
+        }
         if (!type || type->isVoid() || !type->llvmType || !type->llvmType->isSized()) {
             // Named as `sizeof`'s own refusal and not as "a variable of type X": the
             // program asked for a number, and what is missing is the representation

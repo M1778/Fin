@@ -691,17 +691,19 @@ BACKEND_TEST(Soundness_DiagnosticLocation, AVariablesRefusalIsLocatedAtTheDeclar
     // The cause was in the grammar rather than in the backend: a `let` is reachable
     // both as a `variable_declaration` statement and as a `declaration_body`, the
     // two paths carry six duplicated productions each, and only the statement copies
-    // called setLoc (src/parser/parser.y). `any` is the type because it is refused
-    // for a reason that is not waiting on anything -- there is no representation for
-    // a value whose type is unknown at compile time -- so this test cannot quietly
-    // stop testing a location the way ARefusalNamesTheLine above did three times.
+    // called setLoc (src/parser/parser.y). `object` is the type because it is
+    // refused for a reason that is not waiting on anything -- there is no
+    // representation for a value whose type is unknown at compile time -- so
+    // this test cannot quietly stop testing a location the way
+    // ARefusalNamesTheLine above did three times. (`any` served here until it
+    // mapped as an opaque blob; `object` is its still-unmapped sibling.)
     const Built b = build(
         "fun main() <noret> {\n"
         "    let i <int> = 1;\n"
-        "    let v <any>;\n"
+        "    let v <object>;\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a variable of type 'any'"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("a variable of type 'object'"), std::string::npos) << b.why();
     EXPECT_NE(b.compileErr.find(".fin:3:5"), std::string::npos) << b.why();
     EXPECT_EQ(b.compileErr.find(".fin:1:1"), std::string::npos) << b.why();
 }
@@ -716,7 +718,7 @@ BACKEND_TEST(Soundness_DiagnosticLocation, AnAttributedVariablesRefusalIsLocated
     const Built b = build(
         "fun main() <noret> {\n"
         "    let i <int> = 1;\n"
-        "    #[slaveof($Fin)] let v <any>;\n"
+        "    #[slaveof($Fin)] let v <object>;\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find(".fin:3:5"), std::string::npos) << b.why();
@@ -730,10 +732,10 @@ BACKEND_TEST(Soundness_DiagnosticLocation, AGlobalsRefusalIsLocatedAtItsOwnLine)
     // at all. It is on line 2 for that reason.
     const Built b = build(
         "let i <int> = 1;\n"
-        "pub let v <any>;\n"
+        "pub let v <object>;\n"
         "fun main() <noret> { }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a global of type 'any'"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("a global of type 'object'"), std::string::npos) << b.why();
     EXPECT_NE(b.compileErr.find(".fin:2:1"), std::string::npos) << b.why();
 }
 
@@ -1693,9 +1695,11 @@ BACKEND_TEST(Soundness_Codegen, APrototypeOfAnArityOtherThanTwoIsRefused) {
 
 BACKEND_TEST(Soundness_Codegen, APrototypeWithAnErasedHalfIsRefused) {
     // `{object, object}` is what tests/samples/prototype_test.fin:40 writes, and it
-    // refuses for the same reason a bare `let v <any>;` does: there is no representation
-    // for a value whose type is unknown at compile time, so there is none for an array of
-    // them either. This is the half of item 7 that stays refused until `any` has one.
+    // refuses for the same reason a bare `let v <object>;` does: there is no
+    // representation for a value whose type is unknown at compile time, so there is
+    // none for an array of them either. (`any` maps as an opaque blob since, but a
+    // half of it stays refused for want of boxing.) This is the half of item 7 that
+    // stays refused until `any` has values.
     const Built b = build("fun main() <noret> { let p <{object, object}>; }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
     EXPECT_NE(b.compileErr.find("prototype<object, object>"), std::string::npos) << b.why();
@@ -6094,6 +6098,102 @@ BACKEND_TEST(Soundness_Codegen, ABodilessInterfaceConstructorLowersToNothing) {
     ASSERT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "ok\n") << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// `any` maps as an opaque blob; its values do not lower.
+//
+// `any` is `{i8*, i64}` (payload, typeid) for layout and signatures only --
+// the plan-fixed shape, with no claim about what a value in it means. Boxing
+// a value into one, converting either way, comparing, sizing, and calling
+// through it all refuse: a blob holding nothing is storage, and storage that
+// answers reads is a wrong answer rather than a missing feature.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AFunctionFieldOverAnyLaysOut) {
+    // The HashMap.hasher shape (`hasher? <fn(any) -> int>`) minus the
+    // nullable, whose discriminant is its own unruled question: a function
+    // field whose parameter is `any` lays out, defaults to null, and is
+    // never called here.
+    const Built b = build(std::string(kPrintf) +
+        "struct Holder {\n"
+        "    h <fn(any) -> int> = null,\n"
+        "    v <int>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let h <Holder> = Holder{ v: 5 };\n"
+        "    printf(\"%d\\n\", h.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnAssignmentIntoAnyIsRefused) {
+    // There is no boxing: an integer cannot become an `any` blob.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let x <any>;\n"
+        "    x = 5;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a conversion from 'an integer' to 'any'"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AComparisonOnAnyIsRefused) {
+    // Blob equality is unruled: comparing payload pointers, typeids, or deep
+    // values are three programs, and the operator cannot pick one silently.
+    const Built b = build(
+        "fun eq(a: any, b: any) <bool> { return a == b; }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("an operator on 'any'"), std::string::npos)
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ACallThroughAnAnyParameterIsRefused) {
+    // The field lays out and defaults to null, but no argument converts into
+    // `any` to make the call with. Through a local: `h.h(5)` parses as a
+    // method call, which a function field is not.
+    const Built b = build(std::string(kPrintf) +
+        "struct Holder {\n"
+        "    h <fn(any) -> int> = null,\n"
+        "    v <int>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let h <Holder> = Holder{ v: 1 };\n"
+        "    let f <fn(any) -> int> = h.h;\n"
+        "    printf(\"%d\\n\", f(5));\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a conversion from 'an integer' to 'any'"),
+              std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, APrototypeHalfOfAnyIsRefused) {
+    // Halves stay refused even though the type maps: a prototype of `any`
+    // elements would need boxing on every store, which is the same missing
+    // rule as the assignment above, one level in.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let p <{any, int}>;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ASizeofAnyIsRefused) {
+    // The blob has 16 bytes, but the shared layout model answers "no layout"
+    // for `any` until a lib/std declaration owns the representation -- and a
+    // `sizeof` that disagreed with that model would be two passes with two
+    // sizes for one type.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", sizeof(any));\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("the size of 'any'"), std::string::npos)
+        << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {

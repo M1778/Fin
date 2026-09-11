@@ -130,6 +130,22 @@ std::string buildErrWithModule(const std::string& code, const std::string& inclu
     return buildErr(code, {"-I", includeDir});
 }
 
+// The backend's trace for a program against the bundle: what it lowered,
+// which is the only way from out here to see an instantiation that never
+// becomes a symbol. Mirrors test_codegen.cpp's helper, which cannot serve
+// here -- that one passes no environment, and these programs resolve their
+// imports through the bundle that FIN_LIBS="" keeps on the path.
+std::string bundledTrace(const std::string& code) {
+    Src src(code);
+    const fs::path obj = uniqueTempPath("fin_stdlib_tr", ".o");
+    const FincRun r = runFinc({src.str(), "-c", "-o", obj.string(),
+                               "--debug-codegen"},
+                              {{"FIN_LIBS", ""}});
+    std::error_code ec;
+    fs::remove(obj, ec);
+    return stripAnsi(r.err);
+}
+
 // A throwaway directory of .fin modules, for the tests here that need a second file
 // the bundle does not provide. test_module_loader.cpp has the same class against
 // the loader's C++ API; this copy drives the real binary and the two share nothing
@@ -510,29 +526,33 @@ TEST(KnownDefect_Modules, AnImportedExternThatIsNotAmbientIsNotLoweredThroughADo
         << declared;
 }
 
-TEST(Soundness_Modules, AnImportedGenericStructTemplateIsFoundAndChecked) {
-    // Was KnownDefect_Modules.AnImportedGenericStructsConstructorIsNotLowered:
-    // `HashMap::<string, Data>()` (deeptest4.fin:11) refused with
-    // "a call to 'HashMap'" because the backend had never heard the name. The
-    // imported-declaration decision (ADR 0032) landed since, and `#[export]`
-    // is import-visibility only (ADR 0033), so the template is found, checked
-    // and instantiated -- and the first refusal moved into the instantiation
-    // itself, the `hasher` field's `fn(any) -> int` type. What remains is
-    // instantiation: `any`/`fn` field types, transitive callees, and bodies.
-    const std::string err = buildErr(
+TEST(Soundness_Modules, AnImportedGenericStructInstantiatesOnDemand) {
+    // Was KnownDefect_Modules.AnImportedGenericStructsConstructorIsNotLowered,
+    // then AnImportedGenericStructTemplateIsFoundAndChecked: `HashMap::<string,
+    // int>()` refused first with "a call to 'HashMap'", then with `#[export]`,
+    // then with the `fn(any) -> int` field. Each landing moved the refusal one
+    // step further in: the template is now found, checked, and instantiated --
+    // transitively, with Collection<string/int/bool> and HashMap's methods --
+    // and what refuses is a body the instantiation queued, pointer arithmetic
+    // inside a method. Lazy per use, as designed: nothing here instantiates
+    // what the root never names.
+    const std::string prog =
         "import { HashMap } from hashmap::std;\n"
-        "fun main() <noret> { let a <auto> = HashMap::<string, int>(); }\n");
-    EXPECT_NE(err.find("a field of 'HashMap<string, int>' of type 'fn(any) -> int'"),
+        "fun main() <noret> { let a <auto> = HashMap::<string, int>(); }\n";
+    const std::string trace = bundledTrace(prog);
+    EXPECT_NE(trace.find("instantiated struct HashMap<string, int>"),
               std::string::npos)
-        << "the imported template must be found, checked and instantiated,\n"
-           "not missed\n"
-        << err;
-    // And specifically not the old misses, either of which would mean the
-    // registry lookup regressed rather than the check moved on.
+        << "the imported template must instantiate, not merely be found\n"
+        << trace;
+    const std::string err = buildErr(prog);
+    EXPECT_NE(err.find("an operator on a pointer"), std::string::npos) << err;
+    // And specifically none of the old misses, any of which would mean the
+    // registry lookup regressed rather than the work moved on.
     EXPECT_EQ(err.find("a call to 'HashMap'"), std::string::npos) << err;
     EXPECT_EQ(err.find("the attribute 'export' on struct 'HashMap'"),
               std::string::npos)
         << err;
+    EXPECT_EQ(err.find("of type 'fn(any) -> int'"), std::string::npos) << err;
     // And specifically not the turbofish refusal, which is what this said before the
     // generic-constructor unit and which would now name the wrong gap.
     EXPECT_EQ(err.find("explicit generic arguments"), std::string::npos) << err;
