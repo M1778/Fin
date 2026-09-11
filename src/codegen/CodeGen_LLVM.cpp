@@ -7306,16 +7306,33 @@ private:
         builder_.SetInsertPoint(okBB);
     }
 
-    // The C error stream's linker symbol, which is not spelled one way
-    // everywhere. glibc exposes `stderr`; macOS defines `stderr` as a macro
-    // for `__stderrp` and exports only the latter, so an extern `stderr`
-    // links on Linux and nowhere Apple. Keyed off the module triple, which
-    // is the native target. Windows' UCRT hides it behind `__acrt_iob_func`
-    // instead -- still open, and still untested, because no Windows job has
-    // linked a `blame` program yet.
-    const char* stderrSymbol() const {
-        if (llvm::Triple(module_.getTargetTriple()).isOSDarwin()) return "__stderrp";
-        return "stderr";
+    // The C error stream, which is not spelled one way everywhere. glibc
+    // exposes `stderr`; macOS defines `stderr` as a macro for `__stderrp` and
+    // exports only the latter; Windows' UCRT hides it behind a call,
+    // `__acrt_iob_func(2)`. Keyed off the module triple, which is the native
+    // target. Returns null having already reported when the platform refuses.
+    llvm::Value* emitStderr(ASTNode& node, const char* what) {
+        llvm::Type* ptrTy = llvm::PointerType::getUnqual(ctx_);
+        llvm::Triple triple(module_.getTargetTriple());
+        if (triple.isOSWindows()) {
+            llvm::FunctionCallee lookup = runtimeFn(
+                node, "__acrt_iob_func",
+                llvm::FunctionType::get(ptrTy, {llvm::Type::getInt32Ty(ctx_)},
+                                        /*isVarArg=*/false),
+                what);
+            if (!lookup) return nullptr;
+            return builder_.CreateCall(
+                lookup, {llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_), 2)},
+                "stderr");
+        }
+        const char* symbol = triple.isOSDarwin() ? "__stderrp" : "stderr";
+        llvm::GlobalVariable* errStream = module_.getGlobalVariable(symbol);
+        if (!errStream) {
+            errStream = new llvm::GlobalVariable(
+                module_, ptrTy, /*isConstant=*/false,
+                llvm::GlobalValue::ExternalLinkage, /*Initializer=*/nullptr, symbol);
+        }
+        return builder_.CreateLoad(ptrTy, errStream, "stderr");
     }
 
     // A runtime Fin blame with a fixed reason: print `<file>:<line>: Fin blames
@@ -7335,13 +7352,8 @@ private:
     bool emitRuntimeBlame(ASTNode& node, const std::string& reason, const char* what) {
         llvm::Type* ptrTy = llvm::PointerType::getUnqual(ctx_);
         llvm::Type* i32Ty = llvm::Type::getInt32Ty(ctx_);
-        llvm::GlobalVariable* errStream = module_.getGlobalVariable(stderrSymbol());
-        if (!errStream) {
-            errStream = new llvm::GlobalVariable(
-                module_, ptrTy, /*isConstant=*/false,
-                llvm::GlobalValue::ExternalLinkage, /*Initializer=*/nullptr,
-                stderrSymbol());
-        }
+        llvm::Value* stream = emitStderr(node, what);
+        if (!stream) return false;
         llvm::FunctionCallee report = runtimeFn(
             node, "fprintf",
             llvm::FunctionType::get(i32Ty, {ptrTy, ptrTy}, /*isVarArg=*/true), what);
@@ -7350,7 +7362,6 @@ private:
             node, "abort", llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_), false),
             what);
         if (!stop) return false;
-        llvm::Value* stream = builder_.CreateLoad(ptrTy, errStream, "stderr");
         llvm::Value* format = builder_.CreateGlobalString("%s:%d: Fin blames %s\n");
         llvm::Value* file = builder_.CreateGlobalString(sourceName_);
         llvm::Value* line = llvm::ConstantInt::get(i32Ty, node.loc.begin.line);
@@ -7391,16 +7402,9 @@ private:
             message = m.value;
         }
 
-        // The error stream (stderrSymbol): an external `FILE*`, loaded and
-        // passed straight on. Declared as one machine word with no pointee,
-        // because nothing here looks inside it.
-        llvm::GlobalVariable* errStream = module_.getGlobalVariable(stderrSymbol());
-        if (!errStream) {
-            errStream = new llvm::GlobalVariable(
-                module_, ptrTy, /*isConstant=*/false,
-                llvm::GlobalValue::ExternalLinkage, /*Initializer=*/nullptr,
-                stderrSymbol());
-        }
+        // The error stream (emitStderr): loaded and passed straight on.
+        llvm::Value* stream = emitStderr(node, "a 'blame'");
+        if (!stream) return false;
 
         llvm::FunctionCallee report = runtimeFn(
             node, "fprintf",
@@ -7418,7 +7422,6 @@ private:
         llvm::Value* file = builder_.CreateGlobalString(sourceName_);
         llvm::Value* line = llvm::ConstantInt::get(i32Ty, node.loc.begin.line);
 
-        llvm::Value* stream = builder_.CreateLoad(ptrTy, errStream, "stderr");
         if (message) {
             llvm::Value* format =
                 builder_.CreateGlobalString("%s:%d: assertion failed: %s\n");
