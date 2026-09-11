@@ -1,6 +1,6 @@
 # Handoff — Fin compiler completion
 
-Updated 2026-09-11 at commit `bd606c1` on branch `wave3-semantics`.
+Updated 2026-09-12 at commit `2e4065f` on branch `wave3-semantics`.
 
 This is the **current, short handoff**. `docs/plan.md` and the older commit history contain
 historical design notes; do not use their old sample counts as current measurements. Start here,
@@ -21,32 +21,42 @@ Backend invariant:
 ## Working rules
 
 - Work in `/home/M1778/Fin` on the existing branch; do not create a worktree.
-- Commit incremental work by pathspec. Never push and never amend.
+- Commit incremental work by pathspec. Pushing `wave3-semantics` to origin is allowed
+  (user-lifted 2026-09-11); never amend. Monitor CI with `gh` after pushes.
 - Commit author: `M1778M <m1778.pc@gmail.com>`.
 - Write regression tests first, then implement, build, and run tests.
+- After every edit, verify `git diff` shows only the intended change before building.
 - Keep unrelated files untouched. `CMakeUserPresets.json` is tracked but must not be committed;
   do not use `git commit -a`.
 - Use the default Opus agent only if delegation is genuinely needed; keep agent count low.
-- Do not work in `~/finn-registry`.
+- Do not work in `~/finn-registry`. Read-only research in `~/finn` (package manager) is allowed
+  and settled the import model (see ADR 0032): whole-program source visibility, no objects.
 
 ## Current verified state
 
-Recent commits:
+Recent work (21 commits since `bd606c1`, all pushed):
 
-- `86696b3` — accept layout-neutral `#[debug]` fields and explicit operator receivers
-- `76a5950` — treat user macro declarations as compile-time-only
-- `e6a7a57` — update the written-`self` operator regression
-- `8715f04` — lower explicit struct destructors
-- `bd606c1` — give destructors an explicit empty parameter list
+- Diamond multiple inheritance shares one ancestor (ADR 0029, layout + codegen).
+- `deeptest2.fin` tail: implicit-`self` fields, `super::` access, `Self()` calls,
+  bodiless interface ctor/dtor requirements — the sample compiles with `finc -c`.
+- Import registry (ADR 0032): templates/interfaces/blocks register lazily from the
+  loader; export is visibility-only (ADR 0033); concrete bases lay out on need.
+- `any` maps as an opaque blob, values still refuse (ADR 0034); nullable `fn`
+  lowers; null compares, null scalar defaults, pointer→int casts, denullify.
+- Meta-types map distinctly; `resolve_type*` evaluate to per-compile typeids (ADR 0035).
+- `stdlib/hashmap.fin` and `stdlib/prototypes.fin` compile with `finc -c`.
+- CI runs on branch pushes and is green on Linux/macOS/build-script; Windows rows
+  are experimental (`continue-on-error`) pending two known issues below.
 
 Verification already completed:
 
-- Full CTest suite: **1708/1708 passed**.
-- Codegen tests after the destructor work: **560/560 passed**.
-- `readonly.fin` and `macros.fin` compile with `finc -c`.
-- `deeptest2.fin` now passes its operator and destructor blockers and reaches multiple-inheritance
-  layout.
-- Working tree was clean at handoff creation.
+- Full CTest suite: **1742/1742 passed** (local Debug build).
+- Linux x86_64/arm64, macOS arm64/x86_64, build-script jobs green on CI Release builds.
+- Fixed along the way from CI Release failures: uninitialized `is_public` on AST
+  declarations (phantom-`pub` on nested functions), missing `<sstream>` include,
+  shell signal epilogue in a blame test, `ArrayType` extent ambiguity on Apple Clang.
+- `finc -c` corpus remeasure matches the blocker list below; all other failures are
+  the documented frontend blockers (unchanged).
 
 Rebuild with:
 
@@ -63,82 +73,67 @@ rm -f *.o tests/samples/*.o tests/samples/stdlib/*.o
 
 ## Remaining object/codegen blockers
 
-Run each sample with `build/finc -c <sample>` and fix the first refusal, then remeasure. Current
-backend blockers are:
+Run each sample with `build/finc -c <sample>` and fix the first refusal, then remeasure.
 
-1. **`tests/samples/deeptest2.fin`**
-   - Current refusal: `MultiInherit` inherits `Person` and `Student`; `Student` already carries
-     `Person`, so the backend sees duplicate inherited fields such as `name`.
-   - Do not guess a second-base ABI. `src/types/Layout.cpp` explicitly refuses multiple base
-     structs because placement/upcast semantics are undecided. The attempted backend-only
-     deduplication segfaulted and was reverted. Decide whether to implement the layout rule in
-     the shared layout model first, or book this as a known defect.
-   - Destructor lowering is explicit-only: `~T` gets a destructor symbol/body but is not implicitly
-     invoked at scope exit. Revisit only if the language ruling requires implicit destruction.
+1. **`tests/samples/deeptest4.fin`** (normative)
+   - Current refusal: `an undeclared operator '==' on struct 'Data'`, from
+     `Collection<Data>` method bodies (every body lowers, called or not).
+   - HELD RULING: struct equality stays refused (field-wise vs identity vs
+     declared-only is undecided; the stdlib header documents the refusal as the
+     contract). Revisit only by deliberate language decision.
 
-2. **`tests/samples/deeptest4.fin` and `tests/samples/useful_macros.fin`**
-   - Current refusals are generic `HashMap`/`Collection` instantiations and variables.
-   - The imported module AST does not reach the root compilation unit's backend. This is a
-     separate-compilation/design problem, not merely a missing generic-instantiation branch.
-   - Inspect `src/driver/Driver.cpp`, module loading, `src/codegen/CodeGen_LLVM.cpp`'s
-     `templates_`/`instantiateGeneric`, and the `@stdimport` handling before changing codegen.
-   - Preserve the distinction between ambient `@define`/`#[global]` declarations and imported Fin
-     definitions: emitting an extern for an imported Fin body would create a link-time lie.
+2. **`tests/samples/useful_macros.fin`** (check label before treating as blocking)
+   - Current refusal: boxing a pointer into `any` (`f(key)` needs string→`any`).
+   - HELD RULING: `any` values stay refused (ADR 0034); full boxing (typeids,
+     box/unbox, conversions) is its own workstream.
 
-3. **`tests/samples/stdlib/hashmap.fin`**
-   - `HashMapError : <Error>` refuses because `Error` was not lowered in this compilation unit.
-   - This is coupled to the separate-compilation decision above, and to imported interface/base-type
-     classification (`parentIsInterface`). Do not solve it by blindly ignoring the parent.
+3. **`tests/samples/stdlib/error.fin`** (normative)
+   - Current first refusal: `#[uncastable]` (then `#[stderror]`); struct attributes
+     refused by `canLowerStruct`. Existing soundness tests intentionally require
+     unread attributes to be refused — add semantics and invert tests only when
+     the implementation is real. Untouched this session.
 
-4. **`tests/samples/stdlib/error.fin`**
-   - Current first refusal: struct attributes such as `#[uncastable]` are refused by
-     `canLowerStruct`.
-   - `#[uncastable]`, `#[stderror]`, and `#[class]` have semantic meaning in the frontend; none has
-     a complete backend implementation yet. Existing soundness tests intentionally require unread
-     attributes to be refused (`tests/test_codegen.cpp`, `AnAttributeThisFileDoesNotReadIsStillRefused`
-     and `AnLlvmNameBesideAnUnreadAttributeIsStillRefused`). Add semantics and invert tests only
-     when the implementation is real. `error.fin` also exposes `@special` and pointer comparison
-     after the attribute refusal is removed.
+4. **Frontend blockers still visible in the corpus** (not codegen failures; do not
+   turn a documented sample typo into a compiler feature):
+   - `const.fin` — `rptr<int>` versus `&rptr<int>` mismatch
+   - `enums.fin`, `stdlib/operators.fin`, `stdlib/typing.fin` — `Any`
+   - `importing.fin` — intentionally missing `somelib` module
+   - `literal_interface.fin` — `implements`
+   - `literal_struct.fin` — undefined `st`
+   - `nullifier.fin` — nullable `A?` versus `int?`
+   - `preprocessor.fin` — parser error at `RPAREN`
+   - `prototype_test.fin` — `int` versus `object`
+   - `stdlib/collection.fin` — function variance/signature mismatch
+   - `stdlib/enums.fin` — `Enum`
+   - `stdlib/memory.fin` — `Alloc`
+   - `stdlib/stdio.fin` — generic `X` method lookup
+   - `stdlib/stdptr.fin` — `pointer_type`
+   - `stdlib/types.fin` — `_static_string`
+   - `undefined_behavior.fin` — expected missing-return diagnostic; negative sample.
 
-5. **`tests/samples/stdlib/prototypes.fin`**
-   - Current refusal: return type `$type` is not lowered.
-   - Prototype values already lower as a pair of dynamic arrays (`prototype<K,V>`); `$type` is a
-     compile-time/type-reflection result and needs an explicit representation/ruling. Do not map it
-     to an ordinary runtime pointer without checking `docs/adr/0028` and the analyzer's `$type` use.
+   Regenerate first diagnostics rather than copying this list.
 
-## Frontend blockers still visible in the corpus
+## Accepted but not yet implemented
 
-These are not codegen failures and should be handled after measuring each one against its sample
-expectation. Do not turn a documented sample typo into a compiler feature:
-
-- `const.fin` — `rptr<int>` versus `&rptr<int>` mismatch
-- `enums.fin`, `stdlib/operators.fin`, `stdlib/typing.fin` — `Any`
-- `importing.fin` — intentionally missing `somelib` module
-- `literal_interface.fin` — `implements`
-- `literal_struct.fin` — undefined `st`
-- `nullifier.fin` — nullable `A?` versus `int?`
-- `preprocessor.fin` — parser error at `RPAREN`
-- `prototype_test.fin` — `int` versus `object`
-- `stdlib/collection.fin` — function variance/signature mismatch
-- `stdlib/enums.fin` — `Enum`
-- `stdlib/memory.fin` — `Alloc`
-- `stdlib/stdio.fin` — generic `X` method lookup
-- `stdlib/stdptr.fin` — `pointer_type`
-- `stdlib/types.fin` — `_static_string`
-- `undefined_behavior.fin` — expected missing-return diagnostic; this is a negative sample and
-  should continue failing frontend analysis.
-
-The exact current first diagnostics should always be regenerated rather than copied from this list.
+- **Implicit scope-exit destruction** (ADR 0030): destructor symbols/bodies lower
+  explicitly; no scope-exit invocation is wired up. Revisit only if the language
+  ruling requires it.
+- **Windows full green**: MSVC component-link ruling implemented (ADR 0031) and
+  `__acrt_iob_func` stderr handled, but Windows jobs now fail compiling the bison
+  parser (`parser.hpp` copies move-only AST nodes; MSVC C2280, GCC/Clang move).
+  A portability workstream of its own — do not fix inside language work.
+- **Stale pointers**: `CMakeLists.txt` and ADRs 0025/0026 cite `docs/HANDOFF.md §8`,
+  which the rewrite deleted. Point them somewhere real when touching those lines.
 
 ## Important implementation locations
 
-- `src/codegen/CodeGen_LLVM.cpp` — LLVM emitter, lowerability checks, struct layout, templates,
-  imported declarations, and explicit refusal policy.
-- `src/types/Layout.cpp` / `src/types/StructType.hpp` — shared semantic layout; multiple base
-  structs are currently refused here.
-- `src/driver/Driver.cpp` and module-loader sources — root/module compilation boundary.
-- `src/semantics/impl/Analyzer_Decl.cpp` — struct parents, attributes, `@special`, macros, and
-  operator signatures.
+- `src/codegen/CodeGen_LLVM.cpp` — LLVM emitter, lowerability checks, struct layout,
+  templates, imported declarations, and explicit refusal policy.
+- `src/types/Layout.cpp` / `src/types/StructType.hpp` — shared semantic layout; only
+  transitive (chain-diamond) sharing is decided, fork diamonds still refuse.
+- `src/driver/Driver.cpp` and `src/utils/ModuleLoader.*` — root/module boundary;
+  `astStorage` owns module Programs, backend borrows them (ADR 0032).
+- `src/semantics/impl/Analyzer_Decl.cpp` — struct parents, attributes, `@special`, macros.
 - `tests/test_codegen.cpp` — backend soundness and known-defect tests.
 - `tests/test_expectations.cpp` — corpus discovery/expectation harness.
 - `lib/std/` — standard-library declarations and implementations.
