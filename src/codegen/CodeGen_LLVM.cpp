@@ -32,6 +32,7 @@
 #include <fmt/color.h>
 #include <fmt/core.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <functional>
 #include <memory>
@@ -39,6 +40,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // The LLVM 18 backend (ADR 0002, ADR 0010).
@@ -442,6 +444,10 @@ struct CgVal {
 struct Local {
     llvm::AllocaInst* slot = nullptr;
     CgType type;
+    // Declaration order within its scope, for scope-exit destruction (reverse
+    // order). Assigned wherever a Local is published; the counter never
+    // resets, since only relative order inside one scope is ever read.
+    size_t order = 0;
 };
 
 // Where a `continue` and a `break` inside the innermost loop go. Declared out here
@@ -450,6 +456,12 @@ struct Local {
 struct LoopTargets {
     llvm::BasicBlock* continueTo = nullptr;
     llvm::BasicBlock* breakTo = nullptr;
+    // The scope index the loop's own bindings live at (`for` init,
+    // `foreach` element), or the enclosing size for loops without one
+    // (`while`). `break` and `continue` clean everything deeper; the loop
+    // scope itself dies at the end block, which cleans it uniformly for all
+    // paths joining there.
+    size_t scopeDepth = 0;
 };
 
 // A module-scope variable. The same pair as a Local, with the home in the object
@@ -4607,7 +4619,8 @@ private:
         explicit ScopedEmission(Emitter& e)
             : e_(e), block_(e.builder_.GetInsertBlock()),
               point_(block_ ? e.builder_.GetInsertPoint() : llvm::BasicBlock::iterator()),
-              fn_(e.currentFn_), scopes_(std::move(e.scopes_)),
+              fn_(e.currentFn_), structBase_(e.fnScopeBase_),
+              scopes_(std::move(e.scopes_)),
               nested_(std::move(e.nested_)), lambdas_(std::move(e.lambdaTemplates_)),
               loops_(std::move(e.loops_)), poisoned_(std::move(e.poisoned_)) {
             e_.scopes_.clear();
@@ -4631,6 +4644,7 @@ private:
             e_.loops_ = std::move(loops_);
             e_.poisoned_ = std::move(poisoned_);
             e_.currentFn_ = fn_;
+            e_.fnScopeBase_ = structBase_;
             if (block_) e_.builder_.SetInsertPoint(block_, point_);
             else e_.builder_.ClearInsertionPoint();
         }
@@ -4642,6 +4656,7 @@ private:
         llvm::BasicBlock* block_;
         llvm::BasicBlock::iterator point_;
         FnInfo* fn_;
+        size_t structBase_;
         std::vector<std::unordered_map<std::string, Local>> scopes_;
         std::vector<std::unordered_map<std::string, std::string>> nested_;
         std::vector<std::unordered_map<std::string, LambdaTemplate>> lambdas_;
@@ -4691,6 +4706,7 @@ private:
 
         currentFn_ = &found->second;
         pushScope();
+        fnScopeBase_ = scopes_.size() - 1;
 
         // The nested functions this body may call, if it is one of the two kinds that
         // may call any: the outermost scope of the body holds them, so the body's own
@@ -4715,7 +4731,7 @@ private:
         if (info.hasReceiver && !info.paramTypes.empty()) {
             auto* slot = builder_.CreateAlloca(info.paramTypes[0].llvmType, nullptr, "self");
             builder_.CreateStore(info.fn->getArg(0), slot);
-            scopes_.back()["self"] = Local{slot, info.paramTypes[0]};
+            scopes_.back()["self"] = Local{slot, info.paramTypes[0], nextLocalOrder_++};
             index = 1;
         }
 
@@ -4729,7 +4745,7 @@ private:
             auto* slot = builder_.CreateAlloca(info.paramTypes[index].llvmType, nullptr,
                                                p->name);
             builder_.CreateStore(info.fn->getArg((unsigned)index), slot);
-            scopes_.back()[p->name] = Local{slot, info.paramTypes[index]};
+            scopes_.back()[p->name] = Local{slot, info.paramTypes[index], nextLocalOrder_++};
             ++index;
         }
 
@@ -4740,8 +4756,12 @@ private:
         }
 
         // The implicit tail. A Fin function that falls off the end returns nothing,
-        // except `main`, which owes the shell a status.
+        // except `main`, which owes the shell a status. Locals die here exactly
+        // as on any other exit; by now only the function's own scope is left
+        // (every block cleaned and popped itself on the way out).
         if (!terminated()) {
+            cleanScopesFrom(node, fnScopeBase_);
+            if (failed_) { popScope(); currentFn_ = nullptr; return; }
             if (info.isMain) {
                 builder_.CreateRet(builder_.getInt32(0));
             } else if (info.returnType.isVoid()) {
@@ -5323,7 +5343,7 @@ private:
             // undefined stack contents is the one answer that cannot be tested.
             builder_.CreateStore(llvm::Constant::getNullValue(type.llvmType), slot);
         }
-        scopes_.back()[node.name] = Local{slot, type};
+        scopes_.back()[node.name] = Local{slot, type, nextLocalOrder_++};
     }
 
     // ---- statements -------------------------------------------------------
@@ -5345,6 +5365,14 @@ private:
                 }
                 failed_ = false;
             }
+        }
+        // Fallthrough only: a terminated block already cleaned what its exits
+        // left (`return`, `break` and `continue` clean everything they exit;
+        // `blame` and `m1778` unwind nothing), so cleaning here as well would
+        // destroy twice.
+        if (!terminated()) {
+            cleanScopeAt(node, scopes_.size() - 1);
+            if (failed_) { popScope(); return; }
         }
         popScope();
     }
@@ -5389,9 +5417,21 @@ private:
         if (!currentFn_) { unsupported(node, "a return outside a function"); return; }
         const bool isMain = currentFn_->isMain;
 
+        // Every path below leaves the function, so every path cleans what it
+        // leaves: all scopes from the function body's own down (parameters
+        // included; the `self` receiver is a borrowed pointer and needs
+        // nothing). The returned value is always materialized first.
         if (!node.value) {
-            if (isMain) builder_.CreateRet(builder_.getInt32(0));
-            else if (currentFn_->returnType.isVoid()) builder_.CreateRetVoid();
+            if (isMain) {
+                cleanScopesFrom(node, fnScopeBase_);
+                if (failed_) return;
+                builder_.CreateRet(builder_.getInt32(0));
+            }
+            else if (currentFn_->returnType.isVoid()) {
+                cleanScopesFrom(node, fnScopeBase_);
+                if (failed_) return;
+                builder_.CreateRetVoid();
+            }
             else unsupported(node, "a bare 'return' from a function with a return type");
             return;
         }
@@ -5404,7 +5444,10 @@ private:
         if (isMain) {
             CgType i32 = types_.intType(32, true);
             llvm::Value* status = convert(node, v, i32);
-            if (status) builder_.CreateRet(status);
+            if (!status) return;
+            cleanScopesFrom(node, fnScopeBase_);
+            if (failed_) return;
+            builder_.CreateRet(status);
             return;
         }
         if (currentFn_->isConstructor) {
@@ -5414,12 +5457,17 @@ private:
             // value is not returned: it is *the* value of the object, and it is stored
             // through the receiver before the void return.
             if (!emitConstructedValue(node, v)) return;
+            cleanScopesFrom(node, fnScopeBase_);
+            if (failed_) return;
             builder_.CreateRetVoid();
             return;
         }
         if (target.isVoid()) { unsupported(node, "a 'return <value>' from a void function"); return; }
         llvm::Value* out = convert(node, v, target);
-        if (out) builder_.CreateRet(out);
+        if (!out) return;
+        cleanScopesFrom(node, fnScopeBase_);
+        if (failed_) return;
+        builder_.CreateRet(out);
     }
 
     void visit(ExpressionStatement& node) override {
@@ -5471,7 +5519,9 @@ private:
         if (!test) return;
         builder_.CreateCondBr(test, bodyBB, endBB);
 
-        loops_.push_back({condBB, endBB});
+        // No scope of its own: the depth is the enclosing size, so `break`
+        // and `continue` clean the body scopes and nothing above them.
+        loops_.push_back({condBB, endBB, scopes_.size()});
         builder_.SetInsertPoint(bodyBB);
         if (node.body) node.body->accept(*this);
         if (!terminated()) builder_.CreateBr(condBB);
@@ -5506,8 +5556,11 @@ private:
 
         // `continue` goes to the step and not to the condition: skipping the
         // increment is an infinite loop, which is the classic way to get this
-        // wrong.
-        loops_.push_back({stepBB, endBB});
+        // wrong. The loop's own scope dies at the end block, not on `continue`
+        // (the init lives across iterations), so the depth recorded here is
+        // that scope: `break` and `continue` clean everything deeper, and the
+        // end block cleans this one uniformly for all paths joining there.
+        loops_.push_back({stepBB, endBB, scopes_.size() - 1});
         builder_.SetInsertPoint(bodyBB);
         if (node.body) node.body->accept(*this);
         if (!terminated()) builder_.CreateBr(stepBB);
@@ -5518,16 +5571,22 @@ private:
         if (!terminated()) builder_.CreateBr(condBB);
 
         builder_.SetInsertPoint(endBB);
+        cleanScopeAt(node, scopes_.size() - 1);
+        if (failed_) { popScope(); return; }
         popScope();
     }
 
     void visit(BreakStatement& node) override {
         if (loops_.empty()) { unsupported(node, "a 'break' outside a loop"); return; }
+        cleanScopesFrom(node, loops_.back().scopeDepth + 1);
+        if (failed_) return;
         builder_.CreateBr(loops_.back().breakTo);
     }
 
     void visit(ContinueStatement& node) override {
         if (loops_.empty()) { unsupported(node, "a 'continue' outside a loop"); return; }
+        cleanScopesFrom(node, loops_.back().scopeDepth + 1);
+        if (failed_) return;
         builder_.CreateBr(loops_.back().continueTo);
     }
 
@@ -7886,8 +7945,8 @@ private:
         }
         // Ordinary locals from here on, which is what makes the body's reads of them
         // the same code any other read of a local is.
-        scopes_.back()[node.var_name] = Local{elementSlot, element};
-        if (indexType) scopes_.back()[node.index_name] = Local{indexSlot, *indexType};
+        scopes_.back()[node.var_name] = Local{elementSlot, element, nextLocalOrder_++};
+        if (indexType) scopes_.back()[node.index_name] = Local{indexSlot, *indexType, nextLocalOrder_++};
 
         auto* condBB = llvm::BasicBlock::Create(ctx_, "foreach.cond", currentFn_->fn);
         auto* bodyBB = llvm::BasicBlock::Create(ctx_, "foreach.body", currentFn_->fn);
@@ -7922,7 +7981,11 @@ private:
 
         // `continue` goes to the step, so it advances the counter. Skipping it would be
         // an infinite loop, and here it would be one with no visible increment to blame.
-        loops_.push_back({stepBB, endBB});
+        // The bindings' scope dies at the end block like a `for` init's: depth is
+        // that scope, so `break` and `continue` clean everything deeper and the
+        // end block cleans the bindings uniformly for all paths joining there.
+        loops_.push_back({stepBB, endBB, scopes_.size() - 1});
+        builder_.SetInsertPoint(bodyBB);
         if (node.body) node.body->accept(*this);
         if (!terminated()) builder_.CreateBr(stepBB);
         loops_.pop_back();
@@ -7935,16 +7998,15 @@ private:
         builder_.CreateBr(condBB);
 
         builder_.SetInsertPoint(endBB);
+        cleanScopeAt(node, scopes_.size() - 1);
+        if (failed_) { popScope(); return; }
         popScope();
     }
     // `delete p` returns the allocation. deeptest3.fin:44 says what it is:
     // "(Calls destructor if defined, then frees memory)".
     //
-    // The call is emitted in visit(DeleteStatement&), just above the `free`:
-    // the pointee's own destructor symbol, when one was declared. Field and
-    // element cleanup is composition (ADR 0016) and lives in the destructor
-    // body, not at the `delete` -- which is also why a type with no destructor
-    // symbol frees exactly as it always has.
+    // The call is emitted in visit(DeleteStatement&) through emitDestructorCall:
+    // the declared body, then fields and bases, just above the `free`.
     // Can this expression's address be taken twice without the program noticing?
     //
     // Asked by the one caller that has to try an address, may not like what it finds, and
@@ -8021,6 +8083,39 @@ private:
         // removing a key that is absent is not an error -- the same rule `rm` follows.
         emitPrototypeRemove(node, *base, key);
         return true;
+    }
+
+    // Emit destructor calls for the struct-valued locals of one scope,
+    // latest declared first. No popping: the scope stays for the walk to pop;
+    // every caller below runs only where the scope dies on this path. Locals
+    // without storage (poisoned) or without struct type need nothing.
+    void cleanScopeAt(ASTNode& node, size_t index) {
+        if (index >= scopes_.size()) return;
+        std::vector<std::pair<size_t, std::string>> names;
+        for (auto& entry : scopes_[index]) names.emplace_back(entry.second.order, entry.first);
+        std::sort(names.begin(), names.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+        for (auto& named : names) {
+            auto found = scopes_[index].find(named.second);
+            if (found == scopes_[index].end()) continue;
+            const Local& local = found->second;
+            if (!local.slot) continue;
+            if (!local.type.isStruct() || !local.type.structInfo) continue;
+            if (!emitDestructorCall(node, *local.type.structInfo, local.slot))
+                return;
+        }
+    }
+
+    // Emit destructor calls for every scope from `depth` up, innermost first:
+    // what a `return` (function base), `break` or `continue` (loop depth)
+    // exits. Callers branch or return right after; popping stays with the
+    // walk, which is what keeps this from running twice for one scope (an
+    // exit cleans what it leaves; a fallthrough end cleans what is left).
+    void cleanScopesFrom(ASTNode& node, size_t depth) {
+        for (size_t i = scopes_.size(); i-- > depth;) {
+            cleanScopeAt(node, i);
+            if (failed_) return;
+        }
     }
 
     // A destructor call for the object at `receiver` of this struct: its
@@ -10213,6 +10308,13 @@ private:
     std::set<const VariableDeclaration*> registeredGlobals_;
     std::vector<LoopTargets> loops_;
     FnInfo* currentFn_ = nullptr;
+    // The function-body scope's index, for `return`: everything from here up
+    // dies with the call. Set when a body starts emitting (after its scope
+    // push), saved and restored across nested emission like currentFn_.
+    size_t fnScopeBase_ = 0;
+    // Declaration sequence for Local::order below. Monotonic across bodies:
+    // only relative order inside one scope is ever compared.
+    size_t nextLocalOrder_ = 0;
     // The struct whose member body is being emitted, for `Self`. Set while
     // draining each queued member body (drainPendingBodies) and empty
     // everywhere else -- in particular a free function never sees one, so a

@@ -6780,6 +6780,90 @@ BACKEND_TEST(Soundness_Codegen, ADeleteCleansTheBaseAfterTheBody) {
     EXPECT_EQ(b.out, "der\nbase\ndone\n") << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// Scope-exit destruction: locals with destructors clean up when control
+// leaves their scope (ADR 0030) -- at `return`, at block end, and on `break`
+// and `continue` -- in reverse declaration order. There are no moves in the
+// language (every binding copies), so every value destroys independently,
+// exactly as C++ value semantics without move constructors.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, ALocalsCleanUpAtReturnInReverseOrder) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Log {\n"
+        "    id <int>,\n"
+        "    ~Log() { printf(\"bye %d\\n\", self.id); }\n"
+        "}\n"
+        "fun work() <int> {\n"
+        "    let a <Log> = Log{ id: 1 };\n"
+        "    let b <Log> = Log{ id: 2 };\n"
+        "    printf(\"body\\n\");\n"
+        "    return 7;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", work());\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "body\nbye 2\nbye 1\n7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABlockLocalCleansUpAtBlockEnd) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Log {\n"
+        "    id <int>,\n"
+        "    ~Log() { printf(\"bye %d\\n\", self.id); }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"a\\n\");\n"
+        "    {\n"
+        "        let t <Log> = Log{ id: 3 };\n"
+        "        printf(\"b\\n\");\n"
+        "    }\n"
+        "    printf(\"c\\n\");\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "a\nb\nbye 3\nc\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ALoopBodyCleansUpPerIterationAndOnBreak) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Log {\n"
+        "    id <int>,\n"
+        "    ~Log() { printf(\"bye %d\\n\", self.id); }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    for (let i <int> = 0; i < 3; i++) {\n"
+        "        let t <Log> = Log{ id: i };\n"
+        "        if (i == 1) { break; }\n"
+        "        printf(\"iter %d\\n\", i);\n"
+        "    }\n"
+        "    printf(\"end\\n\");\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "iter 0\nbye 0\nbye 1\nend\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AParameterCleansUpAtReturn) {
+    // Copies destroy independently (there are no moves): the parameter and
+    // the caller's variable clean separately, each exactly once.
+    const Built b = build(std::string(kPrintf) +
+        "struct Log {\n"
+        "    id <int>,\n"
+        "    ~Log() { printf(\"bye %d\\n\", self.id); }\n"
+        "}\n"
+        "fun take(o: Log) <int> { return o.id; }\n"
+        "fun main() <noret> {\n"
+        "    let v <Log> = Log{ id: 9 };\n"
+        "    printf(\"%d\\n\", take(v));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "bye 9\n9\nbye 9\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the
