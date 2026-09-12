@@ -370,9 +370,15 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
             return;
         }
 
-        case NodeKind::ArrayLiteral:
-            emitAll(out, static_cast<ArrayLiteral&>(node).elements);
+        case NodeKind::ArrayLiteral: {
+            auto& n = static_cast<ArrayLiteral&>(node);
+            emitAll(out, n.elements);
+            // What inference found, beside what was written -- see
+            // ArrayLiteral::resolved_type, and FunctionCall::resolved_args
+            // for why both are emitted.
+            emit(out, n.resolved_type.get());
             return;
+        }
 
         case NodeKind::PrototypeLiteral: {
             auto& n = static_cast<PrototypeLiteral&>(node);

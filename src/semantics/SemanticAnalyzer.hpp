@@ -376,6 +376,14 @@ private:
     // StructInstantiation::resolved_args.
     void recordLiteralArgs(StructInstantiation& node, const std::shared_ptr<Type>& inferred);
 
+    // Records on an array literal the type inference found (`[int, 4]` for
+    // `[1, 2, 3, 4]`), for the backend to build where no declaration set a
+    // hint. The array half of the same rule: what is recorded is the type the
+    // elements were checked against, spelled back out, with the same spelling
+    // guards -- so the backend builds what the front end typed rather than
+    // guessing from an element. See ArrayLiteral::resolved_type.
+    void recordLiteralType(ArrayLiteral& node, const std::shared_ptr<Type>& inferred);
+
     // The type an expression is about to be checked against, and the exact expression
     // node it belongs to.
     //

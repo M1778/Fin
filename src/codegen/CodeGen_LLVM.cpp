@@ -9775,17 +9775,31 @@ private:
         // asked for it. That is what makes `let c <[int, 3]> = a;` a copy: an LLVM
         // array value is a value.
         //
-        // The element type comes from the hint the surrounding declaration set, and
-        // there is exactly one thing that can set it -- a literal reaching here with
-        // no hint has no element type to be an array *of*. `[1, 2, 3]` on its own is
-        // not `[int, 3]` by inspection: the front end may have typed those constants
-        // as `uint` against an annotation this file cannot see, and guessing from the
-        // first element is how the two passes come to disagree about a stride.
-        if (!arrayHint_ || !arrayHint_->element) {
+        // The element type comes from the hint the surrounding declaration set
+        // -- and, where nothing set one, from what inference recorded. A
+        // recorded type is not a guess from an element: it is the type the
+        // front end checked the elements against, spelled back out, so the
+        // two passes build the same array. The hint still wins where one is
+        // set (a declaration refines what a literal means); a literal with
+        // neither has no element type to be an array *of*.
+        const CgType* hintType =
+            (arrayHint_ && arrayHint_->element) ? arrayHint_ : nullptr;
+        CgType recordedType;
+        bool haveRecorded = false;
+        if (!hintType && node.resolved_type) {
+            auto mapped = types_.map(node.resolved_type.get());
+            if (!mapped) {
+                unsupportedType(node, node.resolved_type.get(), "an array literal");
+                return;
+            }
+            recordedType = *mapped;
+            haveRecorded = true;
+        }
+        if (!hintType && !haveRecorded) {
             unsupported(node, "an array literal with no declared type");
             return;
         }
-        const CgType type = *arrayHint_;
+        const CgType type = hintType ? *hintType : recordedType;
         if (type.isDynamicArray) {
             std::vector<Expression*> elements;
             elements.reserve(node.elements.size());

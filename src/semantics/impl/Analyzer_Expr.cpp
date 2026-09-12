@@ -2448,6 +2448,13 @@ void SemanticAnalyzer::visit(ArrayLiteral& node) {
     // adopting the type they were checked against is what keeps that the whole report.
     lastExprType = std::make_shared<ArrayType>(
         expected, static_cast<uint64_t>(node.elements.size()));
+    // What the elements were checked against, spelled back out for the backend
+    // to build where no declaration sets a hint (a comparison operand, a
+    // ternary arm). `expected` already folds the hint in where there was one,
+    // so a recorded type and a hint cannot disagree -- and where the elements
+    // carry no spelling (an error, `any`, a function value) nothing is
+    // recorded and the backend refuses as before.
+    if (lastExprType) recordLiteralType(node, lastExprType);
 }
 
 void SemanticAnalyzer::visit(SizeofExpression& node) {
@@ -2647,6 +2654,25 @@ void SemanticAnalyzer::recordLiteralArgs(StructInstantiation& node,
     debugLog(fg(fmt::color::blue), "      [Generic] '{}' resolved its arguments to '{}'\n",
              node.struct_name, inferred->toString());
     node.resolved_args = std::move(spelled);
+}
+
+// The array half of the same rule: the literal's own inferred type, spelled
+// for the backend to build where no hint is set. See recordResolvedArgs for
+// the guards, which are the same -- an unspellable element and a
+// still-standing unresolvable parameter both record nothing, and the failure
+// is the old refusal rather than a wrong array.
+void SemanticAnalyzer::recordLiteralType(ArrayLiteral& node,
+                                          const std::shared_ptr<Type>& inferred) {
+    if (!inferred) return;
+    if (!everyGenericParamResolvesHere(inferred, currentScope.get())) return;
+    auto spelled = spellType(inferred);
+    if (!spelled) return;
+    // The literal's location, for the reason recordResolvedTarget states: an
+    // inferred type has no source spelling to point at.
+    spelled->setLoc(node.loc);
+    debugLog(fg(fmt::color::blue), "      [Generic] array literal resolved its type to '{}'\n",
+             inferred->toString());
+    node.resolved_type = std::move(spelled);
 }
 
 void SemanticAnalyzer::visit(StaticMethodCall& node) {

@@ -7077,6 +7077,48 @@ BACKEND_TEST(Soundness_Codegen, AnElidedLiteralWithNoSourceStillNamesTheStruct) 
         << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, ADynamicArrayComparesAgainstABareLiteral) {
+    // const.fin:102 in miniature: the literal carries no declaration, so the
+    // backend cannot ask the hint what it is -- but the analyzer already
+    // typed it (`[int, 4]`, fixed) and records the spelling. Lengths decide
+    // without reading out of bounds either way.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int]> = [1, 2, 3];\n"
+        "    printf(\"%d %d\\n\", a == [1, 2, 3], a == [1, 2]);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, TwoBareLiteralsCompareByLengthThenElements) {
+    // Neither side has a declaration; each carries what inference found.
+    // Same extent compares element-wise, so equal lengths with a differing
+    // element are unequal rather than unlowered.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    printf(\"%d %d\\n\", [1, 2] == [1, 2], [1, 2] == [1, 3]);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnEmptyBareLiteralStillHasNoType) {
+    // `[]` states no elements, and `==` offers no hint, so there is nothing
+    // to record and the refusal stays where inference leaves it: the front
+    // end, which is the pass that knows no annotation was written.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int]> = [1, 2, 3];\n"
+        "    printf(\"%d\\n\", a == []);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("Empty array literal cannot infer type"),
+              std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the
