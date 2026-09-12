@@ -94,13 +94,12 @@ Run each sample with `build/finc -c <sample>` and fix the first refusal, then re
 
 4. **Frontend blockers still visible in the corpus** (not codegen failures; do not
    turn a documented sample typo into a compiler feature):
-   - `const.fin` — `rptr<int>` versus `&rptr<int>` mismatch
-   - `enums.fin`, `stdlib/operators.fin`, `stdlib/typing.fin` — `Any`
-   - `importing.fin` — intentionally missing `somelib` module
-   - `literal_interface.fin` — `implements`
-   - `literal_struct.fin` — undefined `st`
-   - `nullifier.fin` — nullable `A?` versus `int?`
-   - `preprocessor.fin` — parser error at `RPAREN`
+- `const.fin` — `rptr<int>` versus `&rptr<int>` mismatch
+- `enums.fin`, `stdlib/operators.fin`, `stdlib/typing.fin` — `Any<...>` needs
+  `...` as a generic argument (ADR 0018); the `Any` imports they owed are paid
+- `importing.fin` — intentionally missing `somelib` module
+- `literal_interface.fin` — `implements`
+- `literal_struct.fin` — undefined `st`
    - `prototype_test.fin` — `int` versus `object`
    - `stdlib/collection.fin` — function variance/signature mismatch
    - `stdlib/enums.fin` — `Enum`
