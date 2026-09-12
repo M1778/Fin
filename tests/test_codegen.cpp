@@ -6711,6 +6711,75 @@ BACKEND_TEST(Soundness_Codegen, ADeleteRunsTheDestructorFirst) {
     EXPECT_EQ(b.out, "dtor 3\nafter\n") << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// Composed destruction: a destructor call cleans fields and bases after it.
+//
+// ADR 0016: a field whose type has a destructor is cleaned from its parent's
+// destructor, after the declared body (C++/D order); fields go in reverse
+// declaration order and effective bases last. A parent that declares none
+// still cleans its fields -- there is simply no body before them.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, ADeleteCleansFieldsInReverseAfterTheBody) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Part {\n"
+        "    id <int>,\n"
+        "    ~Part() { printf(\"part %d\\n\", self.id); }\n"
+        "}\n"
+        "struct Mach {\n"
+        "    first <Part>,\n"
+        "    second <Part>,\n"
+        "    ~Mach() { printf(\"mach\\n\"); }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let m <&Mach> = new Mach{ first: Part{ id: 1 }, second: Part{ id: 2 } };\n"
+        "    delete m;\n"
+        "    printf(\"done\\n\");\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "mach\npart 2\npart 1\ndone\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADeleteCleansFieldsWithNoDeclaredBody) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Inner {\n"
+        "    v <int>,\n"
+        "    ~Inner() { printf(\"inner %d\\n\", self.v); }\n"
+        "}\n"
+        "struct Wrap {\n"
+        "    inn <Inner>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let w <&Wrap> = new Wrap{ inn: Inner{ v: 9 } };\n"
+        "    delete w;\n"
+        "    printf(\"done\\n\");\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "inner 9\ndone\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADeleteCleansTheBaseAfterTheBody) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Base {\n"
+        "    v <int>,\n"
+        "    ~Base() { printf(\"base\\n\"); }\n"
+        "}\n"
+        "struct Der : <Base> {\n"
+        "    w <int>,\n"
+        "    ~Der() { printf(\"der\\n\"); }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let d <&Der> = new Der{ v: 1, w: 2 };\n"
+        "    delete d;\n"
+        "    printf(\"done\\n\");\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "der\nbase\ndone\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the

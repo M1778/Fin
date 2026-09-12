@@ -114,9 +114,12 @@ Run each sample with `build/finc -c <sample>` and fix the first refusal, then re
 
 ## Accepted but not yet implemented
 
-- **Implicit scope-exit destruction** (ADR 0030): destructor symbols/bodies lower
-  explicitly; no scope-exit invocation is wired up. Revisit only if the language
-  ruling requires it.
+- **Implicit scope-exit destruction** (ADR 0030): destructors run via `delete`
+  (composed: body, fields reverse, effective bases), but no scope-exit
+  invocation is wired up. Revisit only if the language ruling requires it.
+- **`delete &field` vs automatic field cleanup**: an explicit deallocation of a
+  field with a destructor will run twice once scope exits clean it too (ADR 0016
+  names this decision as the one to revisit). No corpus program hits it yet.
 - **Windows full green**: MSVC component-link ruling implemented (ADR 0031) and
   `__acrt_iob_func` stderr handled, but Windows jobs now fail compiling the bison
   parser (`parser.hpp` copies move-only AST nodes; MSVC C2280, GCC/Clang move).

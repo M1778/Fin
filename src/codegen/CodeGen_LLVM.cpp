@@ -2172,6 +2172,39 @@ private:
         }
     }
 
+    // The direct bases that own bytes in this layout: a base that is a
+    // strict transitive ancestor of another direct base arrives through the
+    // descendant (ADR 0029), and a duplicate spelling keeps its first
+    // occurrence. Shared by declareStructBody's splice and emitDestructorCall,
+    // which is what makes "laid out" and "cleaned up" answer together: a base
+    // skipped here is never spliced and never destroyed twice.
+    std::vector<const TypeNode*> effectiveBases(const StructDeclaration& s) {
+        std::vector<const TypeNode*> out;
+        for (size_t i = 0; i < s.parents.size(); ++i) {
+            auto& parent = s.parents[i];
+            if (!parent || parentIsInterface(*parent)) continue;
+            bool shared = false;
+            for (size_t j = 0; j < s.parents.size(); ++j) {
+                if (i == j) continue;
+                auto& other = s.parents[j];
+                if (!other || parentIsInterface(*other)) continue;
+                if (other->name == parent->name) {
+                    if (j < i) {
+                        shared = true;
+                        break;
+                    }
+                    continue;
+                }
+                if (baseIsAncestorOf(parent->name, other->name)) {
+                    shared = true;
+                    break;
+                }
+            }
+            if (!shared) out.push_back(parent.get());
+        }
+        return out;
+    }
+
     // Second pass for one struct: splice base fields, map own members, set the
     // body. The name entry must already exist (first pass); methods are a later
     // pass and never run here, which is what makes this usable for imported
@@ -2197,34 +2230,11 @@ private:
         // the analyzer reports `Undefined type 'Base'` first (measured), so the
         // ordering problem the third pass exists to solve does not apply.
         //
-        // ADR 0029's chain diamond shares one ancestor: a direct base that is
-        // a strict transitive ancestor of another direct base arrives through
-        // the descendant, so it is skipped and its bytes appear once at
-        // offset 0. A duplicate spelling keeps its first occurrence. Any
-        // other second base lays out sequentially as before -- unrelated
-        // bases still refuse downstream (a second field, a misread method),
-        // never silently.
-        for (size_t pi = 0; pi < s->parents.size(); ++pi) {
-            auto& parent = s->parents[pi];
-            if (!parent || parentIsInterface(*parent)) continue;
-            bool shared = false;
-            for (size_t oi = 0; oi < s->parents.size(); ++oi) {
-                if (oi == pi) continue;
-                auto& other = s->parents[oi];
-                if (!other || parentIsInterface(*other)) continue;
-                if (other->name == parent->name) {
-                    if (oi < pi) {
-                        shared = true;
-                        break;
-                    }
-                    continue;
-                }
-                if (baseIsAncestorOf(parent->name, other->name)) {
-                    shared = true;
-                    break;
-                }
-            }
-                if (shared) continue;
+        // ADR 0029's chain diamond shares one ancestor (effectiveBases
+        // selects them): any other second base lays out sequentially as
+        // before -- unrelated bases still refuse downstream (a second field,
+        // a misread method), never silently.
+        for (const TypeNode* parent : effectiveBases(*s)) {
                 auto base = structs_.find(parent->name);
                 if (base == structs_.end()) {
                     // A base from a loaded module lays out on first need
@@ -8013,6 +8023,61 @@ private:
         return true;
     }
 
+    // A destructor call for the object at `receiver` of this struct: its
+    // declared body, if any, then field destructors in reverse declaration
+    // order, then effective base destructors -- construction mirrored
+    // (ADR 0016's body-after-fields rule, C++/D order throughout, ADR 0029's
+    // sharing for bases). A struct with neither cleans nothing and this
+    // emits nothing, which is what makes a generated destructor need no
+    // symbol: parents that declare none still clean their fields through
+    // here. Recursion terminates because only plain struct values recurse --
+    // pointer and array fields hold no owned value (unruled shapes, not empty
+    // ones) -- and a value cycle has no finite size. Inherited fields belong
+    // to a base subobject the base call below owns. False having reported.
+    bool emitDestructorCall(ASTNode& node, const StructInfo& info,
+                            llvm::Value* receiver) {
+        auto declared = functions_.find(methodKey(info.finName, "destructor"));
+        if (declared == functions_.end()) {
+            // No body to call. If the declaration HAS one somewhere this
+            // object does not define (a module's -- bodies never emit from
+            // imports), skipping would leak silently, so it refuses instead.
+            if (info.decl && info.decl->destructor) {
+                unsupported(node, fmt::format("the destructor of '{}', which is "
+                                              "defined in another module",
+                                              info.finName));
+                return false;
+            }
+        } else {
+            const std::string key = methodKey(info.finName, "destructor");
+            std::vector<llvm::Value*> noArgs{receiver};
+            if (!emitCallArgs(node, declared->second, key, {}, noArgs))
+                return false;
+            emitCall(declared->second, noArgs);
+        }
+        for (size_t i = info.fields.size(); i-- > 0;) {
+            const StructField& field = info.fields[i];
+            if (field.inherited) continue;
+            if (!field.type.isStruct() || !field.type.structInfo) continue;
+            llvm::Value* fieldPtr = builder_.CreateStructGEP(
+                info.llvmType, receiver, (unsigned)i, field.name);
+            if (!emitDestructorCall(node, *field.type.structInfo, fieldPtr))
+                return false;
+        }
+        if (info.decl) {
+            const std::vector<const TypeNode*> bases = effectiveBases(*info.decl);
+            for (size_t i = bases.size(); i-- > 0;) {
+                auto base = structs_.find(bases[i]->name);
+                // No layout, no subobject: a generic base never splices one
+                // (its fields are not in this body), so there is nothing here
+                // to destroy -- consistent with the layout gap, not a new hole.
+                if (base == structs_.end() || !base->second.complete) continue;
+                if (!emitDestructorCall(node, base->second, receiver))
+                    return false;
+            }
+        }
+        return true;
+    }
+
     void visit(DeleteStatement& node) override {
         if (!currentFn_) { unsupported(node, "'delete' outside a function"); return; }
         if (!node.expr) { unsupported(node, "'delete' with no operand"); return; }
@@ -8031,20 +8096,13 @@ private:
             return;
         }
         // The destructor runs before the storage goes: deeptest3.fin:44
-        // ("Calls destructor if defined, then frees memory"). Only the
-        // pointee's own destructor -- field and element cleanup is
-        // composition (ADR 0016), which lives in the destructor body, not
-        // here. A type with no destructor symbol frees exactly as before.
+        // ("Calls destructor if defined, then frees memory") -- the declared
+        // body, then fields and bases through emitDestructorCall, so cleanup
+        // composes. A type with nothing to clean frees exactly as before.
         if (v.type.isPointer() && v.type.pointee && v.type.pointee->isStruct() &&
             v.type.pointee->structInfo) {
-            const StructInfo& target = *v.type.pointee->structInfo;
-            auto found = functions_.find(methodKey(target.finName, "destructor"));
-            if (found != functions_.end()) {
-                const std::string key = methodKey(target.finName, "destructor");
-                std::vector<llvm::Value*> dargs{address};
-                if (!emitCallArgs(node, found->second, key, {}, dargs)) return;
-                emitCall(found->second, dargs);
-            }
+            if (!emitDestructorCall(node, *v.type.pointee->structInfo, address))
+                return;
         }
         llvm::FunctionCallee release = runtimeFn(
             node, "free",
