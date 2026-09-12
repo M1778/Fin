@@ -7017,6 +7017,66 @@ BACKEND_TEST(Soundness_Codegen, AnUninferrableConstructorStillNamesTheTemplate) 
         << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, AnElidedLiteralInstantiatesFromTheEnclosingReturn) {
+    // stdptr.fin's `weak()` in miniature: `wptr{...}` inside `rptr<T>` names
+    // the bare template but means `wptr<T>`, and the declaration that says so
+    // is the enclosing return type. The analyzer records the spelling; the
+    // backend instantiates what was recorded.
+    const Built b = build(std::string(kPrintf) +
+        "struct Inner<T> {\n"
+        "    v <T>,\n"
+        "}\n"
+        "struct Outer<T> {\n"
+        "    x <T>,\n"
+        "    fun make(self: &Self) <Inner<T>> {\n"
+        "        return Inner{ v: self.x };\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let o <Outer<int>> = Outer{ x: 5 };\n"
+        "    let i <Inner<int>> = o.make();\n"
+        "    printf(\"%d\\n\", i.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnElidedLiteralInstantiatesFromTheAnnotation) {
+    // The same elision at namespace scope, seeded by the declaration: the
+    // annotation names the instantiation and the literal carries no turbofish
+    // of its own.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box{ val: 7 };\n"
+        "    printf(\"%d\\n\", b.val);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "7\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnElidedLiteralWithNoSourceStillNamesTheStruct) {
+    // No turbofish, no declaration naming the instantiation (`auto` takes no
+    // seed), and no field mentioning the parameter: inference records nothing
+    // and the refusal names the struct rather than inventing an
+    // instantiation. (A field that does mention it infers -- `Box{ val: 7 }`
+    // under `auto` is `Box<int>` -- by the same rule a call's arguments do.)
+    const Built b = build(std::string(kPrintf) +
+        "struct Empty<T> {\n"
+        "    tag <int>,\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let e <auto> = Empty{ tag: 1 };\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("a literal of struct 'Empty'"), std::string::npos)
+        << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the

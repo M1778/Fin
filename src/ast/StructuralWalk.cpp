@@ -386,6 +386,10 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
         case NodeKind::StructInstantiation: {
             auto& n = static_cast<StructInstantiation&>(node);
             emitAll(out, n.generic_args);
+            // What inference found, beside what was written -- see
+            // StructInstantiation::resolved_args, and FunctionCall's for why
+            // both are emitted.
+            emitAll(out, n.resolved_args);
             emitPairValues(out, n.fields);
             return;
         }

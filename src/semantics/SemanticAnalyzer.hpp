@@ -367,6 +367,15 @@ private:
     // is the old refusal, never a wrong instantiation.
     void recordResolvedArgs(FunctionCall& node, const std::shared_ptr<Type>& inferred);
 
+    // Records on a struct literal the type arguments inference found, for the
+    // backend to instantiate where the literal wrote none (`Box{ val: 7 }`
+    // under `Box<int>`, `wptr{...}` under `wptr<T>`). The literal half of the
+    // same rule: a written turbofish needs no record, and what is recorded is
+    // spelled out of the instantiation the literal's own inference computed --
+    // hint first, then fields -- with the same spelling guards. See
+    // StructInstantiation::resolved_args.
+    void recordLiteralArgs(StructInstantiation& node, const std::shared_ptr<Type>& inferred);
+
     // The type an expression is about to be checked against, and the exact expression
     // node it belongs to.
     //

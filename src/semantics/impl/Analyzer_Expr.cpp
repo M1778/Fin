@@ -2257,7 +2257,7 @@ void SemanticAnalyzer::visit(StructInstantiation& node) {
             auto t = resolveTypeFromAST(arg.get());
             if (t) args.push_back(t);
         }
-        
+
         auto instantiated = structDef->instantiate(args);
         if (!instantiated) {
             error(node, "Generic count mismatch in struct instantiation");
@@ -2265,6 +2265,59 @@ void SemanticAnalyzer::visit(StructInstantiation& node) {
             return;
         }
         concreteType = std::static_pointer_cast<StructType>(instantiated);
+    } else if (mentionsGenericParam(structDef)) {
+        // An elided construction of a generic struct: `Box{ val: 7 }` for
+        // `Box<int>`, `wptr{...}` for the `wptr<T>` a method declares it
+        // returns. The constructor-call path (checkGenericCall) reads three
+        // sources in order -- what the call wrote, the hint, the arguments --
+        // and a literal has the same three: the turbofish above, the
+        // annotation/return/assignment hint, and the field values. The first
+        // is absent by construction of this branch, so the hint is unified
+        // first and the fields second; first-binding-wins is what makes the
+        // hint win, exactly as for a call.
+        //
+        // Walked once: the values are accepted here and checked below against
+        // the instantiation, so the existing loop underneath only runs for the
+        // cases this branch does not take (a turbofish, a concrete struct).
+        // Where nothing binds every parameter the target stays the template
+        // and the checks below run against it -- today's behavior exactly --
+        // and only a complete, spellable instantiation is recorded.
+        std::vector<std::shared_ptr<Type>> valueTypes;
+        valueTypes.reserve(node.fields.size());
+        for (auto& f : node.fields) {
+            f.second->accept(*this);
+            valueTypes.push_back(lastExprType);
+        }
+        TypeMap mapping;
+        if (auto hint = hintFor(node)) {
+            if (hint->as<StructType>()) unifyGeneric(structDef, hint, mapping);
+        }
+        for (size_t i = 0; i < node.fields.size(); ++i) {
+            auto ft = structDef->getFieldType(node.fields[i].first);
+            if (ft) unifyGeneric(ft, valueTypes[i], mapping);
+        }
+        std::shared_ptr<StructType> target = structDef;
+        bool complete = true;
+        for (auto& g : structDef->generic_args) {
+            if (!mapping.count(g->toString())) { complete = false; break; }
+        }
+        if (complete) {
+            if (auto inst = std::dynamic_pointer_cast<StructType>(
+                    structDef->instantiate(orderedGenericArgs(structDef, mapping))))
+                target = inst;
+        }
+        for (size_t i = 0; i < node.fields.size(); ++i) {
+            auto fieldType = target->getFieldType(node.fields[i].first);
+            if (!fieldType) {
+                error(node, fmt::format("Struct '{}' has no field '{}'",
+                                        target->toString(), node.fields[i].first));
+            } else {
+                checkType(*node.fields[i].second, valueTypes[i], fieldType);
+            }
+        }
+        lastExprType = target;
+        if (complete) recordLiteralArgs(node, target);
+        return;
     }
     
     lastExprType = concreteType;
@@ -2569,6 +2622,30 @@ void SemanticAnalyzer::recordResolvedArgs(FunctionCall& node,
     }
     debugLog(fg(fmt::color::blue), "      [Generic] '{}' resolved its arguments to '{}'\n",
              node.name, inferred->toString());
+    node.resolved_args = std::move(spelled);
+}
+
+// The literal half of the same rule: what a struct literal's inference found,
+// spelled for the backend to instantiate where the literal wrote none. See
+// recordResolvedArgs for the guards, which are the same -- an unspellable
+// argument and a still-standing unresolvable parameter both record nothing,
+// and the failure is the old refusal rather than a wrong instantiation.
+void SemanticAnalyzer::recordLiteralArgs(StructInstantiation& node,
+                                          const std::shared_ptr<Type>& inferred) {
+    auto* st = inferred ? inferred->as<StructType>() : nullptr;
+    if (!st) return;
+    if (!everyGenericParamResolvesHere(inferred, currentScope.get())) return;
+    std::vector<std::unique_ptr<TypeNode>> spelled;
+    for (const auto& arg : st->generic_args) {
+        auto s = spellType(arg);
+        if (!s) return;
+        // The literal's location, for the reason recordResolvedTarget states:
+        // an inferred argument has no source spelling to point at.
+        s->setLoc(node.loc);
+        spelled.push_back(std::move(s));
+    }
+    debugLog(fg(fmt::color::blue), "      [Generic] '{}' resolved its arguments to '{}'\n",
+             node.struct_name, inferred->toString());
     node.resolved_args = std::move(spelled);
 }
 

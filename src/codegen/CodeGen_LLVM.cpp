@@ -9508,8 +9508,16 @@ private:
     }
 
     void visit(StructInstantiation& node) override {
-        const std::string name = literalStructName(node, node.struct_name,
-                                                   node.generic_args);
+        // What inference found, where the literal wrote no turbofish -- the
+        // literal half of the constructor call's resolved_args, under the
+        // same rule: a written turbofish needs no record, and the recorded
+        // spelling instantiates by the path below. Either empty means the
+        // bare-name path, which is what a Self-family literal still takes.
+        const std::vector<std::unique_ptr<TypeNode>>& args =
+            node.generic_args.empty() && !node.resolved_args.empty()
+                ? node.resolved_args
+                : node.generic_args;
+        const std::string name = literalStructName(node, node.struct_name, args);
         if (name.empty()) return;  // already reported
         value_ = buildStructValue(node, name, node.fields);
     }
@@ -9530,11 +9538,13 @@ private:
         ASTNode& node, const std::string& writtenName,
         const std::vector<std::unique_ptr<TypeNode>>& args) {
         if (args.empty()) {
-            // A bare `Collection{...}` inside `Collection<T>`'s own method
-            // bodies: the enclosing instantiation (Self-family, like `Self()`
-            // calls), with the bindings the body is being emitted under. The
-            // name must be the template's own: any other bare generic name is
-            // a use the annotation-inference gap owns, not this.
+            // A bare `Self{...}` inside `Collection<T>`'s own method bodies:
+            // the enclosing instantiation (Self-family, like `Self()` calls),
+            // with the bindings the body is being emitted under. The name must
+            // be the template's own -- any other bare generic name either
+            // carried recorded arguments (resolved_args, read at the call
+            // site above) or is a use nothing answered, which buildStructValue
+            // refuses by name.
             if (!currentStructName_.empty()) {
                 auto cur = structs_.find(currentStructName_);
                 if (cur != structs_.end() && cur->second.decl &&
