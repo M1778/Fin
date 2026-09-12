@@ -356,6 +356,17 @@ private:
     // StaticMethodCall::resolved_target and spellType.
     void recordResolvedTarget(StaticMethodCall& node, const std::shared_ptr<Type>& instance);
 
+    // Records on a constructor call the type arguments inference found, for the
+    // backend to instantiate where the call wrote no turbofish (`Box(5)` for
+    // `let b <Box<int>> = Box(5)`). The constructor-call half of
+    // recordResolvedTarget's rule: the front end infers (annotation first, then
+    // arguments -- b690f60), the backend lowers what was recorded. Records
+    // nothing where an argument has no node to spell it, and nothing where a
+    // parameter is still standing unresolvable here -- see FunctionCall::
+    // resolved_args and everyGenericParamResolvesHere. Either way the failure
+    // is the old refusal, never a wrong instantiation.
+    void recordResolvedArgs(FunctionCall& node, const std::shared_ptr<Type>& inferred);
+
     // The type an expression is about to be checked against, and the exact expression
     // node it belongs to.
     //

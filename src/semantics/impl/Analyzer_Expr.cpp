@@ -1280,6 +1280,12 @@ std::shared_ptr<Type> SemanticAnalyzer::checkGenericCall(ASTNode& node, const ch
 void SemanticAnalyzer::visit(FunctionCall& node) {
     std::shared_ptr<FunctionType> funcType = nullptr;
     std::string funcName = node.name;
+    // The struct this call constructs, when the name resolved to one (Case 2
+    // below): a constructor call, as opposed to a free function or an
+    // enumerator that happens to return a generic struct. Only a constructor
+    // has its instantiation recorded -- the backend reads resolved_args on no
+    // other spelling.
+    std::shared_ptr<StructType> ctorTarget = nullptr;
 
     // Case 1: Self(...)
     if (funcName == "Self") {
@@ -1303,6 +1309,7 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
         auto type = currentScope->resolveType(funcName);
         if (type) {
             if (auto st = getStructType(type, currentScope)) {
+                ctorTarget = st;
                 // constructorFor and not `constructors[0]`: a parent's is inherited,
                 // rebound to construct this type rather than the parent
                 // (Soundness_ConstructorInheritance). `struct CollectionError :
@@ -1401,6 +1408,12 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
     if (funcType->return_type && mentionsGenericParam(funcType->return_type)) {
         lastExprType = checkGenericCall(node, "Function", funcName, *funcType, node.args,
                                         nullptr, std::move(written));
+        // A constructor that wrote no turbofish: what inference found is
+        // recorded for the backend to instantiate. Annotation first, then
+        // arguments -- checkGenericCall's order -- and nothing at all where a
+        // parameter is still standing, which is the backend's old refusal.
+        if (node.generic_args.empty() && ctorTarget && lastExprType)
+            recordResolvedArgs(node, lastExprType);
         return;
     }
 
@@ -2523,6 +2536,40 @@ void SemanticAnalyzer::recordResolvedTarget(StaticMethodCall& node,
              node.target_type ? node.target_type->name : std::string("?"),
              node.method_name, instance->toString());
     node.resolved_target = std::move(spelled);
+}
+
+// The constructor-call half of recordResolvedTarget's rule: what inference
+// found, spelled as nodes for the backend to instantiate where the call wrote
+// no turbofish. Read is `lastExprType` fresh out of checkGenericCall -- the
+// instantiated return, e.g. `rptr<int>` for `rptr(5)` under an `rptr<int>`
+// annotation -- and what is recorded is its argument list, which is what the
+// backend's instantiation takes.
+//
+// The caller gates on the callee having resolved as a struct (a constructor),
+// and on nothing written (a turbofish needs no record). What remains ungated
+// here is refused by the two guards below, and both refusals are the old
+// backend one rather than a wrong type: an argument with no spelling (a
+// function type, `any`, the error sentinel -- see spellType) records nothing,
+// and a parameter still standing records nothing unless it resolves, here, to
+// itself -- the everyGenericParamResolvesHere rule, which is what stops an
+// enclosing template's same-spelled parameter from being stamped on the node.
+void SemanticAnalyzer::recordResolvedArgs(FunctionCall& node,
+                                           const std::shared_ptr<Type>& inferred) {
+    auto* st = inferred ? inferred->as<StructType>() : nullptr;
+    if (!st || st->generic_args.empty()) return;
+    if (!everyGenericParamResolvesHere(inferred, currentScope.get())) return;
+    std::vector<std::unique_ptr<TypeNode>> spelled;
+    for (const auto& arg : st->generic_args) {
+        auto s = spellType(arg);
+        if (!s) return;
+        // The call's location, for the reason recordResolvedTarget states: an
+        // inferred argument has no source spelling to point at.
+        s->setLoc(node.loc);
+        spelled.push_back(std::move(s));
+    }
+    debugLog(fg(fmt::color::blue), "      [Generic] '{}' resolved its arguments to '{}'\n",
+             node.name, inferred->toString());
+    node.resolved_args = std::move(spelled);
 }
 
 void SemanticAnalyzer::visit(StaticMethodCall& node) {

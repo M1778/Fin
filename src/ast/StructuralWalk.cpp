@@ -319,6 +319,10 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
         case NodeKind::FunctionCall: {
             auto& n = static_cast<FunctionCall&>(node);
             emitAll(out, n.generic_args);
+            // What inference found, beside what was written -- see
+            // FunctionCall::resolved_args. Emitted so a substitution inside a
+            // template body reaches a recorded parameter name.
+            emitAll(out, n.resolved_args);
             emitAll(out, n.args);
             return;
         }

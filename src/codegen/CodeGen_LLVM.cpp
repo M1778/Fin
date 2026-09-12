@@ -7097,17 +7097,28 @@ private:
         StructDeclaration* structTmpl = ensureTemplate(node.name);
         if (structTmpl) {
             if (node.generic_args.empty()) {
-                // `Box(7)`, with the arguments meant to say what T is. Refused naming
-                // the question rather than inferred, and the question is *where the
-                // arguments come from* rather than how to unify them: unifyBinding over
-                // the constructor's parameters would answer this spelling, and
-                // `let b <Box<int>> = Box(7);` -- which is the same call with the
-                // annotation carrying the answer -- would still have to reach the same
-                // instantiation by a different route. That is the booked
-                // StructInstantiation-does-not-infer-from-an-annotation gap, and half of
-                // it landing here would make two spellings of one call disagree about
-                // which of the two sources wins. `Box::<int>(7)` is the spelling that
-                // says it once.
+                // What inference found, recorded on the call: `Box(5)` for
+                // `let b <Box<int>> = Box(5)`. The analyzer read the annotation
+                // first and the arguments second (b690f60), and recorded
+                // nothing where a parameter is still standing -- so this is
+                // the same instantiation the turbofish below would name, by
+                // the same path, and `Box::<int>(7)` keeps meaning what it
+                // did. A bare `Collection{...}`-style use from inside a
+                // template body records its parameters by name and maps
+                // through the active substitution, exactly as a written one
+                // does.
+                if (!node.resolved_args.empty()) {
+                    const std::string instance =
+                        literalStructName(node, node.name, node.resolved_args);
+                    if (instance.empty()) return;  // already reported
+                    emitNamedCall(node, instance);
+                    return;
+                }
+                // `Box(7)`, with nothing to say what T is: no turbofish, and
+                // inference recorded nothing -- `auto` takes no seed and no
+                // argument bound the parameter. Refused naming the question
+                // rather than inferred, because the one source that could
+                // answer it is absent and not merely unread.
                 unsupported(node, fmt::format("a constructor call on the generic struct "
                                               "'{}' with no type arguments", node.name));
                 return;

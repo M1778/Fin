@@ -12,6 +12,23 @@ public:
     std::string name;
     std::vector<std::unique_ptr<Expression>> args;
     std::vector<std::unique_ptr<TypeNode>> generic_args;
+    // The type arguments inference found, when the call wrote none: `Box<int>`
+    // for the `Box(5)` of `let b <Box<int>> = Box(5)`, spelled back out of the
+    // instantiation the analyzer already computed.
+    //
+    // Beside `generic_args` rather than written into it, for the reason
+    // StaticMethodCall::resolved_target states: `generic_args` is what the source
+    // says and a diagnostic about it points at written text, while an inferred
+    // argument has no spelling to point at. The backend reads these where it
+    // would otherwise refuse an elided construction; empty everywhere else --
+    // where a turbofish was written, and where nothing bound the parameters.
+    //
+    // A parameter still standing is spelled as its own name and is sound exactly
+    // where the substitution active at emission binds that parameter -- the same
+    // rule resolved_target follows, for the same reason: the mapper resolves a
+    // bare name through the active substitution. StructuralWalk emits these, so a
+    // pass substituting inside a template body sees them.
+    std::vector<std::unique_ptr<TypeNode>> resolved_args;
     // Written `@name(args)`: a call of a special function, which is resolved by
     // the compiler and not by name lookup in the program
     // (tests/samples/stdlib/memory.fin:14, stdlib/enums.fin:18,

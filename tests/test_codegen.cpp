@@ -6981,6 +6981,42 @@ BACKEND_TEST(Soundness_Codegen, ADynamicArrayComparesLengthThenElements) {
     EXPECT_EQ(b.out, "0 1\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, AnElidedConstructorInstantiatesFromWhatInferenceFound) {
+    // const.fin:80 in miniature: `rptr(5)` with `rptr<int>` on the left. The
+    // analyzer infers T (from the annotation first, then the arguments --
+    // b690f60) and records the spelling on the call; the backend instantiates
+    // what was recorded, exactly as a written turbofish instantiates.
+    const Built b = build(std::string(kPrintf) +
+        "struct Box<T> {\n"
+        "    val <T>,\n"
+        "    constructor(v: T) { self.val = v; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let b <Box<int>> = Box(5);\n"
+        "    printf(\"%d\\n\", b.val);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "5\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AnUninferrableConstructorStillNamesTheTemplate) {
+    // Nothing says what T is -- no turbofish, no annotation seed (`auto`
+    // takes none), no argument -- so there is nothing to record and the
+    // refusal names the template rather than inventing an instantiation.
+    const Built b = build(std::string(kPrintf) +
+        "struct Wrap<T> {\n"
+        "    val <T>,\n"
+        "    constructor() {}\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let w <auto> = Wrap();\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("with no type arguments"), std::string::npos)
+        << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the
@@ -7284,31 +7320,32 @@ BACKEND_TEST(Soundness_Codegen, AnErasureMarkedGenericStructRefusesItsConstructo
                                 "struct 'M'"), std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AGenericConstructorCallWithNoTypeArgumentsNamesTheQuestion) {
-    // `Box(7)`, and `let b <Box<int>> = Box(7);` -- the same refusal, deliberately. The
-    // arguments would answer the first by unification and the annotation would answer
-    // the second, and implementing one of the two would make two spellings of one call
-    // disagree about which source of an answer wins. That is the booked
-    // StructInstantiation-does-not-infer-from-an-annotation gap, and both halves of it
-    // wait on the same ruling.
+BACKEND_TEST(Soundness_Codegen, AGenericConstructorCallInfersFromArgumentsThenAnnotation) {
+    // The booked gap the previous test here named has landed: b690f60 ruled
+    // the sources -- annotation first, then arguments -- and what inference
+    // finds is recorded on the call, so both spellings lower through one
+    // path. What still refuses for want of an answer is a call with no source
+    // at all (AnUninferrableConstructorStillNamesTheTemplate), and sources
+    // that disagree refuse in the front end, at the argument.
     const char* const kBox =
         "struct Box<T> {\n"
         "    val <T> = null,\n"
         "    Box(v: T) { return new Box{val: v}; }\n"
         "}\n";
     const Built inferred = build(std::string(kPrintf) + kBox +
-        "fun main() <noret> { let b <auto> = Box(7); }\n");
-    EXPECT_NE(inferred.compileExit, 0) << inferred.why();
-    EXPECT_NE(inferred.compileErr.find("a constructor call on the generic struct 'Box' "
-                                       "with no type arguments"),
-              std::string::npos) << inferred.why();
+        "fun main() <noret> {\n"
+        "    let b <auto> = Box(7);\n"
+        "    printf(\"%d\\n\", b.val);\n"
+        "}\n");
+    ASSERT_EQ(inferred.compileExit, 0) << inferred.why();
+    ASSERT_TRUE(inferred.ran) << inferred.why();
+    EXPECT_EQ(inferred.out, "7\n") << inferred.why();
 
-    const Built annotated = build(std::string(kPrintf) + kBox +
-        "fun main() <noret> { let b <Box<int>> = Box(7); }\n");
-    EXPECT_NE(annotated.compileExit, 0) << annotated.why();
-    EXPECT_NE(annotated.compileErr.find("a constructor call on the generic struct 'Box' "
-                                        "with no type arguments"),
-              std::string::npos) << annotated.why();
+    const Built mismatch = build(std::string(kPrintf) + kBox +
+        "fun main() <noret> { let b <Box<string>> = Box(7); }\n");
+    EXPECT_NE(mismatch.compileExit, 0) << mismatch.why();
+    EXPECT_NE(mismatch.compileErr.find("expected 'string', got 'int'"),
+              std::string::npos) << mismatch.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AGenericStructWithNoConstructorNamesTheInstance) {
