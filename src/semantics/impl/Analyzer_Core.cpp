@@ -380,6 +380,16 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
         bool argsResolved = true;
         
         for(size_t i = 0; i < node->generics.size(); ++i) {
+            // `...` is elision: accepted as a generic argument and only there.
+            // A bare `...` stays undefined, and what an elided argument constrains
+            // is nothing -- dynamic targets drop their arguments unread already,
+            // and anything else answers for itself downstream. This is what
+            // `Any<...>` (stdlib/operators.fin:6) needs to resolve.
+            if (node->generics[i]->name == "..." &&
+                node->generics[i]->generics.empty()) {
+                args.push_back(std::make_shared<DynamicType>("..."));
+                continue;
+            }
             auto argType = resolveTypeFromAST(node->generics[i].get());
             args.push_back(argType);
             if (!argType) { argsResolved = false; continue; }

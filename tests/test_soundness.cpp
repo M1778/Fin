@@ -844,6 +844,19 @@ TEST(Soundness_DynamicTypes, AnyIsSpellableInEveryPositionTheCorpusWritesIt) {
     EXPECT_EQ(errorCount(err), 0u) << err;
 }
 
+TEST(Soundness_DynamicTypes, AnElidedGenericArgumentResolves) {
+    // `Any<...>` (stdlib/operators.fin:6, stdlib/typing.fin:14, enums.fin:13):
+    // `...` is elision, accepted as a generic argument and only there -- a bare
+    // `...` stays undefined. The elided arguments are dropped like any other
+    // arguments on a dynamic type (GenericArgumentsOnADynamicTypeAreNotConstraints).
+    const FincRun r = compile("type Any = any;\n"
+                              "fun f<T: Any<...>>(v: T) <int> { return 0; }\n"
+                              "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(stripAnsi(r.err).find("Undefined type"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
+}
+
 TEST(Soundness_DynamicTypes, EveryConcreteTypeIsAssignableToAny) {
     // The whole point of the type. `stdlib/operators.fin` declares thirty
     // requirements taking `(other: any)`, which means every operand of every
