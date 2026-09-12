@@ -74,7 +74,8 @@ rm -f *.o tests/samples/*.o tests/samples/stdlib/*.o
 ## Remaining object/codegen blockers
 
 Run each sample with `build/finc -c <sample>` and fix the first refusal, then remeasure.
-32 of 51 samples compile; the only two codegen refusals left are both held rulings:
+34 of 51 samples compile. Two of the refusals are held rulings; the third is
+an open layout question:
 
 1. **`tests/samples/deeptest4.fin`** (normative)
    - Current refusal: `an undeclared operator '==' on struct 'Data'`, from
@@ -87,14 +88,20 @@ Run each sample with `build/finc -c <sample>` and fix the first refusal, then re
    - HELD RULING: `any` values stay refused (ADR 0034); full boxing (typeids,
      box/unbox, conversions) is its own workstream.
 
-3. **`tests/samples/stdlib/error.fin`** — DONE since this handoff: `#[uncastable]`
+3. **`tests/samples/nullifier.fin`** (normative, `//@ ok` in check-mode)
+   - Current refusal: `a struct field of type 'int' is not lowered yet`, from
+     the nullable `b? <int>` field. No ruling recorded: whether a nullable
+     field widens the struct, reserves a discriminant, or is refused by rule
+     is open. Promoted to `ok` for a repaired annotation while the layout
+     question stays open.
+
+4. **`tests/samples/stdlib/error.fin`** — DONE since this handoff: `#[uncastable]`
    excludes casts to/from the type (checked on the cast expression, not in
    conversions), `#[stderror]` is accepted as a documented marker, `@special`
    declarations emit nothing, scalar-vs-null compares against zero. Compiles.
 
-4. **Frontend blockers still visible in the corpus** (not codegen failures; do not
+5. **Frontend blockers still visible in the corpus** (not codegen failures; do not
    turn a documented sample typo into a compiler feature):
-- `const.fin` — `rptr<int>` versus `&rptr<int>` mismatch
 - `enums.fin` — `Offer` (booked: declared nowhere, must not be invented) and `Ok(T)`
   designator (ADR 0037; needs enum representation). Its `Any<...>` resolves now.
 - `stdlib/operators.fin`, `stdlib/typing.fin` — owe `Any` imports with no
