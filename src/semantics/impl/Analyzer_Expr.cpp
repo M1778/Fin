@@ -1914,6 +1914,23 @@ void SemanticAnalyzer::visit(CastExpression& node) {
     // failing now that an enum is a cast target.
     else if (isEnumType(sourceType) && dynamic_cast<const PrimitiveType*>(targetType.get())) valid = true;
     else if (dynamic_cast<const PrimitiveType*>(sourceType.get()) && isEnumType(targetType)) valid = true;
+    // A string casts to a dynamic `[char]`: the NUL-terminated bytes with the
+    // length measured at run time (strlen in codegen). Narrow on both sides --
+    // bytes are chars, and a fixed extent has no static length to give -- so
+    // `cast<[byte]>`, `cast<[char, 5]>` and casts from any other pointer stay
+    // refused. stdlib/stdio.fin:156 is the corpus site.
+    else if (auto* stringSource = dynamic_cast<const PrimitiveType*>(sourceType.get())) {
+        if (stringSource->name == "string") {
+            if (auto* arrayTarget = dynamic_cast<const ArrayType*>(targetType.get())) {
+                if (!arrayTarget->extent.has_value()) {
+                    if (auto* element = dynamic_cast<const PrimitiveType*>(
+                            arrayTarget->element_type.get())) {
+                        if (element->name == "char") valid = true;
+                    }
+                }
+            }
+        }
+    }
     
     if (!valid) {
         error(node, fmt::format("Invalid cast from '{}' to '{}'", sourceType->toString(), targetType->toString()));

@@ -4477,18 +4477,14 @@ TEST(KnownDefect_Casts, AnIntegerToAStringIsAccepted) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Casts, TheCorpusOwnStringToCharArrayCastIsRejected) {
-    // stdio.fin:156 writes exactly this. The `KnownDefect` here asserts a
-    // *rejection*, which is the opposite shape to every other test in this file:
-    // the defect is that a legitimate cast fails, so the assertion that must
-    // eventually flip is EXPECT_NE, not EXPECT_EQ.
+TEST(Soundness_Casts, TheCorpusOwnStringToCharArrayCastConverts) {
+    // Was KnownDefect_Casts.TheCorpusOwnStringToCharArrayCastIsRejected:
+    // stdio.fin:156 writes exactly this, and a legitimate cast failing was
+    // the defect. Inverted on the fix: a string casts to a dynamic `[char]`,
+    // narrow on both sides (bytes are chars, fixed extents stay refused).
     auto r = compile("fun main() <void> { let a <[char]> = cast<[char]>(\"data\"); }\n");
-    EXPECT_NE(r.exitCode, 0)
-        << "FIXED: string to [char] now converts, which is what stdio.fin:156 "
-           "needs. Invert to EXPECT_EQ and move to Soundness_Casts.";
-    EXPECT_NE(stripAnsi(r.err).find("Invalid cast"), std::string::npos)
-        << "still failing, but no longer on the cast — check this is not now a "
-           "parse error, which would mean the grammar regressed:\n"
+    EXPECT_EQ(r.exitCode, 0)
+        << "string to [char] must convert:\n"
         << stripAnsi(r.err);
 }
 

@@ -6864,6 +6864,30 @@ BACKEND_TEST(Soundness_Codegen, AParameterCleansUpAtReturn) {
     EXPECT_EQ(b.out, "bye 9\n9\nbye 9\n") << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// `cast<[char]>` on a string reads its bytes with a measured length.
+//
+// A `string` is NUL-terminated bytes by the convention everything that
+// prints one already relies on, so the length is there to be measured
+// (strlen) rather than invented. Narrow on both sides: bytes are chars, and
+// a fixed extent has no static length to give -- `cast<[byte]>` and
+// `cast<[char, 5]>` stay refused, as does a cast from any other pointer,
+// whose target need not terminate.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, ACastFromAStringToACharArrayMeasuresIt) {
+    // stdlib/stdio.fin:156 writes exactly this: `cast<[char]>("SomeData...")`
+    // as an `Ok` payload.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let s <[char]> = cast<[char]>(\"hi\");\n"
+        "    printf(\"%d %c %c\\n\", s.length, s[0], s[1]);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 h i\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the

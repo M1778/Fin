@@ -3986,6 +3986,32 @@ private:
                 from.value, llvm::IntegerType::get(ctx_, ptrBits), "addr");
             return convert(node, CgVal{asInt, types_.intType(ptrBits, false)}, to);
         }
+        // A string (a pointer with nothing recorded past it) into a dynamic
+        // `[char]`: the bytes with the length measured (strlen), paired the
+        // way every dynamic array is. Only a string on the way in -- any other
+        // pointer need not terminate -- and only dynamic char arrays going
+        // out: a fixed extent has no static length, and any other element is
+        // not what bytes are.
+        if (from.type.isPointer() && !from.type.pointee && to.isDynamicArray &&
+            to.element && to.element->kind == CgType::Kind::Int &&
+            to.element->bits == 8) {
+            llvm::FunctionCallee measure = runtimeFn(
+                node, "strlen",
+                llvm::FunctionType::get(llvm::Type::getInt64Ty(ctx_),
+                                        {llvm::PointerType::getUnqual(ctx_)}, false),
+                "a string-to-array cast");
+            if (!measure) return nullptr;
+            llvm::Value* data = builder_.CreateBitCast(
+                from.value, llvm::PointerType::getUnqual(ctx_), "strdata");
+            llvm::Value* length = builder_.CreateCall(measure, {data}, "strlen");
+            llvm::Value* pair = llvm::UndefValue::get(to.llvmType);
+            pair = builder_.CreateInsertValue(pair, data, {0u});
+            pair = builder_.CreateInsertValue(
+                pair,
+                builder_.CreateTrunc(length, llvm::Type::getInt32Ty(ctx_)),
+                {1u});
+            return pair;
+        }
         // An `any` blob converts to and from nothing but itself: there is no
         // boxing into one and no reading out of one, so any other pair is a
         // value the program cannot have produced. Blob-to-blob is a 16-byte
