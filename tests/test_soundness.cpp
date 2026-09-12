@@ -1715,12 +1715,10 @@ TEST(KnownDefect_TypeAliases, GenericArgumentsOnANonGenericAliasAreDiscarded) {
     // lookup can find. Six diagnostics in the corpus read `Type 'X' does not have
     // methods` for a parameter whose bound names the interface three characters away.
     //
-    // Booked and not fixed because two separate answers are missing. The alias needs a
+    // Booked and not fixed because two separate mechanisms are missing. The alias needs a
     // parameter list to bind arguments to (see AGenericTypeAliasIsNeverDeclared above),
-    // and `Any<Printable>` has to be *given* a meaning: the sample's comments read it as
-    // "anything implementing Printable", which is the `any implements <Error>` form
-    // spelled with arguments instead, and that is the owner's ruling on whether a bound
-    // of `any` narrows -- not something to invent here.
+    // and the meaning is ruled but unbuilt: `Any<Printable>` narrows to implementors
+    // (ADR 0038), so method calls resolve through the bound once generic aliases exist.
     const FincRun r = compile("interface Printable { pub fun format_str() <string>; }\n"
                               "type Any = any;\n"
                               "fun show<X: Any<Printable>>(o: X) <void> { o.format_str(); }\n");
