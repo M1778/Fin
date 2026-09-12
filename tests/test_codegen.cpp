@@ -6686,6 +6686,31 @@ BACKEND_TEST(Soundness_Codegen, AScalarComparedToNullReadsZero) {
     EXPECT_EQ(b.out, "0 1 1\n") << b.why();
 }
 
+// ---------------------------------------------------------------------------
+// `delete` runs the destructor first, then frees.
+//
+// deeptest3.fin:44 documents it: "(Calls destructor if defined, then frees
+// memory)". A struct with a destructor is no longer refused at its
+// declaration, so a `delete` that skipped the call would be storage freed
+// under a live cleanup rule -- the silent skip the refusal rule forbids.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, ADeleteRunsTheDestructorFirst) {
+    const Built b = build(std::string(kPrintf) +
+        "struct Track {\n"
+        "    v <int>,\n"
+        "    ~Track() { printf(\"dtor %d\\n\", self.v); }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <&Track> = new Track{ v: 3 };\n"
+        "    delete p;\n"
+        "    printf(\"after\\n\");\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "dtor 3\nafter\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the

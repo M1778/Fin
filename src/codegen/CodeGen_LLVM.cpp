@@ -7930,11 +7930,11 @@ private:
     // `delete p` returns the allocation. deeptest3.fin:44 says what it is:
     // "(Calls destructor if defined, then frees memory)".
     //
-    // No destructor call is emitted, and that is sound rather than pending: a struct
-    // with a destructor is refused outright at its declaration (lowerableStruct), so a
-    // `delete` reaching here provably has nothing to run. The day destructors lower is
-    // the day this line has to grow one, and ADR 0016 (destructors compose) is where
-    // the order comes from.
+    // The call is emitted in visit(DeleteStatement&), just above the `free`:
+    // the pointee's own destructor symbol, when one was declared. Field and
+    // element cleanup is composition (ADR 0016) and lives in the destructor
+    // body, not at the `delete` -- which is also why a type with no destructor
+    // symbol frees exactly as it always has.
     // Can this expression's address be taken twice without the program noticing?
     //
     // Asked by the one caller that has to try an address, may not like what it finds, and
@@ -8029,6 +8029,22 @@ private:
         } else if (!v.type.isPointer()) {
             unsupported(node, "'delete' of a non-pointer");
             return;
+        }
+        // The destructor runs before the storage goes: deeptest3.fin:44
+        // ("Calls destructor if defined, then frees memory"). Only the
+        // pointee's own destructor -- field and element cleanup is
+        // composition (ADR 0016), which lives in the destructor body, not
+        // here. A type with no destructor symbol frees exactly as before.
+        if (v.type.isPointer() && v.type.pointee && v.type.pointee->isStruct() &&
+            v.type.pointee->structInfo) {
+            const StructInfo& target = *v.type.pointee->structInfo;
+            auto found = functions_.find(methodKey(target.finName, "destructor"));
+            if (found != functions_.end()) {
+                const std::string key = methodKey(target.finName, "destructor");
+                std::vector<llvm::Value*> dargs{address};
+                if (!emitCallArgs(node, found->second, key, {}, dargs)) return;
+                emitCall(found->second, dargs);
+            }
         }
         llvm::FunctionCallee release = runtimeFn(
             node, "free",
