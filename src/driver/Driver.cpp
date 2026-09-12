@@ -165,6 +165,10 @@ int Driver::compile() {
     // This file is already being compiled, so an import of it is a cycle and not a module
     // to go and load. See `ModuleLoader::beginRootFile`.
     loader.beginRootFile(options.inputFile);
+    // The standard I/O module owns the explicit ambient `#[global] printf`
+    // declaration. Load it before the root analyzer so its published binding is
+    // available without an import, while all other std names remain import-only.
+    loader.loadGlobalModuleIfPresent("stdio", true);
     // ----------------------------
 
     // 3.5 Macro Expansion
@@ -188,6 +192,7 @@ int Driver::compile() {
 
         SemanticAnalyzer analyzer(diag, options.debugSema);
         analyzer.setModuleLoader(&loader); // Use same loader
+        analyzer.setExternalGlobalScope(loader.sharedGlobalScope());
         analyzer.visit(*ast);
 
         if (analyzer.hasError || diag.hasErrors()) {
@@ -197,9 +202,28 @@ int Driver::compile() {
         if (options.debugSema) diag.success("[SUCCESS] Semantics Verified.");
     }
 
+    // 4.5 The prototypes for the ambient externs, spliced into the root program.
+    //
+    // Between the front end and the backend, and in the driver rather than in either,
+    // because it belongs to neither: the analyzer must not see these (the root file may
+    // declare the same `@define` itself -- fourteen corpus samples do -- and a
+    // declaration the analyzer did not walk arriving mid-pass would be a duplicate), and
+    // the backend must not have to know what a module or an ambient name is. What it
+    // sees is a program whose statements declare everything it calls, which is the only
+    // shape `declareTopLevel` has ever handled.
+    //
+    // Unconditional on `skipCodegen`: nothing else reads `ast` afterwards, and making
+    // the tree depend on the flag would mean `--no-codegen` checked a different program
+    // from the one a build compiles.
+    loader.appendAmbientPrototypes(*ast);
+
     // 5. CodeGen
     if (!options.skipCodegen) {
-        if (!runCodeGen(*ast, diag)) {
+        // Borrowed views: the loader (and its astStorage) outlives this call,
+        // which is what makes the backend's registration borrowing sound.
+        std::vector<const Program*> modules;
+        for (const auto& m : loader.modulePrograms()) modules.push_back(m.get());
+        if (!runCodeGen(*ast, diag, modules)) {
             return finish(ExitCode::Diagnostics);
         }
     }
@@ -268,7 +292,8 @@ static bool hasEntryPoint(const Program& ast) {
     return false;
 }
 
-bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag) {
+bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag,
+                       const std::vector<const Program*>& modules) {
     // No `-o` and no `-c`, no artifact. `finc x.fin` is a check, and making it
     // build would mean every diagnostic test and every corpus snapshot linked an
     // executable -- and would turn "the backend cannot lower this yet" into a
@@ -313,7 +338,7 @@ bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag) {
         // The stub says this too, but saying it here means the message does not
         // depend on having reached a node the emitter refuses.
         return generateObject(ast, objectPath, diag, options.optLevel,
-                              options.debugCodegen);
+                              options.debugCodegen, options.inputFile, modules);
     }
 
     std::error_code ec;
@@ -324,7 +349,8 @@ bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag) {
     // that picks it up succeeds.
     std::filesystem::remove(options.compileOnly ? objectPath : options.outputPath, ec);
 
-    if (!generateObject(ast, objectPath, diag, options.optLevel, options.debugCodegen)) {
+    if (!generateObject(ast, objectPath, diag, options.optLevel, options.debugCodegen,
+                        options.inputFile, modules)) {
         std::filesystem::remove(objectPath, ec);
         return false;
     }

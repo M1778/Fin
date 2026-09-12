@@ -47,6 +47,13 @@ public:
     void reportError(const fin::location& loc, const std::string& msg);
     void reportError(const fin::location& loc, const std::string& msg,
                      const DiagnosticAttribution& attribution);
+    // A located diagnostic carrying an explanation the compiler is sure of, which
+    // suppresses the typo heuristic rather than competing with it: the two occupy the
+    // same `= help:` row, and a guess is worth less than a rule. The locationless
+    // overload below has had this parameter since argv errors needed it; a refusal that
+    // names a place had no way to say why until `@macro`'s hygiene rule (ADR 0023).
+    void reportError(const fin::location& loc, const std::string& msg,
+                     const std::string& help);
     // A diagnostic with no source location: a file that could not be read, a
     // module that could not be found, or a mistake in the command line itself.
     // `file` is emitted as null and `line` as 0 for these, which is what the

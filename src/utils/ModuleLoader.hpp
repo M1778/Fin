@@ -11,6 +11,7 @@ namespace fin {
     class Scope;
     class Program;
     class DiagnosticEngine;
+    class DefineDeclaration;
 }
 
 namespace fin {
@@ -18,6 +19,10 @@ namespace fin {
 class ModuleLoader {
 public:
     ModuleLoader(const std::string& basePath);
+    // Out of line, because `ambientPrototypes` holds unique_ptrs to a type this
+    // header only forward-declares: an implicit destructor would have to be
+    // generated wherever a loader dies, and there the AST node is incomplete.
+    ~ModuleLoader();
 
     void addSearchPath(const std::string& path);
 
@@ -35,6 +40,47 @@ public:
     void beginRootFile(const std::string& path);
 
     std::shared_ptr<Scope> loadModule(const std::string& importPath, bool isPackage);
+    void loadGlobalModuleIfPresent(const std::string& importPath, bool isPackage);
+    std::shared_ptr<Scope> sharedGlobalScope() const { return globalScope; }
+
+    // Every module that parsed and analysed cleanly, in load order (ADR 0032).
+    // Borrowed: the loader owns them for the whole compilation, so a backend
+    // that registers templates out of them must not outlive this loader --
+    // which is the driver's ordering to keep, not the caller's to check.
+    // Only successfully analysed modules are here; failed ones leave nothing
+    // behind but their diagnostics.
+    const std::vector<std::unique_ptr<Program>>& modulePrograms() const {
+        return astStorage;
+    }
+
+    // The codegen half of `#[global]` (ADR 0021). Publishing an ambient name into the
+    // shared scope makes a call to it type-check; it does not make the call *link*,
+    // because the declaration that named the C symbol lives in a module whose AST
+    // stays in `astStorage` and never reaches the backend. `declareTopLevel` walks the
+    // root Program's own statements and nothing else, so the call refused with
+    // `codegen: a call to 'printf' is not lowered yet` in a file that had been told it
+    // needed no import.
+    //
+    // These two functions close that: the analyzer hands over each extern it published
+    // ambiently, and the driver splices a copy of each into the root program after the
+    // front end is finished with it and before the backend starts.
+    //
+    // Externs only. A `@define` is a symbol and a signature with nothing to emit, so a
+    // copy of one costs an unused declaration -- and an unused declaration costs
+    // nothing at all, not even an undefined symbol (`nm -u` on an object built with a
+    // spare `@define` lists only what is actually called). A Fin function with a body
+    // is the opposite: copying it would emit a second definition of a symbol the
+    // module's own object already publishes, and that is separate compilation rather
+    // than a splice.
+    //
+    // Returns whether `decl` is the declaration the splice will carry. False for a
+    // second `#[global]` declaration of a name already retained under a *different*
+    // symbol: first retention wins, so what the root program will declare is the
+    // first one's `#[llvm_name]`, and a caller that treated the loser as spliced
+    // would be pointing calls at someone else's symbol. True for an identical
+    // redeclaration, which is one fact and not a conflict.
+    bool retainAmbientPrototype(const DefineDeclaration& decl);
+    void appendAmbientPrototypes(Program& root) const;
 
 private:
     DiagnosticEngine* diags = nullptr;
@@ -42,6 +88,7 @@ private:
     std::vector<std::string> searchPaths; // Global search paths (FIN_LIBS, -I)
     
     std::unordered_map<std::string, std::shared_ptr<Scope>> moduleCache;
+    std::shared_ptr<Scope> globalScope;
     std::set<std::string> loadingStack;
 
     // Imports already reported as unresolvable. `moduleCache` remembers only
@@ -65,6 +112,16 @@ private:
     // misspelled one is exactly what the failure needs to be able to name.
     std::vector<std::string> requestedPaths;
     std::vector<std::unique_ptr<Program>> astStorage;
+
+    // One prototype per ambiently-published extern, in publication order, owned here
+    // rather than pointed at inside `astStorage`: the copy the driver splices into the
+    // root program is a copy of this, so the tree the backend walks does not alias a
+    // module's AST. First declaration of a name wins, which is the rule
+    // `Scope::resolve` and `declareFunction` already follow.
+    std::vector<std::unique_ptr<DefineDeclaration>> ambientPrototypes;
+
+    // The symbol an `@define` names -- its valued `#[llvm_name]`, or its Fin name.
+    static std::string symbolOf(const DefineDeclaration& decl);
 
     std::string resolvePath(const std::string& importPath, bool isPackage);
     // Empty on nothing: a file the loader was not allowed to open used to be

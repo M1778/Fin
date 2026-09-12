@@ -20,6 +20,7 @@ struct FieldInfo {
     std::string name;
     TypePtr type;
     bool is_public;
+    bool is_readonly = false;
 };
 
 class StructType : public Type {
@@ -88,15 +89,16 @@ public:
     // would shift every offset after it, and a struct with a typo in it would lay out
     // differently from the one its author meant. Whether a duplicate field should be
     // rejected outright is KnownDefect_Duplicates', not this function's.
-    void defineField(std::string n, TypePtr t, bool pub = false) {
+    void defineField(std::string n, TypePtr t, bool pub = false, bool readonly = false) {
         auto found = field_index.find(n);
         if (found != field_index.end()) {
             fields[found->second].type = std::move(t);
             fields[found->second].is_public = pub;
+            fields[found->second].is_readonly = readonly;
             return;
         }
         field_index.emplace(n, fields.size());
-        fields.push_back({std::move(n), std::move(t), pub});
+        fields.push_back({std::move(n), std::move(t), pub, readonly});
     }
 
     // This type's own field of that name, or null. No parent walk -- that is

@@ -1,6 +1,7 @@
 #include "../SemanticAnalyzer.hpp"
 #include "../../utils/ModuleLoader.hpp"
 #include "../../types/TypeImpl.hpp"
+#include "../BuiltinMacros.hpp"
 #include <fmt/core.h>
 #include <fmt/color.h>
 #include <filesystem>
@@ -86,6 +87,12 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDec
     declareGenericParams(method.generic_params);
 
     std::vector<std::shared_ptr<Type>> paramTypes;
+    // Parallel to paramTypes, and pushed at exactly the same statements, which is the
+    // whole discipline this field needs. Three of the `continue`s below drop a parameter
+    // from the signature -- a written `self`, an enum's spelled-out receiver -- so
+    // `method.params[i]` and `paramTypes[i]` are not the same parameter and a second
+    // loop over the AST would misalign the flags against the types silently.
+    std::vector<bool> paramDefaults;
     for (size_t i = 0; i < method.params.size(); ++i) {
         auto& param = method.params[i];
         auto type = resolveTypeOrError(param->type.get());
@@ -119,6 +126,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDec
         // unresolved parameter would make `pub fun m(a: NoSuchType)` called `s.m(1)`
         // report "expects 0 arguments, got 1" on top of the one real diagnostic.
         paramTypes.push_back(type);
+        paramDefaults.push_back(param->default_value != nullptr);
     }
     // Walked here rather than at the call sites because this is the only scope that has
     // the method's generics and parameters in it. At the struct and class sites this
@@ -135,7 +143,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildMethodSignature(FunctionDec
     // Null only when `void` itself failed to resolve, which means the primitive table
     // is broken; the callers gate on it as they always did.
     if (!retType) return nullptr;
-    return std::make_shared<FunctionType>(paramTypes, retType);
+    return std::make_shared<FunctionType>(paramTypes, retType, false, paramDefaults);
 }
 
 std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
@@ -144,6 +152,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
     declareGenericParams(op.generic_params);
 
     std::vector<std::shared_ptr<Type>> paramTypes;
+    std::vector<bool> paramDefaults;
     for (auto& param : op.params) {
         auto type = resolveTypeOrError(param->type.get());
         defineParameter(*param, type);
@@ -152,6 +161,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
         // about what a signature is.
         if (param->name == "self") continue;
         paramTypes.push_back(type);
+        paramDefaults.push_back(param->default_value != nullptr);
     }
     visitParameterDefaults(op.params);
 
@@ -180,6 +190,12 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
                 if (!fnNode->param_types.empty() && fnNode->param_types[0]->name == "Self") first = 1;
                 for (size_t i = first; i < fnNode->param_types.size(); ++i) {
                     paramTypes.push_back(resolveTypeOrError(fnNode->param_types[i].get()));
+                    // A parameter that came out of `fn(Self, T)` cannot have a default:
+                    // a function *type* has no expressions in it, only types. Pushed
+                    // false rather than left short so the two vectors stay the same
+                    // length here, where `paramTypes` grew after the loop above stopped
+                    // filling `paramDefaults`.
+                    paramDefaults.push_back(false);
                 }
                 // `fn(Self, T)` has no return type at all -- parser.y's fn_type leaves
                 // it null rather than inventing one, "so a pass that needs one can tell
@@ -209,7 +225,7 @@ std::shared_ptr<FunctionType> SemanticAnalyzer::buildOperatorSignature(
 
     // Null only when `void` itself failed to resolve. Callers gate on it as they did.
     if (!retType) return nullptr;
-    return std::make_shared<FunctionType>(paramTypes, retType);
+    return std::make_shared<FunctionType>(paramTypes, retType, false, paramDefaults);
 }
 
 void SemanticAnalyzer::visit(FunctionDeclaration& node) {
@@ -235,6 +251,7 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
 
     // 3. Resolve Parameters & Build Signature
     std::vector<std::shared_ptr<Type>> paramTypes;
+    std::vector<bool> paramDefaults;
     bool hasSelf = false;
     
     for (auto& param : node.params) {
@@ -247,6 +264,10 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
         // parameter is what made `fun f(p: NoSuchType)` called as `f(1)` report
         // "expects 0 arguments, got 1" -- a claim about a signature nobody wrote.
         paramTypes.push_back(type);
+        // A written `self` is *not* dropped here -- unlike buildMethodSignature, this
+        // loop pushes every parameter and the implicit-self injection below is what
+        // differs -- so the two vectors stay aligned with no `continue` to think about.
+        paramDefaults.push_back(param->default_value != nullptr);
     }
     visitParameterDefaults(node.params);
 
@@ -288,7 +309,7 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     // reported "Undefined function or type 'f'" about a function that is defined.
     if (currentScope->parent) {
         auto funcType = std::make_shared<FunctionType>(
-            paramTypes, retType ? retType : errorType());
+            paramTypes, retType ? retType : errorType(), false, paramDefaults);
         // Mark as immutable and initialized
         currentScope->parent->define({node.name, funcType, false, true});
         debugLog(fg(fmt::color::gray), "      [Register] Registered function '{}' in parent scope\n", node.name);
@@ -365,7 +386,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         }
         // Defined even when the type did not resolve, so `s.field` says nothing
         // further: the annotation is the diagnostic, not every use of the field.
-        structType->defineField(member->name, memberType, member->is_public);
+        structType->defineField(member->name, memberType, member->is_public, member->is_readonly);
         // The default is NOT walked here. PASS 2 below walks it again, with
         // currentStructContext set and the field type read back from the struct,
         // and both walks reported -- `pub v <int> = nosuchvar` said
@@ -430,13 +451,22 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
             // Resolve params in a temp scope to get signature
             enterScope();
             std::vector<std::shared_ptr<Type>> paramTypes;
+            std::vector<bool> paramDefaults;
             for (auto& param : ctor->params) {
                 // Sentinel, not dropped: the constructor keeps its written arity.
                 paramTypes.push_back(resolveTypeOrError(param->type.get()));
+                paramDefaults.push_back(param->default_value != nullptr);
             }
             exitScope();
 
-            auto ctorType = std::make_shared<FunctionType>(paramTypes, structType);
+            // The site `lib/std/error.fin:11` needs. `Error(message: string, err_code:
+            // int = null)` is the library's own base error, and its one-argument call
+            // `Error("boom")` is the shape every module's error subclass is used
+            // through -- so a constructor learning about defaults is what lets the
+            // library write the two-parameter declaration its draft asks for instead of
+            // cutting the second parameter away.
+            auto ctorType = std::make_shared<FunctionType>(paramTypes, structType, false,
+                                                           paramDefaults);
             structType->addConstructor(ctorType);
             debugLog(fg(fmt::color::green), "      [Ctor] Registered constructor for '{}' with {} params\n", node.name, paramTypes.size());
         }
@@ -480,7 +510,13 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         // Inject Self
         currentScope->define({"self", structType, true, true});
         
+        // A constructor has the struct itself as its declared result.  Keep that
+        // expectation active while walking the body so `return` cannot smuggle an
+        // unrelated value through the constructor signature.
+        auto prevCtorRet = context.currentFuncReturnType;
+        context.currentFuncReturnType = structType;
         if (ctor->body) ctor->body->accept(*this);
+        context.currentFuncReturnType = prevCtorRet;
         exitScope();
     }
 
@@ -593,8 +629,41 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
 
 void SemanticAnalyzer::visit(MacroDeclaration& node) {
     debugLog(fg(fmt::color::magenta), "[INFO] Registering macro '{}'\n", node.name);
-    // Macros are handled in a separate expansion pass.
-    // Validate no symbol clashes that it doesn't clash with existing symbols if we wanted to.
+
+    // A macro with a body is the expander's, and it has already run: by the time this
+    // node is reached its every invocation has been replaced by the expansion, so there
+    // is nothing left here to check that expansion did not already answer.
+    //
+    // A macro without one is this pass's, and the check is whether the claim it makes
+    // is true (ADR 0023 step 6). `@define name!(...) <T>;` says the compiler implements
+    // `name!`; if the compiler does not, the declaration is a promise nothing keeps.
+    // Refused here rather than at a call, because a library whose macro nobody calls is
+    // still a library with a broken declaration in it -- the same reason the hygiene
+    // refusal of step 4 fires with no call site present.
+    if (!node.body) {
+        if (!builtinmacros::find(node.name)) {
+            std::string implemented;
+            for (const auto& b : builtinmacros::all()) {
+                if (!implemented.empty()) implemented += ", ";
+                implemented += builtinmacros::signatureOf(b);
+            }
+            error(node,
+                  fmt::format("The compiler implements no macro named '{}!'", node.name),
+                  fmt::format("a macro declared without a body claims the compiler "
+                              "implements it. The ones it does: {}. A macro of your own "
+                              "needs a body: `@macro {}(a) {{ return quote {{ ... }}; }}`",
+                              implemented, node.name));
+        }
+        // The declared signature is not compared against the table's here. What the
+        // node kept is the parameter *names*, their order and the trailing `...`; the
+        // declared parameter types were dropped at the parse, because `MacroParam` holds
+        // a name and a fragment kind and cannot hold a type. A check over three of a
+        // signature's four parts would read as a check over all four, which is worse
+        // than no check: ADR 0023 names the mitigation and it is a test that reads both
+        // spellings as text -- `lib/std/stdio.fin`'s line and this table's row -- in the
+        // shape `Soundness_Codegen.TheNoBackendHelpNamesThePinnedLlvmMajor` already uses
+        // for the pinned LLVM major. That test arrives with the library line, in step 8.
+    }
 }
 
 void SemanticAnalyzer::visit(ConstructorDeclaration& node) {
@@ -629,6 +698,30 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     // a type that has already reported.
     for (auto& member : node.members) {
         auto memberType = resolveTypeOrError(member->type.get());
+        // Registered on the interface's own type, so that a value of interface type
+        // can be read through. Before this, an interface member was resolved and then
+        // *discarded*: `interface P { readonly name <string>; }` followed by
+        // `fun f(a: P) { let n <string> = a.name; }` reported `Struct 'P' has no
+        // member 'name'` -- about a member the interface plainly declares, three lines
+        // up. A method in the same position already worked (`defineMethod` below), so
+        // the two halves of an interface disagreed about whether they existed.
+        //
+        // Found by tests/samples/love.fin, which declares `interface Person { readonly
+        // name <string>, }` and reads `.name` off two values whose type is `Person`.
+        // readonly.fin:29 declares the same shape (`pub readonly value <string>;`) and
+        // never reads it through the interface, which is why fifty samples did not
+        // catch this.
+        //
+        // Visibility is carried through rather than defaulted: an interface member is
+        // written `pub` in the corpus (readonly.fin:29, literal_interface.fin:21) and a
+        // reader outside the declaring file has to see it as public.
+        //
+        // What this does NOT change: whether an implementor is *required* to carry the
+        // field. That is KnownDefect_Interfaces.AMissingFieldIsAccepted, still open --
+        // `implements()` walks methods, operators, constructors and the destructor, and
+        // never fields. Registering the member is what makes a read type-check; the
+        // requirement is a separate rule with its own test.
+        if (memberType) ifaceType->defineField(member->name, memberType, member->is_public, member->is_readonly);
         // literal_interface.fin:21 gives an interface member a default
         // (`pub picked_first <bool> = true;`), so a default on one is part of the
         // language and is checked exactly as a struct member's is (pass 2 step 1 of
@@ -671,10 +764,13 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     for (auto& ctor : node.constructors) {
         enterScope();
         std::vector<std::shared_ptr<Type>> paramTypes;
+        std::vector<bool> paramDefaults;
         for (auto& param : ctor->params) {
             paramTypes.push_back(resolveTypeOrError(param->type.get()));
+            paramDefaults.push_back(param->default_value != nullptr);
         }
-        auto ctorType = std::make_shared<FunctionType>(paramTypes, ifaceType);
+        auto ctorType = std::make_shared<FunctionType>(paramTypes, ifaceType, false,
+                                                       paramDefaults);
         ifaceType->addConstructor(ctorType);
         debugLog(fg(fmt::color::gray), "      [Interface] Added constructor requirement\n");
         exitScope();
@@ -790,11 +886,13 @@ void SemanticAnalyzer::visit(ImportModule& node) {
             if (!currentScope->resolve(kv.first)) currentScope->define(kv.second);
         for (const auto& kv : moduleScope->types)
             if (!currentScope->resolveType(kv.first)) currentScope->defineType(kv.first, kv.second);
+        node.consumed = true;
         return;
     }
 
     // Case 1: Specific Imports: import { A, B } from "lib"
     if (!node.targets.empty()) {
+        bool allBound = true;
         for (const auto& target : node.targets) {
             bool found = false;
             if (auto* sym = moduleScope->resolve(target)) {
@@ -805,8 +903,41 @@ void SemanticAnalyzer::visit(ImportModule& node) {
                 currentScope->defineType(target, type); // Copy type
                 found = true;
             }
+            // And the third table. A `Scope` has three maps -- `symbols`, `types`,
+            // `macros` -- and this check read two of them, so `import { magic_add } from
+            // "sub/mymacros.fin";` reported `does not export 'magic_add'` about a macro
+            // the module does export and the *expander* had already bound
+            // (ExpanderDecls.cpp, the same named-import case). Two passes disagreed and
+            // the analyzer won, so a program whose macro expanded correctly was rejected
+            // for importing it.
+            //
+            // A macro carries no visibility marker -- `pub @macro` is `syntax error,
+            // unexpected AT` -- so "declared in this module" is the only export rule
+            // available and nothing narrower is expressible. ADR 0023 rules that a named
+            // import carries a macro, on the ground that the expander already does the
+            // work and there is no argument for the asymmetry.
+            //
+            // Defined into this scope's macro map rather than only counted as found. The
+            // analyzer never reads it -- expansion is a finished pass by the time this
+            // runs -- but a scope that answered `resolveMacro` differently from the one
+            // the expander built is the disagreement above with the sides swapped.
+            //
+            // `import * from m` is not covered here and is not an oversight: the expander
+            // does not carry macros through a star either (its named-import case looks up
+            // a target literally named `*`), and ADR 0023 rules only on the named form.
+            // Whoever rules the star changes both passes together.
+            if (auto* macro = moduleScope->resolveMacro(target)) {
+                currentScope->defineMacro(target, macro);
+                found = true;
+            }
             if (!found) error(node, "Module '" + node.source + "' does not export '" + target + "'");
+            allBound = allBound && found;
         }
+        // One name it could not find leaves the whole statement standing. The
+        // diagnostic above already stops the build, so nothing downstream sees it --
+        // but if that ever changes, an import that half-bound must look like the
+        // unfinished thing it is rather than like one that did its job.
+        node.consumed = allBound;
         return;
     }
 
@@ -826,6 +957,7 @@ void SemanticAnalyzer::visit(ImportModule& node) {
     // This allows 'alias.member' to work via MemberAccess
     currentScope->define({alias, nsType, false, true});
     
+    node.consumed = true;
     debugLog(fg(fmt::color::blue), "      [Import] Module '{}' bound to namespace '{}'\n", node.source, alias);
 }
 
@@ -838,13 +970,100 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
     auto retType = resolveTypeOrError(node.return_type.get());
 
     std::vector<std::shared_ptr<Type>> paramTypes;
+    std::vector<bool> paramDefaults;
     for (auto& param : node.params) {
         paramTypes.push_back(resolveTypeOrError(param->type.get()));
+        paramDefaults.push_back(param->default_value != nullptr);
     }
     visitParameterDefaults(node.params);
 
-    auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg);
+    auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg,
+                                                  paramDefaults);
     currentScope->define({node.name, funcType, false, true});
+    if (publishIfGlobal(node, node.attributes, node.name, funcType) && loader) {
+        // The backend half. Publishing the name makes a call to it type-check in a file
+        // that imports nothing; the prototype is what makes that call *link*, because
+        // the declaration lives in a module whose AST the backend never sees. Only an
+        // `@define` reaches here, which is the shape the splice is limited to -- a
+        // symbol and a signature, with nothing to emit.
+        if (loader->retainAmbientPrototype(node)) {
+            // And the module's own symbol records it, because the fact is needed from
+            // the *other* side: a file that writes `stdio.printf(...)` resolves this
+            // symbol through the module's scope, and whether that call can be rewritten
+            // into a call on the plain name turns on whether the root program will
+            // declare the plain name for this declaration. Nothing else can answer
+            // that -- a Symbol carries a type and not a declaration -- so it is
+            // answered here, where the retention happened.
+            //
+            // Re-defined rather than mutated in place: `Scope::define` is the only
+            // writer, and reaching into `symbols` here would be the second one.
+            currentScope->define({node.name, funcType, false, true, /*is_ambient=*/true});
+        }
+    }
+}
+
+// The ambient half of `#[global]` (ADR 0021): a declaration the parser stamped as
+// std-scoped is published into the scope the ModuleLoader owns, which sits under
+// every analyzer's own global scope, so a name declared in one file resolves in a
+// file that imported nothing.
+//
+// The target is `globalScope->parent` and not `currentScope->parent`. They are the
+// same scope for a declaration written at file level, which is where the one marked
+// declaration in the tree is written -- and they are not the same for one written
+// inside a function body, which the placement rule accepts (a `namespace std` block
+// stamps every `#[global]` under it, however deep). Publishing to `currentScope->parent`
+// there would put an ambient name into whatever block happened to enclose it: visible
+// to the rest of that function and to nobody else, which is neither what the attribute
+// says nor a failure anything would report.
+//
+// Nothing is published when no external scope was injected. A `SemanticAnalyzer`
+// constructed without a loader has a parentless global scope, and the attribute is then
+// a no-op rather than a crash -- the analyzer is used that way by tests and by the
+// macro expander.
+bool SemanticAnalyzer::publishIfGlobal(
+        ASTNode& node,
+        const std::vector<std::unique_ptr<Attribute>>& attributes,
+        const std::string& name,
+        const std::shared_ptr<Type>& type) {
+    bool isGlobal = false;
+    for (const auto& attr : attributes)
+        if (attr && attr->name == kGlobalAttribute && attr->is_flag && attr->std_scoped)
+            isGlobal = true;
+    if (!isGlobal || !type) return false;
+
+    Scope* ambient = globalScope ? globalScope->parent : nullptr;
+    if (!ambient) return false;
+
+    // A second marked declaration of the same name, with a different type, is refused
+    // rather than allowed to overwrite the first.
+    //
+    // `Scope::define` assigns over an existing key, and for an ordinary declaration in
+    // an ordinary scope that silence is the booked defect KnownDefect_Duplicates
+    // records -- whose fix waits on `#[overwrite]`, because stdlib/stdio.fin declares a
+    // second `printf` under it deliberately. This is not that case and does not wait on
+    // it. An ordinary redeclaration is two lines a reader can see in one file; an
+    // ambient one is two declarations in two files that never mention each other, and
+    // the file that gets the loser resolves a signature nothing it can read wrote. That
+    // is the collision ADR 0021's `std`-only rule exists to bound, and bounding is not
+    // the same as detecting.
+    //
+    // Guarded on the type rather than on the name, so publishing the same declaration
+    // twice is silent. The root file may write the same `@define` the bundled module
+    // does -- fourteen corpus samples write that exact line -- and two identical
+    // bindings are one fact, not a conflict.
+    if (Symbol* existing = ambient->resolve(name)) {
+        if (existing->type && !existing->type->equals(*type)) {
+            error(node,
+                  fmt::format("'{}' is declared #[global] twice with different types, "
+                              "'{}' and '{}' (ADR 0021). An ambient name reaches a file "
+                              "through no import, so nothing the losing file can read "
+                              "would say which of the two it resolved",
+                              name, existing->type->toString(), type->toString()));
+            return false;
+        }
+    }
+    ambient->define({name, type, false, true});
+    return true;
 }
 
 // One `::`-separated path from an `extern` or a symbol resolution, resolved as a
@@ -1044,6 +1263,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
     applyUseAttributes(node, node.attributes);
 
     std::vector<std::shared_ptr<Type>> paramTypes;
+    std::vector<bool> paramDefaults;
     for (auto& param : node.params) {
          auto type = resolveTypeOrError(param->type.get());
          defineParameter(*param, type);
@@ -1051,6 +1271,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
          // dropping a parameter whose type did not resolve advertises an arity
          // nobody wrote.
          paramTypes.push_back(type);
+         paramDefaults.push_back(param->default_value != nullptr);
     }
     visitParameterDefaults(node.params);
 
@@ -1077,7 +1298,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
     // (KnownDefect_DeclarationOrder).
     if (currentScope->parent) {
         auto funcType = std::make_shared<FunctionType>(
-            paramTypes, retType ? retType : errorType());
+            paramTypes, retType ? retType : errorType(), false, paramDefaults);
         currentScope->parent->define({node.name, funcType, false, true});
         debugLog(fg(fmt::color::gray), "      [Register] Registered special '{}' in parent scope\n", node.name);
     }
@@ -1127,7 +1348,7 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
         }
         // Defined even when the type did not resolve, so `s.field` says nothing
         // further: the annotation is the diagnostic, not every use of the field.
-        structType->defineField(member->name, memberType, member->is_public);
+        structType->defineField(member->name, memberType, member->is_public, member->is_readonly);
         // The default is NOT walked here. PASS 2 below walks it again, with
         // currentStructContext set and the field type read back from the struct,
         // and both walks reported -- `pub v <int> = nosuchvar` said
@@ -1352,13 +1573,21 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
             // against is one too many -- next to the diagnostic about the annotation.
             auto* lam = dynamic_cast<LambdaExpression*>(node.overwrite_value.get());
             std::vector<std::shared_ptr<Type>> params = fn->param_types;
+            std::vector<bool> defaults = fn->param_defaults;
             if (lam && lam->params.size() == params.size() && !params.empty() &&
                 (lam->params[0]->name == "self" ||
                  (structType->is_enum && isReceiverOf(params[0], *structType)))) {
                 params.erase(params.begin());
+                // The same erase, or the flags would describe the receiver's position
+                // while the types describe the first real parameter. Guarded because
+                // the vector is allowed to be shorter than the parameters -- a lambda
+                // with no defaults anywhere leaves it empty, and erasing from an empty
+                // vector is undefined rather than a no-op.
+                if (!defaults.empty()) defaults.erase(defaults.begin());
             }
             structType->defineMethod(node.overwrite_member,
-                                     std::make_shared<FunctionType>(params, fn->return_type));
+                                     std::make_shared<FunctionType>(params, fn->return_type,
+                                                                    false, defaults));
             debugLog(fg(fmt::color::green), "      [Implements] Registered member '{}::{}' with {} params\n",
                      node.target_type, node.overwrite_member, params.size());
         }
@@ -1427,16 +1656,19 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
     // nothing looks at which identifier it was.
     for (auto& ctor : node.constructors) {
         std::vector<std::shared_ptr<Type>> paramTypes;
+        std::vector<bool> paramDefaults;
         {
             QuietPass quiet(*this);
             enterScope();
             for (auto& param : ctor->params) {
                 // Sentinel, not dropped: the constructor keeps its written arity.
                 paramTypes.push_back(resolveTypeOrError(param->type.get()));
+                paramDefaults.push_back(param->default_value != nullptr);
             }
             exitScope();
         }
-        structType->addConstructor(std::make_shared<FunctionType>(paramTypes, structType));
+        structType->addConstructor(std::make_shared<FunctionType>(paramTypes, structType,
+                                                                 false, paramDefaults));
         debugLog(fg(fmt::color::green), "      [Implements] Registered constructor for '{}' with {} params\n",
                  node.target_type, paramTypes.size());
 

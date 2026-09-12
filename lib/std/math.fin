@@ -1,0 +1,282 @@
+// Math: comparisons and clamping over the `Number` constraint set, integer arithmetic
+// the language does not have operators for, and C's libm by its own names.
+//
+// NO SAMPLE SPECIFIES THIS MODULE, the same as `strings`. There is no
+// `tests/samples/stdlib/math.fin` and no corpus file imports anything math-shaped, so the
+// contents are chosen rather than derived, and nothing else in lib/std imports this file.
+//
+// WHAT EARNS ITS PLACE HERE, since "a math module" could be anything. Three tests, and a
+// function is here only if it passes one:
+//
+//   * The language has no operator for it. `min`, `max`, `clamp`, `abs`, `signum` and
+//     `gcd` are all a comparison or a loop a caller would otherwise write inline, and
+//     `ipow`/`isqrt` are the integer forms of operations `pow`/`sqrt` only give in
+//     floating point.
+//   * C has it and it links. Every `@define` below is libm, reached the way `printf`
+//     reaches libc.
+//   * It is a constant the caller should not have to type. `PI` and `E` are `double`
+//     literals that need a `cast<double>` at every use site otherwise, because a float
+//     literal defaults to `float` and there is no implicit widening.
+//
+// THE GENERIC HALF IS BOUNDED BY `Number`, which is `types::std`'s constraint set --
+// `int | uint | float | short | long | ushort | ulong | double`. A constraint set is a
+// bound and never a storage type (ADR 0018), and a bound is what these want: `min` over
+// two `int`s and over two `double`s is one function.
+//
+// One sharp edge in that, stated because it is a real trap rather than a theoretical one:
+// `abs` is in the set for the unsigned types too, and on an unsigned value it is a no-op
+// that looks like a bug. `abs::<uint>(3)` gives 3 -- measured -- because `value < 0` is
+// never true for a `uint`, which is correct, but a reader who sees `abs` applied to
+// unsigned data should be asking why the call is there at all. The bound cannot exclude
+// the unsigned types without splitting `Number`, which is `types.fin`'s to decide and not
+// this file's.
+//
+// THE LIBM HALF NEEDS `-lm` AT THE LINK, and this file cannot arrange that. A program
+// calling `sqrt` compiles to an object that references `sqrt` and then fails to link with
+// `undefined reference to 'sqrt'` unless the link line carries `-lm` -- measured both ways.
+// There is no mechanism in the language for a module to declare a library dependency, so
+// this is a caller's obligation and the header is the only place it is written down. glibc
+// is what makes it a link-line issue rather than a runtime one; on a platform where libm
+// is part of libc it would not arise.
+//
+// GAPS hit while writing this file:
+//
+//   * There is no `float`-typed libm here, only `double`. `sqrtf` and its family exist in
+//     C, and a second set of eleven externs that differ only in width is noise until
+//     something asks for it -- a `float` argument does not widen to a `double` parameter
+//     (no implicit conversion between the numeric types), so a caller with a `float`
+//     writes one `cast<double>`.
+//   * `%` on a negative left operand is negative here, so `gcd` takes absolute values
+//     first. Verified: `gcd(-12, 18)` is 6, not -6.
+//   * `isqrt` is a loop and not Newton's method, because the loop is obviously correct at
+//     the boundaries and this module has no benchmark to justify anything cleverer.
+//     `isqrt(15)` is 3 and `isqrt(16)` is 4 -- the boundary that a Newton implementation
+//     with the wrong rounding gets wrong.
+//   * `ipow` does not check for overflow. Nothing in the language traps it and there is no
+//     wider type to promote to, so `ipow(2, 62)` wraps silently. A `blame` on the
+//     exponent's sign is what can be checked and is checked.
+//   * None of the Fin functions here lower when reached through an import. The `@define`d
+//     externs do, and they run: `sqrt(2)` is 1.414214, `pow(2,10)` is 1024, `floor(2.7)`
+//     is 2, `ceil(2.1)` is 3, `fmod(7,3)` is 1, `atan2(1,1)` is 0.785398.
+#[stdimport] %{
+import { Number } from types::std;
+}%
+
+namespace std {
+
+// The two constants that are otherwise a `cast<double>` at every use.
+#[export]
+pub const PI <double> = cast<double>(3.141592653589793);
+
+#[export]
+pub const E <double> = cast<double>(2.718281828459045);
+
+// libm, by its own names. Each needs `-lm` on the link line; see the header.
+#[llvm_name="sqrt"]
+@define math_sqrt(x: double) <double>;
+
+#[llvm_name="cbrt"]
+@define math_cbrt(x: double) <double>;
+
+#[llvm_name="pow"]
+@define math_pow(base: double, exponent: double) <double>;
+
+#[llvm_name="exp"]
+@define math_exp(x: double) <double>;
+
+#[llvm_name="log"]
+@define math_log(x: double) <double>;
+
+#[llvm_name="log2"]
+@define math_log2(x: double) <double>;
+
+#[llvm_name="log10"]
+@define math_log10(x: double) <double>;
+
+#[llvm_name="fabs"]
+@define math_fabs(x: double) <double>;
+
+#[llvm_name="floor"]
+@define math_floor(x: double) <double>;
+
+#[llvm_name="ceil"]
+@define math_ceil(x: double) <double>;
+
+#[llvm_name="round"]
+@define math_round(x: double) <double>;
+
+#[llvm_name="trunc"]
+@define math_trunc(x: double) <double>;
+
+#[llvm_name="fmod"]
+@define math_fmod(a: double, b: double) <double>;
+
+#[llvm_name="sin"]
+@define math_sin(x: double) <double>;
+
+#[llvm_name="cos"]
+@define math_cos(x: double) <double>;
+
+#[llvm_name="tan"]
+@define math_tan(x: double) <double>;
+
+#[llvm_name="asin"]
+@define math_asin(x: double) <double>;
+
+#[llvm_name="acos"]
+@define math_acos(x: double) <double>;
+
+#[llvm_name="atan"]
+@define math_atan(x: double) <double>;
+
+#[llvm_name="atan2"]
+@define math_atan2(y: double, x: double) <double>;
+
+#[llvm_name="hypot"]
+@define math_hypot(x: double, y: double) <double>;
+
+// The generic half. One function per operation across every type in `Number`, which is
+// what a constraint-set bound is for.
+#[export]
+pub fun min<T: Number>(a: T, b: T) <T> {
+    if (a < b) { return a; }
+    return b;
+  }
+
+#[export]
+pub fun max<T: Number>(a: T, b: T) <T> {
+    if (a > b) { return a; }
+    return b;
+  }
+
+// Inverted bounds raise rather than silently returning `high`, because a caller who has
+// them the wrong way round has a bug and either answer would hide it.
+#[export]
+pub fun clamp<T: Number>(value: T, low: T, high: T) <T> {
+    blame low <= high, "clamp bounds are inverted";
+    if (value < low) { return low; }
+    if (value > high) { return high; }
+    return value;
+  }
+
+// A no-op on an unsigned type, and the header says why that is a documented edge rather
+// than a defect.
+#[export]
+pub fun abs<T: Number>(value: T) <T> {
+    if (value < 0) { return -value; }
+    return value;
+  }
+
+// `-1`, `0` or `1`. Returns an `int` and not a `T`: the sign of a value is not a value of
+// the same type, and a `T` return would make `signum` of a `uint` unable to say "negative"
+// even in principle.
+#[export]
+pub fun signum<T: Number>(value: T) <int> {
+    if (value < 0) { return -1; }
+    if (value > 0) { return 1; }
+    return 0;
+  }
+
+#[export]
+pub fun in_range<T: Number>(value: T, low: T, high: T) <bool> {
+    blame low <= high, "range bounds are inverted";
+    if (value < low) { return false; }
+    if (value > high) { return false; }
+    return true;
+  }
+
+// The integer half. Each of these is either an operation the language has no operator for
+// or the integer form of one libm only gives in floating point.
+
+// Euclid, iteratively. Absolute values first because `%` on a negative left operand is
+// negative here: without it `gcd(-12, 18)` would be -6.
+#[export]
+pub fun gcd(a: int, b: int) <int> {
+    let x <int> = a;
+    let y <int> = b;
+    if (x < 0) { x = 0 - x; }
+    if (y < 0) { y = 0 - y; }
+    while (y != 0) {
+        let remainder <int> = x % y;
+        x = y;
+        y = remainder;
+      }
+    return x;
+  }
+
+// `gcd` is what makes this safe from overflow for the inputs it can represent: dividing
+// before multiplying keeps the intermediate no larger than the result.
+#[export]
+pub fun lcm(a: int, b: int) <int> {
+    if (a == 0) { return 0; }
+    if (b == 0) { return 0; }
+    let divisor <int> = gcd(a, b);
+    let scaled <int> = a / divisor;
+    let result <int> = scaled * b;
+    if (result < 0) { return 0 - result; }
+    return result;
+  }
+
+// Integer exponentiation. Does not check for overflow -- nothing in the language traps it
+// and there is no wider type to promote to -- but a negative exponent has no integer
+// answer at all, so that is refused.
+#[export]
+pub fun ipow(base: int, exponent: int) <int> {
+    blame exponent >= 0, "a negative exponent has no integer result";
+    let accumulator <int> = 1;
+    for (let i <int> = 0; i < exponent; i++) {
+        accumulator = accumulator * base;
+      }
+    return accumulator;
+  }
+
+// The largest `n` with `n * n <= value`. A loop rather than Newton's method: the loop is
+// obviously right at the boundaries, which is where a clever version goes wrong.
+// `isqrt(15)` is 3 and `isqrt(16)` is 4.
+#[export]
+pub fun isqrt(value: int) <int> {
+    blame value >= 0, "no integer square root of a negative number";
+    let guess <int> = 0;
+    while ((guess + 1) * (guess + 1) <= value) {
+        guess++;
+      }
+    return guess;
+  }
+
+// Floor division and the remainder that goes with it, which is not what `/` and `%` give
+// for a negative operand: `-7 / 2` truncates toward zero and `-7 % 2` is negative. These
+// are the pair where the remainder always has the divisor's sign, which is what an index
+// wrapping into a table wants -- `hashmap.fin` folds a negative hash by hand for exactly
+// this reason.
+#[export]
+pub fun floor_div(a: int, b: int) <int> {
+    blame b != 0, "division by zero";
+    let quotient <int> = a / b;
+    let remainder <int> = a % b;
+    if (remainder != 0) {
+        if ((remainder < 0) != (b < 0)) { return quotient - 1; }
+      }
+    return quotient;
+  }
+
+#[export]
+pub fun floor_mod(a: int, b: int) <int> {
+    blame b != 0, "division by zero";
+    let remainder <int> = a % b;
+    if (remainder != 0) {
+        if ((remainder < 0) != (b < 0)) { return remainder + b; }
+      }
+    return remainder;
+  }
+
+#[export]
+pub fun is_even(value: int) <bool> {
+    return value % 2 == 0;
+  }
+
+#[export]
+pub fun is_odd(value: int) <bool> {
+    return value % 2 != 0;
+  }
+
+}

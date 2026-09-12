@@ -1,10 +1,57 @@
 #include "../MacroExpander.hpp"
 #include "../SubstitutionVisitor.hpp"
 #include "../../ast/CloneVisitor.hpp"
+#include "../../ast/StructuralWalk.hpp"
+#include "../../ast/types/TypeNode.hpp"
 #include "../../types/NamespaceType.hpp"
-#include <fmt/core.h>
+#include "../../semantics/BuiltinMacros.hpp"
+// <fmt/format.h> and not <fmt/core.h>, because fmt::format is used below and this
+// is the header that declares it.  From fmt 11 core.h carries only the base API
+// and fmt::format is behind FMT_DEPRECATED_HEAVY_CORE, so `#include <fmt/core.h>`
+// plus `fmt::format` is `'format' is not a member of 'fmt'` -- measured against the
+// system fmt 12.2.0, clean against the conanfile's fmt 10.2.1, and format.h is
+// correct against both.  Every other caller in this tree reaches fmt::format
+// through <fmt/color.h>, which includes format.h; this translation unit had no such
+// include, so it is the one that a non-Conan configure breaks on.
+#include <fmt/format.h>
 
 namespace fin {
+
+namespace {
+
+// Writes the declaring module onto every type in a macro's expansion (ADR 0023 step 4).
+//
+// The expansion is a clone of the quote body, so these nodes are new and unshared and
+// the stamp reaches nothing a programmer wrote. It is what lets `Held::make($n)` in
+// `lib/std`'s macro name `Held` in a caller that never imported it: the analyzer looks
+// the name up where the macro was written rather than where it was called, which is the
+// difference between a library macro and a C macro.
+//
+// Only unstamped types are written. A macro whose body invokes another macro expands the
+// inner one first, so the inner expansion arrives already carrying *its* declaring
+// module -- the nearer answer, and the right one.
+//
+// Run before substitution, never after: the arguments are the caller's own expressions
+// and their types resolve where the caller wrote them. Stamping the merged tree would
+// hand the callee's imports to the caller's types, which is the mirror of the bug this
+// closes.
+class DeclaringScopeStamp : public StructuralWalk {
+public:
+    explicit DeclaringScopeStamp(Scope* scope) : scope(scope) {}
+
+protected:
+    bool enter(ASTNode& node) override {
+        if (auto* type = dynamic_cast<TypeNode*>(&node)) {
+            if (!type->declaringScope) type->declaringScope = scope;
+        }
+        return true;
+    }
+
+private:
+    Scope* scope;
+};
+
+} // namespace
 
 // --- Lookup Helper ---
 MacroDeclaration* MacroExpander::resolveMacro(const std::string& name) {
@@ -33,7 +80,32 @@ MacroDeclaration* MacroExpander::resolveMacro(const std::string& name) {
 void MacroExpander::visit(MacroInvocation& node) {
     // 1. Find Macro using helper
     MacroDeclaration* def = resolveMacro(node.name);
-    
+
+    // This pass expands templates, and two macros have none (ADR 0023 step 6).
+    //
+    // A bodyless declaration -- `@define format!(fmt: string, ...) <string>;` -- says
+    // the *compiler* implements the macro, so there is nothing here to substitute into
+    // and the invocation is left standing for the analyzer to answer. Whether that
+    // claim is true is checked where the claim is written: the analyzer refuses a
+    // bodyless declaration whose name is not in `builtinmacros::all()`, and one
+    // diagnostic at the bad declaration beats one there and one at every call.
+    //
+    // The second is a name that resolves to nothing and is a builtin anyway. A builtin
+    // is in no scope, so `resolveMacro` was always going to fail and failing is not an
+    // error: that is what "resolves with no import" means, and it is a requirement
+    // rather than a convenience -- `deeptest2.fin` and `stdlib/error.fin` write zero
+    // import lines between them and both call `format!`.
+    //
+    // Tested after `resolveMacro` rather than before it, so a program that writes its
+    // own `@macro format(a) { ... }` -- with a body -- still expands its own. A builtin
+    // name is not a reserved word.
+    //
+    // Arity is deliberately not checked before returning. ADR 0023 puts arity and the
+    // first argument's type in the analyzer, "because that is the first pass that knows
+    // a type", and a count checked in both passes reports one mistake twice.
+    if (def && !def->body) return;
+    if (!def && builtinmacros::find(node.name)) return;
+
     if (!def) {
         diag.reportError(node.loc, "Undefined macro '" + node.name + "!'");
         return;
@@ -50,6 +122,14 @@ void MacroExpander::visit(MacroInvocation& node) {
     }
     
     // 3. Find quote
+    //
+    // `def->body` is non-null from here down: the bodyless case returned above. It was
+    // a reported error for one step -- "Macro 'x' has no body to expand", which was the
+    // honest answer between step 5 landing the declaration and step 6 landing the table
+    // -- and before step 5 it was a guard against a crash, because `def->body->statements`
+    // on a null body exited 139 and 139 is not one of the four codes ADR 0009 gives
+    // finc. Both readings are now wrong for the same reason: a bodyless declaration is
+    // a claim about who implements the macro, and this pass is not the implementer.
     QuoteExpression* quote = nullptr;
     for (auto& stmt : def->body->statements) {
         if (auto* ret = dynamic_cast<ReturnStatement*>(stmt.get())) {
@@ -101,7 +181,16 @@ void MacroExpander::visit(MacroInvocation& node) {
         return;
     }
     
-    // 6. Substitute
+    // 6. Stamp the declaring module, then substitute
+    //
+    // Nothing to stamp for a macro declared in the file being compiled: `declaringScope`
+    // is null there, its body already resolves where it was written, and a stamp would
+    // only add a fallback that changes no answer.
+    if (def->declaringScope) {
+        DeclaringScopeStamp stamp(def->declaringScope);
+        stamp.walk(*resultExpr);
+    }
+
     SubstitutionVisitor subVisitor(argsMap);
     resultExpr->accept(subVisitor);
     if (subVisitor.replacementExpr) {

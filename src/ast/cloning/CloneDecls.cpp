@@ -109,28 +109,35 @@ void CloneVisitor::visit(DefineDeclaration& node) {
         clone(node.return_type.get()),
         node.is_vararg
     );
+    // `#[llvm_name="printf"]` is what binds an extern to its C symbol, so a clone
+    // that dropped it produced a prototype for a *different* function under the same
+    // Fin name -- and one that links, because the Fin name is a valid symbol too.
+    // Every other declaration visit in this file already copies this vector; this one
+    // did not, and the omission had no witness until something started cloning an
+    // `@define` (ModuleLoader::appendAmbientPrototypes).
+    res->attributes = cloneVector(node.attributes);
     res->setLoc(node.loc);
     result = std::move(res);
 }
 
 void CloneVisitor::visit(MacroDeclaration& node) {
-    if (node.is_rust_style) {
-        std::vector<MacroRule> rules;
-        for (const auto& r : node.rules) {
-            rules.push_back({r.pattern, clone(r.expansion.get())});
-        }
-        auto res = std::make_unique<MacroDeclaration>(node.name, std::move(rules));
-        res->setLoc(node.loc);
-        result = std::move(res);
-    } else {
-        auto res = std::make_unique<MacroDeclaration>(
-            node.name,
-            node.params, 
-            clone(node.body.get())
-        );
-        res->setLoc(node.loc);
-        result = std::move(res);
-    }
+    // `clone(nullptr)` gives null, which is what a bodyless declaration
+    // (`@define format!(...) <string>;`) needs: the clone is bodyless too.
+    auto res = std::make_unique<MacroDeclaration>(
+        node.name,
+        node.params,
+        clone(node.body.get())
+    );
+    res->attributes = cloneVector(node.attributes);
+    // Null for a macro with a body; `clone(nullptr)` gives null (ADR 0023 step 5).
+    res->declared_return_type = clone(node.declared_return_type.get());
+    // The declaring module travels with the clone (ADR 0023 step 4). A clone that
+    // dropped it would be a macro whose body resolves at the call site again -- the
+    // hygiene hole this pointer closes -- and it would do so silently, because a body
+    // that happens to spell only names the caller also has still expands.
+    res->declaringScope = node.declaringScope;
+    res->setLoc(node.loc);
+    result = std::move(res);
 }
 
 void CloneVisitor::visit(OperatorDeclaration& node) {

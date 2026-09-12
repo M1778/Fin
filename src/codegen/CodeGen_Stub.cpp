@@ -13,21 +13,35 @@
 //
 // Everything else this build does -- lexing, parsing, macro expansion, semantic
 // analysis, every diagnostic -- is unaffected, which is the point: the platforms
-// that cannot get LLVM 18 still get a checker (ADR 0010).
+// that cannot get LLVM 22 still get a checker (ADR 0010).
+//
+// The major is spelled here rather than passed in as a compile definition. This
+// file is compiled exactly when FIN_WITH_LLVM=OFF, and on that path
+// find_package(LLVM) never ran -- so FIN_LLVM_MAJOR would be a number nothing had
+// checked against anything, which is worse than a literal. What keeps it in step
+// with ADR 0010's pin is Soundness_Codegen.TheNoBackendHelpNamesThePinnedLlvmMajor,
+// which reads both files and is not a BACKEND_TEST, so it runs in either build.
 
 namespace fin {
 
 bool backendAvailable() { return false; }
 
 bool generateObject(Program& ast, const std::string& objectPath,
-                    DiagnosticEngine& diag, int optLevel, bool debugCodegen) {
+                    DiagnosticEngine& diag, int optLevel, bool debugCodegen,
+                    const std::string& sourceName,
+                    const std::vector<const Program*>& modules) {
     (void)ast;
     (void)objectPath;
     (void)optLevel;
     (void)debugCodegen;
+    // Unread here for the same reason the rest is: this build emits nothing, so it
+    // has nothing to put a source name into. Named in the signature all the same,
+    // because the two definitions of one declaration have to agree.
+    (void)sourceName;
+    (void)modules;
     diag.reportError(
         "codegen: this finc was built without a backend",
-        "configure with -DFIN_WITH_LLVM=ON and an LLVM 18 development install; "
+        "configure with -DFIN_WITH_LLVM=ON and an LLVM 22 development install; "
         "without one finc can check a program but not emit one");
     return false;
 }

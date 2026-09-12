@@ -10,6 +10,23 @@
 // `Addable` is not in the draft and is in the corpus: tests/samples/lambdas.fin:3
 // imports it from here and line 71 uses it as a generic bound on a lambda that adds
 // its two parameters. It is `Add` under the name the corpus uses.
+//
+// FOUR OF THESE DESCRIBE OPERATORS THE GRAMMAR DOES NOT HAVE, and the count is measured
+// rather than carried over: `&`, `|` and `^` are not in the expression grammar at all
+// (`syntax error, unexpected AMPERSAND` / `PIPE` / `CARET` on `a & b`), so `BitAnd`,
+// `BitOr` and their assigning forms cannot be satisfied by anything a caller can write.
+// `<<`, `>>` and `%` *are* in the grammar, so `ShiftLeft`, `ShiftRight` and `Mod` are
+// ordinary.
+//
+// The declaration side is fine either way -- `pub operator &(rhs: any) <Output>;` parses
+// and an interface requiring it resolves -- which is what makes these harmless to keep and
+// pointless to use: a struct can declare the operator and no expression can reach it.
+// `strings.fin`'s case conversions and `hashmap.fin`'s hash both work around the same gap,
+// which is why they are listed here rather than only in those files.
+//
+// They stay because the draft declares them and because the day the grammar gains the
+// three operators they start working with no edit. Removing them would make this file
+// disagree with its own specification for a temporary reason.
 namespace std {
 namespace ops {
 

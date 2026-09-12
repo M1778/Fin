@@ -166,6 +166,7 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
 
         case NodeKind::DefineDeclaration: {
             auto& n = static_cast<DefineDeclaration&>(node);
+            emitAll(out, n.attributes);
             emitAll(out, n.params);
             emit(out, n.return_type.get());
             return;
@@ -173,10 +174,12 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
 
         case NodeKind::MacroDeclaration: {
             auto& n = static_cast<MacroDeclaration&>(node);
+            emitAll(out, n.attributes);
+            // Null for a macro with a body, and the body is null for the bodyless
+            // declaration that has one (ADR 0023 step 5), so exactly one of the two
+            // emits. `emit` skips nulls, which is why this needs no branch.
+            emit(out, n.declared_return_type.get());
             emit(out, n.body.get());
-            for (const MacroRule& rule : n.rules) {
-                emit(out, rule.expansion.get());
-            }
             return;
         }
 
@@ -206,9 +209,13 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
             return;
         }
 
-        case NodeKind::ImportModule:
-            // A leaf: source, alias and targets are strings.
+        case NodeKind::ImportModule: {
+            // Source, alias and targets are strings, so the attributes are the only
+            // children. It read as a leaf until `#[global]` needed finding on one.
+            auto& n = static_cast<ImportModule&>(node);
+            emitAll(out, n.attributes);
             return;
+        }
 
         case NodeKind::VariableDeclaration: {
             auto& n = static_cast<VariableDeclaration&>(node);
@@ -312,6 +319,10 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
         case NodeKind::FunctionCall: {
             auto& n = static_cast<FunctionCall&>(node);
             emitAll(out, n.generic_args);
+            // What inference found, beside what was written -- see
+            // FunctionCall::resolved_args. Emitted so a substitution inside a
+            // template body reaches a recorded parameter name.
+            emitAll(out, n.resolved_args);
             emitAll(out, n.args);
             return;
         }
@@ -321,12 +332,20 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
             emit(out, n.object.get());
             emitAll(out, n.generic_args);
             emitAll(out, n.args);
+            // The free call a module-qualified call resolved to, when there is one. The
+            // arguments moved into it, so `args` above is empty in that case and each
+            // argument is still emitted exactly once -- through the resolved call.
+            emit(out, n.resolved_call.get());
             return;
         }
 
         case NodeKind::StaticMethodCall: {
             auto& n = static_cast<StaticMethodCall&>(node);
             emit(out, n.target_type.get());
+            // The target with its type arguments resolved, when the analyzer could
+            // resolve them. A second node beside the written one and not a replacement
+            // for it, so both are emitted -- see StaticMethodCall::resolved_target.
+            emit(out, n.resolved_target.get());
             emitAll(out, n.generic_args);
             emitAll(out, n.args);
             return;
@@ -351,9 +370,15 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
             return;
         }
 
-        case NodeKind::ArrayLiteral:
-            emitAll(out, static_cast<ArrayLiteral&>(node).elements);
+        case NodeKind::ArrayLiteral: {
+            auto& n = static_cast<ArrayLiteral&>(node);
+            emitAll(out, n.elements);
+            // What inference found, beside what was written -- see
+            // ArrayLiteral::resolved_type, and FunctionCall::resolved_args
+            // for why both are emitted.
+            emit(out, n.resolved_type.get());
             return;
+        }
 
         case NodeKind::PrototypeLiteral: {
             auto& n = static_cast<PrototypeLiteral&>(node);
@@ -367,6 +392,10 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
         case NodeKind::StructInstantiation: {
             auto& n = static_cast<StructInstantiation&>(node);
             emitAll(out, n.generic_args);
+            // What inference found, beside what was written -- see
+            // StructInstantiation::resolved_args, and FunctionCall's for why
+            // both are emitted.
+            emitAll(out, n.resolved_args);
             emitPairValues(out, n.fields);
             return;
         }

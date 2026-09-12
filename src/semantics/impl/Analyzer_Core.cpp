@@ -1,6 +1,10 @@
 #include "../SemanticAnalyzer.hpp"
+#include "../../ast/StructuralWalk.hpp"
+#include "../../ast/types/Attribute.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../../utils/IntegerConstant.hpp"
+#include "../../types/Layout.hpp"
+#include <algorithm>
 #include <fmt/core.h>
 #include <fmt/color.h>
 
@@ -86,16 +90,32 @@ bool SemanticAnalyzer::constantFitsType(const ASTNode& node, const Type& target)
     const auto* prim = target.as<PrimitiveType>();
     if (!prim) return false;
 
-    // The magnitude is not checked, and that is a decision rather than an
-    // oversight: Fin has not said how wide `short` or `char` is, and the `{N}`
-    // annotation that would say is erased by resolveTypeFromAST before anything
-    // can read it. A range check today would be inventing the widths.
-    // KnownDefect_IntegerWidths.AConstantTooLargeForItsTargetIsAccepted records
-    // the hole and is where the check goes when the widths become real.
-    if (isFloatingName(prim->name)) return true;
-    if (isSignedIntegerName(prim->name)) return true;
-    if (isUnsignedIntegerName(prim->name)) return !negative;
-    return false;  // bool, string, void, auto and every named type: unchanged
+    const auto info = scalarOf(*prim);
+    if (!info) return false;
+    if (info->kind == ScalarKind::Float) return true;
+    if (info->kind != ScalarKind::Int || info->bits == 0) return false;
+
+    if (negative) {
+        if (!info->isSigned) return false;
+        int64_t value = 0;
+        if (readSignedConstant(node, value) != ConstantRead::Ok) return false;
+        if (info->bits >= 64) return true;
+        const int64_t minimum = -(int64_t{1} << (info->bits - 1));
+        return value >= minimum;
+    }
+
+    uint64_t value = 0;
+    if (readConstant(node, value) != ConstantRead::Ok) return false;
+    if (info->isSigned) {
+        const uint64_t maximum = info->bits >= 64
+            ? static_cast<uint64_t>(INT64_MAX)
+            : (uint64_t{1} << (info->bits - 1)) - 1;
+        return value <= maximum;
+    }
+    const uint64_t maximum = info->bits >= 64
+        ? UINT64_MAX
+        : (uint64_t{1} << info->bits) - 1;
+    return value <= maximum;
 }
 
 SemanticAnalyzer::SemanticAnalyzer(DiagnosticEngine& d, bool debug) 
@@ -334,6 +354,21 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
 
     auto type = currentScope->resolveType(node->name);
     if (!type) {
+        // The declaring module, for a type inside a macro expansion (ADR 0023 step 4).
+        // A library's macro spelling `Held::make($n)` names `Held` because the module that
+        // wrote the macro imported it; the caller need not have, and under call-site-only
+        // resolution never could without knowing the macro's body, which is ADR 0020's
+        // objection to the C preprocessor.
+        //
+        // Second and not first, so a caller's own name still wins where both have one --
+        // the macro asked for the type by that name, and shadowing it is the caller's
+        // prerogative. Set on nothing a programmer wrote, so this line is unreachable for
+        // every type outside an expansion.
+        if (node->declaringScope) {
+            type = node->declaringScope->resolveType(node->name);
+        }
+    }
+    if (!type) {
         error(*node, "Undefined type '" + node->name + "'");
         return nullptr;
     }
@@ -345,6 +380,16 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
         bool argsResolved = true;
         
         for(size_t i = 0; i < node->generics.size(); ++i) {
+            // `...` is elision: accepted as a generic argument and only there.
+            // A bare `...` stays undefined, and what an elided argument constrains
+            // is nothing -- dynamic targets drop their arguments unread already,
+            // and anything else answers for itself downstream. This is what
+            // `Any<...>` (stdlib/operators.fin:6) needs to resolve.
+            if (node->generics[i]->name == "..." &&
+                node->generics[i]->generics.empty()) {
+                args.push_back(std::make_shared<DynamicType>("..."));
+                continue;
+            }
             auto argType = resolveTypeFromAST(node->generics[i].get());
             args.push_back(argType);
             if (!argType) { argsResolved = false; continue; }
@@ -387,9 +432,108 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
         }
     }
     
+    // 6. The written width: `int{64}`.
+    //
+    // Resolved *into* the type, the way section 2 resolves an array's extent, and
+    // for the same reason: until this the annotation was walked for its own
+    // diagnostics and the value went nowhere, so `int{8}` and `int` were one
+    // semantic type. That single missing number is three defects -- a narrowing
+    // assignment with nothing narrower to refuse, a layout pass answering four
+    // bytes for a one-byte field, and `expected 'uint'` shown to someone who wrote
+    // `uint{8}` -- and PrimitiveType::bits is where it now lives.
+    //
+    // The annotation is still walked whatever it is written on, so a malformed
+    // width is a diagnostic on `float{-8}` as much as on `int{-8}`; what depends on
+    // the base type is only whether there is anywhere to *put* the number. A width
+    // on a non-integer is dropped, because a width is a count of value bits, an
+    // IEEE format is not built from one, and Fin has ruled on no floating-point
+    // format but the two the table names -- so `float{128}` is `float`, which is
+    // what tests/samples/type_annotations.fin:14 needs to keep resolving.
+    //
+    // Nothing reaches here from a pointer, an array, a function type or a
+    // prototype: each of those returns above, so `(*int){32}` and `{int, float}{8}`
+    // keep resolving with their annotation unread. That is the state those
+    // spellings were already in and not a decision this section makes.
     if (type && !node->annotations.empty()) {
         for (auto& ann : node->annotations) {
             ann->accept(*this);
+        }
+
+        // Every annotation walked first, so `int{"a", "b"}` reports both of its own
+        // mismatches, and then the count -- which is the array extent's ordering
+        // read onto a list that may hold more than one thing.
+        if (node->annotations.size() > 1) {
+            error(*node, "A type takes one bit width");
+            return type;
+        }
+
+        Expression& ann = *node->annotations[0];
+        // Checked against `int` like any other expression, which is what reports
+        // `expected 'int', got 'string'` for `int{"a"}`; the width diagnostic below
+        // then says what it was written *as*. Two messages about different things,
+        // exactly as `[int, "x"]` reports both.
+        auto intType = currentScope->resolveType("int");
+        // Keep an unrepresentable magnitude on the width-reading path. If it
+        // became a normal type mismatch first, checkType would suppress the
+        // width-specific diagnostic below.
+        uint64_t writtenWidth = 0;
+        if (readExtent(ann, writtenWidth) == ExtentRead::TooLarge) {
+            error(ann, "A bit width is too large to represent");
+            return type;
+        }
+        bool integral = true;
+        if (lastExprType) {
+            if (!checkType(ann, lastExprType, intType)) {
+                error(ann, "A bit width must be an integer");
+                integral = false;
+            }
+        }
+        if (!integral) return type;
+
+        uint64_t width = 0;
+        switch (readExtent(ann, width)) {
+            case ExtentRead::Ok:
+                if (width == 0) {
+                    // Separated from Negative because they are different mistakes and
+                    // 0 is the one a reader can talk themselves into: a zero-bit
+                    // integer holds no values, so there is nothing for it to be.
+                    error(ann, "A bit width cannot be zero");
+                    return type;
+                }
+                break;
+            case ExtentRead::Negative:
+                error(ann, "A bit width cannot be negative");
+                return type;
+            case ExtentRead::TooLarge:
+                error(ann, "A bit width is too large to represent");
+                return type;
+            case ExtentRead::NotConstant:
+                // Not a diagnostic, and this is the one case where a width differs
+                // from an extent. tests/samples/type_annotations.fin:8 writes
+                // `let z <int{8 * 8}> = 42;` in an `//@ ok` sample, and Fin has no
+                // constant folder on purpose (utils/IntegerConstant.hpp: folding
+                // arithmetic would answer an open language question by accident for
+                // whichever subset happens to be foldable). So there is no width
+                // here to store -- not a wrong one, none -- and the base name stands.
+                // The backend still refuses the program, because a written annotation
+                // that yielded no width is a width the program asked for and did not
+                // get.
+                return type;
+        }
+
+        // Only where the number has a meaning. `width` is a count of value bits, so
+        // it needs an integer scalar to count the bits of; scalarByName is asked
+        // rather than a list of names being restated, which is the same "one table"
+        // rule ADR 0022 states for the widening itself.
+        //
+        // A fresh type rather than a mutation: `currentScope->resolveType("int")`
+        // hands back the one registered `int`, and writing a width onto it would
+        // make every unannotated `int` in the program 64 bits wide.
+        if (auto* prim = type->as<PrimitiveType>()) {
+            const auto info = scalarByName(prim->name);
+            if (info && info->kind == ScalarKind::Int) {
+                type = std::make_shared<PrimitiveType>(prim->name, static_cast<unsigned>(width));
+            }
         }
     }
 
@@ -452,6 +596,13 @@ void SemanticAnalyzer::error(ASTNode& node, const std::string& msg) {
     hasError = true;
 }
 
+void SemanticAnalyzer::error(ASTNode& node, const std::string& msg,
+                             const std::string& help) {
+    if (quietDepth) return;
+    diag.reportError(node.loc, msg, help);
+    hasError = true;
+}
+
 bool SemanticAnalyzer::checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected) {
     if (!actual || !expected) return false;
 
@@ -460,8 +611,87 @@ bool SemanticAnalyzer::checkType(ASTNode& node, std::shared_ptr<Type> actual, st
     // one, naming a type the program never wrote. isErrorType rather than a plain
     // as<ErrorType>() because `&NoSuchType` and `[NoSuchType]` reach here wrapped.
     if (isErrorType(actual) || isErrorType(expected)) return true;
-    
-    if (!actual->isAssignableTo(*expected)) {
+
+    // A reference reads as its pointee where a value is expected (rvalues
+    // deref, lvalues do not): `&T` is accepted for `T`, once, and never
+    // through a nullable (narrow those first). Probed quietly so a miss still
+    // reports the original mismatch rather than the pointee's -- and only one
+    // level, so a `&&T` still needs an explicit `*`.
+    if (auto* ptr = actual->as<PointerType>()) {
+        if (ptr->pointee && !ptr->pointee->as<PointerType>() &&
+            !ptr->pointee->as<NullableType>()) {
+            QuietPass quiet(*this);
+            if (checkType(node, ptr->pointee, expected)) return true;
+        }
+    }
+
+    // A negative constant is not an unsigned value, whatever the widths say.
+    //
+    // Read before assignability and not after, because ADR 0022's widening makes
+    // `int` -> `ulong` succeed and `constantFitsType` below only ever runs when
+    // assignability has already failed. Without this, widening would smuggle in
+    // `let x <ulong> = -1;` -- which is the one thing
+    // Soundness_IntegerConstants.ANegativeConstantIsNotUnsigned exists to catch. That
+    // test names this exact mistake ("a fix that admits `int` to `uint` wholesale
+    // passes every test above and this one is the only thing that catches it") and
+    // says the check must read the AST, because `-1` is a UnaryOp over a Literal and
+    // so a syntactic question with an exact answer.
+    //
+    // The widening ruling did not settle this one. tests/samples/stdlib/stdio.fin:109
+    // writes `fun read(nbytes: ulong = -1)` and :110 tests `nbytes == -1`, the C idiom
+    // for "the maximum", so a normative sample does ask for wraparound -- and that is
+    // the open ruling the Soundness test names, with the two outcomes it lists: invert
+    // the test and drop the `!negative` in constantFitsType, or stdio.fin gains a
+    // ratified edit. Widening must not decide it as a side effect, so :110 stays
+    // refused exactly as it was before ADR 0022, and what widening clears in that file
+    // is :130 and :135 -- `int` to `ulong` with no constant in sight.
+    {
+        bool negative = false;
+        if (integerConstant(node, negative) && negative) {
+            if (const auto* prim = expected->as<PrimitiveType>()) {
+                if (isUnsignedIntegerName(prim->name)) {
+                    error(node, fmt::format("Type mismatch: expected '{}', got '{}'",
+                                            expected->toString(), actual->toString()));
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Widening is normally enough to make an integer assignment legal, but a
+    // constant still has to fit the target. Check this successful path too;
+    // the narrowing path below uses the same rule without double-reporting.
+    bool constantNegative = false;
+    const bool isConstant = integerConstant(node, constantNegative);
+    const bool assignable = actual->isAssignableTo(*expected);
+    const auto* expectedPrim = expected->as<PrimitiveType>();
+    const auto expectedInfo = expectedPrim ? scalarOf(*expectedPrim)
+                                           : std::optional<ScalarInfo>{};
+    const bool numericTarget = expectedInfo &&
+        (expectedInfo->kind == ScalarKind::Int || expectedInfo->kind == ScalarKind::Float);
+    if (assignable && isConstant && numericTarget) {
+        bool fits = constantFitsType(node, *expected);
+        if (!fits) {
+            const auto* prim = expected->as<PrimitiveType>();
+            const auto info = prim ? scalarOf(*prim) : std::optional<ScalarInfo>{};
+            bool negative = false;
+            integerConstant(node, negative);
+            uint64_t magnitude = 0;
+            const auto read = negative
+                ? ConstantRead::NotConstant
+                : readConstant(node, magnitude);
+            if (info && info->kind == ScalarKind::Int && !negative &&
+                !info->isSigned && info->bits >= 64 && read == ConstantRead::TooLarge) {
+                error(node, "An integer constant is too large to represent");
+            } else {
+                error(node, fmt::format("Type mismatch: expected '{}', got '{}'",
+                                        expected->toString(), actual->toString()));
+            }
+            return false;
+        }
+    }
+
+    if (!assignable) {
         if (constantFitsType(node, *expected)) return true;
         error(node, fmt::format("Type mismatch: expected '{}', got '{}'", expected->toString(), actual->toString()));
         return false;
@@ -490,7 +720,41 @@ bool SemanticAnalyzer::checkInitializer(ASTNode& node, std::shared_ptr<Type> act
 
 void SemanticAnalyzer::visitParameterDefaults(const std::vector<std::unique_ptr<Parameter>>& params) {
     for (auto& param : params) {
-        if (param->default_value) param->default_value->accept(*this);
+        if (!param->default_value) continue;
+        param->default_value->accept(*this);
+
+        // The declared type, re-resolved rather than passed in. Every one of the nine
+        // callers resolves the same TypeNode a few lines above this call, so the
+        // answer is already known there -- but not in a form this helper can be
+        // handed: three of them drop a receiver or an enum's first parameter from the
+        // vector they build, so `paramTypes[i]` and `params[i]` are not the same
+        // parameter. Aligning them would mean a second vector at nine sites, which is
+        // the "N copies of one loop" shape this helper exists to remove.
+        //
+        // Quiet, because the caller has already reported anything that does not
+        // resolve: resolveTypeOrError runs first at all nine sites. Without the
+        // QuietPass, `fun f(p: NoSuchType = 1)` would report its undefined type
+        // twice, and Soundness_ErrorRecovery is what would catch it.
+        std::shared_ptr<Type> declared;
+        {
+            QuietPass quiet(*this);
+            declared = resolveTypeFromAST(param->type.get());
+        }
+        // No guard on either side of the comparison, deliberately, and each absence was
+        // mutation-tested: deleting an `isErrorType(declared)` guard and deleting a
+        // `!lastExprType` guard both left every one of the 1396 tests green, because
+        // checkType already answers both -- it returns false silently on a null and true
+        // on the error sentinel, which is where that suppression belongs and where every
+        // other caller relies on it. A guard here that no test can distinguish from its
+        // absence is a claim about behaviour that is not true.
+        //
+        // checkInitializer and not checkType, which was known before this was written
+        // rather than discovered after: a mutation over the walk half applied the naive
+        // version and killed ANullDefaultIsStillAccepted, because stdlib/error.fin:11
+        // writes `err_code: int = null` and a plain checkType has no null exemption. A
+        // default is an initialiser -- `= null` means "absent" here exactly as it does
+        // on a field or a `let` (see checkInitializer's own comment).
+        checkInitializer(*param->default_value, lastExprType, declared);
     }
 }
 
@@ -542,10 +806,17 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
 
         bool resolved = true;
         std::vector<std::shared_ptr<Type>> paramTypes;
+        // The hoisted signature carries defaults for the same reason it carries
+        // parameter types: it is what a call *above* the declaration is checked
+        // against. Without this, `f(1)` before `fun f(a: int, b: int = 2)` reported an
+        // arity error while the identical call below it did not -- the defaultedness
+        // would have depended on which side of the declaration the call sat on.
+        std::vector<bool> paramDefaults;
         for (auto& param : *params) {
             auto type = resolveTypeFromAST(param->type.get());
             if (!type || isErrorType(type)) { resolved = false; break; }
             paramTypes.push_back(type);
+            paramDefaults.push_back(param->default_value != nullptr);
         }
 
         std::shared_ptr<Type> retType;
@@ -568,17 +839,98 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
         // that was already there.
         if (currentScope->symbols.count(name)) continue;
 
-        currentScope->define({name, std::make_shared<FunctionType>(paramTypes, retType),
+        currentScope->define({name, std::make_shared<FunctionType>(paramTypes, retType,
+                                                                   false, paramDefaults),
                               false, true});
         debugLog(fg(fmt::color::gray), "      [Hoist] Registered '{}' at file scope\n", name);
     }
 }
 
+void SemanticAnalyzer::setExternalGlobalScope(const std::shared_ptr<Scope>& scope) {
+    if (!scope || scope.get() == globalScope.get()) return;
+    // Keep builtins and this module's declarations local, while resolving names
+    // through the loader-owned ambient scope.
+    globalScope->parent = scope.get();
+}
+
 void SemanticAnalyzer::visit(Program& node) {
+    refuseMisplacedGlobals(node);
     hoistTopLevelSignatures(node);
     for (auto& stmt : node.statements) {
         stmt->accept(*this);
     }
+    dropConsumedImports(node);
+}
+
+namespace {
+
+// Reports every `#[global]` that the parser did not stamp as std-scoped.
+//
+// A walk over *attributes* rather than over declaration shapes, deliberately.
+// `#[global]` is legal on any declaration the grammar accepts an attribute on, and
+// an enforcement written as "check it on a function, and on a special, and on a
+// variable, and ..." is wrong the day a shape is added and nobody remembers this
+// list -- the failure mode is silence, which is the one this rule exists to
+// prevent. StructuralWalk knows every node's children (ADR 0004), so the check
+// cannot miss a declaration it was never told about.
+//
+// `unregisteredNode` is left at its throwing default for the same reason the
+// parser's marker leaves it: a node type missing from FIN_NODE_LIST would skip a
+// whole subtree, and a skipped subtree here means a misplaced `#[global]` accepted
+// in silence.
+class MisplacedGlobalFinder : public StructuralWalk {
+public:
+    std::vector<Attribute*> found;
+
+protected:
+    bool enter(ASTNode& node) override {
+        if (node.kind() == NodeKind::Attribute) {
+            auto& attr = static_cast<Attribute&>(node);
+            if (attr.name == kGlobalAttribute && attr.is_flag && !attr.std_scoped) {
+                found.push_back(&attr);
+            }
+        }
+        return true;
+    }
+};
+
+} // namespace
+
+// Runs before anything else in the program, so the diagnostic is not buried under
+// the cascade a name that failed to resolve would produce.
+//
+// Every misplaced one is reported, not just the first: a file with three of them
+// has three things to fix, and reporting one at a time makes that three edit-build
+// cycles. Same reasoning as codegen collecting every refusal.
+void SemanticAnalyzer::refuseMisplacedGlobals(Program& node) {
+    MisplacedGlobalFinder finder;
+    finder.walkAll(node.statements);
+    for (Attribute* attr : finder.found) {
+        error(*attr,
+              "#[global] is usable only inside `namespace std` (ADR 0021). A "
+              "declaration marked #[global] is visible to every file in the "
+              "compilation with no import, and a library that could mint such names "
+              "would collide with another library in a third file that imported "
+              "neither");
+    }
+}
+
+// The last thing the front end does to the tree, and the reason it is a separate
+// sweep rather than part of the walk above: erasing from `node.statements` while
+// iterating it invalidates the iterator, and `visit(ImportModule&)` is reached
+// through `accept` and has no handle on the vector holding it anyway.
+//
+// Only the root Program matters -- a module's own AST lives in the loader's
+// `astStorage` and never reaches the backend -- but this runs for both, because a
+// consumed import is spent in a module for exactly the same reason.
+void SemanticAnalyzer::dropConsumedImports(Program& node) {
+    node.statements.erase(
+        std::remove_if(node.statements.begin(), node.statements.end(),
+                       [](const std::unique_ptr<Statement>& stmt) {
+                           auto* imp = dynamic_cast<ImportModule*>(stmt.get());
+                           return imp && imp->consumed;
+                       }),
+        node.statements.end());
 }
 
 void SemanticAnalyzer::visit(TypeNode& node) { resolveTypeFromAST(&node); }

@@ -210,3 +210,7 @@ conanbuildinfo.txt
 /index.json
 
 legacy/
+
+# Per-agent build directories. Concurrent agents sharing one build directory
+# clobber each other's measurements, so each gets its own; none is an artifact.
+build-*/

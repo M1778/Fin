@@ -26,7 +26,16 @@ void SemanticAnalyzer::visit(ReturnStatement& node) {
         typeHint = nullptr;
         // Check return type
         if (context.currentFuncReturnType) {
-            checkType(*node.value, lastExprType, context.currentFuncReturnType);
+            // Constructors conventionally return a heap-allocated instance (`new S{}`),
+            // while their declared result is the value type S. The allocation is the
+            // constructor's storage operation, so accept that pointer form here; all
+            // other return expressions still undergo the ordinary exact check.
+            auto expectedStruct = std::dynamic_pointer_cast<StructType>(context.currentFuncReturnType);
+            auto returnedPtr = lastExprType ? std::dynamic_pointer_cast<PointerType>(lastExprType) : nullptr;
+            if (!(expectedStruct && returnedPtr && returnedPtr->pointee &&
+                  typesEqual(returnedPtr->pointee, expectedStruct))) {
+                checkType(*node.value, lastExprType, context.currentFuncReturnType);
+            }
         }
     } else {
         // Return void

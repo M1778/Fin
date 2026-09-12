@@ -1,3 +1,5 @@
+> **Current-status note (2026-09-11):** Active status and measurements live in [`docs/HANDOFF.md`](HANDOFF.md); this file is historical and must be remeasured before use.
+
 # Plan: finish the Fin compiler
 
 Goal: `finc hello.fin -o hello && ./hello` prints. Everything below is ordered toward that.
@@ -21,23 +23,54 @@ four items and has grown every time anyone probed for more, and a number in the 
 claim nobody updates. It had one — "and has six" — which went stale within the day, which is the
 argument for the rule rather than against it.)
 
-**Interface fields are not checked at all.** A struct declaring `: <I>` where `I` requires `x <int>`,
-carrying no `x`, compiles successfully. Omitting a required *method* is caught; omitting a required
-field is not. `Analyzer_Decl.cpp:367` resolves interface member types without ever calling
-`defineField`, so `StructType::implements` (`StructType.cpp:114-130`) has no fields to compare and
-checks methods and constructors only. Every interface contract in the standard library is therefore
-decorative — this is the most serious item in the plan.
+~~**Interface fields are not checked at all.**~~ **FIXED 2026-08-28.** The diagnosis here was
+right in both halves and both are closed. `visit(InterfaceDeclaration&)` resolved interface member
+types without ever calling `defineField`, so the interface's own type had no fields — which meant
+`StructType::implements` had nothing to compare *and* that a read of a declared member through an
+interface-typed value reported `has no member` about a member three lines up. The member is
+registered now, and `implements` checks presence and type together, because this entry's sibling
+`KnownDefect` warned that "a fix that only adds presence will leave this failing".
 
-```fin
-interface I { x <int>; }
-struct S : <I> { y <int>, }     // Build Successful.
-```
+What the entry could not predict is the case that made the check hard: `Self` in a requirement
+means the *implementor's* type, so `readonly restrict <&Self>` is `&rptr_iface` in
+`lib/std/stdptr.fin`'s interface and `&rptr` in the class that satisfies it. A literal comparison
+rejects the standard library, and
+`Soundness_BundledStdlib.EverySymbolTheCorpusImportsIsExported` is what said so — before any
+sample did. Held by `Soundness_Interfaces.AMissingFieldIsRejected` and four neighbours, including
+the control that a `&Self` requirement is not satisfied by a pointer to some other struct.
+
+Made urgent by ADR 0027 rather than by this entry: an interface reference carries a vtable with one
+offset slot per required field, so a struct missing one has no offset to emit. Closing this was
+step 1 of that ADR's five.
 
 **Integer widths are a lie.** `uint{8}` and `uint{64}` are the same type; assigning one to the other
-succeeds. `resolveTypeFromAST` (`Analyzer_Core.cpp:142-146`) walks the width annotations for side
+succeeds. `resolveTypeFromAST` (`Analyzer_Core.cpp:393-397`) walks the width annotations for side
 effects and returns the *unannotated* type. `lib/std` defines `i64`, `i128`, `u64`, `u128` and
 `size_t` on top of this, so all of them currently collapse onto `int`/`uint`. Harmless until codegen
 exists, then it is wrong machine code.
+
+~~**Widening applies through a pointee and an array element.**~~ **FIXED 2026-09-02.** ADR 0022 made
+an integer assignable to a wider integer, which is right for a value and is a lie about a container:
+`PointerType::isAssignableTo` asked its pointee the *assignment* question and `ArrayType` asked its
+element, so `&int -> &long` was accepted and `let x <int> = 1; let p <*long> = &x; *p = 4294967297;`
+compiled clean, linked, and exited 139 — an eight-byte store through a four-byte slot. `&int ->
+&float` was the same mistake with a zero exit code: it printed 1069547520, 1.5's bit pattern read as
+an integer.
+
+The fix is a second predicate, `isAssignableThrough` (`src/types/Type.cpp`), which every mutable
+container asks instead — pointee, array element, prototype key and value. It is a *narrowing* of
+`isAssignableTo` and never a second opinion on it, so no conversion became possible and the value
+rule is untouched: `let y <long> = x;` still widens, which `stdlib/stdio.fin:130` and `:135` need.
+Struct-to-interface went with it, and for the representation reason rather than the width one: ADR
+0019 fixes an interface reference as `{data, vtable}`, two words, and a `&Sq` is one — `fun f(p:
+&Shape) <int> { return p.area(); }` called with `&q` compiled, linked, and exited 139 on the method
+call. No corpus file writes an interface in a pointee or an element position.
+
+One hole is kept open on the corpus's authority: `[int] -> [any]` is a representation change by the
+same argument, and `stdlib/types.fin:102` declares `resolve_arr_type(const &arr: [any])`, which is
+useless without it. It cannot produce a wrong program today — codegen refuses `[any]` outright — and
+`KnownDefect_ContainerVariance.ADynamicElementTypeStillAcceptsAConcreteOne` books it. Held by eight
+`Soundness_ContainerVariance` tests, four of which assert the exploit rather than the diagnostic.
 
 **Field declaration order is destroyed.** `StructType::fields` is
 `std::unordered_map<std::string, FieldInfo>` (`StructType.hpp:28`) and `defineField` (`:37`) is its only
@@ -1363,7 +1396,7 @@ what the corpus contains.
 **Turbofish on a dotted path**, which this plan had missed and which is a hard blocker rather than a
 singleton. Every turbofish production in the grammar begins with a bare `IDENTIFIER` —
 `parser.y:1202`, `:1213`, `:1360`, `:1388`, `:1416` — so `foo::<T>()` and `mod::<T>::bar()` parse and
-`a.b.c::<T>()` does not. That makes `types.fin:23` a syntax error, and `types.fin:23` is `typeid`, the
+`a.b.c::<T>()` does not. That makes `types.fin:26` a syntax error, and `types.fin:26` is `typeid`, the
 function everything else in the standard library is built on. It needs the missing construct twice in
 one expression, on both `compiler.structs.select_field::<int>` and `compiler.types.gettype::<T>`, with a
 postfix denullify on the result. Nothing in wave 4 is testable until this parses, so it is wave 2 work
@@ -1372,7 +1405,7 @@ and not compiler-API work.
 **Additional grammar work the standard library needs**, found by auditing it against the C++ rather
 than against the corpus. Groups B, C and D get all thirteen stdlib files past line 2; they do not get
 any file to the *end*. Also required: union type aliases (`type X = A | B | C` — there is no `PIPE`
-production inside a type, which kills `Number` in `types.fin:51` and `ErrorLike` in `typing.fin:8`);
+production inside a type, which kills `Number` in `types.fin:54` and `ErrorLike` in `typing.fin:8`);
 enum payloads, generics and typed members (`EnumDeclaration` at `src/ast/decls/StructDecl.hpp:66-74`
 holds `vector<pair<string, Expression>>` and has no field that *could* hold a type, which deletes
 rather than degrades `Result<T,U>` and `IOResult<T>`); the three absent `implements` forms
@@ -1487,7 +1520,7 @@ The stdlib agent has delivered it, and it is far smaller than this wave was scop
 `@special` bodies exist across the standard library — `types.fin:22 typeid`, `types.fin:81 tftid`,
 `types.fin:88 _resolve_type`, `error.fin:24 is_error_type`, `enums.fin:10 getenumkeyid`,
 `memory.fin:38 GET_MEMORY_LIMIT`, `memory.fin:27 mem_info` — and their transitive closure is **exactly
-one interpreted Fin function**: `std::number2str` at `types.fin:106`. Three further functions
+one interpreted Fin function**: `std::number2str` at `types.fin:109`. Three further functions
 (`enums.fin:15 getkeyid`, `types.fin:95 resolve_type`, `memory.fin:11 falloc`) sit on the boundary and
 fold to constants rather than needing interpretation.
 
@@ -1510,7 +1543,7 @@ violate it, which is a fair estimate of how often it will be got wrong. And **an
 called from a `@special` body**: `pyprototype/stdlib/builtins.fin:78` has `@special panic` calling
 `printf`, which would make compile-time behaviour depend on the host's libc.
 
-`number2str` is `<T: Number>` over the union alias at `types.fin:51`, so it cannot be instantiated
+`number2str` is `<T: Number>` over the union alias at `types.fin:54`, so it cannot be instantiated
 until union type aliases parse (wave 2) and until `compiler.system.get_total_memory`'s return type is
 pinned. Its body is currently the placeholder `return "10";`. The entire compile-time story therefore
 rests on one function that has never been written — which is good news for this wave's size and worth
@@ -1523,7 +1556,7 @@ above as a soundness defect, so the two are one piece of work.
 
 **The measurement was not the whole line, and ADR 0006 has been amended.** Five statement forms and no
 control flow is what the *standard library's* reachable closure needs; the corpus needs more.
-`literal_interface.fin:4` is `if (@implements(struct_, iface) == true)`, `:17` is
+`literal_interface.fin:6` is `if (@implements(struct_, iface) == true)`, `:17` is
 `if (option == IFaceOptions::First)` returning an anonymous `interface { ... }` literal from either arm,
 and `literal_struct.fin:27` is `if (!@defined("printf"))` guarding an `@define`. So this wave admits
 `if`/`else`, unary `!`, comparison, calls to `@special` functions, and quote-and-splice — and refuses
@@ -1562,7 +1595,7 @@ should not have to grant the enums component to do it. And a meta-type is opaque
 operations rather than off the value, because member access is unreachable by grant enforcement and would
 put the layout surface outside the mechanism built to govern it; so `keyidof` (`enums.fin:20-22`) becomes a
 `@special` reaching `compiler.enums.keyid_of` plus a plain wrapper, which is the idiom the two functions
-directly above it already use. Also here: the two `geykeyid` typos at `stdio.fin:63` and `typing.fin:35`.
+directly above it already use. Also here: the two `geykeyid` typos at `stdio.fin:65` and `typing.fin:37`.
 
 A misspelled component name is a hard error, not a silent false. `present()` has to answer false for an
 absent component or capability negotiation is impossible, which makes
@@ -1721,7 +1754,7 @@ feature with no specification to build against. The corpus's actual discriminant
 over a mechanism that does not exist: `EnumDeclaration` (`src/ast/decls/StructDecl.hpp:66-74`) holds
 `vector<pair<string, Expression>>` with no field capable of holding a payload type. It also needs
 `$enum_member` to exist first, since `keyidof` takes one and a `match` arm *is* an enum member. The
-sharpest argument against landing it early: `stdio.fin:63` and `typing.fin:35` both call **`geykeyid`**,
+sharpest argument against landing it early: `stdio.fin:65` and `typing.fin:37` both call **`geykeyid`**,
 a typo in two files that nobody has caught because nothing runs. Exhaustiveness checking would hide
 that entire class of defect behind nicer syntax instead of exposing it. Both typos are in the approved
 sample edits.
@@ -1967,10 +2000,15 @@ purpose because `I(n: int = ...)` does not parse. `visit(Parameter&)` was left i
 interface requires it -- with a comment at its definition saying it is dead, so the next reader does not spend
 what this cost to find out.
 
-**The type check.** Written as `KnownDefect_ParameterDefaults` rather than as code, because it is blocked on
-the integer ruling: `stdlib/stdio.fin:87` and `:109` write `nbytes: ulong = -1`, and checking a default would
-put `Type mismatch: expected 'ulong', got 'int'` on two lines of a normative sample. That is ruling #1, and it
-now blocks two things.
+**The type check.** Written as `KnownDefect_ParameterDefaults` at the time rather than as code, because it
+looked blocked on the integer ruling: `stdlib/stdio.fin:87` and `:109` write `nbytes: ulong = -1`, and checking
+a default puts `Type mismatch: expected 'ulong', got 'int'` on two lines of a normative sample. **Landed
+2026-08-29** anyway, and the reason it stopped being blocked is that the question had already been answered
+elsewhere in the same file. ADR 0022 refuses a negative constant to an unsigned target in a declaration *and*
+in a comparison, and `:110`'s `nbytes == -1` has been a diagnostic in that sample ever since. So the choice was
+never "convict the sample or not"; it was "convict it at one of its three sentinel sites or at all three", and
+a compiler that disagrees with itself about one line is worse than three honest diagnostics. See "A default is
+an initialiser" below.
 
 Twelve mutants over the unit's tests. The eight per-site mutants each delete one call, and each is killed by
 exactly the tests belonging to that site and no others -- which is the useful result, because it proves the
@@ -2020,6 +2058,53 @@ are `-1` and `null` and both walk clean.
 
 Suite: **375 tests, all passing**, corpus 50/50. Lane note: `src/semantics/**` and `tests/test_soundness.cpp`;
 no parser change, no type-system change, no sample change.
+
+### A default is an initialiser
+
+The second half of "A visitor nobody called", landed 2026-08-29. A parameter's default is now compared against
+the parameter's declared type, which every other default in the language already was.
+
+The change is one call and its cost was all in deciding to make it. The three edge cases were known in advance
+rather than discovered: `checkInitializer` and not `checkType`, because a mutation over the *walk* half had
+already established that a plain `checkType` kills `ANullDefaultIsStillAccepted` -- `stdlib/error.fin:11` writes
+`err_code: int = null` and only `checkInitializer` has the null exemption. Widening reaches it, so `n: ulong = 5`
+is accepted. And a negative constant is not an unsigned value, so `n: ulong = -1` is refused by the same guard
+in `checkType` that refuses `let x <ulong> = -1`.
+
+**What unblocked it was reading the file it was blocked on.** The gap was held open by "checking a default would
+put two new diagnostics on a normative sample", which is true: `stdlib/stdio.fin:87` and `:109` both write
+`nbytes: ulong = -1`. What that argument missed is that the *same sample* writes `nbytes == -1` on `:110`, and
+ADR 0022 has refused that since it landed. So the sample was already convicted over the same sentinel, on the
+same reading of the same constant, and the position being defended was not "the corpus is intact" but "the
+corpus is contradicted at one of its three sites instead of three". The second is strictly worse: it is the
+compiler disagreeing with itself about one line, which is exactly the defect `PrimitiveType.cpp`'s comment
+predicted and ADR 0022 recorded as real. Corpus effect: `stdlib/stdio.fin` goes from 9 diagnostics to 11, both
+new ones on lines already carrying the sentinel, and its expectation is prose so the corpus test does not move.
+The ruling on `-1` is still owed; what changed is that it now decides between three consistent diagnostics and
+none, rather than blocking a fix.
+
+Five mutants. Replacing `checkInitializer` with `checkType` kills exactly `ANullDefaultIsStillAccepted`, as
+predicted a wave earlier. Dropping the `QuietPass` around the re-resolution kills
+`AnUnresolvedParameterTypeIsStillReportedOnce` and nothing else -- that test exists because the check resolves
+the parameter's `TypeNode` a second time, which is one resolution more than each of the nine sites used to do,
+and `fun f(p: NoSuchType = 1)` would otherwise report its undefined type twice. Making the check a no-op kills
+the four inverted tests. And two mutants killed nothing, which is the useful result: deleting the
+`isErrorType(declared)` guard and deleting the `!lastExprType` guard both left all 1396 tests green, because
+`checkType` already answers both -- it returns silently on a null and returns true on the error sentinel. Both
+guards were deleted rather than given tests. A guard no test can distinguish from its absence is a claim about
+behaviour that is not true, and it is the second time in this wave that the fix for a zero-kill mutant was to
+remove the code rather than to write the test.
+
+The check re-resolves the declared type instead of being handed it, and that is deliberate: three of the nine
+parameter loops drop a receiver or an enum's first parameter from the vector they build, so `paramTypes[i]` and
+`params[i]` are not the same parameter at those sites. Threading a parallel vector through nine call sites to
+avoid one re-resolution is the "N copies of one loop" shape the helper exists to remove.
+
+Still open, and separately: a default does not make a parameter optional at a call site. That is the
+`FunctionType` change described above and it is unchanged by this.
+
+Suite: **1396 tests, all passing**, corpus 51/51. Lane note: `src/semantics/**`, `tests/test_soundness.cpp`,
+`docs/guide/05-functions.md`, `docs/plan.md`; no parser change, no sample change.
 
 ### One unresolved type, twenty-seven diagnostics
 
@@ -2964,6 +3049,112 @@ the call. `Soundness_Generics.AnOperatorsRegisteredReturnTypeIsWhatItsCallIsType
 it is what kills `D-opgen` and `D-opreg` both. A name that overstates what a test verifies is worse than no
 test, because it retires the suspicion that would have found the gap.
 
+### The corpus, measured from a tree with nothing live in it
+
+Task #3 asked for one thing: re-measure the corpus from a clean detached worktree once `#[global]`
+resolved names, against a recorded baseline of "14/15/21 at `43b3324`, suite 1344/1344". Two facts had
+to be recovered before the measurement could mean anything, and both are worth writing down because
+the task's own note was not enough to act on.
+
+**What the triple counts appeared in no document.** `14/15/21` is in five commit messages and nowhere
+else -- not in `docs/plan.md`, not in `docs/baseline.md`, not in `docs/HANDOFF.md`'s table. It is the
+three-bucket census `HANDOFF.md` §4 documents the *command* for without ever naming the buckets in a
+sentence a reader could grep: `OBJECT_CLEAN` (exit 0 under `-c -o`), `CODEGEN_REFUSED` (at least one
+`codegen:` line), `FRONTEND_ERROR` (everything else). A measurement whose units live only in commit
+messages is a measurement the next person re-derives or misreads, so §4 now names them and carries the
+current numbers.
+
+**`Census.ThePassingSampleCountNeverFalls` is not the same measure, and `baseline.md` said it was.**
+Two revisions of that file pointed at the test as "the live number" for samples surviving the full
+pipeline. It counts samples annotated `//@ ok`, and the corpus harness runs the **front end only** --
+it never invokes `-o` (ADR 0008). So the test answers "how many type-check as expected" and the census
+answers "how many reach an object", and the gap between them is not noise: it is 31 against 19, because
+twelve samples type-check exactly as annotated and are then refused by the backend. The two numbers
+looking interchangeable is precisely why the wrong one was cited, and `baseline.md` now says which
+question each answers.
+
+**The measurement.** A detached worktree at `4788753`, configured against the existing Conan toolchain
+and built from scratch -- §17.1 of the machine notes is the argument for that being the default rather
+than a precaution. `FIN_WITH_LLVM=ON`: **1396 / 1396 pass, 0 skipped**. A second build directory at
+`FIN_WITH_LLVM=OFF`: **1391 ran, 1022 pass, 369 skip, 0 fail** -- the skips are the codegen suites
+behind `BACKEND_TEST`, and the delta of 5 in the total is the codegen tests that are not even
+registered without a backend. Corpus: **19 `OBJECT_CLEAN` / 12 `CODEGEN_REFUSED` / 20 `FRONTEND_ERROR`
+of 51**.
+
+Against `43b3324`'s 14/15/21 of 50: five samples out of codegen refusal, one out of front-end error,
+one sample added by ratified decision (`love.fin`), and **nothing moved to a worse bucket**. That last
+clause is the only part of a bucket census that is a regression check; the rest is progress reporting.
+
+The floor in `Census.ThePassingSampleCountNeverFalls` went 29 -> 31, raised by its own `[  NOTE  ]`
+line rather than by a failure. That is the asymmetry the floor was chosen for working as designed: the
+equality it replaced would have failed on every unit of progress, in a harness file the agent making
+the progress does not own.
+
+### A default that had no effect, and the tenth parameter loop
+
+The second half of the parameter-defaults root cause, and the paragraph two sections up
+("A visitor nobody called") is the record of it being measured and deferred. That deferral
+ranked the unit last, on arithmetic that was correct: the corpus declares exactly three
+defaulted parameters (`stdlib/stdio.fin:87`, `:109`, `stdlib/error.fin:11`), calls none of
+them, and the one call that would need the fix is commented out -- so the corpus effect is
+zero diagnostics, measured as 78 before and 78 after.
+
+**The ranking was wrong and the arithmetic was not.** What a corpus diagnostic count
+cannot measure is a shape the library declines to write *because* the compiler refuses it.
+`lib/std/error.fin` cut its second parameter away and ships a one-argument `Error`, and the
+guide's chapter 12 said so in as many words -- "the constructor takes one argument, not the
+draft's two, because a defaulted parameter is still required at the call site". An absent
+declaration produces no diagnostic to count. A defect that costs the standard library a
+shape ranks by what the library cannot write, not by what the corpus reports.
+
+**The field.** `FunctionType` gains `param_defaults`, a `std::vector<bool>` positionally
+parallel to `param_types`, read through `hasDefault(i)` which returns false past its end so
+a site that knows about only its leading parameters need not pad. Parallel to the
+parameters rather than a count of required ones, because *which* parameters are optional
+decides arity and a count cannot say it: arguments bind positionally, so `(a: int = 1, b:
+int)` still needs both written while `(a: int, b: int = 1)` needs one. Flags rather than the
+default *expressions*: nothing consumes an expression at a call site, and storing one would
+put an AST pointer inside a `Type`, which is the aliasing `clone` and `substitute` exist to
+avoid.
+
+`checkCallArity` folds the flag together with nullability into one `required` rather than
+applying them in sequence, because a parameter that is both nullable and defaulted is
+optional once. `equals()` deliberately ignores the field: a default is a fact about a
+declaration, observable only by omitting an argument, and a `fn(int) -> int` annotation has
+nowhere to write one -- so comparing them would split two types over a difference no call
+site can see. The file-scope hoist carries it, or optionality would have depended on which
+side of the declaration a call sat on.
+
+**Fifteen construction sites, and the fifteenth was found by mutation.** Eleven mutants
+over five files; two survived, and both survivals were the same omission from different
+ends. M4 dropped the field in `clone()` and no test could tell -- `FunctionType::clone` is
+reached only through `StructType::clone`, which nothing in the compiler calls, so no
+accepted program can observe it. That is the shape this repo deletes rather than tests, and
+the deletion is wrong here: the rule is about *guards*, and a faithful-copy contract that
+silently loses a field is not a guard but a trap for its first caller. It gets a type-level
+test, on the precedent `Soundness_FieldOrder` set for exactly this on exactly this method.
+
+M7 removed the receiver-erase from the implements-block overwriter and no test could tell
+either -- and that was not a missing test at all. The vector it erases from was *always
+empty*, because `visit(LambdaExpression&)` recorded no flags. A lambda was the tenth
+parameter loop, and it was absent from the list of nine the earlier unit enumerated,
+because those nine are declaration forms and a lambda is an expression: a helper factored
+out of declaration handling never reached it. Two consequences, one of them a silent hole
+rather than a missing feature -- `fun(a: int, b: int = "hello")` built clean where the
+identical parameters on a named function reported the mismatch, so a lambda's default was
+never checked against anything. Both halves are fixed, five tests pin them, and all eleven
+mutants are dead.
+
+The lesson is narrower than "mutation testing works", which this plan has said four times.
+A surviving mutant is usually a weak test; twice in this unit it was a hole in the
+implementation, pointed at from the only direction that could see it. Reading harder would
+not have found the lambda, because nothing in the fix's own five files mentions one.
+
+Suite **1410 / 1410 pass, 0 skipped**, from 1396. Corpus **19 / 12 / 20 of 51** and 78
+diagnostics -- unchanged, cross-checked at clean HEAD. Lane: `src/types/`,
+`src/semantics/impl/`, `tests/test_soundness.cpp`, and `docs/guide/05-functions.md`, whose
+"Default parameter values" section carried the limitation with the arity error verbatim.
+
 ## Rulings owed
 
 Every entry below is a question only the language owner can answer, discovered by measurement and blocking
@@ -2973,11 +3164,14 @@ exist yet and which will be written against whatever the answers turn out to be.
 so an answer converts directly into work rather than into more discussion.
 
 **Integers.** Is `-1` a legal unsigned constant by C wraparound, or must a maximum be spelled explicitly?
-This one now blocks two things and the evidence is exact. `stdlib/stdio.fin:87` and `:109` both write
-`fun read(nbytes: ulong = -1)` -- a parameter default -- and `:110` compares `nbytes == -1`. A parameter
-default is now *visited* (see below), but it is deliberately not *type-checked*, because the check would put
-`Type mismatch: expected 'ulong', got 'int'` on two lines of a normative sample. `KnownDefect_ParameterDefaults`
-holds the gap open with a test naming this ruling as the blocker. Does an
+The evidence is exact and it is all in one file. `stdlib/stdio.fin:87` and `:109` both write
+`fun read(nbytes: ulong = -1)` -- a parameter default -- and `:110` compares `nbytes == -1`. **This no longer
+blocks anything**, and what unblocked it was noticing that the compiler had already answered it: ADR 0022's two
+`Soundness_IntegerWidening` tests refuse the constant in a declaration and in a comparison, so `:110` was
+already convicted, and the parameter default now is too
+(`Soundness_ParameterDefaults.AnUnsignedParameterDefaultingToMinusOneIsRefused`). The ruling is still owed --
+it decides whether the answer is a `constantFitsType` change or a ratified edit to `stdio.fin` -- but it is now
+a question about three consistent diagnostics rather than a blocker on a fix. Does an
 `int`-typed *expression* convert to unsigned implicitly as in C, or require a cast as in Rust and Zig?
 (Five `int` <- `ulong` diagnostics in the corpus.) What are the widths of `int`, `long`, `short` and `char`,
 and is `char` signed? (Nothing can range-check a literal until these are fixed, and the answer is ABI, so it
@@ -3019,9 +3213,14 @@ module does not declare an error or a no-op? (Twelve stdlib samples open with `n
 imports name `::std`; today the block has no effect and the tail is discarded.) Is `pub` required to export
 — and if so, is `structs.fin:3` wrong, or are quoted-path file imports exempt from visibility while library
 imports are gated, or is `pub` advisory? (`#[export]` on a `%{ ... }%` block is a third spelling of the same
-intent and must be answered in the same breath.) Should a named import or `import *` carry macros? Does a
-quoted import mean one thing or two — a path relative to the importing file, or to the working directory?
-(The corpus documents both meanings.)
+intent and must be answered in the same breath.) *Struck, the named half:* a named import carries a macro,
+ADR 0023, and it does — `import { shout } from mm;` binds the macro `mm` declares. A macro has no
+visibility marker (`pub @macro` is a syntax error), so "declared in this module" is the only export rule
+expressible and there was nothing narrower to rule on. `import *` still does not carry one, and it is
+booked as `KnownDefect_Imports.ImportStarDoesNotBindAMacro` rather than answered: the macro expander's
+star case does not carry macros either, so the two passes agree there and whoever rules on it moves both
+in one commit. Does a quoted import mean one thing or two — a path relative to the importing file, or to
+the working directory? (The corpus documents both meanings.)
 
 **Generic bounds.** Does a primitive satisfy an interface bound? `checkConstraint` now runs -- the bound is
 stored on the `GenericType` at last -- and reports only when the argument is itself a struct, so `S<int>`
@@ -3029,9 +3228,15 @@ still satisfies `<T: I>`. `Castable` and `Any` are erasure markers (ADR 0018) sp
 primitive must satisfy, so rejecting every non-struct argument is not obviously the answer. Three lines
 behind one ruling.
 
-**Syntax not yet settled.** Is the `@macro name { (pattern) => { body } }` form final?
-`macro_definitions.fin:8` says of it "NOT DECIDED YET", and it does not parse in any spelling tried, so no
-macro can be declared at all and the macro-import question above cannot even be measured. In
+**Syntax not yet settled.** *Struck, the macro half:* the `@macro name { (pattern) => { body } }` form is
+not final and is not adopted — ADR 0023 rules against it, and its grammar is deleted, so
+`macro name { ... }` is a syntax error rather than a construct that parses and cannot be expanded. The
+form that exists is `@macro name(a, b) { return quote { $a + $b; }; }`: named parameters, a body that is
+one quoted expression, and the delimiting bracket of a *call* shaping its argument (`name!(a, b)`
+positional, `name![a, b]` and `name!{k => v}` one prototype each). `macro_definitions.fin:8`'s
+"NOT DECIDED YET" is stale in the direction nobody expected — the form was decided *against* — and that
+sample's line is due an update to point at the ADR. Two things the old note said cannot be measured now
+can: a macro *can* be declared, and the macro-import question above is measured and half answered. In
 `preprocessor.fin:23`, which operand order does the ternary `cond : then ? else` take under nesting?
 
 *Struck:* what `fun?` means. `nullifier.fin:23` answers it — "Automatically returns null even without an
@@ -3047,11 +3252,10 @@ slip for `<A>`, or does `_` suppress the check? It is the file's last diagnostic
 *omitted argument*, so the type looks incidental to what it is demonstrating. (3) May a parameter be
 assigned inside the body? `stdlib/error.fin:13` writes `err_code = -1;` and finc answers "Cannot assign to
 immutable variable 'err_code'"; a normative sample and the compiler disagree, so one of them is wrong.
-(4) A parameter's default value is never checked against the parameter's type at all
-(`visit(Parameter&)` resolves the type and visits the default without comparing them), so
-`fun g(n: string = 3)` is accepted. That is a defect rather than a ruling, but it shares a site with (3) and
-is worth fixing in the same visit; it is why `ANullDefaultOnAParameterIsAccepted` passed before this wave
-started.
+~~(4) A parameter's default value is never checked against the parameter's type.~~ **FIXED** -- and this
+entry's own diagnosis was the wrong half. `visit(Parameter&)` does resolve the type and visit the default
+without comparing them, but nothing dispatches to `visit(Parameter&)` at all, so a check added there would
+have changed nothing. Both halves live in `visitParameterDefaults` now; see "A default is an initialiser".
 
 **Diagnostics.** Is there a legal third diagnostic shape beyond error and warning — a note, or a remark
 attached to a parent? Two sites want one, and the JSON contract in ADR 0009 fixes the shape, so the answer

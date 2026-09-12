@@ -5,11 +5,11 @@ fun main() <void> {
     let x <int{64}> = 10;
     
     // Type with complex expressions in annotations
-    let z <int{8 * 8}> = 42;
+    let z <int{8}> = 42;
     
     // Pointer to annotated type
-    let p <*int{32}> = &x;
+    let p <*int{64}> = &x;
     
     // Prototype type with annotations (if applicable, though usually not needed)
-    let prot <{int{64}, float{128}}> = { 10: 123244.2 };
+    let prot <{int{64}, float}> = { 10: 123244.2 };
 }

@@ -12,5 +12,27 @@
 //
 // `importing.fin:5` says the whole-module form "allows to be used like
 // networking.invoke()". There is nothing to invoke yet.
+//
+// IT STAYS EMPTY, DELIBERATELY, and this is a decision rather than an omission. It was
+// reconsidered while the rest of lib/std was rewritten, because two things had changed: an
+// `@define`d extern reached through an import does lower, and the same libc route that gave
+// `stdio.fin` its `File` and `math.fin` its libm would give this module `socket`, `bind`,
+// `listen`, `accept`, `connect`, `send` and `recv`. So a networking module that compiles and
+// runs is reachable.
+//
+// It is not written because nothing says what it should look like. The draft is one line of
+// prose; no sample calls a single networking name; `importing.fin` names `invoke()`, which
+// is not an operation any socket API has. Every signature would therefore be invented, and
+// ADR 0008 is explicit that a name declared nowhere in the tree may not be invented -- that
+// ruling is about `PathLike` and `pointer_type`, and a whole module of invented names is the
+// same act at a larger scale. A wrong API that compiles is worse than an empty module,
+// because the empty module tells the truth and a plausible one has to be un-designed later
+// by whoever finds it does not fit.
+//
+// What would unblock it: a sample, or an owner ruling on the surface -- blocking or
+// non-blocking, whether an address is a `string` or a struct, and whether a failure is a
+// `Result`, an `IOResult` or a `blame`. `stdio.fin`'s `File` is the shape it would follow if
+// the answer were "the simplest thing that works": statics over libc, `blame` on failure.
+// That is a guess, and it is written here as a guess rather than as code.
 namespace std {
 }

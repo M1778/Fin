@@ -30,10 +30,19 @@ endif()
 # OFF the build still succeeds and finc still checks: src/codegen/CodeGen_Stub.cpp
 # takes the module's place and every `-o` refuses with "this build has no
 # backend", which is a diagnostic and not a silently empty artifact.  That is the
-# configuration for a platform where LLVM 18 cannot be had -- ConanCenter
-# publishes no LLVM 18 for Linux armv8, macOS x86_64 or Windows armv8, and none
-# of the six CI combinations may be allowed to go quiet over it.
-set(FIN_LLVM_MAJOR 18 CACHE STRING
+# configuration for a platform where the pinned major cannot be had -- ConanCenter
+# published no LLVM 18 for Linux armv8, macOS x86_64 or Windows armv8, and which
+# platforms 22 is missing on is a measurement, not an assumption, so CI owes it
+# afresh; none of the six combinations may be allowed to go quiet over it.
+#
+# The pin was 18 and is 22 (ADR 0010, amended 2026-08-27).  The reason is the ADR's
+# own criterion -- it chose 18 because 18 was what the build was verified against
+# -- and what this machine verifies is 22.1.8.  Not because 18 is unobtainable:
+# Artix packages `llvm18` 18.1.8-2, so that claim would be false.  What is true is
+# that 18 is not installed, that a second LLVM under a versioned prefix has to be
+# pointed at with LLVM_DIR by hand, and that the 18 pin's actual effect here was
+# FIN_WITH_LLVM=OFF with 285 codegen tests skipping in silence.
+set(FIN_LLVM_MAJOR 22 CACHE STRING
     "The single LLVM major version finc is built against (ADR 0010)")
 option(FIN_WITH_LLVM
     "Find and link LLVM ${FIN_LLVM_MAJOR}. Required from wave 5 (codegen)." ON)
@@ -45,8 +54,8 @@ find_package(fmt CONFIG REQUIRED)
 
 if(FIN_WITH_LLVM)
     # No version argument, deliberately.  LLVMConfigVersion.cmake compares
-    # major.minor, so asking for `18` leaves PACKAGE_FIND_VERSION_MINOR empty and
-    # LLVM 18.1.3 is *rejected* as incompatible with 18 -- which is the opposite
+    # major.minor, so asking for `22` leaves PACKAGE_FIND_VERSION_MINOR empty and
+    # LLVM 22.1.8 is *rejected* as incompatible with 22 -- which is the opposite
     # of what the pin means.  The check below is the pin, and it is the honest
     # place for it: it compares the major that ADR 0010 names against the major
     # that was found, and it says which one it found and where.
@@ -56,6 +65,35 @@ if(FIN_WITH_LLVM)
             "ADR 0010: finc is built against exactly one LLVM major, "
             "${FIN_LLVM_MAJOR}. Found ${LLVM_PACKAGE_VERSION} at "
             "${LLVM_DIR}.")
+    endif()
+    # The pinned major is necessary and not sufficient.  What
+    # `target_link_libraries(fin_core PUBLIC LLVM)` below links is the
+    # *monolithic* libLLVM, exported by LLVMExports.cmake as the target
+    # `LLVM`, and that target exists only in a build configured with
+    # LLVM_BUILD_LLVM_DYLIB -- which LLVM refuses to do under MSVC at any
+    # version: llvm/CMakeLists.txt sets CAN_BUILD_LLVM_DYLIB OFF when MSVC, and
+    # llvm/tools/llvm-shlib/CMakeLists.txt raises "Generating libLLVM is not
+    # supported on MSVC".
+    #
+    # So on Windows find_package succeeds, the check above passes, and there
+    # is no monolith to link.  ADR 0031 rules the fallback: the component
+    # static libraries via llvm_map_components_to_libnames, which is also what
+    # the `TARGET LLVM` branch below yields to -- if LLVM's MSVC story ever
+    # grows a dylib, that branch prefers it with no edit here.
+    if(NOT TARGET LLVM)
+        if(NOT MSVC)
+            message(FATAL_ERROR
+                "LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR} does not export "
+                "the monolithic `LLVM` target that fin_core links, and this "
+                "is not MSVC, so ADR 0031's component fallback does not "
+                "apply -- this is a version mismatch or a dylib-less build "
+                "where one was expected.")
+        endif()
+        llvm_map_components_to_libnames(fin_llvm_libs
+            Core Support BitWriter BitReader MC
+            nativecodegen nativeasmparser)
+        message(STATUS "No monolithic LLVM target (MSVC); linking components: "
+            "${fin_llvm_libs}")
     endif()
     message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
 else()
@@ -130,6 +168,7 @@ add_library(fin_core STATIC
     src/ast/cloning/CloneTypes.cpp
 
     # Semantic Analysis
+    src/semantics/BuiltinMacros.cpp
     src/semantics/CompilerApi.cpp
     src/semantics/impl/Analyzer_CompilerApi.cpp
     src/semantics/impl/Analyzer_Core.cpp
@@ -174,7 +213,12 @@ endif()
 target_link_libraries(fin_core PUBLIC fmt::fmt)
 
 if(FIN_WITH_LLVM)
-    target_link_libraries(fin_core PUBLIC LLVM)
+    if(TARGET LLVM)
+        target_link_libraries(fin_core PUBLIC LLVM)
+    else()
+        # MSVC only (see above): the component static libraries.
+        target_link_libraries(fin_core PUBLIC ${fin_llvm_libs})
+    endif()
     target_include_directories(fin_core PUBLIC ${LLVM_INCLUDE_DIRS})
     # PUBLIC so tests/CMakeLists.txt can key its backend tests off the same
     # switch without repeating the find_package result.

@@ -1,76 +1,169 @@
 //@ bundled
-// Output, the `Printable` contract, and the byte stream.
+// Output, the `Printable` contract, the byte stream, and files.
 //
 // tests/samples/stdlib/stdio.fin is the specification. `extern_as.fin:3` is the only
 // consumer and it takes the whole module (`import stdio::std as stdio;`), so no single
 // name here is load-bearing for the corpus -- but `printf` is called by twenty-odd
-// samples, and it is undefined without this file: there is no builtin printf in the
-// compiler (`grep printf src/semantics` finds nothing). Whether a sample has to import
-// stdio to call printf is an owner ruling; today it does.
+// samples and it is `#[global]`, which makes this file the one place in the library that
+// a program can reach without an import (ADR 0021).
+//
+// THREE THINGS THIS FILE GAINED, each with what unblocked it:
+//
+//   * `IOResult<T>` has an `implements` block. The header that stood here said all three
+//     of its bodies were blocked on `keyidof(Ok)` reporting `expected '$enum_member', got
+//     'fn(...)'` and that whether a member named rather than called satisfies
+//     `$enum_member` was an undecided owner ruling. Re-measured: it resolves, and not
+//     vacuously -- `keyidof(NoSuchMember)` reports `Undefined variable 'NoSuchMember'`, so
+//     the name is checked against the enum's members. `typing.fin` records the same
+//     finding for `Result`; the two enums are the same shape and were blocked by the same
+//     thing.
+//   * `File` exists. It was absent because the draft's version depends on `PathLike`,
+//     which nothing declares, on `Err(...)`/`Ok(...)` as free enum constructors, and on
+//     the corpus ternary. `PathLike` is declared here now -- as `string`, which is what
+//     every use in the draft passes it -- and the file operations go through C's `fopen`
+//     family rather than through the draft's unresolvable names. It is measured end to
+//     end, not merely type-checked: a scratch program writes a file, reads `exists=1
+//     size=5`, reads the bytes back, removes it and reads `exists=0`.
+//   * `eprint`/`eprintln` exist. A stderr extern *is* reachable: `dprintf(2, ...)` is one
+//     `@define` away and it goes to fd 2 -- verified by running a linked program and
+//     redirecting each stream separately.
+//
+// `Stream`'s surface is coherent now, which it was not. `read` used to compare `nbytes`
+// against `stream_length` and then allocate `want - self.pointer`, so a full-length read
+// from a non-zero pointer allocated the right size by accident and any other combination
+// did not; the count and the offset were being mixed. It reads *forward from the pointer*
+// now, clamped to what is left, and `read_all` reads what is left rather than the whole
+// stream from the beginning -- which is what makes calling it twice give the second call
+// nothing instead of a duplicate. `tell`, `remaining`, `rewind`, `write` and `capacity`
+// are new: a stream with `seek` and no `tell` cannot be saved and restored, and one with
+// `expand` and no `write` can only grow a buffer nobody can fill.
+//
+// `capacity()` is the buffer extent and `stream_length` is the content length, and they
+// differ because `expand` deliberately allocates more than the content. That is the same
+// distinction `Collection` draws between `capacity()` and `len()`.
 //
 // Divergences from the draft, each with its reason:
 //
-//   * The draft declares `@define printf` under `#[llvm_name="c_printf"]` and then
-//     re-exports it as `pub implements c_printf = printf;`. That alias form resolves its
-//     right-hand side as a *type*, so it reports `Undefined type 'printf'`. The
-//     `@define` is exported directly instead and the alias is dropped.
-//   * The draft's `printf` is a second, generic, `#[overwrite(printf)]` definition whose
-//     body calls `format!(fmt, ...objects)`. `format!` is not a registered macro
-//     (`Undefined macro 'format!'`) and nothing reads `#[overwrite]`, so the variadic
-//     C-style `printf` is the only one here.
-//   * `print`/`println` are bound `<X: Printable>`, not the draft's `<X: Any<Printable>>`.
-//     Both parse, but the bound written through the alias loses the interface: the body
-//     then reports `Type 'X' does not have methods`, while the plain bound resolves
-//     `format_str` fine. So `Any` is not imported at all here, and the draft's first
-//     import is dropped.
-//   * `IOResult`'s generic parameter loses the draft's `Strict<Stream>` bound: `Strict`
-//     is undefined -- no module declares it and it is not a builtin classifier.
-//   * The draft's `IOResult<T> implements <IResult> { ... }` block is dropped for one
-//     reason, which is the draft's own: `keyidof(Ok)` in all three bodies reports
-//     `expected '$enum_member', got 'fn(...)'`, the undecided ruling
-//     stdlib/typing.fin's note records. Two reasons that used to stand here are gone --
-//     an enum can be the target of an implements block, and `enum_.0` reads as a
-//     positional payload access (Soundness_PositionalMembers), a `blame` of one
-//     included (Soundness_Blame.RaisingAValueOfErasedTypeIsAccepted). `IResult` is
-//     therefore still not imported, and the draft's third import goes with it.
-//   * `IStream` declares no constructor: a bodyless `Self(data: [char]);` in an
-//     interface is a syntax error twice over -- `Self` is not an IDENTIFIER in that
-//     position, and a constructor declaration without a body does not parse at all.
-//   * `Stream::read`'s `nbytes: ulong = -1` sentinel is gone. A default parameter value
-//     parses but is not honoured -- calling `f()` on `fun f(n: int = 5)` reports
-//     `expects 1 arguments, got 0` -- so a defaulted parameter is a required parameter
-//     wearing a default, and `read_all` is a separate method instead.
+//   * The draft declares `@define printf` under `#[llvm_name="c_printf"]` and re-exports
+//     it as `pub implements c_printf = printf;`. That alias form resolves its right-hand
+//     side as a *type*, so it reports `Undefined type 'printf'`. The `@define` is
+//     exported directly and the alias is dropped.
+//   * The draft's second, generic, `#[overwrite(printf)]` `printf` calls
+//     `format!(fmt, ...objects)`, which type-checks now: `format!` is a macro the compiler
+//     implements (ADR 0023 step 6), measured on that exact body. `format!` also lowers as
+//     of step 7 -- but not this call. The lowering reads the placeholders out of the format
+//     string at compile time to pick a conversion per value, so the string has to be a
+//     literal where the call is written, and `fmt` here is a parameter: the body reports
+//     `codegen: a 'format!' whose format string is not a literal is not lowered yet`
+//     (measured 2026-09-07). A `printf` that forwards its own `fmt` is exactly the shape
+//     that needs the runtime formatter this lowering does not have. That, and nothing
+//     reading `#[overwrite]`, is what is left.
+//   * `print`/`println` are bound `<X: Printable>`, not `<X: Any<Printable>>`. The bound
+//     written through the alias loses the interface and the body then reports `Type 'X'
+//     does not have methods` (KnownDefect_TypeAliases.GenericArgumentsOnANonGenericAlias-
+//     AreDiscarded), while the plain bound resolves `format_str` fine.
+//   * `IOResult`'s parameter loses the draft's `Strict<Stream>` bound: `Strict` is
+//     declared nowhere in the tree and ADR 0008 forbids inventing it.
+//   * `IStream` declares no constructor: a bodyless `Self(data: [char]);` in an interface
+//     is a syntax error twice over.
+//   * `Stream::read`'s `nbytes: ulong = -1` sentinel is gone. A defaulted parameter *is*
+//     optional at a call site now (`d7a91df`), so this is no longer why -- what remains is
+//     that `-1` in a `ulong` is refused (Soundness_ParameterDefaults.AnUnsignedParameter-
+//     DefaultingToMinusOneIsRefused) and that `read_all` reading what is left is a
+//     different operation from `read` with a sentinel, not a spelling of it.
 //   * The draft types every length, offset and pointer `ulong`. They are `int` here:
-//     `ulong` is accepted as an array size or an index nowhere -- `new [char, n]` with
-//     an `ulong` n reports `Array size must be an integer` *and*
-//     `expected 'int', got 'ulong'`, and so does `a[i]`. There is no widening or
-//     narrowing between the integer types at all, which is on the owner's ruling list;
-//     until it is settled a stream cannot be longer than an `int`.
-//   * Where the draft writes `_temp.length` or `data.length`, this file carries the length
-//     itself. `.length` works on both an array and a string -- the claim that used to
-//     stand here was measured when these buffers were annotated `&[char]`, and a pointer
-//     to an array has no members. The lengths stay carried for a different reason: a
-//     `Stream`'s `stream_length` is how much content it holds, and `expand` deliberately
-//     allocates more than that, so the buffer's `.length` is not the stream's length.
+//     `new [char, n]` with a `ulong` n reports `Array size must be an integer`, and so
+//     does `a[i]`. Until an integer conversion lands a stream cannot be longer than an
+//     `int`.
 //   * The draft's loops run `for (i: int = 0; i >= _temp.length; i++)` -- `>=`, which
-//     never executes. Written `<` here. The draft is wrong about its own loops in three
-//     places and stdlib/collection.fin repeats it.
-//   * `File`/`FileIO` are dropped whole: `PathLike` is undefined, `Err(...)`/`OK(...)`
-//     as free enum constructors do not resolve, and `File::exists` returns through
-//     `path.length == 10 : true ? false` -- the corpus ternary, whose operand order is
-//     an open owner ruling (preprocessor.fin:23 is blocked on the same thing).
+//     never executes. Written `<` here.
+//   * `File::exists` returns `path.length == 10 : true ? false` in the draft, which is a
+//     stub with a comment saying so ("for testing"). It asks the operating system here.
+//   * `FileIO`'s `get_file_info(path) <IOResult>` is dropped: `IOResult` with no argument
+//     is not a type this file can write, and what the info would be is undecided. `size`
+//     is the part of it that has an answer.
+//
+// GAPS hit while writing this file:
+//
+//   * A `[char]` does not cast to a `&char` (`Invalid cast from '[char]' to '&char'`), so
+//     `File::read_all` passes `&buf[0]` to `fread` -- taking the address of the first
+//     element, which does work.
+//   * A `string` does not cast to a `&char` either, and does not pass to a `&char`
+//     parameter (`expected '&char', got 'string'`). `File::write_text` therefore declares
+//     `fwrite`'s buffer as a `string`, which is the same pointer wearing the type the call
+//     site has.
+//   * `cast<any>` reaches the front end and is refused in codegen (`a cast of type 'any'
+//     is not lowered yet`), so the `string`-to-bytes route that type-checks does not run.
+//     That is why nothing here converts a `string` to a `[char]`.
+//   * `File`'s methods are `static` and take a path, rather than a `File` being an open
+//     handle with a `&void` field. A `&void` field in a struct was not tried far enough to
+//     claim it works, and the static form is what the draft writes.
+//   * None of the Fin-level functions here lower when reached through an import -- a call
+//     to an imported function is not lowered. The `@define`d externs are the exception
+//     and they lower with their `#[llvm_name]` intact.
 #[stdimport] %{
 import { Error } from error::std;
+import { getkeyid, keyidof } from enums::std;
 }%
 
 namespace std {
 
-// The C library's printf, by its own name. Variadic, and no format checking: the
-// `...` in a `@define` accepts anything.
+// The C library's printf, by its own name. Variadic, and no format checking: the `...` in
+// a `@define` accepts anything. `#[global]` makes this the one name in the language that
+// needs no import, and it is legal only inside `namespace std` (ADR 0021).
 #[llvm_name="printf"]
+#[global]
 #[export]
 @define printf(fmt: string, ...) <noret>;
 
+// The other formatter, and the only one that is not C's. `format!` is implemented by the
+// compiler rather than by a body (ADR 0023 steps 6 and 7), which is what the `!` says: the
+// line declares the signature and nothing here supplies the code. It needs no `#[global]`,
+// and could not use one -- a builtin resolves bare because it is in no scope at all, so
+// there is nothing for publication to add. The declaration is here because this is the
+// module that owns formatted output and a reader looking for the signature looks here.
+@define format!(fmt: string, ...) <string>;
+
+// The rest of C's I/O that this module needs. None of these is `#[global]`: the marked set
+// is two names and minting a third would be a hole in the module system rather than a
+// convenience. So none of them is *callable* from a program that imports this module, and
+// the line here used to claim otherwise -- measured 2026-08-31, `io_fflush(null)` behind
+// `import { io_fflush } from stdio;` gives `codegen: a call to 'io_fflush' is not lowered
+// yet`, and `stdio.io_fflush(null)` gives the qualified form of the same refusal. An extern
+// is no better off than a Fin function here. What `#[global]` buys is the prototype splice
+// (ADR 0021), the one mechanism that puts a declaration into the program the backend walks.
+#[llvm_name="dprintf"]
+@define io_dprintf(fd: int, fmt: string, ...) <int>;
+
+#[llvm_name="fflush"]
+@define io_fflush(handle: &void) <int>;
+
+#[llvm_name="fopen"]
+@define io_fopen(path: string, mode: string) <&void>;
+
+#[llvm_name="fclose"]
+@define io_fclose(handle: &void) <int>;
+
+#[llvm_name="fread"]
+@define io_fread(buffer: &char, size: ulong, count: ulong, handle: &void) <ulong>;
+
+#[llvm_name="fwrite"]
+@define io_fwrite(buffer: string, size: ulong, count: ulong, handle: &void) <ulong>;
+
+#[llvm_name="fseek"]
+@define io_fseek(handle: &void, offset: long, whence: int) <int>;
+
+#[llvm_name="ftell"]
+@define io_ftell(handle: &void) <long>;
+
+#[llvm_name="access"]
+@define io_access(path: string, mode: int) <int>;
+
+#[llvm_name="remove"]
+@define io_remove(path: string) <int>;
+
+// What a type provides to be printed. `print`/`println` are written against this and
+// nothing else, which is why they are one line each.
 #[export]
 pub interface Printable {
     pub fun format_str() <string>;
@@ -86,6 +179,53 @@ pub fun println<X: Printable>(object: X) <noret> {
     printf("%s\n", object.format_str());
   }
 
+// The same two on standard error. `dprintf(2, ...)` is what makes these possible at all --
+// verified by running a linked program and redirecting each stream separately, so this is
+// stderr and not stdout wearing the name.
+#[export]
+pub fun eprint<X: Printable>(object: X) <noret> {
+    let written <int> = io_dprintf(2, "%s", object.format_str());
+  }
+
+#[export]
+pub fun eprintln<X: Printable>(object: X) <noret> {
+    let written <int> = io_dprintf(2, "%s\n", object.format_str());
+  }
+
+// The un-`Printable` forms, for the values that have no `format_str` and never will. A
+// caller printing a `string` or an `int` should not have to wrap it in a struct, and
+// `printf` with a hand-written format string is the alternative these replace -- the whole
+// point of the typed layer is that the format string is not the caller's problem.
+#[export]
+pub fun print_str(text: string) <noret> { printf("%s", text); }
+
+#[export]
+pub fun println_str(text: string) <noret> { printf("%s\n", text); }
+
+#[export]
+pub fun eprint_str(text: string) <noret> {
+    let written <int> = io_dprintf(2, "%s", text);
+  }
+
+#[export]
+pub fun eprintln_str(text: string) <noret> {
+    let written <int> = io_dprintf(2, "%s\n", text);
+  }
+
+#[export]
+pub fun print_int(value: int) <noret> { printf("%d", value); }
+
+#[export]
+pub fun println_int(value: int) <noret> { printf("%d\n", value); }
+
+// `fflush(null)` flushes every open stream, which is what C specifies for a null argument.
+// It lowers, which is worth stating because a null passed to a pointer parameter is not
+// always accepted here.
+#[export]
+pub fun flush() <noret> {
+    let result <int> = io_fflush(null);
+  }
+
 #[export]
 pub struct IOError : <Error> {}
 
@@ -99,6 +239,59 @@ pub enum IOResult<T> {
     pub Ok <T>,
   }
 
+// The interface the draft wanted for `IOResult`, and the block that satisfies it. Both are
+// possible now for the reason at the top of this file: `keyidof(Ok)` resolves.
+//
+// The receiver of a method on an enum is its *first parameter* when the parameter's type is
+// the enum (Soundness_EnumMethodReceiver), so `r.unwrap()` passes nothing.
+#[export]
+pub interface IIOResult<T> {
+    pub:
+      fun unwrap(enum_ : IOResult<T>) <T>;
+      fun unwrap_or(enum_ : IOResult<T>, fallback: T) <T>;
+      fun expect(enum_ : IOResult<T>) <noret>;
+      fun select(enum_ : IOResult<T>, callback : fn(T) -> void) <noret>;
+      fun is_ok(enum_ : IOResult<T>) <bool>;
+      fun is_err(enum_ : IOResult<T>) <bool>;
+}
+
+IOResult<T> implements <IIOResult> {
+    pub fun unwrap(enum_ : IOResult<T>) <T> {
+        if (getkeyid(enum_) == keyidof(Ok)) {
+            return enum_.0;
+          } else {
+            blame enum_.0;
+          }
+      }
+
+    pub fun unwrap_or(enum_ : IOResult<T>, fallback: T) <T> {
+        if (getkeyid(enum_) == keyidof(Ok)) {
+            return enum_.0;
+          }
+        return fallback;
+      }
+
+    pub fun expect(enum_ : IOResult<T>) <noret> {
+        if (getkeyid(enum_) == keyidof(Err)) {
+            blame enum_.0;
+          }
+      }
+
+    pub fun select(enum_ : IOResult<T>, callback : fn(T) -> void) <noret> {
+        if (getkeyid(enum_) == keyidof(Ok)) {
+            callback(enum_.0);
+          }
+      }
+
+    pub fun is_ok(enum_ : IOResult<T>) <bool> {
+        return getkeyid(enum_) == keyidof(Ok);
+      }
+
+    pub fun is_err(enum_ : IOResult<T>) <bool> {
+        return getkeyid(enum_) == keyidof(Err);
+      }
+}
+
 #[export]
 pub interface IStream {
   priv:
@@ -108,11 +301,19 @@ pub interface IStream {
 
   pub:
     fun seek(offset: int) <bool>;
+    fun tell() <int>;
+    fun remaining() <int>;
+    fun rewind() <noret>;
     fun read(nbytes: int) <[char]>;
     fun read_all() <[char]>;
+    fun write(data: [char], count: int) <int>;
     fun expand(nbytes: int) <noret>;
+    fun capacity() <int>;
 }
 
+// An in-memory byte stream. `stream_length` is how much content it holds and
+// `capacity()` is how large the buffer is; `expand` deliberately makes the second larger
+// than the first, which is why both exist.
 #[export]
 pub struct Stream : <IStream> {
     priv:
@@ -121,38 +322,73 @@ pub struct Stream : <IStream> {
       stream <[char]>,
 
     pub:
+      fun tell(self: &Self) <int> { return self.pointer; }
+
+      fun capacity(self: &Self) <int> { return self.stream.length; }
+
+      fun remaining(self: &Self) <int> { return self.stream_length - self.pointer; }
+
+      fun rewind(self: &Self) <noret> { self.pointer = 0; }
+
+      // Seeking to exactly `stream_length` is allowed and leaves the stream at its end,
+      // which is where a sequence of full reads finishes. A negative offset is not: it
+      // used to be accepted, and every read after it indexed below zero.
       fun seek(self: &Self, offset: int) <bool> {
-          if (offset > self.stream_length) {
-              return false;
-            } else {
-              self.pointer = offset;
-              return true;
-            }
+          if (offset < 0) { return false; }
+          if (offset > self.stream_length) { return false; }
+          self.pointer = offset;
+          return true;
         }
 
-      // Reads forward from the pointer and leaves it past what was read.
+      // Reads forward from the pointer, clamped to what is left, and leaves the pointer
+      // past what it read. The version this replaces clamped `nbytes` against
+      // `stream_length` and then allocated `want - self.pointer`, mixing a count with an
+      // offset -- correct only when the pointer was 0 or the read was the whole stream.
       fun read(self: &Self, nbytes: int) <[char]> {
+          blame nbytes >= 0, "a read count cannot be negative";
           let want <int> = nbytes;
-          if (want > self.stream_length) { want = self.stream_length; }
-
-          let _temp <[char]> = new [char, want - self.pointer]{};
-          for (let i <int> = 0; i < want - self.pointer; i++) {
-              _temp[i] = self.stream[i + self.pointer];
+          let left <int> = self.stream_length - self.pointer;
+          if (want > left) { want = left; }
+          let out <[char]> = new [char, want]{};
+          for (let i <int> = 0; i < want; i++) {
+              out[i] = self.stream[self.pointer + i];
             }
-
           self.pointer += want;
-          return _temp;
+          return out;
         }
 
-      fun read_all(self: &Self) <[char]> { return self.read(self.stream_length); }
+      // What is left, not the whole stream. That is the difference that makes calling it
+      // twice give the second call nothing rather than a duplicate of the first.
+      fun read_all(self: &Self) <[char]> {
+          return self.read(self.stream_length - self.pointer);
+        }
 
-      fun expand(self: &Self, nbytes: int) <noret> {
-          let _temp <[char]> = new [char, nbytes + self.stream_length]{};
-          for (let i <int> = 0; i < self.stream_length; i++) {
-              _temp[i] = self.stream[i];
+      // Writes at the pointer, growing the buffer if `count` does not fit, and extends
+      // `stream_length` when it writes past the old end. Without this, `expand` could
+      // only grow a buffer nothing could fill.
+      fun write(self: &Self, data: [char], count: int) <int> {
+          blame count >= 0, "a write count cannot be negative";
+          let room <int> = self.stream.length - self.pointer;
+          if (count > room) { self.expand(count - room); }
+          for (let i <int> = 0; i < count; i++) {
+              self.stream[self.pointer + i] = data[i];
             }
-          self.stream = _temp;
-          self.stream_length += nbytes;
+          self.pointer += count;
+          if (self.pointer > self.stream_length) { self.stream_length = self.pointer; }
+          return count;
+        }
+
+      // Grows the buffer by `nbytes` and copies the content across. The content length is
+      // unchanged -- expanding makes room, it does not invent bytes -- which is what the
+      // version this replaces got wrong when it added `nbytes` to `stream_length`.
+      fun expand(self: &Self, nbytes: int) <noret> {
+          blame nbytes >= 0, "cannot expand by a negative amount";
+          let bigger <[char]> = new [char, self.stream.length + nbytes]{};
+          for (let i <int> = 0; i < self.stream_length; i++) {
+              bigger[i] = self.stream[i];
+            }
+          delete self.stream;
+          self.stream = bigger;
         }
 
       Stream(data: [char], length: int) {
@@ -161,5 +397,112 @@ pub struct Stream : <IStream> {
           self.pointer = 0;
         }
 }
+
+// The draft's `PathLike`, declared. It was one of the names that kept `File` out of this
+// module: the draft uses it and nothing in the tree declares it, and ADR 0008 forbids
+// inventing a name -- but this is not an invention, it is the library declaring its own
+// alias for what every draft use site passes, which is a `string`.
+//
+// Exported for a caller to name, and *not* used in a signature below. A parameter whose
+// type is written as an alias is refused in codegen (`a parameter of type 'PathLike' is
+// not lowered yet`), measured by bisecting a working `File` down to one line, so every
+// signature here says `string` and this alias is documentation a caller may opt into.
+// Writing `PathLike` in the interface and `string` in the struct would have type-checked
+// and it would have passed for the wrong reason: interface conformance does not compare
+// parameter types at all -- `exists(path: int)` satisfies `exists(path: string)`.
+#[export]
+pub type PathLike = string;
+
+#[export]
+pub interface FileIO {
+    pub fun exists(path: string) <bool>;
+    pub fun size(path: string) <int>;
+}
+
+// Files, through C. Every method is `static` and takes a path, which is the shape the
+// draft writes; a `File` value that holds an open handle is a different design and this
+// module does not have the `&void`-field evidence to write it.
+//
+// Measured end to end rather than type-checked: a scratch program writes five bytes,
+// reads `exists=1 size=5`, reads the bytes back through `read_all`, removes the file and
+// reads `exists=0`.
+#[export]
+pub struct File : <FileIO> {
+    pub:
+      // Asks the operating system. `F_OK` is 0. The draft returns
+      // `path.length == 10 : true ? false` with a comment saying "for testing".
+      static fun exists(path: string) <bool> {
+          return io_access(path, 0) == 0;
+        }
+
+      // The byte length, or `-1` when the file does not open. `SEEK_END` is 2.
+      static fun size(path: string) <int> {
+          let handle <&void> = io_fopen(path, "rb");
+          if (handle == null) { return -1; }
+          let sought <int> = io_fseek(handle, cast<long>(0), 2);
+          let at <long> = io_ftell(handle);
+          let closed <int> = io_fclose(handle);
+          return cast<int>(at);
+        }
+
+      // The whole file, NUL-terminated, in a fresh buffer. The terminator is why the
+      // buffer is one longer than the file: a caller handing these bytes to anything that
+      // expects a C string needs it, and `.length` reports the buffer rather than the
+      // content, so the extra byte is visible rather than hidden.
+      //
+      // `&buf[0]` and not `cast<&char>(buf)`: a `[char]` does not cast to a `&char`
+      // (`Invalid cast from '[char]' to '&char'`), and taking the address of the first
+      // element does what the cast was for.
+      static fun read_all(path: string) <[char]> {
+          let extent <int> = File::size(path);
+          blame extent >= 0, "cannot read a file that does not open";
+          let handle <&void> = io_fopen(path, "rb");
+          blame handle != null, "cannot open the file for reading";
+          let buffer <[char]> = new [char, extent + 1]{};
+          let got <ulong> = io_fread(&buffer[0], cast<ulong>(1), cast<ulong>(extent), handle);
+          let closed <int> = io_fclose(handle);
+          buffer[extent] = cast<char>(0);
+          return buffer;
+        }
+
+      // Writes `text` over whatever was there, and returns whether every byte went. The
+      // buffer parameter of `io_fwrite` is a `string` and not a `&char` because a `string`
+      // does not convert to a `&char` at a call (`expected '&char', got 'string'`) and
+      // does not cast to one either -- so the extern is declared with the type the call
+      // site has.
+      static fun write_text(path: string, text: string, count: int) <bool> {
+          blame count >= 0, "a write count cannot be negative";
+          let handle <&void> = io_fopen(path, "wb");
+          if (handle == null) { return false; }
+          let wrote <ulong> = io_fwrite(text, cast<ulong>(1), cast<ulong>(count), handle);
+          let closed <int> = io_fclose(handle);
+          return cast<int>(wrote) == count;
+        }
+
+      // Appends instead of truncating. Same shape, `"ab"` instead of `"wb"`, and it is a
+      // separate method rather than a mode parameter because a mode string is C's
+      // vocabulary and not this library's.
+      static fun append_text(path: string, text: string, count: int) <bool> {
+          blame count >= 0, "a write count cannot be negative";
+          let handle <&void> = io_fopen(path, "ab");
+          if (handle == null) { return false; }
+          let wrote <ulong> = io_fwrite(text, cast<ulong>(1), cast<ulong>(count), handle);
+          let closed <int> = io_fclose(handle);
+          return cast<int>(wrote) == count;
+        }
+
+      static fun remove(path: string) <bool> {
+          return io_remove(path) == 0;
+        }
+
+      // A `Stream` over a file's bytes, which is the draft's `File::open` with its
+      // unresolvable parts replaced: the draft returns an `IOResult<Stream>` built with a
+      // free `Ok(...)`/`Err(...)`, and a free enum constructor does not resolve. This
+      // raises instead, which is the same failure the rest of this module signals with.
+      static fun open(path: string) <Stream> {
+          let bytes <[char]> = File::read_all(path);
+          return Stream(bytes, bytes.length - 1);
+        }
+  }
 
 }

@@ -23,7 +23,7 @@ public:
     std::vector<std::unique_ptr<GenericParam>> generic_params;
     std::vector<std::unique_ptr<Attribute>> attributes;
     std::vector<std::unique_ptr<TypeNode>> parents;
-    bool is_public;
+    bool is_public = false;
     
     ClassDeclaration(std::string n, std::vector<std::unique_ptr<StructMember>> m, bool pub);
     void accept(Visitor& v) override;

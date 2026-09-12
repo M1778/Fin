@@ -9,7 +9,7 @@ import { Index, IndexAssign } from operators::std;
 namespace std {
 @define printf(fmt: string, ...) <noret>;
 
-struct HashMapError: <Error> {} // Error Class
+struct HashMapError: <Error> {} // HashMap-specific error type
 
 
 struct HashMap<T, U> : <Index, IndexAssign> {
@@ -17,7 +17,7 @@ struct HashMap<T, U> : <Index, IndexAssign> {
     priv values <Collection<U>>,
 
     pub fun get_index(self: &Self, other: T) <int> {
-        for (let i <int> = 0; i <= self.values.len();i++) {
+        for (let i <int> = 0; i < self.values.len();i++) {
           if (self.keys.get(i) == other){
               return i;
             }
@@ -25,7 +25,7 @@ struct HashMap<T, U> : <Index, IndexAssign> {
         return -1;
       }
     pub fun exists(self: &Self, other: T) <bool> {
-        for (let i <int> = 0; i <= self.values.len();i++) {
+        for (let i <int> = 0; i < self.values.len();i++) {
             if (self.keys.get(i) == other){
               return true;
             }
@@ -40,7 +40,7 @@ struct HashMap<T, U> : <Index, IndexAssign> {
       }
 
     pub fun __get(self: &Self, other: T) <U> {
-        for (let i <int> = 0; i <= self.values.len();i++) {
+        for (let i <int> = 0; i < self.values.len();i++) {
             if (self.keys.get(i) == other) {
                 return self.values.get(i);
               }

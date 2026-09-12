@@ -14,6 +14,21 @@ struct Symbol {
     std::shared_ptr<Type> type;
     bool is_mutable;
     bool is_initialized;
+
+    // Whether a prototype for this name was retained for the splice into the root
+    // program (ADR 0021's backend half: ModuleLoader::retainAmbientPrototype).
+    //
+    // It is not "is this declaration marked #[global]", which is a weaker fact. The
+    // mark is what asks; the retention is what the backend will actually be given, and
+    // the two differ when a name is published twice -- first retention wins, so the
+    // second module's declaration is marked and is *not* the one the root program will
+    // declare. Only the retained one may be rewritten into a call on its Fin name
+    // (SemanticAnalyzer::visit(MethodCall&)'s namespace branch), because only for that
+    // one is the name in the root program bound to the symbol the module named.
+    //
+    // Defaulted, so the twenty-two aggregate initialisations of Symbol elsewhere mean
+    // what they meant: a symbol is not ambient unless something says it is.
+    bool is_ambient = false;
 };
 
 class Scope {

@@ -1,327 +1,167 @@
-# Handoff — finishing `finc`
+# Handoff — Fin compiler completion
 
-Written 2026-08-26, at commit `91312b8` on branch `wave3-semantics`.
+Updated 2026-09-12 at commit `2e4065f` on branch `wave3-semantics`.
 
-This is a live handoff for a fresh agent picking up the work. It records the things that are
-**not** derivable from the repo: the user's standing instructions, the hard constraints on this
-working copy, the environment's traps, and the design decisions already made for the units that
-have not been written yet. Everything that *is* in the repo is referenced by path, not copied.
+This is the **current, short handoff**. `docs/plan.md` and the older commit history contain
+historical design notes; do not use their old sample counts as current measurements. Start here,
+then inspect the current tree and rerun the measurements below.
 
-Read, in order: this file, then `docs/plan.md` (approved by the user; §"Wave 5 — backend" and
-§"Rulings owed" are the live parts), then `git log` — the commit messages are the real design
-record and each one states the rule it implemented and why.
+## Goal
 
----
+Finish the standing goal: all runnable normative samples compile and run, and `lib/std/` is
+complete. The 51 files under `tests/samples/` are the language specification (ADR 0008), with
+expectations in their `//@` headers. `//@ ok` describes frontend diagnostics; it does not promise
+that LLVM object generation already works.
 
-## 1. What the project is
+Backend invariant:
 
-`finc` is a C++20 compiler for **Fin**, a systems language. LLVM 18 backend.
+> If codegen cannot lower a construct, it must report an explicit refusal. Never silently drop
+> runtime code or emit guessed IR.
 
-**There is no prose specification. `tests/samples/*.fin` IS the specification** — 50 samples.
-Authority is per-expectation, in the `//@` comment at the top of each sample (ADR 0008,
-`docs/adr/0008-sample-authority-is-per-expectation.md`). When the compiler and a sample disagree,
-the sample wins unless the sample is a typo — and a typo gets **booked, never fixed** (§7).
+## Working rules
 
-The founding backend rule, which every commit since has followed:
+- Work in `/home/M1778/Fin` on the existing branch; do not create a worktree.
+- Commit incremental work by pathspec. Pushing `wave3-semantics` to origin is allowed
+  (user-lifted 2026-09-11); never amend. Monitor CI with `gh` after pushes.
+- Commit author: `M1778M <m1778.pc@gmail.com>`.
+- Write regression tests first, then implement, build, and run tests.
+- After every edit, verify `git diff` shows only the intended change before building.
+- Keep unrelated files untouched. `CMakeUserPresets.json` is tracked but must not be committed;
+  do not use `git commit -a`.
+- Use the default Opus agent only if delegation is genuinely needed; keep agent count low.
+- Do not work in `~/finn-registry`. Read-only research in `~/finn` (package manager) is allowed
+  and settled the import model (see ADR 0032): whole-program source visibility, no objects.
 
-> **A construct the backend cannot lower must be _refused_, never skipped. A silently dropped
-> statement is a miscompile.**
+## Current verified state
 
-Corollary established during the struct-methods unit: a construct only reachable by *naming* it
-(a method, an operator) may be left undeclared and refused at the **use site** instead of at its
-declaration. That is what lets `operators.fin` declare a generic operator it never applies and
-still be `//@ ok`.
+Recent work (21 commits since `bd606c1`, all pushed):
 
-## 2. Standing user instructions — all still binding, quoted verbatim
+- Diamond multiple inheritance shares one ancestor (ADR 0029, layout + codegen).
+- `deeptest2.fin` tail: implicit-`self` fields, `super::` access, `Self()` calls,
+  bodiless interface ctor/dtor requirements — the sample compiles with `finc -c`.
+- Import registry (ADR 0032): templates/interfaces/blocks register lazily from the
+  loader; export is visibility-only (ADR 0033); concrete bases lay out on need.
+- `any` maps as an opaque blob, values still refuse (ADR 0034); nullable `fn`
+  lowers; null compares, null scalar defaults, pointer→int casts, denullify.
+- Meta-types map distinctly; `resolve_type*` evaluate to per-compile typeids (ADR 0035).
+- `stdlib/hashmap.fin` and `stdlib/prototypes.fin` compile with `finc -c`.
+- CI runs on branch pushes and is green on Linux/macOS/build-script; Windows rows
+  are experimental (`continue-on-error`) pending two known issues below.
 
-- "Continue *Don't stop until a big goal is achieved&"
-- "Remember: to commit your work as you are progressing"
-- "no need to push anything for now. for now keep developing"
-- "No whenever an agent is failing just keep resuming it, its the internet connection its fine"
-- "Try going low on agents and spawn less cause we are low on credits"
-- "banning research but also instead of spawning 1 agent per section to implement spawning 1
-  agent per few sections and tasks saves context and token"
-- "Never spawn an agent on claude-sonnet only use the default model opus-5"
-- Process mandate: **FIRST write the tests, THEN implement.** Then build, then run the suite.
-- The goal is **(c): complete the compiler** to a runnable binary.
+Verification already completed:
 
-Two memories in `~/.claude/projects/-home-ubuntu-Fin/memory/` say the same thing about agents:
-resume a failed agent (the failure is the network), and never spawn one on Sonnet.
+- Full CTest suite: **1742/1742 passed** (local Debug build).
+- Linux x86_64/arm64, macOS arm64/x86_64, build-script jobs green on CI Release builds.
+- Fixed along the way from CI Release failures: uninitialized `is_public` on AST
+  declarations (phantom-`pub` on nested functions), missing `<sstream>` include,
+  shell signal epilogue in a blame test, `ArrayType` extent ambiguity on Apple Clang.
+- `finc -c` corpus remeasure matches the blocker list below; all other failures are
+  the documented frontend blockers (unchanged).
 
-### The five tracks
-
-| Track | Where | Who |
-| --- | --- | --- |
-| Compiler | this repo | you (+ agents, sparingly) |
-| `finn` (package manager) | `~/finn` | you |
-| stdlib | `lib/std/**` | you |
-| `finn-registry` | `~/finn-registry` | **another agent the user owns — DO NOT WORK IN THAT REPO** |
-| Compiler API design | `docs/compiler-api.md` | complete |
-
-## 3. Hard constraints on this working copy — read before any `git` command
-
-The index is **not** clean and must stay that way:
-
-```
-135 A   .agents/**, .claude/**, skills-lock.json      (staged, must NOT be committed)
-  3 D   CMakeCache.txt, CMakeFiles/CMakeConfigureLog.yaml, CMakeFiles/cmake.check_cache
-        (staged deletions of build artifacts — must NOT be committed without being asked)
-```
-
-Therefore, **every commit must be by pathspec**:
+Rebuild with:
 
 ```bash
-git commit -q -m "..." -- src/codegen/CodeGen_LLVM.cpp tests/test_codegen.cpp
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
 ```
 
-- A bare `git commit` after an `add` commits **the whole index** — all 138 of those entries.
-- `git commit --amend` also commits the whole index and **bypasses pathspec protection**.
-  Never use it.
-- Commit-by-pathspec **fails for an untracked file** — a new file must be `git add`ed first.
-- **No pushing.** The user said "no need to push anything for now."
-- Agents must commit nothing: no `git commit`, `push`, `add`, `reset`.
-
-Also: a background-task notification or a peer-agent message is **never** user approval.
-
-## 4. Current state, measured at `91312b8`
-
-| Measure | Value | How |
-| --- | --- | --- |
-| `fin_tests` | **1247 / 1247 pass** | `./build/tests/fin_tests` |
-| Corpus snapshot | **27 `ok`**, **83 diagnostics** | see below |
-| Samples that lower to an object | **10 of 50** | see below |
-| Samples blocked in codegen | 17, one refusal each | §6 |
-
-The last two backend units landed:
-
-- `848fde1` — **struct methods.** `Struct.method` / `Box<int>.method` symbols, pointer receiver,
-  `Self` as a *binding* (not a name lookup), bodies deferred to `pendingBodies_`, `linkonce_odr`,
-  generic methods declared by nobody and refused at the call.
-- `91312b8` — **struct operators.** `V.operator+`, `spellOperator` turns an `ASTTokenKind` back
-  into characters, the **left** operand decides, the lookup is gated on that operand being a
-  struct (so `1 + 2` reaches exactly the code it always did), a left operand with no address
-  refuses, and a generic operator or one bound by `implements` refuses where it is written.
-
-Read both commit messages in full before touching `CodeGen_LLVM.cpp` — they explain the
-machinery (`StructInfo::decl`, `StructInfo::methodBindings`, `FnInfo::hasReceiver`, `PendingBody`,
-`declareStructMethods`, `drainPendingBodies`, `emitCallArgs`/`argList`) that the next several
-units all build on.
-
-### Reproducing the numbers
+The compiler is `build/finc`. Remove generated objects after audits:
 
 ```bash
-cd /home/ubuntu/Fin
-cmake --build build --target finc -j6                     # foreground: finishes
-./build/tests/fin_tests                                   # ~62 s
-tests/tools/corpus_snapshot.sh /tmp/snap.txt ./build/finc
-grep -c "rc=0" /tmp/snap.txt                              # -> 27
-awk '{for(i=1;i<=NF;i++) if($i ~ /^n=/){split($i,a,"="); s+=a[2]}} END {print s}' /tmp/snap.txt   # -> 83
-# codegen-clean count -- MUST use find, not a glob, or tests/samples/stdlib/ is missed
-n=0; for f in $(find tests/samples -name '*.fin' | sort); do
-  ./build/finc "$f" -c -o /tmp/x.o >/dev/null 2>&1 && n=$((n+1)); done; echo $n   # -> 10
+rm -f *.o tests/samples/*.o tests/samples/stdlib/*.o
 ```
 
-## 5. Environment and tooling — the traps
+## Remaining object/codegen blockers
 
-- **Build:** `cmake --build build --target finc fin_tests -j6`. A **full** build exceeds the
-  120 s foreground tool timeout. Start it with `nohup … &` and wait with
-  `until grep -qE 'Built target fin_tests|error:' log; do sleep 10; done`. A **foreground**
-  `sleep` is blocked by the harness. A single-target `--target finc` build does finish in
-  foreground.
-- **`cd` inside a Bash call can be reset** — prefix every command with `cd /home/ubuntu/Fin;`.
-- **gmock is not linked.** Use `EXPECT_NE(x.find(s), std::string::npos)`, never
-  `EXPECT_THAT` / `HasSubstr`.
-- `CodeGen_LLVM.cpp` uses `std::set` and has **no `<unordered_set>` include**.
-- **`finc` has no `--check` flag.** Real flags: `-o`, `-c`, `-O0..-O3`, `-I/--include`,
-  `--fin-libs`, `--diagnostics=`, `--color=`, `--debug-ast`, `--debug-sema`, `--debug-codegen`,
-  `--no-check`, `--version`, `--help`.
-- LLVM 18.1.3 at `/usr/lib/llvm-18`. `nproc` = 6.
-- `ExitCode`: Success 0, Diagnostics 1, Usage 2, Internal 3 (ADR 0009).
-- Temp files: `$CLAUDE_JOB_DIR/tmp`.
-- **`std::unordered_map` is node-based**, which is load-bearing: `StructInfo&` / `FnInfo&`
-  references into `structs_` / `functions_` survive later insertions. That is what makes
-  `declareStructs`' extra passes, `instantiateGeneric`'s `StructInfo& live` and
-  `PendingBody::bindings` (a pointer into a `StructInfo`) safe. Do not change either map to a
-  flat one.
+Run each sample with `build/finc -c <sample>` and fix the first refusal, then remeasure.
+34 of 51 samples compile. Two of the refusals are held rulings; the third is
+an open layout question:
 
-### Test conventions in `tests/test_codegen.cpp`
+1. **`tests/samples/deeptest4.fin`** (normative)
+   - Current refusal: `an undeclared operator '==' on struct 'Data'`, from
+     `Collection<Data>` method bodies (every body lowers, called or not).
+   - HELD RULING (ADR 0036): equality is declared, not synthesized; eager
+     bodies stay eager. Revisit only by deliberate language decision.
 
-- **Two suites.** `Soundness_*` must always pass. `KnownDefect_*` records a boundary. When a
-  boundary moves, **invert and rename the test, never relax it.**
-- Harnesses: `Built build(code)` → `.compileExit`, `.compileErr` (ANSI-stripped), `.ran`,
-  `.runExit`, `.out`, `.why()`. `Compiled compileOnly(code, objectPath = {})` → `.exitCode`,
-  `.err`, `.object`, `.why()` — **with no `objectPath` it writes `<stem>.o` into the cwd and does
-  not clean up, so the test must `fs::remove(c.object, ec);`**.
-- `BACKEND_TEST(suite, name)` skips when `FIN_WITH_LLVM=OFF`.
-- `kPrintf` = `"@define printf(fmt: string, ...) <noret>;\n"`.
-- `std::string codegenTrace(code)`; `size_t occurrences(haystack, needle)`.
-- Link tests: `uniqueTempPath`, `shellQuoteLocal`, `readWholeFile`, `std::system`, `FIN_CC` env.
+2. **`tests/samples/useful_macros.fin`** (check label before treating as blocking)
+   - Current refusal: boxing a pointer into `any` (`f(key)` needs string→`any`).
+   - HELD RULING: `any` values stay refused (ADR 0034); full boxing (typeids,
+     box/unbox, conversions) is its own workstream.
 
-### Fin syntax reminders (they bite)
+3. **`tests/samples/nullifier.fin`** (normative, `//@ ok` in check-mode)
+   - Current refusal: `a struct field of type 'int' is not lowered yet`, from
+     the nullable `b? <int>` field. No ruling recorded: whether a nullable
+     field widens the struct, reserves a discriminant, or is refused by rule
+     is open. Promoted to `ok` for a repaired annotation while the layout
+     question stays open.
 
-`fun` is the function keyword; void return is `<noret>`; types go in angle brackets
-(`let x <int> = 1;`); a pointer is `&T`; a generic struct literal needs the **turbofish**
-(`Box::<int>{ val: 100 }`); struct **fields are comma/newline-separated with no semicolons**;
-enum members are bare names; `pub static fun` for statics; `Point::method()` parses as a
-`StaticMethodCall`. `Self{x: 1}` as a struct literal **does not parse** (`new Self{...}` does).
+4. **`tests/samples/stdlib/error.fin`** — DONE since this handoff: `#[uncastable]`
+   excludes casts to/from the type (checked on the cast expression, not in
+   conversions), `#[stderror]` is accepted as a documented marker, `@special`
+   declarations emit nothing, scalar-vs-null compares against zero. Compiles.
 
-### Editing idiom that has not lost work yet
+5. **Frontend blockers still visible in the corpus** (not codegen failures; do not
+   turn a documented sample typo into a compiler feature):
+- `enums.fin` — `Offer` (booked: declared nowhere, must not be invented) and `Ok(T)`
+  designator (ADR 0037; needs enum representation). Its `Any<...>` resolves now.
+- `stdlib/operators.fin`, `stdlib/typing.fin` — owe `Any` imports with no
+  shift-free slot (measured green in scratch with them); `...` itself resolves.
+- `importing.fin` — intentionally missing `somelib` module
+- `literal_interface.fin` — `implements`
+- `literal_struct.fin` — undefined `st`
+   - `prototype_test.fin` — `int` versus `object`
+   - `stdlib/collection.fin` — function variance/signature mismatch
+   - `stdlib/enums.fin` — `Enum`
+   - `stdlib/memory.fin` — `Alloc`
+   - `stdlib/stdio.fin` — generic `X` method lookup
+   - `stdlib/stdptr.fin` — `pointer_type`
+   - `stdlib/types.fin` — `_static_string`
+   - `undefined_behavior.fin` — expected missing-return diagnostic; negative sample.
 
-A Python heredoc with a `one(old, new)` helper that asserts `s.count(old) == 1` **before** any
-write, and writes the file only at the very end — so a failed assertion changes nothing. Use
-`r'''…'''` for C++ snippets containing `\n`. Anchors must start at a line boundary.
+   Regenerate first diagnostics rather than copying this list.
 
-## 6. What to do next
+## Accepted but not yet implemented
 
-The 17 samples that reach codegen and are blocked by exactly one refusal each, freshly measured
-at `91312b8`. This list **is** the work queue for the backend:
+- **Implicit scope-exit destruction** (ADR 0030): destructors run via `delete`
+  (composed: body, fields reverse, effective bases), but no scope-exit
+  invocation is wired up. Revisit only if the language ruling requires it.
+- **`delete &field` vs automatic field cleanup**: an explicit deallocation of a
+  field with a destructor will run twice once scope exits clean it too (ADR 0016
+  names this decision as the one to revisit). No corpus program hits it yet.
+- **Windows full green**: MSVC component-link ruling implemented (ADR 0031) and
+  `__acrt_iob_func` stderr handled, but Windows jobs now fail compiling the bison
+  parser (`parser.hpp` copies move-only AST nodes; MSVC C2280, GCC/Clang move).
+  A portability workstream of its own — do not fix inside language work.
+- **Stale pointers**: `CMakeLists.txt` and ADRs 0025/0026 cite `docs/HANDOFF.md §8`,
+  which the rewrite deleted. Point them somewhere real when touching those lines.
 
+## Important implementation locations
+
+- `src/codegen/CodeGen_LLVM.cpp` — LLVM emitter, lowerability checks, struct layout,
+  templates, imported declarations, and explicit refusal policy.
+- `src/types/Layout.cpp` / `src/types/StructType.hpp` — shared semantic layout; only
+  transitive (chain-diamond) sharing is decided, fork diamonds still refuse.
+- `src/driver/Driver.cpp` and `src/utils/ModuleLoader.*` — root/module boundary;
+  `astStorage` owns module Programs, backend borrows them (ADR 0032).
+- `src/semantics/impl/Analyzer_Decl.cpp` — struct parents, attributes, `@special`, macros.
+- `tests/test_codegen.cpp` — backend soundness and known-defect tests.
+- `tests/test_expectations.cpp` — corpus discovery/expectation harness.
+- `lib/std/` — standard-library declarations and implementations.
+
+## Measurement script
+
+```bash
+for f in tests/samples/*.fin tests/samples/stdlib/*.fin; do
+  out=$(build/finc -c "$f" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf 'OK   %s\n' "$f"
+  else
+    printf 'ERR  %s | %s\n' "$f" "$(printf '%s' "$out" | grep '^error:' | head -1)"
+  fi
+done
+rm -f *.o tests/samples/*.o tests/samples/stdlib/*.o
 ```
-arrays_enums.fin          a variable of type '[int]'
-blame_assert.fin          an empty struct 'M<int>'
-complex.fin               an import (the module loader did not consume it)
-deeptest1.fin             an interface declaration
-deeptest4.fin             an import (the module loader did not consume it)
-extern_as.fin             a type alias
-functions.fin             a parameter of type 'fn'
-generics_interfaces.fin   the erasure marker 'Castable' on 'T' of a generic function
-implements_block.fin      an interface declaration
-lambdas.fin               a parameter of type 'fn'
-letssee.fin               a '::' call on the generic struct 'Vec2' with no type arguments
-loops.fin                 a 'foreach' loop
-readonly.fin              struct 'ChangableSomehow' inheriting another type
-stdlib/hashmap.fin        struct 'HashMapError' inheriting another type
-stdlib/prototypes.fin     a return of type '$type'
-type_annotations.fin      a variable of type 'prototype<int, float>'
-variables.fin             the address of a value with no home
-```
 
-Recommended order — cheapest first, and each one unblocks the next:
-
-1. **Generic methods** (two substitutions at once: the struct's and the call's). The one layer
-   `declareStructMethods` deliberately stops short of. Smallest step from where the code is now.
-2. **Constructors and `new S(args)`.** `lowerableStruct` still refuses `s.constructors`.
-   Note the booked defect: **constructor overloads are not resolved — only `constructors[0]`.**
-3. **Struct inheritance** — `readonly.fin`, `stdlib/hashmap.fin`. Two samples.
-4. **Interfaces** — `deeptest1.fin`, `implements_block.fin`. ADR 0019 already rules that an
-   interface reference is two words and the pointer map has three states.
-5. **Imports** — `complex.fin`, `deeptest4.fin`.
-6. **`::`-call type-argument inference** — `letssee.fin`. The refusal already names the template
-   correctly; the missing piece is inferring `T` from the arguments, the same inference a free
-   generic call needs and does not have.
-7. **Variable types:** `[int]` (`arrays_enums.fin`) — **blocked on an owner ruling for the
-   representation of a dynamic `[T]`**; `prototype<int, float>` (`type_annotations.fin`).
-8. Then, in any order: the address-of-a-value-with-no-home ruling (`variables.fin`); the
-   empty-struct ruling (`blame_assert.fin`'s `M<int>`); type aliases (`extern_as.fin` — also the
-   blocker for the corpus's own `<T: Number>` spelling); `[T]`/`$type` returns
-   (`stdlib/prototypes.fin`); `foreach` (`loops.fin`); lambdas and `fn` parameter types
-   (`functions.fin`, `lambdas.fin`); the erasure marker (`generics_interfaces.fin`, ADR 0002).
-9. After the corpus: the struct ABI classifier, `blame`/`try`/`catch`, the payload-carrying
-   tagged-union enum, bit-width annotations (`int{64}`).
-
-### Design already settled for the generic-methods unit
-
-A generic method is currently `continue`d in `declareStructMethods` and refused at the call by
-`reportMissingMethod` ("a call to the generic method 'x' on struct 'Y'"). The unit is: at the
-call site, infer the method's own type parameters from the arguments (the machinery exists — see
-the parameter-matching helper `instantiateFunction` uses), compose them **onto** the struct's
-`methodBindings` rather than replacing them, key the instance
-`Struct<args>.method<margs>`, `linkonce_odr` it, and queue the body on `pendingBodies_` with the
-composed substitution. `operators.fin`'s `operator + : <T>(other: <T>)` is the operator half of
-exactly the same unit and should land in the same commit or the one after.
-
-## 7. Booked, not to be fixed
-
-These are all **deliberate**. Do not "fix" them without a ruling; do add a `KnownDefect_*` test
-if one is missing.
-
-**Front-end gaps with tests already:** `KnownDefect_Codegen.AStructTypeDoesNotHoist`,
-`.AnEnumMemberDoesNotHoist`, `.AGlobalDoesNotHoist`. No implicit widening float→double. No
-conversion between integer types. `cast<int>` of a float is not lowered.
-
-**Corpus typos — book, never fix:** `geykeyid` at `stdlib/typing.fin:37` and
-`stdlib/stdio.fin:65`; `literal_interface.fin:24`'s missing `;`; `arrays.fin`'s `let temp <int>`;
-`collection.fin:55`'s `let i <int> = i`; `enums.fin:29`'s `blame enum_.1`; `enums.fin:26`'s
-`Ok(T)`.
-
-**Analyzer/AST defects carried:** `StructType::substitute` leaks the outer struct as a nested
-struct's `Self`; default parameter values parse but are not honoured; an interface cannot inherit
-an interface; `StructType::implements()` compares names only; **operators have no arity check**
-(which is why the backend's own `too few arguments` refusal is where a wrong-arity operator
-lands); interface-typed pointer assignability; `Scope::resolve` leaks non-exports through a
-namespace; prototype methods; index assignment never consults `operator []=`; the two
-`KnownDefect_TypeAliases` cases; the `isCastableTo` family is dead; `CloneVisitor` drops several
-flags; `namespace_path` read by nobody; **constructor overloads are not resolved (only
-`constructors[0]`)**; `ImplementsBlock::is_overwriter` read by nobody; a generic free function's
-turbofish binds nothing (worked around in the backend); a member assignment is never
-mutability-checked.
-
-**Unbooked parse gaps** (need `KnownDefect_*` tests written): hex literals; `fn(m: int) -> int`;
-`std::Error` in type position; `Box<int> { v: 1 }`; `{ 1: S{v:1} }`; `{}` as an empty prototype
-literal; `let s <module.Type>`; `Box<int>()` in a call; `new int;`; an empty `implements <>`;
-`struct B : A`; `<T?>` as a return type; `new T(p)` as a `<&T>` return expression. Also: binary
-`|`, `^`, `&` and unary `~` have precedence but no production.
-
-**Codegen residuals:** the `baseAddress`-then-`emit` double-emit for `(*get()).field` — and now,
-narrowly, for a struct-typed left operand of an operator (one dead aggregate load; `-O1` removes
-it). A flat pointer map for a very large fixed array is a size problem.
-
-**Other:** `parser.y` carries the whole `new` production block twice; display-width-aware caret
-placement; the stale `foreach` comment in `parser.y`; the stdlib track has no ordered plan yet;
-CI green on six platform/arch combos.
-
-## 8. Owner rulings queued
-
-`docs/plan.md` §"Rulings owed" (line 2967) is the canonical list. Added since, and **blocking**
-where marked:
-
-- **The representation of a dynamic `[T]`** — *blocks `arrays_enums.fin`.*
-- The tagged union's layout; whether `p++` advances by element or byte; the four nullability
-  edges; what `&"Hello world"` means as a `&string`; `#[slaveof(...)]` lifetimes; struct `==`;
-  whether a `class` is a value or a reference; the size of an empty struct; which passes `-O`
-  runs; namespaces; `pub` export; macros in imports; `Any<Printable>`; `cast<auto>`; variance;
-  interface-member defaults; integer conversions; `GET_MEMORY_LIMIT`.
-- On a **template**, whether `#[llvm_name="vec2_f32"]` names the template or one instantiation
-  (the code reads it as the template's; nothing observable rides on it — see the comment on
-  `llvmNameOf`).
-- Whether `Point::make(1).get()` should copy to a temporary for a read-only method (written into
-  the test that refuses it).
-- Whether `a += b` on a struct should compose the declared `+` with a store, or want an
-  `operator +=` of its own (written into
-  `Soundness_Codegen.ACompoundAssignmentToAStructIsStillRefused`).
-- `macro_rule`'s `LPAREN STRING_LITERAL RPAREN` keeps the quotes in `MacroRule::pattern`.
-- A bare `null` binding a generic parameter is keyed and displayed as `string`.
-
-## 9. Documentation still owed
-
-Write the prelude ruling into `const.fin`, `interfaces.fin`, `enums.fin`, `useful_macros.fin`,
-`stdlib/typing.fin`, `stdlib/stdio.fin`, `stdlib/operators.fin`, `stdlib/enums.fin`,
-`deeptest2.fin`, `stdlib/error.fin`. `importing.fin`'s note still opens with a stale
-"module not found". Re-verify `stdlib/stdio.fin`'s `keyidof` / `getkeyid` references at lines
-57, 65, 71.
-
-## 10. Suggested skills for the next agent
-
-Call the `Skill` tool for:
-
-- **`tdd`** — matches the user's process mandate exactly (tests first, then implement).
-- **`diagnosing-bugs`** — when a `Soundness_*` test goes red and the cause is not obvious.
-- **`domain-modeling`** — when a unit needs a new ADR (`docs/adr/`, format in
-  `.agents/skills/domain-modeling/ADR-FORMAT.md`). 20 ADRs so far, `0001`–`0020`.
-- **`code-review`** — before a large unit lands, reviewing since `91312b8`.
-
-Do **not** use `research` (the user banned research). Keep agent use minimal — "we are low on
-credits" — and bundle several sections per agent rather than one agent per section.
-
----
-
-## Commit-message style
-
-The repo's commit messages are the design record. They are declarative sentences stating the
-rule, then the reasoning, then the measurement. Look at `91312b8` and `848fde1`. Every message
-ends with the numbers (`1247/1247. 27 ok / 83 diagnostics unchanged. Codegen-clean samples
-9 -> 10`) and:
-
-```
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
-```
+After each backend change, add or update a focused `Soundness_Codegen` test, run that test, then
+run the full suite. When a refusal becomes supported, rename/invert the old regression test rather
+than weakening it. Commit only the intentional source/test/docs paths.

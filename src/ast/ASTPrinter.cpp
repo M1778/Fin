@@ -349,18 +349,24 @@ void ASTPrinter::printDefine(const DefineDeclaration* node, std::string prefix, 
 
 void ASTPrinter::printMacro(const MacroDeclaration* node, std::string prefix, bool isLast) {
     fmt::print(fg(fmt::color::magenta), "{}Macro ", prefix);
-    fmt::print("'{}'\n", node->name);
-    if (node->is_rust_style) {
-        for (const auto& rule : node->rules) {
-            fmt::print("{}    Rule: {} =>\n", prefix, rule.pattern);
-            printNode(rule.expansion.get(), prefix + "        ", true);
-        }
-    } else {
-        for (const auto& param : node->params) {
-            fmt::print("{}    Param: {}: {}{}\n", prefix, param.name, param.type, param.is_vararg ? "..." : "");
-        }
-        printNode(node->body.get(), prefix + "    ", true);
+    fmt::print("'{}'", node->name);
+    // A bodyless declaration prints its signature, because that is all it has: the
+    // parameters below and this type are the whole contract between the library line and
+    // the compiler that implements it (ADR 0023 step 5). ADR 0023's own verification
+    // clause reads `--debug-ast` for this, so what it shows has to be the distinguishing
+    // fact and not just an absence.
+    if (node->declared_return_type) {
+        fmt::print(" -> {} (compiler-implemented)",
+                   astTypeToString(node->declared_return_type.get()));
     }
+    fmt::print("\n");
+    for (const auto& param : node->params) {
+        fmt::print("{}    Param: {}: {}{}\n", prefix, param.name, param.type, param.is_vararg ? "..." : "");
+    }
+    // Null for a bodyless declaration -- `@define format!(...) <string>;` -- and
+    // printNode already handles a null child, so this reads as a macro with
+    // parameters and no template, which is what it is.
+    printNode(node->body.get(), prefix + "    ", true);
 }
 
 void ASTPrinter::printOperator(const OperatorDeclaration* node, std::string prefix, bool isLast) {

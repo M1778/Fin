@@ -13,6 +13,13 @@ public:
     std::string struct_name;
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
     std::vector<std::unique_ptr<TypeNode>> generic_args;
+    // The type arguments inference found, when the literal wrote none:
+    // `Box<int>` for `Box{ val: 7 }` under a `Box<int>` annotation. The
+    // literal half of FunctionCall::resolved_args, under the same
+    // record-don't-replace rule and the same spelling guards -- see it, and
+    // spellType. The backend instantiates what was recorded where it would
+    // otherwise refuse a bare generic name; empty everywhere else.
+    std::vector<std::unique_ptr<TypeNode>> resolved_args;
     StructInstantiation(std::string n, 
                         std::vector<std::pair<std::string, std::unique_ptr<Expression>>> f,
                         std::vector<std::unique_ptr<TypeNode>> g = {});

@@ -2,4 +2,16 @@
 //@ ok
 @define printf(fmt: string, ...) <noret>;
 
-// Truncated (Rust-Like upcoming...)
+// Line 5 used to read "Truncated (Rust-Like upcoming...)" and both halves of it are gone,
+// 2026-09-07. The Rust-like arms form is not upcoming: ADR 0023 refused it and step 1 deleted
+// the `macro name { ... }` production, so that spelling is a syntax error rather than a
+// pending feature. And the file is no longer truncated -- the macro importing.fin:23 calls
+// is written below, which is ADR 0023 step 8.
+//
+// `magic_add` is the form ADR 0023 settled: named parameters, one `quote` returning one
+// expression, and `$a`/`$b` unquotes. The body spells nothing but its own parameters and an
+// operator, which is all a body may spell (ADR 0020) -- so it needs no qualifier and no
+// import to be correct anywhere it is expanded. importing.fin:7 imports this file as a whole
+// module and calls it `macros.magic_add!(10, 20)`; the parenthesised bracket keeps each
+// argument an expression, so `10` and `20` arrive as themselves and the expansion is `10 + 20`.
+@macro magic_add(a, b) { return quote { $a + $b; }; }

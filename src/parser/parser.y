@@ -60,6 +60,53 @@
         return {};
     }
 
+    // The single argument a braced or bracketed macro call passes (ADR 0023).
+    //
+    // `name!{k => v}` and `name![a, b]` each arrive as ONE `PrototypeLiteral`, not as a
+    // flattened run of positional expressions. The flattening these replace justified
+    // itself in its own comment -- "so a macro body reads `$0`/`$1` for the first pair
+    // either way and no argument is dropped" -- and both halves of that were wrong. `$0`
+    // is `syntax error, unexpected INTEGER, expecting IDENTIFIER`, because an unquote is
+    // `DOLLAR IDENTIFIER` and `SubstitutionVisitor` keys on parameter names, of which `0`
+    // can never be one. And while no argument was dropped, the *pairing* was:
+    // `map!{"alex" => 10, "robot" => 20}` arrived as four expressions of two types, from
+    // which no single-expression body can rebuild two pairs.
+    //
+    // What the shape buys is that `coll!` and `map!` need no repetition, no block
+    // expression and no invented library name -- one call each, into the two
+    // `from_prototype` constructors the corpus already writes at
+    // tests/samples/prototype_test.fin:27 and :30.
+    std::vector<std::unique_ptr<fin::Expression>> one_prototype_arg(
+            std::vector<std::pair<std::unique_ptr<fin::Expression>,
+                                  std::unique_ptr<fin::Expression>>> elements,
+            const fin::location& loc) {
+        auto proto = std::make_unique<fin::PrototypeLiteral>(std::move(elements));
+        proto->setLoc(loc);
+        std::vector<std::unique_ptr<fin::Expression>> args;
+        args.push_back(std::move(proto));
+        return args;
+    }
+
+    // The bracketed form's keys are its positions. `coll![1,2,3,4,5]` is
+    // `{0: 1, 1: 2, 2: 3, 3: 4, 4: 5}`, which is exactly what
+    // `Collection::from_prototype` takes -- `{int, T}`, lib/std/collection.fin:111 --
+    // and what prototype_test.fin:30 writes by hand. Each key literal carries the
+    // element's own location, so a diagnostic about the third entry points at the third
+    // entry rather than at the bracket.
+    std::vector<std::unique_ptr<fin::Expression>> positional_prototype_arg(
+            std::vector<std::unique_ptr<fin::Expression>> items,
+            const fin::location& loc) {
+        std::vector<std::pair<std::unique_ptr<fin::Expression>,
+                              std::unique_ptr<fin::Expression>>> elements;
+        for (size_t i = 0; i < items.size(); ++i) {
+            auto key = std::make_unique<fin::Literal>(std::to_string(i),
+                                                      fin::ASTTokenKind::INTEGER);
+            if (items[i]) key->setLoc(items[i]->loc);
+            elements.push_back({std::move(key), std::move(items[i])});
+        }
+        return one_prototype_arg(std::move(elements), loc);
+    }
+
     // Moves an attribute list onto a declaration. Silent when the node has no
     // attribute field, which is the pre-existing behaviour of the chain this
     // replaces.
@@ -72,8 +119,8 @@
 
     // Copies an attribute list onto a declaration, for the `%{ ... }%` block:
     // one written list, N statements, so the nodes cannot share the originals.
-    // Attribute is plain data (name, value, flag), so this is a real copy and
-    // needs no help from CloneVisitor.
+    // Attribute is plain data (name, value, flag, std_scoped), so this is a real
+    // copy and needs no help from CloneVisitor.
     void copy_attributes_onto(fin::Statement* s,
                               const std::vector<std::unique_ptr<fin::Attribute>>& attrs) {
         DeclFields f = decl_fields_of(s);
@@ -83,6 +130,12 @@
             auto dup = a->is_flag ? std::make_unique<fin::Attribute>(a->name, true)
                                   : std::make_unique<fin::Attribute>(a->name, a->value_str);
             dup->setLoc(a->loc);
+            // Carried rather than defaulted. Today the `%{ ... }%` block always
+            // reduces before the `namespace std` around it, so every dup is
+            // stamped afterwards and this line changes nothing; a copy that
+            // dropped the stamp would nonetheless turn a legal `#[global] %{ ... }%`
+            // into a diagnostic the moment those two reductions swapped order.
+            dup->std_scoped = a->std_scoped;
             f.attributes->push_back(std::move(dup));
         }
     }
@@ -224,9 +277,6 @@
 /*                                    TYPES                                   */
 /* ========================================================================== */
 
-%type <std::vector<fin::MacroRule>> macro_rules
-%type <fin::MacroRule> macro_rule
-
 /* Core */
 %type <std::unique_ptr<fin::Program>> program
 %type <std::vector<std::unique_ptr<fin::Statement>>> statements block_stmts statement_group namespace_block attribute_block
@@ -277,7 +327,8 @@
 
 /* Control Flow */
 %type <std::unique_ptr<fin::TypeNode>> implements_opt
-%type <std::vector<std::unique_ptr<fin::Expression>>> macro_arg_item macro_arg_list_body macro_arguments
+%type <std::vector<std::unique_ptr<fin::Expression>>> macro_list_items macro_list_body
+%type <std::vector<std::pair<std::unique_ptr<fin::Expression>, std::unique_ptr<fin::Expression>>>> macro_dict_elements macro_dict_body
 %type <std::unique_ptr<fin::Statement>> if_statement while_loop for_loop foreach_loop try_catch_statement blame_statement return_statement expression_statement
 %type <std::unique_ptr<fin::Statement>> control_statement delete_statement
 
@@ -393,9 +444,23 @@ attribute_block:
  
    So: parsing is complete here, name resolution is not.  `ImportModule::
    namespace_path` already carries the `::` tail from the import side; the two
-   halves meet when namespaces get a node and a scope. */
+   halves meet when namespaces get a node and a scope.
+
+   ONE THING IS READ OFF THE NAME BEFORE IT GOES.  `#[global]` is usable only
+   inside `namespace std` (ADR 0021), and this production is the last place in
+   the compiler that knows which namespace a declaration was written in -- so a
+   `std` block stamps every `#[global]` underneath it as std-scoped, and the
+   analyzer refuses the ones that carry no stamp.  Stamping here rather than
+   refusing here because a refusal wants the whole file's worth of context to be
+   reported once, in the pass that owns diagnostics about declarations; and
+   because a nested `namespace std { namespace ops { ... } }` reduces inner-first,
+   so the inner block's statements are already spliced into `$4` by the time the
+   `std` block runs.  A `namespace mine { namespace std { ... } }` counts as std
+   for the same reason every other pass does: the outer name is discarded and
+   nothing downstream can tell the two apart. */
 namespace_block:
     KW_NAMESPACE IDENTIFIER LBRACE block_stmts RBRACE {
+        if ($2 == "std") fin::markStdScopedGlobals($4);
         $$ = std::move($4);
     }
     ;
@@ -533,26 +598,58 @@ declaration_body:
         $$ = std::move(en);
         $$->setLoc(@$);
     }
+    /* `class X { ... }` builds a **StructDeclaration** with `is_class` set, not a
+       ClassDeclaration -- one line different from the `struct` production above it.
+
+       ADR 0026 ruled that a class *is* a struct that may name a base: a value, copied
+       on assignment, with inheritance the whole of the difference. readonly.fin:16
+       introduces `class MyClass` with "Readonly in classes (same with struct)" and
+       stdlib/error.fin:7 says `#[class]` "turns structs into classes (for stronger
+       inheritance support)". If the two are one thing, one node is the honest encoding.
+
+       This production used to copy six vectors out of `struct_body_content` -- which is
+       itself a StructDeclaration accumulator -- into a ClassDeclaration that duplicated
+       every field. That duplication cost a real bug, recorded at the top of this file:
+       ClassDeclaration does not derive from StructDeclaration, so an attribute-dispatch
+       chain with no ClassDeclaration branch dropped every `#[...]` and `pub` on a class
+       silently. It would have cost more, because the backend keys on `StructDeclaration*`
+       in three places and the analyzer carried a 144-line class path beside the struct
+       path's 201 -- and the struct path does strictly more (it tracks
+       `currentStructContext` in six places against four, and declares generic parameters
+       in two against one).
+
+       So a class now gets every struct pass for free, including the ones the class path
+       did not have. `is_class` is set for a reader that wants to know how the type was
+       spelled; nothing in codegen branches on it, because ADR 0026 says nothing should. */
     | KW_CLASS IDENTIFIER generic_params_opt inheritance_opt LBRACE struct_body_content RBRACE {
-        auto cls = std::make_unique<fin::ClassDeclaration>($2, std::move($6->members), false);
-        cls->methods = std::move($6->methods);
-        cls->operators = std::move($6->operators);
-        cls->constructors = std::move($6->constructors);
-        cls->destructor = std::move($6->destructor);
-        cls->attributes = std::move($6->attributes);
-        cls->generic_params = std::move($3);
-        cls->parents = std::move($4);
-        $$ = std::move(cls);
+        $6->name = $2;
+        $6->generic_params = std::move($3);
+        $6->parents = std::move($4);
+        $6->is_class = true;
+        $$ = std::move($6);
         $$->setLoc(@$);
     }
+    /* The same six forms `variable_declaration` below has, and they are duplicated
+       because a `let` is reachable two ways: as a statement, and as a
+       `declaration_body` that `pub`, `priv` or an attribute list may precede. The
+       copies here are the ones a plain `let` inside a function goes through, and
+       they had no setLoc -- so a diagnostic reported at the *declaration* rather
+       than at its type landed at 1:1, which for every sample is its `//@` line.
+       `#[slaveof($Fin)] let p <...>` was located and a bare `let p <...>` was not,
+       because `annotated_declaration` sets a location over the whole thing and the
+       bare path had nothing to fall back on. Held by Soundness_DiagnosticLocation
+       .AVariablesRefusalIsLocatedAtTheDeclaration in tests/test_codegen.cpp. */
     | KW_LET IDENTIFIER LT type GT EQUAL expression SEMICOLON {
         $$ = std::make_unique<fin::VariableDeclaration>(true, $2, std::move($4), std::move($7));
+        $$->setLoc(@$);
     }
     | KW_CONST IDENTIFIER LT type GT EQUAL expression SEMICOLON {
         $$ = std::make_unique<fin::VariableDeclaration>(false, $2, std::move($4), std::move($7));
+        $$->setLoc(@$);
     }
     | KW_LET IDENTIFIER LT type GT SEMICOLON {
         $$ = std::make_unique<fin::VariableDeclaration>(true, $2, std::move($4), nullptr);
+        $$->setLoc(@$);
     }
     /* Nullable variable, `let x? <A>` -- tests/samples/nullifier.fin:27, :34, :39.
        `_` is an ordinary IDENTIFIER to the lexer, so `let _? <int>` needs no
@@ -560,14 +657,17 @@ declaration_body:
     | KW_LET IDENTIFIER QUESTION LT type GT EQUAL expression SEMICOLON {
         $5->is_nullable = true;
         $$ = std::make_unique<fin::VariableDeclaration>(true, $2, std::move($5), std::move($8));
+        $$->setLoc(@$);
     }
     | KW_LET IDENTIFIER QUESTION LT type GT SEMICOLON {
         $5->is_nullable = true;
         $$ = std::make_unique<fin::VariableDeclaration>(true, $2, std::move($5), nullptr);
+        $$->setLoc(@$);
     }
     | KW_CONST IDENTIFIER QUESTION LT type GT EQUAL expression SEMICOLON {
         $5->is_nullable = true;
         $$ = std::make_unique<fin::VariableDeclaration>(false, $2, std::move($5), std::move($8));
+        $$->setLoc(@$);
     }
     | type_definition { $$ = std::move($1); }
     ;
@@ -1341,9 +1441,51 @@ super_expression:
 
 /* --- EXTERN / DEFINE --- */
 
+/* `@define` declares something whose implementation is elsewhere, and the `!` says where.
+
+   Without it, the implementer is a linker symbol: `@define printf(fmt: string, ...) <noret>;`
+   with `#[llvm_name="c_printf"]` reaches C (stdlib/stdio.fin:11).
+
+   With it, the implementer is the compiler: `@define format!(fmt: string, ...) <string>;`
+   (ADR 0023 step 5). A macro has no linker symbol, so there is no other possible
+   implementer and no attribute is needed to name one.
+
+   The `!` and not a new keyword or an attribute, because `!` is already how every macro is
+   spelled at its call site -- `format!(...)` -- so the declaration reads as the thing being
+   declared. One token of lookahead past the IDENTIFIER separates the two forms, and NOT is
+   in neither's follow set otherwise.
+
+   The node is a MacroDeclaration with a null `body`, which is what makes this step small:
+   `resolveMacro` already finds it, `visit(MacroInvocation&)` already refuses to expand it
+   (there is no template to substitute into), and `CloneVisitor`, `ASTPrinter` and
+   `StructuralWalk` already tolerate the null. The parameter list is dropped rather than
+   converted, because a MacroParam holds a name and a fragment kind and cannot hold a type:
+   what a builtin's arguments must be is the builtin table's business (step 6), and the
+   analyzer is the first pass that knows a type at all. The names are kept in declaration
+   order, so arity is checkable here and a diagnostic can name the parameter it means. */
 define_declaration:
     AT KW_DEFINE IDENTIFIER LPAREN extern_params RPAREN LT type GT SEMICOLON {
         $$ = std::make_unique<fin::DefineDeclaration>($3, std::move($5.first), std::move($8), $5.second);
+        $$->setLoc(@$);
+    }
+    | AT KW_DEFINE IDENTIFIER NOT LPAREN extern_params RPAREN LT type GT SEMICOLON {
+        std::vector<fin::MacroParam> params;
+        for (auto& p : $6.first) {
+            params.push_back(fin::MacroParam{p->name, "expr", p->is_vararg});
+        }
+        if ($6.second) {
+            // `...` with no name of its own. A vararg parameter is how MacroParam spells
+            // one, and `...` is the name the corpus writes for the rest of the arguments
+            // at every `format!` call site.
+            params.push_back(fin::MacroParam{"...", "expr", true});
+        }
+        auto decl = std::make_unique<fin::MacroDeclaration>($3, std::move(params), nullptr);
+        // The declared return type, kept where the analyzer can compare it against the
+        // builtin table's (step 6). Not on MacroDeclaration before this production
+        // existed, because a macro with a body has no return type to declare: what it
+        // expands to is an expression whose type is whatever the analyzer makes of it.
+        decl->declared_return_type = std::move($9);
+        $$ = std::move(decl);
         $$->setLoc(@$);
     }
     ;
@@ -1357,31 +1499,37 @@ extern_params:
 
 /* --- MACROS --- */
 
+/* One declaration form, and the `@` is not optional (ADR 0023).
+
+   The arms form -- `macro name { (x) => { ... } }`, the shape
+   tests/samples/macro_definitions.fin:9 sketches -- is deleted rather than kept as a
+   refused construct, and the `macro_rules`/`macro_rule` nonterminals and the
+   `MacroRule` node field go with it. Three reasons, in the order they matter:
+
+     * It could not hold what it parsed. `MacroRule::pattern` was one
+       `std::string`, filled from a bare IDENTIFIER, a STRING_LITERAL or nothing, so
+       `$x:expr` had nowhere to put a fragment kind and `$(...),*` had no token, no
+       production and no node. The form was a shell around a pattern language that
+       does not exist.
+     * It crashed on invocation. The rules constructor left `body` null, and
+       MacroExpander read `def->body->statements`, so a four-line program with one
+       call exited 139 -- not one of the four codes ADR 0009 gives finc. That was
+       guarded first, but a guard on a form nothing can express is a diagnostic
+       nobody should be able to reach.
+     * It disagreed with itself about the `@`. This production forbade `AT` and the
+       parameter form required it, so `macro_definitions.fin:9`'s own `@macro my_vec {`
+       matched neither and reported `unexpected LBRACE, expecting LPAREN`. `@` is how
+       every other declaration modifier in Fin is spelled -- `@define`, `@special`,
+       `@implements` -- so the `@` stays and the bare spelling goes with the form that
+       wanted it.
+
+   `macro name { ... }` is now a syntax error. Nothing in the corpus writes one
+   outside the `[WIP]` comment block in `macro_definitions.fin`, so nothing
+   regresses. */
 macro_declaration:
     AT KW_MACRO IDENTIFIER LPAREN macro_param_list RPAREN block {
         $$ = std::make_unique<fin::MacroDeclaration>($3, std::move($5), std::move($7));
         $$->setLoc(@$);
-    }
-    | KW_MACRO IDENTIFIER LBRACE macro_rules RBRACE {
-        $$ = std::make_unique<fin::MacroDeclaration>($2, std::move($4));
-        $$->setLoc(@$);
-    }
-    ;
-
-macro_rules:
-    macro_rules macro_rule { $1.push_back(std::move($2)); $$ = std::move($1); }
-    | macro_rule { std::vector<fin::MacroRule> v; v.push_back(std::move($1)); $$ = std::move(v); }
-    ;
-
-macro_rule:
-    LPAREN IDENTIFIER RPAREN ARROW block { 
-        $$ = fin::MacroRule{$2, std::move($5)}; 
-    }
-    | LPAREN STRING_LITERAL RPAREN ARROW block { 
-        $$ = fin::MacroRule{$2, std::move($5)}; 
-    }
-    | LPAREN RPAREN ARROW block {
-        $$ = fin::MacroRule{"", std::move($4)};
     }
     ;
 
@@ -2328,24 +2476,34 @@ expression:
        existed only in `no_struct_expression`, the half of the grammar used where a
        bare `{` would be a block, so a dict-shaped macro was a syntax error in every
        initialiser: "unexpected LBRACE, expecting LPAREN". No ambiguity with struct
-       instantiation, which is `IDENTIFIER LBRACE` with no `!`. */
-    | expression NOT LBRACE macro_arguments RBRACE {
+       instantiation, which is `IDENTIFIER LBRACE` with no `!`.
+
+       Each passes ONE prototype argument (ADR 0023) -- see `one_prototype_arg` in the
+       prologue for why the pairing is kept rather than flattened. The location handed
+       to the literal is the bracketed span (@3 through @5), not @$: @$ would start at
+       the macro's name, so a diagnostic about the argument would point at `map!` and
+       underline the whole call. */
+    | expression NOT LBRACE macro_dict_elements RBRACE {
         std::string name = flatten_macro_name($1.get());
         if (name.empty()) {
             error(@1, "Invalid macro name");
             $$ = nullptr;
         } else {
-            $$ = std::make_unique<fin::MacroInvocation>(name, std::move($4));
+            fin::location span = @3; span.end = @5.end;
+            $$ = std::make_unique<fin::MacroInvocation>(
+                name, one_prototype_arg(std::move($4), span));
             $$->setLoc(@$);
         }
     }
-    | expression NOT LBRACKET macro_arguments RBRACKET {
+    | expression NOT LBRACKET macro_list_items RBRACKET {
         std::string name = flatten_macro_name($1.get());
         if (name.empty()) {
             error(@1, "Invalid macro name");
             $$ = nullptr;
         } else {
-            $$ = std::make_unique<fin::MacroInvocation>(name, std::move($4));
+            fin::location span = @3; span.end = @5.end;
+            $$ = std::make_unique<fin::MacroInvocation>(
+                name, positional_prototype_arg(std::move($4), span));
             $$->setLoc(@$);
         }
     }
@@ -2382,12 +2540,15 @@ expression:
         $$->setLoc(@$);
     }
     /* New expression - pointer type */
-    /* `new int(5)` -- tests/samples/variables.fin:28, :36 and
-       simple_pointers.fin:24. Every other `new` form starts with an IDENTIFIER,
-       so heap-allocating a builtin was a syntax error: "unexpected TYPE_INT,
-       expecting IDENTIFIER". `primitive_type` rather than `type` keeps it out of
-       the way of the five IDENTIFIER forms -- TYPE_INT and friends are their own
-       tokens, so no state has to choose. */
+    /* `new int(5)` -- tests/samples/variables.fin:28 and :36, both of which bind
+       the result to a `&int`, which is what this form yields. Every other `new`
+       form starts with an IDENTIFIER, so heap-allocating a builtin was a syntax
+       error: "unexpected TYPE_INT, expecting IDENTIFIER". `primitive_type` rather
+       than `type` keeps it out of the way of the five IDENTIFIER forms -- TYPE_INT
+       and friends are their own tokens, so no state has to choose.
+       simple_pointers.fin:24 used to be cited here too and no longer is: it wrote
+       `**x = new int(10);` into an `int` lvalue, which this form cannot satisfy
+       without breaking the two sites above, and the sample was repaired instead. */
     | KW_NEW primitive_type LPAREN arguments RPAREN {
         auto ty = std::make_unique<fin::TypeNode>($2);
         ty->setLoc(@2);
@@ -2551,7 +2712,12 @@ no_struct_expression:
         $$->setLoc(@$);
     }
 
-    | no_struct_expression NOT LPAREN macro_arguments RPAREN {
+    /* `arguments` and not a macro-specific list, which is what the `expression` copy
+       of this production above always used. The two spellings had drifted: this one
+       could not carry `format!(fmt, ...objects)` -- tests/samples/stdlib/stdio.fin:36,
+       inside an `if` condition or any other no-struct position -- because the spread
+       lives in `expression_list`. */
+    | no_struct_expression NOT LPAREN arguments RPAREN {
         std::string name = flatten_macro_name($1.get());
         if (name.empty()) {
             error(@1, "Invalid macro name");
@@ -2561,23 +2727,27 @@ no_struct_expression:
             $$->setLoc(@$);
         }
     }
-    | no_struct_expression NOT LBRACE macro_arguments RBRACE {
+    | no_struct_expression NOT LBRACE macro_dict_elements RBRACE {
         std::string name = flatten_macro_name($1.get());
         if (name.empty()) {
             error(@1, "Invalid macro name");
             $$ = nullptr;
         } else {
-            $$ = std::make_unique<fin::MacroInvocation>(name, std::move($4));
+            fin::location span = @3; span.end = @5.end;
+            $$ = std::make_unique<fin::MacroInvocation>(
+                name, one_prototype_arg(std::move($4), span));
             $$->setLoc(@$);
         }
     }
-    | no_struct_expression NOT LBRACKET macro_arguments RBRACKET {
+    | no_struct_expression NOT LBRACKET macro_list_items RBRACKET {
         std::string name = flatten_macro_name($1.get());
         if (name.empty()) {
             error(@1, "Invalid macro name");
             $$ = nullptr;
         } else {
-            $$ = std::make_unique<fin::MacroInvocation>(name, std::move($4));
+            fin::location span = @3; span.end = @5.end;
+            $$ = std::make_unique<fin::MacroInvocation>(
+                name, positional_prototype_arg(std::move($4), span));
             $$->setLoc(@$);
         }
     }
@@ -2615,12 +2785,15 @@ no_struct_expression:
         $$->setLoc(@$);
     }
     /* New expression - pointer type */
-    /* `new int(5)` -- tests/samples/variables.fin:28, :36 and
-       simple_pointers.fin:24. Every other `new` form starts with an IDENTIFIER,
-       so heap-allocating a builtin was a syntax error: "unexpected TYPE_INT,
-       expecting IDENTIFIER". `primitive_type` rather than `type` keeps it out of
-       the way of the five IDENTIFIER forms -- TYPE_INT and friends are their own
-       tokens, so no state has to choose. */
+    /* `new int(5)` -- tests/samples/variables.fin:28 and :36, both of which bind
+       the result to a `&int`, which is what this form yields. Every other `new`
+       form starts with an IDENTIFIER, so heap-allocating a builtin was a syntax
+       error: "unexpected TYPE_INT, expecting IDENTIFIER". `primitive_type` rather
+       than `type` keeps it out of the way of the five IDENTIFIER forms -- TYPE_INT
+       and friends are their own tokens, so no state has to choose.
+       simple_pointers.fin:24 used to be cited here too and no longer is: it wrote
+       `**x = new int(10);` into an `int` lvalue, which this form cannot satisfy
+       without breaking the two sites above, and the sample was repaired instead. */
     | KW_NEW primitive_type LPAREN arguments RPAREN {
         auto ty = std::make_unique<fin::TypeNode>($2);
         ty->setLoc(@2);
@@ -2835,42 +3008,68 @@ expression_list:
     }
     ;
 
-macro_arg_item:
-    expression {
-        std::vector<std::unique_ptr<fin::Expression>> v;
-        v.push_back(std::move($1));
+/* The braced macro call's entries, as pairs. Both separators are accepted:
+   `k => v` is what tests/samples/useful_macros.fin:8-9 writes and `k : v` is the
+   prototype literal's own spelling (prototype_test.fin:27), and a macro call whose
+   argument IS a prototype should not disagree with a prototype literal about how a
+   pair is written.
+
+   A trailing comma is allowed here and is not allowed in a prototype literal
+   (`{"a": 1,}` is `syntax error, unexpected RBRACE`), which is the one reason the
+   node is built by hand in the prologue rather than reached through
+   `prototype_literal`: useful_macros.fin:9 has that trailing comma. Whoever makes the
+   literal accept one can delete `macro_dict_body` and this note with it.
+
+   Empty is accepted -- `m!{}` -- and produces a prototype literal with no entries.
+   The analyzer types that from its hint or reports that it cannot; nothing here needs
+   to know which. */
+macro_dict_elements:
+    macro_dict_body { $$ = std::move($1); }
+    | macro_dict_body COMMA { $$ = std::move($1); }
+    | %empty {
+        $$ = std::vector<std::pair<std::unique_ptr<fin::Expression>,
+                                   std::unique_ptr<fin::Expression>>>();
+    }
+    ;
+
+macro_dict_body:
+    macro_dict_body COMMA expression ARROW expression {
+        $1.push_back({std::move($3), std::move($5)}); $$ = std::move($1);
+    }
+    | macro_dict_body COMMA expression COLON expression {
+        $1.push_back({std::move($3), std::move($5)}); $$ = std::move($1);
+    }
+    | expression ARROW expression {
+        std::vector<std::pair<std::unique_ptr<fin::Expression>,
+                              std::unique_ptr<fin::Expression>>> v;
+        v.push_back({std::move($1), std::move($3)});
         $$ = std::move(v);
     }
     | expression COLON expression {
-        std::vector<std::unique_ptr<fin::Expression>> v;
-        v.push_back(std::move($1));
-        v.push_back(std::move($3));
-        $$ = std::move(v);
-    }
-    /* `"alex" => 10` inside a macro call -- tests/samples/useful_macros.fin:6-7.
-       The pair is flattened into two arguments, exactly as the `key: value` form
-       above it already is, so a macro body reads `$0`/`$1` for the first pair
-       either way and no argument is dropped. */
-    | expression ARROW expression {
-        std::vector<std::unique_ptr<fin::Expression>> v;
-        v.push_back(std::move($1));
-        v.push_back(std::move($3));
+        std::vector<std::pair<std::unique_ptr<fin::Expression>,
+                              std::unique_ptr<fin::Expression>>> v;
+        v.push_back({std::move($1), std::move($3)});
         $$ = std::move(v);
     }
     ;
 
-macro_arg_list_body:
-    macro_arg_list_body COMMA macro_arg_item {
-        for(auto& e : $3) $1.push_back(std::move(e));
-        $$ = std::move($1);
-    }
-    | macro_arg_item { $$ = std::move($1); }
-    ;
-
-macro_arguments:
-    macro_arg_list_body { $$ = std::move($1); }
-    | macro_arg_list_body COMMA { $$ = std::move($1); }
+/* The bracketed macro call's items, positionally. A trailing comma for the same
+   reason as above; `coll![1,2,3,4,5]` (useful_macros.fin:12) does not write one but
+   `m![1,2,]` is the same shape as the braced form and refusing it here would be an
+   asymmetry with no reason behind it. */
+macro_list_items:
+    macro_list_body { $$ = std::move($1); }
+    | macro_list_body COMMA { $$ = std::move($1); }
     | %empty { $$ = std::vector<std::unique_ptr<fin::Expression>>(); }
+    ;
+
+macro_list_body:
+    macro_list_body COMMA expression { $1.push_back(std::move($3)); $$ = std::move($1); }
+    | expression {
+        std::vector<std::unique_ptr<fin::Expression>> v;
+        v.push_back(std::move($1));
+        $$ = std::move(v);
+    }
     ;
 
 field_assignments:

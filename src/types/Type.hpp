@@ -42,4 +42,16 @@ public:
 
 bool typesEqual(const TypePtr& a, const TypePtr& b);
 
+// The question a *mutable container* asks about its element -- a pointee, an array
+// element, a prototype's key or value. Not the same question as `isAssignableTo`,
+// and the difference is the point: an assignment copies a value and may convert it
+// on the way, while a container conversion keeps one object and hands out a second
+// name for it. A conversion that changes a value's representation is sound in the
+// first case and is a lie in the second.
+//
+// `&int -> &long` is that lie. Both are integers, `long` is wider, so ADR 0022's
+// widening rule says yes -- and the object is still four bytes, so a store through
+// the `&long` writes eight. It compiled clean and segfaulted.
+bool isAssignableThrough(const TypePtr& from, const TypePtr& to);
+
 } // namespace fin

@@ -32,10 +32,21 @@ Note that two of the eleven passes are hollow: `stdlib/networking.fin` is a sing
 `// NOT IMPLEMENTED YET` and `stdlib/somelib.fin` reads `// Empty lib`. Nine samples exercise the
 compiler.
 
-**Since moved: 16 of 50 now survive the full pipeline, not 11.** Recorded here as a pointer, not a
-rewrite — the eleven above is what was true when work started and it stays. The live number is
-`Census.ThePassingSampleCountNeverFalls` in `tests/test_expectations.cpp`, which prints it and holds a
-floor under it; re-derive the list itself with the command in [Reproducing](#reproducing).
+**Since moved: 19 of 51 now survive the full pipeline, not 11** — measured 2026-08-29 from a
+detached worktree at `4788753` built from scratch. Recorded here as a pointer, not a rewrite: the
+eleven above is what was true when work started and it stays. The corpus is also 51 rather than 50
+now, `love.fin` having been added by ratified decision (ADR 0008).
+
+Two earlier versions of this paragraph pointed at
+`Census.ThePassingSampleCountNeverFalls` in `tests/test_expectations.cpp` as "the live number",
+which was wrong in a way worth naming because the two measures look interchangeable and are not.
+That test counts samples whose annotation is `//@ ok`, and the corpus harness runs the **front end
+only** — never `-o`. So it answers "how many samples type-check as expected" (31), not "how many
+survive the full pipeline" (19). A sample can be `//@ ok` and still be refused by the backend, and
+twelve are. For the pipeline number use the bucket census in `docs/HANDOFF.md` §4; for the
+front-end number use the test. Re-derive the parse list itself with the command in
+[Reproducing](#reproducing), remembering that it reads `finc`'s exit code without `-c -o` and so
+measures the front end too.
 
 ### The `fin_tests` row measured the parse column twice
 

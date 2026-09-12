@@ -1,5 +1,5 @@
 //@ normative
-//@ unimplemented "Const parameters, which are what this sample is about, are accepted throughout, and both smart-pointer constructions type correctly now: `rptr(5)` on 80 is an `rptr<int>` and `rptr([1,2,3,4])` on 98 an `rptr<[int]>`, because a generic constructor is instantiated from the arguments written to it and the annotation seeds what an argument cannot say (Soundness_GenericInference). Five are left, and four of them are one question. `ta2.restrict` on 82, `ta2.value` on 84 and 89, and `arr.value` on 102 are all declared `&Self<T>` or `&T` in stdptr.fin, so each is a pointer handed to something written for the pointee -- a parameter on 82, the right side of `==` on the other three. Whether a pointer reads as its pointee at a call or in a comparison is a language question this file cannot answer on its own. `printf` on 68 is called with no import (see enums.fin's note: the prelude question)"
+//@ ok
 import { rptr } from stdptr::std;
 
 // ALL const usages
@@ -51,8 +51,9 @@ fun test_5(const a: &rptr<int>) <noret> {
     if (a.owned == true){ // we completely own the smart pointer and there is no giving back
         a.set(1010); // we can do anything we want to the smart pointer (even freeing it before it is read again which is dangerous)
 
-        // let's free the smart pointer and dispose of it (this will automatically happen when compiler goes out of scope because we have full ownership and we are going out of scope)
-        // we'll manually dispose of it so it cannot be read even by the other pointers pointing to the value (we'll ignore the counter)
+        // drop this handle's reference. The value outlives it while other handles
+        // remain: release decrements the shared count and frees only at zero, so
+        // the handles still out there keep reading what was written (ADR 0039).
         a.release();
       }
   }
@@ -64,7 +65,7 @@ fun test_6(const a: [int]) <noret> {
 
 // readonly arrays:
 fun test_7(const a: rptr<[int]>) <noret> {
-    for (i: int = 0; i >= a.value.length; i++){
+    for (i: int = 0; i < a.value.length; i++){
         printf("%d: %d, ", i, a.value[i]);
       }
   }
@@ -88,12 +89,19 @@ fun main() <noret> {
 
   blame ta2.value == 2026; // assert value has changed
 
-  // we can also give full ownership and dispose of the ownership we currently have
+  // we can also give full ownership away: `own()` hands a fresh owning handle
+  // to `test_5`, and this one stops being the owner while keeping its reference.
 
-  test_5(ta2.own()); // this will give up ownership and we'll only have a readonly pointer `ta2`
+  test_5(ta2.own()); // ownership moved to the heir; `ta2` keeps reading the value
 
-  // since `test_5` manually releases all other pointers to the value without considering counters we can assert like this:
-  blame ta2.value == null; // this will not cause an error since the value is now null
+  // `test_5` set 1010 through the heir and then released the heir's reference,
+  // which drops the shared count from 3 to 2 (this handle, and the borrow from
+  // `test_4` that nothing released). The value outlives the release, so it
+  // still reads what was written -- release drops a reference, it does not
+  // dispose the value (ADR 0039).
+  blame ta2.refs() == 2; // heir gone, lender and borrow outstanding
+  blame ta2.owned == false; // ownership went with the heir
+  blame *ta2.value == 1010; // the shared cell, intact
 
   let arr <rptr<[int]>> = rptr([1,2,3,4]);
 

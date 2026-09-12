@@ -10,6 +10,7 @@
 namespace fin {
 
 class StructType;
+class PrimitiveType;
 
 // Size, alignment, field offsets, and which words of a value hold pointers.
 //
@@ -106,6 +107,40 @@ struct ScalarInfo {
 // consistent -- 8 bits either way -- and only the sign of a widening conversion
 // depends on the difference.
 std::optional<ScalarInfo> scalarByName(const std::string& name);
+
+// The same question asked of a *type* rather than a name, so that a written width
+// is read here and nowhere else.
+//
+// `int{64}` is a written width and it is the type (ADR 0022's "one table, not
+// two"), so the width has to reach the machine shape by joining this table rather
+// than by standing beside it: the name supplies the kind and the sign, the
+// annotation supplies the bits, and everything downstream -- sizeOfScalar,
+// alignOfScalar, the struct walk, the array stride, the backend's intType -- was
+// already written in terms of `bits` and needs nothing.
+//
+// A width on anything that is not an integer scalar is dropped, which is the same
+// answer the front end gives: a width is a count of value bits, an IEEE format is
+// not built from one, and Fin has ruled on no floating-point format but the two
+// this table names. So `float{128}` is `float` and `bool{64}` is `bool`, here as
+// there. Nullopt for a name that is not a scalar at all, exactly as scalarByName.
+std::optional<ScalarInfo> scalarOf(const PrimitiveType& type);
+
+// The four widths this compiler represents, and the sentence that names them.
+//
+// A well-formed width outside the set -- `uint{7}`, `int{128}` -- is not a
+// malformed type and is not refused by the front end: it is one positive integer
+// constant, exactly as `int{64}` is. It has no *representation*, which is the
+// layout pass's third outcome and the backend's refusal, and both say so with this
+// sentence because "no layout" without it sends a reader to the compiler rather
+// than to the four widths that work.
+//
+// Not every width LLVM can build, which would be 1 to 2^23: LLVM's DataLayout
+// rounds an integer's store size up to a power of two while sizeOfScalar computes
+// `(bits + 7) / 8`, so the two agree at 1-16, 25-32 and 57-64 and disagree
+// everywhere else -- an i17 allocates four bytes where this file says three. A
+// language whose widths are that agreement set is not one anyone designed.
+bool isRepresentableIntegerWidth(unsigned bits);
+inline constexpr const char* kRepresentableIntegerWidths = "8, 16, 32 or 64";
 
 uint64_t sizeOfScalar(const ScalarInfo& info, const TargetLayout& target);
 uint64_t alignOfScalar(const ScalarInfo& info, const TargetLayout& target);

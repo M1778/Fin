@@ -14,6 +14,7 @@
 #include "ast/decls/ClassDecl.hpp"
 #include "ast/decls/Program.hpp"
 #include "semantics/SemanticAnalyzer.hpp"
+#include "types/FunctionType.hpp"
 #include "types/StructType.hpp"
 
 // The soundness defects listed at the top of docs/plan.md, each pinned by a test
@@ -68,6 +69,15 @@ private:
 FincRun compile(const std::string& code) {
     Src s(code);
     return runFinc({s.str()});
+}
+
+// The same, with extra flags. For the handful of cases where the assertion is about what
+// finc *renders* rather than what it accepts -- `--debug-ast`, chiefly.
+FincRun compileWith(const std::vector<std::string>& flags, const std::string& code) {
+    Src s(code);
+    std::vector<std::string> argv{s.str()};
+    argv.insert(argv.end(), flags.begin(), flags.end());
+    return runFinc(argv);
 }
 
 // The diagnostic message lines, and nothing else.
@@ -834,6 +844,19 @@ TEST(Soundness_DynamicTypes, AnyIsSpellableInEveryPositionTheCorpusWritesIt) {
     EXPECT_EQ(errorCount(err), 0u) << err;
 }
 
+TEST(Soundness_DynamicTypes, AnElidedGenericArgumentResolves) {
+    // `Any<...>` (stdlib/operators.fin:6, stdlib/typing.fin:14, enums.fin:13):
+    // `...` is elision, accepted as a generic argument and only there -- a bare
+    // `...` stays undefined. The elided arguments are dropped like any other
+    // arguments on a dynamic type (GenericArgumentsOnADynamicTypeAreNotConstraints).
+    const FincRun r = compile("type Any = any;\n"
+                              "fun f<T: Any<...>>(v: T) <int> { return 0; }\n"
+                              "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(stripAnsi(r.err).find("Undefined type"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
+}
+
 TEST(Soundness_DynamicTypes, EveryConcreteTypeIsAssignableToAny) {
     // The whole point of the type. `stdlib/operators.fin` declares thirty
     // requirements taking `(other: any)`, which means every operand of every
@@ -923,6 +946,271 @@ TEST(Soundness_Pointers, AVoidPointerIsAssignableInBothDirections) {
         "fun main() <int> { let x <int> = 1; return t(&x); }\n");
     EXPECT_NE(stripAnsi(bad.err).find("Type mismatch"), std::string::npos)
         << "&int does not fit &string\n" << stripAnsi(bad.err);
+}
+
+// ---------------------------------------------------------------------------
+// A conversion *through* a container is a different question from an assignment,
+// and until 2026-09-02 the compiler asked the assignment one at all three
+// container boundaries.
+//
+// The difference: an assignment copies a value and may convert it on the way, so
+// `let y <long> = x;` for an `int` `x` sign-extends four bytes into eight and both
+// objects are correct afterwards. A container conversion copies nothing -- a
+// pointer, an array and a prototype each hand out a second name for one object --
+// so a conversion that changes a value's width or its interpretation is a promise
+// about memory that the source's layout does not keep.
+//
+// ADR 0022's integer widening is the rule that made this visible, and the tests
+// below assert the exploit rather than the diagnostic wherever the shape reaches
+// codegen: `&int -> &long` compiled clean and exited 139, and `&int -> &float`
+// did not crash at all, which is worse -- it printed 1069547520.
+//
+// The predicate is `isAssignableThrough` (src/types/Type.cpp), a narrowing of
+// `isAssignableTo` that no container may bypass. It permits what stores what the
+// source stored -- the same type, `any`/`object`, `auto`, a generic parameter,
+// `Self` -- and a void pointer is permitted one layer above it, by PointerType,
+// because every pointer is one word.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_ContainerVariance, APointeeDoesNotWidenAndTheWideStoreIsWhy) {
+    // The exploit first, because the diagnostic is only interesting if it stops a
+    // real program. Before this rule: compiled clean, linked, exited 139 -- an
+    // eight-byte store through a four-byte slot.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let p <*long> = &x;\n"
+        "    *p = 4294967297;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << "an 8-byte store through a 4-byte slot\n" << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected '&long', got '&int'"), std::string::npos)
+        << stripAnsi(r.err);
+
+    // Both directions, because narrowing is the same lie told the other way: a
+    // `&char` promising four bytes reads three the object does not own.
+    const FincRun narrow = compile(
+        "fun main() <noret> { let x <char> = 1; let p <*int> = &x; }\n");
+    EXPECT_NE(stripAnsi(narrow.err).find("expected '&int', got '&char'"), std::string::npos)
+        << stripAnsi(narrow.err);
+
+    // And at depth, which is what makes the predicate recursive rather than a
+    // special case on one pair: the same line refuses `&&int -> &&long`.
+    const FincRun deep = compile(
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let p <&int> = &x;\n"
+        "    let q <&&long> = &p;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(deep.err).find("expected '&&long', got '&&int'"), std::string::npos)
+        << stripAnsi(deep.err);
+}
+
+TEST(Soundness_ContainerVariance, TheSameWideningIsStillLegalByValue) {
+    // The pair to the test above, and the reason the fix is a second predicate
+    // rather than a change to ADR 0022. stdlib/stdio.fin hands an `int` to a
+    // `ulong` at :130 and :135 with no cast, so the *value* conversion is load-
+    // bearing and must be untouched by anything the containers decide.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let y <long> = x;\n"
+        "    let z <ulong> = x;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ContainerVariance, APointeeDoesNotReinterpretAnIntegerAsAFloat) {
+    // The quieter half of the same defect, and the reason this is about
+    // representation rather than about width: `int -> float` is assignable by value
+    // (PrimitiveType::isAssignableTo, the one float rule the corpus needs), both are
+    // four bytes, so a width-only rule would let this through.
+    //
+    // It does not crash. `*p = 1.5;` through a `&float` aliasing an `int` compiled,
+    // linked, ran to exit 0 and printed 1069547520 -- 1.5's bit pattern read as an
+    // integer. A wrong answer with a zero exit code is worse than a segfault.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let p <*float> = &x;\n"
+        "    *p = 1.5;\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r.err).find("expected '&float', got '&int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ContainerVariance, AVoidPointerStillConvertsAtEveryDepth) {
+    // The one pointee conversion that changes nothing about the storage, and the
+    // corpus depends on it. Answered by PointerType *before* it consults its pointee,
+    // which is why it survives a predicate that refuses every other conversion --
+    // and asserted at depth here because that ordering is what makes `&&int ->
+    // &&void` work, where the recursion would refuse it.
+    for (const char* code : {
+            "fun t(p: &void) <int> { return 0; }\n"
+            "fun main() <int> { let x <int> = 1; return t(&x); }\n",
+            "fun t(p: &int) <int> { return 0; }\n"
+            "fun main() <int> { let x <int> = 1; let v <&void> = &x; return t(v); }\n",
+            "fun main() <noret> {\n"
+            "    let x <int> = 1;\n"
+            "    let p <&int> = &x;\n"
+            "    let q <&&void> = &p;\n"
+            "}\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_ContainerVariance, AnArrayElementDoesNotWiden) {
+    // The second container, and the same rule: an array conversion renames one buffer
+    // rather than copying its elements, so a `[long, 2]` view of an `[int, 2]` indexes
+    // a four-byte stride as eight and the second element is read from the first's
+    // upper half.
+    //
+    // Both extents, because they are separate arms of ArrayType::isAssignableTo: a
+    // fixed array decaying into a dynamic one goes through the element check as well.
+    for (const char* code : {
+            "fun main() <noret> { let a <[int,2]> = [1,2]; let b <[long,2]> = a; }\n",
+            "fun f(a: [long]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[int]> = [1,2]; f(v); }\n",
+            "fun f(a: [[long]]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[[int]]> = [[1,2]]; f(v); }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos)
+            << code << stripAnsi(r.err);
+    }
+
+    // The float form, which reaches codegen's own refusal today (`this conversion is
+    // not lowered yet`) rather than a wrong program -- so the front end refusing it is
+    // what makes the diagnostic name the types instead of the backend.
+    const FincRun f = compile(
+        "fun main() <noret> { let a <[int,2]> = [1,2]; let b <[float,2]> = a; }\n");
+    EXPECT_NE(stripAnsi(f.err).find("expected '[float, 2]', got '[int, 2]'"), std::string::npos)
+        << stripAnsi(f.err);
+}
+
+TEST(Soundness_ContainerVariance, AnArrayStillDecaysAndStillAcceptsADynamicElement) {
+    // Everything the array rule must keep, in one program per clause, because the
+    // predicate is a veto and a veto is one edit from refusing the corpus.
+    //
+    //   `[int, 2] -> [int]`   the decay, Soundness_Arrays covers it in full
+    //   `[int] -> [any]`      stdlib/types.fin:102, `resolve_arr_type(const &arr: [any])`
+    //   `[int] -> [auto]`     Soundness_DynamicTypes.TwoArraysWithAssignableElements-
+    //                         AreAssignable
+    //   `[int] -> [T]`        a generic parameter is a name substitution has not filled
+    for (const char* code : {
+            "fun f(a: [int]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[int,2]> = [1,2]; f(v); }\n",
+            "fun f(a: [any]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[int]> = [1,2]; f(v); }\n",
+            "fun f(a: [auto]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[int]> = [1,2]; f(v); }\n",
+            "fun f<T>(a: [T]) <int> { return 0; }\n"
+            "fun main() <noret> { let v <[int]> = [1,2]; f::<int>(v); }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_ContainerVariance, APrototypeHalfDoesNotWiden) {
+    // The third container. Its key and value were compared with `isAssignableTo` for
+    // the reason Soundness_Prototypes.APrototypeOfConcreteTypesFitsAPrototypeOfA-
+    // DynamicType gives -- `equals` accepted no literal at all -- and that fix bought
+    // ADR 0022's widening as a side effect.
+    for (const char* code : {
+            "fun f(p: <{int, long}>) <int> { return 0; }\n"
+            "fun main() <noret> { let a <{int, int}> = { 1: 2 }; f(a); }\n",
+            "fun f(p: <{long, int}>) <int> { return 0; }\n"
+            "fun main() <noret> { let a <{int, int}> = { 1: 2 }; f(a); }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos)
+            << code << stripAnsi(r.err);
+    }
+
+    // And what it keeps: a dynamic half, which prototype_test.fin:40 writes as
+    // `<{object, object}>` and its own comment calls "an expensive type but can fit
+    // any datatype in it".
+    const FincRun ok = compile(
+        "fun f(p: <{int, any}>) <int> { return 0; }\n"
+        "fun main() <noret> { let a <{int, int}> = { 1: 2 }; f(a); }\n");
+    EXPECT_EQ(errorCount(stripAnsi(ok.err)), 0u) << stripAnsi(ok.err);
+}
+
+TEST(Soundness_ContainerVariance, AStructDoesNotConvertToAnInterfaceThroughAContainer) {
+    // The struct-to-interface conversion (Type.cpp, owner ruling 2026-08-28) is a
+    // representation change and not only a permission: ADR 0019 fixes an interface
+    // reference as `{data, vtable}`, two words, and a `&Sq` is one. So a `&Shape`
+    // aliasing a `&Sq` reads its vtable pointer out of whatever follows the struct.
+    //
+    // Measured before this rule, and it is the worst of the four shapes in this
+    // block because it gets all the way to a running program: `fun f(p: &Shape) <int>
+    // { return p.area(); }` called with `&q` compiled clean, linked clean, and exited
+    // 139 on the method call.
+    const FincRun ptr = compile(
+        "interface Shape { fun area() <int>; }\n"
+        "struct Sq : <Shape> { pub s <int>, pub fun area() <int> { return self.s; } }\n"
+        "fun f(p: &Shape) <int> { return 0; }\n"
+        "fun main() <noret> { let q <Sq> = Sq{s: 1}; f(&q); }\n");
+    EXPECT_NE(stripAnsi(ptr.err).find("expected '&Shape', got '&Sq'"), std::string::npos)
+        << stripAnsi(ptr.err);
+
+    const FincRun arr = compile(
+        "interface Shape { fun area() <int>; }\n"
+        "struct Sq : <Shape> { pub s <int>, pub fun area() <int> { return self.s; } }\n"
+        "fun f(a: [Shape]) <int> { return 0; }\n"
+        "fun main() <noret> { let v <[Sq]> = [Sq{s: 1}]; f(v); }\n");
+    EXPECT_NE(stripAnsi(arr.err).find("expected '[Shape]', got '[Sq]'"), std::string::npos)
+        << stripAnsi(arr.err);
+
+    // Nothing is lost: no file in tests/samples or lib writes an interface in a
+    // pointee or an element position. The by-value conversion the corpus *does* write
+    // -- love.fin:38 hands a `Fin` to a `<Person>` parameter -- is untouched, and this
+    // asserts it here as well as at its own test, because a veto in a container must
+    // not be able to reach the value rule.
+    const FincRun byvalue = compile(
+        "interface Shape { fun area() <int>; }\n"
+        "struct Sq : <Shape> { pub s <int>, pub fun area() <int> { return self.s; } }\n"
+        "fun f(v: Shape) <int> { return 0; }\n"
+        "fun main() <noret> { let q <Sq> = Sq{s: 1}; f(q); }\n");
+    EXPECT_EQ(errorCount(stripAnsi(byvalue.err)), 0u) << stripAnsi(byvalue.err);
+}
+
+TEST(KnownDefect_ContainerVariance, ADynamicElementTypeStillAcceptsAConcreteOne) {
+    // The one hole `isAssignableThrough` keeps open, and it is open on the corpus's
+    // authority rather than by oversight. `[int] -> [any]` is a representation change
+    // by the same argument as everything the predicate refuses -- docs/plan.md fixes
+    // `any` as `{i8*, i64}`, sixteen bytes, and an `int` is four -- and
+    // stdlib/types.fin:102 declares `resolve_arr_type(const &arr: [any])`, which is
+    // useless without it.
+    //
+    // It is also mutable-container covariance, which is unsound in the ordinary way
+    // even where the representations agree: a write through the `[any]` view can put a
+    // `string` where the `[int]` name promises an integer.
+    //
+    // Not a wrong program today, which is why it is booked rather than refused: codegen
+    // has no `[any]` at all. Measured -- `fun take(a: [any])` reached with an `[int]`
+    // reports `codegen: a parameter of type '[any]' is not lowered yet`, so the
+    // conversion has nowhere to be wrong yet.
+    //
+    // Closing it needs the corpus to change, so it is an owner ruling: either
+    // `resolve_arr_type` gains a cast or a generic parameter, or `[any]` becomes a
+    // conversion the backend performs element by element rather than a rename. Whoever
+    // closes it inverts this test into Soundness_ContainerVariance beside the four
+    // above.
+    const FincRun r = compile(
+        "fun take(a: [any]) <int> { return 0; }\n"
+        "fun main() <noret> { let v <[int]> = [1, 2]; take(v); }\n");
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u)
+        << "when this fails, `[int]` no longer converts to `[any]`: invert this test\n"
+        << stripAnsi(r.err);
+
+    // The pointee and prototype spellings of the same hole, so that closing one and
+    // leaving the others is visible.
+    for (const char* code : {
+            "fun main() <noret> { let x <int> = 1; let p <*any> = &x; }\n",
+            "fun f(p: <{int, any}>) <int> { return 0; }\n"
+            "fun main() <noret> { let a <{int, int}> = { 1: 2 }; f(a); }\n"}) {
+        const FincRun d = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(d.err)), 0u) << code << stripAnsi(d.err);
+    }
 }
 
 TEST(Soundness_DynamicTypes, AnyDoesNotInferFromItsInitialiser) {
@@ -1440,12 +1728,10 @@ TEST(KnownDefect_TypeAliases, GenericArgumentsOnANonGenericAliasAreDiscarded) {
     // lookup can find. Six diagnostics in the corpus read `Type 'X' does not have
     // methods` for a parameter whose bound names the interface three characters away.
     //
-    // Booked and not fixed because two separate answers are missing. The alias needs a
+    // Booked and not fixed because two separate mechanisms are missing. The alias needs a
     // parameter list to bind arguments to (see AGenericTypeAliasIsNeverDeclared above),
-    // and `Any<Printable>` has to be *given* a meaning: the sample's comments read it as
-    // "anything implementing Printable", which is the `any implements <Error>` form
-    // spelled with arguments instead, and that is the owner's ruling on whether a bound
-    // of `any` narrows -- not something to invent here.
+    // and the meaning is ruled but unbuilt: `Any<Printable>` narrows to implementors
+    // (ADR 0038), so method calls resolve through the bound once generic aliases exist.
     const FincRun r = compile("interface Printable { pub fun format_str() <string>; }\n"
                               "type Any = any;\n"
                               "fun show<X: Any<Printable>>(o: X) <void> { o.format_str(); }\n");
@@ -2478,42 +2764,216 @@ TEST(Soundness_Interfaces, AMissingMethodIsRejected) {
     EXPECT_NE(r.err.find("does not implement"), std::string::npos) << r.err;
 }
 
-TEST(KnownDefect_Interfaces, AMissingFieldIsAccepted) {
+TEST(Soundness_Interfaces, AnInterfaceMemberIsReadableThroughTheInterfaceType) {
+    // `interface P { readonly name <string>; }` and then a read of `.name` off a
+    // `P`-typed value reported `Struct 'P' has no member 'name'` -- about a member the
+    // interface declares two lines up. visit(InterfaceDeclaration&) resolved each
+    // member's type, checked its default, and then *discarded* it: nothing called
+    // defineField, so the interface's own StructType had methods and no fields.
+    //
+    // A method in the same position always worked (defineMethod is called right below
+    // the member loop), so the two halves of an interface disagreed about whether they
+    // existed -- which is the shape of bug that survives a long time, because the half
+    // that works is the half people write.
+    //
+    // Found by tests/samples/love.fin, contributed 2026-08-28, which declares
+    // `interface Person { readonly name <string>, }` and reads `.name` off values of
+    // that type. readonly.fin:29 declares the same shape (`pub readonly value
+    // <string>;`) and never reads it through the interface, which is why fifty samples
+    // did not catch it.
+    //
+    // Both halves asserted: through a parameter, and through a struct field of
+    // interface type. They reach getStructType by different routes.
+    const FincRun viaParam = compile(
+        "interface P { readonly name <string>; }\n"
+        "fun f(a: P) <noret> { let n <string> = a.name; }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(viaParam.exitCode, 0)
+        << "an interface's own member must be readable through its type\n"
+        << stripAnsi(viaParam.err);
+
+    const FincRun viaField = compile(
+        "interface P { readonly name <string>; }\n"
+        "struct S { other <P>, fun show() <noret> { let n <string> = self.other.name; } }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(viaField.exitCode, 0)
+        << "a field of interface type must expose the interface's members\n"
+        << stripAnsi(viaField.err);
+
+    // The separator does not matter: love.fin writes `<string>,` and readonly.fin
+    // writes `<string>;`, and both parse. A fix that registered only one of them would
+    // pass the two assertions above and fail the corpus.
+    const FincRun withComma = compile(
+        "interface P { readonly name <string>, }\n"
+        "fun f(a: P) <noret> { let n <string> = a.name; }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(withComma.exitCode, 0) << stripAnsi(withComma.err);
+}
+
+TEST(Soundness_Interfaces, AStructConvertsToAnInterfaceItImplements) {
+    // Ruled by the owner 2026-08-28, on the witness of tests/samples/love.fin --
+    // `I.love(F)` hands a `Fin` to a parameter declared `Person`, where `Fin`
+    // declares `: <Person, Beautiful>` and carries the `name <string>` the interface
+    // requires. ADR 0019 fixed the representation of an interface reference while
+    // recording that "interface-as-a-runtime-type does not exist in the corpus"; that
+    // sample is what the ADR was written without.
+    //
+    // Front end only. What the value *is* at run time -- `{data, vtable}`, two words,
+    // with a field-offset slot per required field -- is ADR 0027 and the backend still
+    // refuses it, which is why this test compiles without `-o` rather than running.
+    const FincRun r = compile(
+        "interface P { pub fun f() <int>; }\n"
+        "struct S: <P> { fun f() <int> { return 1; } }\n"
+        "fun g(a: P) <noret> {}\n"
+        "fun main() <noret> { let s <S> = S{}; g(s); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, AStructThatDoesNotImplementAnInterfaceDoesNotConvert) {
+    // The conversion is gated on `implements()`, which is the same predicate the
+    // declaration-site check uses. Without this, the rule above would read "a struct
+    // converts to any interface", and the two passes would disagree about what
+    // conformance means.
+    const FincRun r = compile(
+        "interface P { pub fun f() <int>; }\n"
+        "struct S { v <int>, }\n"
+        "fun g(a: P) <noret> {}\n"
+        "fun main() <noret> { let s <S> = S{v:1}; g(s); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, AnInterfaceDoesNotConvertBackToAStruct) {
+    // One direction only. An interface reference carries no fields of its own to
+    // satisfy a struct's, and the corpus asks for the conversion in one direction --
+    // so the reverse must stay refused rather than falling out of a symmetric rule.
+    //
+    // Written as a call inside a function, because a `fun g(a: S)` that nobody calls
+    // never asks the question: an earlier probe of this read as "accepted" for exactly
+    // that reason, which is worth recording as the shape of a false negative here.
+    const FincRun r = compile(
+        "interface P { pub fun f() <int>; }\n"
+        "struct S: <P> { fun f() <int> { return 1; } }\n"
+        "fun g(a: S) <noret> {}\n"
+        "fun takes(p: P) <noret> { g(p); }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, TwoUnrelatedStructsStillDoNotConvert) {
+    // The control on the whole rule: it is guarded on the *target* being an interface,
+    // so two structs with identical fields remain distinct types. A rule that had
+    // dropped that guard passes all three tests above.
+    const FincRun r = compile(
+        "struct A { v <int>, }\n"
+        "struct B { v <int>, }\n"
+        "fun g(a: A) <noret> {}\n"
+        "fun main() <noret> { let b <B> = B{v:1}; g(b); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, AnUndeclaredMemberIsStillNotReadableThroughAnInterface) {
+    // The control. Registering the declared members must not make *every* name
+    // readable -- a lookup that answered yes to anything would pass the test above for
+    // the wrong reason.
+    const FincRun r = compile(
+        "interface P { readonly name <string>; }\n"
+        "fun f(a: P) <noret> { let n <string> = a.nosuchmember; }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, AMissingFieldIsRejected) {
+    // Was KnownDefect_Interfaces.AMissingFieldIsAccepted, whose failure message named
+    // this exact change: "Invert this to EXPECT_NE(r.exitCode, 0), move it to
+    // Soundness_Interfaces". `implements` walked methods, operators, constructors and
+    // the destructor and never fields, so a struct carrying none of an interface's
+    // required fields satisfied it.
+    //
+    // ADR 0027 is what made this urgent rather than merely wrong: an interface reference
+    // carries a vtable with one offset slot per required field, so a struct missing a
+    // required field has no offset to emit. The gap stops being latent the moment a
+    // vtable exists, and the backend would have to refuse a program the front end had
+    // blessed -- which is why the ADR lists closing this as step 1 of 5, before any
+    // vtable is emitted.
     auto r = compile(
         "interface I { x <int>; }\n"
         "struct S : <I> { y <int>, }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a struct that does not carry a required field is now rejected. "
-           "Invert this to EXPECT_NE(r.exitCode, 0), move it to Soundness_Interfaces, "
-           "and delete the interface-fields entry from docs/plan.md.";
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("does not implement"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Interfaces, AMissingFieldIsAcceptedEvenWhenTheMethodsAreChecked) {
-    // Sharper than the test above. Here the struct satisfies the method half, so
-    // `implements` runs to completion and returns true anyway — the field is not
-    // merely unchecked when nothing else is, it is invisible to a check that did
-    // happen.
+TEST(Soundness_Interfaces, AMissingFieldIsRejectedEvenWhenTheMethodsAreSatisfied) {
+    // Sharper than the test above, and its argument is preserved verbatim from the
+    // KnownDefect it replaces: "Here the struct satisfies the method half, so
+    // `implements` runs to completion and returns true anyway -- the field is not merely
+    // unchecked when nothing else is, it is invisible to a check that did happen."
+    //
+    // That distinction is why the field loop is *first* in `implements` now: a check
+    // that only ran when something else had already failed would pass this test for the
+    // wrong reason.
     auto r = compile(
         "interface I { x <int>; fun m(self: &Self) <int>; }\n"
         "struct S : <I> {\n"
         "  y <int>,\n"
         "  fun m(self: &Self) <int> { return 1; }\n"
         "}\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: the field half of an interface contract is now checked "
-           "alongside the method half. See KnownDefect_Interfaces.AMissingFieldIsAccepted.";
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Interfaces, AFieldOfTheWrongTypeIsAccepted) {
-    // And the field is not checked even when it is present: `x <string>` where
-    // the interface said `x <int>`. So the fix needs both a presence check and a
-    // type comparison, and a fix that only adds presence will leave this failing.
+TEST(Soundness_Interfaces, AFieldOfTheWrongTypeIsRejected) {
+    // The third of the trio, and the one that decided the shape of the fix. Its
+    // KnownDefect form said so: "the fix needs both a presence check and a type
+    // comparison, and a fix that only adds presence will leave this failing." So both
+    // landed together rather than presence first.
     auto r = compile(
         "interface I { x <int>; }\n"
         "struct S : <I> { pub x <string>, }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a required field's type is now compared. If the presence check "
-           "landed but not this, that is the remaining half.";
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, AnInheritedFieldSatisfiesARequirement) {
+    // The requirement is about *storage*, not about where the declaration was written.
+    // A base struct's fields splice in at offset 0 (ADR 0026's neighbourhood), so an
+    // inherited field occupies a slot in this type exactly as a declared one does --
+    // which is precisely what a vtable offset slot needs.
+    const FincRun r = compile(
+        "interface I { x <int>; }\n"
+        "struct B { pub x <int>, }\n"
+        "struct S: <B, I> { y <int>, }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Interfaces, ARequiredSelfFieldIsSatisfiedByTheImplementorsOwnType) {
+    // `Self` in a requirement means the implementor's type, and this is the case that
+    // caught it: `lib/std/stdptr.fin:53` declares `readonly restrict <&Self>;` on
+    // `rptr_iface` and `:76` declares `readonly restrict <&Self>,` on `rptr`. Inside the
+    // interface `Self` is the interface (Analyzer_Decl.cpp:625); inside the class it is a
+    // SelfType wrapping the class (:1136). So the two are `&rptr_iface` and `&rptr`, and
+    // a literal comparison can never match -- which is the semantics, not a defect in
+    // either declaration.
+    //
+    // Found by Soundness_BundledStdlib.EverySymbolTheCorpusImportsIsExported going red
+    // the moment the field check landed, which is the guard that matters here: a
+    // conformance check strict enough to reject the standard library is a wrong check,
+    // and that test is what says so before a sample does.
+    const FincRun ok = compile(
+        "interface I { restrict <&Self>; }\n"
+        "class C : <I> { readonly restrict <&Self>, }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(ok.exitCode, 0) << stripAnsi(ok.err);
+
+    // And not loosened into "any pointer satisfies a `&Self`": a pointer to some other
+    // struct is still wrong. Without this, the rule above would accept anything
+    // pointer-shaped, which is how a fix for one corpus file breaks the check for
+    // everything else.
+    const FincRun wrong = compile(
+        "interface I { restrict <&Self>; }\n"
+        "struct Other { v <int>, }\n"
+        "class C : <I> { readonly restrict <&Other>, }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(wrong.exitCode, 0) << stripAnsi(wrong.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -2753,53 +3213,380 @@ TEST(Soundness_InterfaceConstructors, AnInterfaceThatRequiresNoneIsNotGivenOne) 
 }
 
 // ---------------------------------------------------------------------------
-// Integer widths are a lie.
+// Integer widths.
 //
-// resolveTypeFromAST (Analyzer_Core.cpp) walks the `{N}` width annotation for
-// side effects and returns the unannotated type, so uint{8} and uint{64} are one
-// type. lib/std builds i64, i128, u64, u128 and size_t on top of this. Harmless
-// exactly as long as there is no codegen, and wrong machine code the day there is.
+// `int{64}` is a written width, and it is the type. The parser attaches the
+// expression to the TypeNode (parser.y, `base_type LBRACE expression_list
+// RBRACE`), resolveTypeUnwrapped reads it through the one shared constant reader
+// and stores it on the PrimitiveType, and from there the width is what every
+// later question is answered from: identity, assignability, the diagnostic text,
+// the layout pass, and the machine type the backend emits. Before this unit the
+// annotation was walked for its side effects and dropped, so `uint{8}` and
+// `uint{64}` were one type -- plain `uint` -- which accepted -1, laid out as four
+// bytes and lowered as an i32.
+//
+// The division of labour is the compiler's usual one, and it is what these tests
+// are arranged around. The front end decides *well-formedness*: a width is one
+// positive integer constant, and anything else is a diagnostic here. The layout
+// pass decides *representation*, and it has four widths -- 8, 16, 32 and 64, the
+// ones scalarByName already names. `int{7}` and `int{128}` are therefore
+// well-formed types that this compiler cannot lower, refused by name at the
+// backend exactly as a dynamic `[T]` or an `any` is, and covered in
+// test_codegen.cpp rather than here.
+//
+// That split is a ruling and the alternative was measured before being rejected.
+// Refusing an unrepresentable width in the front end would say "Fin has no
+// 128-bit integer", and nobody has decided that: tests/samples/stdlib/types.fin
+// :47 and :50 write `i128` and `u128` deliberately, in a normative sample, as
+// part of the standard library's number tower, and docs/plan.md:3175 reserves the
+// ABI for the owner. "This compiler does not lower it yet" is the true sentence,
+// and it is the one the backend already knows how to say.
+//
+// Why four and not "every width LLVM can build": LLVM's DataLayout rounds an
+// integer's store size up to a power of two, so i17 and i24 both allocate four
+// bytes and i33 through i56 all allocate eight, while sizeOfScalar computes
+// `(bits + 7) / 8`. The two agree for 1-16, 25-32 and 57-64 and disagree
+// everywhere else. A language whose widths are that set is not one anyone
+// designed -- it is the intersection of two rounding rules, with holes at 17-24
+// and 33-56 that no rule explains. Four named widths is a set the table states,
+// and Soundness_Codegen.TheLayoutTableAgreesWithLLVM is what holds it to LLVM.
 // ---------------------------------------------------------------------------
 
-TEST(KnownDefect_IntegerWidths, AWiderValueAssignsToANarrowerBinding) {
-    auto r = compile(
-        "fun main() <void> {\n"
-        "  let a <uint{8}>;\n"
-        "  let b <uint{64}> = a;\n"
-        "}\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: width annotations now produce distinct types. Widening may well "
-           "be legal by a language decision — if so, keep this as Soundness and "
-           "record the decision; the narrowing test below is the one that must reject.";
+TEST(Soundness_IntegerWidths, AWrittenWidthIsTheType) {
+    // The identity claim: a width and the name that means the same width are one
+    // type, so `long` initialises an `int{64}` and vice versa, with no conversion
+    // and no diagnostic. The name supplies the kind and the sign; the annotation
+    // supplies the bits.
+    //
+    // This is what makes the rest of the section a statement about widths rather
+    // than about annotations. Were `int{64}` merely *assignable* to `long`, the
+    // two would still be different types and every question below -- a pointee, a
+    // field, an argument, a layout -- would need an answer of its own.
+    for (const char* code : {
+             "fun main() <noret> { let a <int{64}> = 1; let b <long> = a; }\n",
+             "fun main() <noret> { let a <long> = 1; let b <int{64}> = a; }\n",
+             "fun main() <noret> { let a <int{32}> = 1; let b <int> = a; }\n",
+             "fun main() <noret> { let a <int> = 1; let b <int{32}> = a; }\n",
+             "fun main() <noret> { let a <uint{16}> = 1; let b <ushort> = a; }\n",
+             "fun main() <noret> { let a <char{8}> = 1; let b <char> = a; }\n",
+             "fun main() <noret> { let a <int{16}> = 1; let b <short> = a; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "a written width and the name for that width are one type:\n"
+            << code << stripAnsi(r.err);
+    }
 }
 
-TEST(KnownDefect_IntegerWidths, ANarrowerParameterAcceptsAWiderArgument) {
-    // This is the direction that cannot be excused by any implicit-conversion
-    // rule: passing uint{64} where uint{8} was asked for truncates.
-    auto r = compile(
+TEST(Soundness_IntegerWidths, AWrittenWidthWidensLikeAName) {
+    // ADR 0022 unchanged, read through the annotation: an integer reaches a wider
+    // integer, and an equal width passes only when the sign agrees. Was
+    // KnownDefect_IntegerWidths.AWiderValueAssignsToANarrowerBinding, which
+    // asserted this same exit 0 for the opposite reason -- the two types were
+    // literally one type, so there was nothing for the rule to be true about.
+    for (const char* code : {
+             "fun main() <noret> { let a <uint{8}>; let b <uint{64}> = a; }\n",
+             "fun main() <noret> { let a <int{8}>; let b <int{16}> = a; }\n",
+             "fun main() <noret> { let a <uint{8}>; let b <uint{8}> = a; }\n",
+             "fun main() <noret> { let a <int{16}>; let b <long> = a; }\n",
+             "fun main() <noret> { let a <ushort>; let b <uint{32}> = a; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << "a widening:\n" << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidths, ANarrowerTargetIsRefusedThroughTheWidth) {
+    // The direction no implicit-conversion rule excuses, and the one this unit
+    // exists for: before it every one of these compiled, because both sides were
+    // the base name and the base name was all there was.
+    struct Case { const char* code; const char* text; };
+    const std::vector<Case> cases{
+        {"fun main() <noret> { let a <uint{64}>; let b <uint{8}> = a; }\n",
+         "expected 'uint{8}', got 'uint{64}'"},
+        {"fun main() <noret> { let a <int{64}>; let b <int{32}> = a; }\n",
+         "expected 'int{32}', got 'int{64}'"},
+        {"fun main() <noret> { let a <long>; let b <int{16}> = a; }\n",
+         "expected 'int{16}', got 'long'"},
+        {"fun main() <noret> { let a <int{16}>; let b <char> = a; }\n",
+         "expected 'char', got 'int{16}'"},
+        {"fun main() <noret> { let a <uint{32}>; let b <int{32}> = a; }\n",
+         "expected 'int{32}', got 'uint{32}'"},
+    };
+    for (const Case& c : cases) {
+        const FincRun r = compile(c.code);
+        EXPECT_NE(r.exitCode, 0) << "a narrowing:\n" << c.code << stripAnsi(r.err);
+        EXPECT_NE(stripAnsi(r.err).find(c.text), std::string::npos)
+            << c.code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidths, ANarrowerParameterRefusesAWiderArgument) {
+    // Was KnownDefect_IntegerWidths.ANarrowerParameterAcceptsAWiderArgument. Kept
+    // as a test of its own rather than folded into the loop above because a
+    // parameter is checked at the call and a binding at its initialiser: the
+    // defect this inverts was reachable through both, and only one was written.
+    const FincRun r = compile(
         "fun f(x: uint{8}) <void> {}\n"
         "fun main() <void> {\n"
         "  let big <uint{64}>;\n"
         "  f(big);\n"
         "}\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a narrowing argument is now rejected. Invert and move to "
-           "Soundness_IntegerWidths.";
+    EXPECT_NE(r.exitCode, 0) << "passing a uint{64} where uint{8} was asked for "
+                                "truncates\n" << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'uint{8}', got 'uint{64}'"),
+              std::string::npos) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_IntegerWidths, TheWidthIsAbsentFromDiagnosticText) {
-    // Evidence for the *cause* rather than the symptom, and the reason this one is
-    // worth its own test: the annotation is gone by the time anything can see it,
-    // so a diagnostic about `uint{8}` says plain `uint`. That also makes the fix
-    // observable without codegen — when the type carries its width, this text
-    // changes, and a user reading `expected 'uint'` while having written
-    // `uint{8}` is being told something untrue today.
-    auto r = compile("fun main() <void> { let a <uint{8}> = -1; }\n");
-    ASSERT_NE(r.exitCode, 0) << "expected a signedness mismatch here: " << r.err;
+TEST(Soundness_IntegerWidths, TheWidthIsInTheDiagnosticText) {
+    // Was KnownDefect_IntegerWidths.TheWidthIsAbsentFromDiagnosticText, whose
+    // whole argument was that a user reading `expected 'uint'` while having
+    // written `uint{8}` is being told something untrue. The width reaches
+    // toString now, so a diagnostic names what the program wrote.
+    const FincRun r = compile("fun main() <void> { let a <uint{8}> = -1; }\n");
+    ASSERT_NE(r.exitCode, 0) << "a negative constant is not an unsigned value: "
+                             << stripAnsi(r.err);
     const std::string err = stripAnsi(r.err);
-    EXPECT_NE(err.find("expected 'uint'"), std::string::npos) << err;
-    EXPECT_EQ(err.find("uint{8}'"), std::string::npos)
-        << "FIXED: the diagnostic now names the annotated width. " << err;
+    EXPECT_NE(err.find("expected 'uint{8}'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << "one diagnostic, about the sign\n" << err;
+}
+
+TEST(Soundness_IntegerWidths, AWidthMustBeAPositiveConstant) {
+    // The four readings of a malformed width, and the messages are the array
+    // extent's four with one word changed. That is deliberate: an extent and a
+    // width are the same syntactic question -- a constant written inside a type --
+    // read through the same reader (utils/IntegerConstant.hpp), so a reader who
+    // has seen one diagnostic can predict the other.
+    struct Case { const char* code; const char* text; };
+    const std::vector<Case> cases{
+        {"fun main() <noret> { let a <int{-8}>; }\n",
+         "A bit width cannot be negative"},
+        {"fun main() <noret> { let a <int{0}>; }\n",
+         "A bit width cannot be zero"},
+        {"fun main() <noret> { let a <int{18446744073709551616}>; }\n",
+         "A bit width is too large to represent"},
+        {"fun main() <noret> { let a <int{64, 32}>; }\n",
+         "A type takes one bit width"},
+    };
+    for (const Case& c : cases) {
+        const FincRun r = compile(c.code);
+        EXPECT_NE(r.exitCode, 0) << c.code << stripAnsi(r.err);
+        EXPECT_NE(stripAnsi(r.err).find(c.text), std::string::npos)
+            << c.code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidths, AWidthThatIsNotAnIntegerIsSaidToBeOne) {
+    // Two diagnostics and not one, and the count is asserted because it is the
+    // part that looks like a bug and is not. The annotation is an expression: it
+    // is walked and checked against `int` like any other, which reports the type
+    // mismatch, and then read as a width, which reports that a width has to be an
+    // integer. The array extent behaves identically -- `[int, "a"]` reports both
+    // `expected 'int', got 'string'` and `Array size must be an integer` -- and
+    // the two messages are about different things. One says what was written; the
+    // other says what it was written *as*.
+    for (const char* code : {"fun main() <noret> { let a <int{\"a\"}>; }\n",
+                             "fun main() <noret> { let a <int{1.5}>; }\n",
+                             "fun main() <noret> { let a <int{true}>; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << code << stripAnsi(r.err);
+        const std::string err = stripAnsi(r.err);
+        EXPECT_NE(err.find("A bit width must be an integer"), std::string::npos)
+            << code << err;
+        EXPECT_EQ(errorCount(err), 2u)
+            << "the mismatch and the width, as the array extent reports both\n"
+            << code << err;
+    }
+}
+
+TEST(Soundness_IntegerWidths, AnArithmeticWidthIsNotAConstantAndIsNotRefusedHere) {
+    // tests/samples/type_annotations.fin:8 writes `let z <int{8 * 8}> = 42;` in a
+    // `//@ ok` sample, so this must not become a front-end diagnostic. Fin has no
+    // constant folder and deliberately so (utils/IntegerConstant.hpp: folding
+    // arithmetic would answer an open language question by accident for whichever
+    // subset happens to be foldable), which means there is no width here to store
+    // -- not a wrong one, none. The base name stands and the type is `int`.
+    //
+    // The backend still refuses it, because a written annotation that yielded no
+    // width is a width the program asked for and did not get:
+    // Soundness_Codegen.ANonConstantWidthAnnotationIsRefusedAndSaidToBeOne.
+    const FincRun r = compile("fun main() <noret> { let z <int{8 * 8}> = 42; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+
+    // And what makes that a statement about folding rather than about `int{64}`:
+    // the same program with the width written out is a 64-bit type, so `long`
+    // reaches it and `int{8 * 8}` -- being plain `int` -- does not.
+    const FincRun folded = compile(
+        "fun main() <noret> { let a <long> = 1; let b <int{8 * 8}> = a; }\n");
+    EXPECT_NE(folded.exitCode, 0)
+        << "`int{8 * 8}` is `int`, so a `long` narrows into it\n"
+        << stripAnsi(folded.err);
+}
+
+TEST(Soundness_IntegerWidths, AWidthOnANonIntegerIsStillNotAType) {
+    // tests/samples/type_annotations.fin:14 writes `{int{64}, float{128}}` in a
+    // `//@ ok` sample, so `float{128}` must keep resolving. It resolves to plain
+    // `float`, which is the honest answer available: a width is a count of value
+    // bits, an IEEE format is not built from one, and Fin has ruled on no
+    // floating-point format but the two the table names. Inventing `float{128}`
+    // as a fifth would be inventing an ABI.
+    //
+    // So the annotation stays where it was on every non-integer: read for its own
+    // side effects, then dropped, with the backend refusing the type by name.
+    // Asserted rather than left implicit because "widths are real now" invites the
+    // reading that every `{N}` is one.
+    for (const char* code : {
+             "fun main() <noret> { let a <float{128}> = 1.5; let b <float> = a; }\n",
+             "fun main() <noret> { let a <float> = 1.5; let b <float{128}> = a; }\n",
+             "fun main() <noret> { let a <bool{1}> = true; let b <bool> = a; }\n",
+             "fun main() <noret> { let a <string{8}> = \"s\"; let b <string> = a; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "a width on a non-integer is the base type, unchanged:\n"
+            << code << stripAnsi(r.err);
+    }
+    // The prototype the sample actually writes, whole.
+    const FincRun sample = compile(
+        "fun main() <noret> { let prot <{int{64}, float{128}}> = { 10: 123244.2 }; }\n");
+    EXPECT_EQ(sample.exitCode, 0)
+        << "tests/samples/type_annotations.fin:14\n" << stripAnsi(sample.err);
+}
+
+TEST(Soundness_IntegerWidths, AnAliasToAWidthIsThatWidth) {
+    // What lib/std/types.fin:68-81 and tests/samples/stdlib/memory.fin:8 are for:
+    // `i8`, `u8`, `i16`, `u16`, `i64`, `u64`, `usize`, `isize`, `byte` and
+    // `size_t` are all `type X = <integer>{N};`, and an alias that dropped the
+    // width would make all ten of them plain `int` or `uint`. Front-end only --
+    // an alias is not lowered at all yet (codegen: "a variable of type 'I64' is
+    // not lowered yet"), which is booked separately and is not about widths.
+    const FincRun ok = compile(
+        "type I64 = int{64};\n"
+        "fun main() <noret> { let a <I64> = 1; let b <long> = a; }\n");
+    EXPECT_EQ(ok.exitCode, 0) << "an alias carries its width\n" << stripAnsi(ok.err);
+
+    const FincRun narrowing = compile(
+        "type U8 = uint{8};\n"
+        "fun main() <noret> { let big <uint{64}>; let a <U8> = big; }\n");
+    EXPECT_NE(narrowing.exitCode, 0)
+        << "an alias narrows like the width it names\n" << stripAnsi(narrowing.err);
+    EXPECT_NE(stripAnsi(narrowing.err).find("got 'uint{64}'"), std::string::npos)
+        << stripAnsi(narrowing.err);
+}
+
+TEST(Soundness_IntegerWidths, AWidthIsAcceptedInEveryTypePosition) {
+    // The width is read in resolveTypeUnwrapped, which every written type goes
+    // through, so this holds by construction -- and it is asserted because "by
+    // construction" is exactly the claim a second reader somewhere else would
+    // quietly falsify. Each of these is a position the corpus writes a width in
+    // or is one node away from one: a parameter and a return (lib/std/types.fin's
+    // number tower), a struct field (test_layout.cpp:806), an enum payload
+    // (tests/samples/enums.fin:8), a pointee and an array element
+    // (tests/samples/type_annotations.fin:11), a cast target, a global, an alias.
+    struct Case { const char* what; const char* code; };
+    const std::vector<Case> cases{
+        {"a binding",
+         "fun main() <noret> { let a <int{64}> = 1; let b <long> = a; }\n"},
+        {"a parameter",
+         "fun f(x: int{64}) <void> {}\n"
+         "fun main() <noret> { let a <long> = 1; f(a); }\n"},
+        {"a return",
+         "fun f() <int{64}> { return 1; }\n"
+         "fun main() <noret> { let a <long> = f(); }\n"},
+        {"a struct field",
+         "struct S { pub a <uint{8}>, }\n"
+         "fun main() <noret> { let s <S>; let b <uint{64}> = s.a; }\n"},
+        {"an enum payload",
+         "enum Color { RGB(uint{8}, uint{8}, uint{8}) }\n"
+         "fun main() <noret> { let c <Color> = Color::RGB(1, 2, 3); }\n"},
+        {"a pointee",
+         "fun main() <noret> { let x <int{64}> = 1; let p <*int{64}> = &x; }\n"},
+        {"an array element",
+         "fun main() <noret> { let a <[int{64}, 2]> = [1, 2]; }\n"},
+        {"a cast target",
+         "fun main() <noret> { let a <int> = 1; let b <long> = cast<int{64}>(a); }\n"},
+        {"a global",
+         "let g <int{64}> = 1;\nfun main() <noret> { let b <long> = g; }\n"},
+        {"a nullable binding",
+         "fun main() <noret> { let a? <int{64}>; }\n"},
+        {"a const",
+         "const N <int{64}> = 1;\nfun main() <noret> { let b <long> = N; }\n"},
+        {"a prototype half",
+         "fun main() <noret> { let p <{int{64}, int{64}}> = { 1: 2 }; }\n"},
+    };
+    for (const Case& c : cases) {
+        const FincRun r = compile(c.code);
+        EXPECT_EQ(r.exitCode, 0) << "a width in this position: " << c.what << "\n"
+                                 << c.code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidths, APointeeWidthIsCheckedThroughThePointer) {
+    // The rule ADR 0022's pointer half exists for, now reachable through a written
+    // width. `*int{32}` over an `int{64}` object is an eight-byte slot addressed
+    // four bytes at a time, which is the shape Soundness_Pointers's own comment
+    // records as "compiled clean and exited 139" before pointee assignability was
+    // narrowed. isAssignableThrough asks the pointees, and the pointees now differ.
+    //
+    // tests/samples/type_annotations.fin:11 wrote exactly this -- `let p <*int{32}>
+    // = &x;` over `let x <int{64}>` -- and it is repaired to `*int{64}` in the same
+    // commit as this test, under the standing grant that a defect in a sample's own
+    // text may be fixed rather than booked. So this is also the test that says the
+    // repair was a repair and not a workaround: the old text has to be refused.
+    const FincRun narrow = compile(
+        "fun main() <noret> { let x <int{64}> = 1; let p <*int{32}> = &x; }\n");
+    EXPECT_NE(narrow.exitCode, 0)
+        << "an eight-byte object addressed as four bytes\n" << stripAnsi(narrow.err);
+    EXPECT_NE(stripAnsi(narrow.err).find("expected '&int{32}', got '&int{64}'"),
+              std::string::npos) << stripAnsi(narrow.err);
+
+    // The sample as repaired.
+    const FincRun ok = compile(
+        "fun main() <noret> { let x <int{64}> = 1; let p <*int{64}> = &x; }\n");
+    EXPECT_EQ(ok.exitCode, 0) << "tests/samples/type_annotations.fin:11 as repaired\n"
+                              << stripAnsi(ok.err);
+}
+
+TEST(Soundness_IntegerWidths, AWidthOnANonNumberIsNotADiagnosticEither) {
+    // Every remaining shape a `{N}` can be written on, all of which resolved at
+    // exit 0 before this unit and must keep doing so: the annotation is dropped on
+    // anything that is not an integer primitive, and dropping it is not the same
+    // decision as accepting it. `S{8}` and `E{8}` are a struct and an enum, `T{8}`
+    // a generic parameter, `any{8}` and `auto{8}` the two type-inference names, and
+    // the parenthesised forms are a pointer, an array and a function type wearing a
+    // width the type system has nowhere to put.
+    //
+    // None of them is *ruled* on here. What is asserted is that making integer
+    // widths real did not turn any of them into a front-end error, because that is
+    // the regression this unit could plausibly cause and a sample would catch it
+    // only if a sample happened to write one -- and none does.
+    for (const char* code : {
+             "struct S { pub a <int>, }\nfun main() <noret> { let a <S{8}>; }\n",
+             "enum E { A }\nfun main() <noret> { let a <E{8}>; }\n",
+             "fun f<T>(x: T{8}) <void> {}\nfun main() <noret> { f::<int>(1); }\n",
+             "fun main() <noret> { let a <any{8}>; }\n",
+             "fun main() <noret> { let a <auto{8}> = 1; }\n",
+             "fun main() <noret> { let x <int> = 1; let a <(*int){32}> = &x; }\n",
+             "fun main() <noret> { let a <([int, 2]){8}>; }\n",
+             "fun main() <noret> { let a <(fn(int) -> int){8}>; }\n",
+             "fun main() <noret> { let a <{int, float}{8}>; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "a width on a non-integer resolves to the base type:\n"
+            << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidths, AWidthMustBeWrittenInsideTheType) {
+    // Two spellings the grammar refuses, pinned so that the width work is not
+    // mistaken for having created them and so that a future grammar edit that
+    // starts accepting either has to say so. `int{}` has nothing between the
+    // braces, and `int{64}?` puts the nullable marker outside them where the
+    // grammar wants `<int{64}?>` to read the `?` off the declaration.
+    for (const char* code : {"fun main() <noret> { let a <int{}>; }\n",
+                             "fun main() <noret> { let a <int{64}?>; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << code << stripAnsi(r.err);
+        EXPECT_NE(stripAnsi(r.err).find("syntax error"), std::string::npos)
+            << code << stripAnsi(r.err);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3010,8 +3797,9 @@ TEST(Soundness_Attributes, AnAttributeOnAClassReachesTheAST) {
     auto parsed = parseSource("#[export]\nclass C { }\n", diag);
     ASSERT_TRUE(parsed.parsed) << "#[export] class C {} must parse";
     ASSERT_EQ(parsed.ast->statements.size(), 1u);
-    auto* cls = dynamic_cast<fin::ClassDeclaration*>(parsed.ast->statements[0].get());
-    ASSERT_NE(cls, nullptr) << "expected a ClassDeclaration";
+    auto* cls = dynamic_cast<fin::StructDeclaration*>(parsed.ast->statements[0].get());
+    ASSERT_NE(cls, nullptr) << "expected a StructDeclaration";
+    EXPECT_TRUE(cls->is_class);
     ASSERT_EQ(cls->attributes.size(), 1u)
         << "the attribute was dropped: parser.y's attribute dispatch lost its "
            "ClassDeclaration branch";
@@ -3700,18 +4488,14 @@ TEST(KnownDefect_Casts, AnIntegerToAStringIsAccepted) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Casts, TheCorpusOwnStringToCharArrayCastIsRejected) {
-    // stdio.fin:156 writes exactly this. The `KnownDefect` here asserts a
-    // *rejection*, which is the opposite shape to every other test in this file:
-    // the defect is that a legitimate cast fails, so the assertion that must
-    // eventually flip is EXPECT_NE, not EXPECT_EQ.
+TEST(Soundness_Casts, TheCorpusOwnStringToCharArrayCastConverts) {
+    // Was KnownDefect_Casts.TheCorpusOwnStringToCharArrayCastIsRejected:
+    // stdio.fin:156 writes exactly this, and a legitimate cast failing was
+    // the defect. Inverted on the fix: a string casts to a dynamic `[char]`,
+    // narrow on both sides (bytes are chars, fixed extents stay refused).
     auto r = compile("fun main() <void> { let a <[char]> = cast<[char]>(\"data\"); }\n");
-    EXPECT_NE(r.exitCode, 0)
-        << "FIXED: string to [char] now converts, which is what stdio.fin:156 "
-           "needs. Invert to EXPECT_EQ and move to Soundness_Casts.";
-    EXPECT_NE(stripAnsi(r.err).find("Invalid cast"), std::string::npos)
-        << "still failing, but no longer on the cast — check this is not now a "
-           "parse error, which would mean the grammar regressed:\n"
+    EXPECT_EQ(r.exitCode, 0)
+        << "string to [char] must convert:\n"
         << stripAnsi(r.err);
 }
 
@@ -4292,10 +5076,11 @@ TEST(Soundness_TypeResolution, AnUnresolvedParameterDoesNotChangeTheReportedArit
 // is a question about the syntax rather than about a value flowing through the
 // analyzer.
 //
-// What is deliberately NOT admitted, each with its own test below: an `int`-typed
-// *expression* assigned to an unsigned type (a language decision, not a defect --
-// see KnownDefect_IntegerConstants), and a constant too large for its target (the
-// widths do not exist yet; KnownDefect_IntegerWidths owns that line).
+// What is deliberately NOT admitted: an `int`-typed *expression* assigned to an
+// unsigned type, which is a language decision rather than a defect and is booked
+// as KnownDefect_IntegerConstants below. A constant too large for its target used
+// to be on that list for want of widths; the widths are real now, so it is
+// checked instead -- AConstantMustFitItsTarget.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -4423,6 +5208,318 @@ TEST(Soundness_IntegerConstants, ANegativeConstantIsNotUnsigned) {
     }
 }
 
+// ===========================================================================
+// Implicit integer widening (ADR 0022).
+//
+// tests/samples/stdlib/stdio.fin is the site. It declares `stream_length <ulong>`
+// and `pointer <ulong>` (:81, :82, :96, :97) and surrounds them with `int` lengths
+// and `int` loop indices, then writes not one cast: `self.stream_length =
+// _temp.length` on :130 and `= data.length` on :135 hand an `int` to a `ulong`.
+// Five diagnostics in that file were this one gap, and the ruling is that an
+// integer converts implicitly to a wider integer wherever no value is lost.
+//
+// Widths come from src/types/Layout.hpp, which is the compiler's only table of
+// them. Two lists is how two answers come apart, so the rule reads that one.
+// ===========================================================================
+
+TEST(Soundness_IntegerWidening, AnIntegerReachesAWiderOne) {
+    // Both directions of sign, which is the ruling as given: `ushort` -> `int` loses
+    // nothing, and `int` -> `ulong`/`long` is what the corpus writes.
+    for (const char* pair : {"int|long", "int|ulong", "ushort|int", "char|int",
+                             "short|long", "uint|ulong", "short|int"}) {
+        const std::string s = pair;
+        const auto bar = s.find('|');
+        const std::string from = s.substr(0, bar), to = s.substr(bar + 1);
+        const std::string code =
+            "fun main() <noret> { let a <" + from + "> = 1; let b <" + to + "> = a; }\n";
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << from << " widens to " << to << ":\n" << code << r.err;
+    }
+}
+
+TEST(Soundness_IntegerWidening, ANarrowerTargetIsStillRefused) {
+    // The half that must reject, and the reason the rule is a width comparison rather
+    // than "integers are interchangeable". `ulong` -> `int` is the pair the corpus's
+    // own remaining diagnostics stand on (stdlib/stdio.fin:115, :126).
+    for (const char* pair : {"long|int", "ulong|int", "int|short", "int|char",
+                             "ulong|uint", "long|ushort"}) {
+        const std::string s = pair;
+        const auto bar = s.find('|');
+        const std::string from = s.substr(0, bar), to = s.substr(bar + 1);
+        const std::string code =
+            "fun main() <noret> { let a <" + from + "> = 1; let b <" + to + "> = a; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << from << " must not narrow to " << to << ":\n" << code;
+        EXPECT_NE(stripAnsi(r.err).find("expected '" + to + "', got '" + from + "'"),
+                  std::string::npos)
+            << code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerWidening, AnEqualWidthSignChangeIsNotAWidening) {
+    // Reinterpreting a sign is not a conversion that loses nothing, and no corpus line
+    // writes one. Both directions, so neither is admitted by accident.
+    for (const char* pair : {"int|uint", "uint|int", "short|ushort", "ushort|short",
+                             "long|ulong", "ulong|long"}) {
+        const std::string s = pair;
+        const auto bar = s.find('|');
+        const std::string from = s.substr(0, bar), to = s.substr(bar + 1);
+        const std::string code =
+            "fun main() <noret> { let a <" + from + "> = 1; let b <" + to + "> = a; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << from << " must not reach " << to << ":\n" << code;
+    }
+}
+
+TEST(Soundness_IntegerWidening, TheTablesAliasSpellingsAreNotTypeNamesYet) {
+    // Layout.hpp pairs each width with an alias -- `int8`, `uint8`, `int16`, `int32`,
+    // `uint64`, `byte` -- and its header says they are there "so that lib/std's
+    // `i64`/`u64`/`size_t` resolve to a width rather than to a second table". None of
+    // those six is a *type name*: the analyzer's constructor registers `int`, `uint`,
+    // `short`, `ushort`, `long`, `ulong`, `char`, `bool`, `float`, `double`, `string`
+    // and no alias, so no program can write one.
+    //
+    // The corpus reaches 64 bits a different way, through Fin-level aliases over a
+    // width annotation: `pub type i64 = int{64};` (lib/std/types.fin:19,
+    // stdlib/types.fin:46), `pub type u64 = uint{64};` (:21, :49) and
+    // `type size_t = uint{64};` (stdlib/memory.fin:8). So the table's aliases and the
+    // corpus's spellings do not meet, and this test is what stops that going unnoticed
+    // -- it is pinned here rather than left implicit because the equal-width branch of
+    // the widening rule exists precisely for two names of one scalar, and nothing in
+    // source can reach it until these resolve.
+    //
+    // Not a claim that they *should* stay undefined. It is a claim about which of the
+    // two spellings is live today, and the moment one is registered this test says so
+    // by failing.
+    for (const char* t : {"int8", "uint8", "int16", "uint16", "int32", "uint32",
+                          "int64", "uint64", "byte"}) {
+        const std::string code =
+            std::string("fun main() <noret> { let a <") + t + "> = 1; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0)
+            << "`" << t << "` is a width in Layout.hpp and not a type name; if it is one "
+               "now, the equal-width branch of the widening rule is reachable and this "
+               "test should assert that instead:\n"
+            << code;
+    }
+}
+
+TEST(Soundness_IntegerWidening, WideningDoesNotReachBoolOrFloatOrString) {
+    // ScalarKind keeps these out on its own -- a bool is its own kind and one bit, a
+    // float is its own kind -- and this is the assertion that the rule stayed a rule
+    // about integers. `int` -> `float` is legal and stays legal, by the separate line
+    // above it in PrimitiveType::isAssignableTo that the corpus's arithmetic needs.
+    for (const char* code : {"fun main() <noret> { let a <int> = 1; let b <bool> = a; }\n",
+                             "fun main() <noret> { let a <bool> = true; let b <int> = a; }\n",
+                             "fun main() <noret> { let a <int> = 1; let b <string> = a; }\n",
+                             "fun main() <noret> { let a <double> = 1.0; let b <long> = a; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << "widening is about integers only:\n" << code;
+    }
+    const FincRun toFloat =
+        compile("fun main() <noret> { let a <int> = 1; let b <float> = a; }\n");
+    EXPECT_EQ(toFloat.exitCode, 0) << "int -> float is unchanged:\n" << toFloat.err;
+}
+
+TEST(Soundness_IntegerWidening, WideningDoesNotAdmitANegativeConstantToAnUnsignedTarget) {
+    // The interaction that had to be got right, and the reason checkType reads the
+    // constant before it asks about assignability. Widening makes `int` -> `ulong`
+    // succeed, and constantFitsType -- which holds the `!negative` rule -- runs only
+    // when assignability fails, so ordering is the whole of it. Held from the other
+    // side by Soundness_IntegerConstants.ANegativeConstantIsNotUnsigned, which is the
+    // test that predicted this exact mistake.
+    for (const char* t : {"uint", "ulong", "ushort"}) {
+        const std::string code =
+            std::string("fun main() <noret> { let x <") + t + "> = -1; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0)
+            << "a negative constant is not an unsigned value, widening or not:\n" << code;
+    }
+    // And a *variable* of signed type still widens, so the guard is about constants and
+    // did not quietly revoke the rule.
+    const FincRun viaVar =
+        compile("fun main() <noret> { let a <int> = 1; let b <ulong> = a; }\n");
+    EXPECT_EQ(viaVar.exitCode, 0) << viaVar.err;
+}
+
+TEST(Soundness_IntegerWidening, AComparisonHappensInTheWiderInteger) {
+    // tests/samples/stdlib/stdio.fin:126 writes `i < self.stream_length` with `i` an
+    // `int` and `stream_length` a `ulong` (:96), and no cast. The comparison branch used
+    // to treat the left operand as the expectation, which its own note called a separate
+    // question; ADR 0022 answers it for integers. Both orders, because a comparison is
+    // symmetric and a rule that depended on which side was written first would be wrong
+    // in exactly the way the constant rule beside it already guards against.
+    for (const char* op : {"<", ">", "<=", ">=", "==", "!="}) {
+        for (const char* order : {"a %OP% b", "b %OP% a"}) {
+            std::string expr = order;
+            expr.replace(expr.find("%OP%"), 4, op);
+            const std::string code =
+                "fun main() <noret> { let a <int> = 1; let b <ulong> = 2;\n"
+                "  let c <bool> = " + expr + "; }\n";
+            const FincRun r = compile(code);
+            EXPECT_EQ(r.exitCode, 0) << code << r.err;
+        }
+    }
+}
+
+TEST(Soundness_IntegerWidening, ArithmeticOnTwoWidthsYieldsTheWider) {
+    // tests/samples/stdlib/stdio.fin:115 writes `self.stream[i+self.pointer]` with `i`
+    // an `int` and `pointer` a `ulong`. The sum is the `ulong`, which is what makes the
+    // subscript legal; the `+` itself used to be the diagnostic.
+    //
+    // The result is read back through an annotation rather than asserted about
+    // internals: `<ulong>` accepts it and `<int>` does not, which pins the sum's type
+    // from both sides. Both operand orders, because the wider must not depend on which
+    // was written first.
+    for (const char* expr : {"a + b", "b + a", "a - b", "a * b", "b / a"}) {
+        const std::string wide =
+            std::string("fun main() <noret> { let a <int> = 4; let b <ulong> = 2;\n"
+                        "  let c <ulong> = ") + expr + "; }\n";
+        const FincRun ok = compile(wide);
+        EXPECT_EQ(ok.exitCode, 0) << wide << ok.err;
+
+        const std::string narrow =
+            std::string("fun main() <noret> { let a <int> = 4; let b <ulong> = 2;\n"
+                        "  let c <int> = ") + expr + "; }\n";
+        const FincRun bad = compile(narrow);
+        EXPECT_NE(bad.exitCode, 0) << "the sum is the wider type, so an int target "
+                                      "narrows:\n" << narrow;
+        EXPECT_NE(stripAnsi(bad.err).find("expected 'int', got 'ulong'"), std::string::npos)
+            << narrow << stripAnsi(bad.err);
+    }
+}
+
+TEST(Soundness_IntegerWidening, AComparisonDoesNotAdmitANegativeConstantToAnUnsigned) {
+    // tests/samples/stdlib/stdio.fin:110 writes `nbytes == -1` on a `ulong`. Whether a
+    // negative constant is a legal unsigned value is the ruling
+    // Soundness_IntegerConstants.ANegativeConstantIsNotUnsigned holds open, and it has
+    // to be answered the same way in a comparison as in a declaration -- checkType
+    // refuses `let x <ulong> = -1`, so this must refuse too, or the compiler disagrees
+    // with itself about one line. Both orders and both operator families.
+    for (const char* expr : {"n == -1", "-1 == n", "n > -1", "-1 < n", "n + -1"}) {
+        const std::string code =
+            std::string("fun main() <noret> { let n <ulong> = 1;\n"
+                        "  let c <auto> = ") + expr + "; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0)
+            << "a negative constant is not an unsigned value here either:\n" << code;
+    }
+    // A signed target takes it, so the guard is about the unsigned side and not about
+    // negative constants in general.
+    const FincRun signedOk =
+        compile("fun main() <noret> { let n <long> = 1; let c <bool> = n == -1; }\n");
+    EXPECT_EQ(signedOk.exitCode, 0) << signedOk.err;
+}
+
+TEST(Soundness_DefaultArguments, ADefaultArgumentIsCheckedAgainstItsParameterType) {
+    // Inverted from KnownDefect_DefaultArguments.ADefaultArgumentIsNotCheckedAgainstIts-
+    // ParameterType, whose comment is kept below because it is the diagnosis and it was
+    // right.
+    //
+    // Found while writing ADR 0022, and it is not the negative-constant question --
+    // it is larger than that and swallows it.
+    //
+    // `src/types/PrimitiveType.cpp` argues that refusing `-1` against a `ulong` in a
+    // comparison while accepting it in an initialiser "would be the compiler
+    // disagreeing with itself about one line of one file", citing
+    // tests/samples/stdlib/stdio.fin:109 `fun read(nbytes: ulong = -1)` as the site
+    // where it is accepted. The two Soundness_IntegerWidening tests above then ruled
+    // the *other* way, refusing a negative constant to an unsigned target -- and
+    // :109 was still accepted, so the disagreement the comment predicted was real and
+    // present. The reason was not the sign rule: **nothing checked a default argument
+    // at all**. It does now, and the disagreement is gone in the direction the rest of
+    // the compiler already pointed -- :110's `nbytes == -1` has been a diagnostic in
+    // that sample since ADR 0022, so this makes the compiler say the same thing at all
+    // three places the sample writes the sentinel rather than at one of the three.
+    for (const char* decl : {"fun f(a: int = \"hello\") <noret> {}",
+                             "fun f(a: string = 5) <noret> {}",
+                             "fun f(a: bool = 7) <noret> {}",
+                             "fun f(a: ulong = -1) <noret> {}"}) {
+        const std::string code = std::string(decl) + "\nfun main() <noret> {}\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << "a default argument is checked:\n" << code << r.err;
+        EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos)
+            << code << stripAnsi(r.err);
+    }
+    // The same expression in an initialiser is refused too. Both halves stay in one
+    // test: the asymmetry between them was this defect, so the test that recorded it
+    // is the test that has to show it is gone.
+    const FincRun asInitialiser =
+        compile("fun main() <noret> { let x <ulong> = -1; }\n");
+    EXPECT_NE(asInitialiser.exitCode, 0)
+        << "if this stops refusing, the sign rule was revoked and the two "
+           "Soundness_IntegerWidening tests above are the ones to read:\n"
+        << asInitialiser.err;
+}
+
+// ===========================================================================
+// A subscript may be any integer (ADR 0022).
+//
+// The same rule an allocation's extent already follows (7f899dd) and from the same
+// table. tests/samples/stdlib/stdio.fin allocates `new [char, nbytes - self.pointer]`
+// with a `ulong` extent on :112 and indexes the result with a `ulong` on :115, so
+// refusing one while accepting the other would be the compiler disagreeing with
+// itself about one buffer.
+// ===========================================================================
+
+TEST(Soundness_IntegerIndex, AnIndexMayBeAnyIntegerType) {
+    for (const char* t : {"int", "uint", "long", "ulong", "short", "ushort", "char"}) {
+        const std::string code =
+            std::string("fun main() <noret> { let a <[int]> = [1, 2, 3];\n"
+                        "  let i <") + t + "> = 1; let v <int> = a[i]; }\n";
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << "an index may be a " << t << ":\n" << code << r.err;
+    }
+}
+
+TEST(Soundness_IntegerIndex, ANonIntegerIndexIsRefusedOnce) {
+    // One fault, one diagnostic. The predicate reports on its own and the caller does
+    // not also check the type, which is the shape 7f899dd fixed for the extent.
+    for (const char* pair : {"string|\"x\"", "bool|true", "float|1.0"}) {
+        const std::string s = pair;
+        const auto bar = s.find('|');
+        const std::string t = s.substr(0, bar), v = s.substr(bar + 1);
+        const std::string code =
+            "fun main() <noret> { let a <[int]> = [1, 2, 3];\n"
+            "  let i <" + t + "> = " + v + "; let v2 <int> = a[i]; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0) << code;
+        const std::string err = stripAnsi(r.err);
+        EXPECT_NE(err.find("An index must be an integer, not '" + t + "'"), std::string::npos)
+            << code << err;
+        // Counted, so a second message about the same subscript would fail here.
+        size_t n = 0;
+        for (size_t at = err.find("An index must be"); at != std::string::npos;
+             at = err.find("An index must be", at + 1)) ++n;
+        EXPECT_EQ(n, 1u) << "one fault, one diagnostic:\n" << code << err;
+    }
+}
+
+TEST(Soundness_IntegerIndex, AnUnresolvedIndexDoesNotCascade) {
+    // The name is the diagnostic; the subscript adds nothing to it.
+    const FincRun r = compile(
+        "fun main() <noret> { let a <[int]> = [1]; let v <int> = a[nosuchvar]; }\n");
+    EXPECT_NE(r.exitCode, 0);
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("Undefined variable 'nosuchvar'"), std::string::npos) << err;
+    EXPECT_EQ(err.find("An index must be an integer"), std::string::npos)
+        << "an index that already failed to type is not reported twice:\n" << err;
+}
+
+TEST(Soundness_IntegerIndex, AConstantIndexIsStillBoundsChecked) {
+    // The predicate's return value is what lets checkIndexInBounds run, so the bounds
+    // check has to still fire -- both halves of it.
+    const FincRun past = compile("fun main() <noret> { let a <[int, 2]> = [1, 2];\n"
+                                 "  let v <int> = a[5]; }\n");
+    EXPECT_NE(past.exitCode, 0);
+    EXPECT_NE(stripAnsi(past.err).find("out of bounds"), std::string::npos) << stripAnsi(past.err);
+
+    const FincRun neg = compile("fun main() <noret> { let a <[int, 2]> = [1, 2];\n"
+                                "  let v <int> = a[-1]; }\n");
+    EXPECT_NE(neg.exitCode, 0);
+    EXPECT_NE(stripAnsi(neg.err).find("cannot be negative"), std::string::npos) << stripAnsi(neg.err);
+}
+
 TEST(Soundness_IntegerConstants, AConstantIsStillNotABoolOrAString) {
     // The rule is about integer and floating targets and nothing else. Without this,
     // "the context decides" is indistinguishable from "the check was deleted".
@@ -4431,6 +5528,115 @@ TEST(Soundness_IntegerConstants, AConstantIsStillNotABoolOrAString) {
         EXPECT_NE(r.exitCode, 0)
             << "`let x <" << t << "> = 1;` must still be a type error.";
         EXPECT_NE(stripAnsi(r.err).find("Type mismatch"), std::string::npos) << r.err;
+    }
+}
+
+TEST(Soundness_IntegerConstants, AConstantMustFitItsTarget) {
+    // Was KnownDefect_IntegerWidths.AConstantTooLargeForItsTargetIsAccepted. The
+    // constant rule checked a constant's *sign* against its target and not its
+    // magnitude, and its own note said why: Fin had not said how wide `short` or
+    // `char` was, and the `{N}` annotation that would say was erased before
+    // anything could read it, so a range check would have been inventing the
+    // widths rather than enforcing them. The widths are real now, so it enforces.
+    //
+    // The bound is the target's, both ends, and both ends are needed: a signed
+    // target has a negative half a magnitude check alone would let through, and
+    // an unsigned one has no negative half at all -- which is the older rule, kept
+    // (Soundness_IntegerConstants.ANegativeConstantIsNotUnsigned), and is why this
+    // test's unsigned cases are all positive overflows.
+    //
+    // What this changed for real programs, measured before it landed: `let x
+    // <short> = 99999;` compiled and printed -31073, and `let x <int> =
+    // 9000000000;` compiled and printed 410065408. Both were silent, both ran, and
+    // a truncation nobody wrote is exactly the class of bug a checked constant is
+    // for. Nothing in the corpus or in this suite writes a constant that does not
+    // fit its target -- every large literal in tests/samples and lib/std lands in
+    // an `int` or a `double` it fits (lib/std/math.fin:69 and :72 are `double`),
+    // and every one in this suite is `long`-targeted -- so this rule refuses
+    // nothing that was previously written and correct.
+    struct Case { const char* code; const char* text; };
+    const std::vector<Case> cases{
+        // A declaration, in each of the four widths, signed and unsigned.
+        {"fun main() <noret> { let x <char> = 300; }\n", "'char'"},
+        {"fun main() <noret> { let x <uint{8}> = 300; }\n", "'uint{8}'"},
+        {"fun main() <noret> { let x <short> = 99999; }\n", "'short'"},
+        {"fun main() <noret> { let x <ushort> = 99999; }\n", "'ushort'"},
+        {"fun main() <noret> { let x <int> = 9000000000; }\n", "'int'"},
+        {"fun main() <noret> { let x <uint> = 9000000000; }\n", "'uint'"},
+        {"fun main() <noret> { let x <long> = 99999999999999999999; }\n", "'long'"},
+        // A written width, which is the same question asked the other way round:
+        // the target says 8 bits and the constant needs more than 8.
+        {"fun main() <noret> { let x <int{8}> = 300; }\n", "'int{8}'"},
+        {"fun main() <noret> { let x <uint{16}> = 99999; }\n", "'uint{16}'"},
+        // The negative half of a signed target, which a magnitude check misses.
+        {"fun main() <noret> { let x <char> = -300; }\n", "'char'"},
+        {"fun main() <noret> { let x <short> = -99999; }\n", "'short'"},
+        // The other positions that check a constant against a type. Each is a
+        // separate checkType call site -- see
+        // Soundness_IntegerConstants.TheConstantIsAcceptedInEveryPositionThatChecks
+        // AType, which holds the ten of them open for a constant that fits.
+        {"fun main() <noret> { let x <short> = 1; x = 99999; }\n", "'short'"},
+        {"fun main() <noret> { let x <short> = 1; x += 99999; }\n", "'short'"},
+        {"fun main() <noret> { let x <short> = 1; blame x == 99999; }\n", "'short'"},
+        {"fun main() <noret> { let x <short> = 1; blame 99999 == x; }\n", "'short'"},
+        {"fun f(x: short) <void> {}\nfun main() <noret> { f(99999); }\n", "'short'"},
+        {"fun f() <short> { return 99999; }\nfun main() <noret> { }\n", "'short'"},
+        {"struct S { pub a <short> = 99999, }\nfun main() <noret> { }\n", "'short'"},
+        {"const N <short> = 99999;\nfun main() <noret> { }\n", "'short'"},
+        {"fun main() <noret> { for (i: short = 99999; i > 1; i++) { } }\n", "'short'"},
+        {"fun main() <noret> { let a <[short, 2]> = [99999, 1]; }\n", "'short'"},
+        // Both branches are the same type, because a ternary whose branches
+        // differ is refused for that reason instead and would pass this test
+        // before the range check existed.
+        {"fun main() <noret> { let a <short> = 0;\n"
+         "                     let b <short> = true : 99999 ? a; }\n", "'short'"},
+        // Larger than any target, which is a different reading of the same
+        // question: 2^63 needs a uint64 and 2^64 needs more than readConstant
+        // has, so the first fits `ulong` and only `ulong` while the second fits
+        // nothing. Both used to compile as anything.
+        {"fun main() <noret> { let x <long> = 9223372036854775808; }\n", "'long'"},
+        {"fun main() <noret> { let x <ulong> = 18446744073709551616; }\n",
+         "too large to represent"},
+    };
+    for (const Case& c : cases) {
+        const FincRun r = compile(c.code);
+        EXPECT_NE(r.exitCode, 0)
+            << "a constant that does not fit its target truncates silently:\n"
+            << c.code << stripAnsi(r.err);
+        EXPECT_NE(stripAnsi(r.err).find(c.text), std::string::npos)
+            << "the diagnostic must name the target\n" << c.code << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_IntegerConstants, AConstantAtTheEdgeOfItsTargetFits) {
+    // The other side of the bound, and the reason it is a separate test: a range
+    // check written with the wrong comparison passes every case above and rejects
+    // every value here. Each of these is the largest or smallest value its type
+    // holds, so an off-by-one in either direction shows up as a failure.
+    //
+    // The two asymmetric ones are the point. A signed type's negative bound is one
+    // further out than its positive bound, so `char` holds -128 and not 128, and
+    // `long` holds -9223372036854775808 while 9223372036854775808 does not fit --
+    // the one case readSignedConstant spells out rather than negating.
+    for (const char* code : {
+             "fun main() <noret> { let x <char> = 127; }\n",
+             "fun main() <noret> { let x <char> = -128; }\n",
+             "fun main() <noret> { let x <short> = 32767; }\n",
+             "fun main() <noret> { let x <short> = -32768; }\n",
+             "fun main() <noret> { let x <ushort> = 65535; }\n",
+             "fun main() <noret> { let x <int> = 2147483647; }\n",
+             "fun main() <noret> { let x <int> = -2147483648; }\n",
+             "fun main() <noret> { let x <uint> = 4294967295; }\n",
+             "fun main() <noret> { let x <long> = 9223372036854775807; }\n",
+             "fun main() <noret> { let x <long> = -9223372036854775808; }\n",
+             "fun main() <noret> { let x <ulong> = 18446744073709551615; }\n",
+             "fun main() <noret> { let x <int{8}> = 127; }\n",
+             "fun main() <noret> { let x <uint{8}> = 255; }\n",
+             "fun main() <noret> { let x <ulong> = 0; }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0)
+            << "this constant is exactly representable in its target:\n"
+            << code << stripAnsi(r.err);
     }
 }
 
@@ -4458,28 +5664,6 @@ TEST(KnownDefect_IntegerConstants, AnIntTypedExpressionIsNotUnsigned) {
     EXPECT_NE(stripAnsi(r.err).find("expected 'uint', got 'int'"), std::string::npos) << r.err;
 }
 
-TEST(KnownDefect_IntegerWidths, AConstantTooLargeForItsTargetIsAccepted) {
-    // Introduced by the constant rule and recorded here in the same commit, which is
-    // the whole point of this suite: the rule checks the *sign* of a constant and not
-    // its magnitude, because Fin has not said how wide `short` or `char` is. The
-    // `{N}` annotation that would say is erased before anything can read it (see
-    // TheWidthIsAbsentFromDiagnosticText above), so a magnitude check today would be
-    // inventing the widths rather than enforcing them.
-    //
-    // Rejecting every constant was the alternative and it is strictly worse: it makes
-    // `let p <ulong> = 0;` unwritable. When the widths become real this is where the
-    // range check goes, and this test inverts into
-    // Soundness_IntegerConstants.AConstantMustFitItsTarget.
-    for (const char* code : {"fun main() <noret> { let x <short> = 99999; }\n",
-                             "fun main() <noret> { let x <char> = 300; }\n"}) {
-        const FincRun r = compile(code);
-        EXPECT_EQ(r.exitCode, 0)
-            << "FIXED: the constant's magnitude is now checked against its target. "
-               "Invert this and name the widths in the ADR that decided them.\n"
-            << code << r.err;
-    }
-}
-
 TEST(Soundness_Arrays, AFixedListInitialisesADynamicArrayOfTheSameElementType) {
     // Split out of the KnownDefect below, where it was asserted only as a sentence in
     // a comment. It is what makes that defect single-cause: if this ever regressed,
@@ -4504,7 +5688,7 @@ TEST(Soundness_Arrays, AFixedListInitialisesADynamicArrayOfTheSameElementType) {
 // the analyser resolved no member on any non-struct type whatsoever.
 //
 // Typed `int`, and that is forced rather than chosen. Fin converts between no two
-// integer types at all (KnownDefect_IntegerWidths.AnIntIsNotAssignableToAnUnsigned),
+// integer types at all (KnownDefect_IntegerConstants.AnIntTypedExpressionIsNotUnsigned),
 // so whatever width `.length` returns is the *only* width it can be compared with --
 // and all five corpus sites compare it against an `int`: `array.length <= 1`,
 // `i < a.length - 1` with `i: int` declared in the same header, `path.length == 10`.
@@ -4574,19 +5758,51 @@ TEST(Soundness_BuiltinMembers, AStringHasALengthOfTypeInt) {
 }
 
 TEST(Soundness_BuiltinMembers, ALengthIsAnIntAndNotAnotherIntegerWidth) {
-    // The test that makes the width a decision instead of an accident. With no
-    // conversion between integer types, `let n <ulong> = a.length;` is rejected if and
-    // only if `.length` is not itself a `ulong` -- so this failing means the width
-    // moved, and the four corpus sites that compare a length against an `int` moved
-    // with it. If a ruling widens it, that ruling owns this test and the samples.
-    for (const char* code : {"fun main() <noret> { let a <[int]> = [1]; let n <ulong> = a.length; }\n",
-                             "fun main() <noret> { let s <string> = \"a\"; let n <ulong> = s.length; }\n"}) {
-        const FincRun r = compile(code);
-        EXPECT_EQ(r.exitCode, 1) << "`.length` is an int, so a ulong target must be "
-                                    "rejected while no integer conversion exists:\n"
-                                 << code << r.err;
-        EXPECT_NE(stripAnsi(r.err).find("expected 'ulong', got 'int'"), std::string::npos)
-            << code << stripAnsi(r.err);
+    // The test that makes the width a decision instead of an accident. It used to pin
+    // the width by handing `.length` to a `ulong` and requiring a refusal, which worked
+    // only while no conversion between integer types existed. ADR 0022 introduced one,
+    // and this test's own note said that ruling would own it: "If a ruling widens it,
+    // that ruling owns this test and the samples."
+    //
+    // Same claim, mechanism rebuilt on the new rule. Widening accepts a wider target
+    // and refuses a narrower one, so a width is pinned from both sides at once:
+    // `.length` reaches an `int`, which it could not if it were a `long`, and does not
+    // reach a `short`, which it would if it were a `short` or narrower. That is 32 bits
+    // exactly. The sign is pinned by `uint` -- equal width, opposite sign, which
+    // widening deliberately does not admit -- so `.length` is `int` and not `uint`.
+    for (const char* subject : {"fun main() <noret> { let a <[int]> = [1]; let n <%T%> = a.length; }\n",
+                                "fun main() <noret> { let s <string> = \"a\"; let n <%T%> = s.length; }\n"}) {
+        const std::string tmpl = subject;
+        const auto with = [&tmpl](const std::string& t) {
+            std::string out = tmpl;
+            const auto at = out.find("%T%");
+            out.replace(at, 3, t);
+            return out;
+        };
+
+        // Reaches an `int`: it is no wider than 32 bits.
+        const FincRun toInt = compile(with("int"));
+        EXPECT_EQ(toInt.exitCode, 0) << "`.length` is an int:\n" << with("int") << toInt.err;
+
+        // Reaches a `long`: widening, and the assertion that the two directions differ.
+        const FincRun toLong = compile(with("long"));
+        EXPECT_EQ(toLong.exitCode, 0) << "an int widens to a long:\n" << with("long") << toLong.err;
+
+        // Does not reach a `short`: it is no narrower than 32 bits.
+        const FincRun toShort = compile(with("short"));
+        EXPECT_NE(toShort.exitCode, 0)
+            << "`.length` is an int, so a short target narrows and must be refused:\n"
+            << with("short");
+        EXPECT_NE(stripAnsi(toShort.err).find("expected 'short', got 'int'"), std::string::npos)
+            << with("short") << stripAnsi(toShort.err);
+
+        // Does not reach a `uint`: same width, opposite sign, which is not a widening.
+        const FincRun toUint = compile(with("uint"));
+        EXPECT_NE(toUint.exitCode, 0)
+            << "`.length` is signed, so a uint target must be refused:\n"
+            << with("uint");
+        EXPECT_NE(stripAnsi(toUint.err).find("expected 'uint', got 'int'"), std::string::npos)
+            << with("uint") << stripAnsi(toUint.err);
     }
 }
 
@@ -4648,27 +5864,31 @@ TEST(Soundness_IntegerConstants, AnArrayOfConstantsTakesTheAnnotatedElementType)
 }
 
 // ---------------------------------------------------------------------------
-// A parameter default: walked now, still not type-checked.
+// A parameter default: walked, and now type-checked.
 //
-// This block was written when neither happened, and the split it predicted held.
-// The walk was the whole defect's first half and is fixed -- see
-// Soundness_ParameterDefaults, which owns that half and its eight call sites. The
-// diagnosis here was right about the cause and wrong about the remedy: visit(Parameter&)
-// does walk the default, but nothing dispatches to it, so the fix was not to add a
-// checkType inside a dead visitor but to reach the defaults from the eleven parameter
-// loops that do run. It is still dead code; Analyzer_Core.cpp says so at its definition.
+// This block was written when neither happened, and the split it predicted held. The
+// walk was the first half. The diagnosis here was right about the cause and wrong about
+// the remedy: visit(Parameter&) does walk the default, but nothing dispatches to it, so
+// the fix was not to add a check inside a dead visitor but to reach the defaults from
+// the parameter loops that do run. It is still dead code; Analyzer_Core.cpp says so at
+// its definition.
 //
-// What remains below is the type half, and it is blocked rather than unwritten. Adding
-// the check convicts stdlib/stdio.fin:87 and :109 (`nbytes: ulong = -1`) the moment it
-// lands, which is the integer ruling. Mutation-tested in advance: applying the naive
-// version (checkType, not checkInitializer) kills ANullDefaultIsStillAccepted, because
-// stdlib/error.fin:11 writes `err_code: int = null` and a plain checkType has no null
-// exemption. So the eventual fix is checkInitializer, and that is known before it is
-// written rather than after.
+// The type half landed second, and the prediction made for it in advance held too.
+// Mutation-tested before it was written: applying the naive version (checkType, not
+// checkInitializer) kills ANullDefaultIsStillAccepted, because stdlib/error.fin:11
+// writes `err_code: int = null` and a plain checkType has no null exemption. It is
+// checkInitializer, which was known before rather than after.
 //
-// Measured, and still worth knowing: the corpus test for stdio.fin would NOT catch a
-// regression here -- its expectation is prose (`//@ unimplemented "..."`), so a new
-// diagnostic in that file flips nothing. These tests are the only thing watching.
+// What it cost is two new diagnostics on tests/samples/stdlib/stdio.fin -- :87 and :109
+// both write `nbytes: ulong = -1` -- and that was the whole reason it waited. It is
+// paid rather than dodged: ADR 0022 already refused a negative constant to an unsigned
+// target in a declaration and in a comparison, and :110's `nbytes == -1` has been a
+// diagnostic in that same file since. So the choice was not "convict the sample or not"
+// but "convict it at one of its three sentinel sites or at all three", and one compiler
+// that disagrees with itself about one line is worse than three honest diagnostics.
+// stdio.fin's expectation is `//@ unimplemented "..."`, prose, so the corpus test does
+// not flip either way -- these tests are the only thing watching, which is why the
+// count is asserted here.
 // ---------------------------------------------------------------------------
 
 TEST(Soundness_ParameterDefaults, AParameterDefaultIsAnalysed) {
@@ -4697,31 +5917,40 @@ TEST(Soundness_ParameterDefaults, AParameterDefaultIsAnalysed) {
     EXPECT_NE(body.exitCode, 0) << "an undefined name in a body must still be caught: " << body.err;
 }
 
-TEST(KnownDefect_ParameterDefaults, AParameterDefaultIsNotCheckedAgainstItsType) {
-    // The type half. The walk it waited on exists now (Soundness_ParameterDefaults),
-    // and this still asserts the defect -- which is exactly the split predicted when
-    // both halves were one test.
-    const FincRun r = compile("fun f(x: uint = \"nope\") <noret> { }\nfun main() <noret> { }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a parameter default is type-checked now. Invert this into "
-           "Soundness_ParameterDefaults and check the negative-constant case too -- "
-           "`fun f(x: uint = -1)` is the corpus's own spelling and the ruling on it "
-           "decides whether that is a second diagnostic or none.";
+TEST(Soundness_ParameterDefaults, AParameterDefaultIsCheckedAgainstItsType) {
+    // The type half, inverted from KnownDefect_ParameterDefaults.AParameterDefaultIsNot-
+    // CheckedAgainstItsType. That test asked its successor to "check the negative-constant
+    // case too -- `fun f(x: uint = -1)` is the corpus's own spelling and the ruling on it
+    // decides whether that is a second diagnostic or none". It is one diagnostic and the
+    // same one: the ruling came out where ADR 0022's own two tests already had it, so
+    // `-1` against an unsigned parameter reads exactly as `let x <uint> = -1` does.
+    const FincRun wrong = compile("fun f(x: uint = \"nope\") <noret> { }\nfun main() <noret> { }\n");
+    EXPECT_NE(wrong.exitCode, 0) << "a wrong default is a diagnostic:\n" << wrong.err;
+    EXPECT_NE(stripAnsi(wrong.err).find("expected 'uint', got 'string'"), std::string::npos)
+        << stripAnsi(wrong.err);
+
+    const FincRun negative = compile("fun f(x: uint = -1) <noret> { }\nfun main() <noret> { }\n");
+    EXPECT_NE(negative.exitCode, 0)
+        << "`-1` on an unsigned parameter, exactly as in a declaration:\n" << negative.err;
+    EXPECT_EQ(errorCount(messagesOnly(stripAnsi(negative.err))), 1u)
+        << "one diagnostic, not one per pass over the parameter list:\n"
+        << stripAnsi(negative.err);
 }
 
-TEST(KnownDefect_ParameterDefaults, AStructFieldDefaultIsCheckedButAParameterIsNot) {
-    // The asymmetry is the evidence that this is a missing call and not a missing
-    // capability: the same wrong default in a struct field is both walked and checked
-    // (Analyzer_Decl.cpp:181 accepts it, :183 calls checkType). Its own test because a
-    // fix that adds checking to parameters must not disturb the path that works.
+TEST(Soundness_ParameterDefaults, AStructFieldDefaultAndAParameterDefaultAreBothChecked) {
+    // The asymmetry was the evidence that this was a missing call and not a missing
+    // capability: the same wrong default in a struct field was both walked and checked
+    // (Analyzer_Decl.cpp:453) while a parameter's was walked only. Kept as one test with
+    // both halves, because a change that reached parameters by disturbing the field path
+    // would be a regression this is the only thing watching for.
     const FincRun field = compile("struct S { pub x <uint> = \"nope\", }\nfun main() <noret> { }\n");
     EXPECT_NE(field.exitCode, 0)
         << "a struct field default of the wrong type must still be caught: " << field.err;
     EXPECT_NE(stripAnsi(field.err).find("Type mismatch"), std::string::npos) << field.err;
 
     const FincRun param = compile("fun f(x: uint = \"nope\") <noret> { }\nfun main() <noret> { }\n");
-    EXPECT_EQ(param.exitCode, 0)
-        << "FIXED: parameters are checked like fields now. Invert this.";
+    EXPECT_NE(param.exitCode, 0) << "and so must a parameter's: " << param.err;
+    EXPECT_NE(stripAnsi(param.err).find("Type mismatch"), std::string::npos) << param.err;
 }
 
 // ---------------------------------------------------------------------------
@@ -6039,38 +7268,104 @@ TEST(Soundness_ParameterDefaults, ADefaultMayNameAnEarlierDeclaration) {
 }
 
 // ---------------------------------------------------------------------------
-// KnownDefect_ParameterDefaults
+// The other half of the same defect, landed second.
 //
-// The other half of the same defect, and the half that is blocked. A parameter's
-// default is not compared against the parameter's declared type, so
-// `fun g(n: string = 3)` is accepted. Every other default in the language is
+// A parameter's default was not compared against the parameter's declared type, so
+// `fun g(n: string = 3)` was accepted while every other default in the language was
 // checked -- a struct member's `pub v <int> = "nope"` reports `expected 'int', got
-// 'string'` -- so this is an inconsistency, not a design.
+// 'string'`. An inconsistency, not a design, and now closed.
 //
-// It is not fixed here because the corpus would regress on a question the owner
-// has not answered. stdlib/stdio.fin:87 and :109 both write
-// `fun read(nbytes: ulong = -1)`, and `let x <ulong> = -1` is an error today
-// (`expected 'ulong', got 'int'`). Adding the check therefore puts two new
-// diagnostics on a normative sample, and whether it should is exactly the integer
-// ruling in docs/plan.md: is `-1` a legal unsigned constant? Answer that and this
-// becomes a two-line change at the site the tests above already reach.
+// It waited on what the corpus would do: stdlib/stdio.fin:87 and :109 both write
+// `fun read(nbytes: ulong = -1)`, and `let x <ulong> = -1` is an error. The check
+// therefore puts two new diagnostics on a normative sample. Landing it anyway is the
+// smaller of the two inconsistencies, and the argument is in the block above.
 
-TEST(KnownDefect_ParameterDefaults, ADefaultOfTheWrongTypeIsAccepted) {
+TEST(Soundness_ParameterDefaults, ADefaultOfTheWrongTypeIsRefused) {
     auto r = compile("fun g(n: string = 3) <int> { return 0; }\n"
                      "fun main() <int> { return 0; }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "when this fails, the default is being type-checked: invert it, and check\n"
-           "stdlib/stdio.fin -- `nbytes: ulong = -1` decides whether that is correct.\n"
-        << r.err;
+    EXPECT_NE(r.exitCode, 0) << "`n: string = 3`:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_ParameterDefaults, AnUnsignedParameterDefaultingToMinusOneIsAccepted) {
-    // stdlib/stdio.fin:87 and :109, reduced. This is the sample line that the fix
-    // above would break, kept as its own test so that the blocker is visible from
-    // the suite and not only from the plan.
+TEST(Soundness_ParameterDefaults, AnUnsignedParameterDefaultingToMinusOneIsRefused) {
+    // stdlib/stdio.fin:87 and :109, reduced. Kept as its own test for the reason it was
+    // kept as its own test when it asserted the opposite: this is the sample line the
+    // check convicts, and it should be readable from the suite and not only from a note.
+    // Its diagnostic is the one `let x <ulong> = -1` gets, from the same guard in
+    // checkType, which is what makes the compiler agree with itself about the line.
     auto r = compile("fun g(n: ulong = -1) <int> { return 0; }\n"
                      "fun main() <int> { return 0; }\n");
-    EXPECT_EQ(r.exitCode, 0) << "stdlib/stdio.fin:87's `nbytes: ulong = -1`:\n" << r.err;
+    EXPECT_NE(r.exitCode, 0) << "stdlib/stdio.fin:87's `nbytes: ulong = -1`:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expected 'ulong', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, EveryDeclarationFormChecksItsDefaultExactlyOnce) {
+    // The type check lives in visitParameterDefaults, which the nine walk tests above
+    // already prove is reached from all nine loops -- so this does not re-prove the
+    // reach, it proves the *count*. Three of those loops run over parameters that a
+    // second pass also walks (a struct constructor's, a class constructor's, an
+    // implements block's), and a check placed one line further out would report each of
+    // them twice. Reported once is the assertion; `nosuchvar` cannot make it, because a
+    // walk test's diagnostic and a check's diagnostic are indistinguishable by count.
+    for (const char* code : {
+             "fun f(n: int = \"x\") <int> { return 0; }\n",
+             "struct S { pub fun m(self: &Self, n: int = \"x\") <int> { return 0; } }\n",
+             "class C { pub v <int>, pub fun m(self: &Self, n: int = \"x\") <int> { return 0; } }\n",
+             "struct S { pub v <int>, S(n: int = \"x\") { self.v = 1; } }\n",
+             "class C { pub v <int>, C(n: int = \"x\") { self.v = 1; } }\n",
+             "interface I { fun m(n: int = \"x\") <int>; }\n",
+             "interface I { operator +(self: &Self, other: int = \"x\") <int>; }\n",
+             "struct S { pub v <int>, operator +(self: &Self, other: int = \"x\") <int> { return 0; } }\n",
+             "@special sp(n: int = \"x\") <int> { return 0; }\n"}) {
+        const std::string program = std::string(code) + "fun main() <int> { return 0; }\n";
+        const FincRun r = compile(program);
+        EXPECT_NE(r.exitCode, 0) << "the default is checked here:\n" << program << r.err;
+        const std::string msgs = messagesOnly(stripAnsi(r.err));
+        EXPECT_NE(msgs.find("expected 'int', got 'string'"), std::string::npos)
+            << program << msgs;
+        EXPECT_EQ(errorCount(msgs), 1u)
+            << "once per parameter, not once per pass over the parameter list:\n"
+            << program << msgs;
+    }
+    // An extern too, with the types the other way round so that a copy-paste of the
+    // wrong literal into this loop could not pass it vacuously.
+    const FincRun ext = compile("@define e(fmt: string = 3, ...) <int>;\n"
+                                "fun main() <int> { return 0; }\n");
+    EXPECT_NE(ext.exitCode, 0) << ext.err;
+    EXPECT_NE(stripAnsi(ext.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(ext.err);
+}
+
+TEST(Soundness_ParameterDefaults, AnUnresolvedParameterTypeIsStillReportedOnce) {
+    // The check re-resolves the parameter's type rather than being handed it, which is
+    // one resolution more than there used to be at every site. Under a QuietPass, for
+    // this: without it `fun f(p: NoSuchType = 1)` reports its undefined type twice, once
+    // from the loop above the call and once from inside it. Soundness_ErrorRecovery owns
+    // the general rule; this is the site that change put at risk.
+    const FincRun r = compile("fun f(p: NoSuchType = 1) <noret> { }\nfun main() <noret> { }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string msgs = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(msgs.find("Undefined type 'NoSuchType'"), std::string::npos) << msgs;
+    EXPECT_EQ(errorCount(msgs), 1u)
+        << "the default's own resolution must be quiet:\n" << msgs;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultThatWidensIsAccepted) {
+    // The check is checkInitializer, so it is the same rule as every other assignment
+    // and ADR 0022's widening reaches it. `int` to `ulong` is the corpus's own direction
+    // (stdlib/stdio.fin's lengths), and refusing a *positive* constant there while
+    // refusing the negative one would be a rule about defaults rather than about types.
+    for (const char* decl : {"fun g(n: ulong = 5) <int> { return 0; }",
+                             "fun g(n: long = 5) <int> { return 0; }",
+                             "fun g(n: double = 5) <int> { return 0; }",
+                             "fun g(n: float = 5) <int> { return 0; }"}) {
+        const std::string code = std::string(decl) + "\nfun main() <int> { return 0; }\n";
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 0) << "a default widens like any other initialiser:\n"
+                                 << code << r.err;
+    }
 }
 
 TEST(Soundness_ParameterDefaults, ADefaultMayNameASiblingParameter) {
@@ -6086,45 +7381,295 @@ TEST(Soundness_ParameterDefaults, ADefaultMayNameASiblingParameter) {
     EXPECT_EQ(r.exitCode, 0) << "an earlier parameter is in scope in a later default:\n" << r.err;
 }
 
-// The second half of the same root cause, and a bigger change than the first.
+// The second half of the same root cause, landed 2026-08-29.
 //
-// `required` is computed in Analyzer_Expr's arity check as the index of the last
-// parameter that is not nullable, plus one -- so a nullable parameter is optional and
-// nothing else is. A parameter with a default is still counted as required, which
-// leaves the default with no observable purpose at a call site: it can be named in an
-// expression (see above) but never actually supplied by omission.
+// `required` was computed in Analyzer_Expr's arity check as the index of the last
+// parameter that is not nullable, plus one -- so a nullable parameter was optional and
+// nothing else was. A parameter with a default was still counted as required, which left
+// the default with no observable purpose at a call site: it could be named in a sibling
+// parameter's expression and checked against its own type, and nothing else. A default
+// was a comment with syntax.
 //
-// Not fixed here, for a reason worth writing down rather than a lack of clarity about
-// the meaning. The arity check reads a `FunctionType`, and `FunctionType` records only
-// `param_types`, `return_type` and `is_vararg` -- it has no idea which parameters had
-// defaults. Fixing this means a new field carried through eleven construction sites
-// plus `substitute` and `clone`, which is the same "N copies of one loop" shape that
-// this wave has now hit three times. It is a unit of its own.
+// The fix is a `param_defaults` vector on `FunctionType`, positionally parallel to
+// `param_types`, folded into that same `required` loop: a parameter is optional if it is
+// nullable OR defaulted, and the two are folded rather than sequenced because a
+// parameter that is both is optional once. Carried through fifteen construction sites
+// plus `substitute` and `clone` -- which is what made this a unit of its own rather than
+// a line, and it is the fourth time this wave has met the "N copies of one loop" shape.
 //
-// It is also, by measurement, a low-ranked one: the corpus declares exactly three
-// defaulted parameters (stdlib/stdio.fin:87 and :109, stdlib/error.fin:11) and calls
-// none of them. The one call that would need this, `Error("The answer is forbidden")`
-// at blame_assert.fin:15, is commented out. So the corpus effect of the fix is zero
-// diagnostics, which puts it below every other unit currently queued.
+// The fifteenth site is a lambda, and it was not in the first draft of the fix. Eleven
+// mutants over the five files it touches; two survived, and both survivals were the same
+// omission seen from different ends. M4 dropped the field in `clone()` and no test could
+// tell, because `FunctionType::clone` is reached only through `StructType::clone` and
+// nothing in the compiler calls that -- so the answer there is a type-level test
+// (CloneKeepsTheDefaults) on the same grounds Soundness_FieldOrder gives for its own:
+// `clone` is a faithful-copy contract, and this repo's "a guard no test can distinguish
+// from its absence is deleted" rule is about guards, not about a copy silently losing a
+// field. M7 removed the receiver-erase from the implements-block overwriter and no test
+// could tell either -- and that one was not a missing test at all: the vector it erases
+// from was *always empty*, because `visit(LambdaExpression&)` recorded no flags. It also
+// never called `visitParameterDefaults`, so `fun(a: int, b: int = "hello")` built clean
+// where the same parameters on a named function reported the mismatch. Both halves are
+// fixed and pinned below, and the eleven mutants are all killed now. A surviving mutant
+// pointed at a hole in the implementation and not at a hole in the tests, which is the
+// argument for the matrix rather than for reading harder.
+//
+// What the previous version of this comment got wrong, and it is worth keeping: it
+// ranked the unit last on the grounds that "the corpus effect of the fix is zero
+// diagnostics", because the three defaulted parameters the corpus declares
+// (stdlib/stdio.fin:87 and :109, stdlib/error.fin:11) are called by nothing and
+// `blame_assert.fin:15`'s `Error("The answer is forbidden")` is commented out. The corpus
+// arithmetic was right and the ranking was wrong: what a corpus diagnostic count cannot
+// measure is a shape the library declines to write *because* the compiler refuses it.
+// `lib/std/error.fin` cut its second parameter away and shipped a one-argument `Error`
+// -- the guide's chapter 12 says so in as many words, "the constructor takes one
+// argument, not the draft's two, because a defaulted parameter is still required at the
+// call site" -- so the defect was costing the standard library a declaration rather than
+// costing the corpus a diagnostic. An absent shape produces no diagnostic to count.
 
-TEST(KnownDefect_ParameterDefaults, ADefaultedParameterIsStillRequired) {
-    // Passes by asserting the defect. When the arity check learns about defaults this
-    // goes red -- invert it to EXPECT_EQ(r.exitCode, 0) and move it to Soundness.
+TEST(Soundness_ParameterDefaults, ADefaultedParameterIsOptionalAtACall) {
+    // Was KnownDefect_ParameterDefaults.ADefaultedParameterIsStillRequired, inverted per
+    // its own instructions. Both call forms, because a default that made the argument
+    // *illegal* to pass would satisfy an inversion that only tested the omission.
     auto r = compile("fun g(a: int, b: int = 2) <int> { return a + b; }\n"
+                     "fun main() <int> { let y <int> = g(1); let z <int> = g(1, 5); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a default makes a parameter optional:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultedConstructorParameterIsOptionalAtACall) {
+    // lib/std/error.fin:11's shape, called the way blame_assert.fin:15 wants to call it.
+    // A constructor is reached as `S(args)` and goes through the same arity check, but
+    // through a different construction site -- a struct's constructor list, not a
+    // function's signature -- so the two tests are not redundant.
+    auto r = compile("struct S { pub v <int>, S(msg: int, code: int = null) { return new S{v: msg}; } }\n"
+                     "fun main() <int> { let b <S> = S(1); let c <S> = S(1, 2); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a constructor's default makes its parameter optional:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultInALeadingPositionStillRequiresTheArgument) {
+    // Positional binding, and the reason the loop finds the *last* required parameter
+    // rather than counting the required ones. There is no way to write the second
+    // argument without writing the first, so `(a: int = 1, b: int)` needs both -- and
+    // the diagnostic says 2, not a range, because nothing here is actually optional.
+    auto r = compile("fun g(a: int = 1, b: int) <int> { return a + b; }\n"
                      "fun main() <int> { let z <int> = g(1); return 0; }\n");
-    EXPECT_EQ(r.exitCode, 1) << "today a default does not make a parameter optional:\n" << r.err;
+    EXPECT_NE(r.exitCode, 0) << "a leading default cannot be omitted positionally:\n" << r.err;
     EXPECT_NE(stripAnsi(r.err).find("expects 2 arguments, got 1"), std::string::npos)
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_ParameterDefaults, ADefaultedConstructorParameterIsStillRequired) {
-    // stdlib/error.fin:11's shape, called the way blame_assert.fin:15 wants to call it.
-    // A constructor is reached as `S(args)` and goes through the same arity check.
-    auto r = compile("struct S { pub v <int>, S(msg: int, code: int = null) { return new S{v: msg}; } }\n"
-                     "fun main() <int> { let b <S> = S(1); return 0; }\n");
-    EXPECT_EQ(r.exitCode, 1) << "today a constructor's default does not make it optional:\n" << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("expects 2 arguments, got 1"), std::string::npos)
-        << stripAnsi(r.err);
+TEST(Soundness_ParameterDefaults, TooFewArgumentsIsStillRefusedWithARange) {
+    // The floor still holds under the parameter that has no default, and the message is
+    // the range form rather than "expects 2 arguments" -- which is the case that message
+    // was written for. A fix that made every parameter optional would pass every test
+    // above this one and fail here.
+    auto r = compile("fun g(a: int, b: int = 2) <int> { return a + b; }\n"
+                     "fun main() <int> { let z <int> = g(); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << "the un-defaulted parameter is still required:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("expects between 1 and 2 arguments, got 0"),
+              std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, TooManyArgumentsIsStillRefused) {
+    // The ceiling. `expected` is unchanged by any of this, and a signature that reported
+    // a range would be wrong at the top as well as at the bottom.
+    auto r = compile("fun g(a: int, b: int = 2) <int> { return a + b; }\n"
+                     "fun main() <int> { let z <int> = g(1, 2, 3); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << "a default does not make a function variadic:\n" << r.err;
+    EXPECT_NE(stripAnsi(r.err).find("got 3"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_ParameterDefaults, AMethodsDefaultIsOptionalAtACall) {
+    // buildMethodSignature is a third construction site, and the one whose loop has
+    // three `continue`s in it -- a written `self`, an enum receiver -- so the flags and
+    // the types can misalign there in a way they cannot elsewhere. A method whose
+    // receiver is written by name is the case that would break: the default belongs to
+    // `b`, and if the flag stayed at `self`'s index it would describe `a`.
+    auto r = compile("struct S { pub v <int>,\n"
+                     "  fun add(self: &Self, a: int, b: int = 2) <int> { return a + b; } }\n"
+                     "fun main() <int> { let s <S> = S{v: 1}; let z <int> = s.add(1); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a method's default makes its parameter optional:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, AGenericMethodsDefaultSurvivesInstantiation) {
+    // What `FunctionType::substitute` carrying the field is for. Substituting `T` -> `int`
+    // rebuilds the parameters and the return type; drop `param_defaults` on the way
+    // through and the method is optional as declared and required as instantiated, which
+    // is the silent half of this change.
+    // `Box::<int>{...}` is the corpus's spelling for a generic struct literal
+    // (complex.fin:12); `Box<int>{...}` is a syntax error, measured.
+    auto r = compile("struct Box<T> { pub v <T>,\n"
+                     "  fun put(self: &Self, a: T, n: int = 1) <int> { return n; } }\n"
+                     "fun main() <int> { let b <Box<int>> = Box::<int>{v: 1};\n"
+                     "  let z <int> = b.put(2); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "an instantiated generic keeps its defaults:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, AnAmbientExternsDefaultIsOptionalAtACall) {
+    // `@define` is its own construction site and the only one whose signature also
+    // reaches the backend (ADR 0021's splice). A default on an extern is a claim about
+    // the Fin call, not about the C symbol, so the arity check is the only thing that
+    // can honour it.
+    auto r = compile("@define ext(a: int, b: int = 2) <int>;\n"
+                     "fun main() <int> { let z <int> = ext(1); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "an extern's default makes its parameter optional:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultedParameterIsOptionalAboveItsDeclaration) {
+    // The file-scope hoist builds a second signature for every top-level function, and
+    // that signature is what a call *above* the declaration is checked against. Leave
+    // the defaults out of it and optionality depends on which side of the declaration
+    // the call sits on -- which no reader would ever suspect.
+    auto r = compile("fun main() <int> { let z <int> = g(1); return 0; }\n"
+                     "fun g(a: int, b: int = 2) <int> { return a + b; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a call above the declaration sees the default too:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ADefaultIsNotPartOfTheFunctionType) {
+    // FunctionType::equals deliberately ignores `param_defaults`. `fn(int) -> int` is one
+    // type whether or not the function behind it wrote `= 2`: a default is a fact about a
+    // declaration, and the only way to observe it is to omit an argument, which is arity.
+    // Comparing them would make these two assignments disagree over a difference the
+    // annotation cannot express.
+    // `fn(int) -> int` is the spelling, with the arrow -- lambdas.fin:23 writes it and
+    // `fn(int) <int>` does not parse, measured.
+    auto r = compile("fun a(x: int) <int> { return x; }\n"
+                     "fun b(x: int = 1) <int> { return x; }\n"
+                     "fun main() <int> { let f <fn(int) -> int> = a;\n"
+                     "  let g <fn(int) -> int> = b; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a default does not change the function's type:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ANullableAndADefaultedParameterAgreeOnOneMinimum) {
+    // The two sources of optionality are folded into one `required`, not applied in
+    // sequence. A parameter that is both nullable and defaulted is optional once; a
+    // signature mixing the two kinds has one minimum, at the last parameter that is
+    // neither.
+    auto r = compile("fun g(a: int, b?: int, c: int = 3) <int> { return a; }\n"
+                     "fun main() <int> { let x <int> = g(1); let y <int> = g(1, null);\n"
+                     "  let z <int> = g(1, null, 3); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "nullable and defaulted both reduce the same minimum:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ALambdasDefaultIsOptionalAtACall) {
+    // A lambda was the tenth parameter loop, and it was missing from the list of nine
+    // this block's walk tests enumerate -- because those nine are declaration forms and a
+    // lambda is an expression, so a helper factored out of declaration handling never
+    // reached it. Two consequences, both fixed together and both pinned here: the flags
+    // were not recorded on the lambda's type, and `visitParameterDefaults` was not
+    // called at all.
+    //
+    // Found by mutation rather than by reading: M7 of the matrix removed the
+    // receiver-erase from the implements-block overwriter and survived, which is only
+    // possible if the vector it erases from is always empty.
+    auto r = compile("fun main() <int> {\n"
+                     "  let g <auto> = fun(a: int, b: int = 2) <int> { return a + b; };\n"
+                     "  let x <int> = g(1); let y <int> = g(1, 5); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a lambda's default is optional at a call too:\n" << r.err;
+}
+
+TEST(Soundness_ParameterDefaults, ALambdasDefaultIsCheckedAgainstItsType) {
+    // The other half of the same omission, and the one that was a silent hole rather than
+    // a missing feature: `fun(a: int, b: int = "hello")` built clean while the identical
+    // parameters on a named function reported the mismatch, measured before the fix. A
+    // default the compiler does not look at is the defect this whole block exists about,
+    // surviving in the one form the block never listed.
+    auto r = compile("fun main() <int> {\n"
+                     "  let g <auto> = fun(a: int, b: int = \"hello\") <int> { return a; };\n"
+                     "  return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << "a lambda's default is checked like any other:\n" << r.err;
+    const std::string msgs = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(msgs.find("expected 'int', got 'string'"), std::string::npos) << msgs;
+    EXPECT_EQ(errorCount(msgs), 1u) << "once, not once per pass:\n" << msgs;
+}
+
+TEST(Soundness_ParameterDefaults, ALambdaWithAnUnresolvedParameterKeepsTheFlagsAligned) {
+    // The flag is pushed inside the `if (t)`, at the same statement as the type, because
+    // a lambda drops a parameter whose annotation did not resolve from `param_types` --
+    // and only from `param_types`. Pushed once per parameter instead, the vectors
+    // desynchronise: here `b`'s `true` would land at index 0, where the surviving type is
+    // `b` itself, making it required and reporting a second diagnostic underneath the
+    // first.
+    //
+    // Exactly one diagnostic is the assertion, and it is the undefined type. The same
+    // shape as Soundness_ErrorRecovery's rule -- one mistake, one report -- reached
+    // through a vector alignment rather than through a suppression.
+    auto r = compile("fun main() <int> {\n"
+                     "  let g <auto> = fun(a: NoSuchType, b: int = 2) <int> { return 0; };\n"
+                     "  let x <int> = g(); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string msgs = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(msgs.find("Undefined type 'NoSuchType'"), std::string::npos) << msgs;
+    EXPECT_EQ(errorCount(msgs), 1u)
+        << "the flags must be dropped with the types they describe:\n" << msgs;
+}
+
+TEST(Soundness_ParameterDefaults, AnOverwrittenMemberDropsItsReceiverAndKeepsItsDefault) {
+    // The single-member `@implements T<...>::name = fun(self: &Self, ...)` form, where the
+    // receiver is erased from the type by hand and the flags have to be erased with it --
+    // or they describe the receiver's position while the types describe the first real
+    // parameter, which makes a defaulted first parameter required and a required second
+    // one optional.
+    //
+    // Both bounds are asserted, because erasing from the wrong vector shifts the range
+    // rather than breaking it: with the flags left unerased this reported `expects
+    // between 1 and 1`, so a test that only omitted the argument would pass on the bug.
+    auto r = compile("struct S<T> { v <T>, }\n"
+                     "@implements S<int>::greet = fun(self: &Self, n: int = 3) <int> { return n; }\n"
+                     "fun main() <int> {\n"
+                     "  let s <&S<int>> = new S::<int>{v: 1};\n"
+                     "  let a <int> = s.greet(); let b <int> = s.greet(7); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "the erase must move both vectors:\n" << r.err;
+
+    auto bad = compile("struct S<T> { v <T>, }\n"
+                       "@implements S<int>::greet = fun(self: &Self, n: int = 3) <int> { return n; }\n"
+                       "fun main() <int> {\n"
+                       "  let s <&S<int>> = new S::<int>{v: 1};\n"
+                       "  let a <int> = s.greet(1, 2); return 0; }\n");
+    EXPECT_NE(bad.exitCode, 0) << bad.err;
+    EXPECT_NE(stripAnsi(bad.err).find("between 0 and 1 arguments, got 2"), std::string::npos)
+        << stripAnsi(bad.err);
+}
+
+TEST(Soundness_ParameterDefaults, CloneKeepsTheDefaults) {
+    // Read off the type rather than through a program, for the reason
+    // Soundness_FieldOrder.CloneKeepsTheOrder gives for doing the same: there is no
+    // CLI-visible symptom to read. `FunctionType::clone` is reached only through
+    // `StructType::clone`, and the only callers of that are this file and an
+    // `ArrayType` branch in Analyzer_Expr -- so no program the compiler accepts can
+    // tell whether the copy kept the flags.
+    //
+    // That is exactly the shape this repo deletes rather than tests, and the deletion
+    // is wrong here: `clone` is a faithful-copy contract, and a copy that silently
+    // drops a field is a trap for the first caller who needs one. The precedent is
+    // the field-order block, which made the same call for the same reason. M4 of the
+    // mutation matrix survived on this line and this test is what kills it.
+    fin::DiagnosticEngine diag("", "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    auto parsed = parseSource(
+        "struct S { pub v <int>,\n"
+        "  pub fun m(self: &Self, a: int, b: int = 2) <int> { return a; } }\n", diag);
+    ASSERT_TRUE(parsed.parsed);
+    fin::SemanticAnalyzer analyzer(diag, false);
+    analyzer.visit(*parsed.ast);
+    auto st = std::dynamic_pointer_cast<fin::StructType>(
+        analyzer.getGlobalScope()->resolveType("S"));
+    ASSERT_NE(st, nullptr);
+
+    // The original first, so that a failure says which half is wrong.
+    auto orig = std::dynamic_pointer_cast<fin::FunctionType>(st->getMethodType("m"));
+    ASSERT_NE(orig, nullptr);
+    ASSERT_EQ(orig->param_types.size(), 2u) << "the receiver is dropped: " << orig->toString();
+    EXPECT_FALSE(orig->hasDefault(0));
+    EXPECT_TRUE(orig->hasDefault(1));
+
+    auto copy = std::dynamic_pointer_cast<fin::StructType>(st->clone());
+    ASSERT_NE(copy, nullptr);
+    auto cloned = std::dynamic_pointer_cast<fin::FunctionType>(copy->getMethodType("m"));
+    ASSERT_NE(cloned, nullptr);
+    EXPECT_FALSE(cloned->hasDefault(0));
+    EXPECT_TRUE(cloned->hasDefault(1))
+        << "clone() dropped param_defaults; the copy makes `b` required again";
 }
 
 // ---------------------------------------------------------------------------
@@ -6320,19 +7865,16 @@ TEST(Soundness_TryCatch, AnUnknownCatchTypeIsReportedAsAType) {
 // accepts this" is a thing a future readonly-enforcement change would silently break.
 // Whoever adds static enforcement has to come past this test and past readonly.fin.
 
-TEST(Soundness_Readonly, AWriteToAReadonlyMemberFromOutsideIsNotACompileTimeError) {
-    // readonly.fin:49 in miniature, minus the try/catch, which is not what makes it
-    // legal -- a `try` does not license its contents.
+TEST(Soundness_Readonly, AWriteToAReadonlyMemberFromOutsideIsACompileTimeError) {
+    // readonly.fin keeps invalid writes out of its successful sample. The rule is
+    // static: try/catch cannot make an avoidable readonly violation legal.
     const FincRun r = compile(
         "struct S {\n"
         "  pub readonly v <int>,\n"
         "}\n"
         "fun main() <noret> { let a <S> = S{v: 10}; a.v = 5; }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "readonly.fin:49 requires this to compile -- the violation there is caught at "
-           "run time by `catch (Error as err)`, so static rejection would make a "
-           "normative sample unwritable. If enforcement is ruled to be static after all, "
-           "that ruling owns this test and readonly.fin:48-52.\n"
+    EXPECT_NE(r.exitCode, 0)
+        << "a write through a readonly field from outside its declaring type must be rejected\n"
         << r.err;
 }
 
@@ -6676,15 +8218,20 @@ TEST(Soundness_PrototypeAccess, ANestedPrototypeIsIndexedTwice) {
 
 TEST(Soundness_PrototypeAccess, AnArrayIsStillNotAPrototype) {
     // The regression guard on the other side: adding a prototype branch must not make
-    // arrays take arbitrary subscripts. `.length` is an int (Soundness_BuiltinMembers)
-    // and so is an array index.
+    // arrays take arbitrary subscripts.
+    //
+    // The claim is unchanged and the wording of the refusal is not. It used to read
+    // `expected 'int', got 'string'`, because an index was checked against `int` by
+    // checkType; ADR 0022 made an index any integer, so the check is its own predicate
+    // and names what it wanted. A string is still not one of them.
     const FincRun r = compile(
         "fun main() <noret> {\n"
         "  let a <[int]> = [1, 2, 3];\n"
         "  let bad <int> = a[\"x\"];\n"
         "}\n");
     EXPECT_EQ(r.exitCode, 1) << r.err;
-    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+    EXPECT_NE(stripAnsi(r.err).find("An index must be an integer, not 'string'"),
+              std::string::npos)
         << stripAnsi(r.err);
 }
 
@@ -8677,6 +10224,55 @@ TEST(Soundness_ArrayExtent, AnAllocationsExtentNeedNotBeConstant) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
+TEST(Soundness_ArrayExtent, AnAllocationsExtentMayBeAnyIntegerType) {
+    // The test above cites stdio.fin:112 and then exercises an `int`, which is not
+    // what that line writes. tests/samples/stdlib/stdio.fin:109 declares
+    // `read(nbytes: ulong = -1)` and :112 allocates `new [char, nbytes - self.pointer]`
+    // from it; :123 declares `expand(nbytes: ulong)` and :124 allocates
+    // `new [char, nbytes + self.stream_length]`. Both extents are `ulong`, and both
+    // were refused -- twice each, because visit(NewExpression) checked the extent
+    // against `int` with checkType (which reports) and then reported a second time
+    // that the size "must be an integer" about a value that is one.
+    //
+    // A byte count is the natural use for an unsigned type, so the rule is the
+    // question the message already asks: is the extent an integer. Which integer is
+    // the backend's business, and it reads the same table this check now reads
+    // (types/Layout.hpp -- deliberately the compiler's one table, so that a width or
+    // an alias cannot mean one thing here and another there).
+    for (const char* t : {"int", "uint", "long", "ulong", "short", "ushort"}) {
+        const FincRun r = compile(
+            std::string("fun f(n: ") + t + ") <noret> { let a <[char]> = new [char, n]; }\n"
+            "fun main() <noret> {}\n");
+        EXPECT_EQ(r.exitCode, 0) << t << ":\n" << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_ArrayExtent, ANonIntegerExtentIsRefusedExactlyOnce) {
+    // The other half of the same edit. A `string`, a float and a bool are still not
+    // extents -- and each is now one diagnostic rather than two, which is what makes
+    // the count in a sample's `//@` note mean something.
+    for (const char* e : {"\"x\"", "1.5", "true"}) {
+        const FincRun r = compile(
+            std::string("fun main() <noret> { let a <[int]> = new [int, ") + e + "]; }\n");
+        EXPECT_NE(r.exitCode, 0) << e << ":\n" << stripAnsi(r.err);
+        const std::string err = messagesOnly(stripAnsi(r.err));
+        EXPECT_EQ(errorCount(err), 1u) << e << ":\n" << err;
+        EXPECT_NE(err.find("must be an integer"), std::string::npos) << e << ":\n" << err;
+    }
+}
+
+TEST(Soundness_ArrayExtent, AnUnresolvedExtentDoesNotCascade) {
+    // `new [int, nosuchvar]` was always one diagnostic and stays one: the undefined
+    // name is the fault and the extent check has nothing to add. Held here because the
+    // edit above rewrites the branch that guarantees it.
+    const FincRun r = compile(
+        "fun main() <noret> { let a <[int]> = new [int, nosuchvar]; }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_EQ(errorCount(err), 1u) << err;
+    EXPECT_NE(err.find("nosuchvar"), std::string::npos) << err;
+}
+
 TEST(Soundness_ArrayExtent, ANegativeExtentIsRefused) {
     const FincRun r = compile(
         "fun main() <noret> { let a <[int, -1]> = [1]; }\n");
@@ -9949,6 +11545,97 @@ TEST(Soundness_MemberOverwrite, AnUnknownTargetStillReports) {
         "@implements NoSuchType<T>::m = fun(self: &Self) <int> { return 1; }\n"
         "fun main() <noret> { }\n");
     EXPECT_NE(stripAnsi(r.err).find("NoSuchType"), std::string::npos) << stripAnsi(r.err);
+}
+
+// ===========================================================================
+// A method of the enclosing struct, named rather than called.
+//
+// `tests/samples/stdlib/collection.fin:76` writes
+// `pub getitem <fn(Self, int) => T> = __get,` and :77 the same for `__set`, both
+// naming methods that same struct declares at :61 and :68. The names resolved to
+// nothing -- `Undefined variable '__get'` -- because a member default is analysed
+// with the struct as context but only fields were looked up in it. The comment
+// beside :76 says what the reference is for, "points to __get instead of copying
+// it", against the commented `implements cast<auto>(__get)` at :79 "which copies
+// the function instead of just pointing to it".
+//
+// Resolution is all that is claimed. The registered method type is receiver-less,
+// because `a.__get(i)` passes the receiver implicitly, while the corpus's field
+// types name a receiver -- so the two still disagree, which the KnownDefect below
+// books.
+// ===========================================================================
+
+TEST(Soundness_MemberReference, AMethodOfTheEnclosingStructResolvesToItsType) {
+    // Written against the type the method is registered with, so a clean compile is
+    // the assertion that the name resolved *and* what it resolved to.
+    const FincRun r = compile(
+        "struct Coll {\n"
+        "  pub getitem <fn(int) => int> = __get,\n"
+        "  pub fun __get(self: &Self, index: int) <int> { return index; }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberReference, AMethodDeclaredAfterTheDefaultIsStillFound) {
+    // collection.fin's own order: the defaults are on :76 and :77 and the methods are
+    // above them, but nothing about a member default depends on that -- signatures are
+    // registered for the whole struct before any default is walked. Asserted because
+    // the opposite would make the fix depend on declaration order inside a struct.
+    const FincRun r = compile(
+        "struct Coll {\n"
+        "  pub setitem <fn(int, int) => noret> = __set,\n"
+        "  pub fun __set(self: &Self, index: int, value: int) <noret> { }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_MemberReference, ANameThatIsNeitherAFieldNorAMethodStillReports) {
+    // The boundary. A member default resolves fields, then methods, and then reports --
+    // so a misspelled method name is still named, rather than becoming a silent null.
+    const FincRun r = compile(
+        "struct Coll {\n"
+        "  pub getitem <fn(int) => int> = __gett,\n"
+        "  pub fun __get(self: &Self, index: int) <int> { return index; }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(stripAnsi(r.err).find("Undefined variable '__gett'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(KnownDefect_MemberReference, AMethodReferenceDoesNotCarryItsReceiver) {
+    // collection.fin:76 and :77 as the corpus writes them. The field type names the
+    // receiver and the registered method type does not, so the reference resolves and
+    // then fails to fit -- two diagnostics that changed identity rather than going
+    // away, from `Undefined variable '__get'` to a disagreement about the signature.
+    //
+    // Booked and not fixed because the corpus does not say which side is the mistake.
+    // The receiver slot of a function *type* is spelled `Self` four times
+    // (stdlib/collection.fin:76, :77, stdlib/hashmap.fin:50, :51) and `&Self` once
+    // (stdlib/collection.fin:18), while every method the corpus declares takes
+    // `self: &Self` and no method anywhere declares `self: Self`. So a fix needs two
+    // answers that are not here: whether a method reference prepends its receiver, and
+    // whether a `Self` in that slot matches a `&Self` receiver -- the second being the
+    // pointer-reads-as-pointee question `tests/samples/const.fin:82,84,89,102` raises
+    // and cannot answer on its own either.
+    const FincRun r = compile(
+        "struct Coll {\n"
+        "  pub getitem <fn(Self, int) => int> = __get,\n"
+        "  pub fun __get(self: &Self, index: int) <int> { return index; }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(r.exitCode, 0)
+        << "GOOD NEWS: a method reference fits a field type that names the receiver.\n"
+           "Invert this test -- the program should compile clean -- and rename it to\n"
+           "Soundness_MemberReference.AMethodReferenceCarriesItsReceiver.\n"
+        << stripAnsi(r.err);
+
+    // The name is not what is reported any more. This half is what stops the test from
+    // passing for the old reason if the resolution above is ever lost.
+    EXPECT_EQ(stripAnsi(r.err).find("Undefined variable"), std::string::npos)
+        << "the method name resolves; only its signature disagrees\n"
+        << stripAnsi(r.err);
 }
 
 // ===========================================================================
@@ -11358,4 +13045,717 @@ TEST(Soundness_ArrayBounds, APrototypeKeyIsNotAnIndex) {
                            "    let x <int> = m[99];\n"
                            "}\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// ===========================================================================
+// `#[global]` is usable only inside `namespace std` (ADR 0021).
+//
+// The rule is one sentence and the tests are not, because the interesting part is
+// coverage of *shapes*. `#[global]` is legal wherever the grammar takes an
+// attribute, so an enforcement that checked a hand-written list of declaration
+// kinds would be wrong the day an eleventh kind was added and nobody remembered
+// the list -- and wrong silently, which is the failure this rule exists to
+// prevent. The check is a StructuralWalk over attributes instead, and these tests
+// are what prove the walk reaches all ten writable forms.
+//
+// That is not hypothetical. StructuralWalk did *not* emit the `attributes` vector
+// for DefineDeclaration, MacroDeclaration or ImportModule, so the walk found
+// nothing on a `@define` -- and `printf` at lib/std/stdio.fin:111 is a `@define`,
+// which is to say `#[global]` could not work on the one declaration it exists
+// for. `forEachChild`'s UnregisteredNodeError does not catch that class of bug: the
+// node type *was* registered, only some of its children were missing.
+
+TEST(Soundness_GlobalAttribute, GlobalOutsideStdIsRefusedOnEveryDeclarationFormThatTakesOne) {
+    // Every form the grammar accepts a leading attribute on, measured rather than
+    // assumed -- each of these was probed against finc to confirm it parses, so a
+    // failure here is the rule breaking and not this test's Fin being wrong.
+    const char* const forms[] = {
+        "#[global] @define pf(fmt: string) <noret>;",
+        "#[global] fun f() <noret> {}",
+        "#[global] let x <int> = 1;",
+        "#[global] struct S { a <int> }",
+        "#[global] class C { a <int> }",
+        "#[global] interface I {}",
+        "#[global] enum E { A }",
+        "#[global] type T = int;",
+        "#[global] import { printf } from stdio;",
+        "#[global] @special sp() <int> { return 1; }",
+        // Added when ADR 0023 step 1 left one macro-declaration production. The note
+        // below this group used to say there was nothing to write here, because the
+        // arms-form `@macro m { ... }` took no leading attribute and the parameter form
+        // was unreachable behind it.
+        "#[global] @macro m(a) { return quote { $a; }; }",
+        // The bodyless form (ADR 0023 step 5). A separate entry from the one above
+        // because it is a separate production reaching the same node, and it reaches it
+        // with `body` null -- an attribute walk that dereferenced the body to find the
+        // attributes would pass the line above and abort here.
+        //
+        // `format!` and not a made-up name, since step 6: a bodyless declaration claims
+        // the compiler implements the macro, and a claim about a name the compiler does
+        // not implement is refused on its own. This entry has to fail for being outside
+        // std and for nothing else, or it stops measuring the rule it is filed under.
+        "#[global] @define format!(fmt: string, ...) <string>;",
+    };
+    for (const char* form : forms) {
+        const auto r = compile(std::string(form) + "\nfun main() <noret> {}\n");
+        const std::string err = stripAnsi(r.err);
+        EXPECT_NE(r.exitCode, 0) << "accepted outside std:\n" << form;
+        EXPECT_NE(err.find("usable only inside"), std::string::npos)
+            << "refused, but not for being outside std -- if this is a syntax error "
+               "the form above needs fixing, not the rule:\n"
+            << form << "\n" << err;
+    }
+}
+
+TEST(Soundness_GlobalAttribute, GlobalInsideStdIsAccepted) {
+    // The other direction, and it has to be here: a rule that refuses everything
+    // passes the test above and is useless. `@define` first, because it is the form
+    // ADR 0021 is actually about.
+    const char* const forms[] = {
+        "namespace std { #[global] @define pf(fmt: string) <noret>; }",
+        "namespace std { #[global] import { printf } from stdio; }",
+        "namespace std { #[global] fun f() <noret> {} }",
+        "namespace std { #[global] @macro m(a) { return quote { $a; }; } }",
+        // The signature is `format!`'s because it has to be: a bodyless declaration
+        // names a macro the compiler implements, and `builtinmacros::all()` has one row
+        // (ADR 0023 step 6). This is the line `lib/std/stdio.fin` will carry.
+        "namespace std { #[global] @define format!(fmt: string, ...) <string>; }",
+    };
+    for (const char* form : forms) {
+        const auto r = compile(std::string(form) + "\nfun main() <noret> {}\n");
+        EXPECT_EQ(r.exitCode, 0) << form << "\n" << stripAnsi(r.err);
+    }
+}
+
+TEST(Soundness_GlobalAttribute, AGlobalNestedInsideAStdFunctionBodyStillCounts) {
+    // The reason the parser's marker walks deep rather than one level: the grammar
+    // takes an attributed declaration anywhere it takes a statement, so a rule
+    // enforced over a namespace's immediate statements only would refuse this.
+    const auto r = compile(
+        "namespace std { fun f() <noret> { #[global] let x <int> = 1; } }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, ANamespaceThatIsNotStdDoesNotGrantIt) {
+    // The rule is `std`, not "any namespace". Without this, `namespace anything`
+    // would be a way to mint ambient names, which is the collision ADR 0021 is
+    // about -- and it would surface in a third file that imported neither party.
+    const auto r = compile("namespace mine { #[global] @define pf(fmt: string) <noret>; }\n"
+                           "fun main() <noret> {}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("usable only inside"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, EveryMisplacedGlobalIsReportedNotJustTheFirst) {
+    // Same reasoning as codegen collecting every refusal: a file with three of them
+    // has three things to fix, and one-at-a-time makes that three build cycles.
+    const auto r = compile("#[global] let a <int> = 1;\n"
+                           "#[global] let b <int> = 2;\n"
+                           "#[global] let c <int> = 3;\n"
+                           "fun main() <noret> {}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << err;
+    size_t n = 0;
+    for (size_t at = err.find("usable only inside"); at != std::string::npos;
+         at = err.find("usable only inside", at + 1)) {
+        ++n;
+    }
+    EXPECT_EQ(n, 3u) << "reported " << n << " of 3:\n" << err;
+}
+
+TEST(Soundness_GlobalAttribute, AnUnrelatedAttributeIsNotTouched) {
+    // The check claims one attribute name. An enforcement that fired on any
+    // attribute would be a new refusal for every `#[export]` in lib/std, so this is
+    // the guard that the name is read and not the shape.
+    const auto r = compile("#[export] fun f() <noret> {}\n"
+                           "fun main() <noret> {}\n");
+    EXPECT_EQ(stripAnsi(r.err).find("usable only inside"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+// The `@macro` form is in both groups above now, and it is worth recording why it was
+// not. This note used to read "the rules-form `@macro` takes no leading attribute in
+// the grammar today -- `#[export] @macro m { ... }` is a syntax error at the brace, with
+// or without an attribute, so there is nothing to write a case against". The premise was
+// right and the conclusion did not follow: the syntax error was the *arms* form's, and
+// `#[export] @macro m(a) { ... }` -- the parameter form, the one the grammar has always
+// had -- parsed and took the attribute the whole time. Two declaration forms shared one
+// keyword and only one of them was probed.
+//
+// ADR 0023 step 1 deleted the arms form, which is what made the remaining form the only
+// reading of `@macro` and the omission visible. MacroDeclaration's attributes were
+// already emitted by the walk, because `decl_fields_of` in parser.y gives it an
+// attributes vector and the two lists disagreeing is exactly how the `@define` gap
+// happened -- so the stamp reached the node, was validated, and no test read it.
+
+// ===========================================================================
+// The other half of `#[global]`: a marked declaration resolves with no import
+// (ADR 0021).
+//
+// The tests above are about *where the attribute may be written*, and every one of
+// them would stay green against a compiler that parsed the attribute, refused it
+// outside `std`, and then did nothing with it at all. That is not a hypothetical
+// half-implementation, it is the state this file was in for a day: `#[global]` was
+// stamped, validated, and reached no scope. So these assert resolution, which is
+// the behaviour the attribute exists for.
+//
+// The mechanism is one shared `Scope` owned by the ModuleLoader and installed as
+// the *parent* of every module analyzer's own global scope, published into by
+// `SemanticAnalyzer::publishIfGlobal`. Parent rather than the same scope, because a
+// module's own declarations must not become ambient: an analyzer's global scope
+// also holds the fourteen builtin types, and a module scope is read directly
+// through its `symbols` map by `import *` (docs/plan.md on explicit-beats-wildcard),
+// so merging the two would put every `pub` name in `lib/std` into every file and
+// answer the ambience half of the prelude question `yes` by accident. That is the
+// half ADR 0021 answers **no**, and `ANonGlobalStdNameStillNeedsItsImport` in
+// test_stdlib.cpp is what holds it there.
+
+TEST(Soundness_GlobalAttribute, AGlobalDeclarationResolvesInTheFileThatWroteIt) {
+    // The floor, and it is worth having on its own: publishing to the ambient scope
+    // must not *cost* the declaring file its own binding. `publishIfGlobal` defines
+    // into `globalScope->parent` after `currentScope->define`, and a version that
+    // moved the binding instead of adding one would fail here and nowhere else in
+    // this file, since every other case reaches the name from a different file.
+    const auto r = compile("namespace std { #[global] @define pf(fmt: string) <noret>; }\n"
+                           "fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, AGlobalNameIsNotResolvableWhenNothingDeclaresIt) {
+    // The control for every test below. `pf` resolving in the cases that load a
+    // declaration is only evidence if it fails when none is loaded -- otherwise a
+    // scope that admits any name would pass them all.
+    const auto r = compile("fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Undefined function or type 'pf'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, TwoGlobalsOfOneNameWithDifferentTypesAreRefused) {
+    // `Scope::define` assigns over an existing key, so without a check here the
+    // second declaration silently wins and the file that resolved the first is
+    // reading a signature that nothing it can see wrote. That is the collision the
+    // `std`-only rule *bounds* rather than *detects*, and bounding is not detecting:
+    // `lib/std` is one library and two of its modules can still disagree.
+    //
+    // Deliberately not the same case as KnownDefect_Duplicates, which books ordinary
+    // redeclaration as silently accepted and whose fix waits on `#[overwrite]`
+    // (stdlib/stdio.fin:33 declares a second `printf` under it on purpose). An
+    // ordinary redeclaration is two lines a reader can see at once; an ambient one is
+    // two files that never mention each other.
+    const auto r = compile("namespace std { #[global] @define pf(fmt: string) <noret>; }\n"
+                           "namespace std { #[global] @define pf(n: int) <int>; }\n"
+                           "fun main() <noret> {}\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << err;
+    EXPECT_NE(err.find("declared #[global] twice with different types"), std::string::npos)
+        << err;
+}
+
+TEST(Soundness_GlobalAttribute, TheSameGlobalDeclaredTwiceIdenticallyIsNotAConflict) {
+    // The guard is on the type and not on the name, and this is why. Fourteen corpus
+    // samples write `@define printf(fmt: string, ...) <noret>;` verbatim, and a file
+    // that writes the declaration the bundled module also carries has stated one fact
+    // twice. Refusing that would turn the ambient `printf` into a reason those
+    // fourteen samples stop compiling -- the opposite of what ADR 0021 promises them.
+    const auto r = compile("namespace std { #[global] @define pf(fmt: string) <noret>; }\n"
+                           "namespace std { #[global] @define pf(fmt: string) <noret>; }\n"
+                           "fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, AGlobalWrittenInsideAFunctionBodyIsStillPublished) {
+    // The placement rule accepts this -- `AGlobalNestedInsideAStdFunctionBodyStillCounts`
+    // above is the same shape, because the parser's marker walks the whole subtree under a
+    // `namespace std` block -- so the publish has to agree with it rather than quietly
+    // depend on the declaration sitting at file level.
+    //
+    // This is the test that pins *which* scope is published into. `publishIfGlobal`
+    // targets `globalScope->parent`, and the obvious alternative, `currentScope->parent`,
+    // is identical for every other case in this file and wrong here: inside a body it
+    // names whatever block encloses the declaration, so the ambient name would be
+    // visible to the rest of `holder` and to nothing else -- neither ambient nor
+    // refused, and no diagnostic anywhere to say so. Written and measured: that mutant
+    // passes all fifteen other cases and the whole corpus, and fails this one.
+    const auto r = compile(
+        "namespace std { fun holder() <noret> { #[global] @define pf(fmt: string) <noret>; } }\n"
+        "fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GlobalAttribute, AnUnmarkedDeclarationBesideAMarkedOneIsNotPublished) {
+    // The attribute is opt-in per declaration, so a `@define` sitting in the same
+    // `namespace std` block as a marked one must stay local. Written as one file with
+    // both, because that is the shape a mistake would take: a publish keyed on "we
+    // are inside a std namespace" rather than on the stamp would pass every other
+    // test here and take the whole block with it.
+    //
+    // Only the negative half is asserted, and from the declaring file, which cannot
+    // distinguish local from ambient -- `local` resolves either way. The half that
+    // needs a second file is in test_stdlib.cpp against the real bundle
+    // (`ANonGlobalStdNameStillNeedsItsImport`), because a temp-file harness that
+    // compiles one string has no second file to look from.
+    const auto r = compile("namespace std {\n"
+                           "  #[global] @define pf(fmt: string) <noret>;\n"
+                           "  @define local(fmt: string) <noret>;\n"
+                           "}\n"
+                           "fun main() <noret> { pf(\"x\"); local(\"y\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// ===========================================================================
+// The bracket that delimits a macro call shapes its argument (ADR 0023).
+//
+// Three call forms, and the bracket is the whole difference:
+//
+//   name!(a, b)    positional, one argument per expression
+//   name![a, b]    ONE argument: `{0: a, 1: b}`
+//   name!{k => v}  ONE argument: `{k: v}`
+//
+// The braced and bracketed forms used to flatten. `macro_arg_item` turned `k => v` and
+// `k : v` into two positional arguments each, and its own comment justified that: "so a
+// macro body reads `$0`/`$1` for the first pair either way and no argument is dropped".
+// Both halves were false. `$0` is `syntax error, unexpected INTEGER, expecting
+// IDENTIFIER` -- an unquote is `DOLLAR IDENTIFIER` and SubstitutionVisitor keys on
+// parameter names, of which `0` can never be one -- so there was no spelling for the
+// arguments the flattening produced. And no argument was dropped but the *pairing* was:
+// `map!{"alex" => 10, "robot" => 20}` arrived as four expressions of two types, from
+// which no single-expression body can rebuild two pairs.
+//
+// The shape is not a convenience. It is what removes the need for repetition, fragment
+// specifiers and a block-expression form -- the three features `macro_definitions.fin`'s
+// commented sketch needs and Fin does not have. With it, both macros the corpus asks for
+// are one call each into a constructor that already exists:
+//
+//   @macro coll(items) { return quote { std.Collection::from_prototype($items); }; }
+//   @macro map(pairs)  { return quote { std.HashMap::from_prototype($pairs); };   }
+//
+// `Collection::from_prototype` takes `{int, T}` (lib/std/collection.fin:111), which is
+// exactly what a bracketed list supplies when the positions are the keys, and
+// prototype_test.fin:30 writes that prototype by hand today.
+//
+// Asserted through the types the argument checks against, because that is the only
+// reader of the expanded tree available from a process boundary -- `m![1,2,3]` against
+// `<{int, int}>` accepts and against `<{string, int}>` reports the keys. A test that
+// only checked "it parses" would have passed against the flattening too.
+// ===========================================================================
+
+TEST(Soundness_Macros, ABracketedCallArrivesAsOnePrototype) {
+    // ADR 0023 step 3's verification clause, first half, verbatim: "an `@macro m(p)`
+    // whose body is `$p` called as `m![1,2,3]` type-checks against `<{int, int}>`".
+    const auto r = compile("@macro m(p) { return quote { $p; }; }\n"
+                           "fun main() <noret> { let a <{int, int}> = m![1, 2, 3]; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABracedCallArrivesAsOnePrototype) {
+    // The second half: "and as `m!{\"a\" => 1}` against `<{string, int}>`".
+    const auto r = compile("@macro m(p) { return quote { $p; }; }\n"
+                           "fun main() <noret> { let a <{string, int}> = m!{\"a\" => 1}; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABracketedCallsKeysAreItsPositions) {
+    // The keys are `0..n-1` and not the items, which is the half that makes
+    // `coll![1,2,3]` reach a `{int, T}` parameter. Both directions, because "it built a
+    // prototype" and "it built the right one" are different claims: a shaper that used
+    // the items as their own keys would pass the test above for `m![1,2,3]`, where the
+    // items happen to be ints too.
+    const auto keyed = compile("@macro m(p) { return quote { $p; }; }\n"
+                              "fun main() <noret> { let a <{int, string}> = m![\"a\", \"b\"]; }\n");
+    EXPECT_EQ(keyed.exitCode, 0) << "the keys are the positions:\n" << stripAnsi(keyed.err);
+
+    const auto bad = compile("@macro m(p) { return quote { $p; }; }\n"
+                             "fun main() <noret> { let a <{string, string}> = m![\"a\", \"b\"]; }\n");
+    EXPECT_NE(bad.exitCode, 0) << "the items are not their own keys";
+    EXPECT_EQ(errorCount(stripAnsi(bad.err)), 2u)
+        << "one per position, reported at the position:\n" << stripAnsi(bad.err);
+}
+
+TEST(Soundness_Macros, BothPairSeparatorsAreAcceptedInABracedCall) {
+    // `k => v` is what useful_macros.fin:8-9 writes; `k : v` is the prototype literal's
+    // own spelling (prototype_test.fin:27). A call whose argument *is* a prototype must
+    // not disagree with a prototype literal about how a pair is written, and the
+    // flattening accepted both too -- this is the case that says the replacement did not
+    // narrow the grammar on its way past.
+    const auto arrow = compile("@macro m(p) { return quote { $p; }; }\n"
+                               "fun main() <noret> { let a <{int, string}> = m!{1 => \"x\"}; }\n");
+    EXPECT_EQ(arrow.exitCode, 0) << stripAnsi(arrow.err);
+
+    const auto colon = compile("@macro m(p) { return quote { $p; }; }\n"
+                               "fun main() <noret> { let a <{int, string}> = m!{1 : \"x\"}; }\n");
+    EXPECT_EQ(colon.exitCode, 0) << stripAnsi(colon.err);
+}
+
+TEST(Soundness_Macros, ATrailingCommaIsAcceptedInBothBracketedForms) {
+    // useful_macros.fin:9 has a trailing comma inside `map!{ ... }`, and a prototype
+    // literal does not accept one (`{"a": 1,}` is `syntax error, unexpected RBRACE`).
+    // That inconsistency is the entire reason the node is hand-built in a parser action
+    // rather than reached through `prototype_literal`, so it is the thing to pin: if
+    // someone later routes the shaping through the literal, this goes red and names why.
+    const auto braced = compile("@macro m(p) { return quote { $p; }; }\n"
+                                "fun main() <noret> { let a <{string, int}> = m!{\"a\" => 1,}; }\n");
+    EXPECT_EQ(braced.exitCode, 0) << stripAnsi(braced.err);
+
+    const auto bracketed = compile("@macro m(p) { return quote { $p; }; }\n"
+                                   "fun main() <noret> { let a <{int, int}> = m![1, 2,]; }\n");
+    EXPECT_EQ(bracketed.exitCode, 0) << stripAnsi(bracketed.err);
+}
+
+TEST(Soundness_Macros, TheTrailingCommaAsymmetryWithAPrototypeLiteralIsRecorded) {
+    // The other side of the case above, asserted rather than left as a comment. ADR 0023
+    // lists this under what it does not solve -- "the prototype trailing-comma
+    // inconsistency stays" -- and a recorded asymmetry that nothing measures is how a
+    // reader ends up believing the grammar is uniform. When a corpus site asks for a
+    // trailing comma in a literal, this is the test that says which of the two spellings
+    // moved.
+    const auto r = compile("fun main() <noret> { let a <{int, int}> = {1 : 2,}; }\n");
+    EXPECT_NE(r.exitCode, 0) << "a prototype literal still refuses one";
+    EXPECT_NE(stripAnsi(r.err).find("unexpected RBRACE"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, AShapedArgumentIsOneArgumentForArity) {
+    // The arity count is what a flattening would have gotten wrong most visibly, and it
+    // is the check a macro body can actually rely on. `two![1, 2]` passes ONE argument to
+    // a two-parameter macro, so it is refused -- under the flattening it was accepted,
+    // and the body then read two unrelated expressions as if they were a pair.
+    const auto one = compile("@macro two(a, b) { return quote { $a; }; }\n"
+                             "fun main() <noret> { let x <int> = two![1, 2]; }\n");
+    EXPECT_NE(one.exitCode, 0);
+    EXPECT_NE(stripAnsi(one.err).find("expects exactly 2 args, got 1"), std::string::npos)
+        << stripAnsi(one.err);
+
+    // And the braced form with two pairs is still one argument, not four. Four is the
+    // number the old flattening produced for exactly this text, which is what made
+    // `map!` unwritable: `@macro map(pairs)` was refused for arity, and a four-parameter
+    // macro could not rebuild the pairing.
+    const auto four = compile("@macro four(a, b, c, d) { return quote { $a; }; }\n"
+                              "fun main() <noret> { let x <int> = four!{\"a\" => 1, \"b\" => 2}; }\n");
+    EXPECT_NE(four.exitCode, 0);
+    EXPECT_NE(stripAnsi(four.err).find("expects exactly 4 args, got 1"), std::string::npos)
+        << stripAnsi(four.err);
+}
+
+TEST(Soundness_Macros, TheShapedArgumentReachesAPrototypeParameterThroughTheBody) {
+    // The whole point, end to end: the two macros ADR 0023 says the corpus needs are one
+    // call each into a `from_prototype`, with the shaped argument forwarded by `$p`. `C`
+    // here is a local stand-in for `Collection` so the case needs no library import, and
+    // the parameter type is the real one -- lib/std/collection.fin:111 takes `{int, T}`.
+    //
+    // Qualified as `C::from_prototype` and not as a free `from_prototype`, because step 4's
+    // hygiene rule refuses a bare name in a body: a free call would bind whatever the call
+    // site happened to have. ADR 0023 spells both macros as `Collection::from_prototype`
+    // and `HashMap::from_prototype` for the same reason, so the qualifier is the shape the
+    // real ones take rather than a workaround for the test.
+    const auto positional = compile(
+        "struct C { pub fun from_prototype(p: {int, string}) <int> { return 0; } }\n"
+        "@macro coll(items) { return quote { C::from_prototype($items); }; }\n"
+        "fun main() <noret> { let n <int> = coll![\"a\", \"b\"]; }\n");
+    EXPECT_EQ(positional.exitCode, 0) << stripAnsi(positional.err);
+
+    const auto keyed = compile(
+        "struct C { pub fun from_prototype(p: {string, int}) <int> { return 0; } }\n"
+        "@macro map(pairs) { return quote { C::from_prototype($pairs); }; }\n"
+        "fun main() <noret> { let n <int> = map!{\"alex\" => 10, \"robot\" => 20,}; }\n");
+    EXPECT_EQ(keyed.exitCode, 0) << stripAnsi(keyed.err);
+}
+
+TEST(Soundness_Macros, ADiagnosticAboutTheArgumentUnderlinesTheBracketedListAndNotTheName) {
+    // The location handed to the literal is the bracketed span and not `@$`, which would
+    // start at the macro's name. A reader who is told `got '<{int, int}>'` needs the caret
+    // on the thing that has that type; `m!` underlined with it says the call is wrong
+    // rather than the argument.
+    const auto r = compile("// line 1\n"
+                           "@macro m(p) { return quote { $p; }; }\n"
+                           "fun main() <noret> { let a <int> = m![7, 8]; }\n");
+    EXPECT_NE(r.exitCode, 0);
+    const std::string err = stripAnsi(r.err);
+    // Column 38 is the `[`, which is where `@3` starts. The macro name begins at 36.
+    EXPECT_NE(err.find(":3:38"), std::string::npos)
+        << "the caret starts at the bracket, not at the name:\n" << err;
+    EXPECT_NE(err.find("^^^^^^ here"), std::string::npos)
+        << "and spans `[7, 8]`, six characters:\n" << err;
+}
+
+TEST(Soundness_Macros, AnEmptyShapedCallCannotInferItsTypesAndSaysSo) {
+    // `m![]` and `m!{}` are the only way to write an empty prototype literal: `{}` is
+    // `syntax error, unexpected RBRACE` in the language proper, because
+    // `prototype_elements` requires at least one entry. Bracket shaping builds the node
+    // directly, so it can build an empty one, and ADR 0023 lists this under what it does
+    // not solve -- "an empty collection literal has no expansion target" -- predicting a
+    // syntax error at the call.
+    //
+    // What happened instead was silence. Both halves of the type fell through to the
+    // sentinel, which absorbs every subsequent comparison, so `let a <string> = m![];`
+    // compiled clean: an untyped value assignable to anything, which is the category the
+    // plan puts first. The sentinel is right for an element that *failed to type* and
+    // wrong for a literal that is merely empty, and this is the case that separates them.
+    const auto unannotated = compile("@macro m(p) { return quote { $p; }; }\n"
+                                     "fun main() <noret> { let a <string> = m![]; }\n");
+    EXPECT_NE(unannotated.exitCode, 0) << "an empty prototype fits nothing on its own";
+    EXPECT_NE(stripAnsi(unannotated.err).find("Empty prototype literal cannot infer"),
+              std::string::npos)
+        << stripAnsi(unannotated.err);
+
+    const auto braced = compile("@macro m(p) { return quote { $p; }; }\n"
+                                "fun main() <noret> { let a <int> = m!{}; }\n");
+    EXPECT_NE(braced.exitCode, 0) << stripAnsi(braced.err);
+}
+
+TEST(Soundness_Macros, AnEmptyShapedCallTakesItsTypesFromTheAnnotation) {
+    // The other direction, and the same rule the empty array literal has: the annotation
+    // is the only thing that can say what an empty container holds, and when one says it
+    // the literal is that type. Without this half, the refusal above would just be a ban
+    // on the empty form.
+    const auto annotated = compile("@macro m(p) { return quote { $p; }; }\n"
+                                   "fun main() <noret> { let a <{int, int}> = m![]; }\n");
+    EXPECT_EQ(annotated.exitCode, 0) << stripAnsi(annotated.err);
+
+    // And through a parameter rather than a `let`, which is the shape `coll![]` takes.
+    // Qualified for the reason the test above is.
+    const auto viaParam = compile(
+        "struct C { pub fun from_prototype(p: {int, string}) <int> { return 0; } }\n"
+        "@macro coll(items) { return quote { C::from_prototype($items); }; }\n"
+        "fun main() <noret> { let n <int> = coll![]; }\n");
+    EXPECT_EQ(viaParam.exitCode, 0) << stripAnsi(viaParam.err);
+}
+
+TEST(Soundness_Macros, AParenthesisedCallIsStillPositional) {
+    // The control on the reach of the shaping: `name!(a, b)` is two arguments and stays
+    // two. A shaper that keyed on `!` rather than on the bracket would make every macro
+    // one-parameter, and every test above would still pass.
+    const auto r = compile("@macro two(a, b) { return quote { $a + $b; }; }\n"
+                           "fun main() <noret> { let x <int> = two!(1, 2); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, AShapedCallIsReachableWhereABareBraceWouldBeABlock) {
+    // `no_struct_expression` is the half of the grammar used where a `{` would open a
+    // block -- an `if`/`while` condition, a `for` header. Both shaped forms have to work
+    // there too, because a macro call is not a struct instantiation and there is nothing
+    // ambiguous about `!` followed by a bracket.
+    const auto r = compile(
+        "fun g(p: {int, int}) <bool> { return true; }\n"
+        "@macro m(p) { return quote { $p; }; }\n"
+        "fun main() <noret> {\n"
+        "  if (g(m![1, 2])) { }\n"
+        "  while (g(m!{3 : 4})) { break; }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ASpreadReachesAMacroCallInANoStructPosition) {
+    // The two copies of the parenthesised macro-call production had drifted: `expression`
+    // used `arguments` and `no_struct_expression` used a macro-specific list that had no
+    // spread in it, so `format!(fmt, ...objects)` -- which is
+    // tests/samples/stdlib/stdio.fin:36 exactly -- was a syntax error in an `if`
+    // condition and legal on the right of an `=`. One production reachable from two
+    // places must not be two grammars.
+    const auto r = compile(
+        "@macro mk(fmt, rest...) { return quote { $fmt; }; }\n"
+        "fun f(fmt: bool, ...objects: [int]) <noret> {\n"
+        "  while (mk!(fmt, ...objects)) { break; }\n"
+        "  for (i: int = 0; mk!(fmt, ...objects); i++) { break; }\n"
+        "}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, AShapedArgumentNestsInsideAnother) {
+    // A shaped argument is an ordinary expression once built, so one nests in another.
+    // Worth a case because the two shapers are separate productions calling separate
+    // helpers, and a value position that took only a primary expression would have
+    // passed everything above.
+    const auto r = compile(
+        "@macro m(p) { return quote { $p; }; }\n"
+        "fun main() <noret> { let a <{string, {int, int}}> = m!{\"k\" => m![7, 8]}; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// --- A bodyless macro declaration (ADR 0023 step 5) ------------------------
+
+TEST(Soundness_Macros, ABodylessMacroDeclarationParses) {
+    // ADR 0023 step 5's verification clause: `@define format!(fmt: string, ...) <string>;`
+    // parses. `@define` and not a new keyword because `@define` already means "declared
+    // here, implemented elsewhere" -- `@define printf(fmt: string, ...) <noret>;` reaches C
+    // through `#[llvm_name]` -- and the `!` says which elsewhere. A macro has no linker
+    // symbol, so the compiler is the only possible implementer and no attribute is needed
+    // to name one.
+    const auto r = compile("@define format!(fmt: string, ...) <string>;\n"
+                           "fun main() <noret> { return; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABodylessDeclarationIsAMacroNodeWithNoBody) {
+    // The other half of the clause: `--debug-ast` shows a MacroDeclaration with no body.
+    // Asserted through the render rather than the node because this suite runs the real
+    // compiler, and the render is what a reader of `--debug-ast` sees. `Macro 'format'`
+    // is the node kind; `-> string` is the declared return type, which only a bodyless
+    // declaration has; and the absence of a `Block` under it is the missing body.
+    const auto r = compile("@define format!(fmt: string, ...) <string>;\n"
+                           "fun main() <noret> { return; }\n");
+    ASSERT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+
+    const auto ast = compileWith({"--debug-ast"},
+                                 "@define format!(fmt: string, ...) <string>;\n"
+                                 "fun main() <noret> { return; }\n");
+    const std::string out = stripAnsi(ast.err) + stripAnsi(ast.out);
+    EXPECT_NE(out.find("Macro 'format'"), std::string::npos)
+        << "a bodyless declaration is a MacroDeclaration, not a DefineDeclaration\n" << out;
+    EXPECT_NE(out.find("-> string"), std::string::npos)
+        << "and it carries the return type it declared\n" << out;
+    // The parameters are the ones written, in order, with the `...` kept as a vararg: a
+    // builtin's arity is checkable from this and a diagnostic can name the parameter it
+    // means.
+    EXPECT_NE(out.find("Param: fmt"), std::string::npos) << out;
+    EXPECT_NE(out.find("Param: ...: expr..."), std::string::npos) << out;
+}
+
+// --- The builtin macro table (ADR 0023 step 6) -----------------------------
+
+TEST(Soundness_Macros, ABuiltinMacroResolvesWithNoImport) {
+    // The clause the whole step turns on. `deeptest2.fin` and `stdlib/error.fin` write
+    // zero import lines between them and both call `format!`, so ADR 0021 ruled it a
+    // compiler builtin on that evidence rather than as a convenience. A builtin is in no
+    // scope, which is what makes bare resolution fall out instead of being arranged: the
+    // expander does not find it, does not mind, and leaves the invocation for the
+    // analyzer.
+    //
+    // No declaration of any kind in this program -- not an import, not a `@define`.
+    const auto r = compile(
+        "fun main() <noret> { let x <int> = 7; let s <string> = format!(\"{}\", x); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABuiltinMacroTypesAsItsDeclaredReturn) {
+    // `format!` is a `<string>`, and the annotation is what proves it: a call whose type
+    // stayed null -- which is what an unexpanded macro invocation used to be -- would
+    // pass through an annotation unchecked and be indistinguishable from this. So the
+    // negative half is the assertion that matters, and it is the second one.
+    const auto ok = compile(
+        "fun main() <noret> { let s <string> = format!(\"hello\"); }\n");
+    EXPECT_EQ(ok.exitCode, 0) << stripAnsi(ok.err);
+
+    const auto bad = compile(
+        "fun main() <noret> { let n <int> = format!(\"hello\"); }\n");
+    EXPECT_NE(bad.exitCode, 0)
+        << "a `<string>` assigned to an `<int>` was accepted, so the invocation's type is "
+           "still null rather than the table's\n"
+        << stripAnsi(bad.err);
+    EXPECT_NE(messagesOnly(stripAnsi(bad.err)).find("expected 'int', got 'string'"),
+              std::string::npos)
+        << stripAnsi(bad.err);
+}
+
+TEST(Soundness_Macros, ABuiltinMacroIsRefusedForArity) {
+    // `format!()` passes no format string. Checked in the analyzer and not the expander,
+    // because the expander does not reach a builtin at all -- and checked by hand rather
+    // than through `checkCallArity`, which skips the count entirely for a variadic
+    // signature and would have accepted this.
+    const auto r = compile("fun main() <noret> { let s <string> = format!(); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    const std::string msg = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(msg.find("Macro 'format!' expects at least 1 argument, got 0"),
+              std::string::npos) << stripAnsi(r.err);
+    // The signature is in the help row, because "expects at least 1" does not say what
+    // the one has to be and the programmer's next move needs to know.
+    EXPECT_NE(stripAnsi(r.err).find("format!(fmt: string, ...) <string>"),
+              std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABuiltinMacroChecksItsFixedArgumentTypes) {
+    // `format!(1, 2)`: the first argument is the format string and an `int` is not one.
+    // The variadic tail is deliberately unchecked -- `2` here is fine, and the second
+    // program below is what says so -- because what a formatted value may be is the
+    // lowering's question (step 7) and not a type this table could name.
+    const auto bad = compile("fun main() <noret> { let s <string> = format!(1, 2); }\n");
+    EXPECT_NE(bad.exitCode, 0) << stripAnsi(bad.err);
+    EXPECT_NE(messagesOnly(stripAnsi(bad.err)).find("expected 'string', got 'int'"),
+              std::string::npos) << stripAnsi(bad.err);
+
+    const auto ok = compile(
+        "fun main() <noret> {\n"
+        "  let n <int> = 1;\n"
+        "  let f <float> = 2.5;\n"
+        "  let s <string> = format!(\"{} {} {}\", n, f, \"three\");\n"
+        "}\n");
+    EXPECT_EQ(ok.exitCode, 0)
+        << "the variadic tail takes any type, one call at a time\n" << stripAnsi(ok.err);
+}
+
+TEST(Soundness_Macros, ABodylessDeclarationOfAMacroTheCompilerDoesNotImplementIsRefused) {
+    // The other half of the table: it says what a bodyless declaration is allowed to
+    // claim. `@define frobnicate!(a: int) <int>;` says the compiler implements a macro it
+    // has never heard of, and the alternative to refusing it is a declaration that parses,
+    // type-checks and then answers nothing at every call.
+    //
+    // At the declaration, with no call site in the program -- the same rule as step 4's
+    // hygiene refusal, and for the same reason: a library whose macro nobody calls is
+    // still a library with a broken declaration in it.
+    const auto r = compile("@define frobnicate!(a: int) <int>;\n"
+                           "fun main() <noret> { return; }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err))
+                  .find("The compiler implements no macro named 'frobnicate!'"),
+              std::string::npos) << stripAnsi(r.err);
+    // The help row lists what it does implement. A refusal that names only what is wrong
+    // leaves the reader to guess the legal set, and the legal set is one row long.
+    EXPECT_NE(stripAnsi(r.err).find("format!(fmt: string, ...) <string>"),
+              std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, ABodylessDeclarationOfABuiltinIsAcceptedAndTheCallStillWorks) {
+    // The line `lib/std/stdio.fin` gains in step 8, written here ahead of it: a library
+    // may declare a builtin, and declaring it changes nothing about how the call is
+    // answered. This is the case that used to report `Macro 'format' has no body to
+    // expand` -- the honest answer for exactly one step, between the declaration form
+    // landing and the table landing.
+    const auto r = compile("@define format!(fmt: string, ...) <string>;\n"
+                           "fun main() <noret> { let s <string> = format!(\"x\"); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+
+    // And the checks are still the analyzer's, not the declaration's. A count taken from
+    // the declaration as well would report this twice.
+    const auto few = compile("@define format!(fmt: string, ...) <string>;\n"
+                             "fun main() <noret> { let s <string> = format!(); }\n");
+    EXPECT_NE(few.exitCode, 0) << stripAnsi(few.err);
+    const std::string msg = messagesOnly(stripAnsi(few.err));
+    EXPECT_EQ(msg.find("Macro 'format' expects"), std::string::npos)
+        << "the expander checked arity for a macro it does not implement, so one mistake "
+           "is reported twice\n" << stripAnsi(few.err);
+    EXPECT_NE(msg.find("Macro 'format!' expects at least 1 argument, got 0"),
+              std::string::npos) << stripAnsi(few.err);
+}
+
+TEST(Soundness_Macros, AProgramsOwnMacroOfABuiltinNameStillExpands) {
+    // A builtin name is not a reserved word. This program's `format` takes one argument
+    // and returns it, and the expansion is what answers the call -- asserted through the
+    // type, which is `int` here and would be `string` if the table had won.
+    const auto r = compile(
+        "@macro format(a) { return quote { $a; }; }\n"
+        "fun main() <noret> { let n <int> = format!(7); }\n");
+    EXPECT_EQ(r.exitCode, 0)
+        << "a local macro with a body did not shadow the builtin of the same name\n"
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Macros, TheBangIsWhatSeparatesTheTwoDefineForms) {
+    // The control on the new production's reach: `@define` without the `!` is still an
+    // extern, and one token of lookahead is the whole difference. Asserted through what
+    // each one *is* rather than through parsing, which both do: an extern with a body-
+    // shaped call is a function call, so it lowers and reports nothing; a macro name
+    // reached without `!` is not in the symbol namespace at all (`Scope` keeps the two
+    // apart), so it reports an undefined variable.
+    const auto extern_ = compile("@define pf(fmt: string) <noret>;\n"
+                                 "fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_EQ(extern_.exitCode, 0) << stripAnsi(extern_.err);
+
+    const auto macro = compile("@define pf!(fmt: string) <noret>;\n"
+                               "fun main() <noret> { pf(\"x\"); }\n");
+    EXPECT_NE(macro.exitCode, 0)
+        << "`pf!` declares a macro, and a macro is not callable without the `!`\n"
+        << stripAnsi(macro.err);
 }

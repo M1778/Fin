@@ -4,8 +4,8 @@
 import { Collection } from collection::std;
 import { HashMap } from hashmap::std;
 
-
-// Hygienic Rust-like macro definition (NOT DECIDED YET)
+// Hygienic Rust-like macro definition -- decided *against*, not deferred. ADR 0023 rules
+// one rule per macro with a `quote` body; `f4952f1` deleted the grammar this sketch needs.
 @macro my_vec {
     () => {
         new Collection::<int>{}

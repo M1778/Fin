@@ -1,6 +1,8 @@
 #include "../SemanticAnalyzer.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../../utils/IntegerConstant.hpp"
+#include "../../types/Layout.hpp"
+#include "../BuiltinMacros.hpp"
 #include <fmt/core.h>
 #include <fmt/color.h>
 
@@ -70,8 +72,81 @@ bool isAssignableTarget(const Expression* expr) {
 //
 // An unresolved or error type answers *true*, so that a name that already produced a
 // diagnostic does not produce a second one about its increment.
-bool isIncrementable(const TypePtr& type) {
-    if (!type || isErrorType(type)) return true;
+// Is this type an integer -- any integer -- and so usable as an allocation's extent
+// or as a subscript?
+//
+// The names come from types/Layout.hpp rather than from a list written here, because
+// that header says why not: it is the compiler's one scalar table, and the widths and
+// aliases live in it so that `int64`, `uint8` and lib/std's `u64`/`size_t` resolve to a
+// width rather than to a second table somewhere else. This pass decides whether an
+// extent is legal and the backend decides how many bytes it counts; two lists is how
+// those two answers come apart.
+//
+// `char` answers true, following isSignedIntegerName in Analyzer_Core.cpp, which also
+// counts it. `bool` answers false: the table gives it its own kind, and one bit of
+// value is not a count. No corpus line writes either as an extent.
+//
+// Named for neither caller. It was `isIntegerExtentType` while an allocation's extent
+// was the only place that asked; a subscript asks the same question, and one predicate
+// answering both is the point of the single table.
+bool isAnyIntegerType(const TypePtr& type) {
+    auto* prim = dynamic_cast<const PrimitiveType*>(type.get());
+    if (!prim) return false;
+    // scalarOf, so a written width is read where the name is: the kind is the same
+    // either way here, and asking the same question of the type everywhere is what
+    // keeps `int{64}` from being a different integer depending on which predicate
+    // asked.
+    const auto info = scalarOf(*prim);
+    return info && info->kind == ScalarKind::Int;
+}
+
+// The wider of two integer types, or null when they are not two integers, or when
+// they are the same width with opposite signs -- which neither direction of
+// assignability admits and which therefore has no wider.
+//
+// One function for all three operator families, because "the result is the wider of
+// the two" is one rule and the corpus writes it in each: arithmetic at
+// tests/samples/stdlib/stdio.fin:115 (`i+self.pointer`, an `int` and a `ulong`), a
+// comparison at :126 (`i < self.stream_length`), and an assignment at :130 and :135,
+// which PrimitiveType::isAssignableTo already carries. Asking assignability rather
+// than comparing `bits` keeps that single answer: widening is defined in one place
+// and read here.
+TypePtr widerInteger(const TypePtr& a, const TypePtr& b) {
+    if (!a || !b) return nullptr;
+    if (!isAnyIntegerType(a) || !isAnyIntegerType(b)) return nullptr;
+    if (a->isAssignableTo(*b)) return b;
+    if (b->isAssignableTo(*a)) return a;
+    return nullptr;
+}
+
+bool isUnsignedInteger(const TypePtr& t) {
+    auto* prim = dynamic_cast<const PrimitiveType*>(t.get());
+    if (!prim) return false;
+    const auto info = scalarOf(*prim);
+    return info && info->kind == ScalarKind::Int && !info->isSigned;
+}
+
+// Is one side a negative constant and the other an unsigned integer?
+//
+// The guard that keeps the widening escapes below from settling an open ruling by
+// accident. `nbytes == -1` at tests/samples/stdlib/stdio.fin:110 is exactly this
+// shape, and whether a negative constant is a legal unsigned value is the question
+// Soundness_IntegerConstants.ANegativeConstantIsNotUnsigned holds open -- it has to
+// be answered the same way in `let x <ulong> = -1` and in `x == -1`, and checkType
+// already refuses the first. Without this, widening `int` -> `ulong` would make the
+// comparison legal while the declaration stayed illegal, which is the compiler
+// disagreeing with itself about one line of one file.
+// Soundness_IntegerWidening.AComparisonDoesNotAdmitANegativeConstantToAnUnsigned.
+bool negativeConstantAgainstUnsigned(const ASTNode& l, const TypePtr& lt,
+                                     const ASTNode& r, const TypePtr& rt) {
+    bool neg = false;
+    if (integerConstant(r, neg) && neg && isUnsignedInteger(lt)) return true;
+    neg = false;
+    if (integerConstant(l, neg) && neg && isUnsignedInteger(rt)) return true;
+    return false;
+}
+
+bool isIncrementable(const TypePtr& type) {    if (!type || isErrorType(type)) return true;
     auto* prim = dynamic_cast<const PrimitiveType*>(type.get());
     if (!prim) return false;
     const std::string& n = prim->name;
@@ -227,7 +302,36 @@ void SemanticAnalyzer::visit(PrototypeLiteral& node) {
     // And once a side is the sentinel it stays the sentinel: the widening below must not
     // overwrite it, or `{ nosuchvar : 1, 5 : 2 }` would see `<error>` and `int` disagree,
     // widen to `object`, and put the cascade back with a different type in it.
+
+    // An empty literal, which `m![]` and `m!{}` are the only way to write. There is no
+    // spelling for one in the language proper -- `{}` is `syntax error, unexpected
+    // RBRACE`, because `prototype_elements` requires at least one entry -- and ADR 0023
+    // step 3's bracket-shaping productions build the node directly rather than through
+    // that nonterminal, precisely so they can accept a trailing comma, which is also
+    // what lets them build one with nothing in it.
     //
+    // Same rule as the empty array literal at the sibling container: the annotation is
+    // the only thing that can say what an empty container holds, and without one there
+    // is nothing to infer from. What must *not* happen is the sentinel, which is what
+    // happened before this branch existed. It is the right answer for an element that
+    // failed to type, because absorbing the second comparison is exactly what is wanted
+    // there -- and it is the wrong answer for a literal that is merely empty, because
+    // absorbing the comparison is then the whole diagnostic: `let a <string> = m![];`
+    // compiled clean and reported nothing, an untyped value assignable to anything.
+    //
+    // ADR 0023 predicted a syntax error at the call for this case ("the failure mode is
+    // honest either way") and building the node directly gave silence instead, so the
+    // honesty is owed here.
+    if (node.elements.empty()) {
+        if (!wantedKey || !wantedValue) {
+            error(node, "Empty prototype literal cannot infer its key and value types.");
+            lastExprType = nullptr;
+            return;
+        }
+        lastExprType = std::make_shared<PrototypeType>(wantedKey, wantedValue);
+        return;
+    }
+
     // Each half is offered its type and then checked against it, at the entry, so the
     // caret lands on the key or the value that is wrong rather than on the brace. Where
     // nothing offered one the widening below is exactly what it always was.
@@ -255,8 +359,11 @@ void SemanticAnalyzer::visit(PrototypeLiteral& node) {
         else if (!vType->equals(*valueType)) valueType = currentScope->resolveType("object");
     }
 
-    // Unreachable while `{}` is a syntax error (`unexpected RBRACE`), and a total guard
-    // rather than an assertion because the parser is the only thing keeping it that way.
+    // Unreachable, and now for a reason that does not depend on the grammar: the
+    // empty-literal branch above returns, and every entry sets both halves to something
+    // non-null (an element that did not type becomes the sentinel rather than nothing).
+    // It stays as a total guard rather than an assertion because it costs one branch.
+    //
     // It is the sentinel and not a fabricated `PrimitiveType("any")`, which is what
     // stood here: `any` is a registered DynamicType now, so a hand-built primitive of
     // the same spelling would print as `any` and behave as none of it.
@@ -300,6 +407,33 @@ static bool namesAnEnumerator(const std::string& name, const std::shared_ptr<Typ
     return owner && owner->is_enum && owner->getEnumerator(name) != nullptr;
 }
 
+// A subscript may be any integer, and is refused exactly once.
+//
+// The same rule an allocation's extent already follows (7f899dd), for the same reason
+// and from the same table. tests/samples/stdlib/stdio.fin:115 writes
+// `_temp[i+self.pointer]` where `i` is an `int` and `pointer` is a `ulong` (:82, :97),
+// so the subscript is a `ulong`; it was refused as `expected 'int', got 'ulong'`, which
+// is the narrowing direction ADR 0022 keeps refused. But an index is not an assignment:
+// nothing is being stored into an `int`, and the file that allocates
+// `new [char, nbytes - self.pointer]` with a `ulong` extent (:112) indexes the result
+// with a `ulong` on the next line. Refusing one while accepting the other would be the
+// compiler disagreeing with itself about one buffer.
+//
+// Which integer it is does not change what the subscript means, so no width is
+// preferred here and none is reported. `char` counts, `bool` does not; isAnyIntegerType
+// carries both answers and reads types/Layout.hpp for them.
+//
+// Returns true for an index that already failed to type, so `a[nosuchvar]` stays one
+// diagnostic about the name -- and true is also what lets the bounds check run, which
+// is why the caller reads it.
+// Soundness_IntegerIndex.AnIndexMayBeAnyIntegerType, .ANonIntegerIndexIsRefusedOnce.
+bool SemanticAnalyzer::checkIntegerIndex(ASTNode& node, const std::shared_ptr<Type>& idxType) {
+    if (!idxType || isErrorType(idxType)) return true;
+    if (isAnyIntegerType(idxType)) return true;
+    error(node, fmt::format("An index must be an integer, not '{}'", idxType->toString()));
+    return false;
+}
+
 void SemanticAnalyzer::visit(Identifier& node) {
     // 1. Try local scope
     Symbol* sym = currentScope->resolve(node.name);
@@ -341,6 +475,46 @@ void SemanticAnalyzer::visit(Identifier& node) {
                 lastExprType = fieldType;
                 return;
             }
+
+            // A method of the enclosing struct, named rather than called, is a value
+            // of its own function type.
+            //
+            // tests/samples/stdlib/collection.fin:76 writes
+            // `pub getitem <fn(Self, int) => T> = __get,` and :77
+            // `pub setitem <fn(Self, int, T) => void> = __set,`, where `__get` and
+            // `__set` are that same struct's methods, declared at :61 and :68. The
+            // comment beside :76 says what the reference is for -- "points to __get
+            // instead of copying it" -- and the commented pair at :79-80 names the
+            // operation it is being contrasted with, `implements cast<auto>(__get)`,
+            // "which copies the function instead of just pointing to it". So the name
+            // is a reference to the function, and both diagnostics here were
+            // `Undefined variable` about a method the file declares fifteen lines
+            // earlier.
+            //
+            // Beside the field lookup and not before it, because a field of the same
+            // name is the nearer member: the two share one namespace on the struct and
+            // a field is what `self.name` means when both exist. Beside it rather than
+            // at the end of this function, because both are the same implicit-`self`
+            // step -- what differs is only which of the struct's two member tables the
+            // name is in.
+            //
+            // What this fixes is a *scope* question and nothing more. The type handed
+            // back is the method's as registered, which is receiver-less, because
+            // `a.__get(i)` passes the receiver implicitly. The corpus's field types
+            // name a receiver instead -- `fn(&Self, T)` at :18, `fn(Self, int)` at :76
+            // and :77, `cast<fn(Self, T)>` at stdlib/hashmap.fin:50 and :51 -- so both
+            // sites still report, now as a disagreement about the signature rather
+            // than about the name. Whether a method reference carries its receiver as
+            // a first parameter, and whether a `Self` written in that slot matches a
+            // `self: &Self` receiver, is a language question this pass does not
+            // answer: the corpus spells that slot `Self` four times and `&Self` once
+            // while every method it declares takes `self: &Self`, and no line here
+            // says which of the two is the mistake.
+            // Soundness_MemberReference.AMethodOfTheEnclosingStructResolvesToItsType.
+            if (auto methodType = st->getMethodType(node.name)) {
+                lastExprType = methodType;
+                return;
+            }
         }
     }
     
@@ -380,6 +554,21 @@ void SemanticAnalyzer::visit(Identifier& node) {
 
     error(node, "Undefined variable '" + node.name + "'");
     lastExprType = nullptr;
+}
+
+// One dereference for comparisons: `&T` reads as `T`. Single level, never
+// through a nullable or into another pointer -- narrowing those first stays
+// explicit. Shared by the equality-operand substitution below; call
+// arguments and friends go through checkType instead, which probes the same
+// shape inline.
+static TypePtr derefOnceForComparison(const TypePtr& type) {
+    if (!type || type->as<NullableType>()) return type;
+    if (auto* ptr = type->as<PointerType>()) {
+        if (ptr->pointee && !ptr->pointee->as<PointerType>() &&
+            !ptr->pointee->as<NullableType>())
+            return ptr->pointee;
+    }
+    return type;
 }
 
 void SemanticAnalyzer::visit(BinaryOp& node) {
@@ -427,6 +616,28 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
             }
         }
 
+        // Readonly is a static property of a field, not a runtime exception. The
+        // declaring type's methods may initialize or update their own field; every
+        // other write is rejected before code generation, so try/catch cannot turn
+        // an avoidable violation into a valid program.
+        if (auto* member = dynamic_cast<MemberAccess*>(node.left.get())) {
+            auto savedObject = lastExprType;
+            member->object->accept(*this);
+            auto objectType = lastExprType;
+            lastExprType = savedObject;
+            auto owner = objectType ? getStructType(objectType, currentScope) : nullptr;
+            if (owner) {
+                const auto* field = owner->findField(member->member);
+                const bool internal = currentStructContext &&
+                                      currentStructContext->equals(*owner);
+                if (field && field->is_readonly && !internal) {
+                    error(node, fmt::format(
+                        "Cannot assign to readonly field '{}' of struct '{}'",
+                        member->member, owner->name));
+                }
+            }
+        }
+
         checkType(*node.right, rightType, leftType);
         lastExprType = leftType;
         return;
@@ -456,6 +667,16 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
     if (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ ||
         node.op == ASTTokenKind::LT || node.op == ASTTokenKind::GT ||
         node.op == ASTTokenKind::LTEQ || node.op == ASTTokenKind::GTEQ) {
+        // A reference reads as its pointee in `==` and `!=`, either side, so
+        // `&T == T` checks as `T == T` (constants, widening and all) -- and
+        // diagnostics name the values being compared. Other relationals keep
+        // their operands as written: ordering a dereferenced value is the
+        // same operation mechanically, but no corpus site asks for it.
+        TypePtr leftCmp = leftType, rightCmp = rightType;
+        if (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ) {
+            leftCmp = derefOnceForComparison(leftType);
+            rightCmp = derefOnceForComparison(rightType);
+        }
         // `0 == a` and `a == 0` are the same question, so a constant is looked for
         // on both sides. Without this the left operand is the expectation and a
         // constant on the left makes the *variable* the error: `blame 0 == a` for a
@@ -478,12 +699,78 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         const bool nullComparison = (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ)
                                     && (isNullLiteral(leftType) || isNullLiteral(rightType));
 
+        // Two integers are comparable when either widens to the other. Analyzer_Expr's
+        // note above says this was unfinished -- "Whether two differently-typed
+        // variables may be compared at all is a separate question" -- and ADR 0022
+        // answers it for integers. tests/samples/stdlib/stdio.fin:126 writes
+        // `i < self.stream_length` with `i` an `int` and `stream_length` a `ulong`
+        // (:96), and :110 writes `nbytes > self.stream_length` with both `ulong`: the
+        // same file compares across the pair and within it, and writes no cast at
+        // either.
+        //
+        // Integers only, so nothing is decided about an `int` against a `float`, for
+        // which the corpus writes no site.
+        // A comparison has two operand targets; report an overflowing literal
+        // against the opposite operand before the ordinary compatibility check.
+        bool leftNegative = false;
+        bool rightNegative = false;
+        const bool leftConstant = integerConstant(*node.left, leftNegative);
+        const bool rightConstant = integerConstant(*node.right, rightNegative);
+        if (!nullComparison && leftConstant &&
+            !constantFitsType(*node.left, *rightCmp)) {
+            checkType(*node.left, leftCmp, rightCmp);
+        }
+        if (!nullComparison && rightConstant &&
+            !constantFitsType(*node.right, *leftCmp)) {
+            checkType(*node.right, rightCmp, leftCmp);
+        }
         if (!nullComparison &&
-            !constantFitsType(*node.right, *leftType) &&
-            !constantFitsType(*node.left, *rightType)) {
-            checkType(*node.right, rightType, leftType);
+            !constantFitsType(*node.right, *leftCmp) &&
+            !constantFitsType(*node.left, *rightCmp) &&
+            !(widerInteger(leftCmp, rightCmp) &&
+              !negativeConstantAgainstUnsigned(*node.left, leftCmp,
+                                               *node.right, rightCmp) &&
+              ([&] {
+                  bool negative = false;
+                  return !integerConstant(*node.left, negative) ||
+                         constantFitsType(*node.left, *rightCmp);
+              })() &&
+              ([&] {
+                  bool negative = false;
+                  return !integerConstant(*node.right, negative) ||
+                         constantFitsType(*node.right, *leftCmp);
+              })())) {
+            checkType(*node.right, rightCmp, leftCmp);
         }
         lastExprType = currentScope->resolveType("bool");
+        return;
+    }
+
+    // Arithmetic on two integers of different widths yields the wider of the two.
+    //
+    // tests/samples/stdlib/stdio.fin:115 writes `self.stream[i+self.pointer]` with `i`
+    // an `int` and `pointer` a `ulong` (:82, :97), so the sum is a `ulong` and the
+    // subscript it feeds is one -- which checkIntegerIndex accepts. Without this the
+    // `+` itself was the diagnostic, `expected 'int', got 'ulong'`, reported about an
+    // addition the file writes with no cast.
+    //
+    // The wider and not the left operand, which is what the fall-through below would
+    // give. `i + n` and `n + i` are the same sum, and making the result depend on which
+    // was written first would be the one thing a width rule must not do.
+    //
+    // Guarded on the negative-constant question exactly as the comparison above is, and
+    // for the same reason: `n - 1` on a `ulong` must not become legal here while
+    // `let x <ulong> = -1` stays refused. When the guard trips, the check runs on the
+    // *operand* rather than falling through to the one below it -- checkType reads the
+    // constant off the node it is handed, and the node below is the whole BinaryOp,
+    // which is not a constant and would let `n + -1` through on widening alone.
+    if (const auto wider = widerInteger(leftType, rightType)) {
+        if (!negativeConstantAgainstUnsigned(*node.left, leftType, *node.right, rightType)) {
+            lastExprType = wider;
+            return;
+        }
+        checkType(*node.right, rightType, leftType);
+        lastExprType = nullptr;
         return;
     }
 
@@ -493,7 +780,6 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         lastExprType = leftType;
     }
 }
-
 void SemanticAnalyzer::visit(UnaryOp& node) {
     node.operand->accept(*this);
     auto type = lastExprType;
@@ -681,6 +967,153 @@ std::vector<TypePtr> orderedGenericArgs(const std::shared_ptr<StructType>& st, c
     return out;
 }
 
+// Is every generic parameter this type mentions one that will still be standing at the
+// emission that reads it?
+//
+// A parameter spelled back out as its own name (spellType, below) is sound exactly where
+// the substitution active when the backend maps that node binds *that* parameter: a
+// parameter of a template body the call is written inside, and nothing else. So the
+// question asked here is whether the name resolves, from where the call is, to this very
+// GenericType. `resolveType` walks out through the scopes `declareGenericParams` wrote an
+// enclosing template's parameters into; an argument the analyzer failed to infer is the
+// callee's own parameter, which no scope out here declared.
+//
+// Identity and not the name, because the two come apart:
+//
+//     struct Box<T> { static fun zero() <&Self> { return new Self{}; } }
+//     fun wrap<T>(x: T) <noret> { Box::zero(); }
+//
+// gives `Box::zero()` nothing to infer Box's `T` from, and `wrap`'s `T` is a different
+// parameter that happens to share its spelling. Compared by name this would record
+// `Box<T>`, the mapper would bind it to whatever `wrap` was instantiated at, and the call
+// would lower at a type nothing in the program asked for. Compared by identity it records
+// nothing and the call is refused exactly as it was before this unit.
+//
+// Walks the shapes spellType descends into and no others: what it does not spell it
+// refuses, so a parameter buried in one of those cannot reach a TypeNode from here.
+bool everyGenericParamResolvesHere(const TypePtr& t, Scope* scope) {
+    if (!t) return true;
+    if (auto* gen = t->as<GenericType>())
+        return scope && scope->resolveType(gen->name).get() == static_cast<Type*>(gen);
+    if (auto* ptr = t->as<PointerType>())
+        return everyGenericParamResolvesHere(ptr->pointee, scope);
+    if (auto* arr = t->as<ArrayType>())
+        return everyGenericParamResolvesHere(arr->element_type, scope);
+    if (auto* nullable = t->as<NullableType>())
+        return everyGenericParamResolvesHere(nullable->inner, scope);
+    if (auto* st = t->as<StructType>()) {
+        for (const auto& arg : st->generic_args)
+            if (!everyGenericParamResolvesHere(arg, scope)) return false;
+    }
+    return true;
+}
+
+// A resolved type, spelled as the type node a program could have written for it.
+//
+// The bridge a `::` call on a generic struct needs (HANDOFF section 6, item 6). The
+// backend maps type *nodes*: `Vec2<float>` is a name plus an argument list, and an
+// instantiation is keyed on what those arguments map to -- so an argument the analyzer
+// inferred has to be handed over as a node, because TypeMapper::map is the only door
+// into a representation and a node is all it takes. Teaching the backend to read a
+// semantic Type instead would be a second type system inside the pass that has one.
+//
+// What makes recording an answer on an AST node sound is that the answer is a *node*.
+// Codegen does not clone a template's body: it emits the one AST under a substitution,
+// once per instantiation (Emitter::instantiateGeneric, Emitter::instantiateGenericMethod),
+// while the analyzer walks that body once with the parameters still standing for
+// themselves. A concrete type stamped on a node inside a template would therefore be right
+// for at most one of those emissions. A type *parameter* stamped there is right for all of
+// them, because the mapper resolves a bare parameter name through whichever substitution is
+// active (TypeMapper::boundBinding), and keys the instantiation on what it was bound to
+// (Emitter::displayName) -- which is exactly what it already does for a `Box<T>` written by
+// hand inside a template's body. So `T` is spelled as `T`, and a recorded node is
+// indistinguishable from a written one.
+//
+// A parameter that is *not* bound where the node is emitted maps to nothing and refuses at
+// the target, which is the failure this cannot produce a wrong answer for: the mapper has
+// no way to turn an unbound name into a layout.
+//
+// A name with no representation -- `auto`, a `$` meta-type, a dynamic `[T]` -- is spelled
+// and refuses at the mapper, which is where the truthful message for it lives. That is
+// the difference between the two ways of returning nothing here: null means "this
+// analyzer could not say what the type is", and a node the mapper rejects means "the type
+// is this, and the backend does not lower it yet".
+//
+// No location is set. The caller sets one, because a node with no location makes any
+// diagnostic about it print at 1:1.
+std::unique_ptr<TypeNode> spellType(const TypePtr& t) {
+    if (!t) return nullptr;
+    if (auto* prim = t->as<PrimitiveType>()) {
+        // The names the layout table already answers to (`int`, `float`, `string`), so
+        // the round trip goes through scalarByName rather than through a second table
+        // written here that would have to be kept in step with it.
+        auto node = std::make_unique<TypeNode>(prim->name);
+        if (prim->bits != 0) {
+            node->annotations.push_back(std::make_unique<Literal>(
+                std::to_string(prim->bits), ASTTokenKind::INTEGER));
+        }
+        return node;
+    }
+    if (auto* ptr = t->as<PointerType>()) {
+        auto pointee = spellType(ptr->pointee);
+        if (!pointee) return nullptr;
+        return std::make_unique<PointerTypeNode>(std::move(pointee));
+    }
+    if (auto* arr = t->as<ArrayType>()) {
+        auto element = spellType(arr->element_type);
+        if (!element) return nullptr;
+        // The extent as the literal the source would have written, because a Literal is
+        // what the mapper reads it back through (readConstant). A dynamic `[T]` has no
+        // size node, exactly as a written one has none, and refuses at the mapper for
+        // want of a representation -- which is item 7's question, not this one's.
+        std::unique_ptr<Expression> size;
+        if (arr->extent) {
+            size = std::make_unique<Literal>(std::to_string(*arr->extent),
+                                             ASTTokenKind::INTEGER);
+        }
+        return std::make_unique<ArrayTypeNode>(std::move(element), std::move(size));
+    }
+    if (auto* nullable = t->as<NullableType>()) {
+        // `?` is a flag on the node the parser sets, so a nullable spells as its inner
+        // type carrying the flag. The mapper refuses every nullable today; spelling it
+        // anyway is what makes that the refusal a reader gets, instead of a claim that
+        // the type arguments were never worked out.
+        auto inner = spellType(nullable->inner);
+        if (!inner) return nullptr;
+        inner->is_nullable = true;
+        return inner;
+    }
+    if (auto* gen = t->as<GenericType>()) {
+        // The parameter's own name, for the reason above. The name is the one the source
+        // wrote -- both the analyzer's binding and the backend's come from the same
+        // written `<T>` -- so the two passes are reading one spelling and not two that
+        // have to be kept in step. The constraint is dropped: `T: Castable` is a rule
+        // about what may be bound to T and says nothing about the representation, which
+        // is the whole of what a type node is asked for here.
+        return std::make_unique<TypeNode>(gen->name);
+    }
+    if (auto* st = t->as<StructType>()) {
+        // A struct, an enum or an interface -- all three are StructType, and all three
+        // are spelled by name and arguments. Which of them the backend can lay out is
+        // the backend's answer to give.
+        auto node = std::make_unique<TypeNode>(st->name);
+        for (const auto& arg : st->generic_args) {
+            auto spelled = spellType(arg);
+            if (!spelled) return nullptr;
+            node->generics.push_back(std::move(spelled));
+        }
+        return node;
+    }
+    // A SelfType, a function type, a prototype, `any`, the error sentinel, the type of
+    // `null`. Each is a type whose written spelling this function does not build, and a
+    // node built wrong is worse than no node: it would replace a refusal that names the
+    // template with one that names a type the program never wrote. `Self` is the near
+    // miss -- the mapper does bind the name -- and it stays out because a `Self` reaching
+    // here is a `Box<Self>`, which no sample writes and which would be recorded relative
+    // to whichever struct's method the call sits in rather than to the one it names.
+    return nullptr;
+}
+
 } // namespace
 
 // Arity only, so that the generic-inference path can report it before it walks the
@@ -690,19 +1123,33 @@ void SemanticAnalyzer::checkCallArity(ASTNode& node, const char* kind,
                                      const FunctionType& sig, size_t actual) {
     size_t expected = sig.param_types.size();
 
-    // A nullable parameter is optional at the call site. nullifier.fin:39 calls
-    // `make_A()` with no arguments and says why: "since make_A says \"n?: int\" we
-    // know that n can be null and we don't need to pass any arguments".
+    // Two things make a parameter optional at the call site, and they are folded
+    // together here rather than checked in sequence, because a parameter that is both
+    // nullable and defaulted is optional once, not twice.
+    //
+    // A nullable parameter. nullifier.fin:39 calls `make_A()` with no arguments and says
+    // why: "since make_A says \"n?: int\" we know that n can be null and we don't need
+    // to pass any arguments".
+    //
+    // A parameter written with a default. `lib/std/error.fin:11` declares
+    // `Error(message: string, err_code: int = null)` and `blame_assert.fin:15` wants to
+    // call it `Error("The answer is forbidden")`. Before this, a default could be named
+    // in a sibling parameter's expression and checked against its own type, and had no
+    // other observable effect anywhere -- which made writing one a comment with syntax.
     //
     // The minimum is one past the *last* required parameter rather than the count
     // of required ones, because arguments bind positionally: `(a?: int, b: int)`
     // still needs both written, `(a: int, b?: int)` needs one. That falls out of
     // positional binding and needs no rule about which order the two kinds may
     // appear in -- which matters, because the corpus only ever writes the trailing
-    // form and a rule invented here would be unratified.
+    // form and a rule invented here would be unratified. The same positional argument
+    // covers a default in a leading position, at no extra cost: `(a: int = 1, b: int)`
+    // still requires two arguments, because there is no way to write the second
+    // without writing the first.
     size_t required = 0;
     for (size_t i = 0; i < expected; ++i) {
-        if (!sig.param_types[i]->as<NullableType>()) required = i + 1;
+        const bool optional = sig.param_types[i]->as<NullableType>() || sig.hasDefault(i);
+        if (!optional) required = i + 1;
     }
 
     if (!sig.is_vararg && (actual < required || actual > expected)) {
@@ -795,7 +1242,8 @@ std::shared_ptr<Type> SemanticAnalyzer::checkGenericCall(ASTNode& node, const ch
                                                         FunctionType& sig,
                                                         std::vector<std::unique_ptr<Expression>>& args,
                                                         const std::shared_ptr<StructType>& owner,
-                                                        TypeMap seed) {
+                                                        TypeMap seed,
+                                                        std::shared_ptr<Type>* ownerInstanceOut) {
     TypeMap mapping = std::move(seed);
     if (auto hint = hintFor(node)) unifyGeneric(sig.return_type, hint, mapping);
 
@@ -814,6 +1262,12 @@ std::shared_ptr<Type> SemanticAnalyzer::checkGenericCall(ASTNode& node, const ch
     if (owner && mentionsGenericParam(owner)) {
         instantiatedOwner = owner->instantiate(orderedGenericArgs(owner, mapping));
     }
+    // Reported before the substitution below, so that the one early return it has -- a
+    // signature that did not come back a FunctionType -- still hands the instantiation
+    // over. What the caller does with it is a separate question from whether the
+    // arguments checked out, and a caller that asked for it gets the same answer either
+    // way.
+    if (ownerInstanceOut) *ownerInstanceOut = instantiatedOwner;
     auto isig = std::dynamic_pointer_cast<FunctionType>(sig.substitute(mapping, instantiatedOwner));
     if (!isig) return sig.return_type;
 
@@ -826,6 +1280,12 @@ std::shared_ptr<Type> SemanticAnalyzer::checkGenericCall(ASTNode& node, const ch
 void SemanticAnalyzer::visit(FunctionCall& node) {
     std::shared_ptr<FunctionType> funcType = nullptr;
     std::string funcName = node.name;
+    // The struct this call constructs, when the name resolved to one (Case 2
+    // below): a constructor call, as opposed to a free function or an
+    // enumerator that happens to return a generic struct. Only a constructor
+    // has its instantiation recorded -- the backend reads resolved_args on no
+    // other spelling.
+    std::shared_ptr<StructType> ctorTarget = nullptr;
 
     // Case 1: Self(...)
     if (funcName == "Self") {
@@ -849,6 +1309,7 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
         auto type = currentScope->resolveType(funcName);
         if (type) {
             if (auto st = getStructType(type, currentScope)) {
+                ctorTarget = st;
                 // constructorFor and not `constructors[0]`: a parent's is inherited,
                 // rebound to construct this type rather than the parent
                 // (Soundness_ConstructorInheritance). `struct CollectionError :
@@ -947,11 +1408,78 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
     if (funcType->return_type && mentionsGenericParam(funcType->return_type)) {
         lastExprType = checkGenericCall(node, "Function", funcName, *funcType, node.args,
                                         nullptr, std::move(written));
+        // A constructor that wrote no turbofish: what inference found is
+        // recorded for the backend to instantiate. Annotation first, then
+        // arguments -- checkGenericCall's order -- and nothing at all where a
+        // parameter is still standing, which is the backend's old refusal.
+        if (node.generic_args.empty() && ctorTarget && lastExprType)
+            recordResolvedArgs(node, lastExprType);
         return;
     }
 
     checkCallArguments(node, "Function", funcName, *funcType, node.args);
     lastExprType = funcType->return_type;
+}
+
+// The rewrite half of a module-qualified call (HANDOFF section 6, item 5).
+//
+// `stdio.printf("Big")` (complex.fin:14) is checked above as a call to the module member
+// the qualifier named, and then resolved here into `printf("Big")` -- a plain
+// FunctionCall on the same Fin name, carrying the same arguments -- which the node keeps
+// in `resolved_call` for the backend to lower instead of the qualified spelling.
+//
+// The backend is not taught what a namespace is, and that is the design rather than an
+// omission: CodeGen_LLVM has no reference to NamespaceType, `visit(ImportModule&)`
+// refuses any import that reaches it at all, and `visit(MethodCall&)` asks
+// `baseAddress` for the receiver's address -- which a module has none of, so the call
+// refused with `the receiver of a call to the method 'printf' on a value with no
+// address`. The backend deals in symbols; the qualifier is a front-end fact and is
+// spent in the front end.
+//
+// WHAT IS AND IS NOT REWRITTEN, AND WHY THE GATE IS THIS ONE
+//
+// The rewrite is legal only when the plain name, resolved in the root program the
+// backend walks, is bound to the declaration this qualifier named. Exactly one
+// mechanism puts a module's declaration into the root program: `#[global]` (ADR 0021),
+// whose prototype the driver splices in between the front end and the backend. So the
+// gate is `Symbol::is_ambient` -- set where the prototype was retained, and set only on
+// the declaration the splice will carry.
+//
+// Not a wider gate, and measured rather than assumed. An imported extern that is *not*
+// `#[global]` (`stdio.io_fflush`) and an imported Fin function (`stdio.println`) keep
+// today's refusal, `the receiver of a call to the method '<name>' on a value with no
+// address`, because neither declaration is in the root program the backend walks -- and
+// the *plain* spelling of either, behind `import { io_fflush } from stdio;`, refuses
+// too, with `codegen: a call to 'io_fflush' is not lowered yet`. So a rewrite has
+// nothing better to resolve to: it would trade one refusal for the same refusal under
+// a different name, or -- when the root file declares that name itself -- for a *link*
+// failure after a compile that exited 0.
+// KnownDefect_Modules.AnImportedExternThatIsNotAmbientIsNotLoweredThroughADot books
+// both halves.
+//
+// THE TWO printfs. complex.fin declares `@define printf(fmt: string, ...) <int>;` on :5
+// and imports a `stdio` whose `printf` is `<noret>`, and the rewrite must not silently
+// pick one. It does not, and the ordering is the whole answer: the call is checked
+// against the *module member's* signature above, before this runs, so
+// `let x <int> = stdio.printf("hi");` is a type error (void) while
+// `let x <int> = printf("hi");` in the same file is not. What the backend then sees is
+// one `printf` either way -- `functions_` is keyed by Fin name and `declareFunction`
+// keeps the first declaration -- and that conflation is `#[overwrite]`'s question, not
+// this one: it is already the answer a file with no import gets, and it is the same C
+// function under both signatures. Soundness_Modules.AModuleCallIsCheckedAgainstTheModulesSignatureAndNotTheFilesOwn
+// is what holds the front end to it.
+void SemanticAnalyzer::lowerModuleCall(MethodCall& node, const NamespaceType& ns,
+                                       const Symbol& member) {
+    if (!member.is_ambient) return;
+
+    // Moved, not copied. Two owners of one argument expression would be walked twice by
+    // anything structural, and the arguments have already been checked in place.
+    auto call = std::make_unique<FunctionCall>(node.method_name, std::move(node.args));
+    call->generic_args = std::move(node.generic_args);
+    call->setLoc(node.loc);
+    node.resolved_call = std::move(call);
+    debugLog(fg(fmt::color::blue), "      [Module] '{}.{}' resolved to a call on '{}'\n",
+             ns.name, node.method_name, node.method_name);
 }
 
 void SemanticAnalyzer::visit(MethodCall& node) {
@@ -994,6 +1522,7 @@ void SemanticAnalyzer::visit(MethodCall& node) {
         }
         checkCallArguments(node, "Function", ns->name + "." + node.method_name, *funcType, node.args);
         lastExprType = funcType->return_type;
+        lowerModuleCall(node, *ns, *sym);
         return;
     }
 
@@ -1005,6 +1534,15 @@ void SemanticAnalyzer::visit(MethodCall& node) {
     if (auto* api = dynamic_cast<const CompilerApiType*>(objType.get())) {
         lastExprType = resolveCompilerApi(node, *api, node.method_name,
                                          &node.args, &node.generic_args);
+        return;
+    }
+
+    // A call on a prototype. Before getStructType, which comes back empty for one --
+    // a prototype is not struct-shaped and has no `methods` table to look in -- so
+    // without this branch `a.rm("b")` (prototype_test.fin:24) reported
+    // `Type '<{object, object}>' does not have methods` about a call the language has.
+    if (auto* proto = dynamic_cast<const PrototypeType*>(objType.get())) {
+        checkPrototypeMethod(node, *proto);
         return;
     }
 
@@ -1044,6 +1582,62 @@ void SemanticAnalyzer::visit(MethodCall& node) {
         for (auto& arg : node.args) arg->accept(*this);
         lastExprType = methodType;
     }
+}
+
+// The methods a prototype has. ADR 0028's initial API, and a closed set: a prototype
+// declares nothing, so every name here is one the compiler answers for and a name that
+// is not here is a diagnostic rather than a lookup somewhere else.
+//
+// Each is given a real FunctionType and checked through checkCallArguments, so a
+// prototype method gets the arity and argument checking every other call gets -- and
+// gets the same words for it. Writing the checks out by hand here would be a fourth
+// copy of the logic the header's contract exists to prevent.
+//
+// `rm` is `remove` under the name the corpus writes: prototype_test.fin:24 is
+// `a.rm("b")` and its own comment calls it "the functional way". Two spellings of one
+// operation, and both are kept because the corpus is the specification (ADR 0008) and
+// the ADR's own list says `remove`. Neither is preferred here; whoever rules on one
+// canonical spelling owns this paragraph.
+//
+// `try_get` returns `V?` and not a sentinel, which is the ADR's rule and the reason
+// the type is a NullableType rather than V: a generic V has no value that means absent.
+// Nothing lowers a nullable local yet, so a program that calls it type-checks and then
+// refuses in the backend -- which is the honest staging, and better than answering with
+// a V the table does not have.
+//
+// `entries` is deliberately absent. It yields `Entry<K, V>` values, and that type has
+// to exist before a signature can name it -- it is the stdlib boundary the ADR stages
+// after this, so the diagnostic here says which names a prototype does answer for
+// instead of pretending the method is unknown for a different reason.
+void SemanticAnalyzer::checkPrototypeMethod(MethodCall& node, const PrototypeType& proto) {
+    auto boolType = currentScope->resolveType("bool");
+    const std::string& name = node.method_name;
+
+    std::shared_ptr<Type> result;
+    if (name == "get") {
+        result = proto.valueType;
+    } else if (name == "try_get") {
+        result = std::make_shared<NullableType>(proto.valueType);
+    } else if (name == "contains" || name == "remove" || name == "rm") {
+        // A removal answers whether it removed anything, so `if (p.remove(k))` is a
+        // question a program can ask. A key that was not there is not an error: the
+        // subscript that grows a prototype does not refuse an absent key either.
+        result = boolType;
+    } else {
+        error(node, fmt::format("Prototype '{}' has no method '{}'. A prototype has "
+                                "'get', 'try_get', 'contains', 'remove' and 'rm'",
+                                proto.toString(), name));
+        // The arguments are still walked, so an undefined name inside one is reported
+        // here rather than surviving into a later pass.
+        for (auto& arg : node.args) arg->accept(*this);
+        lastExprType = nullptr;
+        return;
+    }
+
+    // Every one of them takes the key and nothing else.
+    FunctionType sig({proto.keyType}, result);
+    checkCallArguments(node, "Method", name, sig, node.args);
+    lastExprType = result;
 }
 
 // Whether a *constant* subscript is inside a *known* extent.
@@ -1156,7 +1750,7 @@ void SemanticAnalyzer::visit(ArrayAccess& node) {
         if (dynamic_cast<const ArrayType*>(ptrToArray->pointee.get())) {
             arrExprType = ptrToArray->pointee;
         } else {
-            checkType(*node.index, idxType, intType);
+            checkIntegerIndex(*node.index, idxType);
             lastExprType = ptrToArray->pointee;
             return;
         }
@@ -1179,7 +1773,7 @@ void SemanticAnalyzer::visit(ArrayAccess& node) {
     if (auto* arrType = dynamic_cast<const ArrayType*>(arrExprType.get())) {
         // Only when the type check agreed, so that `a["x"]` gets the one diagnostic
         // about its type and not a second about a number it does not have.
-        if (checkType(*node.index, idxType, intType)) checkIndexInBounds(node, *arrType);
+        if (checkIntegerIndex(*node.index, idxType)) checkIndexInBounds(node, *arrType);
         lastExprType = arrType->element_type;
     } else if (isErrorType(arrExprType)) {
         lastExprType = errorType();  // see the note at the method-call site
@@ -1204,11 +1798,69 @@ void SemanticAnalyzer::visit(MacroCall& node) {
 }
 
 void SemanticAnalyzer::visit(MacroInvocation& node) {
-    // Similar to MacroCall
+    // An invocation that is still an invocation here is one the expander did not
+    // answer, and there are exactly two ways to be that (ADR 0023 step 6).
+    //
+    // It names a macro the compiler implements, and this is the pass that implements it:
+    // arity and the fixed parameters' types are checked below and the invocation takes
+    // the table's return type. Checked here and not in the expander because a type is
+    // the thing being checked and the expander does not know one -- it runs before this
+    // pass and has no scope to resolve `string` in.
+    //
+    // Or it names nothing the compiler knows, in which case something upstream has
+    // already refused it: the expander reported `Undefined macro` for an unresolvable
+    // name, and `visit(MacroDeclaration&)` reported a bodyless declaration of a name the
+    // compiler does not implement. Silence here is what keeps one mistake to one
+    // diagnostic. The type stays null, which is the same answer an unexpanded macro gave
+    // before this table existed.
+    const auto* builtin = builtinmacros::find(node.name);
+
+    // The arguments are walked either way, and their types collected as they are, so a
+    // mistake inside one is reported even when the call itself is not a builtin's.
+    // `lastExprType` is overwritten by every walk, so it is read immediately or lost.
+    std::vector<std::shared_ptr<Type>> argTypes;
+    argTypes.reserve(node.args.size());
     for (auto& arg : node.args) {
         arg->accept(*this);
+        argTypes.push_back(lastExprType);
     }
-    lastExprType = nullptr;
+
+    if (!builtin) {
+        lastExprType = nullptr;
+        return;
+    }
+
+    // Arity. A variadic builtin still has required parameters, so this cannot go through
+    // `checkCallArity`: that helper checks nothing at all when `is_vararg` is set, which
+    // is why `format!()` needs its own count here. The `!` is written into the name
+    // because that is how the program spelled the call.
+    const size_t required = builtinmacros::minArgs(*builtin);
+    if (node.args.size() < required ||
+        (!builtin->is_variadic && node.args.size() > required)) {
+        error(node,
+              fmt::format("Macro '{}!' expects {} {} argument{}, got {}", node.name,
+                          builtin->is_variadic ? "at least" : "exactly", required,
+                          required == 1 ? "" : "s", node.args.size()),
+              fmt::format("its signature is `{}`", builtinmacros::signatureOf(*builtin)));
+        lastExprType = currentScope->resolveType(builtin->return_type);
+        return;
+    }
+
+    // The fixed parameters' types. The variadic tail is not checked, by design rather
+    // than omission: `format!("{} {}", n, name)` passes an `int` and a `string` to one
+    // call, and what a formatted value may be is codegen's question (step 7).
+    for (size_t i = 0; i < builtin->params.size(); ++i) {
+        auto expected = currentScope->resolveType(builtin->params[i].type);
+        if (expected && argTypes[i]) {
+            checkType(*node.args[i], argTypes[i], expected);
+        }
+    }
+
+    // The call's type, and the reason `let s <string> = format!("{}", x);` type-checks.
+    // Resolved through the scope rather than held as a `Type` in the table so that
+    // `string` here is the same `string` a program writes -- there is no second type
+    // system behind the builtins.
+    lastExprType = currentScope->resolveType(builtin->return_type);
 }
 
 void SemanticAnalyzer::visit(TypeLiteralExpression& node) {
@@ -1300,6 +1952,23 @@ void SemanticAnalyzer::visit(CastExpression& node) {
     // failing now that an enum is a cast target.
     else if (isEnumType(sourceType) && dynamic_cast<const PrimitiveType*>(targetType.get())) valid = true;
     else if (dynamic_cast<const PrimitiveType*>(sourceType.get()) && isEnumType(targetType)) valid = true;
+    // A string casts to a dynamic `[char]`: the NUL-terminated bytes with the
+    // length measured at run time (strlen in codegen). Narrow on both sides --
+    // bytes are chars, and a fixed extent has no static length to give -- so
+    // `cast<[byte]>`, `cast<[char, 5]>` and casts from any other pointer stay
+    // refused. stdlib/stdio.fin:156 is the corpus site.
+    else if (auto* stringSource = dynamic_cast<const PrimitiveType*>(sourceType.get())) {
+        if (stringSource->name == "string") {
+            if (auto* arrayTarget = dynamic_cast<const ArrayType*>(targetType.get())) {
+                if (!arrayTarget->extent.has_value()) {
+                    if (auto* element = dynamic_cast<const PrimitiveType*>(
+                            arrayTarget->element_type.get())) {
+                        if (element->name == "char") valid = true;
+                    }
+                }
+            }
+        }
+    }
     
     if (!valid) {
         error(node, fmt::format("Invalid cast from '{}' to '{}'", sourceType->toString(), targetType->toString()));
@@ -1326,13 +1995,34 @@ void SemanticAnalyzer::visit(NewExpression& node) {
     // walked past.
     if (auto* arrNode = dynamic_cast<ArrayTypeNode*>(node.type.get())) {
         auto element = resolveTypeFromAST(arrNode->element_type.get());
+        // Any integer, and one diagnostic.
+        //
+        // What stood here checked the extent against `int` with checkType -- which
+        // reports on its own -- and then reported a second time that the size "must be
+        // an integer", about a value that in the corpus's own two cases is one. Both of
+        // stdio.fin's allocations are `ulong`: :109 declares `read(nbytes: ulong = -1)`
+        // and :112 allocates `new [char, nbytes - self.pointer]`; :123 declares
+        // `expand(nbytes: ulong)` and :124 allocates
+        // `new [char, nbytes + self.stream_length]`. That is four diagnostics for two
+        // lines the comment above this branch already names as allocations this pass
+        // must accept, and a byte count is the natural use for an unsigned type.
+        //
+        // isErrorType first, so an extent that already failed to type -- `new [int,
+        // nosuchvar]` -- stays one diagnostic about the name.
+        // Soundness_ArrayExtent.AnAllocationsExtentMayBeAnyIntegerType,
+        // .ANonIntegerExtentIsRefusedExactlyOnce, .AnUnresolvedExtentDoesNotCascade.
+        //
+        // The annotation path has the same doubled report (Analyzer_Core.cpp:260) and
+        // is deliberately left alone: an annotation's extent must be a constant, no
+        // corpus line writes a non-`int` one, and no line proves what the rule there
+        // should be.
         if (arrNode->size) {
             arrNode->size->accept(*this);
-            if (lastExprType) {
-                auto intType = currentScope->resolveType("int");
-                if (!checkType(*arrNode->size, lastExprType, intType)) {
-                    error(*arrNode->size, "An allocation's size must be an integer");
-                }
+            if (lastExprType && !isErrorType(lastExprType) &&
+                !isAnyIntegerType(lastExprType)) {
+                error(*arrNode->size,
+                      fmt::format("An allocation's size must be an integer, not '{}'",
+                                  lastExprType->toString()));
             }
         }
         if (!element) { lastExprType = nullptr; return; }
@@ -1567,7 +2257,7 @@ void SemanticAnalyzer::visit(StructInstantiation& node) {
             auto t = resolveTypeFromAST(arg.get());
             if (t) args.push_back(t);
         }
-        
+
         auto instantiated = structDef->instantiate(args);
         if (!instantiated) {
             error(node, "Generic count mismatch in struct instantiation");
@@ -1575,6 +2265,59 @@ void SemanticAnalyzer::visit(StructInstantiation& node) {
             return;
         }
         concreteType = std::static_pointer_cast<StructType>(instantiated);
+    } else if (mentionsGenericParam(structDef)) {
+        // An elided construction of a generic struct: `Box{ val: 7 }` for
+        // `Box<int>`, `wptr{...}` for the `wptr<T>` a method declares it
+        // returns. The constructor-call path (checkGenericCall) reads three
+        // sources in order -- what the call wrote, the hint, the arguments --
+        // and a literal has the same three: the turbofish above, the
+        // annotation/return/assignment hint, and the field values. The first
+        // is absent by construction of this branch, so the hint is unified
+        // first and the fields second; first-binding-wins is what makes the
+        // hint win, exactly as for a call.
+        //
+        // Walked once: the values are accepted here and checked below against
+        // the instantiation, so the existing loop underneath only runs for the
+        // cases this branch does not take (a turbofish, a concrete struct).
+        // Where nothing binds every parameter the target stays the template
+        // and the checks below run against it -- today's behavior exactly --
+        // and only a complete, spellable instantiation is recorded.
+        std::vector<std::shared_ptr<Type>> valueTypes;
+        valueTypes.reserve(node.fields.size());
+        for (auto& f : node.fields) {
+            f.second->accept(*this);
+            valueTypes.push_back(lastExprType);
+        }
+        TypeMap mapping;
+        if (auto hint = hintFor(node)) {
+            if (hint->as<StructType>()) unifyGeneric(structDef, hint, mapping);
+        }
+        for (size_t i = 0; i < node.fields.size(); ++i) {
+            auto ft = structDef->getFieldType(node.fields[i].first);
+            if (ft) unifyGeneric(ft, valueTypes[i], mapping);
+        }
+        std::shared_ptr<StructType> target = structDef;
+        bool complete = true;
+        for (auto& g : structDef->generic_args) {
+            if (!mapping.count(g->toString())) { complete = false; break; }
+        }
+        if (complete) {
+            if (auto inst = std::dynamic_pointer_cast<StructType>(
+                    structDef->instantiate(orderedGenericArgs(structDef, mapping))))
+                target = inst;
+        }
+        for (size_t i = 0; i < node.fields.size(); ++i) {
+            auto fieldType = target->getFieldType(node.fields[i].first);
+            if (!fieldType) {
+                error(node, fmt::format("Struct '{}' has no field '{}'",
+                                        target->toString(), node.fields[i].first));
+            } else {
+                checkType(*node.fields[i].second, valueTypes[i], fieldType);
+            }
+        }
+        lastExprType = target;
+        if (complete) recordLiteralArgs(node, target);
+        return;
     }
     
     lastExprType = concreteType;
@@ -1703,7 +2446,15 @@ void SemanticAnalyzer::visit(ArrayLiteral& node) {
     // reported anyway. Where the elements disagree with the hint they have already said
     // so, once each, at the element (AnUnrelatedAnnotationDoesNotBecomeTheElementType);
     // adopting the type they were checked against is what keeps that the whole report.
-    lastExprType = std::make_shared<ArrayType>(expected, node.elements.size());
+    lastExprType = std::make_shared<ArrayType>(
+        expected, static_cast<uint64_t>(node.elements.size()));
+    // What the elements were checked against, spelled back out for the backend
+    // to build where no declaration sets a hint (a comparison operand, a
+    // ternary arm). `expected` already folds the hint in where there was one,
+    // so a recorded type and a hint cannot disagree -- and where the elements
+    // carry no spelling (an error, `any`, a function value) nothing is
+    // recorded and the backend refuses as before.
+    if (lastExprType) recordLiteralType(node, lastExprType);
 }
 
 void SemanticAnalyzer::visit(SizeofExpression& node) {
@@ -1734,14 +2485,27 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
     }
 
     std::vector<std::shared_ptr<Type>> paramTypes;
+    // Pushed inside the `if(t)`, at the same statement as the type, because the
+    // `if` is what makes the two vectors able to disagree: a parameter whose
+    // annotation did not resolve is in `node.params` and not in `paramTypes`, so a
+    // flag pushed unconditionally would describe a later parameter's position.
+    std::vector<bool> paramDefaults;
     for(auto& param : node.params) {
         auto t = resolveTypeFromAST(param->type.get());
         if(t) {
             defineParameter(*param, t);
             paramTypes.push_back(t);
+            paramDefaults.push_back(param->default_value != nullptr);
         }
     }
-    
+    // A lambda's default is checked the same way a function's is, and it was not
+    // before this: `fun(a: int, b: int = "hello") <int> { ... }` built and the same
+    // parameters written on a named function reported the mismatch. Nine callers of
+    // this helper were declaration sites and the tenth was missing, which is what a
+    // helper factored out of declaration handling gets wrong -- a lambda is not a
+    // declaration and so was never in the list.
+    visitParameterDefaults(node.params);
+
     auto prevRet = context.currentFuncReturnType;
     context.currentFuncReturnType = retType;
     
@@ -1760,7 +2524,15 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
     // Not when the return type did not resolve: FunctionType dereferences it in
     // toString(), and nullptr already means "unknown, stop asking" to every
     // reader of lastExprType.
-    lastExprType = retType ? std::make_shared<FunctionType>(paramTypes, retType) : nullptr;
+    // The flags travel with the type, or a defaulted lambda parameter is optional
+    // nowhere: a lambda's type is the only record of its signature that a call site
+    // ever sees. This is also what makes the receiver-erase in the implements-block
+    // overwriter (Analyzer_Decl.cpp) reachable -- with the vector always empty its
+    // guarded `defaults.erase` was dead, which is how the mutation matrix found this
+    // gap rather than a missing test.
+    lastExprType = retType ? std::make_shared<FunctionType>(paramTypes, retType, false,
+                                                            paramDefaults)
+                           : nullptr;
 }
 
 void SemanticAnalyzer::visit(QuoteExpression& node) {
@@ -1789,6 +2561,118 @@ void SemanticAnalyzer::visit(TernaryOp& node) {
             lastExprType = t;
         }
     }
+}
+
+// The rewrite half of a `::` call on a generic struct (HANDOFF section 6, item 6).
+//
+// `Vec2::from_angle(0.7854)` (tests/samples/letssee.fin:59) is checked above against the
+// template's signature with `T` inferred, and the instantiation that inference produced
+// is recorded here for the backend to map. Nothing about the call is rewritten -- the
+// target the source wrote stays exactly where it was; what is added is the answer to the
+// one question the backend cannot ask, because `Vec2::zero()` (letssee.fin:77) infers its
+// `T` from the annotation on the left and codegen has no annotations.
+//
+// So the division is the same one the module qualifier's rewrite draws: the front end
+// resolves, the backend lowers what was resolved. Codegen's own inference stays as it is
+// -- it reads argument *values*, which is the only source it has and is enough for a
+// generic free call and for a generic method reached through a receiver.
+void SemanticAnalyzer::recordResolvedTarget(StaticMethodCall& node,
+                                           const std::shared_ptr<Type>& instance) {
+    if (!instance) return;
+    // A parameter of this call's own callee, left standing because nothing bound it --
+    // see everyGenericParamResolvesHere. Recording it would hand the mapper a name that
+    // means something else where it is read.
+    if (!everyGenericParamResolvesHere(instance, currentScope.get())) return;
+    auto spelled = spellType(instance);
+    // A type with no node to spell it -- see spellType. The call keeps the target it was
+    // written with and the backend refuses it exactly as it did before this unit, which is
+    // the whole of the failure mode: never a wrong instantiation, only the old refusal.
+    if (!spelled) return;
+    // The written target's location, so that a refusal about the instantiation points at
+    // the text the reader can go and change. Every part of `Vec2<float>` but the `Vec2`
+    // was inferred and has nowhere else to point.
+    spelled->setLoc(node.target_type ? node.target_type->loc : node.loc);
+    debugLog(fg(fmt::color::blue), "      [Generic] '{}::{}' resolved its target to '{}'\n",
+             node.target_type ? node.target_type->name : std::string("?"),
+             node.method_name, instance->toString());
+    node.resolved_target = std::move(spelled);
+}
+
+// The constructor-call half of recordResolvedTarget's rule: what inference
+// found, spelled as nodes for the backend to instantiate where the call wrote
+// no turbofish. Read is `lastExprType` fresh out of checkGenericCall -- the
+// instantiated return, e.g. `rptr<int>` for `rptr(5)` under an `rptr<int>`
+// annotation -- and what is recorded is its argument list, which is what the
+// backend's instantiation takes.
+//
+// The caller gates on the callee having resolved as a struct (a constructor),
+// and on nothing written (a turbofish needs no record). What remains ungated
+// here is refused by the two guards below, and both refusals are the old
+// backend one rather than a wrong type: an argument with no spelling (a
+// function type, `any`, the error sentinel -- see spellType) records nothing,
+// and a parameter still standing records nothing unless it resolves, here, to
+// itself -- the everyGenericParamResolvesHere rule, which is what stops an
+// enclosing template's same-spelled parameter from being stamped on the node.
+void SemanticAnalyzer::recordResolvedArgs(FunctionCall& node,
+                                           const std::shared_ptr<Type>& inferred) {
+    auto* st = inferred ? inferred->as<StructType>() : nullptr;
+    if (!st || st->generic_args.empty()) return;
+    if (!everyGenericParamResolvesHere(inferred, currentScope.get())) return;
+    std::vector<std::unique_ptr<TypeNode>> spelled;
+    for (const auto& arg : st->generic_args) {
+        auto s = spellType(arg);
+        if (!s) return;
+        // The call's location, for the reason recordResolvedTarget states: an
+        // inferred argument has no source spelling to point at.
+        s->setLoc(node.loc);
+        spelled.push_back(std::move(s));
+    }
+    debugLog(fg(fmt::color::blue), "      [Generic] '{}' resolved its arguments to '{}'\n",
+             node.name, inferred->toString());
+    node.resolved_args = std::move(spelled);
+}
+
+// The literal half of the same rule: what a struct literal's inference found,
+// spelled for the backend to instantiate where the literal wrote none. See
+// recordResolvedArgs for the guards, which are the same -- an unspellable
+// argument and a still-standing unresolvable parameter both record nothing,
+// and the failure is the old refusal rather than a wrong instantiation.
+void SemanticAnalyzer::recordLiteralArgs(StructInstantiation& node,
+                                          const std::shared_ptr<Type>& inferred) {
+    auto* st = inferred ? inferred->as<StructType>() : nullptr;
+    if (!st) return;
+    if (!everyGenericParamResolvesHere(inferred, currentScope.get())) return;
+    std::vector<std::unique_ptr<TypeNode>> spelled;
+    for (const auto& arg : st->generic_args) {
+        auto s = spellType(arg);
+        if (!s) return;
+        // The literal's location, for the reason recordResolvedTarget states:
+        // an inferred argument has no source spelling to point at.
+        s->setLoc(node.loc);
+        spelled.push_back(std::move(s));
+    }
+    debugLog(fg(fmt::color::blue), "      [Generic] '{}' resolved its arguments to '{}'\n",
+             node.struct_name, inferred->toString());
+    node.resolved_args = std::move(spelled);
+}
+
+// The array half of the same rule: the literal's own inferred type, spelled
+// for the backend to build where no hint is set. See recordResolvedArgs for
+// the guards, which are the same -- an unspellable element and a
+// still-standing unresolvable parameter both record nothing, and the failure
+// is the old refusal rather than a wrong array.
+void SemanticAnalyzer::recordLiteralType(ArrayLiteral& node,
+                                          const std::shared_ptr<Type>& inferred) {
+    if (!inferred) return;
+    if (!everyGenericParamResolvesHere(inferred, currentScope.get())) return;
+    auto spelled = spellType(inferred);
+    if (!spelled) return;
+    // The literal's location, for the reason recordResolvedTarget states: an
+    // inferred type has no source spelling to point at.
+    spelled->setLoc(node.loc);
+    debugLog(fg(fmt::color::blue), "      [Generic] array literal resolved its type to '{}'\n",
+             inferred->toString());
+    node.resolved_type = std::move(spelled);
 }
 
 void SemanticAnalyzer::visit(StaticMethodCall& node) {
@@ -1889,8 +2773,10 @@ void SemanticAnalyzer::visit(StaticMethodCall& node) {
         // argument that mentions T at all, and the sample's own comment on 59 calls it
         // "inference on static call".
         if (mentionsGenericParam(structType)) {
+            std::shared_ptr<Type> ownerInstance;
             lastExprType = checkGenericCall(node, "Static method", node.method_name, *sig,
-                                            node.args, structType);
+                                            node.args, structType, {}, &ownerInstance);
+            recordResolvedTarget(node, ownerInstance);
             return;
         }
 

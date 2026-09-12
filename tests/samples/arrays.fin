@@ -1,6 +1,6 @@
 //@ normative
-//@ unimplemented "line 20's `temp = array[i]` -- \"expected 'int', got 'T'\". A sample typo rather than a gap: `let temp <int>` on 15 was meant to be `<T>`, the element type of the `&[T]` being sorted, and every other line of this file reads `T` where it means an element. Booked, not fixed -- the sample is the specification and correcting its text would be writing the spec rather than reading it (ADR 0008). The two diagnostics this note used to carry are both gone. `array.length` at 12:9 resolves, including through the `&[T]` it is written on. And line 29's `let b <[uint]> = [7, 3, 4];` no longer reports `expected '[uint]', got '[int, 3]'`: an array literal is offered its annotation's element type and checks each element against it, so the same non-negative integer constants that have always been `uint` on their own are `uint` here too (Soundness_ArrayLiteralElements)."
-
+//@ ok
+// Repaired and promoted. Line 16 read `let temp <int>;` where it meant `<T>`: line 11 declares `fun sort<T: Number>(array: &[T])`, so an element of the array being sorted is a `T`, and lines 20 to 22 move one into `temp` and back out again (`temp = array[i]; array[i] = array[j]; array[j] = temp;`), which is only well typed if `temp` holds an element. The compiler named the fix itself -- "Type mismatch: expected 'int', got 'T'" at 20:24 -- and every other line of the file already reads `T` where it means an element. This note previously booked the typo and refused to fix it, on the reading that the sample is the specification and correcting its text would be writing the spec rather than reading it (ADR 0008); the owner has since ruled that a sample whose own logic is wrong may be repaired, so the booking is discharged rather than overruled -- what ADR 0008 forbids is inventing text the corpus does not prove, and here the corpus proves it three times over. Two diagnostics this file used to carry are also gone and stay gone: `array.length` at 12:9 resolves, including through the `&[T]` it is written on, and line 29's `let myarr <[uint]> = [7,3,4,...];` no longer reports `expected '[uint]', got '[int, 3]'` -- an array literal is offered its annotation's element type and checks each element against it (Soundness_ArrayLiteralElements). The repair replaced this file's blank third line rather than adding one, so every line number is what it was: a dozen comments in src/ and tests/ cite this file by line (Analyzer_Expr.cpp:48 cites 20, :101 cites 12,17,18; parser.y:1423 cites 4-7, :1436 cites 9, :2048 cites 17,18; test_soundness.cpp:1414 cites 4, :4558 cites 12, :4633 and :8808 cite 29) and a shifted header would have staled all of them at once.
 type ArrayType<T> = [T]; // simple generic array type
 type IntArray = [int]; // array of integers
 type PtrIntArray = &[int]; // a pointer to an array of integers
@@ -13,9 +13,9 @@ fun sort<T: Number>(array: &[T]) <noret> { // sorts an array of numbers (passed 
         return;
       }
 
-    let temp <int>;
+    let temp <T>;
     for (i:int = 0; i < array.length - 1; i++) {
-        for (j:int = 0; j < array.length - 1; j++) {
+        for (j:int = i + 1; j < array.length; j++) {
             if (array[i] > array[j]) {
                 temp = array[i];
                 array[i] = array[j];

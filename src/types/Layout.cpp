@@ -1,6 +1,7 @@
 #include "Layout.hpp"
 
 #include <algorithm>
+#include <set>
 
 #include "TypeImpl.hpp"
 
@@ -15,6 +16,34 @@ namespace {
 // to the decision that is missing.
 std::string refuse(const Type& type, const std::string& reason) {
     return "'" + type.toString() + "' has no layout: " + reason;
+}
+
+// ADR 0029's chain diamond: `MultiInherit: <Person, Student>` where
+// `Student: <Person>` shares the ancestor once. Two spellings of one
+// declaration are one type, whether they are one object or two.
+bool sameStruct(const StructType* a, const StructType* b) {
+    if (!a || !b) return false;
+    if (a == b) return true;
+    return !a->name.empty() && a->name == b->name;
+}
+
+// Strict transitive ancestry through struct parents. Interfaces are skipped:
+// they contribute no bytes, so they never carry anyone's fields.
+bool isAncestorOf(const StructType* ancestor, const StructType* descendant) {
+    if (!ancestor || !descendant || sameStruct(ancestor, descendant)) return false;
+    std::vector<const StructType*> stack{descendant};
+    std::set<const StructType*> seen{descendant};
+    while (!stack.empty()) {
+        const StructType* cur = stack.back();
+        stack.pop_back();
+        for (const auto& parent : cur->parents) {
+            auto ps = std::dynamic_pointer_cast<StructType>(parent);
+            if (!ps || ps->is_interface) continue;
+            if (sameStruct(ancestor, ps.get())) return true;
+            if (seen.insert(ps.get()).second) stack.push_back(ps.get());
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -51,6 +80,28 @@ std::optional<ScalarInfo> scalarByName(const std::string& name) {
     // deliberately *not* a traced slot -- see layoutOf.
     if (name == "string") return ScalarInfo{ScalarKind::Pointer, 0, false};
     return std::nullopt;
+}
+
+std::optional<ScalarInfo> scalarOf(const PrimitiveType& type) {
+    auto info = scalarByName(type.name);
+    if (!info) return info;
+    // No width written: the name is the whole answer, which is every type in the
+    // corpus that does not spell one.
+    if (type.bits == 0) return info;
+    // A width on anything that is not an integer scalar is dropped, and the front
+    // end drops it too (Analyzer_Core.cpp's annotation tail stores a width only for
+    // an integer). Two passes agreeing by accident would be two passes to keep in
+    // step, so the rule is stated once, here, and the front end's copy is an
+    // optimisation of it rather than a second opinion: a `float{128}` that reached
+    // this function anyway -- through clone(), through a test that builds the type
+    // directly -- is still `float`.
+    if (info->kind != ScalarKind::Int) return info;
+    info->bits = type.bits;
+    return info;
+}
+
+bool isRepresentableIntegerWidth(unsigned bits) {
+    return bits == 8 || bits == 16 || bits == 32 || bits == 64;
 }
 
 uint64_t sizeOfScalar(const ScalarInfo& info, const TargetLayout& target) {
@@ -193,7 +244,7 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
     const Type& t = *type;
 
     if (auto* prim = t.as<PrimitiveType>()) {
-        auto info = scalarByName(prim->name);
+        auto info = scalarOf(*prim);
         if (!info) {
             // `auto`, and the four `$` meta-types. Not scalars of unknown size:
             // names with no run-time value at all.
@@ -210,6 +261,20 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
         }
         if (info->kind == ScalarKind::Void) {
             return {{}, refuse(t, "void has no size")};
+        }
+        // A written width outside the four this compiler represents. A refusal and
+        // not a diagnostic, because `int{128}` is a well-formed type -- one positive
+        // integer constant, exactly as `int{64}` is -- that this pass has no
+        // representation for: "Fin has no 128-bit integer" is a sentence nobody has
+        // ruled, while "this compiler does not represent one" is true and is what a
+        // refusal says. tests/samples/stdlib/types.fin:47 and :50 write `i128` and
+        // `u128` on purpose.
+        //
+        // The set is named in the refusal because "no layout" without it sends the
+        // reader here rather than to the four widths that work.
+        if (info->kind == ScalarKind::Int && !isRepresentableIntegerWidth(info->bits)) {
+            return {{}, refuse(t, std::string("this compiler represents integer widths ") +
+                                      kRepresentableIntegerWidths + " only")};
         }
         TypeLayout out;
         out.size = sizeOfScalar(*info, target_);
@@ -263,9 +328,20 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
         // silently has the wrong shape. The retired
         // KnownDefect_Layout.AFixedArrayHasNoExtentToLayOut is what held that open.
         if (!arr->extent) {
-            return {{}, refuse(t, "a dynamic array's representation -- a pointer and a "
-                                  "length side by side, a header ahead of the elements, "
-                                  "something else -- is undecided")};
+            // ADR 0025: dynamic `[T]` is `{ptr, len}`. The element pointer is at
+            // offset zero and the signed int length follows at its natural alignment.
+            TypeLayout out;
+            const ScalarInfo ptrInfo{ScalarKind::Pointer, 0, false};
+            const ScalarInfo lenInfo{ScalarKind::Int, 32, true};
+            const uint64_t ptrSize = sizeOfScalar(ptrInfo, target_);
+            const uint64_t ptrAlign = alignOfScalar(ptrInfo, target_);
+            const uint64_t lenSize = sizeOfScalar(lenInfo, target_);
+            const uint64_t lenAlign = alignOfScalar(lenInfo, target_);
+            out.align = std::max<uint64_t>(ptrAlign, lenAlign);
+            const uint64_t lenOffset = alignUp(ptrSize, lenAlign);
+            out.size = alignUp(lenOffset + lenSize, out.align);
+            if (arr->element_type) out.pointers.push_back({0, arr->element_type});
+            return {out, ""};
         }
         if (!arr->element_type) return {{}, refuse(t, "it has no element type")};
         auto element = layoutOf(arr->element_type);
@@ -406,7 +482,15 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
     // inheritance's ABI trick -- a pointer to the derived type already is a
     // pointer to the base, so an upcast emits no instruction -- and any other
     // order would make it emit an addition.
-    const StructType* base = nullptr;
+    //
+    // ADR 0029's chain diamond shares one ancestor: a direct base that is a
+    // strict transitive ancestor of another direct base arrives through the
+    // descendant, so it is skipped and its bytes appear once. Anything else
+    // with two bases -- unrelated, or a fork sharing a grandparent -- still
+    // refuses: where the second base's bytes go is a second-base ABI nobody
+    // has ruled, and the reverted backend-only deduplication segfaulted.
+    std::vector<std::shared_ptr<StructType>> directBases;
+    std::vector<TypePtr> directBasePtrs;
     for (const auto& parent : st->parents) {
         if (!parent) continue;
         auto parentStruct = std::dynamic_pointer_cast<StructType>(parent);
@@ -419,12 +503,35 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
                                       "' is not a struct, so there is nothing to inherit a "
                                       "layout from")};
         }
-        if (base) {
-            return {{}, refuse(t, "it has more than one base struct, and where a second "
-                                  "base's fields go -- and whether an upcast to it stays "
-                                  "free -- is undecided")};
+        directBases.push_back(parentStruct);
+        directBasePtrs.push_back(parent);
+    }
+    std::vector<size_t> effective;
+    for (size_t i = 0; i < directBases.size(); ++i) {
+        bool skip = false;
+        for (size_t j = 0; j < directBases.size(); ++j) {
+            if (i == j) continue;
+            if (sameStruct(directBases[i].get(), directBases[j].get())) {
+                if (j < i) {
+                    skip = true;
+                    break;
+                }
+                continue;
+            }
+            if (isAncestorOf(directBases[i].get(), directBases[j].get())) {
+                skip = true;
+                break;
+            }
         }
-        base = parentStruct.get();
+        if (!skip) effective.push_back(i);
+    }
+    if (effective.size() > 1) {
+        return {{}, refuse(t, "it has more than one base struct, and where a second "
+                              "base's fields go -- and whether an upcast to it stays "
+                              "free -- is undecided")};
+    }
+    if (!effective.empty()) {
+        const TypePtr& parent = directBasePtrs[effective[0]];
         auto baseLayout = layoutOf(parent);
         if (!baseLayout.ok()) {
             return {{}, refuse(t, "its base '" + parent->toString() + "' has none -- " +
@@ -466,6 +573,23 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
     }
 
     out.size = alignUp(offset, out.align);
+
+    // A struct with nothing in it still occupies a byte, so that two of its values have
+    // distinct addresses and `&a != &b` holds. The owner ruled this on 2026-08-27, and it
+    // reverses what Soundness_Layout used to assert here -- that reasoning is preserved in
+    // the renamed test rather than deleted, because it was argued and not merely assumed.
+    //
+    // This must agree with the backend or nothing else it says is worth reading. Codegen
+    // lays down an i8 padding member for an empty struct, so a size of 0 here would mean
+    // the two passes disagreed on the offset of every field following an empty-struct
+    // member -- this pass placing the next field where the backend had already put a byte.
+    // The old comment named exactly that obligation: "the backend is what has to agree
+    // with this number". The number moved, so this side moves with it.
+    //
+    // Written as a floor on the total rather than a special case for a fieldless struct,
+    // because that is the property being defended: no complete value has no address. A
+    // floor also cannot be missed by a shape nobody thought to enumerate.
+    if (out.size == 0) out.size = 1;
     // Rounded up to the type's own alignment so that `block + headerBytes` is
     // correctly aligned for the object -- three pointer words ahead of a
     // 16-aligned type is 24 bytes, and 24 is not a multiple of 16.

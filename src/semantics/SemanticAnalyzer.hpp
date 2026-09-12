@@ -21,6 +21,8 @@ class ModuleLoader; // Forward declaration
 class FunctionType;
 class StructType; // buildOperatorSignature takes the owner, to look a method up in it
 class ArrayType;  // checkIndexInBounds reads its extent
+class PrototypeType; // checkPrototypeMethod reads its key and value types
+class NamespaceType; // lowerModuleCall names the qualifier it resolved through
 
 struct AnalysisContext {
     bool inLoop = false;
@@ -35,11 +37,33 @@ public:
     ~SemanticAnalyzer();
 
     void setModuleLoader(ModuleLoader* loader) { this->loader = loader; }
+    void setExternalGlobalScope(const std::shared_ptr<Scope>& scope);
     
     std::shared_ptr<Scope> getGlobalScope() { return globalScope; }
 
     // --- Visitor Implementation ---
     void visit(Program& node) override;
+    // Erases every import that bound everything it named. See its definition.
+    void dropConsumedImports(Program& node);
+    // Refuses every `#[global]` the parser did not stamp as written inside
+    // `namespace std` (ADR 0021). See its definition for why it walks attributes
+    // rather than declaration shapes.
+    void refuseMisplacedGlobals(Program& node);
+    // Publishes a declaration the parser stamped `#[global]` into the scope the
+    // ModuleLoader owns, so it resolves in files that import nothing (ADR 0021).
+    // A no-op when no loader-owned scope was injected. See its definition.
+    //
+    // True when this call is what published the name -- so the caller can do the other
+    // half of `#[global]` for the shapes that need one, without a second reading of the
+    // stamp. False for an unmarked declaration, for one with no resolved type, for a
+    // refused conflict, and when no ambient scope was injected at all. An identical
+    // second declaration of a published name returns true, because it *is* a publish of
+    // that name -- the two declarations are one fact and either may be the one a reader
+    // finds.
+    bool publishIfGlobal(ASTNode& node,
+                         const std::vector<std::unique_ptr<Attribute>>& attributes,
+                         const std::string& name,
+                         const std::shared_ptr<Type>& type);
     void visit(VariableDeclaration& node) override;
     void visit(FunctionDeclaration& node) override;
     void visit(StructDeclaration& node) override;
@@ -76,6 +100,10 @@ public:
     void visit(Identifier& node) override;
     void visit(FunctionCall& node) override;
     void visit(MethodCall& node) override;
+    // Resolves a module-qualified call into a plain call on the name it named, when the
+    // root program the backend walks will declare that name for the same declaration.
+    // See its definition for the gate and for why the qualifier does not reach codegen.
+    void lowerModuleCall(MethodCall& node, const NamespaceType& ns, const Symbol& member);
     void visit(MacroCall& node) override;
     void visit(MacroInvocation& node) override;
     void visit(CastExpression& node) override;
@@ -213,6 +241,13 @@ private:
 
     void error(ASTNode& node, const std::string& msg);
 
+    // The same, with an explanation the compiler is sure of. It occupies the `= help:`
+    // row and so displaces the typo heuristic, which is the point: a rule the compiler
+    // can state outright is worth more than a guess at what the programmer meant. Added
+    // for the builtin-macro table (ADR 0023 step 6), where the useful half of the
+    // diagnostic is the list of macros the compiler does implement.
+    void error(ASTNode& node, const std::string& msg, const std::string& help);
+
     // Nesting depth of the quiet pre-passes below. `error` returns before it reports
     // and before it sets hasError while this is non-zero.
     int quietDepth = 0;
@@ -302,11 +337,52 @@ private:
     // `seed` is the bindings the call already states outright -- a written turbofish --
     // which outrank both of the sources this reads, because unifyGeneric's first binding
     // wins and these are in the map before it runs.
+    // `ownerInstanceOut`, when given, receives what `owner` was instantiated to -- and
+    // null where `owner` was already concrete or nothing bound its parameters. The
+    // return value is the call's *result*, which for `Vec2::normalize(scaled)` is
+    // `noret` and says nothing about which Vec2 was called; recordResolvedTarget needs
+    // the receiver, so this is the one thing about the instantiation the caller cannot
+    // reconstruct from what it already has.
     std::shared_ptr<Type> checkGenericCall(ASTNode& node, const char* kind,
                                            const std::string& name, FunctionType& sig,
                                            std::vector<std::unique_ptr<Expression>>& args,
                                            const std::shared_ptr<StructType>& owner,
-                                           TypeMap seed = {});
+                                           TypeMap seed = {},
+                                           std::shared_ptr<Type>* ownerInstanceOut = nullptr);
+
+    // Records on a `::` call which instantiation of a generic target it resolved to,
+    // for the backend to map instead of the bare template (HANDOFF section 6, item 6).
+    // Records nothing where that instantiation has no node to spell it -- see
+    // StaticMethodCall::resolved_target and spellType.
+    void recordResolvedTarget(StaticMethodCall& node, const std::shared_ptr<Type>& instance);
+
+    // Records on a constructor call the type arguments inference found, for the
+    // backend to instantiate where the call wrote no turbofish (`Box(5)` for
+    // `let b <Box<int>> = Box(5)`). The constructor-call half of
+    // recordResolvedTarget's rule: the front end infers (annotation first, then
+    // arguments -- b690f60), the backend lowers what was recorded. Records
+    // nothing where an argument has no node to spell it, and nothing where a
+    // parameter is still standing unresolvable here -- see FunctionCall::
+    // resolved_args and everyGenericParamResolvesHere. Either way the failure
+    // is the old refusal, never a wrong instantiation.
+    void recordResolvedArgs(FunctionCall& node, const std::shared_ptr<Type>& inferred);
+
+    // Records on a struct literal the type arguments inference found, for the
+    // backend to instantiate where the literal wrote none (`Box{ val: 7 }`
+    // under `Box<int>`, `wptr{...}` under `wptr<T>`). The literal half of the
+    // same rule: a written turbofish needs no record, and what is recorded is
+    // spelled out of the instantiation the literal's own inference computed --
+    // hint first, then fields -- with the same spelling guards. See
+    // StructInstantiation::resolved_args.
+    void recordLiteralArgs(StructInstantiation& node, const std::shared_ptr<Type>& inferred);
+
+    // Records on an array literal the type inference found (`[int, 4]` for
+    // `[1, 2, 3, 4]`), for the backend to build where no declaration set a
+    // hint. The array half of the same rule: what is recorded is the type the
+    // elements were checked against, spelled back out, with the same spelling
+    // guards -- so the backend builds what the front end typed rather than
+    // guessing from an element. See ArrayLiteral::resolved_type.
+    void recordLiteralType(ArrayLiteral& node, const std::shared_ptr<Type>& inferred);
 
     // The type an expression is about to be checked against, and the exact expression
     // node it belongs to.
@@ -345,6 +421,17 @@ private:
         return typeHintFor == &node ? typeHint : nullptr;
     }
     bool checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected);
+
+    // A subscript may be any integer, on the same rule and from the same table as an
+    // allocation's extent. Returns true when the index is acceptable -- or already
+    // failed to type -- which is also the caller's signal to run the bounds check.
+    bool checkIntegerIndex(ASTNode& node, const std::shared_ptr<Type>& idxType);
+
+    // The fixed set of methods a prototype has, ADR 0028's initial API. Reports and
+    // types the call; never falls through to the struct path, because a prototype is
+    // not struct-shaped and `getStructType` on one comes back empty. See the definition
+    // for which names are recognised and why `rm` is among them.
+    void checkPrototypeMethod(MethodCall& node, const PrototypeType& proto);
 
     // Whether a constant subscript is inside a known extent. Both halves of that are
     // the rule: a run-time index and a dynamic array are both normal, and neither is
@@ -398,11 +485,19 @@ private:
     // signature-registration passes over the same constructor parameters (struct
     // and class), which would report every diagnostic twice.
     //
-    // It visits and does not type-check. Comparing the default against the declared
-    // type is blocked on the integer ruling: stdlib/stdio.fin:87 and :109 write
-    // `nbytes: ulong = -1`, and `let x <ulong> = -1` is an error today, so the check
-    // would put two new diagnostics on a normative sample over a question the owner
-    // has not answered. KnownDefect_ParameterDefaults holds that half.
+    // It visits *and* type-checks, the second half having landed after the first. The
+    // check is checkInitializer, so a default follows the same rule as every other
+    // initialiser -- `= null` is permitted whatever the declared type is, widening
+    // reaches it, and a negative constant is not an unsigned value. What that costs is
+    // two diagnostics on tests/samples/stdlib/stdio.fin, whose :87 and :109 write
+    // `nbytes: ulong = -1`; the argument for paying it is that :110's `nbytes == -1` has
+    // been refused in that same file since ADR 0022, so the alternative was a compiler
+    // that disagreed with itself about one line. Soundness_ParameterDefaults and
+    // Soundness_DefaultArguments hold both halves.
+    //
+    // Whether a defaulted parameter may be *omitted* at a call is a separate defect and
+    // still open: the arity check reads a FunctionType, which records no defaults.
+    // KnownDefect_ParameterDefaults.ADefaultedParameterIsStillRequired holds it.
     void visitParameterDefaults(const std::vector<std::unique_ptr<Parameter>>& params);
     bool checkReturnPaths(Statement* node);
 

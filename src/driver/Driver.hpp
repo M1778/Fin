@@ -3,6 +3,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 // Forward declarations to keep header clean
 namespace fin {
@@ -35,7 +36,10 @@ private:
     // Emits an object file and links it into `options.outputPath`. A no-op that
     // returns true when `-o` was not written: `finc x.fin` checks a program and
     // `finc x.fin -o x` builds one (see CompilerOptions::outputPathGiven).
-    bool runCodeGen(Program& ast, DiagnosticEngine& diag);
+    // `modules` are the loader's successfully analysed Programs (ADR 0032):
+    // borrowed for registration only, owned by the caller's loader.
+    bool runCodeGen(Program& ast, DiagnosticEngine& diag,
+                    const std::vector<const Program*>& modules);
     // `cc <object> -o <outputPath>`. Separate from runCodeGen because the object
     // is what the backend owns and the executable is what a C toolchain does --
     // and because `finn` will eventually want the object without the link.

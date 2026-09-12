@@ -7,10 +7,16 @@
 #include "../macros/MacroExpander.hpp"
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <filesystem>
 #include <fmt/core.h>
 #include <fmt/color.h>
 #include <algorithm>
+#include "../semantics/Scope.hpp"
+#include "../ast/CloneVisitor.hpp"
+#include "../ast/decls/DefineDecl.hpp"
+#include "../ast/decls/Program.hpp"
+#include "../ast/types/Attribute.hpp"
 
 namespace fs = std::filesystem;
 
@@ -18,7 +24,9 @@ namespace fin {
 
 extern std::unique_ptr<Program> root;
 
-ModuleLoader::ModuleLoader(const std::string& base) : rootBasePath(base) {
+ModuleLoader::~ModuleLoader() = default;
+
+ModuleLoader::ModuleLoader(const std::string& base) : rootBasePath(base), globalScope(std::make_shared<Scope>()) {
     if (!fs::is_directory(rootBasePath)) {
         rootBasePath = fs::path(rootBasePath).parent_path().string();
     }
@@ -180,6 +188,10 @@ void ModuleLoader::beginRootFile(const std::string& path) {
     loadingStack.insert(identityOf(path));
 }
 
+void ModuleLoader::loadGlobalModuleIfPresent(const std::string& importPath, bool isPackage) {
+    if (!resolvePath(importPath, isPackage).empty()) loadModule(importPath, isPackage);
+}
+
 std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, bool isPackage) {
     // 1. Resolve
     std::string fullPath = resolvePath(importPath, isPackage);
@@ -296,6 +308,7 @@ std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, b
     // 7. Semantic Analysis
     SemanticAnalyzer analyzer(diag, false);
     analyzer.setModuleLoader(this);
+    analyzer.setExternalGlobalScope(globalScope);
     analyzer.visit(*moduleAST);
 
     if (analyzer.hasError) {
@@ -316,6 +329,90 @@ std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, b
     loadingStack.erase(key);
     
     return moduleScope;
+}
+
+// Called by the analyzer for each extern it published ambiently, and by nothing else:
+// what is retained here has to be exactly what was published, or the two halves of
+// `#[global]` disagree about which names a file gets for free. The analyzer's
+// `publishIfGlobal` is the single place that reads the stamp, so it is the single place
+// that calls this.
+bool ModuleLoader::retainAmbientPrototype(const DefineDeclaration& decl) {
+    // First declaration of a name wins, which is what `Scope::resolve` gives (the
+    // ambient scope keeps the first binding and refuses a second of a different type)
+    // and what `declareFunction` gives (`if (functions_.count(name)) return;`). Two
+    // *identical* declarations of one name are allowed and are one fact -- fourteen
+    // corpus samples write `@define printf(fmt: string, ...) <noret>;` themselves while
+    // the bundled module publishes it -- so this is reached with a duplicate name
+    // routinely, and a second prototype for it would be a second copy of a signature
+    // the tree already has.
+    //
+    // The answer says which of the two the caller is holding, and the comparison is on
+    // the *symbol* rather than on the signature. `publishIfGlobal` already refuses two
+    // ambient declarations of one name whose types differ; two whose types agree and
+    // whose `#[llvm_name]` does not are accepted there and are not interchangeable
+    // here, because the splice carries exactly one of them and it is the first.
+    for (const auto& existing : ambientPrototypes)
+        if (existing->name == decl.name) return symbolOf(*existing) == symbolOf(decl);
+
+    CloneVisitor cloner;
+    ambientPrototypes.push_back(cloner.clone(&decl));
+    return true;
+}
+
+// The symbol an `@define` names: its valued `#[llvm_name]` if it has one, otherwise its
+// Fin name. The same reading `CodeGen_LLVM::symbolNameOf` gives, and deliberately a
+// second copy of three lines rather than a dependency from the loader on the backend --
+// the two agreeing is what makes a retained prototype's symbol knowable from here.
+// Soundness_Modules.AQualifiedCallReachesTheSymbolTheRetainedPrototypeNames
+// (tests/test_stdlib.cpp) is what goes red if they ever disagree.
+std::string ModuleLoader::symbolOf(const DefineDeclaration& decl) {
+    for (const auto& attr : decl.attributes)
+        if (attr && attr->name == "llvm_name" && !attr->is_flag) return attr->value_str;
+    return decl.name;
+}
+
+// Splices a prototype for every ambiently-published extern into the root program.
+//
+// After the front end and before the backend, which is why the driver calls it rather
+// than the analyzer: run any earlier and the analyzer would see a declaration it did
+// not write and report the root file's own `@define printf` as a duplicate; run it in
+// the analyzer at all and a *module*'s program would gain the prototypes too, where the
+// backend never looks.
+//
+// Appended rather than prepended. Nothing in `declareTopLevel` depends on the order of
+// the statements it walks -- it is a declaration pass over the whole vector before any
+// body is emitted -- and appending keeps every existing statement at the index it was
+// parsed at, so a diagnostic that counts statements still counts the program's own.
+void ModuleLoader::appendAmbientPrototypes(Program& root) const {
+    for (const auto& proto : ambientPrototypes) {
+        CloneVisitor cloner;
+        auto copy = cloner.clone(proto.get());
+
+        // Only `#[llvm_name]` survives into the tree the backend walks.
+        //
+        // Not a drop of an unhonoured request, which is what `attributesAreJustLlvmName`
+        // exists to refuse. `#[global]` and `#[export]` are front-end facts and the front
+        // end has already acted on both: `#[global]` is *why* this prototype is being
+        // spliced, and `#[export]` decided what the module's scope hands out to an
+        // import. Neither asks the backend for anything. Leaving them on would refuse
+        // the splice -- codegen refuses every attribute it cannot read, on an `@define`
+        // as anywhere else -- so the file that needed no import would fail to build with
+        // a diagnostic about an attribute nobody in that file wrote.
+        //
+        // `#[llvm_name]` is the one the backend does read, and dropping *it* would be
+        // the real corruption: `printf` would be emitted as a call to the Fin name, which
+        // is a valid symbol too, so the program would link against nothing and the
+        // failure would arrive at run time.
+        auto& attrs = copy->attributes;
+        attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
+                                   [](const std::unique_ptr<Attribute>& attr) {
+                                       return !(attr && attr->name == "llvm_name" &&
+                                                !attr->is_flag);
+                                   }),
+                    attrs.end());
+
+        root.statements.push_back(std::move(copy));
+    }
 }
 
 }

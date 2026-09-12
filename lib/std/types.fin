@@ -1,36 +1,103 @@
-// Type names and the compile-time type resolver.
+// Type names, numeric aliases, the constraint sets, and the conversions between a number
+// and a `string`.
 //
-// tests/samples/stdlib/types.fin is the specification. What is left out of this copy
-// is everything that needs the compiler API -- `@special` bodies calling
-// `compiler.types.*`, `TypeInfo` with its `_static_string` field, `typeid`, `tftid`
-// -- because `#[use(compiler)]` binds no name yet and every one of them would be a
-// diagnostic inside a library that eleven samples import.
+// tests/samples/stdlib/types.fin is the specification. What is left out of this copy is
+// everything that needs the compiler API -- `@special` bodies calling `compiler.types.*`,
+// `TypeInfo` with its `_static_string` field, `typeid`, `tftid` -- because
+// `#[use(compiler)]` binds no name yet and every one of them would be a diagnostic inside
+// a library that eleven samples import.
 //
-// `resolve_type` and `resolve_arr_type` keep their signatures and have no body. That
-// is not a stub: nothing in the language produces a `$type` *value* -- the four
-// meta-types resolve in every type position (Soundness_MetaTypes) and no expression
-// has one as its type -- so these two are compiler intrinsics, and the declaration
-// without a body (parser.y:471) is how the library names one. A placeholder body
-// would report `expected '$type', got 'any'` on its own return statement.
+// `number2str` NOW CONVERTS. It used to `return "0";` for every input, which is the one
+// kind of stub that is worse than an absent function: a caller gets a `string` back and no
+// indication it is wrong. It goes through C's `snprintf` now, and it is measured rather
+// than type-checked -- `number2str::<int>(42)` gives `42` and `number2str::<int>(-7)` gives
+// `-7` from a linked executable. `number2str_float` is beside it for the types where `%d`
+// would truncate, and `str2int`/`str2double` are the other direction, which nothing here
+// had at all.
+//
+// The two are separate functions rather than one, and that is forced rather than chosen:
+// the format specifier has to be a literal at the `snprintf` call, and nothing in the
+// language can branch on which type `T` is bound to (`if (T == int)` is a syntax error --
+// `unexpected TYPE_STRING` for the type-name comparison generally). So a caller with a
+// `double` picks the float form. `%g` and not `%f` in that one, because `%f` pads
+// `2.5` out to `2.500000` and the shortest round-tripping form is what a caller printing a
+// number wants.
+//
+// `resolve_type` and `resolve_arr_type` keep their signatures and have no body. That is not
+// a stub: nothing in the language produces a `$type` *value* -- the four meta-types resolve
+// in every type position (Soundness_MetaTypes) and no expression has one as its type -- so
+// these two are compiler intrinsics, and the declaration without a body (parser.y:471) is
+// how the library names one. A placeholder body would report `expected '$type', got 'any'`
+// on its own return statement.
+//
+// THE ALIAS SET IS WIDER THAN THE DRAFT'S, and each addition is a name a caller would
+// otherwise spell as a width in braces. `i8`/`i16`/`u8`/`u16` complete the row the draft
+// starts at 32 bits; `usize`/`isize` are the pointer-width names every systems language
+// has; `byte` is `uint{8}` under the name that says what it is for.
+//
+// THE CONSTRAINT SETS ARE SPLIT, which the draft's single `Number` cannot express.
+// `Integer`, `Float`, `Signed` and `Unsigned` are subsets of it, and they exist because a
+// bound of `Number` admits types an operation is wrong for -- `math.fin`'s `abs` is the
+// standing example: it takes `Number` and is a no-op on the unsigned half. A function that
+// means "a signed number" can now say so. `Number` is unchanged, because eleven samples
+// and `math.fin` name it.
+//
+// GAPS hit while writing this file:
+//
+//   * `array<T> = [T]` is declared, marked `#[export]`, and unusable. Importing it reports
+//     `Module 'types' does not export 'array'`, and this is not an export-table problem as
+//     the old header implied: the alias is not declared *at all*, in this file or any
+//     other. `visit(TypeDefinition&)` returns early for an alias with generic parameters
+//     without calling `defineType`, so `array<int>` reports `Undefined type 'array'` even
+//     inside the file that declares it -- measured, and it is exactly what
+//     KnownDefect_TypeAliases.AGenericTypeAliasIsNeverDeclared asserts. Write `[T]`.
+//   * `Any<Printable>` and every other alias-with-arguments silently drops its arguments
+//     (KnownDefect_TypeAliases.GenericArgumentsOnANonGenericAliasAreDiscarded), which is
+//     why `stdio.fin` binds `<X: Printable>` directly rather than through `Any`.
+//   * A constraint set is not enforced as a bound yet
+//     (KnownDefect_GenericBounds.AStructInstantiationViolatingItsBoundIsAccepted), so
+//     `Integer`, `Signed` and `Unsigned` document intent and do not yet refuse anything.
+//     They start refusing without an edit when that check lands.
+//   * `cast<int>` of a floating-point value is refused in codegen (`this conversion is not
+//     lowered yet`), so `number2str` instantiated at `double` type-checks and does not
+//     build. Found by running the conversions rather than by reading them.
+//   * None of the Fin functions here lower through an import. The `@define`d externs do.
 namespace std {
 
 #[export] %{
+pub type i8 = int{8};
+pub type i16 = int{16};
 pub type i32 = int;
 pub type i64 = int{64};
+pub type u8 = uint{8};
+pub type u16 = uint{16};
 pub type u32 = uint;
 pub type u64 = uint{64};
 pub type f32 = float;
 pub type f64 = double;
 
+pub type usize = uint{64};
+pub type isize = int{64};
+pub type byte = uint{8};
+
+// The draft's set, unchanged: eleven samples and `math.fin` name it.
 pub type Number = int | uint | float | short | long | ushort | ulong | double;
+
+// Subsets of it, for the operations `Number` is too wide for. See the header.
+pub type Integer = int | uint | short | long | ushort | ulong;
+pub type Signed = int | short | long;
+pub type Unsigned = uint | ushort | ulong;
+pub type Float = float | double;
 }%
 
+// Declared, exported, and not usable -- see the header's first gap. Kept because the draft
+// declares it and because the day generic aliases are declared it starts working.
 #[export]
 pub type array<T> = [T];
 
 // `Any` and `Any<...>` both mean "checked at runtime, not here", which is what the
-// registered `any` is (Soundness_DynamicTypes). The draft writes them as two aliases
-// with `#[anytype]`/`#[RT]` attributes; the attributes have no reader yet.
+// registered `any` is (Soundness_DynamicTypes). The draft writes them as two aliases with
+// `#[anytype]`/`#[RT]` attributes; the attributes have no reader yet.
 #[export]
 pub type Any = any;
 
@@ -43,9 +110,56 @@ pub fun resolve_type(v: any) <$type>;
 #[export]
 pub fun resolve_arr_type(arr: [any]) <$type>;
 
+// C's formatter and parser, for the four conversions below.
+#[llvm_name="snprintf"]
+@define types_snprintf(buffer: string, limit: ulong, fmt: string, ...) <int>;
+
+#[llvm_name="calloc"]
+@define types_alloc_zeroed(count: ulong, size: ulong) <string>;
+
+#[llvm_name="strtol"]
+@define types_strtol(s: string, rest: &void, base: int) <long>;
+
+#[llvm_name="strtod"]
+@define types_strtod(s: string, rest: &void) <double>;
+
+// An integer as its decimal spelling, in fresh memory the caller owns. 32 bytes covers the
+// widest 64-bit integer with its sign and the terminator; `calloc` supplies the terminator
+// even if `snprintf` were ever to leave the buffer short.
+//
+// A `double` or `float` argument type-checks and does not lower: `cast<int>` of a
+// floating-point value is refused in codegen (`this conversion is not lowered yet`),
+// measured by instantiating this function at `double` and bisecting to that cast. So the
+// integer form is for integers in practice as well as in intent, and `number2str_float` is
+// not merely the nicer choice for a `double` -- it is the one that runs.
 #[export]
 pub fun number2str<T: Number>(number: T) <string> {
-    return "0";
-}
+    let buffer <string> = types_alloc_zeroed(cast<ulong>(32), cast<ulong>(1));
+    let written <int> = types_snprintf(buffer, cast<ulong>(32), "%d", cast<int>(number));
+    return buffer;
+  }
+
+// The same for the types `%d` would truncate. `%g` gives the shortest form that round-trips
+// -- `2.5` rather than `%f`'s `2.500000`.
+#[export]
+pub fun number2str_float<T: Number>(number: T) <string> {
+    let buffer <string> = types_alloc_zeroed(cast<ulong>(40), cast<ulong>(1));
+    let written <int> = types_snprintf(buffer, cast<ulong>(40), "%g", cast<double>(number));
+    return buffer;
+  }
+
+// The other direction, which this module had no form of at all. Both follow C: a string
+// that parses to nothing gives 0, and there is no way to tell that from a string that
+// spells zero. That is C's ambiguity rather than this library's choice, and a caller who
+// needs to distinguish them checks the string first.
+#[export]
+pub fun str2int(text: string) <int> {
+    return cast<int>(types_strtol(text, null, 10));
+  }
+
+#[export]
+pub fun str2double(text: string) <double> {
+    return types_strtod(text, null);
+  }
 
 }

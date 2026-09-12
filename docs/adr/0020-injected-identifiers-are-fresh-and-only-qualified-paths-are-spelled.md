@@ -50,3 +50,21 @@ field reserved in the machine contract (ADR 0009), and the two need to agree.
 `ident` rejecting an unqualified name is a diagnostic the library author sees, not the user of the library —
 which is the right place for it, and an argument for making the restriction a hard error rather than a
 convention.
+
+## Implemented for `@macro`, ahead of the interpreter
+
+`compiler.code` does not exist yet, but `@macro` does, and its body is the same shape of problem: code
+written in one module, landing in a scope its author has never seen. So the rule above is implemented there
+first, by ADR 0023 step 4 — a body may spell `$param` unquotes, literals, operators and module-qualified
+paths, and a bare unqualified identifier is refused at the declaration
+(`src/macros/expander/ExpanderDecls.cpp`).
+
+Two things went the way this ADR predicted. The refusal is a hard error and the author of the macro is who
+sees it, with no call site present. And qualified paths resolve in the declaring module rather than at the
+call site (`TypeNode::declaringScope`), which is the property that makes "a qualified path resolves in a
+module namespace where locals do not exist" true rather than merely likely: without it, a library macro
+spelling `Collection::from_prototype` works only in a caller that happens to import `Collection`.
+
+One thing did not carry over. `fresh()` has no counterpart, and needs none: a macro body is one expression
+(ADR 0023), so it cannot introduce a binding at all, and there is no `let tmp` for a fresh name to protect.
+The half of this ADR about minted identifiers stays reserved for the interpreter.
