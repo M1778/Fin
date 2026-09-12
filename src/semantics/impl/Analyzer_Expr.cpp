@@ -556,6 +556,21 @@ void SemanticAnalyzer::visit(Identifier& node) {
     lastExprType = nullptr;
 }
 
+// One dereference for comparisons: `&T` reads as `T`. Single level, never
+// through a nullable or into another pointer -- narrowing those first stays
+// explicit. Shared by the equality-operand substitution below; call
+// arguments and friends go through checkType instead, which probes the same
+// shape inline.
+static TypePtr derefOnceForComparison(const TypePtr& type) {
+    if (!type || type->as<NullableType>()) return type;
+    if (auto* ptr = type->as<PointerType>()) {
+        if (ptr->pointee && !ptr->pointee->as<PointerType>() &&
+            !ptr->pointee->as<NullableType>())
+            return ptr->pointee;
+    }
+    return type;
+}
+
 void SemanticAnalyzer::visit(BinaryOp& node) {
     node.left->accept(*this);
     auto leftType = lastExprType;
@@ -652,6 +667,16 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
     if (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ ||
         node.op == ASTTokenKind::LT || node.op == ASTTokenKind::GT ||
         node.op == ASTTokenKind::LTEQ || node.op == ASTTokenKind::GTEQ) {
+        // A reference reads as its pointee in `==` and `!=`, either side, so
+        // `&T == T` checks as `T == T` (constants, widening and all) -- and
+        // diagnostics name the values being compared. Other relationals keep
+        // their operands as written: ordering a dereferenced value is the
+        // same operation mechanically, but no corpus site asks for it.
+        TypePtr leftCmp = leftType, rightCmp = rightType;
+        if (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ) {
+            leftCmp = derefOnceForComparison(leftType);
+            rightCmp = derefOnceForComparison(rightType);
+        }
         // `0 == a` and `a == 0` are the same question, so a constant is looked for
         // on both sides. Without this the left operand is the expectation and a
         // constant on the left makes the *variable* the error: `blame 0 == a` for a
@@ -692,30 +717,30 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         const bool leftConstant = integerConstant(*node.left, leftNegative);
         const bool rightConstant = integerConstant(*node.right, rightNegative);
         if (!nullComparison && leftConstant &&
-            !constantFitsType(*node.left, *rightType)) {
-            checkType(*node.left, leftType, rightType);
+            !constantFitsType(*node.left, *rightCmp)) {
+            checkType(*node.left, leftCmp, rightCmp);
         }
         if (!nullComparison && rightConstant &&
-            !constantFitsType(*node.right, *leftType)) {
-            checkType(*node.right, rightType, leftType);
+            !constantFitsType(*node.right, *leftCmp)) {
+            checkType(*node.right, rightCmp, leftCmp);
         }
         if (!nullComparison &&
-            !constantFitsType(*node.right, *leftType) &&
-            !constantFitsType(*node.left, *rightType) &&
-            !(widerInteger(leftType, rightType) &&
-              !negativeConstantAgainstUnsigned(*node.left, leftType,
-                                               *node.right, rightType) &&
+            !constantFitsType(*node.right, *leftCmp) &&
+            !constantFitsType(*node.left, *rightCmp) &&
+            !(widerInteger(leftCmp, rightCmp) &&
+              !negativeConstantAgainstUnsigned(*node.left, leftCmp,
+                                               *node.right, rightCmp) &&
               ([&] {
                   bool negative = false;
                   return !integerConstant(*node.left, negative) ||
-                         constantFitsType(*node.left, *rightType);
+                         constantFitsType(*node.left, *rightCmp);
               })() &&
               ([&] {
                   bool negative = false;
                   return !integerConstant(*node.right, negative) ||
-                         constantFitsType(*node.right, *leftType);
+                         constantFitsType(*node.right, *leftCmp);
               })())) {
-            checkType(*node.right, rightType, leftType);
+            checkType(*node.right, rightCmp, leftCmp);
         }
         lastExprType = currentScope->resolveType("bool");
         return;

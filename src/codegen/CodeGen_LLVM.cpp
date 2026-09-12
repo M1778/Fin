@@ -2291,6 +2291,12 @@ private:
                 members.push_back(f.type.llvmType);
             }
         }
+        // `Self` in field position means this struct (struct_methods.fin:21
+        // writes `<&Point>` where `<&Self>` would do): bound for the member
+        // mapping below, as instantiations bind it for theirs. Idempotent with
+        // the third pass, which binds the same table again for the methods.
+        bindMethodTypes(info);
+        ScopedBindings selfScope(types_, &info.methodBindings);
         for (auto& m : s->members) {
             auto t = types_.map(m->type.get());
             if (!t) { unsupportedType(*m, m->type.get(), "a struct field"); return; }
@@ -3239,12 +3245,25 @@ private:
         structs_[out] = info;
 
         // 3. The body, with the parameters bound. Everything about this is the
-        //    non-generic path in declareStructs' second pass, with `types_.map` seeing
-        //    the substitution -- so a field of `T` is a field of what T became, and a
-        //    field of `&T` or `[T, 3]` is the decoration applied to it.
-        ScopedBindings bound(types_, &structs_[out].substitution);
-        std::vector<llvm::Type*> members;
+        //    non-generic path in declareStructs' second pass, with `types_.map`
+        //    seeing the method bindings (substitution plus `Self` and the bare
+        //    name) -- so a field of `T` is a field of what T became, a field
+        //    of `&T` or `[T, 3]` is the decoration applied to it, and a field
+        //    of `&Self` is this instantiation (lib/std stdptr.fin's
+        //    `rptr<T>`). Bound here rather than with the methods in step 4,
+        //    which also read them: one scope for both.
+        //    The blocks written on the template are this instantiation's:
+        //    `Result<T, U> implements <IResult>` (stdlib/typing.fin:27) is
+        //    filed under `Result`, and `Result<int, string>` is what a method
+        //    of it is declared for. Keyed by the written name for exactly this
+        //    reason -- a block cannot be written on a mangled name, because
+        //    nobody writes one.
         StructInfo& live = structs_[out];
+        live.decl = tmpl;
+        live.extras = extrasFor(tmpl->name);
+        bindMethodTypes(live);
+        ScopedBindings methodScope(types_, &live.methodBindings);
+        std::vector<llvm::Type*> members;
         for (auto& m : tmpl->members) {
             auto t = types_.map(m->type.get());
             if (!t) {
@@ -3284,19 +3303,8 @@ private:
         //    template is a template, and a template with no arguments has no
         //    signature to lower. It is also why `Box<int>.get` and `Box<char>.get` are
         //    two functions -- they are two bodies over two representations, the same
-        //    as a generic free function's instances.
-        live.decl = tmpl;
-        // The blocks written on the template are this instantiation's: `Result<T, U>
-        // implements <IResult>` (stdlib/typing.fin:27) is filed under `Result`, and
-        // `Result<int, string>` is what a method of it is declared for. Keyed by the
-        // written name for exactly this reason -- a block cannot be written on a
-        // mangled name, because nobody writes one.
-        live.extras = extrasFor(tmpl->name);
-        bindMethodTypes(live);
-        // Nested inside `bound` above, and replacing it for the duration: a method
-        // signature needs `Self` and the template's bare name as well as `T`, and
-        // methodBindings is the substitution plus those two.
-        ScopedBindings methodScope(types_, &live.methodBindings);
+        //    as a generic free function's instances. Declaration, extras and
+        //    bindings were all set in step 3, under whose scope this runs.
         return declareStructMethods(live);
     }
 
@@ -3955,7 +3963,8 @@ private:
         return builder_.CreateBitCast(global, ptrTy);
     }
 
-    llvm::Value* convert(ASTNode& node, const CgVal& from, const CgType& to) {
+    llvm::Value* convert(ASTNode& node, const CgVal& from, const CgType& to,
+                       bool explicitCast = false) {
         if (!from.ok()) return nullptr;
         // `null` into a scalar is zero: `integer <int> = null`
         // (deeptest4.fin:6) is normative and the front end takes it, and zero
@@ -3971,20 +3980,26 @@ private:
                 return llvm::ConstantFP::get(to.llvmType, 0.0);
             if (to.isPointer()) return from.value;
         }
-        // A pointer into a non-bool integer is its address bits: what
-        // `cast<int>(key)` means for the default hasher
-        // (lib/std/hashmap.fin:91), where equal pointers must hash equal.
+        // A pointer into a non-bool integer is its address bits, but only as
+        // an explicit `cast`: what `cast<int>(key)` means for the default
+        // hasher (lib/std/hashmap.fin:91), where equal pointers must hash
+        // equal. An *implicit* pointer where an integer is expected is the
+        // dereference below (what the analyzer admitted) or a refusal, never
+        // address bits -- `take(&v)` for `take(x: int)` reads the pointee,
+        // and answering the address instead would link cleanly and pass
+        // garbage.
         // Truncated or zero-extended to the target width through the integer
         // path below. `bool` is excluded: truncating an address to one bit
         // answers "is the low bit set", not "is it null" -- that question is
         // `== null`, which the comparison path already serves.
-        if (from.type.isPointer() && to.kind == CgType::Kind::Int &&
+        if (explicitCast && from.type.isPointer() && to.kind == CgType::Kind::Int &&
             !to.isBool) {
             const unsigned ptrBits =
                 module_.getDataLayout().getPointerSizeInBits();
             llvm::Value* asInt = builder_.CreatePtrToInt(
                 from.value, llvm::IntegerType::get(ctx_, ptrBits), "addr");
-            return convert(node, CgVal{asInt, types_.intType(ptrBits, false)}, to);
+            return convert(node, CgVal{asInt, types_.intType(ptrBits, false)}, to,
+                           explicitCast);
         }
         // A string (a pointer with nothing recorded past it) into a dynamic
         // `[char]`: the bytes with the length measured (strlen), paired the
@@ -4059,6 +4074,19 @@ private:
         if (to.isStruct() && from.type.isPointer() && from.type.pointee &&
             from.type.pointee->isStruct()) {
             return builder_.CreateLoad(to.llvmType, from.value, "constructed");
+        }
+        // A pointer reads as its pointee where a value is expected (rvalues
+        // deref, lvalues do not): the analyzer admits `&T` for `T`, and this
+        // loads it. Single level, mirroring that rule -- and only a sized
+        // pointee, so `&void` and strings still refuse below. Anything the
+        // pointee still mismatches refuses in the recursion, which is what
+        // keeps e.g. `&int` to `string` a refusal rather than a reinterpret.
+        if (from.type.isPointer() && from.type.pointee &&
+            from.type.pointee->llvmType && from.type.pointee->llvmType->isSized() &&
+            !to.isPointer()) {
+            llvm::Value* read = builder_.CreateLoad(from.type.pointee->llvmType,
+                                                    from.value, "deref");
+            return convert(node, CgVal{read, *from.type.pointee}, to, explicitCast);
         }
         if (from.type.llvmType == to.llvmType) return from.value;
 
@@ -6004,6 +6032,138 @@ private:
         emitInstanceCall(node, key, receiver->ptr, values);
     }
 
+    // `==` and `!=` on two arrays: lengths first, then elements.
+    //
+    // A length mismatch decides without reading any element, so
+    // different-sized arrays never touch out-of-bounds memory either way --
+    // and a fixed extent against a dynamic length is the same question as two
+    // of one kind. Equal lengths walk both sides together, comparing
+    // element-wise through emitArithmetic itself, so nesting, widening and
+    // pointer elements answer by the rules they already have; a struct
+    // element refuses exactly as a plain struct `==` does (a declared
+    // operator is a call off the source tree, and there is no tree here).
+    // The result is computed as equality and negated for `!=`, so there is
+    // one loop and not two.
+    //
+    // Fixed sides are stored to fresh slots first: their values arrive in
+    // registers ([N x T] aggregates) and a variable-index read needs a home.
+    // Dynamic sides read straight off the `{ptr, len}` pair. The slots sit
+    // beside the loop's own, the way `foreach` places its counter -- one
+    // evaluation, one set, whatever encloses it.
+    CgVal emitArrayEquality(ASTNode& node, ASTTokenKind op, const CgVal& lhs,
+                            const CgVal& rhs) {
+        if (!currentFn_) {
+            unsupported(node, "this operator outside a function");
+            return CgVal{};
+        }
+        // The loop counts in a signed `int`, which is what a dynamic length
+        // word already is -- the same bound `foreach` sets itself, and for the
+        // same reason: a count past it would truncate into the wrong number of
+        // elements, silently. Both fixed sides are checked, so that `a == b`
+        // and `b == a` refuse together rather than one of them looping.
+        const CgType counterType = types_.intType(32, true);
+        for (const CgType* side : {&lhs.type, &rhs.type}) {
+            if (!side->isDynamicArray && side->extent > 0x7fffffffull) {
+                unsupported(node, "an array comparison with more elements than an "
+                                  "'int' can count");
+                return CgVal{};
+            }
+        }
+        llvm::Value* homeL = nullptr;
+        llvm::Value* homeR = nullptr;
+        if (!lhs.type.isDynamicArray) {
+            homeL = builder_.CreateAlloca(lhs.type.llvmType, nullptr, "cmparr.l");
+            builder_.CreateStore(lhs.value, homeL);
+        }
+        if (!rhs.type.isDynamicArray) {
+            homeR = builder_.CreateAlloca(rhs.type.llvmType, nullptr, "cmparr.r");
+            builder_.CreateStore(rhs.value, homeR);
+        }
+        llvm::Value* lenL = lhs.type.isDynamicArray
+            ? builder_.CreateExtractValue(lhs.value, {1}, "cmplen.l")
+            : llvm::ConstantInt::get(counterType.llvmType,
+                                     (uint64_t)lhs.type.extent, true);
+        llvm::Value* lenR = rhs.type.isDynamicArray
+            ? builder_.CreateExtractValue(rhs.value, {1}, "cmplen.r")
+            : llvm::ConstantInt::get(counterType.llvmType,
+                                     (uint64_t)rhs.type.extent, true);
+        llvm::Value* lenEq = builder_.CreateICmpEQ(lenL, lenR, "cmpleneq");
+
+        auto* loopBB = llvm::BasicBlock::Create(ctx_, "cmparr.loop", currentFn_->fn);
+        auto* bodyBB = llvm::BasicBlock::Create(ctx_, "cmparr.body", currentFn_->fn);
+        auto* endBB = llvm::BasicBlock::Create(ctx_, "cmparr.end", currentFn_->fn);
+
+        // Seeded with the length answer, so a mismatch skips the loop already
+        // decided; the loop only ever ANDs element answers into it.
+        auto* acc = builder_.CreateAlloca(builder_.getInt1Ty(), nullptr, "cmparr.acc");
+        auto* counter = builder_.CreateAlloca(counterType.llvmType, nullptr, "cmparr.i");
+        builder_.CreateStore(lenEq, acc);
+        builder_.CreateStore(llvm::ConstantInt::get(counterType.llvmType, 0), counter);
+        builder_.CreateCondBr(lenEq, loopBB, endBB);
+
+        builder_.SetInsertPoint(loopBB);
+        llvm::Value* at = builder_.CreateLoad(counterType.llvmType, counter, "cmparr.i");
+        // Either side's length bounds the loop: they are equal wherever this
+        // runs, so there is no first and second to choose between.
+        builder_.CreateCondBr(builder_.CreateICmpSLT(at, lenL, "cmparr.more"), bodyBB,
+                              endBB);
+
+        builder_.SetInsertPoint(bodyBB);
+        llvm::Value* i = builder_.CreateLoad(counterType.llvmType, counter, "cmparr.i");
+        // Widened to i64 before it becomes a GEP index, and sign-extended
+        // because the counter is signed -- the same two lines `foreach`
+        // writes, and for the same reason: a fixed home steps over the whole
+        // array first (the leading zero) while a dynamic data pointer already
+        // addresses elements.
+        llvm::Value* wide = builder_.CreateSExt(i, builder_.getInt64Ty());
+        llvm::Value* ptrL = nullptr;
+        if (lhs.type.isDynamicArray) {
+            llvm::Value* data = builder_.CreateExtractValue(lhs.value, {0}, "cmpdata.l");
+            ptrL = builder_.CreateInBoundsGEP(lhs.type.element->llvmType, data, wide,
+                                              "cmpelem.l");
+        } else {
+            ptrL = builder_.CreateInBoundsGEP(lhs.type.llvmType, homeL,
+                                              {builder_.getInt64(0), wide}, "cmpelem.l");
+        }
+        llvm::Value* ptrR = nullptr;
+        if (rhs.type.isDynamicArray) {
+            llvm::Value* data = builder_.CreateExtractValue(rhs.value, {0}, "cmpdata.r");
+            ptrR = builder_.CreateInBoundsGEP(rhs.type.element->llvmType, data, wide,
+                                              "cmpelem.r");
+        } else {
+            ptrR = builder_.CreateInBoundsGEP(rhs.type.llvmType, homeR,
+                                              {builder_.getInt64(0), wide}, "cmpelem.r");
+        }
+        llvm::Value* eltL = builder_.CreateLoad(lhs.type.element->llvmType, ptrL,
+                                                "cmplhs");
+        llvm::Value* eltR = builder_.CreateLoad(rhs.type.element->llvmType, ptrR,
+                                                "cmprhs");
+        CgVal eltEq = emitArithmetic(node, ASTTokenKind::EQEQ,
+                                     CgVal{eltL, *lhs.type.element},
+                                     CgVal{eltR, *rhs.type.element});
+        if (failed_ || !eltEq.value) return CgVal{};
+        CgType boolType = *types_.byName("bool");
+        llvm::Value* elemEq = convert(node, eltEq, boolType);
+        if (failed_ || !elemEq) return CgVal{};
+        builder_.CreateStore(
+            builder_.CreateAnd(
+                builder_.CreateLoad(builder_.getInt1Ty(), acc, "cmpacc"), elemEq,
+                "cmpand"),
+            acc);
+        builder_.CreateStore(
+            builder_.CreateAdd(i, llvm::ConstantInt::get(counterType.llvmType, 1),
+                               "cmpnext"),
+            counter);
+        builder_.CreateBr(loopBB);
+
+        builder_.SetInsertPoint(endBB);
+        llvm::Value* result = builder_.CreateLoad(builder_.getInt1Ty(), acc,
+                                                  "cmpresult");
+        if (op == ASTTokenKind::NOTEQ)
+            result = builder_.CreateXor(result, builder_.getInt1(true), "cmpneg");
+        return CgVal{result, boolType};
+    }
+
     CgVal emitArithmetic(ASTNode& node, ASTTokenKind op, CgVal lhs, CgVal rhs) {
         // An aggregate operand is refused before anything else looks at it. Not for
         // tidiness: commonType compares bit widths, a struct has none, so it would
@@ -6014,6 +6174,18 @@ private:
         if (lhs.type.isStruct() || rhs.type.isStruct()) {
             unsupported(node, "an operator on a struct");
             return CgVal{};
+        }
+
+        // Two arrays compare by length first and then element-wise, and only
+        // for `==` and `!=`: ordering an array is unruled. A mixed
+        // array/non-array pair is not this -- it falls through to the
+        // conversion below, which refuses it as before.
+        if (lhs.type.isArray() && rhs.type.isArray()) {
+            if (op != ASTTokenKind::EQEQ && op != ASTTokenKind::NOTEQ) {
+                unsupported(node, "an ordering on an array");
+                return CgVal{};
+            }
+            return emitArrayEquality(node, op, lhs, rhs);
         }
 
         // A pointer operand, for the same reason and with a narrower exit: equality
@@ -6039,7 +6211,7 @@ private:
             // `if (self.hasher == null)` the standard library initializes
             // through. Only the null constant pairs this way: a runtime
             // pointer is not proven null, and two non-null arrays compare
-            // contents, not identity, which is a rule nobody has written.
+            // contents, not identity, on the array path above.
             const bool lNull = lhs.value &&
                                llvm::isa<llvm::ConstantPointerNull>(lhs.value);
             const bool rNull = rhs.value &&
@@ -6088,7 +6260,25 @@ private:
                         : builder_.CreateICmpNE(word, nil.value);
                 return CgVal{out, boolType};
             }
-            if (!lhs.type.isPointer() || !rhs.type.isPointer()) {
+            // One side a pointer, the other not: compare through the load.
+            // `&int == int` reads the pointee and compares on as usual, so
+            // widening and the rest behave exactly as for a plain value --
+            // which is what the analyzer admitted when it unwrapped one level
+            // for `==`/`!=`. Single level in practice, and only a sized
+            // pointee, so `&void` and strings still refuse with the pointer
+            // message. A struct pointee recurses into the struct refusal
+            // above, exactly as a plain struct `==` does.
+            if (lhs.type.isPointer() != rhs.type.isPointer()) {
+                const CgVal& ptr = lhs.type.isPointer() ? lhs : rhs;
+                if (ptr.type.pointee && ptr.type.pointee->llvmType &&
+                    ptr.type.pointee->llvmType->isSized()) {
+                    llvm::Value* read = builder_.CreateLoad(
+                        ptr.type.pointee->llvmType, ptr.value, "deref");
+                    CgVal loaded{read, *ptr.type.pointee};
+                    if (lhs.type.isPointer())
+                        return emitArithmetic(node, op, loaded, rhs);
+                    return emitArithmetic(node, op, lhs, loaded);
+                }
                 unsupported(node, "an operator on a pointer");
                 return CgVal{};
             }
@@ -7570,7 +7760,7 @@ private:
                                           target->structInfo->finName));
             return;
         }
-        llvm::Value* out = convert(node, v, *target);
+        llvm::Value* out = convert(node, v, *target, /*explicitCast=*/true);
         if (out) value_ = CgVal{out, *target};
     }
 

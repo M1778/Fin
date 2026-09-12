@@ -612,6 +612,19 @@ bool SemanticAnalyzer::checkType(ASTNode& node, std::shared_ptr<Type> actual, st
     // as<ErrorType>() because `&NoSuchType` and `[NoSuchType]` reach here wrapped.
     if (isErrorType(actual) || isErrorType(expected)) return true;
 
+    // A reference reads as its pointee where a value is expected (rvalues
+    // deref, lvalues do not): `&T` is accepted for `T`, once, and never
+    // through a nullable (narrow those first). Probed quietly so a miss still
+    // reports the original mismatch rather than the pointee's -- and only one
+    // level, so a `&&T` still needs an explicit `*`.
+    if (auto* ptr = actual->as<PointerType>()) {
+        if (ptr->pointee && !ptr->pointee->as<PointerType>() &&
+            !ptr->pointee->as<NullableType>()) {
+            QuietPass quiet(*this);
+            if (checkType(node, ptr->pointee, expected)) return true;
+        }
+    }
+
     // A negative constant is not an unsigned value, whatever the widths say.
     //
     // Read before assignability and not after, because ADR 0022's widening makes

@@ -6888,6 +6888,99 @@ BACKEND_TEST(Soundness_Codegen, ACastFromAStringToACharArrayMeasuresIt) {
     EXPECT_EQ(b.out, "2 h i\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, ASelfFieldLowersToThisInstantiation) {
+    // A field of `&Self` is this struct (struct_methods.fin:21 writes `<&Point>`
+    // where `<&Self>` would do): bound during member mapping for templates and
+    // plain structs alike, so the declaration lowers.
+    const Built b = build(std::string(kPrintf) +
+        "struct Node {\n"
+        "    v <int>,\n"
+        "    next <&Self>\n"
+        "}\n"
+        "struct Box<T> {\n"
+        "    v <T>,\n"
+        "    me <&Self>\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let n <Node> = Node{ v: 1, next: null };\n"
+        "    let b <Box<int>> = Box::<int>{ v: 3, me: null };\n"
+        "    printf(\"%d %d\\n\", n.v, b.v);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 3\n") << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// A reference reads as its pointee where a value is expected (rvalues deref,
+// lvalues do not): call arguments, comparisons, returns and plain reads all
+// load through a single-level `&T`. Never through a nullable (narrow those
+// first) and never twice (`&&T` keeps its explicit `*`).
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AReferenceArgumentDereferences) {
+    const Built b = build(std::string(kPrintf) +
+        "fun take(x: int) <int> { return x + 1; }\n"
+        "fun main() <noret> {\n"
+        "    let v <int> = 5;\n"
+        "    printf(\"%d\\n\", take(&v));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AReferenceOperandDereferencesInComparison) {
+    // const.fin:84 verbatim in shape: `ta2.value == 5` where the member reads
+    // as `&int`.
+    const Built b = build(std::string(kPrintf) +
+        "fun same(a: &int, b: int) <bool> { return a == b; }\n"
+        "fun main() <noret> {\n"
+        "    let v <int> = 5;\n"
+        "    if (same(&v, 5)) { printf(\"yes\\n\"); } else { printf(\"no\\n\"); }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "yes\n") << b.why();
+}
+
+// ---------------------------------------------------------------------------
+// Array equality: lengths, then elements.
+//
+// Two arrays compare by length first (no out-of-bounds read either way) and
+// then element-wise through `==` itself, so nesting, `any` and struct
+// elements all answer by the rules they already have. Only `==`/`!=`: ordering
+// an array is unruled.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, AFixedArrayComparesElementWise) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int, 3]> = [1, 2, 3];\n"
+        "    let b <[int, 3]> = [1, 2, 3];\n"
+        "    let c <[int, 3]> = [1, 2, 4];\n"
+        "    printf(\"%d %d\\n\", a == b, a == c);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADynamicArrayComparesLengthThenElements) {
+    // const.fin:102 verbatim in shape (there against a fixed literal): a
+    // length mismatch decides without reading any element.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <[int]> = [1, 2, 3];\n"
+        "    let b <[int]> = [1, 2];\n"
+        "    let c <[int]> = [1, 2, 3];\n"
+        "    printf(\"%d %d\\n\", a == b, a == c);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0 1\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     // ADR 0032: the module loader keeps every loaded Program and the backend
     // registers templates out of them, so `Box::<int>` below instantiates the

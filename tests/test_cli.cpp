@@ -2849,7 +2849,10 @@ TEST(Soundness_DiagnosticAttribution, NoDiagnosticPointsAtAnExpectationComment) 
     //
     // 100 -> 50 for that reason: the corpus is down to 98 located diagnostics about
     // itself, and the floor was one unit away from failing for the right reason.
-    EXPECT_GT(census.considered, 50u)
+    // 50 -> 40 for the same reason: the corpus is down to 43, as `&Self`
+    // fields, elided generic arguments and the sample repairs cleared a dozen
+    // diagnostics without touching the detector.
+    EXPECT_GT(census.considered, 40u)
         << "the corpus emitted almost no located diagnostics about its own files, so the "
            "assertion below would pass without measuring anything. Fix the detector (or "
            "lower this floor on purpose) before trusting an empty census.";
