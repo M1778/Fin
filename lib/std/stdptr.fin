@@ -108,11 +108,12 @@
 //     `alias()` omits `restrict` from the literal and the sibling's `restrict` is null.
 //     A caller wanting a readonly handle calls `readonly_view()`, which is a method and
 //     works; `restrict` remains the field `const.fin:82` reads.
-//   * None of this runs. An `rptr` is refused in codegen (`a variable of type 'rptr<int>'
-//     is not lowered yet`), and a comparison against null -- which `wptr::is_alive` makes
-//     -- is refused separately (`an operator on a pointer is not lowered yet`). The
-//     counting is verified by reading, not by running, and that is the honest statement of
-//     what this file is.
+//   * This runs now -- `const.fin` executes the `rptr<int>` own/borrow/release
+//     sequence end to end -- which is what retired the paragraph that stood
+//     here. It said the counting was verified by reading; the first run proved
+//     the reading wrong at one line (`const.fin:96` expected a release to read
+//     null, and release drops one reference and nulls nothing -- ADR 0039).
+//     Unrun still: the `wptr` paths, `get`, and `is_alive`.
 //   * Ownership is still not enforced against an alias the *language* made. Two `let`s
 //     bound to the same `rptr` are two names for one handle and the count is 1, which is
 //     correct; what no library can see is a raw `&rptr<T>` copied past a `release()`.
