@@ -15,43 +15,582 @@
 
   // --- Embedded Fallback Search Data (Ensures search works offline & via file://) ---
   const FALLBACK_SEARCH_INDEX = [
-    { id: "stdlib-overview", title: "17 Core Standard Library Modules Directory", category: "Standard Library", tags: ["stdlib", "modules", "stdio", "strings", "fs", "math", "random", "env", "path", "time", "collection", "hashmap", "error", "types", "typing", "enums", "operators", "stdptr", "networking"], snippet: "Interactive directory and category filters for all 17 Fin standard library modules engineered with modular memory management.", url: "#stdlib-overview" },
-    { id: "pipeline-architecture", title: "The Fin Compiler Pipeline Flow & Refusal Invariants", category: "Compiler Architecture", tags: ["pipeline", "llvm", "ast", "lexer", "parser", "semantics", "codegen", "refusal", "invariants"], snippet: "Six-stage compiler flow from Source through Bison Parser, AST cloning, Two-Moment semantics, and LLVM lowering with strict refusal invariants.", url: "#pipeline-architecture" },
-    { id: "intro", title: "Introduction to Fin", category: "Getting Started", tags: ["philosophy", "systems", "memory", "invariants"], snippet: "Fin is a modern systems programming language where memory management is a library, the sample corpus is the normative specification, and the compiler refuses silently guessing IR.", url: "#intro" },
-    { id: "installation", title: "Installation & Build", category: "Getting Started", tags: ["build", "cmake", "conan", "llvm", "finc", "cli", "flags"], snippet: "Build finc from source using ./build.sh with CMake, Conan, Flex, Bison, and LLVM. Check installation with finc --version.", url: "#installation" },
-    { id: "quickstart", title: "Quickstart Guide", category: "Getting Started", tags: ["quickstart", "workflow", "compiler", "check", "compile"], snippet: "Create and compile Fin programs using finc. Learn the difference between type-checking with finc file.fin and compiling binaries with finc -o bin.", url: "#quickstart" },
-    { id: "hello-world", title: "Hello, World!", category: "Getting Started", tags: ["hello world", "printf", "main", "noret", "variadic", "define"], snippet: "Your first Fin program using @define printf and fun main() <noret>. Learn about angle-bracket return types and C FFI bindings.", url: "#hello-world" },
-    { id: "variables-types", title: "Variables & Types", category: "Language Tour", tags: ["let", "auto", "const", "readonly", "types", "nullable", "denullify"], snippet: "Local variable declarations with let x <int> = 100, type inference with auto, primitive types, const parameters, and nullable T? with denullify postfix ?.", url: "#variables-types" },
-    { id: "control-flow", title: "Control Flow", category: "Language Tour", tags: ["if", "else", "for", "foreach", "while", "do while", "ternary", "scope"], snippet: "Branching with if/else, three-clause for loops, foreach iterators, while and do-while loops, bare brace scopes, and Fin's ternary condition : then ? otherwise.", url: "#control-flow" },
-    { id: "functions", title: "Functions & Lambdas", category: "Language Tour", tags: ["fun", "noret", "void", "generics", "lambdas", "const", "parameters", "define"], snippet: "Declare functions with fun name(param: Type) <ReturnType>. Supports generic functions, const parameters, first-class lambdas, and @define extern bindings.", url: "#functions" },
-    { id: "structs-classes", title: "Structs & Methods", category: "Language Tour", tags: ["struct", "class", "self", "methods", "fields", "constructors", "pub", "priv", "operator"], snippet: "Define data structures with struct and class. Method definitions with explicit self: &Self receiver, default values, visibility labels, and operator overloading.", url: "#structs-classes" },
-    { id: "interfaces", title: "Interfaces & Generics", category: "Language Tour", tags: ["interface", "implements", "generics", "bounds", "constraints"], snippet: "Define polymorphic contracts with pub interface. Nominal conformance on structs, external implements blocks, generic bounds, and constraint sets.", url: "#interfaces" },
-    { id: "enums", title: "Enums & Tagged Unions", category: "Language Tour", tags: ["enum", "tagged union", "discriminant", "payload", "result", "getkeyid", "keyidof"], snippet: "Fieldless enums and tagged union enums with member payloads. 32-bit discriminants (ADR 0041), positional access enum_.0, and enum reflection.", url: "#enums" },
-    { id: "pointers-memory", title: "Pointers & Memory (rptr, wptr)", category: "Language Tour", tags: ["pointer", "reference", "new", "delete", "rptr", "wptr", "ownership", "borrow"], snippet: "Raw references &T, heap dynamic allocation new [T, n]{}, and standard library smart pointers rptr<T> and wptr<T> with sound ownership and borrow tracking.", url: "#pointers-memory" },
-    { id: "blame", title: "Blame Error Handling", category: "Language Tour", tags: ["blame", "m1778", "assert", "raise", "error", "unimplemented"], snippet: "Fin's unified error construct: blame condition, 'message' for assertions, blame Error(...) for raising, and blame m1778 for unimplemented paths.", url: "#blame" },
-    { id: "prototypes", title: "Prototypes {K,V}", category: "Language Tour", tags: ["prototype", "structural", "map", "dict", "hashmap", "collection"], snippet: "Builtin structural map type {K,V} and literal syntax {'key': value}. Structural equivalence and explicit conversion to nominal HashMap and Collection.", url: "#prototypes" },
-    { id: "macros-specials", title: "Macros & Special Functions", category: "Language Tour", tags: ["macro", "special", "quote", "bracket", "comptime", "compiler api", "grant"], snippet: "Compile-time metaprogramming: @macro returning quote AST blocks, bracket shaping (name!, name![], name!{}), @special functions, and #[use(...)] grants.", url: "#macros-specials" },
-    { id: "stdlib-stdio", title: "std::stdio — Standard I/O & Files", category: "Standard Library", tags: ["stdio", "printf", "format", "print", "println", "Stream", "File", "FileIO"], snippet: "I/O primitives including printf, format!, typed print/println with Printable interface, stderr eprint, byte Stream, and FileIO static File operations.", url: "#stdlib-stdio" },
-    { id: "stdlib-math", title: "std::math — Mathematical Functions", category: "Standard Library", tags: ["math", "PI", "E", "sqrt", "pow", "sin", "cos", "min", "max", "clamp", "abs", "gcd"], snippet: "Constants PI and E, generic Number helpers (min, max, clamp, abs, signum, gcd), integer ipow/isqrt, and C libm bindings (sqrt, pow, log, trig).", url: "#stdlib-math" },
-    { id: "stdlib-strings", title: "std::strings — String Manipulation", category: "Standard Library", tags: ["strings", "len", "equals", "concat", "substr", "to_chars", "from_chars", "trim"], snippet: "String operations and byte utilities: len, equals (content comparison vs == pointer equality), concat, substr, to_chars, from_chars, trim, and case conversion.", url: "#stdlib-strings" },
-    { id: "stdlib-path", title: "std::path — File Paths", category: "Standard Library", tags: ["path", "join", "basename", "dirname", "extname", "is_absolute", "free_path"], snippet: "Filesystem path manipulation: path joining, basename/dirname extraction, extension query, absolute path detection, and memory management.", url: "#stdlib-path" },
-    { id: "stdlib-env", title: "std::env — Environment & Process", category: "Standard Library", tags: ["env", "getenv", "setenv", "unsetenv", "get_env", "has_env", "set_env", "get_pid"], snippet: "Environment inspection and process controls: get_env, has_env, set_env, unset_env, get_pid, and exit code handling via C runtime.", url: "#stdlib-env" },
-    { id: "stdlib-time", title: "std::time — Clocks & Sleep", category: "Standard Library", tags: ["time", "now", "sleep_sec", "sleep_ms", "diff_sec", "clock", "timestamp"], snippet: "System clock and delay utilities: now() Unix timestamp, sleep_sec, sleep_ms (microsecond sleep), and diff_sec duration measurement.", url: "#stdlib-time" },
-    { id: "stdlib-fs", title: "std::fs — File System I/O", category: "Standard Library", tags: ["fs", "file_exists", "remove_file", "file_size", "read_to_string", "write_string"], snippet: "Filesystem operations: file_exists, remove_file, file_size, read_to_string with nullable return, write_string, append_string, and buffer deallocation.", url: "#stdlib-fs" },
-    { id: "stdlib-random", title: "std::random — Pseudo-Random Numbers", category: "Standard Library", tags: ["random", "seed", "seed_now", "rand", "random_int", "random_float"], snippet: "Pseudo-random number generation: seed, seed_now with system epoch, rand, uniform random_int(min, max), random_float, and random_bool.", url: "#stdlib-random" },
-    { id: "stdlib-collection", title: "std::collection — Dynamic Array", category: "Standard Library", tags: ["collection", "array", "vector", "push", "pop_last", "insert", "remove", "len", "capacity"], snippet: "Dynamic array Collection<T> with geometric doubling: push, pop_last, get, set, insert, remove, is_empty, first, last, reverse, and bounds checking.", url: "#stdlib-collection" },
-    { id: "stdlib-hashmap", title: "std::hashmap — Hash Table", category: "Standard Library", tags: ["hashmap", "map", "table", "get_index", "exists", "with_hasher", "linear probing"], snippet: "Real open-addressing hash table with linear probing and 0.75 load factor: exists, __get, __set, indexing operators, and custom hashers.", url: "#stdlib-hashmap" },
-    { id: "stdlib-error", title: "std::error — Error Base Class", category: "Standard Library", tags: ["error", "IOError", "err_code", "message", "describe", "format"], snippet: "Standard Error base class: message, err_code, format, and describe with C snprintf formatting. Inheritable by custom library errors.", url: "#stdlib-error" },
-    { id: "stdlib-types", title: "std::types — Numeric Aliases & Conversions", category: "Standard Library", tags: ["types", "i8", "u8", "usize", "isize", "byte", "Number", "Integer", "number2str"], snippet: "Sized integer aliases (i8-u64, usize, byte), constraint sets (Number, Integer, Float, Signed, Unsigned), and string/number conversions.", url: "#stdlib-types" },
-    { id: "stdlib-typing", title: "std::typing — Result<T, E> & Interfaces", category: "Standard Library", tags: ["typing", "Result", "unwrap", "unwrap_or", "expect", "is_ok", "is_err"], snippet: "The Result<T, E> sum-type enum: Ok(T) and Err(E), with methods unwrap, unwrap_or, expect, select, is_ok, and is_err.", url: "#stdlib-typing" },
-    { id: "stdlib-enums", title: "std::enums — Enum Reflection", category: "Standard Library", tags: ["enums", "getkeyid", "keyidof", "Enum", "EnumType", "discriminant"], snippet: "Enum reflection intrinsics: getkeyid(enum_val) reads the runtime discriminant, and keyidof(Member) resolves compile-time member ID.", url: "#stdlib-enums" },
-    { id: "stdlib-operators", title: "std::operators — Operator Overloading", category: "Standard Library", tags: ["operators", "Equal", "Add", "Sub", "Mul", "Div", "Index", "IndexAssign"], snippet: "Thirty operator interfaces in std::ops: Equal, NotEqual, GreaterThan, LessThan, Add, Sub, Mul, Div, Mod, Index, IndexAssign, and bitwise contracts.", url: "#stdlib-operators" },
-    { id: "stdlib-stdptr", title: "std::stdptr — Smart Pointers (rptr, wptr)", category: "Standard Library", tags: ["stdptr", "rptr", "wptr", "own", "borrow", "giveback", "release"], snippet: "Reference-counted pointer rptr<T> and weak handle wptr<T>: shared reference and borrow counters, sound aliasing refusal, and RAII-style release.", url: "#stdlib-stdptr" },
-    { id: "stdlib-networking", title: "std::networking — Socket Facilities & Status", category: "Standard Library", tags: ["networking", "sockets", "tcp", "udp", "libc", "status"], snippet: "Architectural status of socket facilities in Fin: specification roadmap, libc socket bridging, and design invariants under ADR 0008.", url: "#stdlib-networking" },
-    { id: "arch-invariants", title: "Architecture Invariants & ADRs", category: "Compiler Architecture", tags: ["architecture", "adr", "spec", "normative", "samples", "invariants"], snippet: "Fin's design discipline: ADR 0001 through 0042, normative sample authority, expectations (ok, error, unimplemented), and held rulings.", url: "#arch-invariants" },
-    { id: "arch-refusals", title: "Compiler Refusal Invariants", category: "Compiler Architecture", tags: ["refusal", "invariant", "codegen", "soundness", "explicit error"], snippet: "Non-negotiable backend invariant: if codegen cannot lower a construct, it reports an explicit refusal naming the construct. Never drop code or emit guessed IR.", url: "#arch-refusals" },
-    { id: "arch-llvm", title: "LLVM Backend Lowering", category: "Compiler Architecture", tags: ["llvm", "backend", "codegen", "tagged discriminant", "tagged union"], snippet: "Fresh LLVM backend (ADR 0002): tagged discriminant aggregates for nullables (ADR 0040), tagged unions for enums (ADR 0041), and typed pointer maps.", url: "#arch-llvm" }
-  ];
+    {
+        "id": "intro",
+        "title": "Introduction to Fin",
+        "category": "Getting Started",
+        "tags": [
+            "intro",
+            "philosophy",
+            "systems",
+            "memory",
+            "invariants",
+            "overview"
+        ],
+        "snippet": "Fin is a statically-typed systems programming language with explicit memory semantics, structural prototypes, first-class enums, and zero-overhead C interop.",
+        "url": "index.html#intro"
+    },
+    {
+        "id": "installation",
+        "title": "Installation & Building finc",
+        "category": "Getting Started",
+        "tags": [
+            "install",
+            "build",
+            "cmake",
+            "conan",
+            "llvm",
+            "finc",
+            "cli",
+            "flags",
+            "prerequisites"
+        ],
+        "snippet": "Build finc from source using ./build.sh with CMake, Conan, Flex, Bison, and LLVM. Check installation with finc --version.",
+        "url": "index.html#installation"
+    },
+    {
+        "id": "quickstart",
+        "title": "Quickstart Guide & Compiler Modes",
+        "category": "Getting Started",
+        "tags": [
+            "quickstart",
+            "workflow",
+            "compiler",
+            "check",
+            "compile",
+            "flags",
+            "finc -o"
+        ],
+        "snippet": "Create and compile Fin programs using finc. Type-check with finc file.fin, compile objects with finc -c, or link native binaries with finc -o bin.",
+        "url": "index.html#quickstart"
+    },
+    {
+        "id": "hello-world",
+        "title": "Hello, World! & Ambient printf",
+        "category": "Getting Started",
+        "tags": [
+            "hello world",
+            "printf",
+            "main",
+            "noret",
+            "variadic",
+            "define",
+            "entry point"
+        ],
+        "snippet": "Your first Fin program using ambient printf and fun main() <noret>. Learn about angle-bracket return types and C FFI bindings.",
+        "url": "index.html#hello-world"
+    },
+    {
+        "id": "variables-types",
+        "title": "Variables, Sized Integers & Inference",
+        "category": "Language Tour",
+        "tags": [
+            "let",
+            "auto",
+            "const",
+            "readonly",
+            "types",
+            "nullable",
+            "denullify",
+            "int",
+            "uint",
+            "cast"
+        ],
+        "snippet": "Local variable declarations with let x <int> = 100, sized types int{64}, type inference with auto, const parameters, and cast<T> conversions.",
+        "url": "index.html#variables-types"
+    },
+    {
+        "id": "control-flow",
+        "title": "Control Flow & Ternary Operator",
+        "category": "Language Tour",
+        "tags": [
+            "if",
+            "else",
+            "for",
+            "while",
+            "do while",
+            "ternary",
+            "scope",
+            "branching"
+        ],
+        "snippet": "Branching with if/else, three-clause for loops, while loops, lexical scopes {}, and Fin's ternary condition : then ? otherwise.",
+        "url": "index.html#control-flow"
+    },
+    {
+        "id": "functions",
+        "title": "Functions, Entry Point & Generics",
+        "category": "Language Tour",
+        "tags": [
+            "fun",
+            "noret",
+            "void",
+            "generics",
+            "parameters",
+            "const",
+            "define",
+            "extern"
+        ],
+        "snippet": "Declare functions with fun name(param: Type) <ReturnType>. Supports generic functions, const arguments, and @define extern bindings.",
+        "url": "index.html#functions"
+    },
+    {
+        "id": "structs-classes",
+        "title": "Structs, Methods & Encapsulation",
+        "category": "Language Tour",
+        "tags": [
+            "struct",
+            "class",
+            "self",
+            "methods",
+            "fields",
+            "pub",
+            "priv",
+            "readonly",
+            "static"
+        ],
+        "snippet": "Define data structures with struct. Methods take explicit self: &Self receiver. Default field values, pub/priv visibility, and readonly members.",
+        "url": "index.html#structs-classes"
+    },
+    {
+        "id": "interfaces",
+        "title": "Interfaces & Generic Bounds",
+        "category": "Language Tour",
+        "tags": [
+            "interface",
+            "implements",
+            "generics",
+            "bounds",
+            "constraints",
+            "polymorphism"
+        ],
+        "snippet": "Define polymorphic contracts with pub interface. Nominal conformance on structs, external implements blocks, and generic type constraints.",
+        "url": "index.html#interfaces"
+    },
+    {
+        "id": "enums",
+        "title": "Enums & Tagged Payloads",
+        "category": "Language Tour",
+        "tags": [
+            "enum",
+            "tagged union",
+            "payload",
+            "discriminant",
+            "result",
+            "getkeyid",
+            "keyidof"
+        ],
+        "snippet": "Fieldless enums and tagged union enums with member payloads. Positional payload access via .0 and pattern constructors.",
+        "url": "index.html#enums"
+    },
+    {
+        "id": "pointers-memory",
+        "title": "Arrays, Pointers & Explicit Allocation",
+        "category": "Language Tour",
+        "tags": [
+            "pointer",
+            "reference",
+            "new",
+            "delete",
+            "array",
+            "fixed",
+            "dynamic",
+            "length",
+            "heap"
+        ],
+        "snippet": "Fixed arrays [T, N], dynamic arrays [T] with .length, heap allocation with new [T, n]{}, deallocation with delete, and raw references &T.",
+        "url": "index.html#pointers-memory"
+    },
+    {
+        "id": "blame",
+        "title": "Unified Blame Assertions",
+        "category": "Language Tour",
+        "tags": [
+            "blame",
+            "m1778",
+            "assert",
+            "verification",
+            "raise",
+            "error",
+            "unimplemented"
+        ],
+        "snippet": "Fin's unified verification statement: blame condition, 'message' for assertions, and blame m1778 for unimplemented paths.",
+        "url": "index.html#blame"
+    },
+    {
+        "id": "prototypes",
+        "title": "Structural Prototypes {K,V}",
+        "category": "Language Tour",
+        "tags": [
+            "prototype",
+            "structural",
+            "map",
+            "dict",
+            "hashmap",
+            "collection",
+            "literal"
+        ],
+        "snippet": "Builtin structural map type {K,V} and literal syntax {'key': value}. Structural equivalence and explicit conversion to HashMap.",
+        "url": "index.html#prototypes"
+    },
+    {
+        "id": "macros-specials",
+        "title": "Macros & Compile-Time Specials",
+        "category": "Language Tour",
+        "tags": [
+            "macro",
+            "special",
+            "quote",
+            "bracket",
+            "comptime",
+            "compiler api",
+            "grant"
+        ],
+        "snippet": "Compile-time metaprogramming: @macro returning quote AST blocks, bracket shaping (name!, name![]), @special functions, and #[use(...)] grants.",
+        "url": "index.html#macros-specials"
+    },
+    {
+        "id": "pipeline-architecture",
+        "title": "Compiler Pipeline Flow",
+        "category": "Compiler Reference",
+        "tags": [
+            "pipeline",
+            "llvm",
+            "ast",
+            "lexer",
+            "parser",
+            "semantics",
+            "codegen"
+        ],
+        "snippet": "Six-stage compiler flow from Source through Bison Parser, AST cloning, Two-Moment semantics, and LLVM lowering.",
+        "url": "index.html#pipeline-architecture"
+    },
+    {
+        "id": "compiler-cli",
+        "title": "Compiler CLI Reference & Exit Codes",
+        "category": "Compiler Reference",
+        "tags": [
+            "cli",
+            "flags",
+            "exit codes",
+            "finc",
+            "-o",
+            "-c",
+            "-S",
+            "--emit-llvm"
+        ],
+        "snippet": "Standard CLI flags (-o, -c, -S, --emit-llvm) and deterministic exit codes (0 = Success, 1 = Syntax, 2 = Semantic, 3 = Refusal).",
+        "url": "index.html#compiler-cli"
+    },
+    {
+        "id": "compiler-invariants",
+        "title": "Explicit Refusal Guarantee",
+        "category": "Compiler Reference",
+        "tags": [
+            "refusal",
+            "invariant",
+            "guarantee",
+            "safety",
+            "soundness"
+        ],
+        "snippet": "The compiler will NEVER silently drop code or guess intermediate representations. Any un-lowerable construct halts with an explicit refusal diagnostic.",
+        "url": "index.html#compiler-invariants"
+    },
+    {
+        "id": "module-stdio",
+        "title": "std::stdio \u2014 Standard I/O, Stream & File",
+        "category": "Standard Library",
+        "tags": [
+            "stdio",
+            "printf",
+            "print",
+            "println",
+            "eprint",
+            "eprintln",
+            "Printable",
+            "Stream",
+            "File",
+            "IOResult"
+        ],
+        "snippet": "Terminal I/O, formatted output, the Printable interface contract, in-memory Stream byte buffers, and static File operations.",
+        "url": "stdlib.html#module-stdio"
+    },
+    {
+        "id": "module-fs",
+        "title": "std::fs \u2014 Filesystem Operations",
+        "category": "Standard Library",
+        "tags": [
+            "fs",
+            "file_exists",
+            "remove_file",
+            "file_size",
+            "read_to_string",
+            "write_string",
+            "append_string",
+            "free_file_content"
+        ],
+        "snippet": "Filesystem operations: checking file existence, querying file sizes, reading entire files into strings, writing, appending, and deleting files.",
+        "url": "stdlib.html#module-fs"
+    },
+    {
+        "id": "module-path",
+        "title": "std::path \u2014 Path Manipulation",
+        "category": "Standard Library",
+        "tags": [
+            "path",
+            "is_absolute",
+            "is_relative",
+            "join",
+            "basename",
+            "dirname",
+            "extname",
+            "free_path"
+        ],
+        "snippet": "Filesystem path manipulation: safe segment joining, basename and dirname extraction, extension checking, and absolute vs relative testing.",
+        "url": "stdlib.html#module-path"
+    },
+    {
+        "id": "module-collection",
+        "title": "std::collection \u2014 Dynamic Array Collection<T>",
+        "category": "Standard Library",
+        "tags": [
+            "collection",
+            "array",
+            "vector",
+            "push",
+            "pop_last",
+            "get",
+            "set",
+            "len",
+            "capacity",
+            "insert",
+            "remove"
+        ],
+        "snippet": "The primary growable dynamic array Collection<T> backed by [T] with geometric buffer doubling, capacity reservations, and bounds checking.",
+        "url": "stdlib.html#module-collection"
+    },
+    {
+        "id": "module-hashmap",
+        "title": "std::hashmap \u2014 Open-Addressing Hash Table",
+        "category": "Standard Library",
+        "tags": [
+            "hashmap",
+            "map",
+            "table",
+            "put",
+            "get",
+            "remove",
+            "contains_key",
+            "size",
+            "linear probing"
+        ],
+        "snippet": "Associative key-value map HashMap<K, V> using open addressing with linear probing and a 0.75 load factor threshold for automatic rehashing.",
+        "url": "stdlib.html#module-hashmap"
+    },
+    {
+        "id": "module-env",
+        "title": "std::env \u2014 Environment Variables & Process",
+        "category": "Standard Library",
+        "tags": [
+            "env",
+            "get_env",
+            "has_env",
+            "set_env",
+            "unset_env",
+            "exit",
+            "get_pid",
+            "process"
+        ],
+        "snippet": "Process environment variable inspection (get_env, has_env, set_env, unset_env), process ID query, and process exit codes.",
+        "url": "stdlib.html#module-env"
+    },
+    {
+        "id": "module-time",
+        "title": "std::time \u2014 Clocks & Sleep",
+        "category": "Standard Library",
+        "tags": [
+            "time",
+            "now",
+            "sleep_sec",
+            "sleep_ms",
+            "diff_sec",
+            "epoch",
+            "timestamp",
+            "delay"
+        ],
+        "snippet": "Operating system clock timestamps (Unix epoch) and synchronous execution delays in whole seconds and milliseconds.",
+        "url": "stdlib.html#module-time"
+    },
+    {
+        "id": "module-random",
+        "title": "std::random \u2014 PRNG & Distributions",
+        "category": "Standard Library",
+        "tags": [
+            "random",
+            "seed",
+            "seed_now",
+            "rand",
+            "random_int",
+            "random_float",
+            "random_bool"
+        ],
+        "snippet": "Pseudo-random number generator (PRNG): deterministic integer seeds, automatic epoch-based seeding, uniform integer ranges, floats, and booleans.",
+        "url": "stdlib.html#module-random"
+    },
+    {
+        "id": "module-math",
+        "title": "std::math \u2014 Mathematical Functions & Constants",
+        "category": "Standard Library",
+        "tags": [
+            "math",
+            "PI",
+            "E",
+            "abs",
+            "min",
+            "max",
+            "clamp",
+            "signum",
+            "gcd",
+            "lcm",
+            "ipow",
+            "isqrt",
+            "sqrt",
+            "sin",
+            "cos",
+            "pow"
+        ],
+        "snippet": "Mathematical constants (PI, E, TAU), generic functions over Number (abs, min, max, clamp, signum), integer algorithms (gcd, lcm, ipow, isqrt), and C libm bindings.",
+        "url": "stdlib.html#module-math"
+    },
+    {
+        "id": "module-strings",
+        "title": "std::strings \u2014 String Manipulation",
+        "category": "Standard Library",
+        "tags": [
+            "strings",
+            "len",
+            "starts_with",
+            "ends_with",
+            "contains",
+            "index_of",
+            "slice",
+            "concat",
+            "repeat"
+        ],
+        "snippet": "String query, validation, slicing, and manipulation routines: length, prefix/suffix inspection, substring search, slicing, concatenation, and repetition.",
+        "url": "stdlib.html#module-strings"
+    },
+    {
+        "id": "module-types",
+        "title": "std::types \u2014 Numeric Constraints & number2str",
+        "category": "Standard Library",
+        "tags": [
+            "types",
+            "Number",
+            "Integer",
+            "Float",
+            "Signed",
+            "Unsigned",
+            "number2str"
+        ],
+        "snippet": "Core numeric constraint sets (Number, Integer, Float, Signed, Unsigned) for generic function bounds, and integer-to-string formatting.",
+        "url": "stdlib.html#module-types"
+    },
+    {
+        "id": "module-typing",
+        "title": "std::typing \u2014 Tagged Union Result<T, U>",
+        "category": "Standard Library",
+        "tags": [
+            "typing",
+            "Result",
+            "IResult",
+            "Ok",
+            "Err",
+            "payload",
+            "error handling"
+        ],
+        "snippet": "The tagged union Result<T, U> and polymorphic IResult interface for robust, exception-free error handling.",
+        "url": "stdlib.html#module-typing"
+    },
+    {
+        "id": "module-enums",
+        "title": "std::enums \u2014 Enum Reflection & Discriminants",
+        "category": "Standard Library",
+        "tags": [
+            "enums",
+            "EnumType",
+            "getkeyid",
+            "keyidof",
+            "reflection",
+            "discriminant"
+        ],
+        "snippet": "Reflection and inspection of Fin enum values, runtime discriminants, and compile-time member identifiers.",
+        "url": "stdlib.html#module-enums"
+    },
+    {
+        "id": "module-error",
+        "title": "std::error \u2014 Error Base Class",
+        "category": "Standard Library",
+        "tags": [
+            "error",
+            "Error",
+            "ErrorType",
+            "code",
+            "message",
+            "describe"
+        ],
+        "snippet": "Base Error class and standard error categorizations for structured failure modeling across libraries.",
+        "url": "stdlib.html#module-error"
+    },
+    {
+        "id": "module-operators",
+        "title": "std::operators \u2014 Operator Overloading",
+        "category": "Standard Library",
+        "tags": [
+            "operators",
+            "IndexAssign",
+            "Add",
+            "Sub",
+            "Mul",
+            "Div",
+            "Equals",
+            "overload"
+        ],
+        "snippet": "Interfaces for user-defined operator overloading on structs: arithmetic (Add, Sub, Mul, Div), comparison (Equals), and index assignment (IndexAssign).",
+        "url": "stdlib.html#module-operators"
+    },
+    {
+        "id": "module-memory",
+        "title": "std::memory \u2014 Dynamic Heap & Arena Patterns",
+        "category": "Standard Library",
+        "tags": [
+            "memory",
+            "new",
+            "delete",
+            "heap",
+            "allocation",
+            "arena",
+            "deallocation"
+        ],
+        "snippet": "Explicit memory allocation mechanisms: native heap dynamic arrays new [T, n]{}, delete arr;, and user-defined arena allocators.",
+        "url": "stdlib.html#module-memory"
+    },
+    {
+        "id": "module-stdptr",
+        "title": "std::stdptr \u2014 Reference-Counted Pointer rptr<T>",
+        "category": "Standard Library",
+        "tags": [
+            "stdptr",
+            "rptr",
+            "OwnershipError",
+            "retain",
+            "release",
+            "reference counting",
+            "smart pointer"
+        ],
+        "snippet": "Smart pointer rptr<T> providing sound reference-counted memory sharing with explicit retain/release lifecycle tracking.",
+        "url": "stdlib.html#module-stdptr"
+    }
+];
 
   let searchIndex = FALLBACK_SEARCH_INDEX;
 
@@ -97,18 +636,14 @@
 
   // --- Syntax Highlighter for Fin ---
   function highlightFinCode() {
-    const codeBlocks = document.querySelectorAll('pre code.language-fin');
+    const codeBlocks = document.querySelectorAll('pre code.language-fin, pre code.language-c, pre code.language-rust, pre code.language-bash');
     codeBlocks.forEach(codeEl => {
       let code = codeEl.textContent;
-
-      // Tokenize safely using placeholders for strings and comments
       const tokens = [];
-      let temp = code;
 
-      // 1. Strings (including string interpolation \{...\})
-      temp = temp.replace(/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/g, (match) => {
-        const id = `__STR_${tokens.length}__`;
-        // highlight interpolation inside strings
+      // 1. Strings (including interpolation)
+      let temp = code.replace(/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/g, (match) => {
+        const id = `\uE000STR${tokens.length}\uE001`;
         const formatted = escapeHtml(match).replace(/(\\?\{[^}]+\})/g, '<span class="tok-meta">$1</span>');
         tokens.push({ id, html: `<span class="tok-str">${formatted}</span>` });
         return id;
@@ -116,39 +651,60 @@
 
       // 2. Comments (single-line & multi-line)
       temp = temp.replace(/(\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g, (match) => {
-        const id = `__COM_${tokens.length}__`;
+        const id = `\uE000COM${tokens.length}\uE001`;
         tokens.push({ id, html: `<span class="tok-com">${escapeHtml(match)}</span>` });
         return id;
       });
 
       // 3. Attributes / Decorators (#[...])
       temp = temp.replace(/(#\[[^\]\n]+\])/g, (match) => {
-        const id = `__ATTR_${tokens.length}__`;
+        const id = `\uE000ATTR${tokens.length}\uE001`;
         tokens.push({ id, html: `<span class="tok-attr">${escapeHtml(match)}</span>` });
+        return id;
+      });
+
+      // 4. Meta directives, specials & macros (@define, @macro, quote, $var)
+      temp = temp.replace(/(@[a-zA-Z_]\w*|quote|\$[a-zA-Z_]\w*)/g, (match) => {
+        const id = `\uE000META${tokens.length}\uE001`;
+        tokens.push({ id, html: `<span class="tok-meta">${escapeHtml(match)}</span>` });
         return id;
       });
 
       // Escape HTML in the remaining text
       temp = escapeHtml(temp);
 
-      // 4. Meta directives, specials & macros (@Alloc, @define, @macro, quote, $var)
-      temp = temp.replace(/(@[a-zA-Z_]\w*|quote|\$[a-zA-Z_]\w*)/g, '<span class="tok-meta">$1</span>');
+      // 5. Single-pass keyword and type tokenization (PREVENTS HTML ATTRIBUTE CORRUPTION)
+      const KEYWORDS = new Set([
+        'fun', 'let', 'const', 'pub', 'priv', 'static', 'readonly',
+        'if', 'else', 'for', 'foreach', 'while', 'do', 'return',
+        'struct', 'class', 'interface', 'implements', 'enum', 'type',
+        'namespace', 'import', 'export', 'new', 'delete', 'cast',
+        'sizeof', 'as', 'from', 'switch', 'case', 'default', 'in', 'operator'
+      ]);
 
-      // 5. Blame & m1778
-      temp = temp.replace(/\b(blame|m1778)\b/g, '<span class="tok-blame">$1</span>');
+      const TYPES = new Set([
+        'int', 'uint', 'short', 'ushort', 'long', 'ulong', 'float', 'double',
+        'bool', 'char', 'string', 'void', 'noret', 'any', 'object', 'auto',
+        'Self', 'byte', 'usize', 'isize',
+        'Number', 'Integer', 'Float', 'Signed', 'Unsigned',
+        'Buffer', 'Stream', 'IStream', 'File', 'Collection', 'HashMap', 'Result', 'IResult', 'Error', 'Printable', 'IOError', 'IOResult', 'EnumType', 'rptr'
+      ]);
 
-      // 6. Keywords
-      temp = temp.replace(/\b(fn|fun|let|var|val|pub|priv|static|const|readonly|if|else|for|foreach|while|do|defer|return|struct|class|interface|implements|enum|type|namespace|import|export|new|delete|cast|sizeof|as|from|switch|case|default|in)\b/g, '<span class="tok-kw">$1</span>');
+      const BLAMES = new Set(['blame', 'm1778']);
 
-      // 7. Types & Allocators
-      temp = temp.replace(/\b(int|uint|short|ushort|long|ulong|float|double|bool|char|string|void|noret|any|object|auto|rptr|wptr|Self|i8|u8|i16|u16|i32|u32|i64|u64|f32|f64|usize|isize|byte|Number|Integer|Float|Signed|Unsigned|Arena|Buffer|Stream|File)\b/g, '<span class="tok-type">$1</span>');
+      temp = temp.replace(/\b([a-zA-Z_]\w*)\b/g, (match) => {
+        if (BLAMES.has(match)) return `<span class="tok-blame">${match}</span>`;
+        if (KEYWORDS.has(match)) return `<span class="tok-kw">${match}</span>`;
+        if (TYPES.has(match)) return `<span class="tok-type">${match}</span>`;
+        return match;
+      });
 
-      // 8. Numbers (decimal, float, hex)
+      // 6. Numbers (decimal, float, hex)
       temp = temp.replace(/\b(\d+(?:\.\d+)?(?:e[+-]?\d+)?|0x[0-9a-fA-F]+)\b/g, '<span class="tok-num">$1</span>');
 
-      // Restore tokens
+      // 7. Restore tokens with function replacer to prevent $ corruption
       tokens.forEach(t => {
-        temp = temp.replace(t.id, t.html);
+        temp = temp.replace(t.id, () => t.html);
       });
 
       codeEl.innerHTML = temp;
@@ -263,25 +819,41 @@
   function initStdlibFilter() {
     const filterButtons = document.querySelectorAll('.stdlib-filter-btn');
     const cards = document.querySelectorAll('.stdlib-card');
-    if (filterButtons.length === 0 || cards.length === 0) return;
 
-    filterButtons.forEach(btn => {
-      btn.addEventListener('click', () => {
-        const category = btn.getAttribute('data-filter');
+    if (filterButtons.length > 0 && cards.length > 0) {
+      filterButtons.forEach(btn => {
+        btn.addEventListener('click', () => {
+          const category = btn.getAttribute('data-filter');
+          filterButtons.forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
 
-        filterButtons.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
+          cards.forEach(card => {
+            const cardCat = card.getAttribute('data-category');
+            if (category === 'all' || cardCat === category) {
+              card.style.display = 'flex';
+            } else {
+              card.style.display = 'none';
+            }
+          });
+        });
+      });
+    }
 
-        cards.forEach(card => {
-          const cardCat = card.getAttribute('data-category');
-          if (category === 'all' || cardCat === category) {
-            card.style.display = 'flex';
-          } else {
-            card.style.display = 'none';
+    // Sidebar text filter on stdlib.html
+    const filterInput = document.getElementById('stdlib-search-input') || document.querySelector('.stdlib-filter-input');
+    if (filterInput) {
+      filterInput.addEventListener('input', (e) => {
+        const query = e.target.value.toLowerCase().trim();
+        const links = document.querySelectorAll('.stdlib-module-link');
+        links.forEach(link => {
+          const text = link.textContent.toLowerCase();
+          const li = link.closest('li');
+          if (li) {
+            li.style.display = (!query || text.includes(query)) ? '' : 'none';
           }
         });
       });
-    });
+    }
   }
 
   // --- Search System ---

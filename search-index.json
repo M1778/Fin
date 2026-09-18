@@ -1,264 +1,225 @@
 [
   {
-    "id": "stdlib-overview",
-    "title": "17 Core Standard Library Modules Directory",
-    "category": "Standard Library",
-    "section": "Overview",
-    "tags": [
-      "stdlib",
-      "modules",
-      "stdio",
-      "strings",
-      "fs",
-      "math",
-      "random",
-      "env",
-      "path",
-      "time",
-      "collection",
-      "hashmap",
-      "error",
-      "types",
-      "typing",
-      "enums",
-      "operators",
-      "stdptr",
-      "networking"
-    ],
-    "snippet": "Interactive directory and category filters for all 17 Fin standard library modules engineered with modular memory management.",
-    "url": "#stdlib-overview"
-  },
-  {
     "id": "intro",
     "title": "Introduction to Fin",
     "category": "Getting Started",
-    "section": "Overview",
     "tags": [
+      "intro",
       "philosophy",
       "systems",
       "memory",
-      "compiler",
-      "invariants"
+      "invariants",
+      "overview"
     ],
-    "snippet": "Fin is a modern systems programming language where memory management is a library, the sample corpus is the normative specification, and the compiler refuses silently guessing IR.",
-    "url": "#intro"
+    "snippet": "Fin is a statically-typed systems programming language with explicit memory semantics, structural prototypes, first-class enums, and zero-overhead C interop.",
+    "url": "index.html#intro"
   },
   {
     "id": "installation",
-    "title": "Installation & Build",
+    "title": "Installation & Building finc",
     "category": "Getting Started",
-    "section": "Setup",
     "tags": [
+      "install",
       "build",
       "cmake",
       "conan",
       "llvm",
       "finc",
       "cli",
-      "flags"
+      "flags",
+      "prerequisites"
     ],
     "snippet": "Build finc from source using ./build.sh with CMake, Conan, Flex, Bison, and LLVM. Check installation with finc --version.",
-    "url": "#installation"
+    "url": "index.html#installation"
   },
   {
     "id": "quickstart",
-    "title": "Quickstart Guide",
+    "title": "Quickstart Guide & Compiler Modes",
     "category": "Getting Started",
-    "section": "First Steps",
     "tags": [
       "quickstart",
       "workflow",
       "compiler",
       "check",
-      "compile"
+      "compile",
+      "flags",
+      "finc -o"
     ],
-    "snippet": "Create and compile Fin programs using finc. Learn the difference between type-checking with finc file.fin and compiling binaries with finc -o bin.",
-    "url": "#quickstart"
+    "snippet": "Create and compile Fin programs using finc. Type-check with finc file.fin, compile objects with finc -c, or link native binaries with finc -o bin.",
+    "url": "index.html#quickstart"
   },
   {
     "id": "hello-world",
-    "title": "Hello, World!",
+    "title": "Hello, World! & Ambient printf",
     "category": "Getting Started",
-    "section": "Tutorial",
     "tags": [
       "hello world",
       "printf",
       "main",
       "noret",
       "variadic",
-      "define"
+      "define",
+      "entry point"
     ],
-    "snippet": "Your first Fin program using @define printf and fun main() <noret>. Learn about angle-bracket return types and C FFI bindings.",
-    "url": "#hello-world"
+    "snippet": "Your first Fin program using ambient printf and fun main() <noret>. Learn about angle-bracket return types and C FFI bindings.",
+    "url": "index.html#hello-world"
   },
   {
     "id": "variables-types",
-    "title": "Variables & Types",
+    "title": "Variables, Sized Integers & Inference",
     "category": "Language Tour",
-    "section": "Syntax",
     "tags": [
       "let",
       "auto",
       "const",
       "readonly",
       "types",
-      "int",
-      "float",
-      "string",
-      "bool",
       "nullable",
-      "denullify"
+      "denullify",
+      "int",
+      "uint",
+      "cast"
     ],
-    "snippet": "Local variable declarations with let x <int> = 100, type inference with auto, primitive types, const parameters, and nullable T? with denullify postfix ?.",
-    "url": "#variables-types"
+    "snippet": "Local variable declarations with let x <int> = 100, sized types int{64}, type inference with auto, const parameters, and cast<T> conversions.",
+    "url": "index.html#variables-types"
   },
   {
     "id": "control-flow",
-    "title": "Control Flow",
+    "title": "Control Flow & Ternary Operator",
     "category": "Language Tour",
-    "section": "Syntax",
     "tags": [
       "if",
       "else",
       "for",
-      "foreach",
       "while",
       "do while",
       "ternary",
       "scope",
-      "lexical"
+      "branching"
     ],
-    "snippet": "Branching with if/else, three-clause for loops, foreach iterators, while and do-while loops, bare brace scopes, and Fin's ternary condition : then ? otherwise.",
-    "url": "#control-flow"
+    "snippet": "Branching with if/else, three-clause for loops, while loops, lexical scopes {}, and Fin's ternary condition : then ? otherwise.",
+    "url": "index.html#control-flow"
   },
   {
     "id": "functions",
-    "title": "Functions & Lambdas",
+    "title": "Functions, Entry Point & Generics",
     "category": "Language Tour",
-    "section": "Syntax",
     "tags": [
       "fun",
       "noret",
       "void",
       "generics",
-      "lambdas",
-      "const",
       "parameters",
-      "define"
+      "const",
+      "define",
+      "extern"
     ],
-    "snippet": "Declare functions with fun name(param: Type) <ReturnType>. Supports generic functions, const parameters, first-class lambdas, and @define extern bindings.",
-    "url": "#functions"
+    "snippet": "Declare functions with fun name(param: Type) <ReturnType>. Supports generic functions, const arguments, and @define extern bindings.",
+    "url": "index.html#functions"
   },
   {
     "id": "structs-classes",
-    "title": "Structs & Methods",
+    "title": "Structs, Methods & Encapsulation",
     "category": "Language Tour",
-    "section": "Object Model",
     "tags": [
       "struct",
       "class",
       "self",
       "methods",
       "fields",
-      "constructors",
       "pub",
       "priv",
-      "operator",
-      "inheritance"
+      "readonly",
+      "static"
     ],
-    "snippet": "Define data structures with struct and class. Method definitions with explicit self: &Self receiver, default values, visibility labels, and operator overloading.",
-    "url": "#structs-classes"
+    "snippet": "Define data structures with struct. Methods take explicit self: &Self receiver. Default field values, pub/priv visibility, and readonly members.",
+    "url": "index.html#structs-classes"
   },
   {
     "id": "interfaces",
-    "title": "Interfaces & Generics",
+    "title": "Interfaces & Generic Bounds",
     "category": "Language Tour",
-    "section": "Object Model",
     "tags": [
       "interface",
       "implements",
       "generics",
       "bounds",
       "constraints",
-      "monomorphisation",
-      "erasure"
+      "polymorphism"
     ],
-    "snippet": "Define polymorphic contracts with pub interface. Nominal conformance on structs, external implements blocks, generic bounds, and constraint sets.",
-    "url": "#interfaces"
+    "snippet": "Define polymorphic contracts with pub interface. Nominal conformance on structs, external implements blocks, and generic type constraints.",
+    "url": "index.html#interfaces"
   },
   {
     "id": "enums",
-    "title": "Enums & Tagged Unions",
+    "title": "Enums & Tagged Payloads",
     "category": "Language Tour",
-    "section": "Data Types",
     "tags": [
       "enum",
       "tagged union",
-      "discriminant",
       "payload",
+      "discriminant",
       "result",
       "getkeyid",
       "keyidof"
     ],
-    "snippet": "Fieldless enums and tagged union enums with member payloads. 32-bit discriminants (ADR 0041), positional access enum_.0, and enum reflection.",
-    "url": "#enums"
+    "snippet": "Fieldless enums and tagged union enums with member payloads. Positional payload access via .0 and pattern constructors.",
+    "url": "index.html#enums"
   },
   {
     "id": "pointers-memory",
-    "title": "Pointers & Memory (rptr, wptr)",
+    "title": "Arrays, Pointers & Explicit Allocation",
     "category": "Language Tour",
-    "section": "Memory",
     "tags": [
       "pointer",
       "reference",
       "new",
       "delete",
-      "rptr",
-      "wptr",
-      "ownership",
-      "borrow",
-      "release"
+      "array",
+      "fixed",
+      "dynamic",
+      "length",
+      "heap"
     ],
-    "snippet": "Raw references &T, heap dynamic allocation new [T, n]{}, and standard library smart pointers rptr<T> and wptr<T> with sound ownership and borrow tracking.",
-    "url": "#pointers-memory"
+    "snippet": "Fixed arrays [T, N], dynamic arrays [T] with .length, heap allocation with new [T, n]{}, deallocation with delete, and raw references &T.",
+    "url": "index.html#pointers-memory"
   },
   {
     "id": "blame",
-    "title": "Blame Error Handling",
+    "title": "Unified Blame Assertions",
     "category": "Language Tour",
-    "section": "Error Handling",
     "tags": [
       "blame",
       "m1778",
       "assert",
+      "verification",
       "raise",
       "error",
       "unimplemented"
     ],
-    "snippet": "Fin's unified error construct: blame condition, 'message' for assertions, blame Error(...) for raising, and blame m1778 for unimplemented paths.",
-    "url": "#blame"
+    "snippet": "Fin's unified verification statement: blame condition, 'message' for assertions, and blame m1778 for unimplemented paths.",
+    "url": "index.html#blame"
   },
   {
     "id": "prototypes",
-    "title": "Prototypes {K,V}",
+    "title": "Structural Prototypes {K,V}",
     "category": "Language Tour",
-    "section": "Data Types",
     "tags": [
       "prototype",
       "structural",
       "map",
       "dict",
       "hashmap",
-      "collection"
+      "collection",
+      "literal"
     ],
-    "snippet": "Builtin structural map type {K,V} and literal syntax {'key': value}. Structural equivalence and explicit conversion to nominal HashMap and Collection.",
-    "url": "#prototypes"
+    "snippet": "Builtin structural map type {K,V} and literal syntax {'key': value}. Structural equivalence and explicit conversion to HashMap.",
+    "url": "index.html#prototypes"
   },
   {
     "id": "macros-specials",
-    "title": "Macros & Special Functions",
+    "title": "Macros & Compile-Time Specials",
     "category": "Language Tour",
-    "section": "Metaprogramming",
     "tags": [
       "macro",
       "special",
@@ -266,136 +227,81 @@
       "bracket",
       "comptime",
       "compiler api",
-      "grant",
-      "use",
-      "on"
+      "grant"
     ],
-    "snippet": "Compile-time metaprogramming: @macro returning quote AST blocks, bracket shaping (name!, name![], name!{}), @special functions, and #[use(...)] grants.",
-    "url": "#macros-specials"
+    "snippet": "Compile-time metaprogramming: @macro returning quote AST blocks, bracket shaping (name!, name![]), @special functions, and #[use(...)] grants.",
+    "url": "index.html#macros-specials"
   },
   {
-    "id": "stdlib-stdio",
-    "title": "std::stdio \u2014 Standard I/O & Files",
+    "id": "pipeline-architecture",
+    "title": "Compiler Pipeline Flow",
+    "category": "Compiler Reference",
+    "tags": [
+      "pipeline",
+      "llvm",
+      "ast",
+      "lexer",
+      "parser",
+      "semantics",
+      "codegen"
+    ],
+    "snippet": "Six-stage compiler flow from Source through Bison Parser, AST cloning, Two-Moment semantics, and LLVM lowering.",
+    "url": "index.html#pipeline-architecture"
+  },
+  {
+    "id": "compiler-cli",
+    "title": "Compiler CLI Reference & Exit Codes",
+    "category": "Compiler Reference",
+    "tags": [
+      "cli",
+      "flags",
+      "exit codes",
+      "finc",
+      "-o",
+      "-c",
+      "-S",
+      "--emit-llvm"
+    ],
+    "snippet": "Standard CLI flags (-o, -c, -S, --emit-llvm) and deterministic exit codes (0 = Success, 1 = Syntax, 2 = Semantic, 3 = Refusal).",
+    "url": "index.html#compiler-cli"
+  },
+  {
+    "id": "compiler-invariants",
+    "title": "Explicit Refusal Guarantee",
+    "category": "Compiler Reference",
+    "tags": [
+      "refusal",
+      "invariant",
+      "guarantee",
+      "safety",
+      "soundness"
+    ],
+    "snippet": "The compiler will NEVER silently drop code or guess intermediate representations. Any un-lowerable construct halts with an explicit refusal diagnostic.",
+    "url": "index.html#compiler-invariants"
+  },
+  {
+    "id": "module-stdio",
+    "title": "std::stdio \u2014 Standard I/O, Stream & File",
     "category": "Standard Library",
-    "section": "I/O",
     "tags": [
       "stdio",
       "printf",
-      "format",
       "print",
       "println",
       "eprint",
       "eprintln",
+      "Printable",
       "Stream",
       "File",
-      "FileIO"
+      "IOResult"
     ],
-    "snippet": "I/O primitives including printf, format!, typed print/println with Printable interface, stderr eprint, byte Stream, and FileIO static File operations.",
-    "url": "#stdlib-stdio"
+    "snippet": "Terminal I/O, formatted output, the Printable interface contract, in-memory Stream byte buffers, and static File operations.",
+    "url": "stdlib.html#module-stdio"
   },
   {
-    "id": "stdlib-math",
-    "title": "std::math \u2014 Mathematical Functions",
+    "id": "module-fs",
+    "title": "std::fs \u2014 Filesystem Operations",
     "category": "Standard Library",
-    "section": "Numerics",
-    "tags": [
-      "math",
-      "PI",
-      "E",
-      "sqrt",
-      "pow",
-      "sin",
-      "cos",
-      "min",
-      "max",
-      "clamp",
-      "abs",
-      "gcd",
-      "ipow",
-      "isqrt"
-    ],
-    "snippet": "Constants PI and E, generic Number helpers (min, max, clamp, abs, signum, gcd), integer ipow/isqrt, and C libm bindings (sqrt, pow, log, trig).",
-    "url": "#stdlib-math"
-  },
-  {
-    "id": "stdlib-strings",
-    "title": "std::strings \u2014 String Manipulation",
-    "category": "Standard Library",
-    "section": "Text",
-    "tags": [
-      "strings",
-      "len",
-      "equals",
-      "concat",
-      "substr",
-      "to_chars",
-      "from_chars",
-      "trim",
-      "to_upper",
-      "to_lower",
-      "join"
-    ],
-    "snippet": "String operations and byte utilities: len, equals (content comparison vs == pointer equality), concat, substr, to_chars, from_chars, trim, and case conversion.",
-    "url": "#stdlib-strings"
-  },
-  {
-    "id": "stdlib-path",
-    "title": "std::path \u2014 File Paths",
-    "category": "Standard Library",
-    "section": "Filesystem",
-    "tags": [
-      "path",
-      "join",
-      "basename",
-      "dirname",
-      "extname",
-      "is_absolute",
-      "free_path"
-    ],
-    "snippet": "Filesystem path manipulation: path joining, basename/dirname extraction, extension query, absolute path detection, and memory management.",
-    "url": "#stdlib-path"
-  },
-  {
-    "id": "stdlib-env",
-    "title": "std::env \u2014 Environment & Process",
-    "category": "Standard Library",
-    "section": "System",
-    "tags": [
-      "env",
-      "getenv",
-      "setenv",
-      "unsetenv",
-      "get_env",
-      "has_env",
-      "set_env",
-      "get_pid",
-      "c_exit"
-    ],
-    "snippet": "Environment inspection and process controls: get_env, has_env, set_env, unset_env, get_pid, and exit code handling via C runtime.",
-    "url": "#stdlib-env"
-  },
-  {
-    "id": "stdlib-time",
-    "title": "std::time \u2014 Clocks & Sleep",
-    "category": "Standard Library",
-    "section": "System",
-    "tags": [
-      "time",
-      "now",
-      "sleep_sec",
-      "sleep_ms",
-      "diff_sec",
-      "clock",
-      "timestamp"
-    ],
-    "snippet": "System clock and delay utilities: now() Unix timestamp, sleep_sec, sleep_ms (microsecond sleep), and diff_sec duration measurement.",
-    "url": "#stdlib-time"
-  },
-  {
-    "id": "stdlib-fs",
-    "title": "std::fs \u2014 File System I/O",
-    "category": "Standard Library",
-    "section": "Filesystem",
     "tags": [
       "fs",
       "file_exists",
@@ -403,16 +309,105 @@
       "file_size",
       "read_to_string",
       "write_string",
-      "append_string"
+      "append_string",
+      "free_file_content"
     ],
-    "snippet": "Filesystem operations: file_exists, remove_file, file_size, read_to_string with nullable return, write_string, append_string, and buffer deallocation.",
-    "url": "#stdlib-fs"
+    "snippet": "Filesystem operations: checking file existence, querying file sizes, reading entire files into strings, writing, appending, and deleting files.",
+    "url": "stdlib.html#module-fs"
   },
   {
-    "id": "stdlib-random",
-    "title": "std::random \u2014 Pseudo-Random Numbers",
+    "id": "module-path",
+    "title": "std::path \u2014 Path Manipulation",
     "category": "Standard Library",
-    "section": "Numerics",
+    "tags": [
+      "path",
+      "is_absolute",
+      "is_relative",
+      "join",
+      "basename",
+      "dirname",
+      "extname",
+      "free_path"
+    ],
+    "snippet": "Filesystem path manipulation: safe segment joining, basename and dirname extraction, extension checking, and absolute vs relative testing.",
+    "url": "stdlib.html#module-path"
+  },
+  {
+    "id": "module-collection",
+    "title": "std::collection \u2014 Dynamic Array Collection<T>",
+    "category": "Standard Library",
+    "tags": [
+      "collection",
+      "array",
+      "vector",
+      "push",
+      "pop_last",
+      "get",
+      "set",
+      "len",
+      "capacity",
+      "insert",
+      "remove"
+    ],
+    "snippet": "The primary growable dynamic array Collection<T> backed by [T] with geometric buffer doubling, capacity reservations, and bounds checking.",
+    "url": "stdlib.html#module-collection"
+  },
+  {
+    "id": "module-hashmap",
+    "title": "std::hashmap \u2014 Open-Addressing Hash Table",
+    "category": "Standard Library",
+    "tags": [
+      "hashmap",
+      "map",
+      "table",
+      "put",
+      "get",
+      "remove",
+      "contains_key",
+      "size",
+      "linear probing"
+    ],
+    "snippet": "Associative key-value map HashMap<K, V> using open addressing with linear probing and a 0.75 load factor threshold for automatic rehashing.",
+    "url": "stdlib.html#module-hashmap"
+  },
+  {
+    "id": "module-env",
+    "title": "std::env \u2014 Environment Variables & Process",
+    "category": "Standard Library",
+    "tags": [
+      "env",
+      "get_env",
+      "has_env",
+      "set_env",
+      "unset_env",
+      "exit",
+      "get_pid",
+      "process"
+    ],
+    "snippet": "Process environment variable inspection (get_env, has_env, set_env, unset_env), process ID query, and process exit codes.",
+    "url": "stdlib.html#module-env"
+  },
+  {
+    "id": "module-time",
+    "title": "std::time \u2014 Clocks & Sleep",
+    "category": "Standard Library",
+    "tags": [
+      "time",
+      "now",
+      "sleep_sec",
+      "sleep_ms",
+      "diff_sec",
+      "epoch",
+      "timestamp",
+      "delay"
+    ],
+    "snippet": "Operating system clock timestamps (Unix epoch) and synchronous execution delays in whole seconds and milliseconds.",
+    "url": "stdlib.html#module-time"
+  },
+  {
+    "id": "module-random",
+    "title": "std::random \u2014 PRNG & Distributions",
+    "category": "Standard Library",
     "tags": [
       "random",
       "seed",
@@ -422,240 +417,161 @@
       "random_float",
       "random_bool"
     ],
-    "snippet": "Pseudo-random number generation: seed, seed_now with system epoch, rand, uniform random_int(min, max), random_float, and random_bool.",
-    "url": "#stdlib-random"
+    "snippet": "Pseudo-random number generator (PRNG): deterministic integer seeds, automatic epoch-based seeding, uniform integer ranges, floats, and booleans.",
+    "url": "stdlib.html#module-random"
   },
   {
-    "id": "stdlib-collection",
-    "title": "std::collection \u2014 Dynamic Array",
+    "id": "module-math",
+    "title": "std::math \u2014 Mathematical Functions & Constants",
     "category": "Standard Library",
-    "section": "Containers",
     "tags": [
-      "collection",
-      "array",
-      "vector",
-      "push",
-      "pop_last",
-      "insert",
-      "remove",
+      "math",
+      "PI",
+      "E",
+      "abs",
+      "min",
+      "max",
+      "clamp",
+      "signum",
+      "gcd",
+      "lcm",
+      "ipow",
+      "isqrt",
+      "sqrt",
+      "sin",
+      "cos",
+      "pow"
+    ],
+    "snippet": "Mathematical constants (PI, E, TAU), generic functions over Number (abs, min, max, clamp, signum), integer algorithms (gcd, lcm, ipow, isqrt), and C libm bindings.",
+    "url": "stdlib.html#module-math"
+  },
+  {
+    "id": "module-strings",
+    "title": "std::strings \u2014 String Manipulation",
+    "category": "Standard Library",
+    "tags": [
+      "strings",
       "len",
-      "capacity",
-      "reserve"
+      "starts_with",
+      "ends_with",
+      "contains",
+      "index_of",
+      "slice",
+      "concat",
+      "repeat"
     ],
-    "snippet": "Dynamic array Collection<T> with geometric doubling: push, pop_last, get, set, insert, remove, is_empty, first, last, reverse, and bounds checking.",
-    "url": "#stdlib-collection"
+    "snippet": "String query, validation, slicing, and manipulation routines: length, prefix/suffix inspection, substring search, slicing, concatenation, and repetition.",
+    "url": "stdlib.html#module-strings"
   },
   {
-    "id": "stdlib-hashmap",
-    "title": "std::hashmap \u2014 Hash Table",
+    "id": "module-types",
+    "title": "std::types \u2014 Numeric Constraints & number2str",
     "category": "Standard Library",
-    "section": "Containers",
-    "tags": [
-      "hashmap",
-      "map",
-      "table",
-      "get_index",
-      "exists",
-      "with_hasher",
-      "linear probing",
-      "tombstone"
-    ],
-    "snippet": "Real open-addressing hash table with linear probing and 0.75 load factor: exists, __get, __set, indexing operators, and custom hashers.",
-    "url": "#stdlib-hashmap"
-  },
-  {
-    "id": "stdlib-error",
-    "title": "std::error \u2014 Error Base Class",
-    "category": "Standard Library",
-    "section": "Error Handling",
-    "tags": [
-      "error",
-      "IOError",
-      "err_code",
-      "message",
-      "describe",
-      "format"
-    ],
-    "snippet": "Standard Error base class: message, err_code, format, and describe with C snprintf formatting. Inheritable by custom library errors.",
-    "url": "#stdlib-error"
-  },
-  {
-    "id": "stdlib-types",
-    "title": "std::types \u2014 Numeric Aliases & Conversions",
-    "category": "Standard Library",
-    "section": "Types",
     "tags": [
       "types",
-      "i8",
-      "u8",
-      "usize",
-      "isize",
-      "byte",
       "Number",
       "Integer",
-      "number2str",
-      "str2int",
-      "resolve_type"
+      "Float",
+      "Signed",
+      "Unsigned",
+      "number2str"
     ],
-    "snippet": "Sized integer aliases (i8-u64, usize, byte), constraint sets (Number, Integer, Float, Signed, Unsigned), and string/number conversions.",
-    "url": "#stdlib-types"
+    "snippet": "Core numeric constraint sets (Number, Integer, Float, Signed, Unsigned) for generic function bounds, and integer-to-string formatting.",
+    "url": "stdlib.html#module-types"
   },
   {
-    "id": "stdlib-typing",
-    "title": "std::typing \u2014 Result<T, E> & Interfaces",
+    "id": "module-typing",
+    "title": "std::typing \u2014 Tagged Union Result<T, U>",
     "category": "Standard Library",
-    "section": "Types",
     "tags": [
       "typing",
       "Result",
-      "unwrap",
-      "unwrap_or",
-      "expect",
-      "is_ok",
-      "is_err",
-      "IResult"
+      "IResult",
+      "Ok",
+      "Err",
+      "payload",
+      "error handling"
     ],
-    "snippet": "The Result<T, E> sum-type enum: Ok(T) and Err(E), with methods unwrap, unwrap_or, expect, select, is_ok, and is_err.",
-    "url": "#stdlib-typing"
+    "snippet": "The tagged union Result<T, U> and polymorphic IResult interface for robust, exception-free error handling.",
+    "url": "stdlib.html#module-typing"
   },
   {
-    "id": "stdlib-enums",
-    "title": "std::enums \u2014 Enum Reflection",
+    "id": "module-enums",
+    "title": "std::enums \u2014 Enum Reflection & Discriminants",
     "category": "Standard Library",
-    "section": "Reflection",
     "tags": [
       "enums",
+      "EnumType",
       "getkeyid",
       "keyidof",
-      "Enum",
-      "EnumType",
-      "discriminant",
-      "meta-type"
+      "reflection",
+      "discriminant"
     ],
-    "snippet": "Enum reflection intrinsics: getkeyid(enum_val) reads the runtime discriminant, and keyidof(Member) resolves compile-time member ID.",
-    "url": "#stdlib-enums"
+    "snippet": "Reflection and inspection of Fin enum values, runtime discriminants, and compile-time member identifiers.",
+    "url": "stdlib.html#module-enums"
   },
   {
-    "id": "stdlib-operators",
+    "id": "module-error",
+    "title": "std::error \u2014 Error Base Class",
+    "category": "Standard Library",
+    "tags": [
+      "error",
+      "Error",
+      "ErrorType",
+      "code",
+      "message",
+      "describe"
+    ],
+    "snippet": "Base Error class and standard error categorizations for structured failure modeling across libraries.",
+    "url": "stdlib.html#module-error"
+  },
+  {
+    "id": "module-operators",
     "title": "std::operators \u2014 Operator Overloading",
     "category": "Standard Library",
-    "section": "Language",
     "tags": [
       "operators",
-      "Equal",
+      "IndexAssign",
       "Add",
       "Sub",
       "Mul",
       "Div",
-      "Index",
-      "IndexAssign",
+      "Equals",
       "overload"
     ],
-    "snippet": "Thirty operator interfaces in std::ops: Equal, NotEqual, GreaterThan, LessThan, Add, Sub, Mul, Div, Mod, Index, IndexAssign, and bitwise contracts.",
-    "url": "#stdlib-operators"
+    "snippet": "Interfaces for user-defined operator overloading on structs: arithmetic (Add, Sub, Mul, Div), comparison (Equals), and index assignment (IndexAssign).",
+    "url": "stdlib.html#module-operators"
   },
   {
-    "id": "stdlib-stdptr",
-    "title": "std::stdptr \u2014 Smart Pointers (rptr, wptr)",
+    "id": "module-memory",
+    "title": "std::memory \u2014 Dynamic Heap & Arena Patterns",
     "category": "Standard Library",
-    "section": "Memory",
+    "tags": [
+      "memory",
+      "new",
+      "delete",
+      "heap",
+      "allocation",
+      "arena",
+      "deallocation"
+    ],
+    "snippet": "Explicit memory allocation mechanisms: native heap dynamic arrays new [T, n]{}, delete arr;, and user-defined arena allocators.",
+    "url": "stdlib.html#module-memory"
+  },
+  {
+    "id": "module-stdptr",
+    "title": "std::stdptr \u2014 Reference-Counted Pointer rptr<T>",
+    "category": "Standard Library",
     "tags": [
       "stdptr",
       "rptr",
-      "wptr",
-      "own",
-      "borrow",
-      "giveback",
+      "OwnershipError",
+      "retain",
       "release",
-      "refs",
-      "borrows",
-      "weak"
+      "reference counting",
+      "smart pointer"
     ],
-    "snippet": "Reference-counted pointer rptr<T> and weak handle wptr<T>: shared reference and borrow counters, sound aliasing refusal, and RAII-style release.",
-    "url": "#stdlib-stdptr"
-  },
-  {
-    "id": "stdlib-networking",
-    "title": "std::networking \u2014 Socket Facilities & Status",
-    "category": "Standard Library",
-    "section": "Networking",
-    "tags": [
-      "networking",
-      "sockets",
-      "tcp",
-      "udp",
-      "libc",
-      "status",
-      "roadmap"
-    ],
-    "snippet": "Architectural status of socket facilities in Fin: specification roadmap, libc socket bridging, and design invariants under ADR 0008.",
-    "url": "#stdlib-networking"
-  },
-  {
-    "id": "arch-invariants",
-    "title": "Architecture Invariants & ADRs",
-    "category": "Compiler Architecture",
-    "section": "Design",
-    "tags": [
-      "architecture",
-      "adr",
-      "spec",
-      "normative",
-      "samples",
-      "invariants"
-    ],
-    "snippet": "Fin's design discipline: ADR 0001 through 0042, normative sample authority, expectations (ok, error, unimplemented), and held rulings.",
-    "url": "#arch-invariants"
-  },
-  {
-    "id": "arch-refusals",
-    "title": "Compiler Refusal Invariants",
-    "category": "Compiler Architecture",
-    "section": "Codegen",
-    "tags": [
-      "refusal",
-      "invariant",
-      "codegen",
-      "soundness",
-      "explicit error",
-      "no guessing"
-    ],
-    "snippet": "Non-negotiable backend invariant: if codegen cannot lower a construct, it reports an explicit refusal naming the construct. Never drop code or emit guessed IR.",
-    "url": "#arch-refusals"
-  },
-  {
-    "id": "arch-llvm",
-    "title": "LLVM Backend Lowering",
-    "category": "Compiler Architecture",
-    "section": "Codegen",
-    "tags": [
-      "llvm",
-      "backend",
-      "codegen",
-      "tagged discriminant",
-      "tagged union",
-      "pointer map"
-    ],
-    "snippet": "Fresh LLVM backend (ADR 0002): tagged discriminant aggregates for nullables (ADR 0040), tagged unions for enums (ADR 0041), and typed pointer maps.",
-    "url": "#arch-llvm"
-  },
-  {
-    "id": "pipeline-architecture",
-    "title": "The Fin Compiler Pipeline Flow & Refusal Invariants",
-    "category": "Compiler Architecture",
-    "section": "Pipeline",
-    "tags": [
-      "pipeline",
-      "llvm",
-      "ast",
-      "lexer",
-      "parser",
-      "semantics",
-      "codegen",
-      "refusal",
-      "invariants"
-    ],
-    "snippet": "Six-stage compiler flow from Source through Bison Parser, AST cloning, Two-Moment semantics, and LLVM lowering with strict refusal invariants.",
-    "url": "#pipeline-architecture"
+    "snippet": "Smart pointer rptr<T> providing sound reference-counted memory sharing with explicit retain/release lifecycle tracking.",
+    "url": "stdlib.html#module-stdptr"
   }
 ]

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fin — Systems Programming Language Documentation</title>
+  <title>Fin — Systems Programming Language Documentation &amp; Reference</title>
   <meta name="description" content="Official documentation for Fin, a modern systems programming language where memory management is a library, the sample corpus is the specification, and backend lowering adheres to explicit refusal invariants.">
   <link rel="stylesheet" href="styles.css">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233B82F6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 2L2 7l10 5 10-5-10-5z'/><path d='M2 17l10 5 10-5'/><path d='M2 12l10 5 10-5'/></svg>">
@@ -22,9 +22,8 @@
           </svg>
         </button>
 
-        <a href="#intro" class="logo-link">
+        <a href="index.html" class="logo-link">
           <div class="logo-icon" aria-hidden="true">
-            <!-- Stylized Shark Fin / Lambda Motif -->
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M4 20h16a1 1 0 0 0 1-1C19.5 9 12 3 12 3S8 11 4 19a1 1 0 0 0 0 1z"></path>
               <path d="M12 9v11"></path>
@@ -35,6 +34,12 @@
             <span class="version-badge">v0.4.0</span>
           </div>
         </a>
+
+        <nav class="header-nav" aria-label="Primary Navigation">
+          <a href="#quickstart" class="header-nav-link">Guide</a>
+          <a href="#variables-types" class="header-nav-link">Syntax</a>
+          <a href="stdlib.html" class="header-nav-link">Standard Library <span class="header-nav-badge">17 Modules</span></a>
+        </nav>
       </div>
 
       <!-- Instant Search Trigger -->
@@ -86,23 +91,23 @@
   <section class="hero-section" id="hero">
     <div class="hero-container">
       <div class="hero-left">
-        <a href="#stdlib-overview" class="hero-announcement-pill">
+        <a href="stdlib.html" class="hero-announcement-pill">
           <span class="hero-pulse-dot"></span>
-          <span>Fin v0.4.0 is live: 17 Standard Library Modules &amp; LLVM Lowering &rarr;</span>
+          <span>Fin v0.4.0 is live: 17 Standard Library Modules &rarr;</span>
         </a>
-        <h1 class="hero-title">The systems language where memory is a library.</h1>
+        <h1 class="hero-title">A statically-typed systems language with explicit memory semantics.</h1>
         <p class="hero-subtitle">
-          Fin decouples memory architecture from the compiler core into modular libraries. The sample corpus is the normative specification, with explicit refusal invariants in LLVM backend lowering.
+          Fin delivers structural prototypes, first-class enums with payloads, compile-time type verification, and zero-overhead C interop without garbage collection.
         </p>
         <div class="hero-actions">
-          <a href="#intro" class="btn-primary">
-            <span>Read Documentation &rarr;</span>
+          <a href="#quickstart" class="btn-primary">
+            <span>Get Started &rarr;</span>
+          </a>
+          <a href="stdlib.html" class="btn-secondary">
+            <span>Standard Library (17)</span>
           </a>
           <a href="#pipeline-architecture" class="btn-secondary">
             <span>Compiler Pipeline</span>
-          </a>
-          <a href="#stdlib-overview" class="btn-secondary">
-            <span>Explore Stdlib (17)</span>
           </a>
         </div>
         <div class="hero-install-box">
@@ -144,58 +149,69 @@
         <div class="code-showcase-body">
           <!-- Fin Pane -->
           <div class="code-tab-pane active" id="tab-fin">
-            <pre><code class="language-fin">import std.stdio;
-import std.memory;
+            <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
 
-struct Buffer { len: i32, cap: i32 }
+struct Point {
+    x &lt;int&gt;,
+    y &lt;int&gt; = 0,
 
-#[entry]
-fun main() &lt;i32&gt; {
-    // Memory is an explicit library, not a rigid compiler burden
-    var arena = Arena.init(1024);
-    defer arena.release();
+    pub fun sum(self: &amp;Self) &lt;int&gt; {
+        return self.x + self.y;
+    }
+}
 
-    var buf: rptr&lt;Buffer&gt; = arena.alloc(Buffer { len: 10, cap: 64 });
-    blame buf.len == 10;  // Unified assertion
+fun main() &lt;noret&gt; {
+    let p &lt;Point&gt; = Point { x: 10, y: 25 };
+    blame p.sum() == 35, "sum calculation failed";
 
-    println("Fin buffer initialized with capacity: {}", buf.cap);
-    return 0;
+    let arr &lt;[int]&gt; = [1, 2, 3, 4];
+    blame arr.length == 4;
+
+    printf("Point sum: %d, array length: %d\n", p.sum(), arr.length);
 }</code></pre>
           </div>
           <!-- C Pane -->
           <div class="code-tab-pane" id="tab-c">
             <pre><code class="language-c">#include &lt;stdio.h&gt;
-#include &lt;stdlib.h&gt;
 #include &lt;assert.h&gt;
 
-typedef struct { int len; int cap; } Buffer;
+typedef struct {
+    int x;
+    int y;
+} Point;
+
+int Point_sum(const Point* self) {
+    return self-&gt;x + self-&gt;y;
+}
 
 int main(void) {
-    // Manual allocation requires tracking every path to avoid leaks
-    Buffer* buf = (Buffer*)malloc(sizeof(Buffer));
-    if (!buf) return 1;
-    buf-&gt;len = 10;
-    buf-&gt;cap = 64;
+    Point p = { .x = 10, .y = 25 };
+    assert(Point_sum(&amp;p) == 35);
 
-    assert(buf-&gt;len == 10);
-    printf("C buffer capacity: %d\n", buf-&gt;cap);
-
-    free(buf); // Manual free: easy use-after-free or double-free bug
+    int arr[4] = { 1, 2, 3, 4 };
+    printf("Point sum: %d, array length: %zu\n", Point_sum(&amp;p), sizeof(arr)/sizeof(arr[0]));
     return 0;
 }</code></pre>
           </div>
           <!-- Rust Pane -->
           <div class="code-tab-pane" id="tab-rust">
-            <pre><code class="language-rust">struct Buffer { len: i32, cap: i32 }
+            <pre><code class="language-rust">struct Point {
+    x: i32,
+    y: i32,
+}
+
+impl Point {
+    fn sum(&amp;self) -&gt; i32 {
+        self.x + self.y
+    }
+}
 
 fn main() {
-    // Rigid borrow checker enforces compiler-level lifetimes
-    let buf = Box::new(Buffer { len: 10, cap: 64 });
-    assert_eq!(buf.len, 10);
+    let p = Point { x: 10, y: 25 };
+    assert_eq!(p.sum(), 35);
 
-    // Self-referential structs and custom arenas require unsafe {}
-    println!("Rust buffer capacity: {}", buf.cap);
-    // Implicit drop at end of scope
+    let arr = [1, 2, 3, 4];
+    println!("Point sum: {}, array length: {}", p.sum(), arr.len());
 }</code></pre>
           </div>
         </div>
@@ -254,40 +270,23 @@ fn main() {
           <span class="nav-badge">17 modules</span>
         </button>
         <ul class="nav-section-items">
-          <li><a href="#stdlib-overview" class="nav-item-link"><span>17 Modules Directory</span></a></li>
-          <li><a href="#stdlib-stdio" class="nav-item-link"><span>stdio</span></a></li>
-          <li><a href="#stdlib-math" class="nav-item-link"><span>math</span></a></li>
-          <li><a href="#stdlib-strings" class="nav-item-link"><span>strings</span></a></li>
-          <li><a href="#stdlib-path" class="nav-item-link"><span>path</span></a></li>
-          <li><a href="#stdlib-env" class="nav-item-link"><span>env</span></a></li>
-          <li><a href="#stdlib-time" class="nav-item-link"><span>time</span></a></li>
-          <li><a href="#stdlib-fs" class="nav-item-link"><span>fs</span></a></li>
-          <li><a href="#stdlib-random" class="nav-item-link"><span>random</span></a></li>
-          <li><a href="#stdlib-collection" class="nav-item-link"><span>collection</span></a></li>
-          <li><a href="#stdlib-hashmap" class="nav-item-link"><span>hashmap</span></a></li>
-          <li><a href="#stdlib-error" class="nav-item-link"><span>error</span></a></li>
-          <li><a href="#stdlib-types" class="nav-item-link"><span>types</span></a></li>
-          <li><a href="#stdlib-typing" class="nav-item-link"><span>typing</span></a></li>
-          <li><a href="#stdlib-enums" class="nav-item-link"><span>enums</span></a></li>
-          <li><a href="#stdlib-operators" class="nav-item-link"><span>operators</span></a></li>
-          <li><a href="#stdlib-stdptr" class="nav-item-link"><span>stdptr</span></a></li>
-          <li><a href="#stdlib-networking" class="nav-item-link"><span>networking</span></a></li>
+          <li><a href="#stdlib-overview" class="nav-item-link"><span>Directory Overview</span></a></li>
+          <li><a href="stdlib.html" class="nav-item-link" style="color:var(--primary); font-weight:600;"><span>Full Stdlib Portal &rarr;</span></a></li>
         </ul>
       </div>
 
       <!-- Section: Compiler Architecture -->
       <div class="nav-section">
         <button type="button" class="nav-section-header">
-          <span>Compiler Architecture</span>
+          <span>Compiler Reference</span>
           <svg class="nav-section-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="6 9 12 15 18 9"></polyline>
           </svg>
         </button>
         <ul class="nav-section-items">
-          <li><a href="#pipeline-architecture" class="nav-item-link"><span>Compiler Pipeline Flow</span></a></li>
-          <li><a href="#arch-invariants" class="nav-item-link"><span>Invariants &amp; ADRs</span></a></li>
-          <li><a href="#arch-refusals" class="nav-item-link"><span>Refusal Invariants</span></a></li>
-          <li><a href="#arch-llvm" class="nav-item-link"><span>LLVM Backend Lowering</span></a></li>
+          <li><a href="#pipeline-architecture" class="nav-item-link"><span>Pipeline Flow</span></a></li>
+          <li><a href="#compiler-cli" class="nav-item-link"><span>CLI Flags &amp; Modes</span></a></li>
+          <li><a href="#compiler-invariants" class="nav-item-link"><span>Refusal Guarantee</span></a></li>
         </ul>
       </div>
 
@@ -312,7 +311,7 @@ fn main() {
           </p>
 
           <p>
-            Unlike languages that hide runtime garbage collectors behind magical runtimes or mandate complex borrow-checker lifecycles into the compiler core, Fin treats memory models as modular libraries (<a href="#pointers-memory">ADR 0003</a>). The compiler frontend focuses on rigorous semantic analysis, structural typing with prototypes, and compile-time event handlers, while the LLVM backend enforces strict safety guarantees without silently guessing intermediate representations.
+            Unlike languages that hide runtime garbage collectors behind magical runtimes or mandate complex borrow-checker lifecycles into the compiler core, Fin treats memory models as modular libraries . The compiler frontend focuses on rigorous semantic analysis, structural typing with prototypes, and compile-time event handlers, while the LLVM backend enforces strict safety guarantees without silently guessing intermediate representations.
           </p>
 
           <div class="callout callout-invariant">
@@ -327,7 +326,7 @@ fn main() {
 
           <h2 id="core-philosophy">Core Philosophy <a href="#core-philosophy" class="header-anchor">#</a></h2>
           <ul>
-            <li><strong>No Prose Specification:</strong> The language specification lives as code in <code>tests/samples/*.fin</code> (ADR 0008). Each sample carries an explicit <code>//@</code> expectation (<code>ok</code>, <code>error</code>, or <code>unimplemented</code>) that tests and convicts the compiler.</li>
+            <li><strong>No Prose Specification:</strong> The language specification lives as code in <code>tests/samples/*.fin</code> . Each sample carries an explicit <code>//@</code> expectation (<code>ok</code>, <code>error</code>, or <code>unimplemented</code>) that tests and convicts the compiler.</li>
             <li><strong>Single Unified Error Construct:</strong> <code>blame</code> replaces <code>assert</code>, <code>panic</code>, and <code>throw</code>. <code>blame condition;</code> asserts conditions, <code>blame Error(...);</code> raises error values, and <code>blame m1778;</code> marks unimplemented paths.</li>
             <li><strong>First-Class Structural Prototypes:</strong> <code>{K,V}</code> serves as an inference-first structural map type that converts cleanly to nominal containers like <code>HashMap</code> and <code>Collection</code>.</li>
             <li><strong>Two-Moment Layout Engine:</strong> Struct layout cleanly separates the <em>decide</em> phase (where header words and alignments are requested) from the <em>observe</em> phase (where byte sizes and typed pointer maps are queried).</li>
@@ -533,7 +532,7 @@ Hello, World from the Fin Systems Language!</code></pre>
 
           <h3 id="nullable-types">Nullable Types (<code>T?</code>) &amp; Denullify (<code>expr?</code>) <a href="#nullable-types" class="header-anchor">#</a></h3>
           <p>
-            Fin provides native nullability without unmanaged NULL pointer exceptions. Per <strong>ADR 0040</strong>, nullable value types (like <code>int?</code> or <code>struct?</code>) are lowered as deterministic tagged aggregates <code>{ T, bool }</code> with a presence discriminant.
+            Fin provides native nullability without unmanaged NULL pointer exceptions. Nullable value types (like <code>int?</code> or <code>struct?</code>) carry a presence flag alongside the value, guaranteeing memory safety without raw null pointer dereferences.
           </p>
 
           <div class="code-block">
@@ -568,9 +567,9 @@ fun run() &lt;noret&gt; {
             Fin features structured control flow: <code>if / else if / else</code>, three-clause <code>for</code> loops, <code>while</code>, <code>do / while</code>, and a unique ternary syntax.
           </p>
 
-          <h3 id="ternary-operator">Ternary Conditional Expression (ADR 0005) <a href="#ternary-operator" class="header-anchor">#</a></h3>
+          <h3 id="ternary-operator">Ternary Conditional Expression  <a href="#ternary-operator" class="header-anchor">#</a></h3>
           <p>
-            Per ADR 0005, Fin's ternary operator is written: <code>condition : then ? otherwise</code> (colon precedes the true branch, question mark precedes the fallback):
+            Fin's ternary conditional operator is written: <code>condition : then ? otherwise</code> (colon precedes the true branch, question mark precedes the fallback):
           </p>
 
           <div class="code-block">
@@ -601,7 +600,7 @@ let status &lt;string&gt; = score &gt;= 50 : "Pass" ? "Fail";</code></pre>
         count--;
     }
 
-    // Bare brace opens a lexical scope (ADR 0011)
+    // Bare brace opens a lexical scope
     {
         let isolated &lt;int&gt; = 999;
         // isolated goes out of scope and frees resources at closing brace
@@ -723,7 +722,7 @@ pub fun render&lt;T: Drawable&gt;(item: T) &lt;noret&gt; {
               <line x1="12" y1="17" x2="12.01" y2="17"></line>
             </svg>
             <div class="callout-body">
-              <strong>Constraint Sets vs. Storage Types (ADR 0018)</strong>
+              <strong>Constraint Sets vs. Storage Types</strong>
               <p>Constraint sets (such as <code>type Number = int | uint | float;</code>) are bounds for generic parameters and never concrete storage types. You cannot declare a field or variable of type <code>Number</code> directly.</p>
             </div>
           </div>
@@ -734,7 +733,7 @@ pub fun render&lt;T: Drawable&gt;(item: T) &lt;noret&gt; {
           <span class="section-tag">Language Tour</span>
           <h2 id="enums-heading">Enums &amp; Tagged Unions <a href="#enums-heading" class="header-anchor">#</a></h2>
           <p>
-            Fin enums encompass both simple C-style enumerations and rich tagged unions with member payloads (ADR 0041).
+            Fin enums encompass both simple C-style enumerations and rich tagged unions with member payloads .
           </p>
 
           <div class="code-block">
@@ -768,7 +767,7 @@ fun handle_event(e: WebEvent) &lt;noret&gt; {
           <span class="section-tag">Language Tour</span>
           <h2 id="pointers-memory-heading">Pointers &amp; Memory (<code>rptr</code>, <code>wptr</code>) <a href="#pointers-memory-heading" class="header-anchor">#</a></h2>
           <p>
-            Fin rejects language-mandated monolithic garbage collection. As defined in <strong>ADR 0003</strong>, memory management is implemented as a library. For automatic reference management, Fin standard library provides <code>rptr&lt;T&gt;</code> (sound reference-counted pointer with borrow tracking) and <code>wptr&lt;T&gt;</code> (weak non-owning observer).
+            Fin rejects language-mandated monolithic garbage collection. Memory management in Fin is implemented as explicit libraries. For automatic reference management, Fin standard library provides <code>rptr&lt;T&gt;</code> (sound reference-counted pointer with borrow tracking) and <code>wptr&lt;T&gt;</code> (weak non-owning observer).
           </p>
 
           <div class="code-block">
@@ -802,30 +801,27 @@ fun memory_lifecycle() &lt;noret&gt; {
 }</code></pre>
           </div>
 
-          <!-- Memory Model Visual Diagram -->
+          <!-- Memory Model Systems Card -->
           <div class="memory-model-diagram">
-            <h3 style="font-size: 16px; font-weight: 600; margin-bottom: 14px; color: var(--text-primary);">Three Pillars of Fin's Memory Architecture</h3>
+            <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 14px; color: var(--text-primary);">Memory Management Models in Fin</h3>
             <div class="memory-pillars-grid">
-              <div class="memory-pillar-card glow-cyan">
+              <div class="memory-pillar-card">
                 <div class="pillar-title">
-                  <span>🎯</span>
-                  <code>rptr&lt;T&gt;</code> (Shared Borrow)
+                  <code>[T]</code> &amp; Heap Arrays
                 </div>
-                <p class="pillar-desc">Sound reference-counted pointer. Manages runtime ref-count and active borrow tracking. When borrow is granted via <code>.borrow()</code>, mutation is strictly sequenced until <code>.giveback()</code>.</p>
+                <p class="pillar-desc">Raw dynamic heap arrays allocated with <code>new [T, n]{}</code> and deallocated with <code>delete arr;</code>. Carries length and pointer with zero runtime overhead.</p>
               </div>
-              <div class="memory-pillar-card glow-blue">
+              <div class="memory-pillar-card">
                 <div class="pillar-title">
-                  <span>👁️</span>
-                  <code>wptr&lt;T&gt;</code> (Weak Observer)
+                  <code>rptr&lt;T&gt;</code> &amp; <code>wptr&lt;T&gt;</code>
                 </div>
-                <p class="pillar-desc">Weak non-owning observer handle. Monitors allocation lifetime without incrementing strong reference counts, preventing circular reference memory leaks.</p>
+                <p class="pillar-desc">Library-provided reference-counted smart pointers with shared handle tracking and weak non-owning observer handles to avoid reference cycles.</p>
               </div>
-              <div class="memory-pillar-card glow-emerald">
+              <div class="memory-pillar-card">
                 <div class="pillar-title">
-                  <span>⚡</span>
-                  <code>@Alloc(Arena)</code> (Custom Arenas)
+                  Custom Allocators &amp; Arenas
                 </div>
-                <p class="pillar-desc">User-defined custom memory managers. High-throughput linear bump allocators and pool allocators with deterministic batch release via <code>defer arena.release()</code>.</p>
+                <p class="pillar-desc">User-defined memory arenas for batch allocations. High-throughput bump allocation with unified lifetime reset at phase boundaries.</p>
               </div>
             </div>
           </div>
@@ -870,7 +866,7 @@ fun incomplete_feature() &lt;noret&gt; {
           <span class="section-tag">Language Tour</span>
           <h2 id="prototypes-heading">Prototypes <code>{K,V}</code> <a href="#prototypes-heading" class="header-anchor">#</a></h2>
           <p>
-            Prototypes are built-in structural map types written as <code>{K,V}</code>. Two prototypes with the same key and value types are identical types. They convert explicitly into nominal library maps like <code>HashMap</code> (ADR 0028).
+            Prototypes are built-in structural map types written as <code>{K,V}</code>. Two prototypes with the same key and value types are identical types. They convert explicitly into nominal library maps like <code>HashMap</code> .
           </p>
 
           <div class="code-block">
@@ -899,7 +895,7 @@ fun demo_prototype() &lt;noret&gt; {
             Fin distinguishes syntax macros from compiler extensions:
           </p>
           <ul>
-            <li><strong><code>@macro</code>:</strong> Operates on typed ASTs and returns a <code>quote { ... }</code> block (ADR 0023). Invoked with <code>!</code>.</li>
+            <li><strong><code>@macro</code>:</strong> Operates on typed ASTs and returns a <code>quote { ... }</code> block . Invoked with <code>!</code>.</li>
             <li><strong><code>@special</code>:</strong> Compile-time execution functions running within the compiler. The only location where compiler components can be reached via <code>#[use(...)]</code> grants.</li>
           </ul>
 
@@ -921,695 +917,110 @@ fun calculate() &lt;int&gt; {
         </article>
 
         <!-- ===================================================================
-             3. STANDARD LIBRARY
+             3. STANDARD LIBRARY OVERVIEW
              =================================================================== -->
 
-        <!-- Standard Library Overview & Interactive Explorer -->
         <article class="doc-section" id="stdlib-overview">
           <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-overview-heading">17 Core Standard Library Modules <a href="#stdlib-overview-heading" class="header-anchor">#</a></h2>
+          <h2 id="stdlib-heading">Standard Library Modules <a href="#stdlib-heading" class="header-anchor">#</a></h2>
           <p class="doc-lead">
-            Fin ships with 17 rigorously tested standard library modules engineered with modular memory safety in mind. Explore modules below or jump directly to their respective documentation guides.
+            The Fin standard library lives in <code>lib/std/</code> and ships beside the compiler.
+            All 17 modules declare their contents under <code>namespace std</code> and are imported using <code>from &lt;module&gt;::std</code>.
           </p>
 
-          <div class="stdlib-explorer">
-            <!-- Filter Pills -->
-            <div class="stdlib-filter-bar" role="toolbar" aria-label="Filter modules by domain">
-              <button type="button" class="stdlib-filter-btn active" data-filter="all">All (17)</button>
-              <button type="button" class="stdlib-filter-btn" data-filter="io">IO &amp; Filesystem (3)</button>
-              <button type="button" class="stdlib-filter-btn" data-filter="math">Math &amp; PRNG (2)</button>
-              <button type="button" class="stdlib-filter-btn" data-filter="system">System &amp; Time (2)</button>
-              <button type="button" class="stdlib-filter-btn" data-filter="data">Data Structures (2)</button>
-              <button type="button" class="stdlib-filter-btn" data-filter="core">Core &amp; Reflection (6)</button>
-              <button type="button" class="stdlib-filter-btn" data-filter="low-level">Low-Level &amp; Net (2)</button>
-            </div>
-
-            <!-- Grid of 17 Cards -->
-            <div class="stdlib-grid">
-              <a href="#stdlib-stdio" class="stdlib-card" data-category="io">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">📟</span>
-                    <span class="stdlib-card-name">std::stdio</span>
-                  </div>
-                  <span class="stdlib-card-tag">IO</span>
-                </div>
-                <p class="stdlib-card-desc">Console printing, println formatting, standard streams, and static file utilities.</p>
-              </a>
-
-              <a href="#stdlib-strings" class="stdlib-card" data-category="core">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">🔤</span>
-                    <span class="stdlib-card-name">std::strings</span>
-                  </div>
-                  <span class="stdlib-card-tag">Text</span>
-                </div>
-                <p class="stdlib-card-desc">High-performance UTF-8 string manipulation, content comparisons, and slicing.</p>
-              </a>
-
-              <a href="#stdlib-fs" class="stdlib-card" data-category="io">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">📁</span>
-                    <span class="stdlib-card-name">std::fs</span>
-                  </div>
-                  <span class="stdlib-card-tag">Filesystem</span>
-                </div>
-                <p class="stdlib-card-desc">POSIX-compliant filesystem operations, file existence, read_to_string, and buffers.</p>
-              </a>
-
-              <a href="#stdlib-random" class="stdlib-card" data-category="math">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">🎲</span>
-                    <span class="stdlib-card-name">std::random</span>
-                  </div>
-                  <span class="stdlib-card-tag">Math</span>
-                </div>
-                <p class="stdlib-card-desc">PRNG seed initialization, uniform integers, floating-point distributions, and booleans.</p>
-              </a>
-
-              <a href="#stdlib-math" class="stdlib-card" data-category="math">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">📐</span>
-                    <span class="stdlib-card-name">std::math</span>
-                  </div>
-                  <span class="stdlib-card-tag">Math</span>
-                </div>
-                <p class="stdlib-card-desc">Constants PI/E, generic Number helpers (min/max/clamp/gcd), ipow/isqrt, and libm.</p>
-              </a>
-
-              <a href="#stdlib-env" class="stdlib-card" data-category="system">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">⚙️</span>
-                    <span class="stdlib-card-name">std::env</span>
-                  </div>
-                  <span class="stdlib-card-tag">System</span>
-                </div>
-                <p class="stdlib-card-desc">Environment variable access (getenv/setenv), process ID querying, and exit codes.</p>
-              </a>
-
-              <a href="#stdlib-path" class="stdlib-card" data-category="io">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">🗺️</span>
-                    <span class="stdlib-card-name">std::path</span>
-                  </div>
-                  <span class="stdlib-card-tag">Filesystem</span>
-                </div>
-                <p class="stdlib-card-desc">Cross-platform path resolution, join, basename, dirname, and extension checks.</p>
-              </a>
-
-              <a href="#stdlib-time" class="stdlib-card" data-category="system">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">⏱️</span>
-                    <span class="stdlib-card-name">std::time</span>
-                  </div>
-                  <span class="stdlib-card-tag">System</span>
-                </div>
-                <p class="stdlib-card-desc">Nanosecond resolution timestamps, monotonic clocks, sleep_sec, and duration diffs.</p>
-              </a>
-
-              <a href="#stdlib-collection" class="stdlib-card" data-category="data">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">📦</span>
-                    <span class="stdlib-card-name">std::collection</span>
-                  </div>
-                  <span class="stdlib-card-tag">Data</span>
-                </div>
-                <p class="stdlib-card-desc">Contiguous generic array (Collection&lt;T&gt;) with dynamic capacity doubling and slicing.</p>
-              </a>
-
-              <a href="#stdlib-hashmap" class="stdlib-card" data-category="data">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">🗝️</span>
-                    <span class="stdlib-card-name">std::hashmap</span>
-                  </div>
-                  <span class="stdlib-card-tag">Data</span>
-                </div>
-                <p class="stdlib-card-desc">Linear probing robin hood hash table with prototype {K,V} conversions and custom hashers.</p>
-              </a>
-
-              <a href="#stdlib-error" class="stdlib-card" data-category="core">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">🛡️</span>
-                    <span class="stdlib-card-name">std::error</span>
-                  </div>
-                  <span class="stdlib-card-tag">Core</span>
-                </div>
-                <p class="stdlib-card-desc">Standard Error base class, snprintf diagnostic formatting, and conviction records.</p>
-              </a>
-
-              <a href="#stdlib-types" class="stdlib-card" data-category="core">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">🧩</span>
-                    <span class="stdlib-card-name">std::types</span>
-                  </div>
-                  <span class="stdlib-card-tag">Core</span>
-                </div>
-                <p class="stdlib-card-desc">Explicit numeric type aliases (i8-u64, usize, byte) and generic constraint sets.</p>
-              </a>
-
-              <a href="#stdlib-typing" class="stdlib-card" data-category="core">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">🔍</span>
-                    <span class="stdlib-card-name">std::typing</span>
-                  </div>
-                  <span class="stdlib-card-tag">Reflection</span>
-                </div>
-                <p class="stdlib-card-desc">Result&lt;T, E&gt; sum-type enum (Ok/Err) with unwrap, unwrap_or, and expect methods.</p>
-              </a>
-
-              <a href="#stdlib-enums" class="stdlib-card" data-category="core">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">🏷️</span>
-                    <span class="stdlib-card-name">std::enums</span>
-                  </div>
-                  <span class="stdlib-card-tag">Core</span>
-                </div>
-                <p class="stdlib-card-desc">Runtime discriminant reflection via getkeyid and compile-time member resolution keyidof.</p>
-              </a>
-
-              <a href="#stdlib-operators" class="stdlib-card" data-category="core">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">➕</span>
-                    <span class="stdlib-card-name">std::operators</span>
-                  </div>
-                  <span class="stdlib-card-tag">Traits</span>
-                </div>
-                <p class="stdlib-card-desc">Overload contracts in std::ops: Equal, Add, Sub, Mul, Div, Index, and IndexAssign.</p>
-              </a>
-
-              <a href="#stdlib-stdptr" class="stdlib-card" data-category="low-level">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">🎯</span>
-                    <span class="stdlib-card-name">std::stdptr</span>
-                  </div>
-                  <span class="stdlib-card-tag">Low-Level</span>
-                </div>
-                <p class="stdlib-card-desc">Reference-counted rptr&lt;T&gt; and weak handle wptr&lt;T&gt; with sound borrow checking.</p>
-              </a>
-
-              <a href="#stdlib-networking" class="stdlib-card" data-category="low-level">
-                <div class="stdlib-card-top">
-                  <div class="stdlib-card-header">
-                    <span class="stdlib-card-icon">🌐</span>
-                    <span class="stdlib-card-name">std::networking</span>
-                  </div>
-                  <span class="stdlib-card-tag">Network</span>
-                </div>
-                <p class="stdlib-card-desc">POSIX socket abstractions, libc socket ABI bridging, and network specifications.</p>
-              </a>
-            </div>
-          </div>
-        </article>
-
-        <!-- stdio -->
-        <article class="doc-section" id="stdlib-stdio">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-stdio-heading">std::stdio — Standard I/O &amp; Files <a href="#stdlib-stdio-heading" class="header-anchor">#</a></h2>
-          <p>
-            The <code>stdio</code> module owns console output, typed printing via the <code>Printable</code> contract, in-memory byte streams (<code>Stream</code>), and static file operations (<code>File</code>).
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { println_str, println_int, File, Stream } from stdio::std;
-
-fun io_example() &lt;noret&gt; {
-    // Basic console output
-    println_str("Writing file demo...");
-
-    // File writing &amp; reading
-    let path &lt;string&gt; = "output.txt";
-    File::write_text(path, "Fin standard I/O byte stream\n", 29);
-
-    if (File::exists(path)) {
-        let size &lt;int&gt; = File::size(path);
-        println_int(size);
-
-        let bytes &lt;[char]&gt; = File::read_all(path);
-        File::remove(path);
-    }
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- math -->
-        <article class="doc-section" id="stdlib-math">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-math-heading">std::math — Mathematical Functions <a href="#stdlib-math-heading" class="header-anchor">#</a></h2>
-          <p>
-            Provides generic arithmetic operations over the <code>Number</code> constraint set (<code>min</code>, <code>max</code>, <code>clamp</code>, <code>abs</code>, <code>gcd</code>), integer powers and square roots (<code>ipow</code>, <code>isqrt</code>), math constants (<code>PI</code>, <code>E</code>), and C <code>libm</code> bindings.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { PI, min, max, clamp, gcd, ipow, isqrt, math_sqrt } from math::std;
-
-fun math_example() &lt;noret&gt; {
-    let bounded &lt;int&gt; = clamp(150, 0, 100);  // 100
-    let greatest &lt;int&gt; = gcd(48, 18);        // 6
-    let root &lt;int&gt; = isqrt(26);              // 5
-    let power &lt;int&gt; = ipow(2, 10);           // 1024
-    let hyp &lt;double&gt; = math_sqrt(2.0);       // 1.414214
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- strings -->
-        <article class="doc-section" id="stdlib-strings">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-strings-heading">std::strings — String Manipulation <a href="#stdlib-strings-heading" class="header-anchor">#</a></h2>
-          <p>
-            Provides content comparisons, substrings, searching, trimming, case conversions, and character array transformations. Every string returned by allocating functions is caller-owned and can be released with <code>free_str</code>.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { len, equals, concat, substr, trim, to_upper, free_str } from strings::std;
-
-fun string_example() &lt;noret&gt; {
-    let s1 &lt;string&gt; = "Hello";
-    let s2 &lt;string&gt; = " World";
-
-    // Note: == compares pointers; equals() compares character bytes!
-    let is_same &lt;bool&gt; = equals(s1, "Hello");
-
-    let combined &lt;string&gt; = concat(s1, s2);
-    let trimmed &lt;string&gt; = trim("   Fin Language   ");
-    let upper &lt;string&gt; = to_upper(s1);
-
-    // Free allocated strings when finished
-    free_str(combined);
-    free_str(trimmed);
-    free_str(upper);
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- path -->
-        <article class="doc-section" id="stdlib-path">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-path-heading">std::path — Path Manipulation <a href="#stdlib-path-heading" class="header-anchor">#</a></h2>
-          <p>
-            Standard platform path utilities for filesystem paths: joining segments, extracting basenames, dirnames, file extensions, and checking path absoluteness.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { join, basename, dirname, extname, is_absolute, free_path } from path::std;
-
-fun path_example() &lt;noret&gt; {
-    let full &lt;string&gt; = join("/usr/local", "bin/finc"); // "/usr/local/bin/finc"
-    let base &lt;string&gt; = basename(full);                  // "finc"
-    let dir &lt;string&gt; = dirname(full);                    // "/usr/local/bin"
-    let ext &lt;string&gt; = extname("archive.tar.gz");        // ".gz"
-
-    let is_abs &lt;bool&gt; = is_absolute(full);               // true
-
-    free_path(full);
-    free_path(base);
-    free_path(dir);
-    free_path(ext);
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- env -->
-        <article class="doc-section" id="stdlib-env">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-env-heading">std::env — Environment &amp; Process <a href="#stdlib-env-heading" class="header-anchor">#</a></h2>
-          <p>
-            System environment variable access, modification, PID inspection, and graceful process termination.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { get_env, has_env, set_env, unset_env, get_pid, c_exit } from env::std;
-
-fun env_demo() &lt;noret&gt; {
-    let port &lt;string&gt; = get_env("PORT", "8080");
-    let has_user &lt;bool&gt; = has_env("USER");
-    let pid &lt;int&gt; = get_pid();
-
-    set_env("FIN_LOG_LEVEL", "DEBUG");
-    unset_env("TEMPORARY_FLAG");
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- time -->
-        <article class="doc-section" id="stdlib-time">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-time-heading">std::time — System Clock &amp; Sleep <a href="#stdlib-time-heading" class="header-anchor">#</a></h2>
-          <p>
-            Wall-clock timestamps from the POSIX epoch and execution delay controls.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { now, sleep_sec, sleep_ms, diff_sec } from time::std;
-
-fun time_demo() &lt;noret&gt; {
-    let start &lt;long&gt; = now();
-    sleep_ms(250); // sleep for 250 milliseconds
-    let end &lt;long&gt; = now();
-    let elapsed &lt;long&gt; = diff_sec(start, end);
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- fs -->
-        <article class="doc-section" id="stdlib-fs">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-fs-heading">std::fs — File System I/O <a href="#stdlib-fs-heading" class="header-anchor">#</a></h2>
-          <p>
-            Direct filesystem file utilities for reading and writing files as full strings. Includes nullable returns for absent files.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { file_exists, file_size, read_to_string, write_string, free_file_content } from fs::std;
-
-fun fs_demo() &lt;noret&gt; {
-    let path &lt;string&gt; = "config.json";
-    write_string(path, "{\"mode\": \"fast\"}");
-
-    if (file_exists(path)) {
-        let content? &lt;string&gt; = read_to_string(path);
-        if (content != null) {
-            printf("File content: %s\n", content?);
-            free_file_content(content?);
-        }
-    }
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- random -->
-        <article class="doc-section" id="stdlib-random">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-random-heading">std::random — Pseudo-Random Numbers <a href="#stdlib-random-heading" class="header-anchor">#</a></h2>
-          <p>
-            Pseudo-random number generation, seeding via system epoch, and uniform distributions across ranges.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { seed_now, random_int, random_float, random_bool } from random::std;
-
-fun random_demo() &lt;noret&gt; {
-    seed_now();
-    let roll &lt;int&gt; = random_int(1, 6);       // Dice roll [1..6]
-    let factor &lt;float&gt; = random_float();     // Floating point [0.0..1.0)
-    let coin_flip &lt;bool&gt; = random_bool();   // true or false
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- collection -->
-        <article class="doc-section" id="stdlib-collection">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-collection-heading">std::collection — Dynamic Array <a href="#stdlib-collection-heading" class="header-anchor">#</a></h2>
-          <p>
-            The growable dynamic array container <code>Collection&lt;T&gt;</code>. Features geometric doubling reallocation, explicit bounds-checking via <code>blame</code>, and conversion from structural prototypes.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { Collection } from collection::std;
-
-fun collection_demo() &lt;noret&gt; {
-    let list &lt;&amp;Collection&lt;int&gt;&gt; = new Collection&lt;int&gt;{};
-
-    list.push(10);
-    list.push(20);
-    list.push(30);
-
-    printf("Count: %d, Cap: %d\n", list.len(), list.capacity());
-
-    let val &lt;int&gt; = list[1]; // 20
-    list.insert(1, 15);      // inserts 15 at index 1
-    let removed &lt;int&gt; = list.remove(0); // removes 10
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- hashmap -->
-        <article class="doc-section" id="stdlib-hashmap">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-hashmap-heading">std::hashmap — Hash Table <a href="#stdlib-hashmap-heading" class="header-anchor">#</a></h2>
-          <p>
-            Production open-addressing hash table with linear probing, tombstones for deletion, and dynamic rehashing at a 0.75 load factor. Supports custom hash functions via <code>with_hasher</code>.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { HashMap } from hashmap::std;
-
-fun map_demo() &lt;noret&gt; {
-    let map &lt;&amp;HashMap&lt;string, int&gt;&gt; = new HashMap&lt;string, int&gt;{};
-
-    map["apples"] = 5;
-    map["oranges"] = 12;
-
-    if (map.exists("apples")) {
-        let count &lt;int&gt; = map["apples"];
-        printf("Apples count: %d\n", count);
-    }
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- error -->
-        <article class="doc-section" id="stdlib-error">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-error-heading">std::error — Error Base Class <a href="#stdlib-error-heading" class="header-anchor">#</a></h2>
-          <p>
-            The root <code>Error</code> class inherited by all standard and user-defined errors raised through <code>blame</code>.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { Error } from error::std;
-
-pub struct DatabaseError : &lt;Error&gt; {
-    code &lt;int&gt;,
-
-    DatabaseError(msg: string, code: int) {
-        self.message = msg;
-        self.err_code = code;
-    }
-}
-
-fun query() &lt;noret&gt; {
-    blame DatabaseError("Connection timed out", 504);
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- types -->
-        <article class="doc-section" id="stdlib-types">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-types-heading">std::types — Numeric Aliases &amp; Constraint Sets <a href="#stdlib-types-heading" class="header-anchor">#</a></h2>
-          <p>
-            Declares sized integer type aliases (<code>i8</code>, <code>u8</code>, <code>i16</code>, <code>u16</code>, <code>i32</code>, <code>u32</code>, <code>i64</code>, <code>u64</code>, <code>usize</code>, <code>isize</code>, <code>byte</code>), constraint sets (<code>Number</code>, <code>Integer</code>, <code>Float</code>, <code>Signed</code>, <code>Unsigned</code>), and string/number conversions.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { number2str, str2int, byte, usize } from types::std;
-
-fun types_demo() &lt;noret&gt; {
-    let s &lt;string&gt; = number2str&lt;int&gt;(42);  // "42"
-    let n &lt;int&gt; = str2int("1024");         // 1024
-    let b &lt;byte&gt; = cast&lt;byte&gt;(255);
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- typing -->
-        <article class="doc-section" id="stdlib-typing">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-typing-heading">std::typing — Result&lt;T, E&gt; Sum Type <a href="#stdlib-typing-heading" class="header-anchor">#</a></h2>
-          <p>
-            The canonical <code>Result&lt;T, E&gt;</code> sum type with <code>Ok(T)</code> and <code>Err(E)</code> variants and helper methods for unwrapping, fallbacks, and inspection.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { Result, IResult } from typing::std;
-import { Error } from error::std;
-
-fun parse_number(text: string) &lt;Result&lt;int, Error&gt;&gt; {
-    if (text == "") {
-        return Result::Err(Error("empty input"));
-    }
-    return Result::Ok(42);
-}
-
-fun handle() &lt;noret&gt; {
-    let res &lt;Result&lt;int, Error&gt;&gt; = parse_number("42");
-    if (res.is_ok()) {
-        let value &lt;int&gt; = res.unwrap();
-    }
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- enums -->
-        <article class="doc-section" id="stdlib-enums">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-enums-heading">std::enums — Enum Reflection <a href="#stdlib-enums-heading" class="header-anchor">#</a></h2>
-          <p>
-            Provides reflection operations across enumerations: <code>getkeyid(val)</code> inspects the runtime 32-bit tag discriminant, and <code>keyidof(Member)</code> evaluates the compile-time member ID.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { getkeyid, keyidof } from enums::std;
-
-enum Color { Red, Green, Blue }
-
-fun check_color(c: Color) &lt;bool&gt; {
-    return getkeyid(c) == keyidof(Red);
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- operators -->
-        <article class="doc-section" id="stdlib-operators">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-operators-heading">std::operators — Operator Overloading <a href="#stdlib-operators-heading" class="header-anchor">#</a></h2>
-          <p>
-            Contains the 30 operator interfaces defined in <code>std::ops</code>: <code>Equal</code>, <code>NotEqual</code>, <code>GreaterThan</code>, <code>LessThan</code>, <code>Add</code>, <code>Sub</code>, <code>Mul</code>, <code>Div</code>, <code>Mod</code>, <code>Index</code>, <code>IndexAssign</code>, and bitwise contracts.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { Add, Equal } from operators::std;
-
-pub struct Money : &lt;Add&gt; {
-    cents &lt;int&gt;,
-
-    pub operator +(other: Money) &lt;Money&gt; {
-        return Money(self.cents + other.cents);
-    }
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- stdptr -->
-        <article class="doc-section" id="stdlib-stdptr">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-stdptr-heading">std::stdptr — Smart Pointers (<code>rptr</code>, <code>wptr</code>) <a href="#stdlib-stdptr-heading" class="header-anchor">#</a></h2>
-          <p>
-            Implementation of reference-counted and weak smart pointers. Refuses aliased mutation through checked runtime borrow counts.
-          </p>
-
-          <div class="code-block">
-            <div class="code-header">
-              <span class="code-lang">fin</span>
-              <button type="button" class="copy-btn"><span>Copy</span></button>
-            </div>
-            <pre><code class="language-fin">import { rptr, wptr } from stdptr::std;
-
-fun pointer_demo() &lt;noret&gt; {
-    let owner &lt;rptr&lt;string&gt;&gt; = rptr("Resource");
-    let weak_ref &lt;wptr&lt;string&gt;&gt; = owner.downgrade();
-
-    if (weak_ref.is_alive()) {
-        printf("Resource is still alive!\n");
-    }
-    owner.release();
-}</code></pre>
-          </div>
-        </article>
-
-        <!-- networking -->
-        <article class="doc-section" id="stdlib-networking">
-          <span class="section-tag">Standard Library</span>
-          <h2 id="stdlib-networking-heading">std::networking — Socket Facilities &amp; Status <a href="#stdlib-networking-heading" class="header-anchor">#</a></h2>
-          <p>
-            The networking module status is specified under ADR 0008. The module boundary is bundled in <code>lib/std/networking.fin</code> to allow module imports. Low-level POSIX socket externs (<code>socket</code>, <code>bind</code>, <code>listen</code>, <code>accept</code>, <code>connect</code>, <code>send</code>, <code>recv</code>) are bridged to the libc socket layer.
-          </p>
-
-          <div class="callout callout-tip">
+          <div class="callout callout-tip" style="margin-bottom: 28px;">
             <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"></circle>
-              <line x1="12" y1="16" x2="12" y2="12"></line>
-              <line x1="12" y1="8" x2="12.01" y2="8"></line>
+              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+              <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
             </svg>
             <div class="callout-body">
-              <strong>Network Sockets Roadmap</strong>
-              <p>Programs requiring network communication currently interface with standard POSIX socket bindings via <code>@define</code> extern declarations matching the C runtime ABI.</p>
+              <strong>Dedicated Standard Library Documentation Portal</strong>
+              <p>For complete API signatures, parameters, return types, memory allocation lifecycles, and runnable Fin code examples for every module, visit the dedicated <a href="stdlib.html" style="text-decoration:underline; font-weight:600;">Fin Standard Library Portal &rarr;</a></p>
             </div>
+          </div>
+
+          <div class="stdlib-modules-grid" style="margin-top: 24px;">
+            <a href="stdlib.html#module-stdio" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">stdio</span><span class="stdlib-card-badge">Core &amp; I/O</span></div>
+              <p class="stdlib-card-desc">Formatted printing, Printable contract, byte Stream, and File operations.</p>
+            </a>
+            <a href="stdlib.html#module-fs" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">fs</span><span class="stdlib-card-badge">Core &amp; I/O</span></div>
+              <p class="stdlib-card-desc">File existence check, reading to string, writing, appending, and deletion.</p>
+            </a>
+            <a href="stdlib.html#module-path" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">path</span><span class="stdlib-card-badge">Core &amp; I/O</span></div>
+              <p class="stdlib-card-desc">Path joining, basename, dirname, extname, and absolute/relative testing.</p>
+            </a>
+            <a href="stdlib.html#module-collection" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">collection</span><span class="stdlib-card-badge">Collections</span></div>
+              <p class="stdlib-card-desc">Dynamic growable array Collection&lt;T&gt; with geometric buffer doubling.</p>
+            </a>
+            <a href="stdlib.html#module-hashmap" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">hashmap</span><span class="stdlib-card-badge">Collections</span></div>
+              <p class="stdlib-card-desc">Associative hash map HashMap&lt;K,V&gt; with open addressing and linear probing.</p>
+            </a>
+            <a href="stdlib.html#module-env" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">env</span><span class="stdlib-card-badge">System &amp; Runtime</span></div>
+              <p class="stdlib-card-desc">Environment variables (get/set/unset), process ID, and process termination.</p>
+            </a>
+            <a href="stdlib.html#module-time" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">time</span><span class="stdlib-card-badge">System &amp; Runtime</span></div>
+              <p class="stdlib-card-desc">System epoch clock timestamps and synchronous delays in seconds/milliseconds.</p>
+            </a>
+            <a href="stdlib.html#module-random" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">random</span><span class="stdlib-card-badge">System &amp; Runtime</span></div>
+              <p class="stdlib-card-desc">Pseudo-random number generator (PRNG), bounded integers, floats, and booleans.</p>
+            </a>
+            <a href="stdlib.html#module-math" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">math</span><span class="stdlib-card-badge">Math &amp; Utilities</span></div>
+              <p class="stdlib-card-desc">Constants (PI, E), Number helpers (min, max, clamp, abs), and C libm bindings.</p>
+            </a>
+            <a href="stdlib.html#module-strings" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">strings</span><span class="stdlib-card-badge">Math &amp; Utilities</span></div>
+              <p class="stdlib-card-desc">String length, prefix/suffix check, substring search, slicing, and repetition.</p>
+            </a>
+            <a href="stdlib.html#module-types" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">types</span><span class="stdlib-card-badge">Types &amp; Semantics</span></div>
+              <p class="stdlib-card-desc">Numeric constraint sets (Number, Integer, Signed, Unsigned), and number2str.</p>
+            </a>
+            <a href="stdlib.html#module-typing" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">typing</span><span class="stdlib-card-badge">Types &amp; Semantics</span></div>
+              <p class="stdlib-card-desc">Tagged union Result&lt;T, U&gt; for robust error handling without exception overhead.</p>
+            </a>
+            <a href="stdlib.html#module-enums" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">enums</span><span class="stdlib-card-badge">Types &amp; Semantics</span></div>
+              <p class="stdlib-card-desc">Reflection utilities: getkeyid for runtime tags and keyidof for member IDs.</p>
+            </a>
+            <a href="stdlib.html#module-error" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">error</span><span class="stdlib-card-badge">Types &amp; Semantics</span></div>
+              <p class="stdlib-card-desc">Base Error class and standard error categorizations for structured failure modeling.</p>
+            </a>
+            <a href="stdlib.html#module-operators" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">operators</span><span class="stdlib-card-badge">Types &amp; Semantics</span></div>
+              <p class="stdlib-card-desc">Operator overloading interfaces for user-defined structs (Add, Sub, Mul, Equals...).</p>
+            </a>
+            <a href="stdlib.html#module-memory" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">memory</span><span class="stdlib-card-badge">Memory &amp; Pointers</span></div>
+              <p class="stdlib-card-desc">Native dynamic arrays new [T, n]{}, delete arr;, and user-defined arena allocators.</p>
+            </a>
+            <a href="stdlib.html#module-stdptr" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">stdptr</span><span class="stdlib-card-badge">Memory &amp; Pointers</span></div>
+              <p class="stdlib-card-desc">Smart pointer rptr&lt;T&gt; providing sound reference-counted memory sharing.</p>
+            </a>
+          </div>
+
+          <div style="margin-top: 32px; text-align: center;">
+            <a href="stdlib.html" class="btn-primary" style="display:inline-flex; padding: 12px 28px; font-size: 15px;">
+              <span>Open Standard Library Documentation Portal (17 Modules) &rarr;</span>
+            </a>
           </div>
         </article>
 
         <!-- ===================================================================
-             4. COMPILER ARCHITECTURE
+             4. COMPILER ARCHITECTURE & REFERENCE
              =================================================================== -->
-
-        <!-- Compiler Pipeline Flow Diagram & Refusal Invariants -->
+<!-- Compiler Pipeline Flow Diagram & Refusal Invariants -->
         <article class="doc-section" id="pipeline-architecture">
           <span class="section-tag">Compiler Architecture</span>
           <h2 id="pipeline-architecture-heading">The Fin Compiler Pipeline Flow <a href="#pipeline-architecture-heading" class="header-anchor">#</a></h2>
@@ -1672,75 +1083,74 @@ fun pointer_demo() &lt;noret&gt; {
           </div>
         </article>
 
-        <!-- Invariants & ADRs -->
-        <article class="doc-section" id="arch-invariants">
-          <span class="section-tag">Compiler Architecture</span>
-          <h2 id="arch-invariants-heading">Architecture Invariants &amp; ADRs <a href="#arch-invariants-heading" class="header-anchor">#</a></h2>
+        <!-- CLI Reference & Flags -->
+        <article class="doc-section" id="compiler-cli">
+          <span class="section-tag">Compiler Reference</span>
+          <h2 id="compiler-cli-heading">Command-Line Interface &amp; Flags <a href="#compiler-cli-heading" class="header-anchor">#</a></h2>
           <p>
-            Fin has no prose specification. Per <strong>ADR 0008</strong>, <code>tests/samples/*.fin</code> serves as the single source of truth. Every Architectural Decision Record (ADR) in <code>docs/adr/</code> defines an immutable structural invariant:
+            The <code>finc</code> compiler provides a Unix-standard command-line interface. Exit code <code>0</code> indicates complete success.
           </p>
 
           <div class="table-wrapper">
             <table>
               <thead>
                 <tr>
-                  <th>ADR</th>
-                  <th>Title &amp; Invariant</th>
+                  <th style="width: 25%;">Flag</th>
+                  <th style="width: 25%;">Argument</th>
+                  <th style="width: 50%;">Description</th>
                 </tr>
               </thead>
               <tbody>
-                <tr><td><strong>0001</strong></td><td><code>m1778</code> means "not implemented". Reaching it is compile-time or run-time failure.</td></tr>
-                <tr><td><strong>0002</strong></td><td>Fresh LLVM backend. AST lowering produces direct LLVM IR without intermediate C emission.</td></tr>
-                <tr><td><strong>0003</strong></td><td>Memory management is a library, not built-in compiler magic.</td></tr>
-                <tr><td><strong>0005</strong></td><td>Ternary is written <code>condition : then ? otherwise</code>.</td></tr>
-                <tr><td><strong>0008</strong></td><td>Sample authority is per-expectation (<code>//@ ok</code>, <code>//@ error</code>, <code>//@ unimplemented</code>).</td></tr>
-                <tr><td><strong>0011</strong></td><td>A bare brace opens an explicit lexical scope.</td></tr>
-                <tr><td><strong>0018</strong></td><td>A constraint set is a bound, never a storage type.</td></tr>
-                <tr><td><strong>0019</strong></td><td>An interface reference is two words: data pointer and vtable pointer.</td></tr>
-                <tr><td><strong>0036</strong></td><td>Struct equality (<code>==</code>) is declared-only, never synthesized automatically.</td></tr>
-                <tr><td><strong>0040</strong></td><td>Nullable values are tagged aggregates <code>{ T, bool }</code>; nullable pointers use null sentinel.</td></tr>
-                <tr><td><strong>0041</strong></td><td>Enums are tagged unions with 32-bit discriminants and byte-aligned payload buffers.</td></tr>
-                <tr><td><strong>0042</strong></td><td>Compiler API builtins (<code>@implements</code>, <code>@defined</code>, <code>@Alloc</code>, <code>@Free</code>) map to unified compiler components.</td></tr>
+                <tr><td><code>-o &lt;file&gt;</code></td><td>Path to binary</td><td>Compiles and links source into a standalone executable.</td></tr>
+                <tr><td><code>-c</code></td><td>Source file</td><td>Compiles source to a native object file (<code>.o</code>) without linking.</td></tr>
+                <tr><td><code>-S</code></td><td>Source file</td><td>Emits human-readable LLVM intermediate representation (IR).</td></tr>
+                <tr><td><code>--emit-llvm</code></td><td>Source file</td><td>Emits LLVM bitcode representation.</td></tr>
+                <tr><td><code>--dump-ast</code></td><td>Source file</td><td>Dumps internal Abstract Syntax Tree after parsing.</td></tr>
+                <tr><td><code>--version</code></td><td>None</td><td>Displays compiler version and machine contract version.</td></tr>
+                <tr><td><code>--help</code></td><td>None</td><td>Displays complete list of available flags and diagnostic controls.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3 id="exit-codes">Compiler Exit Codes <a href="#exit-codes" class="header-anchor">#</a></h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 20%;">Exit Code</th>
+                  <th style="width: 30%;">Status</th>
+                  <th style="width: 50%;">Meaning</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td><code>0</code></td><td>Success</td><td>Compilation, type-checking, or linking finished with zero diagnostics.</td></tr>
+                <tr><td><code>1</code></td><td>Syntax Error</td><td>Bison parser or Flex lexer failed to parse input source.</td></tr>
+                <tr><td><code>2</code></td><td>Semantic Failure</td><td>Type mismatch, undeclared identifier, or invalid constraint bound.</td></tr>
+                <tr><td><code>3</code></td><td>Codegen Refusal</td><td>Explicit refusal: compiler halts when a construct cannot be lowered soundly.</td></tr>
               </tbody>
             </table>
           </div>
         </article>
 
         <!-- Refusal Invariants -->
-        <article class="doc-section" id="arch-refusals">
-          <span class="section-tag">Compiler Architecture</span>
-          <h2 id="arch-refusals-heading">Compiler Refusal Invariants <a href="#arch-refusals-heading" class="header-anchor">#</a></h2>
+        <article class="doc-section" id="compiler-invariants">
+          <span class="section-tag">Compiler Reference</span>
+          <h2 id="compiler-invariants-heading">The Explicit Refusal Guarantee <a href="#compiler-invariants-heading" class="header-anchor">#</a></h2>
           <p>
-            A foundational guarantee of the <code>finc</code> compiler backend:
+            A core principle of the Fin compiler is <strong>truth in code generation</strong>:
           </p>
           <div class="callout callout-invariant">
             <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
             </svg>
             <div class="callout-body">
-              <strong>Refusal Rule</strong>
-              <p>Whenever the code generator encounters a type, operator, or expression that cannot be fully lowered to LLVM IR, it halts with an explicit refusal diagnostic: <code>codegen: &lt;construct&gt; is not lowered yet</code>. It will NEVER silently omit execution code or substitute stub IR.</p>
+              <strong>Non-Negotiable Refusal Invariant</strong>
+              <p>Whenever the code generator encounters a type, operator, or construct that cannot be soundly lowered to machine code, it reports an explicit refusal: <code>codegen: &lt;construct&gt; is not lowered yet</code>. It will NEVER silently omit execution code or substitute stub IR.</p>
             </div>
           </div>
         </article>
-
-        <!-- LLVM Lowering -->
-        <article class="doc-section" id="arch-llvm">
-          <span class="section-tag">Compiler Architecture</span>
-          <h2 id="arch-llvm-heading">Backend LLVM Lowering <a href="#arch-llvm-heading" class="header-anchor">#</a></h2>
-          <p>
-            The backend maps high-level Fin AST constructs directly into optimized LLVM IR representations:
-          </p>
-          <ul>
-            <li><strong>Nullable Values (ADR 0040):</strong> Value types lower as an LLVM struct <code>{ T, i1 }</code>. Pointers lower as raw 64-bit pointers with NULL checks.</li>
-            <li><strong>Enums &amp; Tagged Unions (ADR 0041):</strong> Fieldless enums map to <code>i32</code>. Payloaded enums map to <code>{ i32, [MaxPayloadSize x i8] }</code>, ensuring standard C ABI calling compatibility.</li>
-            <li><strong>Dynamic Arrays (ADR 0025):</strong> <code>[T]</code> is exactly two words: a 64-bit pointer to heap elements and a 32-bit/64-bit length.</li>
-            <li><strong>Interface References (ADR 0019, 0027):</strong> Two words: data pointer and vtable pointer. The vtable carries function pointers alongside embedded field offsets.</li>
-          </ul>
-        </article>
-
       </div>
-    </main>
+</main>
 
     <!-- Right On This Page TOC -->
     <aside class="toc-sidebar" aria-label="Table of contents">
@@ -1760,28 +1170,10 @@ fun pointer_demo() &lt;noret&gt; {
         <li class="toc-item"><a href="#blame" class="toc-link">Blame Error Handling</a></li>
         <li class="toc-item"><a href="#prototypes" class="toc-link">Prototypes {K,V}</a></li>
         <li class="toc-item"><a href="#macros-specials" class="toc-link">Macros &amp; Specials</a></li>
-        <li class="toc-item"><a href="#stdlib-overview" class="toc-link">17 Modules Directory</a></li>
-        <li class="toc-item"><a href="#stdlib-stdio" class="toc-link">std::stdio</a></li>
-        <li class="toc-item"><a href="#stdlib-math" class="toc-link">std::math</a></li>
-        <li class="toc-item"><a href="#stdlib-strings" class="toc-link">std::strings</a></li>
-        <li class="toc-item"><a href="#stdlib-path" class="toc-link">std::path</a></li>
-        <li class="toc-item"><a href="#stdlib-env" class="toc-link">std::env</a></li>
-        <li class="toc-item"><a href="#stdlib-time" class="toc-link">std::time</a></li>
-        <li class="toc-item"><a href="#stdlib-fs" class="toc-link">std::fs</a></li>
-        <li class="toc-item"><a href="#stdlib-random" class="toc-link">std::random</a></li>
-        <li class="toc-item"><a href="#stdlib-collection" class="toc-link">std::collection</a></li>
-        <li class="toc-item"><a href="#stdlib-hashmap" class="toc-link">std::hashmap</a></li>
-        <li class="toc-item"><a href="#stdlib-error" class="toc-link">std::error</a></li>
-        <li class="toc-item"><a href="#stdlib-types" class="toc-link">std::types</a></li>
-        <li class="toc-item"><a href="#stdlib-typing" class="toc-link">std::typing</a></li>
-        <li class="toc-item"><a href="#stdlib-enums" class="toc-link">std::enums</a></li>
-        <li class="toc-item"><a href="#stdlib-operators" class="toc-link">std::operators</a></li>
-        <li class="toc-item"><a href="#stdlib-stdptr" class="toc-link">std::stdptr</a></li>
-        <li class="toc-item"><a href="#stdlib-networking" class="toc-link">std::networking</a></li>
+        <li class="toc-item"><a href="#stdlib-overview" class="toc-link">Standard Library Overview</a></li>
         <li class="toc-item"><a href="#pipeline-architecture" class="toc-link">Compiler Pipeline Flow</a></li>
-        <li class="toc-item"><a href="#arch-invariants" class="toc-link">Invariants &amp; ADRs</a></li>
-        <li class="toc-item"><a href="#arch-refusals" class="toc-link">Refusal Invariants</a></li>
-        <li class="toc-item"><a href="#arch-llvm" class="toc-link">LLVM Lowering</a></li>
+        <li class="toc-item"><a href="#compiler-cli" class="toc-link">CLI Reference &amp; Flags</a></li>
+        <li class="toc-item"><a href="#compiler-invariants" class="toc-link">Refusal Invariants</a></li>
       </ul>
     </aside>
 
@@ -1822,9 +1214,9 @@ fun pointer_demo() &lt;noret&gt; {
       <div class="footer-links">
         <a href="#hero">Overview</a>
         <a href="#quickstart">Quickstart</a>
-        <a href="#stdlib-overview">Standard Library</a>
-        <a href="#pipeline-architecture">Architecture</a>
-        <a href="#arch-invariants">ADRs</a>
+        <a href="stdlib.html">Standard Library</a>
+        <a href="#pipeline-architecture">Compiler Flow</a>
+        <a href="#compiler-cli">CLI Reference</a>
         <a href="https://github.com/Fin-Lang" target="_blank" rel="noopener noreferrer">GitHub</a>
       </div>
     </div>
