@@ -15,6 +15,8 @@
 
   // --- Embedded Fallback Search Data (Ensures search works offline & via file://) ---
   const FALLBACK_SEARCH_INDEX = [
+    { id: "stdlib-overview", title: "17 Core Standard Library Modules Directory", category: "Standard Library", tags: ["stdlib", "modules", "stdio", "strings", "fs", "math", "random", "env", "path", "time", "collection", "hashmap", "error", "types", "typing", "enums", "operators", "stdptr", "networking"], snippet: "Interactive directory and category filters for all 17 Fin standard library modules engineered with modular memory management.", url: "#stdlib-overview" },
+    { id: "pipeline-architecture", title: "The Fin Compiler Pipeline Flow & Refusal Invariants", category: "Compiler Architecture", tags: ["pipeline", "llvm", "ast", "lexer", "parser", "semantics", "codegen", "refusal", "invariants"], snippet: "Six-stage compiler flow from Source through Bison Parser, AST cloning, Two-Moment semantics, and LLVM lowering with strict refusal invariants.", url: "#pipeline-architecture" },
     { id: "intro", title: "Introduction to Fin", category: "Getting Started", tags: ["philosophy", "systems", "memory", "invariants"], snippet: "Fin is a modern systems programming language where memory management is a library, the sample corpus is the normative specification, and the compiler refuses silently guessing IR.", url: "#intro" },
     { id: "installation", title: "Installation & Build", category: "Getting Started", tags: ["build", "cmake", "conan", "llvm", "finc", "cli", "flags"], snippet: "Build finc from source using ./build.sh with CMake, Conan, Flex, Bison, and LLVM. Check installation with finc --version.", url: "#installation" },
     { id: "quickstart", title: "Quickstart Guide", category: "Getting Started", tags: ["quickstart", "workflow", "compiler", "check", "compile"], snippet: "Create and compile Fin programs using finc. Learn the difference between type-checking with finc file.fin and compiling binaries with finc -o bin.", url: "#quickstart" },
@@ -72,6 +74,27 @@
     }
   }
 
+  // --- Toast Notification Helper ---
+  function showToast(message) {
+    let toast = document.getElementById('fin-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'fin-toast';
+      toast.className = 'fin-toast';
+      document.body.appendChild(toast);
+    }
+    toast.innerHTML = `
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
+      <span>${escapeHtml(message)}</span>
+    `;
+    toast.classList.add('show');
+    setTimeout(() => {
+      toast.classList.remove('show');
+    }, 2400);
+  }
+
   // --- Syntax Highlighter for Fin ---
   function highlightFinCode() {
     const codeBlocks = document.querySelectorAll('pre code.language-fin');
@@ -82,21 +105,23 @@
       const tokens = [];
       let temp = code;
 
-      // 1. Strings
+      // 1. Strings (including string interpolation \{...\})
       temp = temp.replace(/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/g, (match) => {
         const id = `__STR_${tokens.length}__`;
-        tokens.push({ id, html: `<span class="tok-str">${escapeHtml(match)}</span>` });
+        // highlight interpolation inside strings
+        const formatted = escapeHtml(match).replace(/(\\?\{[^}]+\})/g, '<span class="tok-meta">$1</span>');
+        tokens.push({ id, html: `<span class="tok-str">${formatted}</span>` });
         return id;
       });
 
-      // 2. Comments
+      // 2. Comments (single-line & multi-line)
       temp = temp.replace(/(\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g, (match) => {
         const id = `__COM_${tokens.length}__`;
         tokens.push({ id, html: `<span class="tok-com">${escapeHtml(match)}</span>` });
         return id;
       });
 
-      // 3. Attributes
+      // 3. Attributes / Decorators (#[...])
       temp = temp.replace(/(#\[[^\]\n]+\])/g, (match) => {
         const id = `__ATTR_${tokens.length}__`;
         tokens.push({ id, html: `<span class="tok-attr">${escapeHtml(match)}</span>` });
@@ -106,19 +131,19 @@
       // Escape HTML in the remaining text
       temp = escapeHtml(temp);
 
-      // 4. Meta directives & macros
+      // 4. Meta directives, specials & macros (@Alloc, @define, @macro, quote, $var)
       temp = temp.replace(/(@[a-zA-Z_]\w*|quote|\$[a-zA-Z_]\w*)/g, '<span class="tok-meta">$1</span>');
 
       // 5. Blame & m1778
       temp = temp.replace(/\b(blame|m1778)\b/g, '<span class="tok-blame">$1</span>');
 
       // 6. Keywords
-      temp = temp.replace(/\b(let|fun|pub|priv|static|const|readonly|if|else|for|foreach|while|do|return|struct|class|interface|implements|enum|type|namespace|import|export|new|delete|cast|sizeof|as|from)\b/g, '<span class="tok-kw">$1</span>');
+      temp = temp.replace(/\b(fn|fun|let|var|val|pub|priv|static|const|readonly|if|else|for|foreach|while|do|defer|return|struct|class|interface|implements|enum|type|namespace|import|export|new|delete|cast|sizeof|as|from|switch|case|default|in)\b/g, '<span class="tok-kw">$1</span>');
 
-      // 7. Types
-      temp = temp.replace(/\b(int|uint|short|ushort|long|ulong|float|double|bool|char|string|void|noret|any|object|auto|rptr|wptr|Self|i8|u8|i16|u16|i32|u32|i64|u64|usize|isize|byte|Number|Integer|Float|Signed|Unsigned)\b/g, '<span class="tok-type">$1</span>');
+      // 7. Types & Allocators
+      temp = temp.replace(/\b(int|uint|short|ushort|long|ulong|float|double|bool|char|string|void|noret|any|object|auto|rptr|wptr|Self|i8|u8|i16|u16|i32|u32|i64|u64|f32|f64|usize|isize|byte|Number|Integer|Float|Signed|Unsigned|Arena|Buffer|Stream|File)\b/g, '<span class="tok-type">$1</span>');
 
-      // 8. Numbers
+      // 8. Numbers (decimal, float, hex)
       temp = temp.replace(/\b(\d+(?:\.\d+)?(?:e[+-]?\d+)?|0x[0-9a-fA-F]+)\b/g, '<span class="tok-num">$1</span>');
 
       // Restore tokens
@@ -139,15 +164,18 @@
       .replace(/'/g, '&#039;');
   }
 
-  // --- Copy to Clipboard ---
+  // --- Copy to Clipboard & Tooltip ---
   function initCodeCopy() {
-    const codeBlocks = document.querySelectorAll('.code-block');
+    const codeBlocks = document.querySelectorAll('.code-block, .code-showcase-window');
     codeBlocks.forEach(block => {
       const copyBtn = block.querySelector('.copy-btn');
-      const codeEl = block.querySelector('pre code');
-      if (!copyBtn || !codeEl) return;
+      if (!copyBtn) return;
 
       copyBtn.addEventListener('click', async () => {
+        const activePane = block.querySelector('.code-tab-pane.active') || block;
+        const codeEl = activePane.querySelector('pre code') || block.querySelector('pre code');
+        if (!codeEl) return;
+
         const textToCopy = codeEl.innerText || codeEl.textContent;
         try {
           await navigator.clipboard.writeText(textToCopy);
@@ -158,6 +186,7 @@
             </svg>
             <span>Copied!</span>
           `;
+          showToast('Code copied to clipboard!');
           setTimeout(() => {
             copyBtn.classList.remove('copied');
             copyBtn.innerHTML = `
@@ -171,6 +200,86 @@
         } catch (err) {
           console.error('Failed to copy to clipboard', err);
         }
+      });
+    });
+
+    // Hero Install Box Copy
+    const heroCopyBtn = document.getElementById('hero-copy-install-btn');
+    if (heroCopyBtn) {
+      heroCopyBtn.addEventListener('click', async () => {
+        const cmd = 'curl -fsSL https://fin-lang.org/install.sh | sh';
+        try {
+          await navigator.clipboard.writeText(cmd);
+          heroCopyBtn.innerHTML = `
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <span>Copied!</span>
+          `;
+          showToast('Copied install command!');
+          setTimeout(() => {
+            heroCopyBtn.innerHTML = `
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              <span>Copy</span>
+            `;
+          }, 2000);
+        } catch (e) {
+          console.error('Failed to copy install cmd', e);
+        }
+      });
+    }
+  }
+
+  // --- Interactive Code Tabs ---
+  function initCodeTabs() {
+    const tabButtons = document.querySelectorAll('.code-tab-btn');
+    tabButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const targetId = btn.getAttribute('data-tab');
+        const container = btn.closest('.code-showcase-window') || document;
+        
+        // Deactivate siblings in this tab bar
+        const siblingButtons = btn.parentElement.querySelectorAll('.code-tab-btn');
+        siblingButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        // Switch pane
+        const panes = container.querySelectorAll('.code-tab-pane');
+        panes.forEach(pane => {
+          if (pane.id === targetId) {
+            pane.classList.add('active');
+          } else {
+            pane.classList.remove('active');
+          }
+        });
+      });
+    });
+  }
+
+  // --- Interactive Stdlib Module Filtering ---
+  function initStdlibFilter() {
+    const filterButtons = document.querySelectorAll('.stdlib-filter-btn');
+    const cards = document.querySelectorAll('.stdlib-card');
+    if (filterButtons.length === 0 || cards.length === 0) return;
+
+    filterButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const category = btn.getAttribute('data-filter');
+
+        filterButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        cards.forEach(card => {
+          const cardCat = card.getAttribute('data-category');
+          if (category === 'all' || cardCat === category) {
+            card.style.display = 'flex';
+          } else {
+            card.style.display = 'none';
+          }
+        });
       });
     });
   }
@@ -467,6 +576,8 @@
     initTheme();
     highlightFinCode();
     initCodeCopy();
+    initCodeTabs();
+    initStdlibFilter();
     initSearch();
     initScrollspy();
     initNavCollapsing();
@@ -474,3 +585,4 @@
   });
 
 })();
+
