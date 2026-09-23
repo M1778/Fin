@@ -550,6 +550,7 @@ fun is_prototype_node(ctx: &FnContext, node: &AstNode) <bool> {
         let v <&LocalVar> = fn_ctx_find_var(ctx, node.name);
         if (v != null && v.type_annotation != null) {
             let t <string> = v.type_annotation;
+            if (cg_str_eq(t, "prototype")) { return true; }
             let tlen <int> = cast<int>(cg_strlen(t));
             if (tlen > 0 && cg_str_eq(substr(t, 0, 1), "{")) { return true; }
             if (tlen >= 9 && cg_str_eq(substr(t, 0, 9), "prototype")) { return true; }
@@ -572,10 +573,11 @@ fun emit_destructor_for_var(ctx: &FnContext, v: &LocalVar) <noret> {
         let st <&StructInfo> = ctx.structs[si];
         if (st != null && cg_str_eq(st.name, st_name)) {
             if (st.has_destructor) {
+                let rec_val <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, v.val, "self");
                 let d_sym <&FnSymbol> = fn_ctx_find_fn(ctx, st.destructor_name);
                 if (d_sym != null) {
                     let d_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                    d_args.v0 = v.val;
+                    d_args.v0 = rec_val;
                     llvm_build_call2(ctx.builder, d_sym.fn_ty, d_sym.fn_val, d_args, 1, "");
                     delete d_args;
                 } else {
@@ -583,7 +585,7 @@ fun emit_destructor_for_var(ctx: &FnContext, v: &LocalVar) <noret> {
                     if (d_fn != null) {
                         let d_ty <&LLVMType> = llvm_global_get_value_type(d_fn);
                         let d_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                        d_args.v0 = v.val;
+                        d_args.v0 = rec_val;
                         llvm_build_call2(ctx.builder, d_ty, d_fn, d_args, 1, "");
                         delete d_args;
                     }
@@ -2069,7 +2071,20 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 else if (arg_count == 15) { exp_ty = param_tys.t15; }
 
                 if (exp_ty != null && exp_ty != a_ty) {
-                    av = coerce_val(ctx, av, exp_ty);
+                    if (exp_ty == ctx.fat_ptr_ty && ctx.fat_ptr_ty != null) {
+                        let actual_rec_st <string> = get_node_struct_name(ctx, actual_arg);
+                        if (cg_strlen(actual_rec_st) == cast<ulong>(0)) {
+                            if (actual_arg.kind == ast_ident()) {
+                                let v_arg <&LocalVar> = fn_ctx_find_var(ctx, actual_arg.name);
+                                if (v_arg != null) { actual_rec_st = v_arg.type_annotation; }
+                            }
+                        }
+                        if (ctx.interface_count > 0 && ctx.interfaces[0] != null) {
+                            av = struct_to_interface(ctx, av, actual_rec_st, ctx.interfaces[0]);
+                        }
+                    } else {
+                        av = coerce_val(ctx, av, exp_ty);
+                    }
                 }
             } else {
                 let exp_ty <&LLVMType> = null;
@@ -2230,13 +2245,17 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         let v <&LocalVar> = fn_ctx_find_var(ctx, stmt.name);
         let alloca <&LLVMValue> = null;
         let ty <&LLVMType> = null;
+        let ty_ann <string> = stmt.type_annotation;
+        if (stmt.left != null && stmt.left.kind == ast_prototype_literal()) {
+            ty_ann = "prototype";
+        }
         if (v != null) {
             alloca = v.val;
             ty = v.ty;
         } else {
-            ty = map_type(ctx, stmt.type_annotation);
+            ty = map_type(ctx, ty_ann);
             alloca = llvm_build_alloca(ctx.builder, ty, stmt.name);
-            fn_ctx_add_var(ctx, stmt.name, alloca, ty, stmt.type_annotation);
+            fn_ctx_add_var(ctx, stmt.name, alloca, ty, ty_ann);
             v = fn_ctx_find_var(ctx, stmt.name);
         }
         if (stmt.left != null) {
@@ -2549,7 +2568,14 @@ pub fun lower_block(ctx: &FnContext, block: &AstNode) <noret> {
     }
 }
 
-pub fun declare_function(module: &LLVMModule, fn_node: &AstNode, fn_syms: [&FnSymbol], sym_count: int) <int> {
+pub fun declare_function(
+    module: &LLVMModule,
+    fn_node: &AstNode,
+    fn_syms: [&FnSymbol],
+    sym_count: int,
+    interfaces: [&InterfaceInfo],
+    interface_count: int
+) <int> {
     if (fn_node == null) { return sym_count; }
 
     let fn_name <string> = fn_node.name;
@@ -2568,7 +2594,24 @@ pub fun declare_function(module: &LLVMModule, fn_node: &AstNode, fn_syms: [&FnSy
 
     let ret_ty <&LLVMType> = i32_t;
     let i8_t <&LLVMType> = llvm_i8_type();
-    if (cg_str_eq(fn_node.type_annotation, "void") || cg_str_eq(fn_node.type_annotation, "noret")) {
+
+    let is_iface_ret <bool> = false;
+    let ii_r <int> = 0;
+    while (ii_r < interface_count) {
+        if (interfaces[ii_r] != null && cg_str_eq(interfaces[ii_r].name, fn_node.type_annotation)) {
+            is_iface_ret = true;
+            break;
+        }
+        ii_r = ii_r + 1;
+    }
+
+    if (is_iface_ret) {
+        let f_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
+        f_args.t0 = ptr_t;
+        f_args.t1 = ptr_t;
+        ret_ty = llvm_struct_type(f_args, 2, 0);
+        delete f_args;
+    } else if (cg_str_eq(fn_node.type_annotation, "void") || cg_str_eq(fn_node.type_annotation, "noret")) {
         ret_ty = void_t;
     } else if (cg_str_eq(fn_node.type_annotation, "bool")) {
         ret_ty = i1_t;
@@ -2595,7 +2638,23 @@ pub fun declare_function(module: &LLVMModule, fn_node: &AstNode, fn_syms: [&FnSy
             continue;
         }
         let pt <&LLVMType> = i32_t;
-        if (cg_str_eq(p_cur.type_annotation, "bool")) { pt = i1_t; }
+        let is_iface_p <bool> = false;
+        let ii_p <int> = 0;
+        while (ii_p < interface_count) {
+            if (interfaces[ii_p] != null && cg_str_eq(interfaces[ii_p].name, p_cur.type_annotation)) {
+                is_iface_p = true;
+                break;
+            }
+            ii_p = ii_p + 1;
+        }
+
+        if (is_iface_p) {
+            let f_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
+            f_args.t0 = ptr_t;
+            f_args.t1 = ptr_t;
+            pt = llvm_struct_type(f_args, 2, 0);
+            delete f_args;
+        } else if (cg_str_eq(p_cur.type_annotation, "bool")) { pt = i1_t; }
         else if (cg_str_eq(p_cur.type_annotation, "char") || cg_str_eq(p_cur.type_annotation, "u8") || cg_str_eq(p_cur.type_annotation, "i8")) { pt = i8_t; }
         else if (cg_str_eq(p_cur.type_annotation, "string")) { pt = ptr_t; }
         else if (cg_str_eq(p_cur.type_annotation, "ulong") || cg_str_eq(p_cur.type_annotation, "long") || cg_str_eq(p_cur.type_annotation, "i64") || cg_str_eq(p_cur.type_annotation, "u64")) { pt = i64_t; }
@@ -2667,9 +2726,13 @@ fun collect_var_allocas(ctx: &FnContext, node: &AstNode) <noret> {
     if (node.kind == ast_var_decl()) {
         let v <&LocalVar> = fn_ctx_find_var(ctx, node.name);
         if (v == null) {
-            let ty <&LLVMType> = map_type(ctx, node.type_annotation);
+            let ty_ann <string> = node.type_annotation;
+            if (node.left != null && node.left.kind == ast_prototype_literal()) {
+                ty_ann = "prototype";
+            }
+            let ty <&LLVMType> = map_type(ctx, ty_ann);
             let alloca <&LLVMValue> = llvm_build_alloca(ctx.builder, ty, node.name);
-            fn_ctx_add_var(ctx, node.name, alloca, ty, node.type_annotation);
+            fn_ctx_add_var(ctx, node.name, alloca, ty, ty_ann);
         }
     }
     collect_var_allocas(ctx, node.left);
@@ -2856,12 +2919,10 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int) 
     let interfaces <[&InterfaceInfo]> = new [&InterfaceInfo, 256]{};
     let interface_count <int> = 0;
 
-    // Pass 1: Declare all functions and struct methods, and record struct, enum, interface definitions
+    // Pass 1: Record interface, enum, and struct definitions FIRST
     let decl <&AstNode> = root.left;
     while (decl != null) {
-        if (decl.kind == ast_fun_decl()) {
-            fn_sym_count = declare_function(module, decl, fn_syms, fn_sym_count);
-        } else if (decl.kind == ast_struct_decl()) {
+        if (decl.kind == ast_struct_decl()) {
             if (struct_count < 1020) {
                 let s_info <&StructInfo> = new StructInfo{};
                 s_info.name = decl.name;
@@ -2883,24 +2944,19 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int) 
                 }
                 let m_check <&AstNode> = decl.extra;
                 while (m_check != null) {
-                    if (cg_str_eq(m_check.name, "destructor")) {
+                    let mlen <int> = cast<int>(cg_strlen(m_check.name));
+                    let is_dtor <bool> = false;
+                    if (cg_str_eq(m_check.name, "destructor")) { is_dtor = true; }
+                    if (mlen >= 11 && cg_str_eq(substr(m_check.name, mlen - 11, 11), "_destructor")) { is_dtor = true; }
+                    if (mlen >= 11 && cg_str_eq(substr(m_check.name, mlen - 11, 11), ".destructor")) { is_dtor = true; }
+                    if (is_dtor) {
                         s_info.has_destructor = true;
-                        let b_d <Buffer> = new_buffer(64);
-                        b_d.write_string(decl.name);
-                        b_d.write_char('.');
-                        b_d.write_string(m_check.name);
-                        s_info.destructor_name = b_d.to_string();
-                        free_buffer(b_d);
+                        s_info.destructor_name = m_check.name;
                     }
                     m_check = m_check.right;
                 }
                 structs[struct_count] = s_info;
                 struct_count = struct_count + 1;
-            }
-            let m <&AstNode> = decl.extra;
-            while (m != null) {
-                fn_sym_count = declare_function(module, m, fn_syms, fn_sym_count);
-                m = m.right;
             }
         } else if (decl.kind == ast_enum_decl()) {
             if (enum_count < 250) {
@@ -2986,6 +3042,21 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int) 
 
                 interfaces[interface_count] = if_info;
                 interface_count = interface_count + 1;
+            }
+        }
+        decl = decl.right;
+    }
+
+    // Pass 1.5: Declare all functions and struct methods with full interface awareness
+    decl = root.left;
+    while (decl != null) {
+        if (decl.kind == ast_fun_decl()) {
+            fn_sym_count = declare_function(module, decl, fn_syms, fn_sym_count, interfaces, interface_count);
+        } else if (decl.kind == ast_struct_decl()) {
+            let m <&AstNode> = decl.extra;
+            while (m != null) {
+                fn_sym_count = declare_function(module, m, fn_syms, fn_sym_count, interfaces, interface_count);
+                m = m.right;
             }
         }
         decl = decl.right;

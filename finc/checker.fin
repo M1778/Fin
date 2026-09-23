@@ -218,7 +218,7 @@ pub struct Checker {
                       if (chk_str_eq(base_st, "Self") && chk_strlen(self.current_struct) > cast<ulong>(0)) {
                           base_st = self.current_struct;
                       }
-                      if (chk_str_eq(base_st, "Collection")) {
+                      if (chk_str_eq(base_st, "Collection") || chk_str_eq(base_st, "prototype") || chk_str_eq(expr.name, "rm")) {
                           is_coll_method = true;
                       }
                       let q_buf <Buffer> = new_buffer(64);
