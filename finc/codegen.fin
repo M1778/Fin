@@ -8,19 +8,24 @@ import {
     ast_expr_stmt, ast_break_stmt, ast_continue_stmt,
     ast_binary_expr, ast_unary_expr, ast_call_expr,
     ast_index_expr, ast_member_access,
-    ast_ident, ast_literal_int, ast_literal_string, ast_literal_bool
+    ast_ident, ast_literal_int, ast_literal_string, ast_literal_bool,
+    ast_enum_decl, ast_interface_decl, ast_prototype_literal
 } from ast::std;
 
 import {
     LLVMModule, LLVMBuilder, LLVMValue, LLVMType, LLVMBasicBlock,
     LLVMTarget, LLVMTargetMachine, LLVMTargetSlot, LLVMErrSlot,
     LLVMTypeArgs, LLVMValueArgs, LLVMIndices, LLVMBlockArgs,
+    LLVMContext,
     llvm_module_create, llvm_dispose_module, llvm_dump_module, llvm_write_bitcode_to_file,
+    llvm_get_module_context, llvm_get_global_context,
+    llvm_struct_create_named, llvm_struct_set_body, llvm_struct_type, llvm_array_type, llvm_array_type2,
+    llvm_count_struct_element_types, llvm_struct_get_type_at_index,
     llvm_i32_type, llvm_i64_type, llvm_i8_type, llvm_i1_type, llvm_void_type, llvm_pointer_type,
     llvm_function_type, llvm_add_function, llvm_get_named_function, llvm_append_basic_block,
     llvm_get_param, llvm_create_builder, llvm_dispose_builder, llvm_position_builder,
     llvm_get_insert_block, llvm_get_basic_block_terminator,
-    llvm_const_int, llvm_const_string, llvm_const_null, llvm_build_global_string_ptr,
+    llvm_const_int, llvm_const_string, llvm_const_null, llvm_get_undef, llvm_build_global_string_ptr,
     llvm_build_ret, llvm_build_ret_void,
     llvm_build_add, llvm_build_sub, llvm_build_mul, llvm_build_sdiv, llvm_build_srem,
     llvm_build_and, llvm_build_or, llvm_build_xor, llvm_build_not, llvm_build_neg,
@@ -31,6 +36,9 @@ import {
     llvm_build_gep2, llvm_build_struct_gep2,
     llvm_build_sext, llvm_build_zext,
     llvm_build_malloc, llvm_build_array_malloc, llvm_build_free, llvm_build_trunc, llvm_build_bitcast,
+    llvm_build_switch, llvm_add_case,
+    llvm_build_extract_value, llvm_build_insert_value,
+    llvm_build_is_null, llvm_build_is_not_null,
     llvm_int_eq, llvm_int_ne, llvm_int_sgt, llvm_int_sge, llvm_int_slt, llvm_int_sle,
     llvm_global_get_value_type, llvm_type_of,
     init_native_target, emit_module_to_object, llvm_verify_module, llvm_verify_function,
@@ -45,6 +53,12 @@ import { Buffer, new_buffer, free_buffer } from buffer::std;
 
 #[llvm_name="strlen"]
 @define cg_raw_strlen(s: string) <ulong>;
+
+#[llvm_name="dprintf"]
+@define cg_dprintf(fd: int, fmt: string, ...) <int>;
+
+#[llvm_name="exit"]
+@define cg_exit(code: int) <noret>;
 
 priv fun cg_strlen(s: string) <ulong> {
     if (s == null) { return cast<ulong>(0); }
@@ -65,6 +79,7 @@ pub struct LocalVar {
       type_annotation <string> = "",
       len_val <&LLVMValue> = null,
       elem_ty <&LLVMType> = null,
+      scope_depth <int> = 0,
 }
 
 pub struct FnSymbol {
@@ -86,6 +101,43 @@ pub struct StructInfo {
       name <string> = "",
       fields <[&StructFieldInfo]>,
       field_count <int> = 0,
+      has_destructor <bool> = false,
+      destructor_name <string> = "",
+}
+
+pub struct EnumMemberInfo {
+    pub:
+      name <string> = "",
+      tag <int> = 0,
+      has_payload <bool> = false,
+      payload_type <string> = "",
+      payload_size <int> = 0,
+}
+
+pub struct EnumInfo {
+    pub:
+      name <string> = "",
+      has_payload <bool> = false,
+      llvm_type <&LLVMType> = null,
+      members <[&EnumMemberInfo]>,
+      member_count <int> = 0,
+      max_payload_size <int> = 0,
+}
+
+pub struct InterfaceMethodInfo {
+    pub:
+      name <string> = "",
+      index <int> = 0,
+      ret_type <string> = "",
+      param_count <int> = 0,
+}
+
+pub struct InterfaceInfo {
+    pub:
+      name <string> = "",
+      methods <[&InterfaceMethodInfo]>,
+      method_count <int> = 0,
+      fat_ptr_ty <&LLVMType> = null,
 }
 
 pub struct FnContext {
@@ -103,10 +155,16 @@ pub struct FnContext {
       i8_ty <&LLVMType> = null,
       ptr_ty <&LLVMType> = null,
       void_ty <&LLVMType> = null,
+      fat_ptr_ty <&LLVMType> = null,
       break_bb <&LLVMBasicBlock> = null,
       continue_bb <&LLVMBasicBlock> = null,
       structs <[&StructInfo]>,
       struct_count <int> = 0,
+      enums <[&EnumInfo]>,
+      enum_count <int> = 0,
+      interfaces <[&InterfaceInfo]>,
+      interface_count <int> = 0,
+      current_scope_depth <int> = 0,
 }
 
 fun fn_ctx_add_var(ctx: &FnContext, name: string, val: &LLVMValue, ty: &LLVMType, type_ann: string) <noret> {
@@ -334,6 +392,221 @@ fun fn_ctx_find_fn(ctx: &FnContext, name: string) <&FnSymbol> {
     return null;
 }
 
+fun find_enum(ctx: &FnContext, name: string) <&EnumInfo> {
+    if (name == null || ctx == null) { return null; }
+    let i <int> = 0;
+    while (i < ctx.enum_count) {
+        let e <&EnumInfo> = ctx.enums[i];
+        if (e != null && cg_str_eq(e.name, name)) {
+            return e;
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
+fun find_enum_by_llvm_type(ctx: &FnContext, ty: &LLVMType) <&EnumInfo> {
+    if (ty == null || ctx == null) { return null; }
+    let i <int> = 0;
+    while (i < ctx.enum_count) {
+        let e <&EnumInfo> = ctx.enums[i];
+        if (e != null && e.has_payload && e.llvm_type == ty) {
+            return e;
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
+fun find_enum_for_member(ctx: &FnContext, member_name: string) <&EnumInfo> {
+    if (member_name == null || ctx == null) { return null; }
+    let i <int> = 0;
+    while (i < ctx.enum_count) {
+        let e <&EnumInfo> = ctx.enums[i];
+        if (e != null) {
+            let j <int> = 0;
+            while (j < e.member_count) {
+                let m <&EnumMemberInfo> = e.members[j];
+                if (m != null) {
+                    if (cg_str_eq(m.name, member_name)) {
+                        return e;
+                    }
+                    let b <Buffer> = new_buffer(64);
+                    b.write_string(e.name);
+                    b.write_string("::");
+                    b.write_string(m.name);
+                    let q <string> = b.to_string();
+                    free_buffer(b);
+                    if (cg_str_eq(q, member_name)) {
+                        return e;
+                    }
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
+fun find_enum_member_global(ctx: &FnContext, member_name: string) <&EnumMemberInfo> {
+    if (member_name == null || ctx == null) { return null; }
+    let i <int> = 0;
+    while (i < ctx.enum_count) {
+        let e <&EnumInfo> = ctx.enums[i];
+        if (e != null) {
+            let j <int> = 0;
+            while (j < e.member_count) {
+                let m <&EnumMemberInfo> = e.members[j];
+                if (m != null) {
+                    if (cg_str_eq(m.name, member_name)) {
+                        return m;
+                    }
+                    let b <Buffer> = new_buffer(64);
+                    b.write_string(e.name);
+                    b.write_string("::");
+                    b.write_string(m.name);
+                    let q <string> = b.to_string();
+                    free_buffer(b);
+                    if (cg_str_eq(q, member_name)) {
+                        return m;
+                    }
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
+fun find_interface(ctx: &FnContext, name: string) <&InterfaceInfo> {
+    if (name == null || ctx == null) { return null; }
+    let i <int> = 0;
+    while (i < ctx.interface_count) {
+        let iface <&InterfaceInfo> = ctx.interfaces[i];
+        if (iface != null && cg_str_eq(iface.name, name)) {
+            return iface;
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
+fun find_interface_method(iface: &InterfaceInfo, method_name: string) <&InterfaceMethodInfo> {
+    if (iface == null || method_name == null) { return null; }
+    let i <int> = 0;
+    while (i < iface.method_count) {
+        let m <&InterfaceMethodInfo> = iface.methods[i];
+        if (m != null && cg_str_eq(m.name, method_name)) {
+            return m;
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
+fun find_interface_for_node(ctx: &FnContext, node: &AstNode) <&InterfaceInfo> {
+    if (node == null || ctx == null) { return null; }
+    if (node.kind == ast_ident()) {
+        let v <&LocalVar> = fn_ctx_find_var(ctx, node.name);
+        if (v != null && v.type_annotation != null) {
+            return find_interface(ctx, v.type_annotation);
+        }
+    }
+    if (node.type_annotation != null && cg_strlen(node.type_annotation) > cast<ulong>(0)) {
+        return find_interface(ctx, node.type_annotation);
+    }
+    return null;
+}
+
+fun is_nullable_type(type_ann: string) <bool> {
+    if (type_ann == null) { return false; }
+    let len <int> = cast<int>(cg_strlen(type_ann));
+    if (len > 0) {
+        return cg_str_eq(substr(type_ann, len - 1, 1), "?");
+    }
+    return false;
+}
+
+fun is_nullable_value_type(type_ann: string) <bool> {
+    if (!is_nullable_type(type_ann)) { return false; }
+    let len <int> = cast<int>(cg_strlen(type_ann));
+    let inner <string> = substr(type_ann, 0, len - 1);
+    let ilen <int> = cast<int>(cg_strlen(inner));
+    if (ilen == 0) { return false; }
+    let first <string> = substr(inner, 0, 1);
+    let last <string> = substr(inner, ilen - 1, 1);
+    if (cg_str_eq(first, "&") || cg_str_eq(first, "[") || cg_str_eq(last, "*") || cg_str_eq(inner, "string")) {
+        return false;
+    }
+    return true;
+}
+
+fun is_prototype_node(ctx: &FnContext, node: &AstNode) <bool> {
+    if (node == null) { return false; }
+    if (node.kind == ast_prototype_literal()) { return true; }
+    if (node.kind == ast_ident()) {
+        let v <&LocalVar> = fn_ctx_find_var(ctx, node.name);
+        if (v != null && v.type_annotation != null) {
+            let t <string> = v.type_annotation;
+            let tlen <int> = cast<int>(cg_strlen(t));
+            if (tlen > 0 && cg_str_eq(substr(t, 0, 1), "{")) { return true; }
+            if (tlen >= 9 && cg_str_eq(substr(t, 0, 9), "prototype")) { return true; }
+        }
+    }
+    return false;
+}
+
+fun emit_destructor_for_var(ctx: &FnContext, v: &LocalVar) <noret> {
+    if (v == null || v.val == null || v.type_annotation == null) { return; }
+    let st_name <string> = v.type_annotation;
+    let s_len <int> = cast<int>(cg_strlen(st_name));
+    if (s_len == 0) { return; }
+    let s_first <string> = substr(st_name, 0, 1);
+    if (cg_str_eq(s_first, "&") || cg_str_eq(s_first, "[") || cg_str_eq(s_first, "*")) {
+        return;
+    }
+    let si <int> = 0;
+    while (si < ctx.struct_count) {
+        let st <&StructInfo> = ctx.structs[si];
+        if (st != null && cg_str_eq(st.name, st_name)) {
+            if (st.has_destructor) {
+                let d_sym <&FnSymbol> = fn_ctx_find_fn(ctx, st.destructor_name);
+                if (d_sym != null) {
+                    let d_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                    d_args.v0 = v.val;
+                    llvm_build_call2(ctx.builder, d_sym.fn_ty, d_sym.fn_val, d_args, 1, "");
+                    delete d_args;
+                } else {
+                    let d_fn <&LLVMValue> = llvm_get_named_function(ctx.module, st.destructor_name);
+                    if (d_fn != null) {
+                        let d_ty <&LLVMType> = llvm_global_get_value_type(d_fn);
+                        let d_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                        d_args.v0 = v.val;
+                        llvm_build_call2(ctx.builder, d_ty, d_fn, d_args, 1, "");
+                        delete d_args;
+                    }
+                }
+            }
+            return;
+        }
+        si = si + 1;
+    }
+}
+
+fun emit_scope_cleanups(ctx: &FnContext, from_idx: int) <noret> {
+    if (ctx == null) { return; }
+    let i <int> = ctx.var_count - 1;
+    while (i >= from_idx) {
+        let v <&LocalVar> = ctx.vars[i];
+        if (v != null) {
+            emit_destructor_for_var(ctx, v);
+        }
+        i = i - 1;
+    }
+}
+
 fun map_type(ctx: &FnContext, fin_type: string) <&LLVMType> {
     if (fin_type == null || cg_str_eq(fin_type, "void") || cg_str_eq(fin_type, "noret")) {
         return ctx.void_ty;
@@ -357,6 +630,35 @@ fun map_type(ctx: &FnContext, fin_type: string) <&LLVMType> {
         if (cg_str_eq(first_char, "&") || cg_str_eq(first_char, "[") || cg_str_eq(last_char, "*")) {
             return ctx.ptr_ty;
         }
+        if (cg_str_eq(first_char, "{") || (flen >= 9 && cg_str_eq(substr(fin_type, 0, 9), "prototype"))) {
+            return ctx.ptr_ty;
+        }
+        if (cg_str_eq(last_char, "?")) {
+            let inner_t <string> = substr(fin_type, 0, flen - 1);
+            let in_len <int> = cast<int>(cg_strlen(inner_t));
+            if (in_len > 0) {
+                let in_first <string> = substr(inner_t, 0, 1);
+                let in_last <string> = substr(inner_t, in_len - 1, 1);
+                if (cg_str_eq(in_first, "&") || cg_str_eq(in_first, "[") || cg_str_eq(in_last, "*") || cg_str_eq(inner_t, "string")) {
+                    return ctx.ptr_ty;
+                }
+            }
+            let inner_llvm <&LLVMType> = map_type(ctx, inner_t);
+            let n_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
+            n_args.t0 = inner_llvm;
+            n_args.t1 = ctx.i1_ty;
+            let n_ty <&LLVMType> = llvm_struct_type(n_args, 2, 0);
+            delete n_args;
+            return n_ty;
+        }
+    }
+    let iface <&InterfaceInfo> = find_interface(ctx, fin_type);
+    if (iface != null && ctx.fat_ptr_ty != null) {
+        return ctx.fat_ptr_ty;
+    }
+    let en <&EnumInfo> = find_enum(ctx, fin_type);
+    if (en != null) {
+        return en.llvm_type;
     }
     if (!cg_str_eq(fin_type, "int") && !cg_str_eq(fin_type, "uint") && !cg_str_eq(fin_type, "auto")) {
         return ctx.ptr_ty;
@@ -460,6 +762,60 @@ fun get_or_declare_calloc(ctx: &FnContext) <&LLVMValue> {
         calloc_fn = llvm_add_function(ctx.module, "calloc", c_ty);
     }
     return calloc_fn;
+}
+
+fun struct_to_interface(ctx: &FnContext, st_val: &LLVMValue, st_name: string, iface: &InterfaceInfo) <&LLVMValue> {
+    if (st_val == null || iface == null || ctx == null || ctx.fat_ptr_ty == null) { return st_val; }
+    let m_count <int> = iface.method_count;
+    if (m_count == 0) { m_count = 1; }
+    let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
+    let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
+    let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
+    c_args.v0 = llvm_const_int(ctx.i64_ty, m_count, 0);
+    c_args.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+    let vt_ptr <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "vtable");
+    delete c_args;
+
+    let mi <int> = 0;
+    while (mi < iface.method_count) {
+        let m_info <&InterfaceMethodInfo> = iface.methods[mi];
+        if (m_info != null) {
+            let b <Buffer> = new_buffer(64);
+            b.write_string(st_name);
+            b.write_char('.');
+            b.write_string(m_info.name);
+            let m_full_name <string> = b.to_string();
+            free_buffer(b);
+
+            let m_fn <&LLVMValue> = llvm_get_named_function(ctx.module, m_full_name);
+            if (m_fn == null) {
+                let b2 <Buffer> = new_buffer(64);
+                b2.write_string(st_name);
+                b2.write_char('_');
+                b2.write_string(m_info.name);
+                let m_under_name <string> = b2.to_string();
+                free_buffer(b2);
+                m_fn = llvm_get_named_function(ctx.module, m_under_name);
+            }
+            if (m_fn != null) {
+                let ind <&LLVMIndices> = new LLVMIndices{};
+                ind.i0 = llvm_const_int(ctx.i64_ty, mi, 0);
+                let slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, vt_ptr, ind, 1, "vt_slot");
+                delete ind;
+                let fn_p <&LLVMValue> = llvm_build_bitcast(ctx.builder, m_fn, ctx.ptr_ty, "fn_p");
+                llvm_build_store(ctx.builder, fn_p, slot);
+            }
+        }
+        mi = mi + 1;
+    }
+
+    let fat_alloca <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.fat_ptr_ty, "fat.tmp");
+    let d_gep <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, ctx.fat_ptr_ty, fat_alloca, 0, "d_gep");
+    let st_p <&LLVMValue> = coerce_val(ctx, st_val, ctx.ptr_ty);
+    llvm_build_store(ctx.builder, st_p, d_gep);
+    let vt_gep <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, ctx.fat_ptr_ty, fat_alloca, 1, "vt_gep");
+    llvm_build_store(ctx.builder, vt_ptr, vt_gep);
+    return llvm_build_load2(ctx.builder, ctx.fat_ptr_ty, fat_alloca, "fat.val");
 }
 
 fun get_or_declare_malloc(ctx: &FnContext) <&LLVMValue> {
@@ -738,6 +1094,17 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         if (v != null) {
             return llvm_build_load2(ctx.builder, v.ty, v.val, n.name);
         }
+        let em <&EnumMemberInfo> = find_enum_member_global(ctx, n.name);
+        if (em != null) {
+            let en_owner <&EnumInfo> = find_enum_for_member(ctx, em.name);
+            if (en_owner != null && en_owner.has_payload) {
+                let slot <&LLVMValue> = llvm_build_alloca(ctx.builder, en_owner.llvm_type, "enum.tmp");
+                let tag_ptr <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, en_owner.llvm_type, slot, 0, "tag");
+                llvm_build_store(ctx.builder, llvm_const_int(ctx.i32_ty, em.tag, 0), tag_ptr);
+                return llvm_build_load2(ctx.builder, en_owner.llvm_type, slot, "enum.val");
+            }
+            return llvm_const_int(ctx.i32_ty, em.tag, 0);
+        }
         return null;
     }
     if (n.kind == ast_unary_expr()) {
@@ -850,6 +1217,55 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             }
             return null;
         }
+        if (cg_str_eq(n.name, "?")) {
+            let inner <&LLVMValue> = lower_expr(ctx, n.left);
+            if (inner == null) { return null; }
+            let in_ty <&LLVMType> = llvm_type_of(inner);
+
+            let fn_cur <&LLVMValue> = ctx.fn_val;
+            let absent_bb <&LLVMBasicBlock> = llvm_append_basic_block(fn_cur, "denull.absent");
+            let ok_bb <&LLVMBasicBlock> = llvm_append_basic_block(fn_cur, "denull.ok");
+
+            if (in_ty == ctx.ptr_ty) {
+                let is_null <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), inner, llvm_const_null(ctx.ptr_ty), "is_null");
+                llvm_build_cond_br(ctx.builder, is_null, absent_bb, ok_bb);
+
+                llvm_position_builder(ctx.builder, absent_bb);
+                let p_fn <&LLVMValue> = get_or_declare_printf(ctx);
+                if (p_fn != null) {
+                    let p_fn_ty <&LLVMType> = llvm_global_get_value_type(p_fn);
+                    let s_fmt <&LLVMValue> = llvm_build_global_string_ptr(ctx.builder, "blame: denullify of an absent value\n", "denull_err");
+                    let p_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                    p_args.v0 = s_fmt;
+                    llvm_build_call2(ctx.builder, p_fn_ty, p_fn, p_args, 1, "");
+                    delete p_args;
+                }
+                llvm_build_unreachable(ctx.builder);
+
+                llvm_position_builder(ctx.builder, ok_bb);
+                return inner;
+            } else {
+                let has_val <&LLVMValue> = llvm_build_extract_value(ctx.builder, inner, 1, "has_val");
+                let is_absent <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), has_val, llvm_const_int(ctx.i1_ty, 0, 0), "is_absent");
+                llvm_build_cond_br(ctx.builder, is_absent, absent_bb, ok_bb);
+
+                llvm_position_builder(ctx.builder, absent_bb);
+                let p_fn <&LLVMValue> = get_or_declare_printf(ctx);
+                if (p_fn != null) {
+                    let p_fn_ty <&LLVMType> = llvm_global_get_value_type(p_fn);
+                    let s_fmt <&LLVMValue> = llvm_build_global_string_ptr(ctx.builder, "blame: denullify of an absent value\n", "denull_err");
+                    let p_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                    p_args.v0 = s_fmt;
+                    llvm_build_call2(ctx.builder, p_fn_ty, p_fn, p_args, 1, "");
+                    delete p_args;
+                }
+                llvm_build_unreachable(ctx.builder);
+
+                llvm_position_builder(ctx.builder, ok_bb);
+                let res <&LLVMValue> = llvm_build_extract_value(ctx.builder, inner, 0, "val");
+                return res;
+            }
+        }
         let inner <&LLVMValue> = lower_expr(ctx, n.left);
         if (inner == null) { return null; }
         if (cg_str_eq(n.name, "-")) {
@@ -873,6 +1289,19 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         let arr_val <&LLVMValue> = lower_expr(ctx, n.left);
         let idx_val <&LLVMValue> = lower_expr(ctx, n.right);
         if (arr_val != null && idx_val != null) {
+            if (is_prototype_node(ctx, n.left)) {
+                let ind_v <&LLVMIndices> = new LLVMIndices{};
+                ind_v.i0 = llvm_const_int(ctx.i64_ty, 2, 0);
+                let pv_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_v, 1, "pv_p");
+                delete ind_v;
+                let v_buf <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, pv_ptr, "v_buf");
+                let ind0 <&LLVMIndices> = new LLVMIndices{};
+                ind0.i0 = llvm_const_int(ctx.i64_ty, 0, 0);
+                let v0_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, v_buf, ind0, 1, "v0");
+                delete ind0;
+                return llvm_build_load2(ctx.builder, ctx.i64_ty, v0_gep, "val_at_0");
+            }
+
             let idx_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "idx64");
             let ind <&LLVMIndices> = new LLVMIndices{};
             ind.i0 = idx_i64;
@@ -884,11 +1313,51 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         return null;
     }
     if (n.kind == ast_member_access()) {
+        if (cg_str_eq(n.name, "0") || cg_str_eq(n.name, "1")) {
+            let base_val <&LLVMValue> = lower_expr(ctx, n.left);
+            if (base_val != null) {
+                let b_ty <&LLVMType> = llvm_type_of(base_val);
+                if (is_prototype_node(ctx, n.left)) {
+                    let slot_idx <int> = 0;
+                    if (cg_str_eq(n.name, "1")) { slot_idx = 2; }
+                    let ind <&LLVMIndices> = new LLVMIndices{};
+                    ind.i0 = llvm_const_int(ctx.i64_ty, slot_idx, 0);
+                    let p_slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, base_val, ind, 1, "p_half");
+                    delete ind;
+                    return llvm_build_load2(ctx.builder, ctx.ptr_ty, p_slot, "half_buf");
+                }
+                let e_owner <&EnumInfo> = find_enum_by_llvm_type(ctx, b_ty);
+                if (e_owner != null && e_owner.has_payload) {
+                    let pay_slot <&LLVMValue> = llvm_build_alloca(ctx.builder, e_owner.llvm_type, "enum.tmp");
+                    llvm_build_store(ctx.builder, base_val, pay_slot);
+                    let pay_gep <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, e_owner.llvm_type, pay_slot, 1, "payload");
+                    let pay_cast <&LLVMValue> = llvm_build_bitcast(ctx.builder, pay_gep, llvm_pointer_type(ctx.i32_ty, 0), "p_i32");
+                    return llvm_build_load2(ctx.builder, ctx.i32_ty, pay_cast, "payload_val");
+                }
+                if (b_ty == ctx.ptr_ty) {
+                    let slot <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, ctx.ptr_ty, base_val, 1, "payload_p");
+                    let pay_cast <&LLVMValue> = llvm_build_bitcast(ctx.builder, slot, llvm_pointer_type(ctx.i32_ty, 0), "p_i32");
+                    return llvm_build_load2(ctx.builder, ctx.i32_ty, pay_cast, "payload_val");
+                }
+            }
+        }
         if (cg_str_eq(n.name, "length")) {
             let is_st_field <bool> = struct_has_field(ctx, n.left, "length");
             if (!is_st_field) {
                 let base_node <&AstNode> = n.left;
                 if (base_node == null) { return llvm_const_int(ctx.i32_ty, 0, 0); }
+
+                if (is_prototype_node(ctx, base_node)) {
+                    let p_val <&LLVMValue> = lower_expr(ctx, base_node);
+                    if (p_val != null) {
+                        let ind_l <&LLVMIndices> = new LLVMIndices{};
+                        ind_l.i0 = llvm_const_int(ctx.i64_ty, 1, 0);
+                        let plen_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, p_val, ind_l, 1, "plen_p");
+                        delete ind_l;
+                        let l64 <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, plen_ptr, "plen");
+                        return llvm_build_trunc(ctx.builder, l64, ctx.i32_ty, "plen32");
+                    }
+                }
 
                 // Case 1: Array literal [a, b, c].length
                 if (base_node.kind == ast_call_expr() && cg_str_eq(base_node.name, "__fin_array_literal")) {
@@ -1049,14 +1518,28 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     let arr_val <&LLVMValue> = lower_expr(ctx, n.left.left);
                     let idx_val <&LLVMValue> = lower_expr(ctx, n.left.right);
                     if (arr_val != null && idx_val != null && rhs != null) {
-                        let idx_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "idx64");
-                        let ind <&LLVMIndices> = new LLVMIndices{};
-                        ind.i0 = idx_i64;
-                        let elem_ty <&LLVMType> = get_index_elem_type(ctx, n.left.left);
-                        let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, elem_ty, arr_val, ind, 1, "arr_gep");
-                        delete ind;
-                        rhs = coerce_val(ctx, rhs, elem_ty);
-                        llvm_build_store(ctx.builder, rhs, gep);
+                        if (is_prototype_node(ctx, n.left.left)) {
+                            let ind_v <&LLVMIndices> = new LLVMIndices{};
+                            ind_v.i0 = llvm_const_int(ctx.i64_ty, 2, 0);
+                            let pv_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_v, 1, "pv_p");
+                            delete ind_v;
+                            let v_buf <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, pv_ptr, "v_buf");
+                            let ind0 <&LLVMIndices> = new LLVMIndices{};
+                            ind0.i0 = llvm_const_int(ctx.i64_ty, 0, 0);
+                            let v0_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, v_buf, ind0, 1, "v0");
+                            delete ind0;
+                            let r64 <&LLVMValue> = coerce_val(ctx, rhs, ctx.i64_ty);
+                            llvm_build_store(ctx.builder, r64, v0_gep);
+                        } else {
+                            let idx_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "idx64");
+                            let ind <&LLVMIndices> = new LLVMIndices{};
+                            ind.i0 = idx_i64;
+                            let elem_ty <&LLVMType> = get_index_elem_type(ctx, n.left.left);
+                            let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, elem_ty, arr_val, ind, 1, "arr_gep");
+                            delete ind;
+                            rhs = coerce_val(ctx, rhs, elem_ty);
+                            llvm_build_store(ctx.builder, rhs, gep);
+                        }
                     }
                 } else if (n.left.kind == ast_member_access()) {
                     let base_val <&LLVMValue> = lower_expr(ctx, n.left.left);
@@ -1192,11 +1675,46 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         if (cg_str_eq(n.name, ">>")) {
             return llvm_build_ashr(ctx.builder, lhs, rhs, "shr");
         }
-        if (cg_str_eq(n.name, "==")) {
-            return llvm_build_icmp(ctx.builder, llvm_int_eq(), lhs, rhs, "eq");
-        }
-        if (cg_str_eq(n.name, "!=")) {
-            return llvm_build_icmp(ctx.builder, llvm_int_ne(), lhs, rhs, "ne");
+        if (cg_str_eq(n.name, "==") || cg_str_eq(n.name, "!=")) {
+            let is_eq <bool> = cg_str_eq(n.name, "==");
+            if (llvm_count_struct_element_types(l_ty) == 2 && rhs == llvm_const_null(r_ty)) {
+                let has_val <&LLVMValue> = llvm_build_extract_value(ctx.builder, lhs, 1, "has_val");
+                if (is_eq) {
+                    return llvm_build_icmp(ctx.builder, llvm_int_eq(), has_val, llvm_const_int(ctx.i1_ty, 0, 0), "is_null");
+                } else {
+                    return llvm_build_icmp(ctx.builder, llvm_int_ne(), has_val, llvm_const_int(ctx.i1_ty, 0, 0), "not_null");
+                }
+            }
+            if (llvm_count_struct_element_types(r_ty) == 2 && lhs == llvm_const_null(l_ty)) {
+                let has_val <&LLVMValue> = llvm_build_extract_value(ctx.builder, rhs, 1, "has_val");
+                if (is_eq) {
+                    return llvm_build_icmp(ctx.builder, llvm_int_eq(), has_val, llvm_const_int(ctx.i1_ty, 0, 0), "is_null");
+                } else {
+                    return llvm_build_icmp(ctx.builder, llvm_int_ne(), has_val, llvm_const_int(ctx.i1_ty, 0, 0), "not_null");
+                }
+            }
+            let l_en <&EnumInfo> = find_enum_by_llvm_type(ctx, l_ty);
+            let r_en <&EnumInfo> = find_enum_by_llvm_type(ctx, r_ty);
+            if (l_en != null || r_en != null) {
+                let l_tag <&LLVMValue> = lhs;
+                if (l_en != null) {
+                    l_tag = llvm_build_extract_value(ctx.builder, lhs, 0, "ltag");
+                }
+                let r_tag <&LLVMValue> = rhs;
+                if (r_en != null) {
+                    r_tag = llvm_build_extract_value(ctx.builder, rhs, 0, "rtag");
+                }
+                if (is_eq) {
+                    return llvm_build_icmp(ctx.builder, llvm_int_eq(), l_tag, r_tag, "eq");
+                } else {
+                    return llvm_build_icmp(ctx.builder, llvm_int_ne(), l_tag, r_tag, "ne");
+                }
+            }
+            if (is_eq) {
+                return llvm_build_icmp(ctx.builder, llvm_int_eq(), lhs, rhs, "eq");
+            } else {
+                return llvm_build_icmp(ctx.builder, llvm_int_ne(), lhs, rhs, "ne");
+            }
         }
         if (cg_str_eq(n.name, "<")) {
             return llvm_build_icmp(ctx.builder, llvm_int_slt(), lhs, rhs, "lt");
@@ -1340,6 +1858,117 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             return free_res;
         }
 
+        if (cg_str_eq(n.name, "getkeyid") && n.left != null) {
+            let actual_arg <&AstNode> = n.left.left;
+            if (actual_arg == null) { actual_arg = n.left; }
+            let arg_val <&LLVMValue> = lower_expr(ctx, actual_arg);
+            if (arg_val != null) {
+                let aty <&LLVMType> = llvm_type_of(arg_val);
+                let e_match <&EnumInfo> = find_enum_by_llvm_type(ctx, aty);
+                if (e_match != null) {
+                    return llvm_build_extract_value(ctx.builder, arg_val, 0, "tag");
+                }
+                if (aty == ctx.i32_ty) {
+                    return arg_val;
+                }
+                return coerce_val(ctx, arg_val, ctx.i32_ty);
+            }
+            return llvm_const_int(ctx.i32_ty, 0, 0);
+        }
+        if (cg_str_eq(n.name, "keyidof") && n.left != null) {
+            let mem_name <string> = "";
+            let actual_arg <&AstNode> = n.left.left;
+            if (actual_arg == null) { actual_arg = n.left; }
+            if (actual_arg.kind == ast_ident()) { mem_name = actual_arg.name; }
+            let mem <&EnumMemberInfo> = find_enum_member_global(ctx, mem_name);
+            if (mem != null) {
+                return llvm_const_int(ctx.i32_ty, mem.tag, 0);
+            }
+            return llvm_const_int(ctx.i32_ty, 0, 0);
+        }
+        let em_call <&EnumMemberInfo> = find_enum_member_global(ctx, n.name);
+        if (em_call != null) {
+            let en_owner <&EnumInfo> = find_enum_for_member(ctx, em_call.name);
+            if (en_owner != null && en_owner.has_payload) {
+                let slot <&LLVMValue> = llvm_build_alloca(ctx.builder, en_owner.llvm_type, "enum.tmp");
+                let tag_ptr <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, en_owner.llvm_type, slot, 0, "tag");
+                llvm_build_store(ctx.builder, llvm_const_int(ctx.i32_ty, em_call.tag, 0), tag_ptr);
+                if (n.left != null) {
+                    let actual_arg <&AstNode> = n.left.left;
+                    if (actual_arg == null) { actual_arg = n.left; }
+                    let p_val <&LLVMValue> = lower_expr(ctx, actual_arg);
+                    if (p_val != null) {
+                        let payload_gep <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, en_owner.llvm_type, slot, 1, "payload");
+                        let pt <&LLVMType> = llvm_type_of(p_val);
+                        let p_cast <&LLVMValue> = llvm_build_bitcast(ctx.builder, payload_gep, llvm_pointer_type(pt, 0), "p_cast");
+                        llvm_build_store(ctx.builder, p_val, p_cast);
+                    }
+                }
+                return llvm_build_load2(ctx.builder, en_owner.llvm_type, slot, "enum.constructed");
+            }
+            return llvm_const_int(ctx.i32_ty, em_call.tag, 0);
+        }
+        if (cg_str_eq(n.name, "rm") && n.left != null) {
+            let actual_rec <&AstNode> = n.left.left;
+            if (actual_rec == null) { actual_rec = n.left; }
+            if (is_prototype_node(ctx, actual_rec)) {
+                let proto_val <&LLVMValue> = lower_expr(ctx, actual_rec);
+                if (proto_val != null) {
+                    let ind_l <&LLVMIndices> = new LLVMIndices{};
+                    ind_l.i0 = llvm_const_int(ctx.i64_ty, 1, 0);
+                    let plen_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, proto_val, ind_l, 1, "plen_p");
+                    delete ind_l;
+                    let cur_len <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, plen_ptr, "cur_l");
+                    let one <&LLVMValue> = llvm_const_int(ctx.i64_ty, 1, 0);
+                    let new_len <&LLVMValue> = llvm_build_sub(ctx.builder, cur_len, one, "dec_l");
+                    llvm_build_store(ctx.builder, new_len, plen_ptr);
+                    return llvm_const_int(ctx.i1_ty, 1, 0);
+                }
+            }
+        }
+        if (n.left != null) {
+            let actual_rec <&AstNode> = n.left.left;
+            if (actual_rec == null) { actual_rec = n.left; }
+            let iface <&InterfaceInfo> = find_interface_for_node(ctx, actual_rec);
+            if (iface != null) {
+                let m_info <&InterfaceMethodInfo> = find_interface_method(iface, n.name);
+                if (m_info != null) {
+                    let iface_pair <&LLVMValue> = lower_expr(ctx, actual_rec);
+                    if (iface_pair != null) {
+                        let data_ptr <&LLVMValue> = llvm_build_extract_value(ctx.builder, iface_pair, 0, "data");
+                        let vtable_ptr <&LLVMValue> = llvm_build_extract_value(ctx.builder, iface_pair, 1, "vtable");
+                        let ind <&LLVMIndices> = new LLVMIndices{};
+                        ind.i0 = llvm_const_int(ctx.i64_ty, m_info.index, 0);
+                        let fn_slot <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, vtable_ptr, ind, 1, "fn_slot");
+                        delete ind;
+                        let fn_ptr <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, fn_slot, "m_ptr");
+                        let if_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                        if_args.v0 = data_ptr;
+                        let if_arg_count <int> = 1;
+                        let cur_wrap <&AstNode> = n.left.right;
+                        while (cur_wrap != null && if_arg_count < 16) {
+                            let actual_arg <&AstNode> = cur_wrap.left;
+                            if (actual_arg == null) { actual_arg = cur_wrap; }
+                            let av <&LLVMValue> = lower_expr(ctx, actual_arg);
+                            if (if_arg_count == 1) { if_args.v1 = av; }
+                            else if (if_arg_count == 2) { if_args.v2 = av; }
+                            else if (if_arg_count == 3) { if_args.v3 = av; }
+                            else if (if_arg_count == 4) { if_args.v4 = av; }
+                            if_arg_count = if_arg_count + 1;
+                            cur_wrap = cur_wrap.right;
+                        }
+                        let ret_t <&LLVMType> = map_type(ctx, m_info.ret_type);
+                        let if_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
+                        if_params.t0 = ctx.ptr_ty;
+                        let if_fn_ty <&LLVMType> = llvm_function_type(ret_t, if_params, if_arg_count, 0);
+                        delete if_params;
+                        let res_v <&LLVMValue> = llvm_build_call2(ctx.builder, if_fn_ty, fn_ptr, if_args, if_arg_count, "if_call");
+                        delete if_args;
+                        return res_v;
+                    }
+                }
+            }
+        }
         let callee <&LLVMValue> = null;
         let callee_fn_ty <&LLVMType> = null;
 
@@ -1503,6 +2132,94 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         delete args;
         return call_res;
     }
+    if (n.kind == ast_prototype_literal()) {
+        let count <int> = 0;
+        let cur <&AstNode> = n.left;
+        while (cur != null) {
+            count = count + 1;
+            cur = cur.extra;
+        }
+        let alloc_count <int> = count;
+        if (alloc_count == 0) { alloc_count = 1; }
+
+        let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
+        let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
+
+        let c_args_k <&LLVMValueArgs> = new LLVMValueArgs{};
+        c_args_k.v0 = llvm_const_int(ctx.i64_ty, alloc_count, 0);
+        c_args_k.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+        let keys_buf <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args_k, 2, "k_buf");
+        delete c_args_k;
+
+        let c_args_v <&LLVMValueArgs> = new LLVMValueArgs{};
+        c_args_v.v0 = llvm_const_int(ctx.i64_ty, alloc_count, 0);
+        c_args_v.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+        let vals_buf <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args_v, 2, "v_buf");
+        delete c_args_v;
+
+        cur = n.left;
+        let p_idx <int> = 0;
+        while (cur != null) {
+            if (cur.left != null) {
+                let kv <&LLVMValue> = lower_expr(ctx, cur.left);
+                if (kv != null) {
+                    let kv_64 <&LLVMValue> = coerce_val(ctx, kv, ctx.i64_ty);
+                    let ind <&LLVMIndices> = new LLVMIndices{};
+                    ind.i0 = llvm_const_int(ctx.i64_ty, p_idx, 0);
+                    let k_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, keys_buf, ind, 1, "k_gep");
+                    delete ind;
+                    llvm_build_store(ctx.builder, kv_64, k_gep);
+                }
+            }
+            if (cur.right != null) {
+                let vv <&LLVMValue> = lower_expr(ctx, cur.right);
+                if (vv != null) {
+                    let vv_64 <&LLVMValue> = coerce_val(ctx, vv, ctx.i64_ty);
+                    let ind_v <&LLVMIndices> = new LLVMIndices{};
+                    ind_v.i0 = llvm_const_int(ctx.i64_ty, p_idx, 0);
+                    let v_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, vals_buf, ind_v, 1, "v_gep");
+                    delete ind_v;
+                    llvm_build_store(ctx.builder, vv_64, v_gep);
+                }
+            }
+            p_idx = p_idx + 1;
+            cur = cur.extra;
+        }
+
+        let c_args_h <&LLVMValueArgs> = new LLVMValueArgs{};
+        c_args_h.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
+        c_args_h.v1 = llvm_const_int(ctx.i64_ty, 32, 0);
+        let proto_hdr <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args_h, 2, "proto_hdr");
+        delete c_args_h;
+
+        let ind0 <&LLVMIndices> = new LLVMIndices{};
+        ind0.i0 = llvm_const_int(ctx.i64_ty, 0, 0);
+        let p_k_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, proto_hdr, ind0, 1, "pk");
+        delete ind0;
+        llvm_build_store(ctx.builder, keys_buf, p_k_ptr);
+
+        let ind1 <&LLVMIndices> = new LLVMIndices{};
+        ind1.i0 = llvm_const_int(ctx.i64_ty, 1, 0);
+        let p_len_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, proto_hdr, ind1, 1, "plen");
+        delete ind1;
+        llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, count, 0), p_len_ptr);
+
+        let ind2 <&LLVMIndices> = new LLVMIndices{};
+        ind2.i0 = llvm_const_int(ctx.i64_ty, 2, 0);
+        let p_v_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, proto_hdr, ind2, 1, "pv");
+        delete ind2;
+        llvm_build_store(ctx.builder, vals_buf, p_v_ptr);
+
+        let ind3 <&LLVMIndices> = new LLVMIndices{};
+        ind3.i0 = llvm_const_int(ctx.i64_ty, 3, 0);
+        let p_vlen_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, proto_hdr, ind3, 1, "pvlen");
+        delete ind3;
+        llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, count, 0), p_vlen_ptr);
+
+        return proto_hdr;
+    }
+    cg_dprintf(2, "finc codegen refusal: unhandled expression kind %d\n", n.kind);
+    llvm_build_unreachable(ctx.builder);
     return null;
 }
 
@@ -1527,7 +2244,20 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
             if (init_val != null && alloca != null) {
                 let v_ty <&LLVMType> = llvm_type_of(init_val);
                 if (ty != v_ty) {
-                    if (ty == ctx.i8_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i64_ty)) {
+                    if (llvm_count_struct_element_types(ty) == 2 && llvm_count_struct_element_types(v_ty) != 2) {
+                        let agg_slot <&LLVMValue> = llvm_build_alloca(ctx.builder, ty, "agg.tmp");
+                        let val_gep <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, ty, agg_slot, 0, "val");
+                        let target_elem_ty <&LLVMType> = llvm_struct_get_type_at_index(ty, 0);
+                        let conv_val <&LLVMValue> = coerce_val(ctx, init_val, target_elem_ty);
+                        llvm_build_store(ctx.builder, conv_val, val_gep);
+                        let has_gep <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, ty, agg_slot, 1, "has_val");
+                        let has_bit <int> = 1;
+                        if (init_val == llvm_const_null(v_ty) || (stmt.left.kind == ast_ident() && (cg_str_eq(stmt.left.name, "null") || cg_str_eq(stmt.left.name, "NULL")))) {
+                            has_bit = 0;
+                        }
+                        llvm_build_store(ctx.builder, llvm_const_int(ctx.i1_ty, has_bit, 0), has_gep);
+                        init_val = llvm_build_load2(ctx.builder, ty, agg_slot, "agg.val");
+                    } else if (ty == ctx.i8_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i64_ty)) {
                         init_val = llvm_build_trunc(ctx.builder, init_val, ctx.i8_ty, "v_tr8");
                     } else if (ty == ctx.i1_ty && v_ty != ctx.i1_ty) {
                         init_val = to_condition_i1(ctx, init_val);
@@ -1578,6 +2308,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         }
         let fn_ret_ty <&LLVMType> = llvm_get_return_type(llvm_global_get_value_type(ctx.fn_val));
         if (fn_ret_ty == ctx.void_ty) {
+            emit_scope_cleanups(ctx, 0);
             llvm_build_ret_void(ctx.builder);
             return;
         }
@@ -1598,11 +2329,14 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                         val = llvm_build_bitcast(ctx.builder, val, ctx.ptr_ty, "ret_pcast");
                     }
                 }
+                emit_scope_cleanups(ctx, 0);
                 llvm_build_ret(ctx.builder, val);
             } else {
+                emit_scope_cleanups(ctx, 0);
                 llvm_build_ret_void(ctx.builder);
             }
         } else {
+            emit_scope_cleanups(ctx, 0);
             llvm_build_ret_void(ctx.builder);
         }
         return;
@@ -1779,6 +2513,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         return;
     }
     if (stmt.kind == ast_block()) {
+        let start_var <int> = ctx.var_count;
         let cur <&AstNode> = stmt.left;
         while (cur != null) {
             if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) != null) {
@@ -1787,7 +2522,18 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
             lower_stmt(ctx, cur.left);
             cur = cur.right;
         }
+        if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+            emit_scope_cleanups(ctx, start_var);
+        }
         return;
+    }
+    if (stmt.kind != ast_var_decl() && stmt.kind != ast_return_stmt() &&
+        stmt.kind != ast_expr_stmt() && stmt.kind != ast_if_stmt() &&
+        stmt.kind != ast_while_stmt() && stmt.kind != ast_for_stmt() &&
+        stmt.kind != ast_block() && stmt.kind != ast_break_stmt() &&
+        stmt.kind != ast_continue_stmt() && stmt.kind != ast_blame_stmt()) {
+        cg_dprintf(2, "finc codegen refusal: unhandled statement kind %d\n", stmt.kind);
+        llvm_build_unreachable(ctx.builder);
     }
 }
 
@@ -1938,7 +2684,11 @@ pub fun lower_fun_decl(
     fn_syms: [&FnSymbol],
     fn_sym_count: int,
     structs: [&StructInfo],
-    struct_count: int
+    struct_count: int,
+    enums: [&EnumInfo],
+    enum_count: int,
+    interfaces: [&InterfaceInfo],
+    interface_count: int
 ) <noret> {
     if (fn_node == null || fn_node.left == null) { return; }
 
@@ -1980,6 +2730,16 @@ pub fun lower_fun_decl(
     ctx.continue_bb = null;
     ctx.structs = structs;
     ctx.struct_count = struct_count;
+    ctx.enums = enums;
+    ctx.enum_count = enum_count;
+    ctx.interfaces = interfaces;
+    ctx.interface_count = interface_count;
+
+    let fat_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
+    fat_args.t0 = ptr_t;
+    fat_args.t1 = ptr_t;
+    ctx.fat_ptr_ty = llvm_struct_type(fat_args, 2, 0);
+    delete fat_args;
 
     let p_idx <int> = 0;
     let p_cur <&AstNode> = fn_node.extra;
@@ -2008,6 +2768,7 @@ pub fun lower_fun_decl(
 
     let cur_bb <&LLVMBasicBlock> = llvm_get_insert_block(builder);
     if (llvm_get_basic_block_terminator(cur_bb) == null) {
+        emit_scope_cleanups(ctx, 0);
         if (cg_str_eq(fn_node.type_annotation, "void") || cg_str_eq(fn_node.type_annotation, "noret")) {
             llvm_build_ret_void(builder);
         } else if (cg_str_eq(fn_name, "main") || cg_str_eq(fn_node.type_annotation, "int")) {
@@ -2041,9 +2802,13 @@ pub fun lower_function_body(
     fn_syms: [&FnSymbol],
     fn_sym_count: int,
     structs: [&StructInfo],
-    struct_count: int
+    struct_count: int,
+    enums: [&EnumInfo],
+    enum_count: int,
+    interfaces: [&InterfaceInfo],
+    interface_count: int
 ) <noret> {
-    lower_fun_decl(module, builder, fn_node, fn_syms, fn_sym_count, structs, struct_count);
+    lower_fun_decl(module, builder, fn_node, fn_syms, fn_sym_count, structs, struct_count, enums, enum_count, interfaces, interface_count);
 }
 
 pub fun lower_decl(
@@ -2053,15 +2818,19 @@ pub fun lower_decl(
     fn_syms: [&FnSymbol],
     fn_sym_count: int,
     structs: [&StructInfo],
-    struct_count: int
+    struct_count: int,
+    enums: [&EnumInfo],
+    enum_count: int,
+    interfaces: [&InterfaceInfo],
+    interface_count: int
 ) <noret> {
     if (decl == null) { return; }
     if (decl.kind == ast_fun_decl()) {
-        lower_fun_decl(module, builder, decl, fn_syms, fn_sym_count, structs, struct_count);
+        lower_fun_decl(module, builder, decl, fn_syms, fn_sym_count, structs, struct_count, enums, enum_count, interfaces, interface_count);
     } else if (decl.kind == ast_struct_decl()) {
         let m <&AstNode> = decl.extra;
         while (m != null) {
-            lower_fun_decl(module, builder, m, fn_syms, fn_sym_count, structs, struct_count);
+            lower_fun_decl(module, builder, m, fn_syms, fn_sym_count, structs, struct_count, enums, enum_count, interfaces, interface_count);
             m = m.right;
         }
     }
@@ -2081,7 +2850,13 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int) 
     let structs <[&StructInfo]> = new [&StructInfo, 1024]{};
     let struct_count <int> = 0;
 
-    // Pass 1: Declare all functions and struct methods, and record struct definitions
+    let enums <[&EnumInfo]> = new [&EnumInfo, 256]{};
+    let enum_count <int> = 0;
+
+    let interfaces <[&InterfaceInfo]> = new [&InterfaceInfo, 256]{};
+    let interface_count <int> = 0;
+
+    // Pass 1: Declare all functions and struct methods, and record struct, enum, interface definitions
     let decl <&AstNode> = root.left;
     while (decl != null) {
         if (decl.kind == ast_fun_decl()) {
@@ -2092,6 +2867,8 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int) 
                 s_info.name = decl.name;
                 s_info.fields = new [&StructFieldInfo, 64]{};
                 s_info.field_count = 0;
+                s_info.has_destructor = false;
+                s_info.destructor_name = "";
                 let f_cur <&AstNode> = decl.left;
                 let f_idx <int> = 0;
                 while (f_cur != null && f_idx < 64) {
@@ -2104,6 +2881,19 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int) 
                     f_idx = f_idx + 1;
                     f_cur = f_cur.right;
                 }
+                let m_check <&AstNode> = decl.extra;
+                while (m_check != null) {
+                    if (cg_str_eq(m_check.name, "destructor")) {
+                        s_info.has_destructor = true;
+                        let b_d <Buffer> = new_buffer(64);
+                        b_d.write_string(decl.name);
+                        b_d.write_char('.');
+                        b_d.write_string(m_check.name);
+                        s_info.destructor_name = b_d.to_string();
+                        free_buffer(b_d);
+                    }
+                    m_check = m_check.right;
+                }
                 structs[struct_count] = s_info;
                 struct_count = struct_count + 1;
             }
@@ -2112,6 +2902,91 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int) 
                 fn_sym_count = declare_function(module, m, fn_syms, fn_sym_count);
                 m = m.right;
             }
+        } else if (decl.kind == ast_enum_decl()) {
+            if (enum_count < 250) {
+                let e_info <&EnumInfo> = new EnumInfo{};
+                e_info.name = decl.name;
+                e_info.members = new [&EnumMemberInfo, 64]{};
+                e_info.member_count = 0;
+                e_info.has_payload = false;
+                e_info.max_payload_size = 0;
+
+                let mem_cur <&AstNode> = decl.left;
+                let cur_tag <int> = 0;
+                let m_idx <int> = 0;
+                while (mem_cur != null && m_idx < 64) {
+                    let m_item <&EnumMemberInfo> = new EnumMemberInfo{};
+                    m_item.name = mem_cur.name;
+                    if (mem_cur.left != null && mem_cur.left.kind == ast_literal_int()) {
+                        cur_tag = mem_cur.left.int_val;
+                    }
+                    m_item.tag = cur_tag;
+                    m_item.has_payload = (mem_cur.int_val == 1);
+                    m_item.payload_type = mem_cur.type_annotation;
+                    if (m_item.has_payload) {
+                        e_info.has_payload = true;
+                        let ps <int> = 8;
+                        if (cg_str_eq(m_item.payload_type, "int") || cg_str_eq(m_item.payload_type, "uint")) { ps = 4; }
+                        else if (cg_str_eq(m_item.payload_type, "bool") || cg_str_eq(m_item.payload_type, "char") || cg_str_eq(m_item.payload_type, "u8") || cg_str_eq(m_item.payload_type, "i8")) { ps = 1; }
+                        m_item.payload_size = ps;
+                        if (ps > e_info.max_payload_size) {
+                            e_info.max_payload_size = ps;
+                        }
+                    }
+                    e_info.members[m_idx] = m_item;
+                    e_info.member_count = e_info.member_count + 1;
+                    m_idx = m_idx + 1;
+                    cur_tag = cur_tag + 1;
+                    mem_cur = mem_cur.right;
+                }
+                if (e_info.has_payload) {
+                    let pay_sz <int> = e_info.max_payload_size;
+                    if (pay_sz == 0) { pay_sz = 8; }
+                    let e_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
+                    e_args.t0 = llvm_i32_type();
+                    e_args.t1 = llvm_array_type(llvm_i8_type(), pay_sz);
+                    e_info.llvm_type = llvm_struct_type(e_args, 2, 0);
+                    delete e_args;
+                } else {
+                    e_info.llvm_type = llvm_i32_type();
+                }
+                enums[enum_count] = e_info;
+                enum_count = enum_count + 1;
+            }
+        } else if (decl.kind == ast_interface_decl()) {
+            if (interface_count < 250) {
+                let if_info <&InterfaceInfo> = new InterfaceInfo{};
+                if_info.name = decl.name;
+                if_info.methods = new [&InterfaceMethodInfo, 64]{};
+                if_info.method_count = 0;
+                let m_cur <&AstNode> = decl.extra;
+                let mi <int> = 0;
+                while (m_cur != null && mi < 64) {
+                    let mi_item <&InterfaceMethodInfo> = new InterfaceMethodInfo{};
+                    mi_item.name = m_cur.name;
+                    mi_item.index = mi;
+                    mi_item.ret_type = m_cur.type_annotation;
+                    let p_count <int> = 0;
+                    let pc <&AstNode> = m_cur.extra;
+                    while (pc != null) {
+                        p_count = p_count + 1;
+                        pc = pc.right;
+                    }
+                    mi_item.param_count = p_count;
+                    if_info.methods[mi] = mi_item;
+                    if_info.method_count = if_info.method_count + 1;
+                    mi = mi + 1;
+                    m_cur = m_cur.right;
+                }
+                let if_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
+                if_args.t0 = llvm_pointer_type(llvm_i8_type(), 0);
+                if_args.t1 = llvm_pointer_type(llvm_i8_type(), 0);
+                if_info.fat_ptr_ty = llvm_struct_type(if_args, 2, 0);
+                delete if_args;
+
+                interfaces[interface_count] = if_info;
+                interface_count = interface_count + 1;
+            }
         }
         decl = decl.right;
     }
@@ -2119,7 +2994,7 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int) 
     // Pass 2: Lower declarations (functions and struct methods)
     decl = root.left;
     while (decl != null) {
-        lower_decl(module, builder, decl, fn_syms, fn_sym_count, structs, struct_count);
+        lower_decl(module, builder, decl, fn_syms, fn_sym_count, structs, struct_count, enums, enum_count, interfaces, interface_count);
         decl = decl.right;
     }
 
@@ -2143,6 +3018,40 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int) 
         si = si + 1;
     }
     delete structs;
+
+    let ei <int> = 0;
+    while (ei < enum_count) {
+        if (enums[ei] != null) {
+            let mi2 <int> = 0;
+            while (mi2 < enums[ei].member_count) {
+                if (enums[ei].members[mi2] != null) {
+                    delete enums[ei].members[mi2];
+                }
+                mi2 = mi2 + 1;
+            }
+            delete enums[ei].members;
+            delete enums[ei];
+        }
+        ei = ei + 1;
+    }
+    delete enums;
+
+    let ii <int> = 0;
+    while (ii < interface_count) {
+        if (interfaces[ii] != null) {
+            let mii <int> = 0;
+            while (mii < interfaces[ii].method_count) {
+                if (interfaces[ii].methods[mii] != null) {
+                    delete interfaces[ii].methods[mii];
+                }
+                mii = mii + 1;
+            }
+            delete interfaces[ii].methods;
+            delete interfaces[ii];
+        }
+        ii = ii + 1;
+    }
+    delete interfaces;
 
     let fi2 <int> = 0;
     while (fi2 < fn_sym_count) {

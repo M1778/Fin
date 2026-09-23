@@ -304,6 +304,9 @@ pub struct Scanner {
           if (c == '-' && self.match_char('-')) {
               return Token { kind: 97, text: "--", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
           }
+          if (c == '-' && self.match_char('>')) {
+              return Token { kind: 103, text: "->", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+          }
           if (c == '-' && self.match_char('=')) {
               return Token { kind: 99, text: "-=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
           }
@@ -346,6 +349,7 @@ pub struct Scanner {
           if (c == '@') { return Token { kind: 121, text: "@", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
           if (c == '#') { return Token { kind: 122, text: "#", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
           if (c == '$') { return Token { kind: 123, text: "$", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+          if (c == '|') { return Token { kind: 124, text: "|", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
 
           let len <int> = self.cursor - self.start_pos;
           let txt <string> = slice_str(self._chars, self.start_pos, len);

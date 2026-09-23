@@ -413,20 +413,10 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
              if (instantiated) type = instantiated;
              else error(*node, "Generic count mismatch");
         } else if (auto* dyn = type->as<DynamicType>()) {
-             // `any<int>` is still an `any`. The fabrication below would have made it
-             // a struct named `any`, which rejected every value it was written to
-             // accept and answered member access with `Struct 'any' has no member` --
-             // the same fiction visit(TypeDefinition&) used to produce, at the site
-             // that the corpus actually reaches: stdlib/types.fin:74 declares
-             // `type Any<...> = any implements <...>;` and the library uses `Any<...>`
-             // as a generic bound, so every use went through here.
-             //
-             // The arguments are dropped rather than recorded, because there is
-             // nothing yet that could read them and a field nobody reads is a claim
-             // that the bound is honoured. Whether `any<int>` should narrow at all is
-             // an owner ruling -- KnownDefect_DynamicTypes
-             // .GenericArgumentsOnADynamicTypeAreNotConstraints books the state.
-             (void)dyn;
+             // ADR 0038: A bound written Any<Printable> narrows to implementors of
+             // Printable, so method calls through such a value resolve against the bound.
+             // We record the generic arguments as bounds on the DynamicType.
+             type = std::make_shared<DynamicType>(dyn->name, args);
         } else {
              type = std::make_shared<StructType>(node->name, args);
         }

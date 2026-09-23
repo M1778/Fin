@@ -10,6 +10,7 @@ pub struct LLVMType {}
 pub struct LLVMBasicBlock {}
 pub struct LLVMTarget {}
 pub struct LLVMTargetMachine {}
+pub struct LLVMContext {}
 
 pub struct LLVMTargetSlot {
     pub:
@@ -148,6 +149,30 @@ pub struct LLVMBlockArgs {
 #[llvm_name="LLVMGetParamTypes"]
 @define llvm_get_param_types(fn_type: &LLVMType, dest: &LLVMTypeArgs) <noret>;
 
+#[llvm_name="LLVMGetModuleContext"]
+@define llvm_get_module_context(m: &LLVMModule) <&LLVMContext>;
+
+#[llvm_name="LLVMGetGlobalContext"]
+@define llvm_get_global_context() <&LLVMContext>;
+
+#[llvm_name="LLVMStructCreateNamed"]
+@define llvm_struct_create_named(c: &LLVMContext, name: string) <&LLVMType>;
+
+#[llvm_name="LLVMStructSetBody"]
+@define llvm_struct_set_body(struct_ty: &LLVMType, elem_types: &LLVMTypeArgs, elem_count: int, packed: int) <noret>;
+
+#[llvm_name="LLVMArrayType"]
+@define llvm_array_type(elem_type: &LLVMType, elem_count: int) <&LLVMType>;
+
+#[llvm_name="LLVMArrayType2"]
+@define llvm_array_type2(elem_type: &LLVMType, elem_count: ulong) <&LLVMType>;
+
+#[llvm_name="LLVMCountStructElementTypes"]
+@define llvm_count_struct_element_types(struct_ty: &LLVMType) <int>;
+
+#[llvm_name="LLVMStructGetTypeAtIndex"]
+@define llvm_struct_get_type_at_index(struct_ty: &LLVMType, idx: int) <&LLVMType>;
+
 #[llvm_name="LLVMStructType"]
 @define llvm_struct_type(elem_types: &LLVMTypeArgs, elem_count: int, packed: int) <&LLVMType>;
 
@@ -195,6 +220,9 @@ pub struct LLVMBlockArgs {
 
 #[llvm_name="LLVMConstNull"]
 @define llvm_const_null(ty: &LLVMType) <&LLVMValue>;
+
+#[llvm_name="LLVMGetUndef"]
+@define llvm_get_undef(ty: &LLVMType) <&LLVMValue>;
 
 #[llvm_name="LLVMBuildGlobalStringPtr"]
 @define llvm_build_global_string_ptr(b: &LLVMBuilder, s: string, name: string) <&LLVMValue>;
@@ -259,6 +287,24 @@ pub struct LLVMBlockArgs {
 
 #[llvm_name="LLVMBuildCondBr"]
 @define llvm_build_cond_br(builder: &LLVMBuilder, cond: &LLVMValue, then_b: &LLVMBasicBlock, else_b: &LLVMBasicBlock) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildSwitch"]
+@define llvm_build_switch(builder: &LLVMBuilder, val: &LLVMValue, else_b: &LLVMBasicBlock, num_cases: int) <&LLVMValue>;
+
+#[llvm_name="LLVMAddCase"]
+@define llvm_add_case(switch_val: &LLVMValue, on_val: &LLVMValue, dest_b: &LLVMBasicBlock) <noret>;
+
+#[llvm_name="LLVMBuildExtractValue"]
+@define llvm_build_extract_value(builder: &LLVMBuilder, agg_val: &LLVMValue, index: int, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildInsertValue"]
+@define llvm_build_insert_value(builder: &LLVMBuilder, agg_val: &LLVMValue, elt_val: &LLVMValue, index: int, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildIsNull"]
+@define llvm_build_is_null(builder: &LLVMBuilder, val: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildIsNotNull"]
+@define llvm_build_is_not_null(builder: &LLVMBuilder, val: &LLVMValue, name: string) <&LLVMValue>;
 
 #[llvm_name="LLVMBuildCall2"]
 @define llvm_build_call2(builder: &LLVMBuilder, fn_type: &LLVMType, fn_val: &LLVMValue, args: &LLVMValueArgs, num_args: int, name: string) <&LLVMValue>;

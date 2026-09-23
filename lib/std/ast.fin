@@ -12,6 +12,8 @@ pub const AST_FUN_DECL <int> = 2;
 pub const AST_STRUCT_DECL <int> = 3;
 pub const AST_VAR_DECL <int> = 4;
 pub const AST_PARAM <int> = 5;
+pub const AST_ENUM_DECL <int> = 7;
+pub const AST_INTERFACE_DECL <int> = 8;
 
 pub const AST_BLOCK <int> = 10;
 pub const AST_IF_STMT <int> = 11;
@@ -32,6 +34,8 @@ pub const AST_IDENT <int> = 25;
 pub const AST_LITERAL_INT <int> = 26;
 pub const AST_LITERAL_STRING <int> = 27;
 pub const AST_LITERAL_BOOL <int> = 28;
+pub const AST_LAMBDA_EXPR <int> = 29;
+pub const AST_PROTOTYPE_LITERAL <int> = 30;
 
 // Node Kind Accessor Functions
 #[export] pub fun ast_program() <int> { return 1; }
@@ -39,6 +43,8 @@ pub const AST_LITERAL_BOOL <int> = 28;
 #[export] pub fun ast_struct_decl() <int> { return 3; }
 #[export] pub fun ast_var_decl() <int> { return 4; }
 #[export] pub fun ast_param() <int> { return 5; }
+#[export] pub fun ast_enum_decl() <int> { return 7; }
+#[export] pub fun ast_interface_decl() <int> { return 8; }
 
 #[export] pub fun ast_block() <int> { return 10; }
 #[export] pub fun ast_if_stmt() <int> { return 11; }
@@ -59,6 +65,8 @@ pub const AST_LITERAL_BOOL <int> = 28;
 #[export] pub fun ast_literal_int() <int> { return 26; }
 #[export] pub fun ast_literal_string() <int> { return 27; }
 #[export] pub fun ast_literal_bool() <int> { return 28; }
+#[export] pub fun ast_lambda_expr() <int> { return 29; }
+#[export] pub fun ast_prototype_literal() <int> { return 30; }
 
 // Returns human-readable name for an AST node kind.
 #[export]
@@ -68,6 +76,8 @@ pub fun node_kind_name(kind: int) <string> {
     if (kind == 3) { return "StructDeclaration"; }
     if (kind == 4) { return "VariableDeclaration"; }
     if (kind == 5) { return "Parameter"; }
+    if (kind == 7) { return "EnumDeclaration"; }
+    if (kind == 8) { return "InterfaceDeclaration"; }
 
     if (kind == 10) { return "BlockStatement"; }
     if (kind == 11) { return "IfStatement"; }
@@ -86,6 +96,8 @@ pub fun node_kind_name(kind: int) <string> {
     if (kind == 26) { return "IntegerLiteral"; }
     if (kind == 27) { return "StringLiteral"; }
     if (kind == 28) { return "BooleanLiteral"; }
+    if (kind == 29) { return "LambdaExpression"; }
+    if (kind == 30) { return "PrototypeLiteral"; }
 
     return "UnknownNode";
 }
@@ -222,6 +234,54 @@ pub fun make_if(cond: &AstNode, then_body: &AstNode, else_body: &AstNode, line: 
     n.left = cond;
     n.right = then_body;
     n.extra = else_body;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates a lambda expression node.
+#[export]
+pub fun make_lambda(params: &AstNode, ret_type: string, body: &AstNode, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 29;
+    n.type_annotation = ret_type;
+    n.left = body;
+    n.extra = params;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates a prototype literal node.
+#[export]
+pub fun make_prototype(elements: &AstNode, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 30;
+    n.left = elements;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates an enum declaration node.
+#[export]
+pub fun make_enum_decl(name: string, members: &AstNode, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 7;
+    n.name = name;
+    n.left = members;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates an interface declaration node.
+#[export]
+pub fun make_interface_decl(name: string, members: &AstNode, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 8;
+    n.name = name;
+    n.left = members;
     n.line = line;
     n.col = col;
     return n;

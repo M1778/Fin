@@ -125,6 +125,7 @@ pub const TOKEN_QUESTION <int> = 120;
 pub const TOKEN_AT <int> = 121;
 pub const TOKEN_HASH <int> = 122;
 pub const TOKEN_DOLLAR <int> = 123;
+pub const TOKEN_PIPE <int> = 124;
 
 // Token Kind Accessor Functions (for cross-module calls)
 #[export] pub fun tok_eof() <int> { return 0; }
@@ -200,6 +201,9 @@ pub const TOKEN_DOLLAR <int> = 123;
 #[export] pub fun tok_comma() <int> { return 118; }
 #[export] pub fun tok_dot() <int> { return 119; }
 #[export] pub fun tok_ellipsis() <int> { return 105; }
+#[export] pub fun tok_arrow() <int> { return 102; }
+#[export] pub fun tok_rarrow() <int> { return 103; }
+#[export] pub fun tok_pipe() <int> { return 124; }
 #[export] pub fun tok_at() <int> { return 121; }
 #[export] pub fun tok_hash() <int> { return 122; }
 #[export] pub fun tok_double_colon() <int> { return 104; }
@@ -350,6 +354,7 @@ pub fun token_name(kind: int) <string> {
     if (kind == 121) { return "@"; }
     if (kind == 122) { return "#"; }
     if (kind == 123) { return "$"; }
+    if (kind == 124) { return "|"; }
 
     return "unknown";
 }

@@ -1718,40 +1718,17 @@ TEST(KnownDefect_TypeAliases, AGenericTypeAliasIsNeverDeclared) {
     EXPECT_EQ(plain.exitCode, 0) << stripAnsi(plain.err);
 }
 
-TEST(KnownDefect_TypeAliases, GenericArgumentsOnANonGenericAliasAreDiscarded) {
-    // The other half of the alias gap, and the one the corpus actually leans on.
-    // `type Any = any;` (lib/std/types.fin:35) takes no parameters, and every corpus
-    // use writes arguments anyway: `X: Any<Printable>` (stdlib/stdio.fin:23, 28, 35),
-    // `T: Any<...>` (stdlib/typing.fin:13), `T: Strict<Stream>` (stdlib/stdio.fin:48).
-    // The arguments are dropped in silence -- not diagnosed as too many, not stored
-    // anywhere -- so the bound is bare `any`, and `any` carries no members a method
-    // lookup can find. Six diagnostics in the corpus read `Type 'X' does not have
-    // methods` for a parameter whose bound names the interface three characters away.
-    //
-    // Booked and not fixed because two separate mechanisms are missing. The alias needs a
-    // parameter list to bind arguments to (see AGenericTypeAliasIsNeverDeclared above),
-    // and the meaning is ruled but unbuilt: `Any<Printable>` narrows to implementors
-    // (ADR 0038), so method calls resolve through the bound once generic aliases exist.
+TEST(Soundness_TypeAliases, GenericArgumentsOnAnAliasReachItsTarget) {
+    // ADR 0038: A bound written Any<Printable> narrows to implementors of Printable,
+    // so method calls through such a value resolve against the bound.
     const FincRun r = compile("interface Printable { pub fun format_str() <string>; }\n"
                               "type Any = any;\n"
                               "fun show<X: Any<Printable>>(o: X) <void> { o.format_str(); }\n");
-    EXPECT_NE(stripAnsi(r.err).find("does not have methods"), std::string::npos)
-        << "GOOD NEWS: an alias with arguments carries them now. Invert this test -- the\n"
-           "program should compile clean -- and rename it to\n"
-           "Soundness_TypeAliases.GenericArgumentsOnAnAliasReachItsTarget.\n"
-        << stripAnsi(r.err);
-
-    // Nothing is said about the arguments either, which is what makes this a silent
-    // drop rather than a refusal: one diagnostic, and it is about the method lookup.
-    // Counted rather than matched on a word -- the temp file's own name is printed in
-    // the diagnostic, so any needle like "Alias" finds the path and not the message.
-    // If a diagnostic about the discarded arguments ever appears, this count moves and
-    // this test is where it is decided whether it is the right one.
-    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
 
     // The control: the same bound written as a real interface resolves and the call is
     // fine (Soundness_GenericBounds.ABoundIsVisibleToMethodResolution owns that rule).
-    // So the loss is the alias's, not method resolution's.
     const FincRun direct = compile("interface Printable { pub fun format_str() <string>; }\n"
                                    "fun show<X: Printable>(o: X) <void> { o.format_str(); }\n");
     EXPECT_EQ(direct.exitCode, 0) << stripAnsi(direct.err);
@@ -4497,6 +4474,19 @@ TEST(Soundness_Casts, TheCorpusOwnStringToCharArrayCastConverts) {
     EXPECT_EQ(r.exitCode, 0)
         << "string to [char] must convert:\n"
         << stripAnsi(r.err);
+}
+
+TEST(Soundness_Casts, CastToAutoInfersSourceType) {
+    // tests/samples/stdlib/collection.fin:52 writes `let temp_arr <auto> = cast<auto>(self._arr);`
+    // where self._arr is `[T]`. cast<auto> infers its target type from the operand,
+    // preserving the array/value type for indexing and deletion.
+    auto r = compile("fun f(arr: [int]) <noret> {\n"
+                     "    let temp <auto> = cast<auto>(arr);\n"
+                     "    let x <int> = temp[0];\n"
+                     "    delete temp;\n"
+                     "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
 }
 
 TEST(KnownDefect_Casts, TheCorpusOwnPointerCastIsRejected) {
@@ -8548,6 +8538,24 @@ TEST(Soundness_Enums, APayloadlessEnumeratorIsStillAValue) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
+TEST(Soundness_Enums, MemberDesignatorInComparisonDenotesMember) {
+    // ADR 0037 / ADR 0041: `enum_ == Ok(T)` in comparison position denotes the member
+    const FincRun r = compile(
+        "enum Result<T, E> {\n"
+        "    Ok(T),\n"
+        "    Err(E)\n"
+        "}\n"
+        "extern Result::Ok as Ok;\n"
+        "fun is_ok<T, E>(r: Result<T, E>) <bool> {\n"
+        "    if (r == Ok(T)) {\n"
+        "        return true;\n"
+        "    }\n"
+        "    return false;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
+}
+
 // `extern X as Y;` -- a second name for an existing symbol.
 //
 // tests/samples/extern_as.fin is the whole specification and its first line says what
@@ -12546,6 +12554,16 @@ TEST(Soundness_EnumMemberValue, AnOrdinaryNameIsNotAMember) {
         "fun main() <noret> { const k <int> = keyidof(other); }\n");
     EXPECT_NE(stripAnsi(r.err).find("expected '$enum_member'"), std::string::npos)
         << stripAnsi(r.err);
+}
+
+TEST(Soundness_EnumMemberValue, EnumMemberDotKeyidReturnsInt) {
+    // tests/samples/stdlib/enums.fin:23: `enum_member._keyid`
+    const FincRun r = compile(
+        "fun keyidof(enum_member: $enum_member) <int> {\n"
+        "    return enum_member._keyid;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
 }
 
 TEST(Soundness_EnumMemberValue, AMemberIsStillItsConstructorWhereAValueIsWanted) {

@@ -39,6 +39,15 @@ std::shared_ptr<StructType> getStructType(std::shared_ptr<Type> type, std::share
         }
     }
 
+    // 5. DynamicType with bounds (ADR 0038: Any<I> narrows to implementors of I)
+    if (auto* dyn = dynamic_cast<const DynamicType*>(type.get())) {
+        for (const auto& bound : dyn->bounds) {
+            if (auto st = getStructType(bound, scope)) {
+                return st;
+            }
+        }
+    }
+
     return nullptr;
 }
 
@@ -604,15 +613,53 @@ static TypePtr derefOnceForComparison(const TypePtr& type) {
 }
 
 void SemanticAnalyzer::visit(BinaryOp& node) {
+    const bool isEqComparison = (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ);
+    auto* leftFn = isEqComparison ? dynamic_cast<FunctionCall*>(node.left.get()) : nullptr;
+    auto* rightFn = isEqComparison ? dynamic_cast<FunctionCall*>(node.right.get()) : nullptr;
+
+    if (isEqComparison && leftFn && !rightFn) {
+        node.right->accept(*this);
+        auto rightType = lastExprType;
+        auto asEnum = rightType ? std::dynamic_pointer_cast<StructType>(derefOnceForComparison(rightType)) : nullptr;
+        if (asEnum && asEnum->is_enum && asEnum->getEnumerator(leftFn->name)) {
+            // Symmetrical: Ok(T) == enum_ (ADR 0037)
+            bool valid = true;
+            for (auto& arg : leftFn->args) {
+                if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
+                    bool isType = currentScope->resolveType(id->name) != nullptr;
+                    if (!isType) {
+                        for (const auto& g : asEnum->generic_args) {
+                            if (auto* gt = dynamic_cast<GenericType*>(g.get())) {
+                                if (gt->name == id->name) { isType = true; break; }
+                            }
+                        }
+                    }
+                    if (!isType) {
+                        error(*arg, fmt::format("Undefined type '{}'", id->name));
+                        valid = false;
+                    }
+                } else {
+                    arg->accept(*this);
+                }
+            }
+            if (!valid) {
+                lastExprType = nullptr;
+                return;
+            }
+            lastExprType = currentScope->resolveType("bool");
+            return;
+        }
+    }
+
     node.left->accept(*this);
     auto leftType = lastExprType;
 
     // Assignments
     bool isAssignment = (
-        node.op == ASTTokenKind::EQUAL || 
-        node.op == ASTTokenKind::PLUSEQUAL || 
-        node.op == ASTTokenKind::MINUSEQUAL || 
-        node.op == ASTTokenKind::MULTEQUAL || 
+        node.op == ASTTokenKind::EQUAL ||
+        node.op == ASTTokenKind::PLUSEQUAL ||
+        node.op == ASTTokenKind::MINUSEQUAL ||
+        node.op == ASTTokenKind::MULTEQUAL ||
         node.op == ASTTokenKind::DIVEQUAL
     );
 
@@ -628,10 +675,43 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         typeHintFor = node.right.get();
         typeHint = leftType;
     }
-    node.right->accept(*this);
-    typeHintFor = nullptr;
-    typeHint = nullptr;
-    auto rightType = lastExprType;
+
+    TypePtr rightType = nullptr;
+    auto asEnum = leftType ? std::dynamic_pointer_cast<StructType>(derefOnceForComparison(leftType)) : nullptr;
+    if (isEqComparison && asEnum && asEnum->is_enum && rightFn && asEnum->getEnumerator(rightFn->name)) {
+        // ADR 0037: `enum_ == Ok(T)` in comparison position denotes the member:
+        // the `T` is the payload type as written in the member's declaration --
+        // disambiguation, not a value.
+        bool valid = true;
+        for (auto& arg : rightFn->args) {
+            if (auto* id = dynamic_cast<Identifier*>(arg.get())) {
+                bool isType = currentScope->resolveType(id->name) != nullptr;
+                if (!isType) {
+                    for (const auto& g : asEnum->generic_args) {
+                        if (auto* gt = dynamic_cast<GenericType*>(g.get())) {
+                            if (gt->name == id->name) { isType = true; break; }
+                        }
+                    }
+                }
+                if (!isType) {
+                    error(*arg, fmt::format("Undefined type '{}'", id->name));
+                    valid = false;
+                }
+            } else {
+                arg->accept(*this);
+            }
+        }
+        if (!valid) {
+            lastExprType = nullptr;
+            return;
+        }
+        rightType = leftType;
+    } else {
+        node.right->accept(*this);
+        typeHintFor = nullptr;
+        typeHint = nullptr;
+        rightType = lastExprType;
+    }
 
     if (!leftType || !rightType) {
         lastExprType = nullptr;
@@ -2054,6 +2134,15 @@ void SemanticAnalyzer::visit(CastExpression& node) {
         return;
     }
 
+    // `cast<auto>(expr)` infers its target type from the operand (used e.g. at
+    // tests/samples/stdlib/collection.fin:52 for copying an array).
+    if (auto* prim = dynamic_cast<const PrimitiveType*>(targetType.get())) {
+        if (prim->name == "auto") {
+            lastExprType = sourceType;
+            return;
+        }
+    }
+
     bool valid = false;
     if (sourceType->equals(*targetType)) valid = true;
     else if (dynamic_cast<const PrimitiveType*>(sourceType.get()) && 
@@ -2350,6 +2439,13 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
             error(node, fmt::format("Type '{}' has no member '{}'", objType->toString(), node.member));
             lastExprType = nullptr;
             return;
+        }
+
+        if (auto* prim = objType->as<PrimitiveType>()) {
+            if (prim->name == "$enum_member" && node.member == "_keyid") {
+                lastExprType = currentScope->resolveType("int");
+                return;
+            }
         }
 
         error(node, fmt::format("Type '{}' is not a struct", objType->toString()));

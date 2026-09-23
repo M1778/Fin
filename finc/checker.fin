@@ -7,12 +7,14 @@ import {
     ast_expr_stmt, ast_break_stmt, ast_continue_stmt,
     ast_binary_expr, ast_unary_expr, ast_call_expr,
     ast_member_access, ast_index_expr, ast_ident,
-    ast_literal_int, ast_literal_string, ast_literal_bool
+    ast_literal_int, ast_literal_string, ast_literal_bool,
+    ast_enum_decl, ast_interface_decl, ast_prototype_literal
 } from ast::std;
 
 import {
     Scope, Symbol, new_scope, free_scope,
     sym_variable, sym_function, sym_struct, sym_parameter,
+    sym_enum, sym_interface,
     make_var_sym, make_fn_sym
 } from scope::std;
 
@@ -85,6 +87,8 @@ pub struct Checker {
           self.global_scope.insert_symbol(make_fn_sym("__fin_alloc_struct", "void*", true));
           self.global_scope.insert_symbol(make_fn_sym("__fin_alloc_scalar", "void*", true));
           self.global_scope.insert_symbol(make_fn_sym("__fin_struct_init", "void*", true));
+          self.global_scope.insert_symbol(make_fn_sym("getkeyid", "int", true));
+          self.global_scope.insert_symbol(make_fn_sym("keyidof", "int", true));
           self.global_scope.insert_symbol(make_var_sym("NULL", "void*", true));
       }
 
@@ -259,6 +263,16 @@ pub struct Checker {
                   return "auto";
               }
               return "void";
+          }
+
+          if (expr.kind == ast_prototype_literal()) {
+              let cur <&AstNode> = expr.left;
+              while (cur != null) {
+                  if (cur.left != null) { self.check_expression(cur.left); }
+                  if (cur.right != null) { self.check_expression(cur.right); }
+                  cur = cur.extra;
+              }
+              return "prototype";
           }
 
           if (expr.kind == ast_index_expr()) {
@@ -486,6 +500,72 @@ pub struct Checker {
                   let fn_sym <Symbol> = make_fn_sym(decl.name, decl.type_annotation, true);
                   if (!self.global_scope.has(decl.name)) {
                       self.global_scope.insert_symbol(fn_sym);
+                  }
+              } else if (decl.kind == ast_enum_decl()) {
+                  let en_sym <Symbol> = Symbol {
+                      name: decl.name,
+                      kind: sym_enum(),
+                      type_name: decl.name,
+                      is_pub: true,
+                      is_mut: false,
+                      line: decl.line,
+                      col: decl.col
+                  };
+                  if (!self.global_scope.has(decl.name)) {
+                      self.global_scope.insert_symbol(en_sym);
+                  }
+                  let m <&AstNode> = decl.left;
+                  while (m != null) {
+                      let mem_sym <Symbol> = make_var_sym(m.name, decl.name, true);
+                      if (!self.global_scope.has(m.name)) {
+                          self.global_scope.insert_symbol(mem_sym);
+                      }
+                      let b <Buffer> = new_buffer(64);
+                      b.write_string(decl.name);
+                      b.write_string("::");
+                      b.write_string(m.name);
+                      let q_name <string> = b.to_string();
+                      free_buffer(b);
+                      let q_sym <Symbol> = make_var_sym(q_name, decl.name, true);
+                      if (!self.global_scope.has(q_name)) {
+                          self.global_scope.insert_symbol(q_sym);
+                      }
+                      let b2 <Buffer> = new_buffer(64);
+                      b2.write_string(decl.name);
+                      b2.write_char('_');
+                      b2.write_string(m.name);
+                      let u_name <string> = b2.to_string();
+                      free_buffer(b2);
+                      let u_sym <Symbol> = make_var_sym(u_name, decl.name, true);
+                      if (!self.global_scope.has(u_name)) {
+                          self.global_scope.insert_symbol(u_sym);
+                      }
+                      let mfn_sym <Symbol> = make_fn_sym(q_name, decl.name, true);
+                      if (!self.global_scope.has(q_name)) {
+                          self.global_scope.insert_symbol(mfn_sym);
+                      }
+                      m = m.right;
+                  }
+              } else if (decl.kind == ast_interface_decl()) {
+                  let if_sym <Symbol> = Symbol {
+                      name: decl.name,
+                      kind: sym_interface(),
+                      type_name: decl.name,
+                      is_pub: true,
+                      is_mut: false,
+                      line: decl.line,
+                      col: decl.col
+                  };
+                  if (!self.global_scope.has(decl.name)) {
+                      self.global_scope.insert_symbol(if_sym);
+                  }
+                  let m <&AstNode> = decl.extra;
+                  while (m != null) {
+                      let m_sym <Symbol> = make_fn_sym(m.name, m.type_annotation, true);
+                      if (!self.global_scope.has(m.name)) {
+                          self.global_scope.insert_symbol(m_sym);
+                      }
+                      m = m.right;
                   }
               } else if (decl.kind == ast_var_decl()) {
                   let v_sym <Symbol> = make_var_sym(decl.name, decl.type_annotation, true);

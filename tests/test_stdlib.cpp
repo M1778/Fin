@@ -2399,6 +2399,80 @@ TEST(Soundness_BundledStdlib, FinParserParsesExpressionsAndBooleans) {
     EXPECT_EQ(out, "err=0") << out;
 }
 
+TEST(Soundness_BundledStdlib, FinParserParsesEnumsInterfacesGenericsLambdasPrototypes) {
+    const std::string repoRoot = fs::path(FIN_TESTS_DIR).parent_path().string();
+    const std::string out = buildWithModuleAndRun(
+        "import { Token, tok_eof } from token::std;\n"
+        "import { Scanner, new_scanner, free_scanner } from scanner::std;\n"
+        "import { Parser, new_parser, free_parser } from finc.parser;\n"
+        "import { AstNode } from ast::std;\n"
+        "fun main() <int> {\n"
+        "    let src <string> = \"#[export]\\nenum Color {\\n    Red,\\n    RGB(int, int, int),\\n    Custom = 42,\\n}\\n\\n#[repr]\\ninterface Printable<T> {\\n    pub fun to_string(self: &Self) <string>;\\n}\\n\\nstruct Box<T> {\\n    pub val <T>,\\n}\\n\\nfun identity<T>(x: T) <T> {\\n    return x;\\n}\\n\\nfun test_all() <void> {\\n    let id_call <int> = identity::<int>(42);\\n    let proto <{string, int}> = { \\\"a\\\": 10, \\\"b\\\": 20 };\\n    let lam1 <auto> = |x: int| => x + 1;\\n    let lam2 <auto> = |x: int| { return x * 2; };\\n}\\n\";\n"
+        "    let sc <Scanner> = new_scanner(src);\n"
+        "    let tokens <[Token]> = new [Token, 256]{};\n"
+        "    let tok_count <int> = 0;\n"
+        "    let t <Token> = sc.scan_token();\n"
+        "    while (t.kind != tok_eof() && tok_count < 255) {\n"
+        "        tokens[tok_count] = t;\n"
+        "        tok_count++;\n"
+        "        t = sc.scan_token();\n"
+        "    }\n"
+        "    tokens[tok_count] = t;\n"
+        "    tok_count++;\n"
+        "    free_scanner(sc);\n"
+        "    let p <Parser> = new_parser(tokens, tok_count, \"test_frontend.fin\", src);\n"
+        "    let root <&AstNode> = p.parse_program();\n"
+        "    let err <int> = 0;\n"
+        "    if (p.had_error) { err = 1; }\n"
+        "    delete tokens;\n"
+        "    free_parser(p);\n"
+        "    printf(\"err=%d\", err);\n"
+        "    return 0;\n"
+        "}\n",
+        repoRoot);
+    EXPECT_EQ(out, "err=0") << out;
+}
+
+TEST(Soundness_BundledStdlib, FinCheckerValidatesAutoInferenceEnumsAndInterfaces) {
+    const std::string repoRoot = fs::path(FIN_TESTS_DIR).parent_path().string();
+    const std::string out = buildWithModuleAndRun(
+        "import { Token, tok_eof } from token::std;\n"
+        "import { Scanner, new_scanner, free_scanner } from scanner::std;\n"
+        "import { Parser, new_parser, free_parser } from finc.parser;\n"
+        "import { Checker, new_checker, free_checker } from finc.checker;\n"
+        "import { AstNode } from ast::std;\n"
+        "fun main() <int> {\n"
+        "    let src <string> = \"enum Status { Pending, Active, Done }\\ninterface Runner { pub fun run(self: &Self) <int>; }\\nstruct Worker { pub id <int> = 1, pub fun run(self: &Self) <int> { return self.id; } }\\nfun test_infer() <int> {\\n    let x <auto> = 42;\\n    let y <auto> = x + 10;\\n    let s <Status> = Status_Active;\\n    let w <Worker> = Worker{ id: 7 };\\n    return y + w.run();\\n}\\n\";\n"
+        "    let sc <Scanner> = new_scanner(src);\n"
+        "    let tokens <[Token]> = new [Token, 256]{};\n"
+        "    let tok_count <int> = 0;\n"
+        "    let t <Token> = sc.scan_token();\n"
+        "    while (t.kind != tok_eof() && tok_count < 255) {\n"
+        "        tokens[tok_count] = t;\n"
+        "        tok_count++;\n"
+        "        t = sc.scan_token();\n"
+        "    }\n"
+        "    tokens[tok_count] = t;\n"
+        "    tok_count++;\n"
+        "    free_scanner(sc);\n"
+        "    let p <Parser> = new_parser(tokens, tok_count, \"test_chk.fin\", src);\n"
+        "    let root <&AstNode> = p.parse_program();\n"
+        "    delete tokens;\n"
+        "    let p_err <int> = 0;\n"
+        "    if (p.had_error) { p_err = 1; }\n"
+        "    free_parser(p);\n"
+        "    let chk <Checker> = new_checker(\"test_chk.fin\");\n"
+        "    let ok <bool> = chk.check_program(root);\n"
+        "    let c_err <int> = 0;\n"
+        "    if (!ok || chk.had_error) { c_err = 1; }\n"
+        "    free_checker(chk);\n"
+        "    printf(\"p_err=%d,c_err=%d\", p_err, c_err);\n"
+        "    return 0;\n"
+        "}\n",
+        repoRoot);
+    EXPECT_EQ(out, "p_err=0,c_err=0") << out;
+}
+
 
 
 

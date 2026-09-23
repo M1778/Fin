@@ -4920,6 +4920,14 @@ private:
         }
         if (from.type.llvmType == to.llvmType) return from.value;
 
+        if (to.llvmType && to.llvmType->isStructTy() &&
+            to.llvmType->getStructName() == "fin.enum_member" &&
+            (from.type.kind == CgType::Kind::Int || from.type.isFieldlessEnum())) {
+            llvm::Value* castVal = builder_.CreateIntCast(from.value, llvm::Type::getInt64Ty(ctx_), from.type.isSigned);
+            llvm::Value* word = llvm::ConstantAggregateZero::get(to.llvmType);
+            return builder_.CreateInsertValue(word, castVal, {0}, "enum_member");
+        }
+
         if (from.type.kind == CgType::Kind::Int && to.kind == CgType::Kind::Int) {
             if (from.type.bits == to.bits) return from.value;
             if (from.type.bits < to.bits) {
@@ -6744,6 +6752,31 @@ private:
                 break;
         }
 
+        if (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ) {
+            if (auto* fn = dynamic_cast<FunctionCall*>(node.left.get())) {
+                CgVal rhs = emit(*node.right);
+                if (failed_) return;
+                const EnumInfo* eInfo = rhs.type.enumInfo;
+                if (eInfo && (rhs.type.isPayloadedEnum() || rhs.type.isFieldlessEnum())) {
+                    auto it = eInfo->memberInfoByName.find(fn->name);
+                    if (it != eInfo->memberInfoByName.end()) {
+                        llvm::Value* rTag = rhs.type.isPayloadedEnum()
+                            ? builder_.CreateExtractValue(rhs.value, {0}, "rhs.tag")
+                            : rhs.value;
+                        if (rTag->getType() != builder_.getInt32Ty()) {
+                            rTag = builder_.CreateIntCast(rTag, builder_.getInt32Ty(), /*isSigned=*/true);
+                        }
+                        llvm::Value* lTag = builder_.getInt32(static_cast<uint32_t>(it->second.tag));
+                        llvm::Value* cmp = (node.op == ASTTokenKind::EQEQ)
+                            ? builder_.CreateICmpEQ(lTag, rTag)
+                            : builder_.CreateICmpNE(lTag, rTag);
+                        value_ = CgVal{cmp, *types_.byName("bool")};
+                        return;
+                    }
+                }
+            }
+        }
+
         CgVal lhs = emit(*node.left);
         if (failed_) return;
 
@@ -6769,11 +6802,35 @@ private:
         // (It is also why the operand is emitted *before* the lookup -- the ordinary
         // path needs that value, and computing an address first for every `+` in the
         // program would emit a dead one for each.)
-        if (lhs.type.isPayloadedEnum()) {
-            CgVal rhs = emit(*node.right);
-            if (failed_) return;
-            value_ = emitArithmetic(node, node.op, lhs, rhs);
-            return;
+        if (lhs.type.isPayloadedEnum() || lhs.type.isFieldlessEnum()) {
+            if (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ) {
+                if (auto* fn = dynamic_cast<FunctionCall*>(node.right.get())) {
+                    const EnumInfo* eInfo = lhs.type.enumInfo;
+                    if (eInfo) {
+                        auto it = eInfo->memberInfoByName.find(fn->name);
+                        if (it != eInfo->memberInfoByName.end()) {
+                            llvm::Value* lTag = lhs.type.isPayloadedEnum()
+                                ? builder_.CreateExtractValue(lhs.value, {0}, "lhs.tag")
+                                : lhs.value;
+                            if (lTag->getType() != builder_.getInt32Ty()) {
+                                lTag = builder_.CreateIntCast(lTag, builder_.getInt32Ty(), /*isSigned=*/true);
+                            }
+                            llvm::Value* rTag = builder_.getInt32(static_cast<uint32_t>(it->second.tag));
+                            llvm::Value* cmp = (node.op == ASTTokenKind::EQEQ)
+                                ? builder_.CreateICmpEQ(lTag, rTag)
+                                : builder_.CreateICmpNE(lTag, rTag);
+                            value_ = CgVal{cmp, *types_.byName("bool")};
+                            return;
+                        }
+                    }
+                }
+            }
+            if (lhs.type.isPayloadedEnum()) {
+                CgVal rhs = emit(*node.right);
+                if (failed_) return;
+                value_ = emitArithmetic(node, node.op, lhs, rhs);
+                return;
+            }
         }
 
         if (lhs.type.isStruct()) {
@@ -9098,11 +9155,20 @@ private:
     }
 
     void visit(CastExpression& node) override {
-        auto target = types_.map(node.target_type.get());
-        if (!target) { unsupportedType(node, node.target_type.get(), "a cast"); return; }
+        const bool isAuto = node.target_type && node.target_type->name == "auto" &&
+                            node.target_type->generics.empty() && !node.target_type->is_array &&
+                            node.target_type->pointer_depth == 0;
         CgVal v = emit(*node.expr);
         if (failed_) return;
         if (!v.ok()) { unsupported(node, "this cast operand"); return; }
+
+        if (isAuto) {
+            value_ = v;
+            return;
+        }
+
+        auto target = types_.map(node.target_type.get());
+        if (!target) { unsupportedType(node, node.target_type.get(), "a cast"); return; }
         // `#[uncastable]` (stdlib/error.fin) excludes casts to and from the
         // type -- including same-type and generic/dynamic-mediated ones the
         // analyzer otherwise admits, which is why the check lives on the cast
@@ -10946,6 +11012,23 @@ private:
             unsupported(node, fmt::format("the member '{}' of enum '{}'", node.member, enumInfo->finName));
             return;
         }
+        if (node.member == "_keyid" && object.type.llvmType &&
+            object.type.llvmType->isStructTy() &&
+            object.type.llvmType->getStructName() == "fin.enum_member") {
+            llvm::Value* raw = nullptr;
+            if (object.value) {
+                raw = builder_.CreateExtractValue(object.value, {0}, "keyid.raw");
+            } else if (object.address) {
+                llvm::Value* rawPtr = builder_.CreateStructGEP(object.type.llvmType, object.address, 0, "keyid.ptr");
+                raw = builder_.CreateLoad(llvm::Type::getInt64Ty(ctx_), rawPtr, "keyid.raw");
+            }
+            if (raw) {
+                llvm::Value* tag = builder_.CreateIntCast(raw, builder_.getInt32Ty(), /*isSigned=*/true);
+                value_ = CgVal{tag, *types_.byName("int")};
+                return;
+            }
+        }
+
         if (!object.type.isStruct() || !object.type.structInfo) {
             unsupported(node, fmt::format("the member '{}' of a non-struct", node.member));
             return;
