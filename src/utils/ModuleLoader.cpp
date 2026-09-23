@@ -188,8 +188,12 @@ void ModuleLoader::beginRootFile(const std::string& path) {
     loadingStack.insert(identityOf(path));
 }
 
-void ModuleLoader::loadGlobalModuleIfPresent(const std::string& importPath, bool isPackage) {
-    if (!resolvePath(importPath, isPackage).empty()) loadModule(importPath, isPackage);
+void ModuleLoader::loadGlobalModuleIfPresent(const std::string& importPath, bool isPackage,
+                                             const std::string& skipIfRoot) {
+    std::string fullPath = resolvePath(importPath, isPackage);
+    if (fullPath.empty()) return;
+    if (!skipIfRoot.empty() && identityOf(fullPath) == identityOf(skipIfRoot)) return;
+    loadModule(importPath, isPackage);
 }
 
 std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, bool isPackage) {

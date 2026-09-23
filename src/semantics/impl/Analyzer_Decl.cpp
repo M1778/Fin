@@ -351,8 +351,17 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
 void SemanticAnalyzer::visit(StructDeclaration& node) {
     debugLog(fg(fmt::color::orange), "[INFO] Analyzing struct '{}'\n", node.name);
 
-    auto structType = std::make_shared<StructType>(node.name);
-    currentScope->defineType(node.name, structType);
+    std::shared_ptr<StructType> structType;
+    auto it = hoistedTypes_.find(&node);
+    if (it != hoistedTypes_.end()) {
+        structType = it->second;
+        structType->generic_args.clear();
+        structType->parents.clear();
+        structType->constructors.clear();
+    } else {
+        structType = std::make_shared<StructType>(node.name);
+        currentScope->defineType(node.name, structType);
+    }
 
     enterScope();
 
@@ -482,8 +491,14 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
     // 1. Member Defaults
     for (auto& member : node.members) {
         if (member->default_value) {
-            member->default_value->accept(*this);
             auto memberType = structType->getFieldType(member->name);
+            auto prevHintFor = typeHintFor;
+            auto prevHint = typeHint;
+            typeHintFor = member->default_value.get();
+            typeHint = memberType;
+            member->default_value->accept(*this);
+            typeHintFor = prevHintFor;
+            typeHint = prevHint;
             if (lastExprType && memberType) {
                 checkInitializer(*member->default_value, lastExprType, memberType);
             }
@@ -678,9 +693,17 @@ void SemanticAnalyzer::visit(DestructorDeclaration& node) {
 
 void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     debugLog(fg(fmt::color::magenta), "[INFO] Analyzing interface '{}'\n", node.name);
-    auto ifaceType = std::make_shared<StructType>(node.name);
-    ifaceType->is_interface = true;
-    currentScope->defineType(node.name, ifaceType);
+    std::shared_ptr<StructType> ifaceType;
+    auto it = hoistedTypes_.find(&node);
+    if (it != hoistedTypes_.end()) {
+        ifaceType = it->second;
+        ifaceType->generic_args.clear();
+        ifaceType->constructors.clear();
+    } else {
+        ifaceType = std::make_shared<StructType>(node.name);
+        ifaceType->is_interface = true;
+        currentScope->defineType(node.name, ifaceType);
+    }
     
     enterScope();
     // Collected onto the interface's own type, as visit(StructDeclaration&) and
@@ -791,9 +814,16 @@ void SemanticAnalyzer::visit(EnumDeclaration& node) {
     // and parents, and a PrimitiveType has nowhere to put any of them. tests/samples/
     // enums.fin is the specification and Soundness_Enums the tests, including the
     // guard that this does not make an enum a struct.
-    auto enumType = std::make_shared<StructType>(node.name);
-    enumType->is_enum = true;
-    currentScope->defineType(node.name, enumType);
+    std::shared_ptr<StructType> enumType;
+    auto it = hoistedTypes_.find(&node);
+    if (it != hoistedTypes_.end()) {
+        enumType = it->second;
+        enumType->generic_args.clear();
+    } else {
+        enumType = std::make_shared<StructType>(node.name);
+        enumType->is_enum = true;
+        currentScope->defineType(node.name, enumType);
+    }
 
     // The enumerators are collected here and defined below, after the generic scope
     // has been left: arrays_enums.fin:17 reads one by its bare name (`let s <Status>
@@ -980,6 +1010,9 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
     auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg,
                                                   paramDefaults);
     currentScope->define({node.name, funcType, false, true});
+    if (globalScope && currentScope != globalScope) {
+        globalScope->define({node.name, funcType, false, true});
+    }
     if (publishIfGlobal(node, node.attributes, node.name, funcType) && loader) {
         // The backend half. Publishing the name makes a call to it type-check in a file
         // that imports nothing; the prototype is what makes that call *link*, because
@@ -1312,9 +1345,17 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
 void SemanticAnalyzer::visit(ClassDeclaration& node) {
     debugLog(fg(fmt::color::orange), "[INFO] Analyzing class '{}'\n", node.name);
 
-    auto structType = std::make_shared<StructType>(node.name);
-    // structType->is_class = true; // Placeholder for future
-    currentScope->defineType(node.name, structType);
+    std::shared_ptr<StructType> structType;
+    auto it = hoistedTypes_.find(&node);
+    if (it != hoistedTypes_.end()) {
+        structType = it->second;
+        structType->generic_args.clear();
+        structType->parents.clear();
+        structType->constructors.clear();
+    } else {
+        structType = std::make_shared<StructType>(node.name);
+        currentScope->defineType(node.name, structType);
+    }
 
     enterScope();
 

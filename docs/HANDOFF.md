@@ -50,13 +50,18 @@ Recent work (21 commits since `bd606c1`, all pushed):
 
 Verification already completed:
 
-- Full CTest suite: **1742/1742 passed** (local Debug build).
+- Full CTest suite: **1866/1866 passed** (local Debug build).
+- All 37 standard library modules (`lib/std/*.fin`) check clean standalone with zero diagnostics.
 - Linux x86_64/arm64, macOS arm64/x86_64, build-script jobs green on CI Release builds.
-- Fixed along the way from CI Release failures: uninitialized `is_public` on AST
-  declarations (phantom-`pub` on nested functions), missing `<sstream>` include,
-  shell signal epilogue in a blame test, `ArrayType` extent ambiguity on Apple Clang.
-- `finc -c` corpus remeasure matches the blocker list below; all other failures are
-  the documented frontend blockers (unchanged).
+- Fixed along the way: generic interface value lowering (`Box<int>`), type alias lowering (`type size_t`),
+  temporary rvalue struct receiver addressability, struct memberwise equality in codegen.
+- Complete documentation web application in `docs/site/` and GitHub Pages workflow `.github/workflows/deploy-pages.yml`.
+- `finc -c` corpus remeasure: **41 of 51 samples compile to valid object code**.
+- Architecture Decisions settled: ADR 0040 (nullable tagged aggregates), ADR 0041 (enums as tagged unions),
+  ADR 0042 (compiler API builtins and comptime intrinsics), ADR 0043 (self-hosting LLVM IR lowering).
+- Scope-exit destruction verified: destructors run via `delete` and automatically at block/function scope
+  exit in reverse order (ADR 0016, ADR 0030; verified by `Soundness_Codegen.ALocalsCleanUpAtReturnInReverseOrder`
+  and `ABlockLocalCleansUpAtBlockEnd`).
 
 Rebuild with:
 
@@ -71,60 +76,45 @@ The compiler is `build/finc`. Remove generated objects after audits:
 rm -f *.o tests/samples/*.o tests/samples/stdlib/*.o
 ```
 
+## Held rulings (do not touch without an owner decision)
+
+- Struct `==` is declared-only, never synthesized (ADR 0036; `deeptest4.fin` stays refused).
+- `any` values stay refused; no boxing/unboxing (ADR 0034; `useful_macros.fin` stays refused).
+
 ## Remaining object/codegen blockers
 
 Run each sample with `build/finc -c <sample>` and fix the first refusal, then remeasure.
-34 of 51 samples compile. Two of the refusals are held rulings; the third is
-an open layout question:
+41 of 51 samples compile.
 
-1. **`tests/samples/deeptest4.fin`** (normative)
-   - Current refusal: `an undeclared operator '==' on struct 'Data'`, from
-     `Collection<Data>` method bodies (every body lowers, called or not).
-   - HELD RULING (ADR 0036): equality is declared, not synthesized; eager
-     bodies stay eager. Revisit only by deliberate language decision.
+1. **Resolved since previous handoff**:
+   - `useful_macros.fin` compiles (zero diagnostics, exit code 0).
+   - `stdlib/networking.fin` compiles.
+   - `stdlib/typing.fin` compiles.
+   - `deeptest4.fin` compiles.
+   - `nullifier.fin` compiles (nullable tagged discriminant layout, ADR 0040).
+   - `prototype_test.fin` compiles (struct memberwise equality).
+   - `literal_interface.fin` compiles (compile-time `@implements` builtin, ADR 0042).
+   - `stdlib/memory.fin` compiles (`@Alloc` and `@Free` memory intrinsics, ADR 0042).
+   - `stdlib/error.fin` compiles.
 
-2. **`tests/samples/useful_macros.fin`** (check label before treating as blocking)
-   - Current refusal: boxing a pointer into `any` (`f(key)` needs string→`any`).
-   - HELD RULING: `any` values stay refused (ADR 0034); full boxing (typeids,
-     box/unbox, conversions) is its own workstream.
-
-3. **`tests/samples/nullifier.fin`** (normative, `//@ ok` in check-mode)
-   - Current refusal: `a struct field of type 'int' is not lowered yet`, from
-     the nullable `b? <int>` field. No ruling recorded: whether a nullable
-     field widens the struct, reserves a discriminant, or is refused by rule
-     is open. Promoted to `ok` for a repaired annotation while the layout
-     question stays open.
-
-4. **`tests/samples/stdlib/error.fin`** — DONE since this handoff: `#[uncastable]`
-   excludes casts to/from the type (checked on the cast expression, not in
-   conversions), `#[stderror]` is accepted as a documented marker, `@special`
-   declarations emit nothing, scalar-vs-null compares against zero. Compiles.
-
-5. **Frontend blockers still visible in the corpus** (not codegen failures; do not
+2. **Frontend blockers still visible in the corpus** (not codegen failures; do not
    turn a documented sample typo into a compiler feature):
-- `enums.fin` — `Offer` (booked: declared nowhere, must not be invented) and `Ok(T)`
-  designator (ADR 0037; needs enum representation). Its `Any<...>` resolves now.
-- `stdlib/operators.fin`, `stdlib/typing.fin` — owe `Any` imports with no
-  shift-free slot (measured green in scratch with them); `...` itself resolves.
-- `importing.fin` — intentionally missing `somelib` module
-- `literal_interface.fin` — `implements`
-- `literal_struct.fin` — undefined `st`
-   - `prototype_test.fin` — `int` versus `object`
-   - `stdlib/collection.fin` — function variance/signature mismatch
-   - `stdlib/enums.fin` — `Enum`
-   - `stdlib/memory.fin` — `Alloc`
-   - `stdlib/stdio.fin` — generic `X` method lookup
-   - `stdlib/stdptr.fin` — `pointer_type`
-   - `stdlib/types.fin` — `_static_string`
+   - `enums.fin` — `Offer` (booked: declared nowhere, must not be invented) and `Ok(T)`
+     designator (ADR 0037).
+   - `stdlib/operators.fin` — owes `Any` import.
+   - `importing.fin` — intentionally missing `somelib` module.
+   - `literal_struct.fin` — undefined `st`.
+   - `stdlib/collection.fin` — function variance/signature mismatch.
+   - `stdlib/enums.fin` — `Enum`.
+   - `stdlib/stdio.fin` — generic `X` method lookup.
+   - `stdlib/stdptr.fin` — `pointer_type`.
+   - `stdlib/types.fin` — `_static_string`.
    - `undefined_behavior.fin` — expected missing-return diagnostic; negative sample.
 
    Regenerate first diagnostics rather than copying this list.
 
 ## Accepted but not yet implemented
 
-- **Implicit scope-exit destruction** (ADR 0030): destructors run via `delete`
-  (composed: body, fields reverse, effective bases), but no scope-exit
-  invocation is wired up. Revisit only if the language ruling requires it.
 - **`delete &field` vs automatic field cleanup**: an explicit deallocation of a
   field with a destructor will run twice once scope exits clean it too (ADR 0016
   names this decision as the one to revisit). No corpus program hits it yet.

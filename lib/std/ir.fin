@@ -1,0 +1,314 @@
+// IR: 3-address code intermediate representation for Fin compiler backend.
+//
+// Bridges the abstract syntax tree and target code generation (C / LLVM IR / assembly),
+// facilitating constant folding, basic block formation, and linear lowering.
+
+namespace std {
+
+#[llvm_name="calloc"]
+@define ir_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="free"]
+@define ir_free(ptr: string) <noret>;
+
+#[llvm_name="memcpy"]
+@define ir_memcpy(dst: string, src: &char, count: ulong) <string>;
+
+// Opcode constants
+#[export] pub fun ir_alloca() <int> { return 1; }
+#[export] pub fun ir_load() <int> { return 2; }
+#[export] pub fun ir_store() <int> { return 3; }
+#[export] pub fun ir_get_field() <int> { return 4; }
+
+#[export] pub fun ir_add() <int> { return 10; }
+#[export] pub fun ir_sub() <int> { return 11; }
+#[export] pub fun ir_mul() <int> { return 12; }
+#[export] pub fun ir_div() <int> { return 13; }
+#[export] pub fun ir_mod() <int> { return 14; }
+#[export] pub fun ir_neg() <int> { return 15; }
+
+#[export] pub fun ir_eq() <int> { return 20; }
+#[export] pub fun ir_ne() <int> { return 21; }
+#[export] pub fun ir_lt() <int> { return 22; }
+#[export] pub fun ir_gt() <int> { return 23; }
+#[export] pub fun ir_le() <int> { return 24; }
+#[export] pub fun ir_ge() <int> { return 25; }
+
+#[export] pub fun ir_br() <int> { return 30; }
+#[export] pub fun ir_condbr() <int> { return 31; }
+#[export] pub fun ir_ret() <int> { return 32; }
+#[export] pub fun ir_call() <int> { return 33; }
+
+#[export] pub fun ir_const_int() <int> { return 40; }
+#[export] pub fun ir_const_str() <int> { return 41; }
+#[export] pub fun ir_const_bool() <int> { return 42; }
+#[export] pub fun ir_nop() <int> { return 43; }
+
+// Returns the textual mnemonic for an IR opcode.
+#[export]
+pub fun ir_opcode_name(opcode: int) <string> {
+    if (opcode == 1) { return "alloca"; }
+    if (opcode == 2) { return "load"; }
+    if (opcode == 3) { return "store"; }
+    if (opcode == 4) { return "get_field"; }
+
+    if (opcode == 10) { return "add"; }
+    if (opcode == 11) { return "sub"; }
+    if (opcode == 12) { return "mul"; }
+    if (opcode == 13) { return "div"; }
+    if (opcode == 14) { return "mod"; }
+    if (opcode == 15) { return "neg"; }
+
+    if (opcode == 20) { return "eq"; }
+    if (opcode == 21) { return "ne"; }
+    if (opcode == 22) { return "lt"; }
+    if (opcode == 23) { return "gt"; }
+    if (opcode == 24) { return "le"; }
+    if (opcode == 25) { return "ge"; }
+
+    if (opcode == 30) { return "br"; }
+    if (opcode == 31) { return "condbr"; }
+    if (opcode == 32) { return "ret"; }
+    if (opcode == 33) { return "call"; }
+
+    if (opcode == 40) { return "const_int"; }
+    if (opcode == 41) { return "const_str"; }
+    if (opcode == 42) { return "const_bool"; }
+    return "nop";
+}
+
+#[export]
+pub struct IrInstruction {
+    pub:
+      opcode <int> = 0,
+      dest <string> = "",
+      src1 <string> = "",
+      src2 <string> = "",
+      int_val <int> = 0,
+      str_val <string> = "",
+      type_name <string> = "",
+}
+
+#[export]
+pub struct IrBlock {
+    pub:
+      label <string> = "",
+      instructions <[IrInstruction]>,
+      count <int> = 0,
+      capacity <int> = 0,
+
+    pub:
+      fun emit(self: &Self, inst: IrInstruction) <noret> {
+          if (self.count >= self.capacity) {
+              let next_cap <int> = self.capacity * 2;
+              if (next_cap < 32) { next_cap = 32; }
+              let next_arr <[IrInstruction]> = new [IrInstruction, next_cap]{};
+              for (let i <int> = 0; i < self.count; i++) {
+                  next_arr[i] = self.instructions[i];
+              }
+              delete self.instructions;
+              self.instructions = next_arr;
+              self.capacity = next_cap;
+          }
+          self.instructions[self.count] = inst;
+          self.count++;
+      }
+}
+
+#[export]
+pub struct IrFunction {
+    pub:
+      name <string> = "",
+      return_type <string> = "",
+      blocks <[IrBlock]>,
+      block_count <int> = 0,
+      next_temp <int> = 0,
+
+    pub:
+      fun fresh_temp(self: &Self) <string> {
+          let buf <string> = ir_calloc(cast<ulong>(16), cast<ulong>(1));
+          let digits <[char]> = new [char, 16]{};
+          digits[0] = '%';
+          digits[1] = 't';
+          let val <int> = self.next_temp;
+          self.next_temp++;
+          if (val == 0) {
+              digits[2] = '0';
+              digits[3] = cast<char>(0);
+              ir_memcpy(buf, &digits[0], cast<ulong>(3));
+              delete digits;
+              return buf;
+          }
+          let temp_digits <[char]> = new [char, 12]{};
+          let count <int> = 0;
+          while (val > 0) {
+              temp_digits[count] = cast<char>(cast<int>('0') + (val % 10));
+              count++;
+              val = val / 10;
+          }
+          for (let i <int> = 0; i < count; i++) {
+              digits[2 + i] = temp_digits[count - 1 - i];
+          }
+          digits[2 + count] = cast<char>(0);
+          ir_memcpy(buf, &digits[0], cast<ulong>(cast<ulong>(2 + count)));
+          delete temp_digits;
+          delete digits;
+          return buf;
+      }
+
+      fun add_block(self: &Self, label: string) <int> {
+          if (self.block_count >= 32) { return -1; }
+          let idx <int> = self.block_count;
+          let inst_arr <[IrInstruction]> = new [IrInstruction, 32]{};
+          self.blocks[idx] = IrBlock {
+              label: label,
+              instructions: inst_arr,
+              count: 0,
+              capacity: 32
+          };
+          self.block_count++;
+          return idx;
+      }
+}
+
+// Allocates an IrFunction with default block storage.
+#[export]
+pub fun new_ir_function(name: string, return_type: string) <IrFunction> {
+    let blks <[IrBlock]> = new [IrBlock, 32]{};
+    return IrFunction {
+        name: name,
+        return_type: return_type,
+        blocks: blks,
+        block_count: 0,
+        next_temp: 0
+    };
+}
+
+// Releases an IrFunction and all its blocks.
+#[export]
+pub fun free_ir_function(func: IrFunction) <noret> {
+    for (let i <int> = 0; i < func.block_count; i++) {
+        delete func.blocks[i].instructions;
+    }
+    delete func.blocks;
+}
+
+// Instruction constructors
+#[export]
+pub fun make_ir_const_int(dest: string, val: int) <IrInstruction> {
+    return IrInstruction {
+        opcode: ir_const_int(),
+        dest: dest,
+        src1: "",
+        src2: "",
+        int_val: val,
+        str_val: "",
+        type_name: "int"
+    };
+}
+
+#[export]
+pub fun make_ir_binop(opcode: int, dest: string, src1: string, src2: string) <IrInstruction> {
+    return IrInstruction {
+        opcode: opcode,
+        dest: dest,
+        src1: src1,
+        src2: src2,
+        int_val: 0,
+        str_val: "",
+        type_name: "int"
+    };
+}
+
+#[export]
+pub fun make_ir_alloca(dest: string, type_name: string) <IrInstruction> {
+    return IrInstruction {
+        opcode: ir_alloca(),
+        dest: dest,
+        src1: "",
+        src2: "",
+        int_val: 0,
+        str_val: "",
+        type_name: type_name
+    };
+}
+
+#[export]
+pub fun make_ir_load(dest: string, src: string) <IrInstruction> {
+    return IrInstruction {
+        opcode: ir_load(),
+        dest: dest,
+        src1: src,
+        src2: "",
+        int_val: 0,
+        str_val: "",
+        type_name: ""
+    };
+}
+
+#[export]
+pub fun make_ir_store(src: string, dest: string) <IrInstruction> {
+    return IrInstruction {
+        opcode: ir_store(),
+        dest: dest,
+        src1: src,
+        src2: "",
+        int_val: 0,
+        str_val: "",
+        type_name: ""
+    };
+}
+
+#[export]
+pub fun make_ir_ret(src: string) <IrInstruction> {
+    return IrInstruction {
+        opcode: ir_ret(),
+        dest: "",
+        src1: src,
+        src2: "",
+        int_val: 0,
+        str_val: "",
+        type_name: ""
+    };
+}
+
+#[export]
+pub fun make_ir_call(dest: string, fn_name: string, arg1: string, arg2: string) <IrInstruction> {
+    return IrInstruction {
+        opcode: ir_call(),
+        dest: dest,
+        src1: fn_name,
+        src2: arg1,
+        int_val: 0,
+        str_val: arg2,
+        type_name: ""
+    };
+}
+
+#[export]
+pub fun make_ir_br(target: string) <IrInstruction> {
+    return IrInstruction {
+        opcode: ir_br(),
+        dest: target,
+        src1: "",
+        src2: "",
+        int_val: 0,
+        str_val: "",
+        type_name: ""
+    };
+}
+
+#[export]
+pub fun make_ir_condbr(cond: string, true_label: string, false_label: string) <IrInstruction> {
+    return IrInstruction {
+        opcode: ir_condbr(),
+        dest: cond,
+        src1: true_label,
+        src2: false_label,
+        int_val: 0,
+        str_val: "",
+        type_name: ""
+    };
+}
+
+}

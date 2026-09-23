@@ -1,0 +1,128 @@
+// finc/main.fin: Main CLI entry point for the Fin self-hosting compiler.
+
+import {
+    ArgParser, new_arg_parser, free_arg_parser
+} from argparse::std;
+
+import {
+    print_version, print_help, compile_source_file
+} from finc.driver;
+
+#[llvm_name="fopen"]
+@define m_fopen(path: string, mode: string) <&void>;
+
+#[llvm_name="fclose"]
+@define m_fclose(stream: &void) <int>;
+
+#[llvm_name="fread"]
+@define m_fread(buf: &void, size: ulong, count: ulong, stream: &void) <ulong>;
+
+#[llvm_name="calloc"]
+@define m_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="memcpy"]
+@define m_memcpy(dst: string, src: &char, count: ulong) <string>;
+
+#[llvm_name="free"]
+@define m_free(p: string) <noret>;
+
+#[llvm_name="dprintf"]
+@define m_dprintf(fd: int, fmt: string, ...) <int>;
+
+// Executes the compiler CLI with a supplied argument array.
+pub fun run_finc(args: [string], count: int) <int> {
+    let p <ArgParser> = new_arg_parser("finc", "Fin Self-Hosting Compiler");
+    p.add_flag("--version", "-v", "Print version");
+    p.add_flag("--help", "-h", "Show help");
+    p.add_flag("-c", "-c", "Compile to object file without linking");
+    p.add_flag("--emit-c", "", "Emit ANSI C source code");
+    p.add_flag("--dump-tokens", "", "Print token stream");
+    p.add_flag("--dump-ast", "", "Print parsed AST");
+    p.add_option("-o", "-o", "", "Output path");
+
+    let ok <bool> = p.parse(args, count);
+    if (!ok) {
+        m_dprintf(2, "finc: error: %s\n", p.error_msg);
+        free_arg_parser(p);
+        return 2;
+    }
+
+    if (p.get_flag("--version")) {
+        free_arg_parser(p);
+        return print_version();
+    }
+
+    if (p.get_flag("--help")) {
+        free_arg_parser(p);
+        return print_help();
+    }
+
+    if (p.get_positional_count() == 0) {
+        m_dprintf(2, "finc: error: no input files\n");
+        m_dprintf(2, "run `finc --help` for usage.\n");
+        free_arg_parser(p);
+        return 2;
+    }
+
+    let input_file <string> = p.get_positional(0);
+    let out_file <string> = p.get_option("-o");
+    let is_compile_only <bool> = p.get_flag("-c");
+    let emit_c <bool> = p.get_flag("--emit-c");
+    let dump_tokens <bool> = p.get_flag("--dump-tokens");
+    let dump_ast <bool> = p.get_flag("--dump-ast");
+
+    let res <int> = compile_source_file(
+        input_file,
+        out_file,
+        is_compile_only,
+        dump_tokens,
+        dump_ast,
+        emit_c
+    );
+
+    free_arg_parser(p);
+    return res;
+}
+
+// Process entry point: reads argv from /proc/self/cmdline and invokes run_finc.
+pub fun main() <int> {
+    let raw_buf <[char]> = new [char, 4096]{};
+    let fp <&void> = m_fopen("/proc/self/cmdline", "rb");
+    let total_bytes <int> = 0;
+    if (fp != null) {
+        let n_read <ulong> = m_fread(&raw_buf[0], cast<ulong>(1), cast<ulong>(4095), fp);
+        total_bytes = cast<int>(n_read);
+        m_fclose(fp);
+    }
+
+    let args_list <[string]> = new [string, 64]{};
+    let arg_count <int> = 0;
+    let cur_start <int> = 0;
+
+    for (let i <int> = 0; i < total_bytes; i++) {
+        if (raw_buf[i] == cast<char>(0)) {
+            let arg_len <int> = i - cur_start;
+            if (arg_len > 0) {
+                let str <string> = m_calloc(cast<ulong>(arg_len + 1), cast<ulong>(1));
+                m_memcpy(str, &raw_buf[cur_start], cast<ulong>(arg_len));
+                if (cur_start > 0 && arg_count < 64) {
+                    args_list[arg_count] = str;
+                    arg_count++;
+                } else if (cur_start == 0) {
+                    m_free(str);
+                }
+            }
+            cur_start = i + 1;
+        }
+    }
+    delete raw_buf;
+
+    let exit_code <int> = run_finc(args_list, arg_count);
+
+    for (let j <int> = 0; j < arg_count; j++) {
+        m_free(args_list[j]);
+    }
+    delete args_list;
+
+    return exit_code;
+}

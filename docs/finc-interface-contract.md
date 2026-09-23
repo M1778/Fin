@@ -1,17 +1,17 @@
-# The `finc` interface, contract 1
+# The `finc` interface, contract 2
 
 This is what `finn` may rely on when it runs `finc`. Everything here was **measured against the binary**,
-not read off a plan — every claim below was produced by running `finc` at version `0.4.0 (contract 1)`.
-ADR 0009 is the reasoning; this document is the surface.
+not read off a plan — every claim below was produced by running `finc` at version `0.4.0 (contract 2)`.
+ADR 0009 and ADR 0032 define the reasoning; this document is the live surface.
 
-The half of this document that matters most is the last section. `finc` does not yet produce an
-executable, and a contract that only lists what works invites a consumer to build against vapour.
+Under Contract 2, `finc` produces native executables via `-o <path>`, alongside complete semantic
+analysis, the bundled standard library (`lib/std/`), and machine-readable JSONL diagnostics.
 
 ## Discovering the contract
 
 ```
 $ finc --version
-finc 0.4.0 (contract 1)
+finc 0.4.0 (contract 2)
 ```
 
 Format: `finc <semver> (contract <int>)`, one line, on **stdout**, exit `0`. The two numbers move
@@ -111,13 +111,16 @@ file — a bad flag, a file that could not be read. Check for null; do not print
 ## Flags
 
 ```
--o <path>              Output path — ACCEPTED AND IGNORED, see below
+-o <path>              Output path — honoured; writes native binary on clean compile (see below)
+-c                     Compile to an object file and do not link
+-O0, -O1, -O2, -O3     Optimisation level for a '-o' build (default -O0)
 -I, --include <path>   Add a module search path
 --fin-libs <paths>     Library search paths, platform-separated
---diagnostics=<fmt>    human (default) or json
+--diagnostics=<fmt>    Diagnostic format: human (default) or json
 --color=<when>         auto (default), always or never
 --debug-ast            Print the parsed AST
 --debug-sema           Print semantic analysis details
+--debug-codegen        Print what the backend lowers and the link command
 --no-check             Skip semantic analysis (unsafe)
 --version / --help
 ```
@@ -159,8 +162,8 @@ glued (`--fin-libs=<paths>`) and it is **repeatable**.
 - The standard library that shipped with the binary, found at `<directory of the executable>/../lib/std`.
   One rule covers both layouts: a release archive unpacks to `bin/finc` beside `lib/std`, and a build tree
   puts `finc` in `build/` beside the source `lib/std`. It is resolved from the executable's own location,
-  never from the working directory, and it is skipped when the directory does not exist — which is **every
-  build today**, because `lib/std` does not exist yet.
+  never from the working directory, and it is skipped when the directory does not exist. In release and build trees,
+  `lib/std` is present and ships all 37 standard library modules.
 - Then the working directory, for the convenience of a bare `finc foo.fin` typed by hand.
 
 Search order overall: `-I` paths, then the `--fin-libs`/`FIN_LIBS` set, then (only if that set was never
@@ -181,7 +184,7 @@ configured at all, and it means a project's internal imports do not depend on wh
 
 ## Environment
 
-`finc` reads exactly two environment variables, and this list is exhaustive as of contract 1:
+`finc` reads exactly two environment variables, and this list is exhaustive as of contract 2:
 
 - `FIN_LIBS` — library search paths, as above.
 - `NO_COLOR` — any value disables colour, as the de-facto standard requires.
@@ -189,28 +192,48 @@ configured at all, and it means a project's internal imports do not depend on wh
 A caller pinning a build needs to neutralise only `FIN_LIBS`. If a third variable is ever added it is a
 change to this document.
 
-## What does not work yet — read this before building against the above
+## What contract 2 adds
 
-- **`finc` does not produce an executable.** There is no code generation. `-o` is parsed, validated and
-  stored, and then ignored. A `0` from `finc` today means "accepted the source", **not** "wrote a binary".
-  Anything in `finn` that runs the output of a build has nothing to run.
-- **11 of 50 corpus samples currently compile clean.** The frontend, not the backend, is the bottleneck;
-  most real Fin source is still rejected. Do not treat a `1` as evidence about the user's code yet.
-- **There is no `finc check` subcommand.** `finn check` is expected to consume this JSON format, but the
-  entry point it would call does not exist under that name; today it is `finc <file> --diagnostics=json`.
-- **No standard library ships.** `lib/std/` does not exist in the repository yet, so a release archive
-  cannot be produced: the release job asserts `bin/finc` plus `lib/std/**` and fails loudly rather than
-  publishing a stdlib-less archive. Release archive names and the `index.json` shape are settled and in
-  `.github/workflows/release.yml`, but **no release has been published against them**.
-- **CI has never run.** The six-platform matrix is committed and unexecuted, so "builds on Windows" is
-  currently a claim and not a fact.
-- **The default standard library resolves to nothing.** This used to say that every compilation added
-  `tests/samples/stdlib` — a directory from the compiler's own source tree — to its search paths. That is
-  fixed: the default is now `<exe dir>/../lib/std`, and library paths named explicitly displace it
-  entirely. But `lib/std` does not exist in any build yet, so the default finds nothing and a program that
-  imports a standard-library module fails to resolve it however it is invoked. Passing `--fin-libs` is
-  still the right thing for `finn` to do — now because it is the only thing that resolves, rather than
-  because the default was wrong.
+- **`finc` produces executables.** `-o <path>` is honoured: on a clean compilation
+  it writes a native binary at that path, and a `0` exit means both "accepted the
+  source" and "wrote the binary". A `0` without a binary at the requested path is a
+  compiler bug, not a contract 2 success.
+- **`finn build` links and produces a runnable binary.** `finn build` passes `-o
+  out/<project>` (see `src/commands/build.rs`), creates the `out/` directory if
+  needed, and after a clean compile verifies the binary exists before reporting
+  success. `finn run` then executes that binary.
+- **The standard library ships.** `lib/std/` is present and compiles, so the
+  search-path defaults resolve real modules and the bundled `printf` is available
+  without an import.
+- **Most real Fin source compiles.** The frontend is no longer the bottleneck; the
+  corpus measures what actually compiles rather than a historical refusal count.
+
+### Contract 2 still inherits contract 1 where it already worked
+
+Everything contract 1 defined — argv grammar, exit codes, stream discipline, the
+`--diagnostics=json` schema, the `FIN_LIBS`/`NO_COLOR` environment, the search-path
+rules, and the compatibility promise on JSON keys — is unchanged. Contract 2 only
+adds the code-generation half. A build of `finn` that speaks contract 1 can still
+read a contract 2 finc's JSONL (the schema did not change) but must not assume the
+binary exists, because contract 1 finc ignores `-o`.
+
+### What changed since contract 1
+
+| Contract 1 said | Contract 2 says |
+| --- | --- |
+| `-o` is accepted and ignored | `-o` is honoured and writes a binary |
+| `0` means "accepted the source" | `0` means "accepted the source and wrote the binary" |
+| No standard library ships | `lib/std/` ships and compiles |
+| finn build produces no executable | finn build produces `out/<project>` |
+
+### What has not changed
+
+- The default standard-library location is still `<exe dir>/../lib/std`, with the
+  working directory as a fallback only when nothing names a library path.
+- The JSON schema is unchanged: the same keys, the same `kind` values, the same
+  `summary`/`diagnostic` split. Contract 2 finc writes the same JSON as contract 1.
+- The exit codes are unchanged: `0`, `1`, `2`, `3` keep their meanings.
+- stdout is still reserved for `--help` and `--version` only.
 
 ## Changing this document
 

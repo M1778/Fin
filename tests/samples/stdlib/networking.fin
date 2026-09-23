@@ -1,3 +1,37 @@
 //@ normative
 //@ ok
-// NOT IMPLEMENTED YET
+// Networking, exercised end to end: a listening socket on an ephemeral loopback
+// port, a client that dials it, four bytes sent, and the echo read back.
+//
+// The module was empty until 2026-09-19 and this file said "NOT IMPLEMENTED YET",
+// which was the whole of the specification for it. lib/std/networking.fin held
+// the refusal, and its argument was that nothing in the tree said what a
+// networking API should look like -- blocking or not, address as string or
+// struct, failure as `Result` or `IOResult` or `blame` -- and that ADR 0008
+// forbids inventing names. The owner's ruling that day was to complete it on
+// "the simplest thing that works", the shape `stdio.fin`'s `File` already
+// proved: statics over libc, `blame` on failure, dotted-quad addresses, blocking
+// I/O. lib/std/networking.fin now carries that ruling and the reasoning.
+//
+// Nothing is asserted about the *wire* here beyond the echo: the four bytes that
+// come back are the four that went out, and the port is the one the kernel
+// chose, read back through `local_port`. The sample is a program, so it is also
+// compiled by the corpus harness -- `//@ ok` says a clean build -- and
+// Soundness_BundledStdlib.NetworkingServesAndDialsOnLoopback runs the same shape
+// as a test.
+import { Socket } from networking::std;
+
+fun main() <int> {
+    let srv <Socket> = Socket::serve(0, 4);
+    let port <int> = srv.local_port();
+    let cli <Socket> = Socket::dial("127.0.0.1", port);
+    let conn <Socket> = srv.accept_conn();
+    let sent <bool> = cli.send_text("ping", 4);
+    let back <[char]> = conn.recv_bytes(4);
+    printf("%c%c%c%c %d\n", back[0], back[1], back[2], back[3], sent);
+    conn.shutdown();
+    cli.shutdown();
+    srv.shutdown();
+    return 0;
+}
+

@@ -1,38 +1,219 @@
-//@ bundled
-// tests/samples/stdlib/networking.fin is the specification, and it says, in full:
-// "NOT IMPLEMENTED YET". So does this. The module exists because two imports in the
-// corpus name it -- `importing.fin:5` takes the whole module and `:6` takes it as
-// `net` -- and an import of a module that is not there is a hard error, so an empty
-// module is the difference between measuring the import and measuring nothing.
+// Networking: TCP over IPv4, through the C library's socket calls.
 //
-// It lives under lib/std even though `import networking;` writes no `::std` selector.
-// That is not a claim that networking is a std module: nothing checks the selector at
-// all, which is booked as KnownDefect_BundledStdlib.TheNamespaceSelectorInAnImportIsNotChecked.
-// When the selector starts being checked, a non-std module moves up to lib/.
+// The file this replaces was empty on purpose, and the empty file's argument is
+// recorded here because the module that now stands under it was built by
+// answering that argument. It refused to invent an API because nothing in the
+// tree said what one should look like, and named its own price of unblocking:
+// "a sample, or an owner ruling on the surface -- blocking or non-blocking,
+// whether an address is a `string` or a struct, and whether a failure is a
+// `Result`, an `IOResult` or a `blame`." The owner ruling came 2026-09-19:
+// complete the module, and where the draft had no answer, take "the simplest
+// thing that works" -- the shape the same comment guessed at and `stdio.fin`'s
+// `File` already proves: statics over libc, `blame` on failure. The corpus now
+// carries that ruling (tests/samples/stdlib/networking.fin).
 //
-// `importing.fin:5` says the whole-module form "allows to be used like
-// networking.invoke()". There is nothing to invoke yet.
+// The four questions, answered:
 //
-// IT STAYS EMPTY, DELIBERATELY, and this is a decision rather than an omission. It was
-// reconsidered while the rest of lib/std was rewritten, because two things had changed: an
-// `@define`d extern reached through an import does lower, and the same libc route that gave
-// `stdio.fin` its `File` and `math.fin` its libm would give this module `socket`, `bind`,
-// `listen`, `accept`, `connect`, `send` and `recv`. So a networking module that compiles and
-// runs is reachable.
+//   * Address: a dotted-quad `string`, resolved by C's `inet_addr`. A struct
+//     would restate `sockaddr_in` in Fin and then have to defend its layout
+//     against C's, byte for byte; the string is what a person writes and what
+//     libc already parses. A hostname is not resolved -- `getaddrinfo` is a
+//     second resolver with its own lifetime questions, and a module that
+//     dials a dotted quad is honest about being exactly that.
+//   * Failure: `blame`, with a message. Not `Result`: a `Result<T, E>` is
+//     every caller's `unwrap` away from the same raise, and a connection
+//     refused is not a value the caller can mean anything by. Not
+//     `IOResult`: a socket error carries no payload a caller reads. The
+//     messages name the call that failed, because "connection refused" and
+//     "cannot bind" are different mornings.
+//   * Blocking: blocking, like `File`'s reads. Non-blocking I/O is a state
+//     machine the corpus has no sample for; this module does not invent one.
+//   * A connection is a `Socket`: a struct wrapping the descriptor, so the
+//     type system can tell a listener from an int. The descriptor is `.0`,
+//     and a closed socket is a `Socket` whose `.0` is negative, the same way
+//     a closed `FILE*` handle is null behind `stdio.fin`'s functions.
 //
-// It is not written because nothing says what it should look like. The draft is one line of
-// prose; no sample calls a single networking name; `importing.fin` names `invoke()`, which
-// is not an operation any socket API has. Every signature would therefore be invented, and
-// ADR 0008 is explicit that a name declared nowhere in the tree may not be invented -- that
-// ruling is about `PathLike` and `pointer_type`, and a whole module of invented names is the
-// same act at a larger scale. A wrong API that compiles is worse than an empty module,
-// because the empty module tells the truth and a plausible one has to be un-designed later
-// by whoever finds it does not fit.
+// The wire details are filled by hand rather than through a declared struct:
+// an extern cannot take or return a Fin struct (declareFunction refuses the
+// aggregate on the ABI question), so `sockaddr_in` is its sixteen bytes in a
+// `[char, 16]`, family first, port and address in network order. The
+// arithmetic writes them the way `htons` and `inet_addr` already ordered
+// them, big-endian, high byte first.
 //
-// What would unblock it: a sample, or an owner ruling on the surface -- blocking or
-// non-blocking, whether an address is a `string` or a struct, and whether a failure is a
-// `Result`, an `IOResult` or a `blame`. `stdio.fin`'s `File` is the shape it would follow if
-// the answer were "the simplest thing that works": statics over libc, `blame` on failure.
-// That is a guess, and it is written here as a guess rather than as code.
+// Measured end to end, not merely type-checked: a test dials `127.0.0.1`,
+// sends, and reads the echo back (Soundness_Stdlib, Networking_*); the
+// loopback needs no network and no peer outside the test process.
 namespace std {
+
+#[export]
+#[llvm_name="socket"]
+@define c_socket(domain: int, kind: int, protocol: int) <int>;
+
+#[export]
+#[llvm_name="connect"]
+@define c_connect(fd: int, addr: &int, len: int) <int>;
+
+#[export]
+#[llvm_name="bind"]
+@define c_bind(fd: int, addr: &int, len: int) <int>;
+
+#[export]
+#[llvm_name="listen"]
+@define c_listen(fd: int, backlog: int) <int>;
+
+#[export]
+#[llvm_name="accept"]
+@define c_accept(fd: int, addr: &int, len: &int) <int>;
+
+#[export]
+#[llvm_name="getsockname"]
+@define c_getsockname(fd: int, addr: &int, len: &int) <int>;
+
+#[export]
+#[llvm_name="send"]
+@define c_send(fd: int, buf: string, len: int, flags: int) <int>;
+
+#[export]
+#[llvm_name="recv"]
+@define c_recv(fd: int, buf: &char, len: int, flags: int) <int>;
+
+#[export]
+#[llvm_name="close"]
+@define c_close(fd: int) <int>;
+
+#[export]
+#[llvm_name="inet_addr"]
+@define c_inet_addr(cp: string) <int>;
+
+#[export]
+// `sockaddr_in` is its sixteen bytes in an `[int, 4]`. Word 0 is the C struct's
+// first two `short`s -- `sin_family` (host order) then `sin_port` (network
+// order) -- packed into one 32-bit store, and word 1 is `sin_addr`, stored
+// exactly as `inet_addr` answered it, which is already network order. Storing
+// the four bytes as bytes would have to know which end of an integer is which;
+// a store of the integer whose *bits* are those bytes does not, because the
+// platform writes it the same way C does. The port is packed through a `long`
+// so that the high byte's term does not overflow an `int` on the way in.
+pub struct Socket {
+    fd <int>,
+
+    // Dials `host`:`port` and blocks until the connection is established.
+    // The `sockaddr_in` is built before the socket, so a malformed address
+    // blames before anything is opened.
+    static fun dial(host: string, port: int) <Socket> {
+        blame port > 0, "a port is positive";
+        let a <int> = c_inet_addr(host);
+        blame a != -1, "cannot parse the address as a dotted quad";
+        let addr <[int]> = new [int, 4]{};
+        addr[0] = cast<int>(2 + cast<long>(port / 256) * 65536 +
+                            cast<long>(port % 256) * 16777216);
+        addr[1] = a;
+        let fd <int> = c_socket(2, 1, 0);   // AF_INET, SOCK_STREAM
+        blame fd >= 0, "cannot open a socket";
+        let err <int> = c_connect(fd, &addr[0], 16);
+        if (err != 0) {
+            c_close(fd);
+            blame err == 0, "cannot connect";
+          }
+        return Socket{fd: fd};
+      }
+
+    // Binds `port` on every interface and listens. Returns the listening
+    // socket; a connection is taken with `accept_conn`. A port of 0 asks the
+    // kernel to choose an unused one, which `local_port` then reports -- the
+    // only way a caller can pick a port nothing else holds.
+    static fun serve(port: int, backlog: int) <Socket> {
+        blame port >= 0, "a port cannot be negative";
+        blame backlog > 0, "a backlog is positive";
+        let addr <[int]> = new [int, 4]{};
+        addr[0] = cast<int>(2 + cast<long>(port / 256) * 65536 +
+                            cast<long>(port % 256) * 16777216);
+        addr[1] = 0;                  // INADDR_ANY
+        let fd <int> = c_socket(2, 1, 0);
+        blame fd >= 0, "cannot open a socket";
+        let bound <int> = c_bind(fd, &addr[0], 16);
+        if (bound != 0) {
+            c_close(fd);
+            blame bound == 0, "cannot bind";
+          }
+        let err <int> = c_listen(fd, backlog);
+        if (err != 0) {
+            c_close(fd);
+            blame err == 0, "cannot listen";
+          }
+        return Socket{fd: fd};
+      }
+
+    // Takes one connection. The peer address is C's to fill and this module's
+    // to discard: a caller who wants it is asking for a second module, and a
+    // zeroed `sockaddr_in` storage is what `accept` writes into on this call.
+    fun accept_conn(self: &Socket) <Socket> {
+        let peer <[int]> = new [int, 4]{};
+        let peerlen <int> = 16;
+        let fd <int> = c_accept(self.fd, &peer[0], &peerlen);
+        blame fd >= 0, "cannot accept a connection";
+        return Socket{fd: fd};
+      }
+
+    // Sends `text` and returns whether every byte went. A short send on a
+    // blocking socket of this size is not a state a caller can mean anything
+    // by, so it is a failed send and says so -- the caller decides whether
+    // that is a `blame`, which is why this one answers instead of raising.
+    fun send_text(self: &Socket, text: string, count: int) <bool> {
+        blame count >= 0, "a send count cannot be negative";
+        let sent <int> = c_send(self.fd, text, count, 0);
+        return sent == count;
+      }
+
+    // Reads at most `cap` bytes into a fresh buffer and returns what arrived.
+    // An empty read is the peer's half-close, returned as an empty array
+    // rather than blamed: it is an answer, not a failure.
+    fun recv_bytes(self: &Socket, cap: int) <[char]> {
+        blame cap > 0, "a receive capacity is positive";
+        let buffer <[char]> = new [char, cap]{};
+        let got <int> = c_recv(self.fd, &buffer[0], cap, 0);
+        blame got >= 0, "cannot receive";
+        if (got == 0) {
+            return buffer;
+          }
+        let out <[char]> = new [char, got + 1]{};
+        let i <int> = 0;
+        while (i < got) {
+            out[i] = buffer[i];
+            i = i + 1;
+          }
+        out[got] = cast<char>(0);
+        return out;
+      }
+
+    // The port this socket is bound to, in host order. `serve(0, ...)` asks the
+    // kernel to choose one, and this is how the caller learns which: the local
+    // address `getsockname` writes back is the same `sockaddr_in` word 0 the
+    // dial side builds, so the port is its two middle bytes.
+    //
+    // The arithmetic is unsigned because it has to be: `word` carries the 4-byte
+    // network-order port in its high two bytes, so for any port whose low byte is
+    // at or above 128 the signed value is negative, and signed division would
+    // answer with the wrong bytes.
+    fun local_port(self: &Socket) <int> {
+        let got <[int]> = new [int, 4]{};
+        let glen <int> = 16;
+        let r <int> = c_getsockname(self.fd, &got[0], &glen);
+        blame r == 0, "cannot read the local address";
+        let u <uint> = cast<uint>(got[0]);
+        let hi <uint> = (u / cast<uint>(65536)) % cast<uint>(256);
+        let lo <uint> = (u / cast<uint>(16777216)) % cast<uint>(256);
+        return cast<int>(hi * cast<uint>(256) + lo);
+      }
+
+    // Closes. The second close of one descriptor is refused by the platform,
+    // and the refusal says so here rather than being left to `close(2)`.
+    fun shutdown(self: &Socket) <bool> {
+        if (self.fd < 0) {
+            return false;
+          }
+        return c_close(self.fd) == 0;
+      }
+  }
+
 }

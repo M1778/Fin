@@ -33,21 +33,32 @@ wiring job.
 | Attributes on variable declarations | `VariableDecl.hpp:19` | `VariableDeclaration::attributes` exists. `#[slaveof(z)]` is attachable. |
 | Declaration order of struct members | `StructDecl.hpp:28` | `std::vector<StructMember>` — order **is** preserved in the AST. |
 
-### 0.2 What does not exist, measured
+### 0.2 What does not exist, measured (Historical Baseline)
+
+> [!NOTE]
+> **Implementation Status Update**:
+> Several items identified in this initial survey were implemented in subsequent development waves:
+> - **Special call expressions (`@f(...)`)**: `@name(...)` and `@implements(...)` parse into `FunctionCall::is_special` and resolve as compile-time queries (`@implements`, `@defined`) or runtime memory intrinsics (`@Alloc`, `@Free`) per ADR 0042.
+> - **`readonly`**: Fully supported in lexer, parser, AST, semantic types (`FieldInfo::is_readonly`), and semantic analysis (`Analyzer_Expr.cpp`).
+> - **Layout engine (size, alignment, field offsets)**: Implemented in `src/types/Layout.cpp` (`LayoutEngine`), computing exact sizes, alignments, offsets, and padding for structs, tagged-union enums (ADR 0041), and nullable values (ADR 0040) per ADR 0015.
+> - **Declaration order of fields on semantic types**: `StructType::fields` is `std::vector<FieldInfo>`, strictly preserving AST declaration order.
+> - **Enum payloads & member types**: Enums support payloads and lower as tagged unions `{ i32, [MaxPayload x i8] }` per ADR 0041.
+> - **Meta-types (`$type`, `$struct`, `$interface`, `$enum_member`)**: Registered and resolved as distinct semantic meta-types per ADR 0035 and ADR 0042.
+> - **`const` parameters**: Parsed and enforced in semantic analysis.
 
 | Thing the design needs | Measured state |
 | --- | --- |
 | Turbofish on a dotted path — `compiler.structs.select_field::<int>(...)` | **Syntax error** at the `::`. `parser.y:1416` accepts turbofish only after a bare `IDENTIFIER`. This is `types.fin:26`, and it is **not in wave 2's list in `docs/plan.md`.** |
-| `$struct`, `$interface`, `$enum_member` as types | Only `$type` has a production (`parser.y:961`). `$struct` is `unexpected KW_STRUCT, expecting KW_TYPE`. |
-| `$type` as a resolvable analyzer type | `Undefined type '$type'`. Parses, never registered. |
-| `@f(...)` as an expression | **Syntax error**, `unexpected AT`. `AT` appears in four grammar places, all declaration headers. So no `@special` can be called at all. |
-| Size, alignment, field offset, layout | **Zero occurrences** of `offset`, `getSize`, `alignment` or `layout` in all of `src/types/` and `src/semantics/`. Not partial — absent. |
-| Ordered fields on the *semantic* type | `StructType::fields` is `std::unordered_map<std::string, FieldInfo>` (`StructType.hpp:28`). Declaration order is preserved in the AST and **thrown away** by the type. |
-| `readonly` | **Zero occurrences** in `lexer.l`, `parser.y`, `src/ast/`, `src/types/`. `CONTEXT.md` ratifies it; the compiler has never heard of it. |
-| `const` as a parameter qualifier | `KW_CONST` appears only in `const x <T> = e;` productions. `fun test(const a: int)` from `const.fin:9` cannot parse. |
-| Field visibility beyond public/private | `FieldInfo { TypePtr type; bool is_public; }` — no readonly, no default value, no attributes on the *semantic* side. |
-| Enum member types | `EnumDeclaration::values` is `vector<pair<string, Expression>>` — no field could hold a type. |
-| Attribute machinery of any kind | `Attribute::accept` is empty, no `visit(Attribute&)` exists, only `ASTPrinter` reads them. |
+| `$struct`, `$interface`, `$enum_member` as types | Implemented in AST and type system; resolves to meta-types per ADR 0035. |
+| `$type` as a resolvable analyzer type | Implemented in AST and type system; resolves to meta-type per ADR 0035. |
+| `@f(...)` as an expression | Implemented via `FunctionCall::is_special` and compiler builtins per ADR 0042. |
+| Size, alignment, field offset, layout | Implemented in `src/types/Layout.cpp` (`LayoutEngine`) per ADR 0015. |
+| Ordered fields on the *semantic* type | Implemented in `StructType::fields` as `std::vector<FieldInfo>` preserving order. |
+| `readonly` | Implemented in lexer, parser, AST, and semantic analyzer (`is_readonly`). |
+| `const` as a parameter qualifier | Implemented in parser and semantic analyzer. |
+| Field visibility beyond public/private | `FieldInfo { TypePtr type; bool is_public; bool is_readonly; }` implemented. |
+| Enum member types | Implemented via `EnumPayload` and tagged-union lowering per ADR 0041. |
+| Attribute machinery of any kind | Attributes parsed, preserved, and read by drivers and code generators. |
 
 ### 0.3 The three consequences that change the design
 

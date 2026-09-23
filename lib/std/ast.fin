@@ -1,0 +1,240 @@
+// Abstract Syntax Tree (AST) node representations and tree builder functions.
+//
+// Matches Go's `go/ast` and standard compiler AST node models.
+// Provides node kinds for Fin declarations, statements, and expressions,
+// along with tree constructors and recursive deallocation.
+
+namespace std {
+
+// Node Kind Constants
+pub const AST_PROGRAM <int> = 1;
+pub const AST_FUN_DECL <int> = 2;
+pub const AST_STRUCT_DECL <int> = 3;
+pub const AST_VAR_DECL <int> = 4;
+pub const AST_PARAM <int> = 5;
+
+pub const AST_BLOCK <int> = 10;
+pub const AST_IF_STMT <int> = 11;
+pub const AST_WHILE_STMT <int> = 12;
+pub const AST_FOR_STMT <int> = 13;
+pub const AST_RETURN_STMT <int> = 14;
+pub const AST_BLAME_STMT <int> = 15;
+pub const AST_EXPR_STMT <int> = 16;
+pub const AST_BREAK_STMT <int> = 17;
+pub const AST_CONTINUE_STMT <int> = 18;
+
+pub const AST_BINARY_EXPR <int> = 20;
+pub const AST_UNARY_EXPR <int> = 21;
+pub const AST_CALL_EXPR <int> = 22;
+pub const AST_MEMBER_ACCESS <int> = 23;
+pub const AST_INDEX_EXPR <int> = 24;
+pub const AST_IDENT <int> = 25;
+pub const AST_LITERAL_INT <int> = 26;
+pub const AST_LITERAL_STRING <int> = 27;
+pub const AST_LITERAL_BOOL <int> = 28;
+
+// Node Kind Accessor Functions
+#[export] pub fun ast_program() <int> { return 1; }
+#[export] pub fun ast_fun_decl() <int> { return 2; }
+#[export] pub fun ast_struct_decl() <int> { return 3; }
+#[export] pub fun ast_var_decl() <int> { return 4; }
+#[export] pub fun ast_param() <int> { return 5; }
+
+#[export] pub fun ast_block() <int> { return 10; }
+#[export] pub fun ast_if_stmt() <int> { return 11; }
+#[export] pub fun ast_while_stmt() <int> { return 12; }
+#[export] pub fun ast_for_stmt() <int> { return 13; }
+#[export] pub fun ast_return_stmt() <int> { return 14; }
+#[export] pub fun ast_blame_stmt() <int> { return 15; }
+#[export] pub fun ast_expr_stmt() <int> { return 16; }
+#[export] pub fun ast_break_stmt() <int> { return 17; }
+#[export] pub fun ast_continue_stmt() <int> { return 18; }
+
+#[export] pub fun ast_binary_expr() <int> { return 20; }
+#[export] pub fun ast_unary_expr() <int> { return 21; }
+#[export] pub fun ast_call_expr() <int> { return 22; }
+#[export] pub fun ast_member_access() <int> { return 23; }
+#[export] pub fun ast_index_expr() <int> { return 24; }
+#[export] pub fun ast_ident() <int> { return 25; }
+#[export] pub fun ast_literal_int() <int> { return 26; }
+#[export] pub fun ast_literal_string() <int> { return 27; }
+#[export] pub fun ast_literal_bool() <int> { return 28; }
+
+// Returns human-readable name for an AST node kind.
+#[export]
+pub fun node_kind_name(kind: int) <string> {
+    if (kind == 1) { return "Program"; }
+    if (kind == 2) { return "FunctionDeclaration"; }
+    if (kind == 3) { return "StructDeclaration"; }
+    if (kind == 4) { return "VariableDeclaration"; }
+    if (kind == 5) { return "Parameter"; }
+
+    if (kind == 10) { return "BlockStatement"; }
+    if (kind == 11) { return "IfStatement"; }
+    if (kind == 12) { return "WhileStatement"; }
+    if (kind == 13) { return "ForStatement"; }
+    if (kind == 14) { return "ReturnStatement"; }
+    if (kind == 15) { return "BlameStatement"; }
+    if (kind == 16) { return "ExpressionStatement"; }
+
+    if (kind == 20) { return "BinaryExpression"; }
+    if (kind == 21) { return "UnaryExpression"; }
+    if (kind == 22) { return "CallExpression"; }
+    if (kind == 23) { return "MemberAccess"; }
+    if (kind == 24) { return "IndexExpression"; }
+    if (kind == 25) { return "Identifier"; }
+    if (kind == 26) { return "IntegerLiteral"; }
+    if (kind == 27) { return "StringLiteral"; }
+    if (kind == 28) { return "BooleanLiteral"; }
+
+    return "UnknownNode";
+}
+
+#[export]
+pub struct AstNode {
+    pub:
+      kind <int> = 0,
+      name <string> = "",
+      type_annotation <string> = "",
+      int_val <int> = 0,
+      str_val <string> = "",
+      line <int> = 1,
+      col <int> = 1,
+      left <&AstNode> = null,
+      right <&AstNode> = null,
+      extra <&AstNode> = null,
+}
+
+// Factory function: creates an identifier node.
+#[export]
+pub fun make_ident(name: string, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 25;
+    n.name = name;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates an integer literal node.
+#[export]
+pub fun make_literal_int(val: int, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 26;
+    n.int_val = val;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates a string literal node.
+#[export]
+pub fun make_literal_string(val: string, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 27;
+    n.str_val = val;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates a boolean literal node.
+#[export]
+pub fun make_literal_bool(val: bool, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 28;
+    if (val) {
+        n.int_val = 1;
+    } else {
+        n.int_val = 0;
+    }
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates a binary expression node.
+#[export]
+pub fun make_binary(op_name: string, left: &AstNode, right: &AstNode, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 20;
+    n.name = op_name;
+    n.left = left;
+    n.right = right;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates a unary expression node.
+#[export]
+pub fun make_unary(op_name: string, operand: &AstNode, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 21;
+    n.name = op_name;
+    n.left = operand;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates a variable declaration node.
+#[export]
+pub fun make_var_decl(name: string, type_ann: string, init_expr: &AstNode, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 4;
+    n.name = name;
+    n.type_annotation = type_ann;
+    n.left = init_expr;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates a return statement node.
+#[export]
+pub fun make_return(expr: &AstNode, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 14;
+    n.left = expr;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates a blame statement node (`blame condition, message`).
+#[export]
+pub fun make_blame(cond: &AstNode, msg_node: &AstNode, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 15;
+    n.left = cond;
+    n.right = msg_node;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Factory function: creates an if statement node.
+#[export]
+pub fun make_if(cond: &AstNode, then_body: &AstNode, else_body: &AstNode, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 11;
+    n.left = cond;
+    n.right = then_body;
+    n.extra = else_body;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// Recursively frees an AST subtree.
+#[export]
+pub fun free_ast(n: &AstNode) <noret> {
+    if (n == null) { return; }
+    if (n.left != null) { free_ast(n.left); }
+    if (n.right != null) { free_ast(n.right); }
+    if (n.extra != null) { free_ast(n.extra); }
+    delete n;
+}
+
+}

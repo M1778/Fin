@@ -183,9 +183,17 @@ and an operator can be generic. `operator []` and `operator []=` are the index f
 standard library declares both on its collection types, and a struct needs `operator []`
 declared before `a[i]` type-checks on it at all.
 
-One caveat: an index expression's *lowering* does not go through `operator []`, which is why
-`lib/std/hashmap.fin` forwards to explicit `__get`/`__set` methods internally rather than
-relying on its own operators.
+An index expression's lowering goes directly through `operator []` (for reading `a[i]`) and
+`operator []=` (for writing `a[i] = v`), both in standalone structs and across generic
+implementations.
+
+> [!IMPORTANT]
+> **Held Ruling on Struct Equality (ADR 0036)**:
+> Equality (`==` and `!=`) on structs is strictly **declared-only, never synthesized**.
+> The compiler will never synthesize an automatic memberwise `==` operator for a struct.
+> To compare instances of a struct with `==`, the struct must explicitly declare an
+> `operator ==` overload. An attempt to compare a struct with no declared `==` operator
+> reports an explicit refusal: `an undeclared operator '==' on struct '<Name>'`.
 
 ## Constructors
 
@@ -196,7 +204,7 @@ struct Temp {
     degrees <int>,
 
     Temp(d: int) {
-        return new Temp{degrees: d};
+        self.degrees = d;
     }
 }
 
@@ -205,9 +213,59 @@ fun main() <noret> {
 }
 ```
 
-This type-checks. A constructor is not yet lowered to machine code, so a program that
-declares one will not build with `-o` — brace initialisation (`Temp{degrees: 20}`) is what
-runs today.
+Constructors also support C++-style member-initialiser lists with a colon:
+
+```fin
+struct Vector3 {
+    x <int>,
+    y <int>,
+    z <int>,
+
+    Vector3(x: int, y: int, z: int) : x(x), y(y), z(z) {}
+}
+```
+
+Constructors are lowered directly to LLVM IR and execute in binaries produced with `-o`,
+whether declared directly in the struct body or within an `implements` block. Direct brace
+initialisation (`Temp{degrees: 20}`) is also supported for field-by-field instantiation.
+
+Interfaces may also specify abstract constructor requirements using `Self(...)`:
+```fin
+interface Initializable {
+    Self(initial_val: int);
+}
+```
+
+## Destructors
+
+A destructor is declared using a tilde `~` followed by the struct name, taking no parameters:
+
+```fin
+struct Resource {
+    handle <int>,
+
+    ~Resource() {
+        // cleanup code executed on destruction
+    }
+}
+```
+
+Destructors are fully lowered to machine code and clean up resources in two ways:
+1. **Explicit deallocation**: Invoked when deleting a heap object with `delete ptr;`.
+2. **Scope-exit destruction**: Automatically invoked when stack-allocated struct locals leave
+   scope (at block ends, function returns, `break`, or `continue`) in **reverse declaration order**
+   (ADR 0016, ADR 0030).
+
+Destructor composition mirrors construction in reverse: the struct's own destructor body runs first,
+followed by field destructors in reverse order of declaration, followed by effective base class
+destructors (with diamond bases cleaned up exactly once per ADR 0029).
+
+Interfaces can specify abstract destructor requirements using `~Self();`:
+```fin
+interface Disposable {
+    ~Self();
+}
+```
 
 ## Classes
 
@@ -257,8 +315,8 @@ consequences of that are worth knowing:
   analyzer refuses it.
 - `class` buys no vtable and no dynamic dispatch. Nothing here makes a method virtual.
 
-Destructors (`~Type()`) do not parse yet. `#[class]` is an attribute form that marks a
-`struct` as a class, which is how `lib/std/error.fin` declares `Error`.
+`#[class]` is an attribute form that marks a `struct` as a class, which is how
+`lib/std/error.fin` declares `Error`.
 
 The reasoning behind class-as-value-type is in
 `docs/adr/0026-a-class-is-a-struct-with-a-base-and-try-is-a-scope.md`.

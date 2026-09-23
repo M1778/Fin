@@ -223,6 +223,7 @@ if(FIN_WITH_LLVM)
     # PUBLIC so tests/CMakeLists.txt can key its backend tests off the same
     # switch without repeating the find_package result.
     target_compile_definitions(fin_core PUBLIC FIN_WITH_LLVM=1)
+    target_compile_definitions(fin_core PUBLIC FIN_LLVM_MAJOR=${FIN_LLVM_MAJOR})
 endif()
 
 target_include_directories(fin_core PUBLIC
@@ -244,10 +245,13 @@ target_compile_definitions(fin_core PUBLIC FINC_VERSION="${PROJECT_VERSION}")
 if(MSVC)
     # flex's generated scanner reaches for POSIX headers; lexer.l already sets
     # `%option nounistd`, this covers the generated parser's siblings.
-    target_compile_definitions(fin_core PUBLIC YY_NO_UNISTD_H)
+    # YY_CPLUSPLUS: ensure Bison's lalr1.cc variant enables C++20 move semantics
+    # rather than falling back to C++98 copy constructors for move-only AST nodes.
+    target_compile_definitions(fin_core PUBLIC YY_NO_UNISTD_H YY_CPLUSPLUS=202002L)
     # /utf-8: the sources contain UTF-8 literals and MSVC otherwise reads them
     # in the active code page.  /bigobj: parser.cpp is 300k lines of tables.
-    target_compile_options(fin_core PUBLIC /utf-8 /bigobj)
+    # /Zc:__cplusplus: make __cplusplus macro report the true C++20 standard.
+    target_compile_options(fin_core PUBLIC /utf-8 /bigobj /Zc:__cplusplus)
     target_compile_definitions(fin_core PUBLIC _CRT_SECURE_NO_WARNINGS NOMINMAX)
 endif()
 

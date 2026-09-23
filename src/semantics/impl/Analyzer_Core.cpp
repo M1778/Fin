@@ -777,7 +777,268 @@ void SemanticAnalyzer::visit(ArrayTypeNode& node) { resolveTypeFromAST(&node); }
 
 void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
     QuietPass quiet(*this);
+    hoistedTypes_.clear();
 
+    // Pass 1: Declare named types at file scope so types can refer to each other
+    for (auto& stmt : node.statements) {
+        if (auto* s = dynamic_cast<StructDeclaration*>(stmt.get())) {
+            if (!currentScope->types.count(s->name)) {
+                auto structType = std::make_shared<StructType>(s->name);
+                currentScope->defineType(s->name, structType);
+                hoistedTypes_[s] = structType;
+                debugLog(fg(fmt::color::gray), "      [Hoist] Registered struct '{}' at file scope\n", s->name);
+            }
+        } else if (auto* cls = dynamic_cast<ClassDeclaration*>(stmt.get())) {
+            if (!currentScope->types.count(cls->name)) {
+                auto structType = std::make_shared<StructType>(cls->name);
+                currentScope->defineType(cls->name, structType);
+                hoistedTypes_[cls] = structType;
+                debugLog(fg(fmt::color::gray), "      [Hoist] Registered class '{}' at file scope\n", cls->name);
+            }
+        } else if (auto* iface = dynamic_cast<InterfaceDeclaration*>(stmt.get())) {
+            if (!currentScope->types.count(iface->name)) {
+                auto ifaceType = std::make_shared<StructType>(iface->name);
+                ifaceType->is_interface = true;
+                currentScope->defineType(iface->name, ifaceType);
+                hoistedTypes_[iface] = ifaceType;
+                debugLog(fg(fmt::color::gray), "      [Hoist] Registered interface '{}' at file scope\n", iface->name);
+            }
+        } else if (auto* en = dynamic_cast<EnumDeclaration*>(stmt.get())) {
+            if (!currentScope->types.count(en->name)) {
+                auto enumType = std::make_shared<StructType>(en->name);
+                enumType->is_enum = true;
+                currentScope->defineType(en->name, enumType);
+                hoistedTypes_[en] = enumType;
+                debugLog(fg(fmt::color::gray), "      [Hoist] Registered enum '{}' at file scope\n", en->name);
+            }
+        } else if (auto* td = dynamic_cast<TypeDefinition*>(stmt.get())) {
+            if (!td->is_extern_wildcard && !td->is_extern_alias && !td->is_symbol_resolution &&
+                td->generic_params.empty() && td->aliased_type && !currentScope->types.count(td->name)) {
+                auto type = resolveTypeFromAST(td->aliased_type.get());
+                if (type && !isErrorType(type)) {
+                    currentScope->defineType(td->name, type);
+                    debugLog(fg(fmt::color::gray), "      [Hoist] Registered type alias '{}' at file scope\n", td->name);
+                }
+            }
+        }
+    }
+
+    // Pass 2: Register members, fields, methods, and enumerators on the types
+    for (auto& stmt : node.statements) {
+        if (auto* s = dynamic_cast<StructDeclaration*>(stmt.get())) {
+            auto it = hoistedTypes_.find(s);
+            if (it == hoistedTypes_.end()) continue;
+            auto structType = it->second;
+
+            enterScope();
+            declareGenericParams(s->generic_params, &structType->generic_args);
+            currentScope->defineType("Self", std::make_shared<SelfType>(structType));
+
+            for (auto& parentNode : s->parents) {
+                auto parentType = resolveTypeFromAST(parentNode.get());
+                if (parentType) {
+                    if (auto p = std::dynamic_pointer_cast<StructType>(parentType)) {
+                        bool found = false;
+                        for (auto& existingP : structType->parents) {
+                            if (existingP->equals(*p)) { found = true; break; }
+                        }
+                        if (!found) structType->parents.push_back(p);
+                    }
+                }
+            }
+
+            for (auto& member : s->members) {
+                auto memberType = resolveTypeFromAST(member->type.get());
+                if (memberType && !isErrorType(memberType)) {
+                    structType->defineField(member->name, memberType, member->is_public, member->is_readonly);
+                }
+            }
+
+            for (auto& method : s->methods) {
+                if (auto sig = buildMethodSignature(*method))
+                    structType->defineMethod(method->name, sig);
+            }
+            for (auto& op : s->operators) {
+                if (auto sig = buildOperatorSignature(*op, structType))
+                    structType->defineOperator((int)op->op, sig);
+            }
+            for (auto& ctor : s->constructors) {
+                enterScope();
+                std::vector<std::shared_ptr<Type>> paramTypes;
+                std::vector<bool> paramDefaults;
+                for (auto& param : ctor->params) {
+                    auto pt = resolveTypeFromAST(param->type.get());
+                    if (pt && !isErrorType(pt)) paramTypes.push_back(pt);
+                    paramDefaults.push_back(param->default_value != nullptr);
+                }
+                auto ctorType = std::make_shared<FunctionType>(paramTypes, structType, false, paramDefaults);
+                structType->addConstructor(ctorType);
+                exitScope();
+            }
+
+            exitScope();
+        } else if (auto* cls = dynamic_cast<ClassDeclaration*>(stmt.get())) {
+            auto it = hoistedTypes_.find(cls);
+            if (it == hoistedTypes_.end()) continue;
+            auto structType = it->second;
+
+            enterScope();
+            declareGenericParams(cls->generic_params, &structType->generic_args);
+            currentScope->defineType("Self", std::make_shared<SelfType>(structType));
+
+            for (auto& parentNode : cls->parents) {
+                auto parentType = resolveTypeFromAST(parentNode.get());
+                if (parentType) {
+                    if (auto p = std::dynamic_pointer_cast<StructType>(parentType)) {
+                        bool found = false;
+                        for (auto& existingP : structType->parents) {
+                            if (existingP->equals(*p)) { found = true; break; }
+                        }
+                        if (!found) structType->parents.push_back(p);
+                    }
+                }
+            }
+
+            for (auto& member : cls->members) {
+                auto memberType = resolveTypeFromAST(member->type.get());
+                if (memberType && !isErrorType(memberType)) {
+                    structType->defineField(member->name, memberType, member->is_public, member->is_readonly);
+                }
+            }
+
+            for (auto& method : cls->methods) {
+                if (auto sig = buildMethodSignature(*method))
+                    structType->defineMethod(method->name, sig);
+            }
+            for (auto& op : cls->operators) {
+                if (auto sig = buildOperatorSignature(*op, structType))
+                    structType->defineOperator((int)op->op, sig);
+            }
+            for (auto& ctor : cls->constructors) {
+                enterScope();
+                std::vector<std::shared_ptr<Type>> paramTypes;
+                std::vector<bool> paramDefaults;
+                for (auto& param : ctor->params) {
+                    auto pt = resolveTypeFromAST(param->type.get());
+                    if (pt && !isErrorType(pt)) paramTypes.push_back(pt);
+                    paramDefaults.push_back(param->default_value != nullptr);
+                }
+                auto ctorType = std::make_shared<FunctionType>(paramTypes, structType, false, paramDefaults);
+                structType->addConstructor(ctorType);
+                exitScope();
+            }
+
+            exitScope();
+        } else if (auto* iface = dynamic_cast<InterfaceDeclaration*>(stmt.get())) {
+            auto it = hoistedTypes_.find(iface);
+            if (it == hoistedTypes_.end()) continue;
+            auto ifaceType = it->second;
+
+            enterScope();
+            declareGenericParams(iface->generic_params, &ifaceType->generic_args);
+            currentScope->defineType("Self", ifaceType);
+
+            for (auto& member : iface->members) {
+                auto memberType = resolveTypeFromAST(member->type.get());
+                if (memberType && !isErrorType(memberType)) {
+                    ifaceType->defineField(member->name, memberType, member->is_public, member->is_readonly);
+                }
+            }
+            for (auto& method : iface->methods) {
+                if (auto sig = buildMethodSignature(*method))
+                    ifaceType->defineMethod(method->name, sig);
+            }
+            for (auto& op : iface->operators) {
+                if (auto sig = buildOperatorSignature(*op, ifaceType))
+                    ifaceType->defineOperator((int)op->op, sig);
+            }
+            for (auto& ctor : iface->constructors) {
+                enterScope();
+                std::vector<std::shared_ptr<Type>> paramTypes;
+                std::vector<bool> paramDefaults;
+                for (auto& param : ctor->params) {
+                    auto pt = resolveTypeFromAST(param->type.get());
+                    if (pt && !isErrorType(pt)) paramTypes.push_back(pt);
+                    paramDefaults.push_back(param->default_value != nullptr);
+                }
+                auto ctorType = std::make_shared<FunctionType>(paramTypes, ifaceType, false, paramDefaults);
+                ifaceType->addConstructor(ctorType);
+                exitScope();
+            }
+
+            exitScope();
+        } else if (auto* en = dynamic_cast<EnumDeclaration*>(stmt.get())) {
+            auto it = hoistedTypes_.find(en);
+            if (it == hoistedTypes_.end()) continue;
+            auto enumType = it->second;
+
+            std::vector<std::string> enumeratorNames;
+            enumeratorNames.reserve(en->values.size());
+
+            enterScope();
+            declareGenericParams(en->generic_params, &enumType->generic_args);
+            currentScope->defineType("Self", enumType);
+
+            for (size_t i = 0; i < en->values.size(); ++i) {
+                auto& val = en->values[i];
+                std::vector<std::shared_ptr<Type>> payload;
+                if (i < en->member_payloads.size() && en->member_payloads[i].name == val.first) {
+                    for (auto& t : en->member_payloads[i].types) {
+                        auto pt = resolveTypeFromAST(t.get());
+                        if (pt && !isErrorType(pt)) payload.push_back(pt);
+                    }
+                }
+                enumType->defineEnumerator(val.first, std::make_shared<FunctionType>(payload, enumType));
+                enumeratorNames.push_back(val.first);
+            }
+            exitScope();
+
+            for (const auto& name : enumeratorNames) {
+                if (!currentScope->symbols.count(name)) {
+                    currentScope->define({name, enumType->getEnumeratorValueType(name), false, true});
+                }
+            }
+        } else if (auto* ib = dynamic_cast<ImplementsBlock*>(stmt.get())) {
+            auto targetType = currentScope->resolveType(ib->target_type);
+            auto structType = std::dynamic_pointer_cast<StructType>(targetType);
+            if (!structType) continue;
+
+            enterScope();
+            currentScope->defineType("Self", structType);
+            if (!ib->target_generics.empty()) {
+                const size_t n = std::min(ib->target_generics.size(), structType->generic_args.size());
+                for (size_t i = 0; i < n; ++i) {
+                    const std::string& written = ib->target_generics[i]->name;
+                    if (currentScope->resolveType(written)) continue;
+                    currentScope->defineType(written, structType->generic_args[i]);
+                }
+            }
+            for (auto& method : ib->methods) {
+                if (auto sig = buildMethodSignature(*method, structType))
+                    structType->defineMethod(method->name, sig);
+            }
+            for (auto& op : ib->operators) {
+                if (auto sig = buildOperatorSignature(*op, structType))
+                    structType->defineOperator((int)op->op, sig);
+            }
+            exitScope();
+        }
+    }
+
+    // Pass 3: Register explicitly-typed global variables
+    for (auto& stmt : node.statements) {
+        if (auto* var = dynamic_cast<VariableDeclaration*>(stmt.get())) {
+            if (var->type && !currentScope->symbols.count(var->name)) {
+                auto type = resolveTypeFromAST(var->type.get());
+                if (type && !isErrorType(type) && type->toString() != "auto") {
+                    currentScope->define({var->name, type, var->is_mutable, var->initializer != nullptr});
+                    debugLog(fg(fmt::color::gray), "      [Hoist] Registered global '{}' at file scope\n", var->name);
+                }
+            }
+        }
+    }
+
+    // Pass 4: Register function and special signatures
     for (auto& stmt : node.statements) {
         std::string name;
         const std::vector<std::unique_ptr<Parameter>>* params = nullptr;
@@ -855,11 +1116,13 @@ void SemanticAnalyzer::setExternalGlobalScope(const std::shared_ptr<Scope>& scop
 
 void SemanticAnalyzer::visit(Program& node) {
     refuseMisplacedGlobals(node);
+    auto prevHoisted = std::move(hoistedTypes_);
     hoistTopLevelSignatures(node);
     for (auto& stmt : node.statements) {
         stmt->accept(*this);
     }
     dropConsumedImports(node);
+    hoistedTypes_ = std::move(prevHoisted);
 }
 
 namespace {

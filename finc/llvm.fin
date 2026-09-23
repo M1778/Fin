@@ -1,0 +1,358 @@
+// LLVM-C API bindings for the Fin Self-Hosting Compiler
+// Implements ADR 0002 and ADR 0043 (pure LLVM lowering)
+
+namespace finc {
+
+pub struct LLVMModule {}
+pub struct LLVMBuilder {}
+pub struct LLVMValue {}
+pub struct LLVMType {}
+pub struct LLVMBasicBlock {}
+pub struct LLVMTarget {}
+pub struct LLVMTargetMachine {}
+
+pub struct LLVMTargetSlot {
+    pub:
+      ptr <&LLVMTarget> = null,
+}
+
+pub struct LLVMErrSlot {
+    pub:
+      msg <string> = "",
+}
+
+pub struct LLVMTypeArgs {
+    pub:
+      t0 <&LLVMType> = null,
+      t1 <&LLVMType> = null,
+      t2 <&LLVMType> = null,
+      t3 <&LLVMType> = null,
+      t4 <&LLVMType> = null,
+      t5 <&LLVMType> = null,
+      t6 <&LLVMType> = null,
+      t7 <&LLVMType> = null,
+      t8 <&LLVMType> = null,
+      t9 <&LLVMType> = null,
+      t10 <&LLVMType> = null,
+      t11 <&LLVMType> = null,
+      t12 <&LLVMType> = null,
+      t13 <&LLVMType> = null,
+      t14 <&LLVMType> = null,
+      t15 <&LLVMType> = null,
+}
+
+pub struct LLVMValueArgs {
+    pub:
+      v0 <&LLVMValue> = null,
+      v1 <&LLVMValue> = null,
+      v2 <&LLVMValue> = null,
+      v3 <&LLVMValue> = null,
+      v4 <&LLVMValue> = null,
+      v5 <&LLVMValue> = null,
+      v6 <&LLVMValue> = null,
+      v7 <&LLVMValue> = null,
+      v8 <&LLVMValue> = null,
+      v9 <&LLVMValue> = null,
+      v10 <&LLVMValue> = null,
+      v11 <&LLVMValue> = null,
+      v12 <&LLVMValue> = null,
+      v13 <&LLVMValue> = null,
+      v14 <&LLVMValue> = null,
+      v15 <&LLVMValue> = null,
+}
+
+pub struct LLVMIndices {
+    pub:
+      i0 <&LLVMValue> = null,
+      i1 <&LLVMValue> = null,
+}
+
+pub struct LLVMBlockArgs {
+    pub:
+      b0 <&LLVMBasicBlock> = null,
+      b1 <&LLVMBasicBlock> = null,
+}
+
+// Target Initialization
+#[llvm_name="LLVMInitializeX86TargetInfo"]
+@define llvm_init_x86_target_info() <noret>;
+
+#[llvm_name="LLVMInitializeX86Target"]
+@define llvm_init_x86_target() <noret>;
+
+#[llvm_name="LLVMInitializeX86TargetMC"]
+@define llvm_init_x86_target_mc() <noret>;
+
+#[llvm_name="LLVMInitializeX86AsmPrinter"]
+@define llvm_init_x86_asm_printer() <noret>;
+
+#[llvm_name="LLVMGetDefaultTargetTriple"]
+@define llvm_get_default_triple() <string>;
+
+#[llvm_name="LLVMGetTargetFromTriple"]
+@define llvm_get_target_from_triple(triple: string, target_out: &LLVMTargetSlot, err_out: &LLVMErrSlot) <int>;
+
+#[llvm_name="LLVMCreateTargetMachine"]
+@define llvm_create_target_machine(t: &LLVMTarget, triple: string, cpu: string, features: string, opt: int, reloc: int, model: int) <&LLVMTargetMachine>;
+
+#[llvm_name="LLVMTargetMachineEmitToFile"]
+@define llvm_target_machine_emit_to_file(tm: &LLVMTargetMachine, m: &LLVMModule, filename: string, codegen: int, err_out: &LLVMErrSlot) <int>;
+
+#[llvm_name="LLVMDisposeTargetMachine"]
+@define llvm_dispose_target_machine(tm: &LLVMTargetMachine) <noret>;
+
+// Module
+#[llvm_name="LLVMModuleCreateWithName"]
+@define llvm_module_create(name: string) <&LLVMModule>;
+
+#[llvm_name="LLVMDisposeModule"]
+@define llvm_dispose_module(m: &LLVMModule) <noret>;
+
+#[llvm_name="LLVMDumpModule"]
+@define llvm_dump_module(m: &LLVMModule) <noret>;
+
+#[llvm_name="LLVMVerifyModule"]
+@define llvm_verify_module(m: &LLVMModule, action: int, out_msg: &LLVMErrSlot) <int>;
+
+#[llvm_name="LLVMVerifyFunction"]
+@define llvm_verify_function(fn_val: &LLVMValue, action: int) <int>;
+
+#[llvm_name="LLVMWriteBitcodeToFile"]
+@define llvm_write_bitcode_to_file(m: &LLVMModule, path: string) <int>;
+
+// Types
+#[llvm_name="LLVMInt32Type"]
+@define llvm_i32_type() <&LLVMType>;
+
+#[llvm_name="LLVMInt64Type"]
+@define llvm_i64_type() <&LLVMType>;
+
+#[llvm_name="LLVMInt8Type"]
+@define llvm_i8_type() <&LLVMType>;
+
+#[llvm_name="LLVMInt1Type"]
+@define llvm_i1_type() <&LLVMType>;
+
+#[llvm_name="LLVMVoidType"]
+@define llvm_void_type() <&LLVMType>;
+
+#[llvm_name="LLVMPointerType"]
+@define llvm_pointer_type(elem_type: &LLVMType, address_space: int) <&LLVMType>;
+
+#[llvm_name="LLVMFunctionType"]
+@define llvm_function_type(ret_type: &LLVMType, param_types: &LLVMTypeArgs, param_count: int, is_var_arg: int) <&LLVMType>;
+
+#[llvm_name="LLVMGetReturnType"]
+@define llvm_get_return_type(fn_type: &LLVMType) <&LLVMType>;
+
+#[llvm_name="LLVMGetParamTypes"]
+@define llvm_get_param_types(fn_type: &LLVMType, dest: &LLVMTypeArgs) <noret>;
+
+#[llvm_name="LLVMStructType"]
+@define llvm_struct_type(elem_types: &LLVMTypeArgs, elem_count: int, packed: int) <&LLVMType>;
+
+#[llvm_name="LLVMGlobalGetValueType"]
+@define llvm_global_get_value_type(val: &LLVMValue) <&LLVMType>;
+
+#[llvm_name="LLVMTypeOf"]
+@define llvm_type_of(val: &LLVMValue) <&LLVMType>;
+
+// Functions & Blocks
+#[llvm_name="LLVMAddFunction"]
+@define llvm_add_function(module: &LLVMModule, name: string, fn_type: &LLVMType) <&LLVMValue>;
+
+#[llvm_name="LLVMGetNamedFunction"]
+@define llvm_get_named_function(module: &LLVMModule, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMAppendBasicBlock"]
+@define llvm_append_basic_block(fn_val: &LLVMValue, name: string) <&LLVMBasicBlock>;
+
+#[llvm_name="LLVMGetParam"]
+@define llvm_get_param(fn_val: &LLVMValue, index: int) <&LLVMValue>;
+
+// IR Builder
+#[llvm_name="LLVMCreateBuilder"]
+@define llvm_create_builder() <&LLVMBuilder>;
+
+#[llvm_name="LLVMDisposeBuilder"]
+@define llvm_dispose_builder(b: &LLVMBuilder) <noret>;
+
+#[llvm_name="LLVMPositionBuilderAtEnd"]
+@define llvm_position_builder(builder: &LLVMBuilder, block: &LLVMBasicBlock) <noret>;
+
+#[llvm_name="LLVMGetInsertBlock"]
+@define llvm_get_insert_block(b: &LLVMBuilder) <&LLVMBasicBlock>;
+
+#[llvm_name="LLVMGetBasicBlockTerminator"]
+@define llvm_get_basic_block_terminator(bb: &LLVMBasicBlock) <&LLVMValue>;
+
+// Constants
+#[llvm_name="LLVMConstInt"]
+@define llvm_const_int(int_type: &LLVMType, val: int, sign_extend: int) <&LLVMValue>;
+
+#[llvm_name="LLVMConstString"]
+@define llvm_const_string(s: string, len: int, dont_null_terminate: int) <&LLVMValue>;
+
+#[llvm_name="LLVMConstNull"]
+@define llvm_const_null(ty: &LLVMType) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildGlobalStringPtr"]
+@define llvm_build_global_string_ptr(b: &LLVMBuilder, s: string, name: string) <&LLVMValue>;
+
+// Instructions
+#[llvm_name="LLVMBuildRet"]
+@define llvm_build_ret(builder: &LLVMBuilder, val: &LLVMValue) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildRetVoid"]
+@define llvm_build_ret_void(builder: &LLVMBuilder) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildAdd"]
+@define llvm_build_add(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildSub"]
+@define llvm_build_sub(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildMul"]
+@define llvm_build_mul(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildSDiv"]
+@define llvm_build_sdiv(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildSRem"]
+@define llvm_build_srem(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildAnd"]
+@define llvm_build_and(b: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildOr"]
+@define llvm_build_or(b: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildXor"]
+@define llvm_build_xor(b: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildNot"]
+@define llvm_build_not(b: &LLVMBuilder, v: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildShl"]
+@define llvm_build_shl(b: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildAShr"]
+@define llvm_build_ashr(b: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildLShr"]
+@define llvm_build_lshr(b: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildICmp"]
+@define llvm_build_icmp(builder: &LLVMBuilder, op: int, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildAlloca"]
+@define llvm_build_alloca(builder: &LLVMBuilder, ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildLoad2"]
+@define llvm_build_load2(builder: &LLVMBuilder, ty: &LLVMType, ptr: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildStore"]
+@define llvm_build_store(builder: &LLVMBuilder, val: &LLVMValue, ptr: &LLVMValue) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildBr"]
+@define llvm_build_br(builder: &LLVMBuilder, dest: &LLVMBasicBlock) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildCondBr"]
+@define llvm_build_cond_br(builder: &LLVMBuilder, cond: &LLVMValue, then_b: &LLVMBasicBlock, else_b: &LLVMBasicBlock) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildCall2"]
+@define llvm_build_call2(builder: &LLVMBuilder, fn_type: &LLVMType, fn_val: &LLVMValue, args: &LLVMValueArgs, num_args: int, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildGEP2"]
+@define llvm_build_gep2(builder: &LLVMBuilder, ty: &LLVMType, ptr: &LLVMValue, indices: &LLVMIndices, num_indices: int, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildStructGEP2"]
+@define llvm_build_struct_gep2(builder: &LLVMBuilder, ty: &LLVMType, ptr: &LLVMValue, idx: int, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildSExt"]
+@define llvm_build_sext(builder: &LLVMBuilder, val: &LLVMValue, dest_ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildZExt"]
+@define llvm_build_zext(builder: &LLVMBuilder, val: &LLVMValue, dest_ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildNeg"]
+@define llvm_build_neg(builder: &LLVMBuilder, v: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildUnreachable"]
+@define llvm_build_unreachable(builder: &LLVMBuilder) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildPhi"]
+@define llvm_build_phi(builder: &LLVMBuilder, ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMAddIncoming"]
+@define llvm_add_incoming(phi_node: &LLVMValue, phi_values: &LLVMValueArgs, phi_blocks: &LLVMBlockArgs, count: int) <noret>;
+
+#[llvm_name="LLVMBuildSelect"]
+@define llvm_build_select(builder: &LLVMBuilder, if_val: &LLVMValue, then_val: &LLVMValue, else_val: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildPointerCast"]
+@define llvm_build_pointer_cast(builder: &LLVMBuilder, val: &LLVMValue, dest_ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildPtrToInt"]
+@define llvm_build_ptr_to_int(builder: &LLVMBuilder, val: &LLVMValue, dest_ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildIntToPtr"]
+@define llvm_build_int_to_ptr(builder: &LLVMBuilder, val: &LLVMValue, dest_ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildBitCast"]
+@define llvm_build_bitcast(builder: &LLVMBuilder, val: &LLVMValue, dest_ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildTrunc"]
+@define llvm_build_trunc(builder: &LLVMBuilder, val: &LLVMValue, dest_ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildMalloc"]
+@define llvm_build_malloc(builder: &LLVMBuilder, ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildArrayMalloc"]
+@define llvm_build_array_malloc(builder: &LLVMBuilder, ty: &LLVMType, val: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildFree"]
+@define llvm_build_free(builder: &LLVMBuilder, ptr: &LLVMValue) <&LLVMValue>;
+
+
+// ICmp Predicates
+#[export] pub fun llvm_int_eq() <int> { return 32; }
+#[export] pub fun llvm_int_ne() <int> { return 33; }
+#[export] pub fun llvm_int_sgt() <int> { return 38; }
+#[export] pub fun llvm_int_sge() <int> { return 39; }
+#[export] pub fun llvm_int_slt() <int> { return 40; }
+#[export] pub fun llvm_int_sle() <int> { return 41; }
+
+// Helper: Initialize native LLVM target machine
+#[export]
+pub fun init_native_target() <bool> {
+    llvm_init_x86_target_info();
+    llvm_init_x86_target();
+    llvm_init_x86_target_mc();
+    llvm_init_x86_asm_printer();
+    return true;
+}
+
+// Helper: Emit LLVM module to object file
+#[export]
+pub fun emit_module_to_object(m: &LLVMModule, object_path: string, opt_level: int) <bool> {
+    let triple <string> = llvm_get_default_triple();
+    let tgt_slot <&LLVMTargetSlot> = new LLVMTargetSlot{};
+    let err_slot <&LLVMErrSlot> = new LLVMErrSlot{};
+    let rc <int> = llvm_get_target_from_triple(triple, tgt_slot, err_slot);
+    if (rc != 0) {
+        delete tgt_slot;
+        delete err_slot;
+        return false;
+    }
+    let target <&LLVMTarget> = tgt_slot.ptr;
+    let tm <&LLVMTargetMachine> = llvm_create_target_machine(target, triple, "generic", "", opt_level, 0, 0);
+    // codegen = 1 for LLVMObjectFile
+    let emit_rc <int> = llvm_target_machine_emit_to_file(tm, m, object_path, 1, err_slot);
+    llvm_dispose_target_machine(tm);
+    delete tgt_slot;
+    delete err_slot;
+    return emit_rc == 0;
+}
+
+}

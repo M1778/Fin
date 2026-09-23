@@ -1,0 +1,195 @@
+// Bit manipulation operations matching C++20 `<bit>` and Python bitwise capabilities.
+//
+// Provides bitwise operations, bit testing and modification, counting operations
+// (popcount, leading/trailing zeros, bit length), power-of-two tests, and circular
+// bit rotations for 32-bit unsigned integers.
+//
+// Fin grammar does not include bitwise binary operators (`&`, `|`, `^`), so bitwise
+// combinations are computed via arithmetic bit extraction and shifts.
+
+namespace std {
+
+// Bitwise AND computed via arithmetic bit extraction.
+#[export]
+pub fun bit_and(a: uint, b: uint) <uint> {
+    let res <uint> = cast<uint>(0);
+    let p <uint> = cast<uint>(1);
+    let x <uint> = a;
+    let y <uint> = b;
+    for (let k <int> = 0; k < 32; k++) {
+        let bit_a <uint> = x % cast<uint>(2);
+        let bit_b <uint> = y % cast<uint>(2);
+        if (bit_a == cast<uint>(1) && bit_b == cast<uint>(1)) {
+            res = res + p;
+        }
+        if (k < 31) {
+            p = p * cast<uint>(2);
+        }
+        x = x / cast<uint>(2);
+        y = y / cast<uint>(2);
+    }
+    return res;
+}
+
+// Bitwise OR computed via arithmetic bit extraction.
+#[export]
+pub fun bit_or(a: uint, b: uint) <uint> {
+    let res <uint> = cast<uint>(0);
+    let p <uint> = cast<uint>(1);
+    let x <uint> = a;
+    let y <uint> = b;
+    for (let k <int> = 0; k < 32; k++) {
+        let bit_a <uint> = x % cast<uint>(2);
+        let bit_b <uint> = y % cast<uint>(2);
+        if (bit_a == cast<uint>(1) || bit_b == cast<uint>(1)) {
+            res = res + p;
+        }
+        if (k < 31) {
+            p = p * cast<uint>(2);
+        }
+        x = x / cast<uint>(2);
+        y = y / cast<uint>(2);
+    }
+    return res;
+}
+
+// Bitwise XOR computed via arithmetic bit extraction.
+#[export]
+pub fun bit_xor(a: uint, b: uint) <uint> {
+    let res <uint> = cast<uint>(0);
+    let p <uint> = cast<uint>(1);
+    let x <uint> = a;
+    let y <uint> = b;
+    for (let k <int> = 0; k < 32; k++) {
+        let bit_a <uint> = x % cast<uint>(2);
+        let bit_b <uint> = y % cast<uint>(2);
+        if (bit_a != bit_b) {
+            res = res + p;
+        }
+        if (k < 31) {
+            p = p * cast<uint>(2);
+        }
+        x = x / cast<uint>(2);
+        y = y / cast<uint>(2);
+    }
+    return res;
+}
+
+// Bitwise NOT: inverts all 32 bits (4294967295 - a).
+#[export]
+pub fun bit_not(a: uint) <uint> {
+    return cast<uint>(4294967295) - a;
+}
+
+// Returns true if bit at index (0..31) is 1.
+#[export]
+pub fun get_bit(n: uint, index: int) <bool> {
+    blame index >= 0 && index < 32, "bit index out of range [0, 31]";
+    let shifted <uint> = n >> cast<uint>(index);
+    return shifted % cast<uint>(2) == cast<uint>(1);
+}
+
+// Sets bit at index (0..31) to 1.
+#[export]
+pub fun set_bit(n: uint, index: int) <uint> {
+    blame index >= 0 && index < 32, "bit index out of range [0, 31]";
+    if (!get_bit(n, index)) {
+        return n + (cast<uint>(1) << cast<uint>(index));
+    }
+    return n;
+}
+
+// Clears bit at index (0..31) to 0.
+#[export]
+pub fun clear_bit(n: uint, index: int) <uint> {
+    blame index >= 0 && index < 32, "bit index out of range [0, 31]";
+    if (get_bit(n, index)) {
+        return n - (cast<uint>(1) << cast<uint>(index));
+    }
+    return n;
+}
+
+// Toggles bit at index (0..31).
+#[export]
+pub fun toggle_bit(n: uint, index: int) <uint> {
+    blame index >= 0 && index < 32, "bit index out of range [0, 31]";
+    if (get_bit(n, index)) {
+        return clear_bit(n, index);
+    }
+    return set_bit(n, index);
+}
+
+// Counts the number of set bits (1s) in n.
+#[export]
+pub fun popcount(n: uint) <int> {
+    let count <int> = 0;
+    let x <uint> = n;
+    while (x > cast<uint>(0)) {
+        if (x % cast<uint>(2) == cast<uint>(1)) {
+            count++;
+        }
+        x = x / cast<uint>(2);
+    }
+    return count;
+}
+
+// Number of bits necessary to represent n in binary (0 for n == 0).
+#[export]
+pub fun bit_length(n: uint) <int> {
+    let length <int> = 0;
+    let x <uint> = n;
+    while (x > cast<uint>(0)) {
+        length++;
+        x = x / cast<uint>(2);
+    }
+    return length;
+}
+
+// Number of consecutive 0 bits starting from MSB (32 for n == 0).
+#[export]
+pub fun count_leading_zeros(n: uint) <int> {
+    return 32 - bit_length(n);
+}
+
+// Number of consecutive 0 bits starting from LSB (32 for n == 0).
+#[export]
+pub fun count_trailing_zeros(n: uint) <int> {
+    if (n == cast<uint>(0)) {
+        return 32;
+    }
+    let count <int> = 0;
+    let x <uint> = n;
+    while (x % cast<uint>(2) == cast<uint>(0)) {
+        count++;
+        x = x / cast<uint>(2);
+    }
+    return count;
+}
+
+// Returns true if n is a power of 2 (has exactly one bit set).
+#[export]
+pub fun is_power_of_two(n: uint) <bool> {
+    return popcount(n) == 1;
+}
+
+// Circular left shift of a 32-bit unsigned integer.
+#[export]
+pub fun rotate_left(n: uint, shift: uint) <uint> {
+    let s <uint> = shift % cast<uint>(32);
+    if (s == cast<uint>(0)) {
+        return n;
+    }
+    return (n << s) + (n >> (cast<uint>(32) - s));
+}
+
+// Circular right shift of a 32-bit unsigned integer.
+#[export]
+pub fun rotate_right(n: uint, shift: uint) <uint> {
+    let s <uint> = shift % cast<uint>(32);
+    if (s == cast<uint>(0)) {
+        return n;
+    }
+    return (n >> s) + (n << (cast<uint>(32) - s));
+}
+
+}

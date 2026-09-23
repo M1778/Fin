@@ -3,10 +3,10 @@
 A module is a `.fin` file. There is no manifest and no module declaration — importing a file
 is what makes it a module.
 
-Before the details, one limitation that shapes this whole chapter: a call to an imported
-function is not yet lowered to machine code. An importing program type-checks cleanly and
-then reports `codegen: a call to 'add' is not lowered yet` under `-o`. So everything below
-is a type-checking story today, and the examples are shown being checked rather than built.
+Fin modules integrate through a whole-program source visibility model backed by the module
+loader (ADR 0032). Imported templates, generic functions, interfaces, structs, enums,
+`implements` blocks, and standard library functions register with the backend and lower
+seamlessly to machine code when building executables with `-o`.
 
 ## `import`
 
@@ -250,9 +250,9 @@ name is the file that says how far it reaches, at per-declaration granularity.
 
 An ambient name is not just resolvable — it *builds*. A file that calls `printf` with no
 declaration and no import compiles to a working executable, because the compiler splices the
-prototype for each published extern into the program before the backend runs. This is the one
-place where a name reaches the backend from another file; a call to an ordinary imported
-function still refuses, as the top of this chapter says.
+prototype for each published extern into the program before the backend runs. Ordinary
+imported modules reach the backend through the module loader cache (ADR 0032), lowering their
+called functions, types, and instantiated templates on demand.
 
 The mechanism is limited to `@define` — an extern is a symbol and a signature with nothing to
 emit, so a copy of one is free. `#[global]` on a `fun`, a `struct`, an `interface`, an `enum`

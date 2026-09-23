@@ -36,6 +36,16 @@ interface Addable<T> {
 }
 ```
 
+An interface may also specify abstract constructor (`Self(...)`) and destructor (`~Self();`)
+requirements that implementors must provide:
+
+```fin
+interface Lifecycle {
+    Self(initial_state: int);
+    ~Self();
+}
+```
+
 Interfaces can use the section-label form too:
 
 ```fin
@@ -105,15 +115,16 @@ Point implements <Addable<Point>> {
 }
 ```
 
-An `implements` block type-checks and registers its members, but it is not yet lowered to
-machine code — a program containing one will not build with `-o`. Declaration-site
-`struct X: <Iface>` is the form that runs today.
+An `implements` block registers its methods, operators, and constructors for the target type
+and lowers fully to machine code in `-o` builds, seamlessly participating in vtables and
+dynamic dispatch. Declaration-site `struct X: <Iface>` is also supported.
 
 There is also a single-member form, `@implements Type::name = <expression>;`, which
 overwrites a member the type declares or adds one it does not. It is what
-`tests/samples/enums.fin` uses to attach an `unwrap` to an enum. Its `$type`-level
-counterpart `@implements(struct, iface)` — asking at compile time whether a type satisfies
-an interface — is declared in `docs/compiler-api.md` but has no implementation yet.
+`tests/samples/enums.fin` uses to attach an `unwrap` to an enum. Its compile-time
+counterpart `@implements(struct, iface)` — asking at compile time whether a struct type
+or value satisfies an interface — is a live compiler intrinsic (ADR 0042) evaluating to a
+static boolean constant.
 
 ## Interfaces as bounds
 
@@ -256,10 +267,9 @@ pub fun keyidof(enum_member: $enum_member) <int>;
 ```
 
 They resolve in every type position, and only these four — an unrecognised `$name` is an
-undefined type rather than a silently accepted one. Nothing in the language produces a
-`$type` *value* yet, so functions taking one are compiler intrinsics: declared without a
-body, implemented in the compiler. Type literals (`struct { ... }` and `interface { ... }`
-as expressions) parse and type-check as `$struct` and `$interface`, but instantiating one
-needs the compiler API, which is not built.
+undefined type rather than a silently accepted one. Type literals (`struct { ... }` and
+`interface { ... }` as expressions) parse and evaluate as `$struct` and `$interface`
+meta-types, mapping distinctly in the semantic analyzer and codegen (ADR 0035, ADR 0042)
+for compile-time reflection, type queries (`@implements`), and intrinsic operations.
 
 Next: [enums and pattern data](08-enums-and-pattern-data.md).

@@ -1,0 +1,244 @@
+// Encodings: Hex and Base64 encoding/decoding.
+//
+// Matches Python's `base64` and `binascii` modules, providing standard
+// RFC 4648 Base64 and lowercase hexadecimal representations.
+
+#[stdimport] %{
+import { free_str } from strings::std;
+}%
+
+namespace std {
+
+#[llvm_name="strlen"]
+@define enc_strlen(s: string) <ulong>;
+
+#[llvm_name="calloc"]
+@define enc_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="memcpy"]
+@define enc_memcpy(dst: &char, src: string, count: ulong) <&char>;
+
+#[llvm_name="memmove"]
+@define enc_memmove(dst: string, src: &char, count: ulong) <string>;
+
+priv fun alloc_str(bytes: ulong) <string> {
+    return enc_calloc(bytes, cast<ulong>(1));
+}
+
+#[export]
+pub fun free_encoded(s: string) <noret> {
+    if (s != null) {
+        free_str(s);
+    }
+}
+
+priv fun to_bytes(s: string) <[char]> {
+    let n <ulong> = enc_strlen(s);
+    let buf <[char]> = new [char, cast<int>(n) + 1]{};
+    enc_memcpy(&buf[0], s, n);
+    buf[cast<int>(n)] = '\0';
+    return buf;
+}
+
+priv fun byte_val(c: char) <int> {
+    let v <int> = cast<int>(c);
+    if (v < 0) { v = v + 256; }
+    return v % 256;
+}
+
+// --- Hexadecimal Encoding ---
+
+priv fun hex_digit(v: int) <char> {
+    if (v < 10) {
+        return cast<char>(cast<int>('0') + v);
+    }
+    return cast<char>(cast<int>('a') + (v - 10));
+}
+
+priv fun hex_val(c: char) <int> {
+    if (c >= '0' && c <= '9') {
+        return cast<int>(c) - cast<int>('0');
+    }
+    if (c >= 'a' && c <= 'f') {
+        return cast<int>(c) - cast<int>('a') + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return cast<int>(c) - cast<int>('A') + 10;
+    }
+    blame false, "invalid hexadecimal character";
+    return 0;
+}
+
+#[export]
+pub fun hex_encode(data: string) <string> {
+    if (data == null) { return alloc_str(cast<ulong>(1)); }
+    let n <int> = cast<int>(enc_strlen(data));
+    let bytes <[char]> = to_bytes(data);
+    let out_buf <[char]> = new [char, n * 2 + 1]{};
+    for (let i <int> = 0; i < n; i++) {
+        let b <int> = byte_val(bytes[i]);
+        out_buf[i * 2] = hex_digit(b / 16);
+        out_buf[i * 2 + 1] = hex_digit(b % 16);
+    }
+    out_buf[n * 2] = '\0';
+    delete bytes;
+    let res <string> = alloc_str(cast<ulong>(n * 2 + 1));
+    enc_memmove(res, &out_buf[0], cast<ulong>(n * 2));
+    delete out_buf;
+    return res;
+}
+
+#[export]
+pub fun hex_decode(hex_str: string) <string> {
+    if (hex_str == null) { return alloc_str(cast<ulong>(1)); }
+    let n <int> = cast<int>(enc_strlen(hex_str));
+    blame n % 2 == 0, "hexadecimal string must have even length";
+    let count <int> = n / 2;
+    let chars <[char]> = to_bytes(hex_str);
+    let out_buf <[char]> = new [char, count + 1]{};
+    for (let i <int> = 0; i < count; i++) {
+        let hi <int> = hex_val(chars[i * 2]);
+        let lo <int> = hex_val(chars[i * 2 + 1]);
+        out_buf[i] = cast<char>(hi * 16 + lo);
+    }
+    out_buf[count] = '\0';
+    delete chars;
+    let res <string> = alloc_str(cast<ulong>(count + 1));
+    enc_memmove(res, &out_buf[0], cast<ulong>(count));
+    delete out_buf;
+    return res;
+}
+
+// --- Base64 Encoding ---
+
+priv fun b64_char(v: int) <char> {
+    if (v < 26) {
+        return cast<char>(cast<int>('A') + v);
+    }
+    if (v < 52) {
+        return cast<char>(cast<int>('a') + (v - 26));
+    }
+    if (v < 62) {
+        return cast<char>(cast<int>('0') + (v - 52));
+    }
+    if (v == 62) { return '+'; }
+    if (v == 63) { return '/'; }
+    return '=';
+}
+
+priv fun b64_val(c: char) <int> {
+    if (c >= 'A' && c <= 'Z') {
+        return cast<int>(c) - cast<int>('A');
+    }
+    if (c >= 'a' && c <= 'z') {
+        return cast<int>(c) - cast<int>('a') + 26;
+    }
+    if (c >= '0' && c <= '9') {
+        return cast<int>(c) - cast<int>('0') + 52;
+    }
+    if (c == '+') { return 62; }
+    if (c == '/') { return 63; }
+    if (c == '=') { return 0; }
+    blame false, "invalid base64 character";
+    return 0;
+}
+
+#[export]
+pub fun base64_encode(data: string) <string> {
+    if (data == null) { return alloc_str(cast<ulong>(1)); }
+    let n <int> = cast<int>(enc_strlen(data));
+    if (n == 0) { return alloc_str(cast<ulong>(1)); }
+    let bytes <[char]> = to_bytes(data);
+    let out_len <int> = ((n + 2) / 3) * 4;
+    let out_buf <[char]> = new [char, out_len + 1]{};
+    let i <int> = 0;
+    let o <int> = 0;
+    while (i + 2 < n) {
+        let b0 <int> = byte_val(bytes[i]);
+        let b1 <int> = byte_val(bytes[i + 1]);
+        let b2 <int> = byte_val(bytes[i + 2]);
+        let v <int> = (b0 * 65536) + (b1 * 256) + b2;
+        out_buf[o] = b64_char((v / 262144) % 64);
+        out_buf[o + 1] = b64_char((v / 4096) % 64);
+        out_buf[o + 2] = b64_char((v / 64) % 64);
+        out_buf[o + 3] = b64_char(v % 64);
+        i += 3;
+        o += 4;
+    }
+    let rem <int> = n - i;
+    if (rem == 1) {
+        let b0 <int> = byte_val(bytes[i]);
+        let v <int> = b0 * 65536;
+        out_buf[o] = b64_char((v / 262144) % 64);
+        out_buf[o + 1] = b64_char((v / 4096) % 64);
+        out_buf[o + 2] = '=';
+        out_buf[o + 3] = '=';
+        o += 4;
+    } else if (rem == 2) {
+        let b0 <int> = byte_val(bytes[i]);
+        let b1 <int> = byte_val(bytes[i + 1]);
+        let v <int> = (b0 * 65536) + (b1 * 256);
+        out_buf[o] = b64_char((v / 262144) % 64);
+        out_buf[o + 1] = b64_char((v / 4096) % 64);
+        out_buf[o + 2] = b64_char((v / 64) % 64);
+        out_buf[o + 3] = '=';
+        o += 4;
+    }
+    out_buf[out_len] = '\0';
+    delete bytes;
+    let res <string> = alloc_str(cast<ulong>(out_len + 1));
+    enc_memmove(res, &out_buf[0], cast<ulong>(out_len));
+    delete out_buf;
+    return res;
+}
+
+#[export]
+pub fun base64_decode(b64_str: string) <string> {
+    if (b64_str == null) { return alloc_str(cast<ulong>(1)); }
+    let n <int> = cast<int>(enc_strlen(b64_str));
+    if (n == 0) { return alloc_str(cast<ulong>(1)); }
+    blame n % 4 == 0, "base64 string length must be a multiple of 4";
+    let chars <[char]> = to_bytes(b64_str);
+    let pad <int> = 0;
+    if (n >= 1 && chars[n - 1] == '=') { pad++; }
+    if (n >= 2 && chars[n - 2] == '=') { pad++; }
+    let out_len <int> = (n / 4) * 3 - pad;
+    let out_buf <[char]> = new [char, out_len + 1]{};
+    let i <int> = 0;
+    let o <int> = 0;
+    while (i < n) {
+        let c0 <char> = chars[i];
+        let c1 <char> = chars[i + 1];
+        let c2 <char> = chars[i + 2];
+        let c3 <char> = chars[i + 3];
+        let v0 <int> = b64_val(c0);
+        let v1 <int> = b64_val(c1);
+        let v2 <int> = b64_val(c2);
+        let v3 <int> = b64_val(c3);
+        if (c2 == '=') {
+            let v <int> = (v0 * 64) + v1;
+            out_buf[o] = cast<char>((v / 16) % 256);
+            o++;
+        } else if (c3 == '=') {
+            let v <int> = (v0 * 4096) + (v1 * 64) + v2;
+            out_buf[o] = cast<char>((v / 1024) % 256);
+            out_buf[o + 1] = cast<char>((v / 4) % 256);
+            o += 2;
+        } else {
+            let v <int> = (v0 * 262144) + (v1 * 4096) + (v2 * 64) + v3;
+            out_buf[o] = cast<char>((v / 65536) % 256);
+            out_buf[o + 1] = cast<char>((v / 256) % 256);
+            out_buf[o + 2] = cast<char>(v % 256);
+            o += 3;
+        }
+        i += 4;
+    }
+    out_buf[out_len] = '\0';
+    delete chars;
+    let res <string> = alloc_str(cast<ulong>(out_len + 1));
+    enc_memmove(res, &out_buf[0], cast<ulong>(out_len));
+    delete out_buf;
+    return res;
+}
+
+}

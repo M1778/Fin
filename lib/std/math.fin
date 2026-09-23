@@ -71,69 +71,100 @@ pub const PI <double> = cast<double>(3.141592653589793);
 #[export]
 pub const E <double> = cast<double>(2.718281828459045);
 
+#[export]
+pub const PI_F <float> = 3.1415926535;
+
+#[export]
+pub const E_F <float> = 2.7182818284;
+
 // libm, by its own names. Each needs `-lm` on the link line; see the header.
+#[export]
 #[llvm_name="sqrt"]
 @define math_sqrt(x: double) <double>;
 
+#[export]
+#[llvm_name="sqrt"]
+@define sqrt(x: double) <double>;
+
+#[export]
 #[llvm_name="cbrt"]
-@define math_cbrt(x: double) <double>;
+@define cbrt(x: double) <double>;
 
+#[export]
 #[llvm_name="pow"]
-@define math_pow(base: double, exponent: double) <double>;
+@define pow(base: double, exponent: double) <double>;
 
+#[export]
 #[llvm_name="exp"]
-@define math_exp(x: double) <double>;
+@define exp(x: double) <double>;
 
+#[export]
 #[llvm_name="log"]
-@define math_log(x: double) <double>;
+@define log(x: double) <double>;
 
+#[export]
 #[llvm_name="log2"]
-@define math_log2(x: double) <double>;
+@define log2(x: double) <double>;
 
+#[export]
 #[llvm_name="log10"]
-@define math_log10(x: double) <double>;
+@define log10(x: double) <double>;
 
+#[export]
 #[llvm_name="fabs"]
-@define math_fabs(x: double) <double>;
+@define math_fabs_double(x: double) <double>;
 
+#[export]
 #[llvm_name="floor"]
-@define math_floor(x: double) <double>;
+@define floor(x: double) <double>;
 
+#[export]
 #[llvm_name="ceil"]
-@define math_ceil(x: double) <double>;
+@define ceil(x: double) <double>;
 
+#[export]
 #[llvm_name="round"]
-@define math_round(x: double) <double>;
+@define round(x: double) <double>;
 
+#[export]
 #[llvm_name="trunc"]
-@define math_trunc(x: double) <double>;
+@define trunc(x: double) <double>;
 
+#[export]
 #[llvm_name="fmod"]
 @define math_fmod(a: double, b: double) <double>;
 
+#[export]
 #[llvm_name="sin"]
-@define math_sin(x: double) <double>;
+@define sin(x: double) <double>;
 
+#[export]
 #[llvm_name="cos"]
-@define math_cos(x: double) <double>;
+@define cos(x: double) <double>;
 
+#[export]
 #[llvm_name="tan"]
-@define math_tan(x: double) <double>;
+@define tan(x: double) <double>;
 
+#[export]
 #[llvm_name="asin"]
-@define math_asin(x: double) <double>;
+@define asin(x: double) <double>;
 
+#[export]
 #[llvm_name="acos"]
-@define math_acos(x: double) <double>;
+@define acos(x: double) <double>;
 
+#[export]
 #[llvm_name="atan"]
-@define math_atan(x: double) <double>;
+@define atan(x: double) <double>;
 
+#[export]
 #[llvm_name="atan2"]
-@define math_atan2(y: double, x: double) <double>;
+@define atan2(y: double, x: double) <double>;
 
+#[export]
 #[llvm_name="hypot"]
-@define math_hypot(x: double, y: double) <double>;
+@define hypot(x: double, y: double) <double>;
 
 // The generic half. One function per operation across every type in `Number`, which is
 // what a constraint-set bound is for.
@@ -165,6 +196,28 @@ pub fun clamp<T: Number>(value: T, low: T, high: T) <T> {
 pub fun abs<T: Number>(value: T) <T> {
     if (value < 0) { return -value; }
     return value;
+  }
+
+#[export]
+#[llvm_name="math_fabs_float"]
+pub fun fabs(x: float) <float> {
+    if (x < 0.0) { return -x; }
+    return x;
+  }
+
+#[export]
+pub fun deg_to_rad(deg: double) <double> {
+    return deg * (PI / cast<double>(180.0));
+  }
+
+#[export]
+pub fun rad_to_deg(rad: double) <double> {
+    return rad * (cast<double>(180.0) / PI);
+  }
+
+#[export]
+pub fun lerpf(a: float, b: float, t: float) <float> {
+    return a + (b - a) * t;
   }
 
 // `-1`, `0` or `1`. Returns an `int` and not a `T`: the sign of a value is not a value of
@@ -277,6 +330,21 @@ pub fun is_even(value: int) <bool> {
 #[export]
 pub fun is_odd(value: int) <bool> {
     return value % 2 != 0;
+  }
+
+#[export]
+pub fun deg2rad(degrees: double) <double> {
+    return degrees * (PI / cast<double>(180.0));
+  }
+
+#[export]
+pub fun rad2deg(radians: double) <double> {
+    return radians * (cast<double>(180.0) / PI);
+  }
+
+#[export]
+pub fun lerp(start: double, end: double, t: double) <double> {
+    return start + t * (end - start);
   }
 
 }

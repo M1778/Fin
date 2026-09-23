@@ -1,0 +1,89 @@
+// Test assertions and testing utilities.
+//
+// Matches Python's `unittest` / `pytest` assertion helpers, using Fin's native
+// `blame` statement for failure reporting.
+
+namespace std {
+
+#[llvm_name="strcmp"]
+@define test_strcmp(a: string, b: string) <int>;
+
+#[export]
+pub fun assert_true(cond: bool, msg: string) <noret> {
+    blame cond, msg;
+}
+
+#[export]
+pub fun assert_false(cond: bool, msg: string) <noret> {
+    blame !cond, msg;
+}
+
+#[export]
+pub fun assert_eq_int(actual: int, expected: int, msg: string) <noret> {
+    blame actual == expected, msg;
+}
+
+#[export]
+pub fun assert_ne_int(actual: int, expected: int, msg: string) <noret> {
+    blame actual != expected, msg;
+}
+
+#[export]
+pub fun assert_eq_long(actual: long, expected: long, msg: string) <noret> {
+    blame actual == expected, msg;
+}
+
+#[export]
+pub fun assert_ne_long(actual: long, expected: long, msg: string) <noret> {
+    blame actual != expected, msg;
+}
+
+#[export]
+pub fun assert_eq_char(actual: char, expected: char, msg: string) <noret> {
+    blame actual == expected, msg;
+}
+
+#[export]
+pub fun assert_ne_char(actual: char, expected: char, msg: string) <noret> {
+    blame actual != expected, msg;
+}
+
+#[export]
+pub fun assert_eq_bool(actual: bool, expected: bool, msg: string) <noret> {
+    blame actual == expected, msg;
+}
+
+#[export]
+pub fun assert_ne_bool(actual: bool, expected: bool, msg: string) <noret> {
+    blame actual != expected, msg;
+}
+
+#[export]
+pub fun assert_eq_string(actual: string, expected: string, msg: string) <noret> {
+    if (actual == null && expected == null) { return; }
+    if (actual == null || expected == null) {
+        blame false, msg;
+    }
+    blame test_strcmp(actual, expected) == 0, msg;
+}
+
+#[export]
+pub fun assert_ne_string(actual: string, expected: string, msg: string) <noret> {
+    if (actual == null && expected == null) {
+        blame false, msg;
+    }
+    if (actual == null || expected == null) { return; }
+    blame test_strcmp(actual, expected) != 0, msg;
+}
+
+#[export]
+pub fun assert_null(ptr: &void, msg: string) <noret> {
+    blame ptr == null, msg;
+}
+
+#[export]
+pub fun assert_not_null(ptr: &void, msg: string) <noret> {
+    blame ptr != null, msg;
+}
+
+}

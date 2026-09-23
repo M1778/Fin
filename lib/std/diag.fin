@@ -1,0 +1,151 @@
+// Compiler diagnostics, severity levels, error tracking, and formatted source reporting.
+//
+// Matches modern compiler diagnostic reporting (Clang, Rust, Fin).
+// Provides severity levels, error counters, and formatted diagnostic messages
+// with source code snippets and caret underlining.
+
+namespace std {
+
+// Severity levels
+pub const DIAG_NOTE <int> = 0;
+pub const DIAG_WARNING <int> = 1;
+pub const DIAG_ERROR <int> = 2;
+pub const DIAG_REFUSAL <int> = 3;
+
+#[llvm_name="snprintf"]
+@define diag_snprintf(buf: string, size: ulong, fmt: string, ...) <int>;
+
+#[llvm_name="calloc"]
+@define diag_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="free"]
+@define diag_free(p: string) <noret>;
+
+#[llvm_name="memcpy"]
+@define diag_memcpy(dst: string, src: &char, count: ulong) <string>;
+
+#[export] pub fun diag_note() <int> { return 0; }
+#[export] pub fun diag_warning() <int> { return 1; }
+#[export] pub fun diag_error() <int> { return 2; }
+#[export] pub fun diag_refusal() <int> { return 3; }
+
+// Returns human-readable name for a diagnostic severity level.
+#[export]
+pub fun level_name(level: int) <string> {
+    if (level == 0) { return "note"; }
+    if (level == 1) { return "warning"; }
+    if (level == 2) { return "error"; }
+    if (level == 3) { return "refusal"; }
+    return "diagnostic";
+}
+
+#[export]
+pub struct Diagnostic {
+    pub:
+      level <int> = 2,
+      message <string> = "",
+      file <string> = "",
+      line <int> = 1,
+      col <int> = 1,
+      len <int> = 1,
+      hint <string> = "",
+}
+
+// Tracks diagnostic counts for a compiler run or compilation unit.
+#[export]
+pub struct DiagnosticBag {
+    pub:
+      error_count <int> = 0,
+      warn_count <int> = 0,
+      note_count <int> = 0,
+      refusal_count <int> = 0,
+
+      fun add_error(self: &Self) <noret> {
+          self.error_count++;
+      }
+
+      fun add_warning(self: &Self) <noret> {
+          self.warn_count++;
+      }
+
+      fun add_note(self: &Self) <noret> {
+          self.note_count++;
+      }
+
+      fun add_refusal(self: &Self) <noret> {
+          self.refusal_count++;
+      }
+
+      fun has_errors(self: &Self) <bool> {
+          return self.error_count > 0 || self.refusal_count > 0;
+      }
+
+      fun total(self: &Self) <int> {
+          return self.error_count + self.warn_count + self.note_count + self.refusal_count;
+      }
+
+      fun clear(self: &Self) <noret> {
+          self.error_count = 0;
+          self.warn_count = 0;
+          self.note_count = 0;
+          self.refusal_count = 0;
+      }
+}
+
+// Formats a single-line compiler diagnostic: `file:line:col: level: message`.
+#[export]
+pub fun format_simple(file: string, line: int, col: int, level: int, msg: string) <string> {
+    let buf <string> = diag_calloc(cast<ulong>(512), cast<ulong>(1));
+    let lvl <string> = level_name(level);
+    let written <int> = diag_snprintf(buf, cast<ulong>(512), "%s:%d:%d: %s: %s", file, line, col, lvl, msg);
+    return buf;
+}
+
+// Formats a compiler diagnostic with source snippet and caret underline:
+//
+// ```
+// error: unexpected token
+//   --> src/main.fin:10:5
+//    |
+// 10 |     let x = 1;
+//    |     ^^^
+// ```
+#[export]
+pub fun format_snippet(file: string, line: int, col: int, level: int, msg: string, source_line: string, span_len: int) <string> {
+    let buf <string> = diag_calloc(cast<ulong>(1024), cast<ulong>(1));
+    let lvl <string> = level_name(level);
+
+    let caret_buf <[char]> = new [char, 128]{};
+    for (let i <int> = 0; i < 127; i++) {
+        caret_buf[i] = ' ';
+    }
+    let col_idx <int> = col - 1;
+    if (col_idx < 0) { col_idx = 0; }
+    if (col_idx > 120) { col_idx = 120; }
+    let slen <int> = span_len;
+    if (slen < 1) { slen = 1; }
+    for (let j <int> = 0; j < slen && (col_idx + j) < 126; j++) {
+        caret_buf[col_idx + j] = '^';
+    }
+    let total_len <int> = col_idx + slen;
+    if (total_len > 127) { total_len = 127; }
+    caret_buf[total_len] = cast<char>(0);
+
+    let caret_str <string> = diag_calloc(cast<ulong>(128), cast<ulong>(1));
+    diag_memcpy(caret_str, &caret_buf[0], cast<ulong>(total_len));
+    delete caret_buf;
+
+    let written <int> = diag_snprintf(buf, cast<ulong>(1024),
+        "%s:%d:%d: %s: %s\n  --> %s:%d:%d\n   |\n%4d | %s\n   | %s\n",
+        file, line, col, lvl, msg, file, line, col, line, source_line, caret_str);
+    diag_free(caret_str);
+    return buf;
+}
+
+// Frees formatted diagnostic string buffers.
+#[export]
+pub fun free_diag_str(s: string) <noret> {
+    diag_free(s);
+}
+
+}

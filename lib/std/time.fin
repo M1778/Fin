@@ -1,0 +1,40 @@
+// Time: system clock and execution delays.
+//
+// Reaches standard C library runtime facilities for epoch timestamping
+// and synchronous sleeping.
+
+namespace std {
+
+#[export]
+#[llvm_name="time"]
+@define time(t: &void) <long>;
+
+#[export]
+#[llvm_name="sleep"]
+@define sleep(secs: uint) <uint>;
+
+#[export]
+#[llvm_name="usleep"]
+@define usleep(usecs: uint) <int>;
+
+#[export]
+pub fun now() <long> {
+    return time(null);
+  }
+
+#[export]
+pub fun sleep_sec(secs: uint) <noret> {
+    sleep(secs);
+  }
+
+#[export]
+pub fun sleep_ms(ms: uint) <noret> {
+    usleep(ms * cast<uint>(1000));
+  }
+
+#[export]
+pub fun diff_sec(start: long, end: long) <long> {
+    return end - start;
+  }
+
+}

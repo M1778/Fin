@@ -1,0 +1,174 @@
+// Double-ended queue (Deque), FIFO Queue, and LIFO Stack.
+//
+// Matches C++'s `<deque>`, `<queue>`, and `<stack>`, and Python's `collections.deque`.
+// Implemented via a dynamic circular buffer with amortized O(1) push/pop at both ends.
+
+namespace std {
+
+#[export]
+pub struct Deque<T> {
+    priv:
+      _arr <[T]>,
+      head <int> = 0,
+      tail <int> = 0,
+      filled <int> = 0,
+      cap <int> = 0,
+
+      priv fun ensure(self: &Self) <noret> {
+          if (self.cap > 0) { return; }
+          self._arr = new [T, 8]{};
+          self.cap = 8;
+          self.head = 0;
+          self.tail = 0;
+          self.filled = 0;
+      }
+
+      priv fun grow(self: &Self) <noret> {
+          let old_cap <int> = self.cap;
+          let new_cap <int> = old_cap * 2;
+          let fresh <[T]> = new [T, new_cap]{};
+          for (let i <int> = 0; i < self.filled; i++) {
+              let idx <int> = (self.head + i) % old_cap;
+              fresh[i] = self._arr[idx];
+          }
+          delete self._arr;
+          self._arr = fresh;
+          self.head = 0;
+          self.tail = self.filled;
+          self.cap = new_cap;
+      }
+
+    pub:
+      fun len(self: &Self) <int> {
+          return self.filled;
+      }
+
+      fun is_empty(self: &Self) <bool> {
+          return self.filled == 0;
+      }
+
+      fun capacity(self: &Self) <int> {
+          return self.cap;
+      }
+
+      fun push_back(self: &Self, item: T) <noret> {
+          self.ensure();
+          if (self.filled >= self.cap) {
+              self.grow();
+          }
+          self._arr[self.tail] = item;
+          self.tail = (self.tail + 1) % self.cap;
+          self.filled++;
+      }
+
+      fun push_front(self: &Self, item: T) <noret> {
+          self.ensure();
+          if (self.filled >= self.cap) {
+              self.grow();
+          }
+          self.head = (self.head - 1 + self.cap) % self.cap;
+          self._arr[self.head] = item;
+          self.filled++;
+      }
+
+      fun pop_front(self: &Self) <T> {
+          self.ensure();
+          blame self.filled > 0, "pop_front on empty deque";
+          let item <T> = self._arr[self.head];
+          self.head = (self.head + 1) % self.cap;
+          self.filled--;
+          return item;
+      }
+
+      fun pop_back(self: &Self) <T> {
+          self.ensure();
+          blame self.filled > 0, "pop_back on empty deque";
+          self.tail = (self.tail - 1 + self.cap) % self.cap;
+          let item <T> = self._arr[self.tail];
+          self.filled--;
+          return item;
+      }
+
+      fun peek_front(self: &Self) <T> {
+          self.ensure();
+          blame self.filled > 0, "peek_front on empty deque";
+          return self._arr[self.head];
+      }
+
+      fun peek_back(self: &Self) <T> {
+          self.ensure();
+          blame self.filled > 0, "peek_back on empty deque";
+          let idx <int> = (self.tail - 1 + self.cap) % self.cap;
+          return self._arr[idx];
+      }
+
+      fun clear(self: &Self) <noret> {
+          self.head = 0;
+          self.tail = 0;
+          self.filled = 0;
+      }
+}
+
+#[export]
+pub struct Queue<T> {
+    priv:
+      inner <Deque<T>>,
+
+    pub:
+      fun len(self: &Self) <int> {
+          return self.inner.len();
+      }
+
+      fun is_empty(self: &Self) <bool> {
+          return self.inner.is_empty();
+      }
+
+      fun push(self: &Self, item: T) <noret> {
+          self.inner.push_back(item);
+      }
+
+      fun pop(self: &Self) <T> {
+          return self.inner.pop_front();
+      }
+
+      fun peek(self: &Self) <T> {
+          return self.inner.peek_front();
+      }
+
+      fun clear(self: &Self) <noret> {
+          self.inner.clear();
+      }
+}
+
+#[export]
+pub struct Stack<T> {
+    priv:
+      inner <Deque<T>>,
+
+    pub:
+      fun len(self: &Self) <int> {
+          return self.inner.len();
+      }
+
+      fun is_empty(self: &Self) <bool> {
+          return self.inner.is_empty();
+      }
+
+      fun push(self: &Self, item: T) <noret> {
+          self.inner.push_back(item);
+      }
+
+      fun pop(self: &Self) <T> {
+          return self.inner.pop_back();
+      }
+
+      fun peek(self: &Self) <T> {
+          return self.inner.peek_back();
+      }
+
+      fun clear(self: &Self) <noret> {
+          self.inner.clear();
+      }
+}
+
+}

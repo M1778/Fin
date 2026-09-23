@@ -1,0 +1,55 @@
+// Random: pseudo-random number generation and seeding.
+//
+// Reaches standard C library rand/srand runtime facilities.
+
+namespace std {
+
+#[llvm_name="rand"]
+@define c_rand() <int>;
+
+#[llvm_name="srand"]
+@define c_srand(seed: uint) <noret>;
+
+#[llvm_name="time"]
+@define rand_time(t: &void) <long>;
+
+#[export]
+pub fun seed(val: uint) <noret> {
+    c_srand(val);
+}
+
+#[export]
+pub fun seed_now() <noret> {
+    let t <long> = rand_time(null);
+    c_srand(cast<uint>(t));
+}
+
+#[export]
+pub fun rand() <int> {
+    return c_rand();
+}
+
+#[export]
+pub fun random_int(min: int, max: int) <int> {
+    if (min >= max) { return min; }
+    let r <int> = c_rand();
+    if (r < 0) { r = -r; }
+    let range <int> = (max - min) + 1;
+    return min + (r % range);
+}
+
+#[export]
+pub fun random_float() <float> {
+    let r <int> = c_rand();
+    if (r < 0) { r = -r; }
+    let rem <int> = r % 1000000;
+    return cast<float>(rem) / 1000000.0;
+}
+
+#[export]
+pub fun random_bool() <bool> {
+    let r <int> = c_rand();
+    return (r % 2) != 0;
+}
+
+}

@@ -1,0 +1,318 @@
+// finc/driver.fin: Compiler driver pipeline and command-line execution.
+
+import { Token, tok_eof, token_name } from token::std;
+import { Scanner, new_scanner, free_scanner } from scanner::std;
+import { AstNode, free_ast, ast_fun_decl } from ast::std;
+import { format_stmt } from printer::std;
+import { read_to_string, write_string, remove_file, free_file_content } from fs::std;
+import { run_command } from process::std;
+import { Buffer, new_buffer, free_buffer, free_string } from buffer::std;
+
+import { Parser, new_parser, free_parser } from finc.parser;
+import { Checker, new_checker, free_checker } from finc.checker;
+import { generate_llvm_code } from finc.codegen;
+
+import { substr } from strings::std;
+
+#[llvm_name="dprintf"]
+@define err_dprintf(fd: int, fmt: string, ...) <int>;
+
+#[llvm_name="strcmp"]
+@define drv_strcmp(a: string, b: string) <int>;
+
+#[llvm_name="strlen"]
+@define drv_raw_strlen(s: string) <ulong>;
+
+priv fun drv_strlen(s: string) <ulong> {
+    if (s == null) { return cast<ulong>(0); }
+    return drv_raw_strlen(s);
+}
+
+priv fun drv_str_eq(a: string, b: string) <bool> {
+    if (a == null && b == null) { return true; }
+    if (a == null || b == null) { return false; }
+    return drv_strcmp(a, b) == 0;
+}
+
+priv fun resolve_module_spec(spec: string) <string> {
+    if (spec == null) { return ""; }
+    if (drv_str_eq(spec, "argparse::std")) { return "lib/std/argparse.fin"; }
+    if (drv_str_eq(spec, "collection::std")) { return ""; }
+    if (drv_str_eq(spec, "operators::std")) { return ""; }
+    if (drv_str_eq(spec, "error::std")) { return ""; }
+    if (drv_str_eq(spec, "token::std")) { return "lib/std/token.fin"; }
+    if (drv_str_eq(spec, "scanner::std")) { return "lib/std/scanner.fin"; }
+    if (drv_str_eq(spec, "parse::std")) { return "lib/std/parse.fin"; }
+    if (drv_str_eq(spec, "ast::std")) { return "lib/std/ast.fin"; }
+    if (drv_str_eq(spec, "diag::std")) { return "lib/std/diag.fin"; }
+    if (drv_str_eq(spec, "scope::std")) { return "lib/std/scope.fin"; }
+    if (drv_str_eq(spec, "buffer::std")) { return "lib/std/buffer.fin"; }
+    if (drv_str_eq(spec, "fs::std")) { return "lib/std/fs.fin"; }
+    if (drv_str_eq(spec, "strings::std")) { return "lib/std/strings.fin"; }
+    if (drv_str_eq(spec, "printer::std")) { return "lib/std/printer.fin"; }
+    if (drv_str_eq(spec, "process::std")) { return "lib/std/process.fin"; }
+    if (drv_str_eq(spec, "hashmap::std")) { return "lib/std/hashmap.fin"; }
+    if (drv_str_eq(spec, "typesys::std")) { return "lib/std/typesys.fin"; }
+    if (drv_str_eq(spec, "finc.driver") || drv_str_eq(spec, "finc::driver")) { return "finc/driver.fin"; }
+    if (drv_str_eq(spec, "finc.parser") || drv_str_eq(spec, "finc::parser")) { return "finc/parser.fin"; }
+    if (drv_str_eq(spec, "finc.checker") || drv_str_eq(spec, "finc::checker")) { return "finc/checker.fin"; }
+    if (drv_str_eq(spec, "finc.codegen") || drv_str_eq(spec, "finc::codegen")) { return "finc/codegen.fin"; }
+    if (drv_str_eq(spec, "finc.llvm") || drv_str_eq(spec, "finc::llvm")) { return "finc/llvm.fin"; }
+
+    let slen <ulong> = drv_strlen(spec);
+    if (slen > cast<ulong>(5)) {
+        let suf <string> = substr(spec, cast<int>(slen - cast<ulong>(5)), 5);
+        if (drv_str_eq(suf, "::std")) {
+            let mod_name <string> = substr(spec, 0, cast<int>(slen - cast<ulong>(5)));
+            let b <Buffer> = new_buffer(64);
+            b.write_string("lib/std/");
+            b.write_string(mod_name);
+            b.write_string(".fin");
+            let res <string> = b.to_string();
+            free_buffer(b);
+            return res;
+        }
+    }
+    return spec;
+}
+
+pub fun print_version() <int> {
+    printf("finc 0.4.0 (contract 2)\n");
+    return 0;
+}
+
+pub fun print_help() <int> {
+    printf("Usage: finc <file.fin> [options]\n");
+    printf("Options:\n");
+    printf("  -o <path>              Build an executable at <path>; without it finc only checks\n");
+    printf("  -c                     Compile to an object file and do not link\n");
+    printf("  --emit-c               Emit C source code instead of compiling\n");
+    printf("  --dump-tokens          Print the scanned tokens\n");
+    printf("  --dump-ast             Print the parsed AST\n");
+    printf("  --version              Print version and machine contract version\n");
+    printf("  --help                 Show this message\n");
+    printf("\nExit codes: 0 success, 1 diagnostics, 2 usage, 3 internal error.\n");
+    return 0;
+}
+
+pub fun compile_source_file(
+    filename: string,
+    out_path: string,
+    is_compile_only: bool,
+    dump_tokens: bool,
+    dump_ast: bool,
+    emit_c_only: bool
+) <int> {
+    // 1. Read source code
+    let source? <string> = read_to_string(filename);
+    if (source == null) {
+        err_dprintf(2, "finc: error: could not read input file '%s'\n", filename);
+        return 2;
+    }
+
+    // 2. Lexical analysis / Scanning
+    let sc <Scanner> = new_scanner(source?);
+    let tokens <[Token]> = new [Token, 65536]{};
+    let tok_count <int> = 0;
+
+    let t <Token> = sc.scan_token();
+    while (t.kind != tok_eof() && tok_count < 65535) {
+        tokens[tok_count] = t;
+        tok_count++;
+        t = sc.scan_token();
+    }
+    tokens[tok_count] = t; // EOF token
+    tok_count++;
+    free_scanner(sc);
+
+    // Option: --dump-tokens
+    if (dump_tokens) {
+        for (let i <int> = 0; i < tok_count; i++) {
+            let tk <Token> = tokens[i];
+            let name <string> = token_name(tk.kind);
+            printf("%d:%d %s: '%s'\n", tk.line, tk.col, name, tk.text);
+        }
+        delete tokens;
+        free_file_content(source);
+        return 0;
+    }
+
+    // 3. Syntactic parsing
+    let p <Parser> = new_parser(tokens, tok_count, filename, source?);
+    let root <&AstNode> = p.parse_program();
+
+    if (p.had_error) {
+        err_dprintf(2, "finc: %d error(s) emitted during parsing\n", p.diag.error_count);
+        delete tokens;
+        free_parser(p);
+        free_ast(root);
+        free_file_content(source);
+        return 1;
+    }
+
+    // Load imported modules recursively
+    let loaded_files <[string]> = new [string, 64]{};
+    let loaded_count <int> = 0;
+    loaded_files[0] = filename;
+    loaded_count = 1;
+
+    let cur_decl <&AstNode> = root.left;
+    while (cur_decl != null) {
+        if (cur_decl.kind == 6) {
+            let mod_path <string> = resolve_module_spec(cur_decl.name);
+            if (!drv_str_eq(mod_path, "")) {
+                let already_loaded <bool> = false;
+                for (let li <int> = 0; li < loaded_count; li++) {
+                    if (drv_str_eq(loaded_files[li], mod_path)) {
+                        already_loaded = true;
+                        break;
+                    }
+                }
+                if (!already_loaded && loaded_count < 64) {
+                    loaded_files[loaded_count] = mod_path;
+                    loaded_count++;
+
+                let mod_src? <string> = read_to_string(mod_path);
+                if (mod_src != null) {
+                    let mod_sc <Scanner> = new_scanner(mod_src?);
+                    let mod_toks <[Token]> = new [Token, 65536]{};
+                    let mod_tc <int> = 0;
+                    let mt <Token> = mod_sc.scan_token();
+                    while (mt.kind != tok_eof() && mod_tc < 65535) {
+                        mod_toks[mod_tc] = mt;
+                        mod_tc++;
+                        mt = mod_sc.scan_token();
+                    }
+                    mod_toks[mod_tc] = mt;
+                    mod_tc++;
+                    free_scanner(mod_sc);
+
+                    let mod_p <Parser> = new_parser(mod_toks, mod_tc, mod_path, mod_src?);
+                    let mod_root <&AstNode> = mod_p.parse_program();
+
+                    let r_end <&AstNode> = root.left;
+                    while (r_end != null && r_end.right != null) {
+                        r_end = r_end.right;
+                    }
+                    if (r_end == null) {
+                        root.left = mod_root.left;
+                    } else {
+                        r_end.right = mod_root.left;
+                    }
+
+                    delete mod_toks;
+                    free_parser(mod_p);
+                    free_file_content(mod_src);
+                }
+            }
+        }
+        }
+        cur_decl = cur_decl.right;
+    }
+    delete loaded_files;
+
+    // Option: --dump-ast
+    if (dump_ast) {
+        let decl <&AstNode> = root.left;
+        while (decl != null) {
+            if (decl.kind == ast_fun_decl()) {
+                printf("fun %s() <%s> {\n", decl.name, decl.type_annotation);
+                let body_node <&AstNode> = decl.left;
+                if (body_node != null) {
+                    let cur_stmt <&AstNode> = body_node.left;
+                    while (cur_stmt != null) {
+                        let actual_stmt <&AstNode> = cur_stmt.left;
+                        if (actual_stmt == null) { actual_stmt = cur_stmt; }
+                        let stmt_str <string> = format_stmt(actual_stmt);
+                        printf("    %s", stmt_str);
+                        cur_stmt = cur_stmt.right;
+                    }
+                }
+                printf("}\n");
+            } else {
+                let decl_str <string> = format_stmt(decl);
+                printf("%s", decl_str);
+            }
+            decl = decl.right;
+        }
+        delete tokens;
+        free_parser(p);
+        free_ast(root);
+        free_file_content(source);
+        return 0;
+    }
+
+    // 4. Semantic analysis & type checking
+    let chk <Checker> = new_checker(filename);
+    let check_ok <bool> = chk.check_program(root);
+    if (!check_ok) {
+        err_dprintf(2, "finc: %d semantic error(s) found\n", chk.diag.error_count);
+        delete tokens;
+        free_parser(p);
+        free_checker(chk);
+        free_ast(root);
+        free_file_content(source);
+        return 1;
+    }
+    free_checker(chk);
+
+    // If check-only mode (no -o, no -c, no --emit-c), clean up and exit 0
+    if (drv_str_eq(out_path, "") && !is_compile_only) {
+        delete tokens;
+        free_parser(p);
+        free_ast(root);
+        free_file_content(source);
+        return 0;
+    }
+
+    // 5. Pure LLVM IR Code Generation
+    let target_o <string> = out_path;
+    let is_temp_o <bool> = false;
+    if (!is_compile_only) {
+        target_o = "/tmp/finc_stage_tmp.o";
+        is_temp_o = true;
+    }
+    if (drv_str_eq(target_o, "")) {
+        target_o = "a.o";
+    }
+
+    let ok_gen <bool> = generate_llvm_code(root, target_o, 0);
+
+    delete tokens;
+    free_parser(p);
+    free_ast(root);
+    free_file_content(source);
+
+    if (!ok_gen) {
+        err_dprintf(2, "finc: error: LLVM code generation failed\n");
+        return 1;
+    }
+
+    if (is_compile_only) {
+        return 0;
+    }
+
+    // 6. Link object file into executable
+    let target_bin <string> = out_path;
+    if (drv_str_eq(target_bin, "")) {
+        target_bin = "a.out";
+    }
+
+    let b_bin <Buffer> = new_buffer(128);
+    b_bin.write_string("cc -no-pie /tmp/finc_stage_tmp.o -o ");
+    b_bin.write_string(target_bin);
+    b_bin.write_string(" -Wl,--as-needed -lLLVM-22 -lm");
+    let bin_cmd_str <string> = b_bin.to_string();
+    let status <int> = run_command(bin_cmd_str);
+    free_string(bin_cmd_str);
+    free_buffer(b_bin);
+    if (is_temp_o) {
+        remove_file("/tmp/finc_stage_tmp.o");
+    }
+    if (status != 0) {
+        err_dprintf(2, "finc: linker failed with status %d\n", status);
+        return 1;
+    }
+
+    return 0;
+}

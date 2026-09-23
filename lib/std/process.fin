@@ -1,0 +1,112 @@
+// Process: process spawning, command execution, and subprocess output capture.
+//
+// Essential for compiler self-hosting: allows compiling emitted C or assembly files,
+// linking object files, and orchestrating compiler build pipelines.
+
+namespace std {
+
+#[export]
+#[llvm_name="system"]
+@define proc_system(command: string) <int>;
+
+#[export]
+#[llvm_name="popen"]
+@define proc_popen(command: string, mode: string) <&void>;
+
+#[export]
+#[llvm_name="pclose"]
+@define proc_pclose(stream: &void) <int>;
+
+#[export]
+#[llvm_name="fgets"]
+@define proc_fgets(buf: &char, size: int, stream: &void) <&char>;
+
+#[llvm_name="calloc"]
+@define proc_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="free"]
+@define proc_free(ptr: string) <noret>;
+
+#[llvm_name="memcpy"]
+@define proc_memcpy(dst: string, src: &char, count: ulong) <string>;
+
+#[llvm_name="strlen"]
+@define proc_strlen(s: string) <ulong>;
+
+#[export]
+pub struct ProcessResult {
+    pub:
+      exit_code <int> = 0,
+      output <string> = "",
+}
+
+// Executes a shell command synchronously and returns its exit status code.
+#[export]
+pub fun run_command(command: string) <int> {
+    return proc_system(command);
+}
+
+// Executes a command and captures its standard output.
+#[export]
+pub fun exec_command(command: string) <ProcessResult> {
+    let pipe <&void> = proc_popen(command, "r");
+    if (pipe == null) {
+        let empty_out <string> = proc_calloc(cast<ulong>(1), cast<ulong>(1));
+        return ProcessResult { exit_code: -1, output: empty_out };
+    }
+    let cap <int> = 1024;
+    let total_len <int> = 0;
+    let out_buf <[char]> = new [char, cap]{};
+    let chunk <[char]> = new [char, 256]{};
+
+    while (proc_fgets(&chunk[0], 256, pipe) != null) {
+        let chunk_len <int> = 0;
+        while (chunk_len < 255 && chunk[chunk_len] != cast<char>(0)) {
+            chunk_len++;
+        }
+        if (total_len + chunk_len + 2 >= cap) {
+            let next_cap <int> = cap * 2 + chunk_len + 32;
+            let next_buf <[char]> = new [char, next_cap]{};
+            for (let i <int> = 0; i < total_len; i++) {
+                next_buf[i] = out_buf[i];
+            }
+            delete out_buf;
+            out_buf = next_buf;
+            cap = next_cap;
+        }
+        for (let j <int> = 0; j < chunk_len; j++) {
+            out_buf[total_len + j] = chunk[j];
+        }
+        total_len = total_len + chunk_len;
+        out_buf[total_len] = cast<char>(0);
+    }
+    delete chunk;
+    let status <int> = proc_pclose(pipe);
+
+    let res_str <string> = proc_calloc(cast<ulong>(total_len + 1), cast<ulong>(1));
+    if (total_len > 0) {
+        proc_memcpy(res_str, &out_buf[0], cast<ulong>(total_len));
+    }
+    delete out_buf;
+
+    return ProcessResult {
+        exit_code: status,
+        output: res_str
+    };
+}
+
+// Checks whether the process finished with a successful exit code (0).
+#[export]
+pub fun is_success(res: ProcessResult) <bool> {
+    return res.exit_code == 0;
+}
+
+// Releases the memory allocated for the process output string.
+#[export]
+pub fun free_process_result(res: ProcessResult) <noret> {
+    if (res.output != null) {
+        proc_free(res.output);
+    }
+}
+
+}

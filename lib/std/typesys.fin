@@ -1,0 +1,178 @@
+// TypeSys: semantic type representation, type checking, and assignability for Fin compilers.
+//
+// Models primitive scalar types, pointer types, dynamic and static array types,
+// and user-defined struct/interface types with structural and nominal equivalence.
+
+namespace std {
+
+#[llvm_name="strcmp"]
+@define ty_strcmp(a: string, b: string) <int>;
+
+#[llvm_name="calloc"]
+@define ty_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="free"]
+@define ty_free(ptr: string) <noret>;
+
+#[llvm_name="snprintf"]
+@define ty_snprintf(buf: string, size: ulong, fmt: string) <int>;
+
+priv fun str_eq(a: string, b: string) <bool> {
+    if (a == null && b == null) { return true; }
+    if (a == null || b == null) { return false; }
+    return ty_strcmp(a, b) == 0;
+}
+
+// Type Kinds
+#[export] pub fun type_kind_void() <int> { return 1; }
+#[export] pub fun type_kind_bool() <int> { return 2; }
+#[export] pub fun type_kind_char() <int> { return 3; }
+#[export] pub fun type_kind_int() <int> { return 4; }
+#[export] pub fun type_kind_int64() <int> { return 5; }
+#[export] pub fun type_kind_uint() <int> { return 6; }
+#[export] pub fun type_kind_uint64() <int> { return 7; }
+#[export] pub fun type_kind_float() <int> { return 8; }
+#[export] pub fun type_kind_double() <int> { return 9; }
+#[export] pub fun type_kind_string() <int> { return 10; }
+#[export] pub fun type_kind_pointer() <int> { return 11; }
+#[export] pub fun type_kind_dyn_array() <int> { return 12; }
+#[export] pub fun type_kind_stat_array() <int> { return 13; }
+#[export] pub fun type_kind_struct() <int> { return 14; }
+#[export] pub fun type_kind_interface() <int> { return 15; }
+#[export] pub fun type_kind_enum() <int> { return 16; }
+#[export] pub fun type_kind_function() <int> { return 17; }
+#[export] pub fun type_kind_error() <int> { return 18; }
+
+#[export]
+pub struct Type {
+    pub:
+      kind <int> = 0,
+      name <string> = "",
+      size_bytes <int> = 0,
+      elem <&Type> = null,
+      is_const <bool> = false,
+      is_nullable <bool> = false,
+
+    pub:
+      fun is_numeric(self: &Self) <bool> {
+          return self.kind == 4 || self.kind == 5 || self.kind == 6 ||
+                 self.kind == 7 || self.kind == 8 || self.kind == 9;
+      }
+
+      fun is_integer(self: &Self) <bool> {
+          return self.kind == 3 || self.kind == 4 || self.kind == 5 ||
+                 self.kind == 6 || self.kind == 7;
+      }
+
+      fun is_pointer(self: &Self) <bool> {
+          return self.kind == 11;
+      }
+
+      fun is_array(self: &Self) <bool> {
+          return self.kind == 12 || self.kind == 13;
+      }
+
+      fun is_composite(self: &Self) <bool> {
+          return self.kind == 14 || self.kind == 15 || self.kind == 16;
+      }
+}
+
+// Structural/nominal equality of two semantic types.
+#[export]
+pub fun type_equals(a: &Type, b: &Type) <bool> {
+    if (a == null && b == null) { return true; }
+    if (a == null || b == null) { return false; }
+    if (a.kind != b.kind) { return false; }
+    if (a.kind == 11 || a.kind == 12) {
+        return type_equals(a.elem, b.elem);
+    }
+    return str_eq(a.name, b.name);
+}
+
+// Determines if `src` is assignable to `dst`.
+#[export]
+pub fun is_assignable(dst: &Type, src: &Type) <bool> {
+    if (dst == null || src == null) { return false; }
+    if (type_equals(dst, src)) { return true; }
+    // Widening rules
+    if (dst.kind == 5 && src.kind == 4) { return true; } // int -> int64
+    if (dst.kind == 7 && src.kind == 6) { return true; } // uint -> uint64
+    if (dst.kind == 9 && src.kind == 8) { return true; } // float -> double
+    if (dst.kind == 9 && src.kind == 4) { return true; } // int -> double
+    // Nullable assignment
+    if (dst.is_nullable && (src.kind == 11 || src.kind == 10)) { return true; }
+    return false;
+}
+
+// Factory helper for primitive types.
+#[export]
+pub fun make_primitive_type(kind: int, name: string, size_bytes: int) <&Type> {
+    let t <&Type> = new Type{};
+    t.kind = kind;
+    t.name = name;
+    t.size_bytes = size_bytes;
+    t.elem = null;
+    t.is_const = false;
+    t.is_nullable = false;
+    return t;
+}
+
+// Factory helper for pointer types (`&T`).
+#[export]
+pub fun make_pointer_type(pointee: &Type) <&Type> {
+    let t <&Type> = new Type{};
+    t.kind = type_kind_pointer();
+    t.name = "&";
+    t.size_bytes = 8;
+    t.elem = pointee;
+    t.is_const = false;
+    t.is_nullable = false;
+    return t;
+}
+
+// Factory helper for dynamic array types (`[T]`).
+#[export]
+pub fun make_dyn_array_type(elem: &Type) <&Type> {
+    let t <&Type> = new Type{};
+    t.kind = type_kind_dyn_array();
+    t.name = "[]";
+    t.size_bytes = 16; // pointer + length
+    t.elem = elem;
+    t.is_const = false;
+    t.is_nullable = false;
+    return t;
+}
+
+// Factory helper for user struct types.
+#[export]
+pub fun make_struct_type(name: string, size_bytes: int) <&Type> {
+    let t <&Type> = new Type{};
+    t.kind = type_kind_struct();
+    t.name = name;
+    t.size_bytes = size_bytes;
+    t.elem = null;
+    t.is_const = false;
+    t.is_nullable = false;
+    return t;
+}
+
+// Deallocates a Type.
+#[export]
+pub fun free_type(t: &Type) <noret> {
+    if (t != null) {
+        delete t;
+    }
+}
+
+// Common primitive singletons
+#[export] pub fun type_void() <&Type> { return make_primitive_type(1, "void", 0); }
+#[export] pub fun type_bool() <&Type> { return make_primitive_type(2, "bool", 1); }
+#[export] pub fun type_char() <&Type> { return make_primitive_type(3, "char", 1); }
+#[export] pub fun type_int() <&Type> { return make_primitive_type(4, "int", 4); }
+#[export] pub fun type_int64() <&Type> { return make_primitive_type(5, "int64", 8); }
+#[export] pub fun type_uint() <&Type> { return make_primitive_type(6, "uint", 4); }
+#[export] pub fun type_float() <&Type> { return make_primitive_type(8, "float", 4); }
+#[export] pub fun type_double() <&Type> { return make_primitive_type(9, "double", 8); }
+#[export] pub fun type_string() <&Type> { return make_primitive_type(10, "string", 8); }
+
+}

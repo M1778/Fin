@@ -302,16 +302,25 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
     if (auto* nullable = t.as<NullableType>()) {
         if (!nullable->inner) return {{}, refuse(t, "it wraps nothing")};
         // `null` is the null pointer, so a nullable pointer needs no discriminant
-        // and is the same eight bytes. Anything else needs somewhere to put
-        // "absent" -- a flag byte, a reserved bit pattern, a separate word -- and
-        // which of those Fin picks is not decided.
+        // and is the same eight bytes.
         auto inner = layoutOf(nullable->inner);
         if (!inner.ok()) return inner;
         const bool pointerShaped = nullable->inner->as<PointerType>() != nullptr;
         if (!pointerShaped) {
-            return {{}, refuse(t, "where a nullable value keeps its 'absent' bit is unruled; "
-                                  "only a nullable pointer has an answer today, because "
-                                  "`null` is the null pointer")};
+            // ADR 0040: A nullable value type (`int?`, `float?`, `struct?`) lowers
+            // as a tagged aggregate `{ T, bool }`: a payload of type T paired with
+            // a boolean presence flag (`has_value`).
+            TypeLayout out;
+            const uint64_t payloadSize = inner.layout.size;
+            const uint64_t payloadAlign = std::max<uint64_t>(1, inner.layout.align);
+            const uint64_t boolSize = 1;
+            const uint64_t boolAlign = 1;
+            uint64_t offset = alignUp(payloadSize, boolAlign);
+            offset += boolSize;
+            out.align = std::max<uint64_t>(payloadAlign, boolAlign);
+            out.size = alignUp(offset, out.align);
+            out.pointers = inner.layout.pointers;
+            return {out, ""};
         }
         return inner;
     }
@@ -452,8 +461,53 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
                               "implements it has a layout, the interface does not")};
     }
     if (st->is_enum) {
-        return {{}, refuse(t, "an enum's tag width and the union of its payloads are "
-                              "undecided")};
+        // ADR 0041: Enums are tagged unions with 32-bit discriminants.
+        // A fieldless enum is a 32-bit integer tag.
+        // An enum with payloads is { i32 tag, [MaxPayloadSize x i8] payload }.
+        ScalarInfo tagInfo{ScalarKind::Int, 32, true};
+        uint64_t tagSize = sizeOfScalar(tagInfo, target_);
+        uint64_t tagAlign = alignOfScalar(tagInfo, target_);
+
+        bool hasPayload = false;
+        uint64_t maxPayloadSize = 0;
+        uint64_t maxPayloadAlign = 1;
+
+        for (const auto& kv : st->enumerators) {
+            if (auto fn = kv.second->as<FunctionType>()) {
+                if (!fn->param_types.empty()) {
+                    hasPayload = true;
+                    uint64_t memberOffset = 0;
+                    uint64_t memberMaxAlign = 1;
+                     
+                    for (const auto& pt : fn->param_types) {
+                        auto pl = layoutOf(pt);
+                        if (!pl.ok()) return {{}, pl.refusal};
+                        if (!pl.layout.pointers.empty()) return {{}, refuse(t, "one of its variants holds a pointer, and how a collector reads a discriminant to safely trace a tagged union is undecided")};
+                        memberOffset = alignUp(memberOffset, pl.layout.align);
+                        memberOffset += pl.layout.size;
+                        memberMaxAlign = std::max(memberMaxAlign, pl.layout.align);
+                    }
+                    uint64_t memberPayloadSize = alignUp(memberOffset, memberMaxAlign);
+                    maxPayloadSize = std::max(maxPayloadSize, memberPayloadSize);
+                    maxPayloadAlign = std::max(maxPayloadAlign, memberMaxAlign);
+                }
+            }
+        }
+        if (!hasPayload) {
+            TypeLayout out;
+            out.size = tagSize;
+            out.align = tagAlign;
+            return {out, ""};
+        }
+
+        uint64_t payloadStart = alignUp(tagSize, maxPayloadAlign);
+        uint64_t totalAlign = std::max(tagAlign, maxPayloadAlign);
+        uint64_t totalSize = alignUp(payloadStart + maxPayloadSize, totalAlign);
+
+        TypeLayout out;
+        out.size = totalSize;
+        out.align = totalAlign;
+        return {out, ""};
     }
 
     // A generic struct that was never instantiated. Caught by its fields

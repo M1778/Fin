@@ -1,0 +1,184 @@
+// Buffer: dynamic heap-allocated byte buffer and string builder for high-performance
+// string concatenation, source code emission, and token/diagnostic formatting.
+//
+// Every returned `string` is owned by the caller and allocated via `calloc`.
+// The underlying `[char]` storage expands dynamically by doubling.
+
+namespace std {
+
+#[llvm_name="strlen"]
+@define buf_strlen(s: string) <ulong>;
+
+#[llvm_name="calloc"]
+@define buf_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="free"]
+@define buf_free(ptr: string) <noret>;
+
+#[llvm_name="memcpy"]
+@define buf_memcpy(dst: string, src: &char, count: ulong) <string>;
+
+#[llvm_name="memmove"]
+@define buf_memmove(dst: &char, src: string, count: ulong) <&char>;
+
+#[export]
+pub struct Buffer {
+    pub:
+      _chars <[char]>,
+      _len <int> = 0,
+      _cap <int> = 0,
+
+    pub:
+      fun length(self: &Self) <int> {
+          return self._len;
+      }
+
+      fun capacity(self: &Self) <int> {
+          return self._cap;
+      }
+
+      fun is_empty(self: &Self) <bool> {
+          return self._len == 0;
+      }
+
+      fun char_at(self: &Self, index: int) <char> {
+          blame index >= 0 && index < self._len, "Buffer.char_at: index out of bounds";
+          return self._chars[index];
+      }
+
+      fun ensure_capacity(self: &Self, needed: int) <noret> {
+          if (needed <= self._cap) { return; }
+          let new_cap <int> = self._cap * 2;
+          if (new_cap < needed) {
+              new_cap = needed + 32;
+          }
+          let next_buf <[char]> = new [char, new_cap]{};
+          for (let i <int> = 0; i < self._len; i++) {
+              next_buf[i] = self._chars[i];
+          }
+          next_buf[self._len] = cast<char>(0);
+          delete self._chars;
+          self._chars = next_buf;
+          self._cap = new_cap;
+      }
+
+      fun write_char(self: &Self, c: char) <noret> {
+          self.ensure_capacity(self._len + 2);
+          self._chars[self._len] = c;
+          self._len++;
+          self._chars[self._len] = cast<char>(0);
+      }
+
+      fun write_string(self: &Self, s: string) <noret> {
+          let slen <int> = cast<int>(buf_strlen(s));
+          if (slen <= 0) { return; }
+          self.ensure_capacity(self._len + slen + 2);
+          buf_memmove(&self._chars[self._len], s, cast<ulong>(slen));
+          self._len = self._len + slen;
+          self._chars[self._len] = cast<char>(0);
+      }
+
+      fun write_int(self: &Self, n: int) <noret> {
+          if (n == 0) {
+              self.write_char('0');
+              return;
+          }
+          let val <int> = n;
+          if (val < 0) {
+              self.write_char('-');
+              val = -val;
+              if (val < 0) {
+                  // Overflow for -2147483648
+                  self.write_string("2147483648");
+                  return;
+              }
+          }
+          let digits <[char]> = new [char, 16]{};
+          let count <int> = 0;
+          while (val > 0) {
+              let rem <int> = val % 10;
+              digits[count] = cast<char>(cast<int>('0') + rem);
+              count++;
+              val = val / 10;
+          }
+          for (let i <int> = count - 1; i >= 0; i--) {
+              self.write_char(digits[i]);
+          }
+          delete digits;
+      }
+
+      fun write_line(self: &Self, s: string) <noret> {
+          self.write_string(s);
+          self.write_char('\n');
+      }
+
+      fun write_repeat(self: &Self, c: char, count: int) <noret> {
+          if (count <= 0) { return; }
+          self.ensure_capacity(self._len + count + 2);
+          for (let i <int> = 0; i < count; i++) {
+              self._chars[self._len + i] = c;
+          }
+          self._len = self._len + count;
+          self._chars[self._len] = cast<char>(0);
+      }
+
+      fun truncate(self: &Self, new_len: int) <noret> {
+          if (new_len < 0) {
+              self._len = 0;
+          } else if (new_len < self._len) {
+              self._len = new_len;
+          }
+          if (self._cap > self._len) {
+              self._chars[self._len] = cast<char>(0);
+          }
+      }
+
+      fun clear(self: &Self) <noret> {
+          self._len = 0;
+          if (self._cap > 0) {
+              self._chars[0] = cast<char>(0);
+          }
+      }
+
+      fun to_string(self: &Self) <string> {
+          let out <string> = buf_calloc(cast<ulong>(self._len + 1), cast<ulong>(1));
+          if (self._len > 0) {
+              buf_memcpy(out, &self._chars[0], cast<ulong>(self._len));
+          }
+          return out;
+      }
+}
+
+// Allocates a new Buffer with the requested initial capacity.
+#[export]
+pub fun new_buffer(initial_cap: int) <Buffer> {
+    let cap <int> = initial_cap;
+    if (cap < 16) { cap = 16; }
+    let chars <[char]> = new [char, cap]{};
+    chars[0] = cast<char>(0);
+    return Buffer {
+        _chars: chars,
+        _len: 0,
+        _cap: cap
+    };
+}
+
+// Alias for creating a string builder.
+#[export]
+pub fun new_string_builder(initial_cap: int) <Buffer> {
+    return new_buffer(initial_cap);
+}
+
+// Releases the memory held by the Buffer.
+#[export]
+pub fun free_buffer(b: Buffer) <noret> {
+    delete b._chars;
+}
+
+// Releases a string returned by Buffer.to_string().
+#[export]
+pub fun free_string(s: string) <noret> {
+    buf_free(s);
+}
+
+}

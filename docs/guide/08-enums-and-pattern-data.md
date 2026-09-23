@@ -205,10 +205,10 @@ Fin has no `match` statement. It is on the roadmap and it will be keyword-introd
 the reason chapter 4 gives: a brace at statement start already means a block. Until it
 arrives, comparison and `getkeyid` are how an enum is discriminated.
 
-Payloads type-check but are not yet lowered to machine code, so an enum with a payloaded
-member will not build with `-o`, reporting `codegen: a payload on enum member 'Color::RGB' is
-not lowered yet`. A *generic* enum is refused the same way (`a generic enum 'Result' is not
-lowered yet`) whether or not any member carries a payload. Plain, non-generic enums build and
-run.
+Enums with payloads and generic enums are fully lowered to machine code as tagged unions
+(ADR 0041), represented as a 32-bit tag discriminant and a max-payload byte buffer
+`{ i32, [MaxPayload x i8] }`. Member constructors, positional `.N` reads, reflection
+via `getkeyid(e)`, and member comparisons (`e == Ok(T)`, ADR 0037) compile and run in
+binaries produced with `-o`.
 
 Next: [arrays and pointers](09-arrays-and-pointers.md).

@@ -383,17 +383,24 @@ function Fin declares:
 ```fin
 @getenumkeyid(value)
 @implements(struct_, iface)
+@defined("name")
 @Alloc(size)
+@Free(ptr)
 ```
 
-`@special` declares one. These belong to a compile-time API layer that is specified in
-`docs/compiler-api.md` and not yet built: none of the operations above resolves today, so a
-call to one is a diagnostic. `@defined("name")`, which would let a file ask whether a symbol
-exists before declaring it, is in the same state.
+`@special` declares a special function. Core compile-time builtins and low-level memory
+intrinsics are implemented per ADR 0042:
+- `@implements(struct_, iface)` queries at compile time whether a type or value satisfies an
+  interface, resolving to a static boolean constant.
+- `@defined("name")` checks at compile time whether a symbol exists in scope, enabling static
+  conditional compilation and dead branch elimination.
+- `@Alloc(size)` and `@Free(ptr)` provide raw unmanaged memory allocation and deallocation
+  lowering directly to runtime memory primitives in codegen (used in `tests/samples/stdlib/memory.fin`).
+- `@getenumkeyid(value)` queries the active discriminant key of an enum value.
 
-`@implements` has two unrelated uses, which is worth flagging: `@implements Type::name =
-<lambda>;` is the member-attachment declaration from chapters 7 and 8 and it works, while
-`@implements(t, i)` as an expression is the unbuilt compile-time predicate.
+Note the two uses of `@implements`: `@implements Type::name = <lambda>;` is the member-attachment
+declaration from chapters 7 and 8, while `@implements(t, i)` as an expression is the compile-time
+predicate.
 
 ## Injected code, when it arrives
 

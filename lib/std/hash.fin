@@ -1,0 +1,154 @@
+// Hash algorithms: CRC32, FNV-1a, DJB2, and SDBM.
+//
+// Provides non-cryptographic checksums and hash algorithms for data integrity,
+// hash tables, and fast indexing, matching Python's `hashlib` and `zlib.crc32`.
+
+namespace std {
+
+#[llvm_name="strlen"]
+@define hash_strlen(s: string) <ulong>;
+
+#[llvm_name="memcpy"]
+@define hash_memcpy(dst: &char, src: string, count: ulong) <&char>;
+
+priv fun to_bytes(s: string) <[char]> {
+    let n <ulong> = hash_strlen(s);
+    let buf <[char]> = new [char, cast<int>(n) + 1]{};
+    hash_memcpy(&buf[0], s, n);
+    buf[cast<int>(n)] = '\0';
+    return buf;
+}
+
+priv fun char_to_byte(c: char) <uint> {
+    let val <int> = cast<int>(c);
+    if (val < 0) { val = val + 256; }
+    return cast<uint>(val % 256);
+}
+
+// 8-bit bitwise XOR computed via arithmetic, as expression-level `^` is not in Fin grammar.
+priv fun xor8(a: uint, b: uint) <uint> {
+    let res <uint> = cast<uint>(0);
+    let p <uint> = cast<uint>(1);
+    let x <uint> = a;
+    let y <uint> = b;
+    for (let k <int> = 0; k < 8; k++) {
+        let bit <uint> = (x % cast<uint>(2) + y % cast<uint>(2)) % cast<uint>(2);
+        if (bit == cast<uint>(1)) {
+            res = res + p;
+        }
+        p = p * cast<uint>(2);
+        x = x / cast<uint>(2);
+        y = y / cast<uint>(2);
+    }
+    return res;
+}
+
+// 32-bit bitwise XOR computed via arithmetic.
+priv fun xor32(a: uint, b: uint) <uint> {
+    let res <uint> = cast<uint>(0);
+    let p <uint> = cast<uint>(1);
+    let x <uint> = a;
+    let y <uint> = b;
+    for (let k <int> = 0; k < 32; k++) {
+        let bit <uint> = (x % cast<uint>(2) + y % cast<uint>(2)) % cast<uint>(2);
+        if (bit == cast<uint>(1)) {
+            res = res + p;
+        }
+        p = p * cast<uint>(2);
+        x = x / cast<uint>(2);
+        y = y / cast<uint>(2);
+    }
+    return res;
+}
+
+// Computes the standard IEEE 802.3 32-bit Cyclic Redundancy Check (CRC-32).
+#[export]
+pub fun crc32(data: string) <uint> {
+    if (data == null) { return cast<uint>(0); }
+    let n <int> = cast<int>(hash_strlen(data));
+    if (n == 0) { return cast<uint>(0); }
+    let bytes <[char]> = to_bytes(data);
+    let crc <uint> = cast<uint>(4294967295);
+    for (let i <int> = 0; i < n; i++) {
+        let b <uint> = char_to_byte(bytes[i]);
+        let low <uint> = crc % cast<uint>(256);
+        crc = (crc - low) + xor8(low, b);
+        for (let j <int> = 0; j < 8; j++) {
+            if (crc % cast<uint>(2) == cast<uint>(1)) {
+                crc = xor32(crc / cast<uint>(2), cast<uint>(3988292384));
+            } else {
+                crc = crc / cast<uint>(2);
+            }
+        }
+    }
+    delete bytes;
+    // Invert bits: ~crc == 4294967295 - crc in 32-bit uint
+    return cast<uint>(4294967295) - crc;
+}
+
+// Fowler-Noll-Vo 32-bit hash (FNV-1a).
+#[export]
+pub fun fnv1a_32(data: string) <uint> {
+    if (data == null) { return cast<uint>(0); }
+    let n <int> = cast<int>(hash_strlen(data));
+    let bytes <[char]> = to_bytes(data);
+    let h <uint> = cast<uint>(2166136261);
+    let prime <uint> = cast<uint>(16777619);
+    for (let i <int> = 0; i < n; i++) {
+        let b <uint> = char_to_byte(bytes[i]);
+        let low <uint> = h % cast<uint>(256);
+        h = ((h - low) + xor8(low, b)) * prime;
+    }
+    delete bytes;
+    return h;
+}
+
+// Fowler-Noll-Vo 64-bit hash (FNV-1a).
+#[export]
+pub fun fnv1a_64(data: string) <ulong> {
+    if (data == null) { return cast<ulong>(0); }
+    let n <int> = cast<int>(hash_strlen(data));
+    let bytes <[char]> = to_bytes(data);
+    let h <ulong> = (cast<ulong>(3421674724) << cast<ulong>(32)) + cast<ulong>(2216829733);
+    let prime <ulong> = cast<ulong>(1099511628211);
+    for (let i <int> = 0; i < n; i++) {
+        let b <uint> = char_to_byte(bytes[i]);
+        let low <ulong> = h % cast<ulong>(256);
+        let xored <ulong> = cast<ulong>(xor8(cast<uint>(low), b));
+        h = ((h - low) + xored) * prime;
+    }
+    delete bytes;
+    return h;
+}
+
+// Dan Bernstein's DJB2 hash algorithm.
+#[export]
+pub fun djb2(data: string) <ulong> {
+    if (data == null) { return cast<ulong>(0); }
+    let n <int> = cast<int>(hash_strlen(data));
+    let bytes <[char]> = to_bytes(data);
+    let h <ulong> = cast<ulong>(5381);
+    for (let i <int> = 0; i < n; i++) {
+        let c <ulong> = cast<ulong>(char_to_byte(bytes[i]));
+        h = ((h << cast<ulong>(5)) + h) + c;
+    }
+    delete bytes;
+    return h;
+}
+
+// Simple Database Manager (SDBM) hash algorithm.
+#[export]
+pub fun sdbm(data: string) <ulong> {
+    if (data == null) { return cast<ulong>(0); }
+    let n <int> = cast<int>(hash_strlen(data));
+    let bytes <[char]> = to_bytes(data);
+    let h <ulong> = cast<ulong>(0);
+    for (let i <int> = 0; i < n; i++) {
+        let c <ulong> = cast<ulong>(char_to_byte(bytes[i]));
+        h = c + (h << cast<ulong>(6)) + (h << cast<ulong>(16)) - h;
+    }
+    delete bytes;
+    return h;
+}
+
+}

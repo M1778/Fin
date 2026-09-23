@@ -128,9 +128,10 @@ fun main() <noret> {
 A `readonly` field can be copied out and the copy modified freely; what is protected is the
 field itself.
 
-One limitation: `readonly` parses and is recorded, but the compiler does not yet reject a
-write to a `readonly` field from outside its declaring type — `c.count = 5;` compiles today.
-Treat it as documentation of intent until that check lands.
+Writes to a `readonly` field from outside its declaring type are rejected at compile time
+by semantic analysis (`Cannot assign to readonly field 'count' of struct 'Counter'`), as
+demonstrated in `tests/samples/readonly.fin`. Only methods within the struct's declaration
+scope may mutate `readonly` fields.
 
 ## Type aliases
 
@@ -183,6 +184,13 @@ fun? make_a(n?: int) <A> {
     return A{};
 }
 ```
+
+Per ADR 0040, nullable types lower cleanly in LLVM IR:
+- **Nullable pointers and functions** (`(&T)?`, `fn?`): Use standard 8-byte pointers with `0x0`
+  as the `null` sentinel.
+- **Nullable value types** (`int?`, `float?`, `struct?`): Lower as tagged aggregates
+  `{ T, bool }` (a payload paired with a boolean presence flag). Struct instantiation initializes
+  absent fields to `{ 0, false }`, and denullify `expr?` tests this discriminant flag at runtime.
 
 Note that `?` means two unrelated things in Fin: this denullify, and the `otherwise` arm of
 the conditional expression covered in the next chapter.

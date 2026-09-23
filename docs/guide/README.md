@@ -64,5 +64,6 @@ choice was made rather than merely what it was. The ones this guide leans on mos
 - `0026` — a class is a struct with a base, and `try` is a scope
 
 `docs/finc-interface-contract.md` specifies the compiler's command-line and diagnostic
-surface for tooling. `docs/compiler-api.md` specifies the compile-time API that chapter 11's
-special functions belong to, which is designed and not yet built.
+surface for tooling (Contract 2). `docs/compiler-api.md` specifies the compile-time API,
+with core builtins and intrinsics (`@implements`, `@defined`, `@Alloc`, `@Free`) implemented
+per ADR 0042.

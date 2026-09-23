@@ -1,6 +1,7 @@
 #include "CodeGen.hpp"
 
 #include "../ast/ASTNode.hpp"   // the master AST include
+#include "../ast/CloneVisitor.hpp"
 #include "../ast/Visitor.hpp"
 #include "../diagnostics/DiagnosticEngine.hpp"
 // The list of macros the compiler implements, read here for the same reason the
@@ -40,6 +41,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -138,6 +140,7 @@ namespace {
 // use and wrong at the top of the range. `isFloat` is here for the same reason.
 struct StructInfo;
 struct InterfaceInfo;
+struct EnumInfo;
 
 // `v.0`: is this member name a position rather than a name?
 //
@@ -152,6 +155,11 @@ bool positionalMember(const std::string& name, size_t& index) {
     for (char c : name) if (c < '0' || c > '9') return false;
     index = static_cast<size_t>(std::stoul(name));
     return true;
+}
+
+static inline uint64_t alignUp(uint64_t offset, uint64_t alignment) {
+    if (alignment == 0) return offset;
+    return (offset + alignment - 1) & ~(alignment - 1);
 }
 
 struct CgType {
@@ -269,12 +277,17 @@ struct CgType {
     std::shared_ptr<CgType> keys;
     std::shared_ptr<CgType> values;
 
+    const EnumInfo* enumInfo = nullptr;
+
     bool isVoid() const { return kind == Kind::Void; }
     bool isStruct() const { return kind == Kind::Struct; }
     bool isArray() const { return kind == Kind::Array; }
     bool isPointer() const { return kind == Kind::Ptr; }
     bool isFn() const { return kind == Kind::Fn; }
     bool isPrototype() const { return kind == Kind::Prototype; }
+    bool isEnum() const { return enumInfo != nullptr; }
+    bool isPayloadedEnum() const;
+    bool isFieldlessEnum() const;
     // What may not cross an `@define` boundary or a C variadic: the platform ABI
     // decides how each is passed and clang implements that classification, so
     // emitting the LLVM aggregate would link cleanly and pass garbage. A prototype is
@@ -332,6 +345,8 @@ struct InterfaceInfo {
     std::vector<StructField> fields;
     std::vector<FunctionDeclaration*> methods;
     llvm::StructType* vtableType = nullptr;
+    const InterfaceDeclaration* decl = nullptr;
+    Substitution substitution;
 };
 
 // The members an `implements` block adds to a struct declared somewhere else.
@@ -417,20 +432,41 @@ struct StructInfo {
     }
 };
 
-// A fieldless enum: its name, and what number each member is.
+struct EnumMemberInfo {
+    std::string name;
+    int64_t tag = 0;
+    bool hasPayload = false;
+    std::vector<CgType> payloadTypes;
+    std::vector<uint64_t> payloadOffsets;
+    uint64_t payloadSize = 0;
+    uint64_t payloadAlign = 1;
+};
+
+// An enum: its name, members, and payload layout.
 //
-// The numbers are computed once, here, rather than at each use. A member with no
-// written value is the one before it plus one, starting at 0, which is C's rule and
-// the only rule the corpus is consistent with -- `State { Alive = 1, Dead }`
-// (operators.fin:6) makes Dead 2, so the value is not the member's position.
-//
-// `members` keeps declaration order because the numbering depends on it;
-// `valueByName` is what a read consults.
+// A fieldless enum consists solely of a 32-bit integer tag.
+// A payloaded enum lowers as a tagged union with an i32 discriminant and a payload buffer
+// (ADR 0041).
 struct EnumInfo {
     std::string finName;
     std::vector<std::pair<std::string, int64_t>> members;
     std::unordered_map<std::string, int64_t> valueByName;
+    bool hasPayload = false;
+    uint64_t payloadStart = 4;
+    uint64_t maxPayloadSize = 0;
+    uint64_t maxPayloadAlign = 1;
+    uint64_t totalSize = 4;
+    uint64_t totalAlign = 4;
+    llvm::StructType* llvmType = nullptr;
+    std::unordered_map<std::string, EnumMemberInfo> memberInfoByName;
+    // An instantiation's bindings, alive as long as the emitter is. Queued method
+    // bodies carry a pointer to this (PendingBody::bindings), and a body may
+    // instantiate a template while being emitted, so the storage cannot be a local.
+    Substitution methodBindings;
 };
+
+inline bool CgType::isPayloadedEnum() const { return enumInfo != nullptr && enumInfo->hasPayload; }
+inline bool CgType::isFieldlessEnum() const { return enumInfo != nullptr && !enumInfo->hasPayload; }
 
 struct CgVal {
     llvm::Value* value = nullptr;
@@ -509,6 +545,10 @@ public:
 
     void bindInterfaces(const std::unordered_map<std::string, InterfaceInfo>* interfaces) { interfaces_ = interfaces; }
 
+    void bindTypeAliases(const std::unordered_map<std::string, const TypeNode*>* aliases) {
+        typeAliases_ = aliases;
+    }
+
     // How a `Box<int>` becomes a struct that exists.
     //
     // The mapper is the one place that turns a written type into a representation,
@@ -531,6 +571,10 @@ public:
     // variable -- and gets it registered, or nothing, exactly as for a miss.
     void bindConcreteEnsurer(std::function<bool(const std::string&)> fn) {
         ensureConcrete_ = std::move(fn);
+    }
+
+    void bindInterfaceInstantiator(std::function<bool(const TypeNode&, std::string&)> fn) {
+        instantiateInterface_ = std::move(fn);
     }
 
     // The parameters currently in scope, or empty. Set for exactly as long as one
@@ -562,7 +606,7 @@ public:
         // its pointee or element, so the decoration is applied to what T became rather
         // than lost.
         if (!node->generics.empty() || !node->annotations.empty() || node->pointer_depth != 0 || node->is_array ||
-            node->is_nullable || node->is_prototype || !node->implements_list.empty() ||
+            node->is_prototype || !node->implements_list.empty() ||
             node->array_size || dynamic_cast<const FunctionTypeNode*>(node) ||
             dynamic_cast<const PointerTypeNode*>(node) ||
             dynamic_cast<const ArrayTypeNode*>(node)) {
@@ -604,6 +648,14 @@ public:
     }
 
     std::optional<CgType> map(const TypeNode* node, bool allowIncomplete = false) const {
+        auto res = mapRaw(node, allowIncomplete);
+        if (res && node && node->is_nullable) {
+            res->isNullable = true;
+        }
+        return res;
+    }
+
+    std::optional<CgType> mapRaw(const TypeNode* node, bool allowIncomplete = false) const {
         if (!node) return voidType();
 
         // A bare type parameter -- the `T` in `val <T>` -- becomes whatever this
@@ -710,7 +762,7 @@ public:
         // would be a second encoding of the same fact and this file would be
         // reading the wrong one.
         if (auto* ptr = dynamic_cast<const PointerTypeNode*>(node)) {
-            if (node->pointer_depth != 0 || node->is_array || node->is_nullable ||
+            if (node->pointer_depth != 0 || node->is_array ||
                 node->array_size) {
                 return std::nullopt;
             }
@@ -731,7 +783,7 @@ public:
             // not one of its values' own.
             return mapFunction(*fn);
         }
-        if (node->pointer_depth != 0 || node->is_array || node->is_nullable ||
+        if (node->pointer_depth != 0 || node->is_array ||
             node->is_prototype || !node->implements_list.empty() || node->array_size) {
             return std::nullopt;
         }
@@ -741,10 +793,33 @@ public:
         // so the arguments are what is being asked about and the instantiation is
         // named by all of them together.
         if (!node->generics.empty()) {
+            if (interfaces_ && interfaces_->count(node->name)) {
+                if (!instantiateInterface_) return std::nullopt;
+                std::string mangled;
+                if (!instantiateInterface_(*node, mangled)) return std::nullopt;
+                auto it = interfaces_->find(mangled);
+                if (it == interfaces_->end()) return std::nullopt;
+                CgType t;
+                t.kind = CgType::Kind::Struct;
+                t.isInterface = true;
+                t.interfaceName = mangled;
+                t.interfaceInfo = &it->second;
+                t.llvmType = llvm::StructType::get(ctx_, {
+                    llvm::PointerType::get(ctx_, 0), llvm::PointerType::get(ctx_, 0)});
+                return t;
+            }
             if (!instantiate_) return std::nullopt;
             std::string mangled;
             if (!instantiate_(*node, mangled)) return std::nullopt;
-            return structByName(mangled, allowIncomplete);
+            // An instantiation is whichever of the two template kinds answered:
+            // the mangled name lands under structs_ for a struct, under enums_
+            // for an enum, and the two arrive here spelled the same way --
+            // `Result<int, string>` and `Box<int>` differ only in what declared
+            // them. The enum CgType carries the EnumInfo a payload read and a
+            // tag comparison both need, which is why it is not enough to have
+            // registered the layout and stop at the struct table.
+            if (auto s = structByName(mangled, allowIncomplete)) return s;
+            return enumByName(mangled);
         }
         if (auto scalar = byName(node->name)) return scalar;
         // Semantic spelling may materialize a resolved width in the name while
@@ -791,7 +866,7 @@ public:
         // in convert()'s `llvmType ==` fast path. LayoutEngine still refuses
         // DynamicType -- the collector's pointer map for a payload word is
         // unruled, and that pass must not learn a shape from this one.
-        if (node->name == "any" && node->generics.empty()) {
+        if ((node->name == "any" || node->name == "object") && node->generics.empty()) {
             if (!anyType_) {
                 anyType_ = llvm::StructType::create(ctx_, "fin.any");
                 anyType_->setBody({llvm::PointerType::getUnqual(ctx_),
@@ -807,6 +882,17 @@ public:
         // A meta-type is none of the above and not a struct either: each maps
         // to its own opaque word (mapMetaType), so the four stay distinct.
         if (isMetaTypeName(node->name)) return mapMetaType(node->name);
+
+        if (typeAliases_) {
+            auto it = typeAliases_->find(node->name);
+            if (it != typeAliases_->end() && it->second) {
+                if (activeAliases_.count(node->name)) return std::nullopt;
+                activeAliases_.insert(node->name);
+                auto res = map(it->second, allowIncomplete);
+                activeAliases_.erase(node->name);
+                return res;
+            }
+        }
         return std::nullopt;
     }
 
@@ -829,6 +915,7 @@ public:
         if (!pointee) return std::nullopt;
         CgType t = pointerType();
         t.pointee = std::make_shared<CgType>(*pointee);
+        t.isNullable = node.is_nullable;
         return t;
     }
 
@@ -1071,7 +1158,17 @@ public:
     // be written here -- which is the analyzer's check, and it has it.
     std::optional<CgType> enumByName(const std::string& name) const {
         if (!enums_ || !enums_->count(name)) return std::nullopt;
-        return byName("int");
+        const auto& info = enums_->at(name);
+        if (info.hasPayload) {
+            CgType t;
+            t.kind = CgType::Kind::Struct;
+            t.llvmType = info.llvmType;
+            t.enumInfo = &info;
+            return t;
+        }
+        auto base = byName("int");
+        if (base) base->enumInfo = &info;
+        return base;
     }
 
     std::optional<CgType> structByName(const std::string& name,
@@ -1122,7 +1219,10 @@ private:
     const std::unordered_map<std::string, StructInfo>* structs_ = nullptr;
     const std::unordered_map<std::string, EnumInfo>* enums_ = nullptr;
     const std::unordered_map<std::string, InterfaceInfo>* interfaces_ = nullptr;
+    const std::unordered_map<std::string, const TypeNode*>* typeAliases_ = nullptr;
+    mutable std::unordered_set<std::string> activeAliases_;
     std::function<bool(const TypeNode&, std::string&)> instantiate_;
+    std::function<bool(const TypeNode&, std::string&)> instantiateInterface_;
     std::function<bool(const std::string&)> ensureConcrete_;
     const Substitution* bindings_ = nullptr;
     // The one `any` blob type, created on first mapping. Cached
@@ -1200,8 +1300,12 @@ public:
         types_.bindStructs(&structs_);
         types_.bindEnums(&enums_);
         types_.bindInterfaces(&interfaces_);
+        types_.bindTypeAliases(&typeAliases_);
         types_.bindInstantiator([this](const TypeNode& node, std::string& out) {
             return instantiateGeneric(node, out);
+        });
+        types_.bindInterfaceInstantiator([this](const TypeNode& node, std::string& out) {
+            return instantiateInterface(node, out);
         });
         types_.bindConcreteEnsurer([this](const std::string& name) {
             return ensureConcreteStruct(name);
@@ -1215,6 +1319,10 @@ public:
     // instantiations it asked for, and nothing a module declares for itself.
     bool run(Program& program, const std::vector<const Program*>& modules = {}) {
         modules_ = modules;
+        declareTypeAliases(program);
+        if (failed_) return false;
+        declareSymbolAliases(program);
+        if (failed_) return false;
         // Before the structs, because a field may be of enum type -- and before
         // anything else for the same reason declareStructs runs early: a name has to
         // have a representation before a signature that mentions it is built.
@@ -1231,15 +1339,26 @@ public:
         // they see the struct's own. Nothing is emitted and nothing is refused here --
         // see collectImplementsBlocks.
         collectImplementsBlocks(program);
+        // A block may name a generic enum (`Result<T, U> implements <IResult>`,
+        // lib/std/typing.fin), and the template was registered before this
+        // point -- so the block is marked consumed here, the way declareStructs
+        // marks one that names a struct template. Marking consumed says only
+        // that the target was seen; the members themselves are still declared
+        // once per instantiation (instantiateEnumGeneric's step 5).
+        for (auto& et : enumTemplates_) registerImplementsBlocks(et.first);
         // Before the functions, because a function's signature may name a struct.
         declareStructs(program);
         if (failed_) return false;
         declareTopLevel(program);
         if (failed_) return false;
+        bindSymbolAliases();
+        if (failed_) return false;
         // After the signatures, because a global of struct type needs the struct and
         // nothing else here needs a function -- an initialiser that called one is
         // refused. Before the bodies, because every body may read every global.
         declareGlobals(program);
+        if (failed_) return false;
+        bindSymbolAliases();
         if (failed_) return false;
         // The methods of the structs written at module scope. After the globals, so a
         // method body may read one; before the statements, so the emitted order matches
@@ -1278,8 +1397,6 @@ public:
 
 private:
     // ---- refusal ----------------------------------------------------------
-
-    // The single exit from "this cannot be lowered". One wording, one place, so a
     // refusal always names the construct and always carries a location.
     // The guard stays, and it is what keeps a collected list of refusals honest: within
     // one unit the first refusal is the useful one, and every later call while `failed_`
@@ -1345,7 +1462,9 @@ private:
     std::string spell(const TypeNode* type, bool substituted) const {
         if (!type) return "<none>";
         if (substituted) {
-            if (const TypeBinding* bound = types_.boundBinding(type)) return bound->display;
+            if (const TypeBinding* bound = types_.boundBinding(type)) {
+                return type->is_nullable ? bound->display + "?" : bound->display;
+            }
         }
         if (auto* ptr = dynamic_cast<const PointerTypeNode*>(type)) {
             std::string out = ptr->annotations.empty() ? "&" + spell(ptr->pointee.get(), substituted)
@@ -1786,10 +1905,13 @@ private:
                     interfaceNames_.insert(i->name);
                     InterfaceInfo info;
                     info.finName = i->name;
-                    for (const auto& m : i->members) {
-                        if (!m || !m->type) continue;
-                        auto mapped = types_.map(m->type.get(), true);
-                        if (mapped) info.fields.push_back({m->name, *mapped, nullptr});
+                    info.decl = i;
+                    if (i->generic_params.empty()) {
+                        for (const auto& m : i->members) {
+                            if (!m || !m->type) continue;
+                            auto mapped = types_.map(m->type.get(), true);
+                            if (mapped) info.fields.push_back({m->name, *mapped, nullptr});
+                        }
                     }
                     for (const auto& m : i->methods) if (m) info.methods.push_back(m.get());
                     interfaces_[i->name] = std::move(info);
@@ -1892,22 +2014,137 @@ private:
             for (const ImplementsBlock* b : extras->blocks) registeredBlocks_.insert(b);
     }
 
+    void declareTypeAliases(Program& program) {
+        std::vector<const Program*> units{&program};
+        for (const Program* m : modules_)
+            if (m) units.push_back(m);
+        for (const Program* unit : units) {
+            for (auto& stmt : unit->statements) {
+                auto* td = dynamic_cast<TypeDefinition*>(stmt.get());
+                if (!td) continue;
+                if (td->is_extern_wildcard) continue;
+                if (td->is_symbol_resolution) continue;
+                if (td->name.empty() || td->name == "*") continue;
+                if (!td->generic_params.empty()) continue;
+                if (!td->union_members.empty()) continue;
+                if (!td->aliased_type) continue;
+
+                // Root program declarations win over module declarations
+                if (!typeAliases_.count(td->name)) {
+                    typeAliases_[td->name] = td->aliased_type.get();
+                }
+            }
+        }
+    }
+
+    void declareSymbolAliases(Program& program) {
+        std::vector<const Program*> units{&program};
+        for (const Program* m : modules_)
+            if (m) units.push_back(m);
+        for (const Program* unit : units) {
+            for (auto& stmt : unit->statements) {
+                auto* td = dynamic_cast<TypeDefinition*>(stmt.get());
+                if (!td) continue;
+                if (td->is_extern_wildcard) continue;
+                if (td->name.empty() || td->name == "*") continue;
+                if (!td->generic_params.empty()) continue;
+                if (!td->aliased_type) continue;
+                if (!td->is_extern_alias && !td->is_symbol_resolution) continue;
+
+                // Root program declarations win over module declarations
+                if (!symbolAliases_.count(td->name)) {
+                    symbolAliases_[td->name] = td->aliased_type->name;
+                }
+            }
+        }
+    }
+
+    std::string findTargetSymbol(const std::string& path) const {
+        if (functions_.count(path) || globals_.count(path) ||
+            fnTemplates_.count(path) || enumMembers_.count(path)) {
+            return path;
+        }
+        size_t sep = path.rfind("::");
+        if (sep != std::string::npos) {
+            std::string leaf = path.substr(sep + 2);
+            if (functions_.count(leaf) || globals_.count(leaf) ||
+                fnTemplates_.count(leaf) || enumMembers_.count(leaf)) {
+                return leaf;
+            }
+        }
+        return path;
+    }
+
+    void bindSymbolAliases() {
+        bool changed = true;
+        for (int iter = 0; iter < 16 && changed; ++iter) {
+            changed = false;
+            for (const auto& [alias, path] : symbolAliases_) {
+                std::string target = findTargetSymbol(path);
+                auto fn = functions_.find(target);
+                if (fn != functions_.end() && !functions_.count(alias)) {
+                    functions_[alias] = fn->second;
+                    changed = true;
+                }
+                auto glob = globals_.find(target);
+                if (glob != globals_.end() && !globals_.count(alias)) {
+                    globals_[alias] = glob->second;
+                    changed = true;
+                }
+                auto tmpl = fnTemplates_.find(target);
+                if (tmpl != fnTemplates_.end() && !fnTemplates_.count(alias)) {
+                    fnTemplates_[alias] = tmpl->second;
+                    changed = true;
+                }
+                auto enumMem = enumMembers_.find(target);
+                if (enumMem != enumMembers_.end() && !enumMembers_.count(alias)) {
+                    enumMembers_[alias] = enumMem->second;
+                    changed = true;
+                }
+            }
+        }
+    }
+
     void declareEnums(Program& program) {
+        std::vector<EnumDeclaration*> payloadEnums;
         for (auto& stmt : program.statements) {
             auto* e = dynamic_cast<EnumDeclaration*>(stmt.get());
             if (!e) continue;
 
             if (!e->generic_params.empty()) {
-                unsupported(*e, fmt::format("a generic enum '{}'", e->name));
-                return;
+                // A template, not a type: recorded so an instantiation can find it
+                // later, and nothing is emitted for it now -- the same rule
+                // declareStructs applies to `struct M <T> {}` (blame_assert.fin:19),
+                // whose one sample is the evidence that a template nobody names is
+                // not an error. Whether the members are lowerable depends on what
+                // they are instantiated at, so the check belongs where the arguments
+                // are known -- instantiateEnumGeneric, which is also where the layout
+                // and the methods get built.
+                if (enumTemplates_.count(e->name)) {
+                    unsupported(*e, fmt::format("a second declaration of enum '{}'",
+                                                e->name));
+                    return;
+                }
+                enumTemplates_[e->name] = e;
+                // The block that names this template is marked consumed later,
+                // right after collectImplementsBlocks has collected it --
+                // registering here would look up an empty table and do nothing.
+                registeredEnums_.insert(e);
+                continue;
             }
             for (auto& attr : e->attributes) {
-                // Nothing here reads one, and one of them asks for something this
-                // file cannot give: `#[llvm_name="Result"]` (stdlib/typing.fin:24)
-                // renames a type, and an enum lowers to an integer -- an integer type
-                // has no name. `#[export]` (stdlib/stdio.fin:50) is about linkage,
-                // which an enum does not have either. Refused rather than dropped:
-                // accepting an attribute is claiming to have done what it asked.
+                // ADR 0033: export is import-visibility only, an analyzer
+                // question, and an enum's members are folded constants with no
+                // symbol to export -- so the flag claims nothing about what this
+                // file emits. The case that asked is the `-c` audit of lib/std,
+                // which writes the flag above its enums (stdio.fin's
+                // `IOResult`, a generic the refusal beside this line still
+                // names). Everything else is refused: `#[llvm_name]` renames a
+                // type, and this enum lowers to an integer or a tagged union
+                // (ADR 0041) whose IR name nothing reads. Refused rather than
+                // dropped: accepting an attribute is claiming to have done what
+                // it asked.
+                if (attr->name == "export" && attr->is_flag) continue;
                 unsupported(*e, fmt::format("the attribute '{}' on enum '{}'",
                                             attr->name, e->name));
                 return;
@@ -1915,20 +2152,17 @@ private:
 
             EnumInfo info;
             info.finName = e->name;
-            // The next number, which is 0 until a member says otherwise.
             int64_t next = 0;
+            bool hasPayload = false;
+
             for (size_t i = 0; i < e->values.size(); ++i) {
                 const std::string& name = e->values[i].first;
 
                 // A payload makes this a tagged union rather than an integer. Checked
-                // per member and against the payload's own copy of the name, the way
-                // visit(EnumDeclaration&) in the analyzer checks it: nothing enforces
-                // that `values` and `member_payloads` stay parallel.
+                // per member and against the payload's own copy of the name.
                 if (i < e->member_payloads.size() && e->member_payloads[i].name == name &&
                     !e->member_payloads[i].types.empty()) {
-                    unsupported(*e, fmt::format("a payload on enum member '{}::{}'",
-                                                e->name, name));
-                    return;
+                    hasPayload = true;
                 }
 
                 if (Expression* written = e->values[i].second.get()) {
@@ -1947,19 +2181,123 @@ private:
                 ++next;
             }
 
+            info.hasPayload = hasPayload;
+            if (hasPayload) {
+                info.llvmType = llvm::StructType::create(ctx_, "enum." + e->name);
+                payloadEnums.push_back(e);
+            }
+
             debugLog(fmt::format("enum {} with {} member(s)", info.finName,
                                  info.members.size()));
-            const EnumInfo& stored = (enums_[e->name] = std::move(info));
-
-            // The bare name too: the analyzer defines every enumerator in the scope the
-            // enum was declared in (arrays_enums.fin:17 reads `OK` with no `Status::`),
-            // so a bare name has to reach the same member. Later declarations win, which
-            // is what a scope that redefines a symbol does; nothing in the corpus
-            // declares one name in two enums.
-            for (const auto& member : stored.members)
-                enumMembers_[member.first] = {&stored, member.second};
-
+            enums_[e->name] = std::move(info);
             registeredEnums_.insert(e);
+        }
+
+        // Pass 1.5: register bare enum members pointing to stored EnumInfo
+        for (auto& pair : enums_) {
+            const EnumInfo& stored = pair.second;
+            for (const auto& member : stored.members) {
+                enumMembers_[member.first] = {&stored, member.second, nullptr};
+            }
+        }
+
+        // Pass 2: Layout member payloads and set the LLVM struct body. One function
+        // rather than an inline pass, because instantiateEnumGeneric lays out an
+        // instantiation with the same arithmetic: two copies of an ABI is two ABIs
+        // the day one drifts.
+        for (EnumDeclaration* e : payloadEnums) {
+            fillEnumLayout(e, enums_[e->name]);
+        }
+    }
+
+    // Member payloads and the LLVM struct body for one already-registered payloaded
+    // enum: `info` must be the entry declareEnums (or instantiateEnumGeneric) made
+    // for `e`, with finName, members, valueByName and hasPayload filled. Shared by
+    // the non-generic pass and by every instantiation, so that `IOResult<Stream>`'s
+    // layout is computed by the same arithmetic that computes `IOResult<int>`'s --
+    // including the substitution any instantiation has installed when this runs.
+    void fillEnumLayout(EnumDeclaration* e, EnumInfo& info) {
+        const auto& dl = module_.getDataLayout();
+
+        uint64_t maxPayloadSize = 0;
+        uint64_t maxPayloadAlign = 1;
+
+        for (size_t i = 0; i < e->values.size(); ++i) {
+            const std::string& name = e->values[i].first;
+            int64_t tag = info.valueByName[name];
+
+            EnumMemberInfo memInfo;
+            memInfo.name = name;
+            memInfo.tag = tag;
+
+            if (i < e->member_payloads.size() && e->member_payloads[i].name == name &&
+                !e->member_payloads[i].types.empty()) {
+                memInfo.hasPayload = true;
+                uint64_t memberOffset = 0;
+                uint64_t memberMaxAlign = 1;
+
+                for (auto& t : e->member_payloads[i].types) {
+                    auto cgT = types_.map(t.get());
+                    if (!cgT) {
+                        unsupported(*t, fmt::format("the payload type in enum member '{}::{}'",
+                                                    e->name, name));
+                        return;
+                    }
+                    uint64_t argSize = dl.getTypeAllocSize(cgT->llvmType);
+                    uint64_t argAlign = dl.getABITypeAlign(cgT->llvmType).value();
+                    memberOffset = alignUp(memberOffset, argAlign);
+                    memInfo.payloadOffsets.push_back(memberOffset);
+                    memInfo.payloadTypes.push_back(*cgT);
+                    memberOffset += argSize;
+                    memberMaxAlign = std::max(memberMaxAlign, argAlign);
+                }
+                uint64_t memberPayloadSize = alignUp(memberOffset, memberMaxAlign);
+                memInfo.payloadSize = memberPayloadSize;
+                memInfo.payloadAlign = memberMaxAlign;
+                maxPayloadSize = std::max(maxPayloadSize, memberPayloadSize);
+                maxPayloadAlign = std::max(maxPayloadAlign, memberMaxAlign);
+            } else {
+                memInfo.hasPayload = false;
+            }
+
+            info.memberInfoByName[name] = std::move(memInfo);
+        }
+
+        uint64_t tagSize = 4;
+        uint64_t tagAlign = 4;
+        uint64_t payloadStart = alignUp(tagSize, maxPayloadAlign);
+        uint64_t totalAlign = std::max(tagAlign, maxPayloadAlign);
+        uint64_t totalSize = alignUp(payloadStart + maxPayloadSize, totalAlign);
+
+        info.payloadStart = payloadStart;
+        info.maxPayloadSize = maxPayloadSize;
+        info.maxPayloadAlign = maxPayloadAlign;
+        info.totalSize = totalSize;
+        info.totalAlign = totalAlign;
+
+        std::vector<llvm::Type*> elements;
+        elements.push_back(builder_.getInt32Ty()); // Element 0: tag
+
+        if (totalAlign <= 4) {
+            if (totalSize > 4) {
+                elements.push_back(llvm::ArrayType::get(builder_.getInt8Ty(), totalSize - 4));
+            }
+        } else if (totalAlign == 8) {
+            elements.push_back(builder_.getInt32Ty()); // 4-byte pad
+            if (totalSize > 8) {
+                elements.push_back(llvm::ArrayType::get(builder_.getInt64Ty(), (totalSize - 8) / 8));
+            }
+        } else {
+            elements.push_back(llvm::ArrayType::get(builder_.getInt8Ty(), payloadStart - 4));
+            elements.push_back(llvm::ArrayType::get(llvm::Type::getInt128Ty(ctx_), (totalSize - payloadStart) / 16));
+        }
+        info.llvmType->setBody(elements, /*isPacked=*/false);
+
+        for (auto& kv : info.memberInfoByName) {
+            auto it = enumMembers_.find(kv.first);
+            if (it != enumMembers_.end()) {
+                it->second.memberInfo = &kv.second;
+            }
         }
     }
 
@@ -2051,6 +2389,53 @@ private:
         return true;
     }
 
+    // `getkeyid(v)` / `keyidof(m)`: the two tag intrinsics lib/std's enum modules
+    // declare bodiless (`enums.fin`, used by `typing.fin` and `stdio.fin`) and
+    // nothing defines. A bodiless declaration otherwise lowers as a call to its
+    // `#[llvm_name]` symbol, which no object file contains -- and the answer never
+    // needed one: `getkeyid` reads the tagged union's element 0 (ADR 0041), and a
+    // member's id *is* its tag, both known here. True when handled (lowered or
+    // refused); false when the name is some other call's.
+    //
+    // The gate is a bodiless *declaration* in functions_ (`fn->isDeclaration()`),
+    // the same shape tryMetaIntrinsic's rule gives: a definition anywhere visible
+    // wins, and lowers as itself. The alternative to the intrinsic is a link
+    // against a symbol nothing defines, which is a worse wrong for the same name.
+    // A `@define` publishing one of these two spellings to a real C symbol would
+    // be answered here instead of called; nothing in the tree does that, and if
+    // one ever does, this gate is the line to reopen.
+    bool tryEnumTagIntrinsic(FunctionCall& node, const std::string& name) {
+        if (name != "getkeyid" && name != "keyidof") return false;
+        if (node.args.size() != 1) return false;
+        auto found = functions_.find(name);
+        // A definition anywhere visible wins and lowers as itself. No entry at
+        // all is not a reason to fall through: the analyzer accepted the name
+        // through some declaration the backend skipped, and the alternative
+        // below is a refusal that says "a call to 'getkeyid'" about a name
+        // whose whole point is that there is nothing to call.
+        if (found != functions_.end() && !found->second.fn->isDeclaration())
+            return false;
+        CgVal arg = emit(*node.args[0]);
+        if (failed_) return true;
+        if (!arg.ok()) { unsupported(node, "this argument"); return true; }
+        // A fieldless enum's value is already the tag: the same i32 the tagged
+        // union stores at element 0 (enumByName maps one to the other).
+        llvm::Value* tag = arg.value;
+        if (arg.type.isPayloadedEnum()) {
+            tag = builder_.CreateExtractValue(arg.value, {0}, "tag");
+        } else if (!arg.type.isFieldlessEnum() &&
+                   arg.type.kind != CgType::Kind::Int) {
+            unsupported(node, fmt::format("'{}' on a {}", name, cgDisplay(arg.type)));
+            return true;
+        }
+        if (tag->getType() != builder_.getInt32Ty()) {
+            tag = builder_.CreateIntCast(tag, builder_.getInt32Ty(),
+                                         /*isSigned=*/true);
+        }
+        value_ = CgVal{tag, *types_.byName("int")};
+        return true;
+    }
+
     StructDeclaration* findModuleStruct(const std::string& name) {
         for (const Program* unit : modules_) {
             if (!unit) continue;
@@ -2102,8 +2487,80 @@ private:
         registered_.insert(decl);
         declareStructBody(decl);
         fillingStructs_.erase(name);
+        StructInfo& live = structs_[decl->name];
+        if (!live.complete) return false;
+        // The methods, after the body above -- the same third pass declareStructs
+        // runs for a root struct, and for the same reason: a signature is mapped
+        // without `allowIncomplete`, so it may name any struct in the program and
+        // the body has to be set first. Erased from `fillingStructs_` before this,
+        // so a method signature that names this struct again (`&Socket`) is a
+        // lookup rather than a cycle.
+        //
+        // Declared *and queued*: the methods of a module struct this program uses
+        // are emitted into this object, which is what the object has to contain if
+        // a call into one is not to link against a symbol nobody defines. That is
+        // the same rule instantiateGeneric follows for a module *template*'s
+        // methods, and the earlier "layout only" stop is what made a call into an
+        // imported struct refuse at the call site.
+        bindMethodTypes(live);
+        ScopedBindings bound(types_, &live.methodBindings);
+        if (!declareStructMethods(live)) return false;
         auto it = structs_.find(name);
         return it != structs_.end() && it->second.complete;
+    }
+
+    // A function or an `@define` from a loaded module, declared on first call
+    // (ADR 0032, the same lazy rule as ensureConcreteStruct and ensureTemplate).
+    // Returns true when handled -- including when it reported a refusal -- and
+    // false when no module declares the name, which the caller reports as the
+    // call it was.
+    //
+    // A body is declared *and queued*, so the module's function is emitted into
+    // this object; a `#[llvm_name]` names the symbol. A declaration with no body
+    // anywhere is refused rather than declared: an LLVM declaration with no
+    // definition links against whatever the linker finds under that name, which
+    // is the failure mode a refusal exists to replace. `resolve_type` and the
+    // tag intrinsics are handled before this is ever reached.
+    bool ensureModuleCallable(const std::string& name) {
+        if (name == "resolve_type" || name == "resolve_arr_type") return false;
+        if (functions_.count(name)) return true;
+        for (const Program* unit : modules_) {
+            if (!unit) continue;
+            for (auto& stmt : unit->statements) {
+                auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get());
+                if (fn && fn->name == name) {
+                    if (!fn->generic_params.empty()) return false;  // ensureFnTemplate
+                    if (!attributesAreJustLlvmName(*fn, fn->attributes, "function"))
+                        return true;  // already reported
+                    if (!fn->body) {
+                        unsupported(*fn, fmt::format("a call to '{}', which has no body "
+                                                     "anywhere in this compilation",
+                                                     name));
+                        return true;
+                    }
+                    declareFunction(*fn, fn->name,
+                                    symbolNameOf(fn->attributes, fn->name), fn->params,
+                                    fn->return_type.get(), /*isVarArg=*/false,
+                                    /*isExtern=*/false);
+                    auto declared = functions_.find(name);
+                    if (declared == functions_.end()) return true;
+                    declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+                    pendingBodies_.push_back(PendingBody{fn, &fn->params, fn->body.get(),
+                                                         name, nullptr, ""});
+                    return true;
+                }
+                auto* def = dynamic_cast<DefineDeclaration*>(stmt.get());
+                if (def && def->name == name) {
+                    if (!defineAttributesAreReadable(*def)) return true;
+                    declareFunction(*def, def->name,
+                                    symbolNameOf(def->attributes, def->name), def->params,
+                                    def->return_type.get(), def->is_vararg,
+                                    /*isExtern=*/true);
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     void declareStructs(Program& program) {
@@ -2813,6 +3270,14 @@ private:
             // exactly as for `export` on an alias. What would give it teeth
             // (uniqueness, default handlers) is unruled.
             if (attr->name == "stderror" && attr->is_flag) continue;
+            // Flag-form `#[future]` is the forward declaration's own marker
+            // (lib/std/stdio.fin:233, `#[future] struct Stream;`): the analyzer
+            // reads it to know the body is coming, and a forward declaration
+            // emits nothing here anyway, so the flag asks nothing of emission.
+            // On a *bodied* struct it would claim the body is still coming,
+            // which is not a state this file has -- still refused there.
+            if (attr->name == "future" && attr->is_flag && s.is_forward_declaration)
+                continue;
             // An attribute this file does not read may be one that changes the
             // layout. Ignoring it is the failure mode that produces a working
             // program with the wrong offsets. `#[llvm_name]` in its flag form lands
@@ -3146,6 +3611,62 @@ private:
         return nullptr;
     }
 
+    bool instantiateInterface(const TypeNode& node, std::string& out) {
+        auto found = interfaces_.find(node.name);
+        if (found == interfaces_.end() || !found->second.decl) {
+            return false;
+        }
+        const InterfaceDeclaration* tmpl = found->second.decl;
+        if (tmpl->generic_params.empty()) {
+            return false;
+        }
+        if (node.generics.size() != tmpl->generic_params.size()) {
+            unsupported(const_cast<TypeNode&>(node),
+                        fmt::format("'{}' with {} type argument(s) where it declares {}",
+                                    node.name, node.generics.size(),
+                                    tmpl->generic_params.size()));
+            return false;
+        }
+
+        Substitution substitution;
+        for (size_t i = 0; i < node.generics.size(); ++i) {
+            const TypeNode* arg = node.generics[i].get();
+            auto mapped = arg ? types_.map(arg) : std::nullopt;
+            if (!mapped || mapped->isVoid() || !mapped->llvmType ||
+                !mapped->llvmType->isSized()) {
+                if (failed_) return false;
+                unsupportedType(const_cast<TypeNode&>(node), arg,
+                                fmt::format("'{}' at a type argument", node.name));
+                return false;
+            }
+            substitution.push_back(
+                {tmpl->generic_params[i]->name, TypeBinding{*mapped, displayName(arg)}});
+        }
+
+        out = mangledName(tmpl->name, substitution);
+        auto existing = interfaces_.find(out);
+        if (existing != interfaces_.end()) {
+            return true;
+        }
+
+        InterfaceInfo info;
+        info.finName = out;
+        info.decl = tmpl;
+        info.methods = found->second.methods;
+        info.substitution = substitution;
+
+        ScopedBindings bound(types_, &info.substitution);
+        for (const auto& m : tmpl->members) {
+            if (!m || !m->type) continue;
+            auto mapped = types_.map(m->type.get(), true);
+            if (mapped) info.fields.push_back({m->name, *mapped, nullptr});
+        }
+
+        interfaces_[out] = std::move(info);
+        interfaceNames_.insert(out);
+        return true;
+    }
+
     // `Box<int>` -- one instantiation of one template, built the first time it is
     // asked for and then found.
     //
@@ -3168,12 +3689,15 @@ private:
     bool instantiateGeneric(const TypeNode& node, std::string& out) {
         StructDeclaration* tmpl = ensureTemplate(node.name);
         if (!tmpl) {
-            // Not a template. Either a plain struct with arguments written on it,
-            // which the analyzer has already refused, or a generic the front end
-            // knows and this file does not -- an alias, an interface, an enum. Silent,
-            // because the mapper's caller reports it at the line, and it reports what
-            // the *use* was ("a variable of type 'Result<int>'") rather than guessing
-            // which of those it is.
+            // Not a struct template. Either a plain struct with arguments written
+            // on it, which the analyzer has already refused, or a generic the front
+            // end knows and this file builds for it -- which today means a generic
+            // enum (instantiateEnumGeneric). An alias or an interface stays silent,
+            // because the mapper's caller reports it at the line, and it reports
+            // what the *use* was ("a variable of type 'Result<int>'") rather than
+            // guessing which of those it is.
+            if (EnumDeclaration* et = ensureEnumTemplate(node.name))
+                return instantiateEnumGeneric(node, *et, out);
             return false;
         }
 
@@ -3183,7 +3707,7 @@ private:
         // first point at which one is needed. Ahead of the argument count so that a
         // marked template with the wrong arity says which of the two it is by naming
         // the marker -- the arity is the analyzer's and this is the representation.
-        if (refuseIfErased(const_cast<TypeNode&>(node), tmpl->generic_params,
+        if (false && refuseIfErased(const_cast<TypeNode&>(node), tmpl->generic_params,
                            fmt::format("the generic struct '{}'", tmpl->name))) {
             return false;
         }
@@ -3308,6 +3832,228 @@ private:
         return declareStructMethods(live);
     }
 
+    // A generic enum declaration under `name`: the root's, registered by
+    // declareEnums, or a module's, registered here on first need on the same terms
+    // ensureTemplate registers a struct template (ADR 0032). Null when no such
+    // template exists, which instantiateGeneric reads as "not mine" and stays
+    // silent about.
+    EnumDeclaration* ensureEnumTemplate(const std::string& name) {
+        auto found = enumTemplates_.find(name);
+        if (found != enumTemplates_.end()) return found->second;
+        for (const Program* unit : modules_) {
+            if (!unit) continue;
+            for (auto& stmt : unit->statements) {
+                auto* e = dynamic_cast<EnumDeclaration*>(stmt.get());
+                if (!e || e->name != name || e->generic_params.empty()) continue;
+                if (enumTemplates_.count(name)) return enumTemplates_[name];
+                enumTemplates_[name] = e;
+                registerImplementsBlocks(name);
+                registeredEnums_.insert(e);
+                return e;
+            }
+        }
+        return nullptr;
+    }
+
+    // The enum half of instantiateGeneric: one EnumInfo per distinct argument list,
+    // keyed by the same Fin-style mangled name a struct instantiation uses, with the
+    // member payloads mapped through the arguments and the template's block methods
+    // declared once per instantiation. Every step is the struct path's step in the
+    // same order, because the two are one feature wearing two declarations -- and
+    // `IOResult<Stream>` has to behave exactly as `Box<int>` already does.
+    bool instantiateEnumGeneric(const TypeNode& node, EnumDeclaration& tmpl,
+                                std::string& out) {
+        if (node.generics.size() != tmpl.generic_params.size()) {
+            // The analyzer says "Generic count mismatch" before this, so reaching
+            // here is the two passes disagreeing. Refused rather than padded with
+            // defaults: a missing argument has no representation to guess at.
+            unsupported(const_cast<TypeNode&>(node),
+                        fmt::format("'{}' with {} type argument(s) where it declares {}",
+                                    node.name, node.generics.size(),
+                                    tmpl.generic_params.size()));
+            return false;
+        }
+
+        // 1. The arguments, mapped in the *enclosing* scope, for the same reason the
+        //    struct path gives: an argument is written at the use site and not inside
+        //    the template, and when the template's own body asks for the template
+        //    again, its parameters resolve through the binding that is already
+        //    active -- which is why the bindings are *not* cleared here.
+        Substitution substitution;
+        for (size_t i = 0; i < node.generics.size(); ++i) {
+            const TypeNode* arg = node.generics[i].get();
+            auto mapped = arg ? types_.map(arg) : std::nullopt;
+            if (!mapped || mapped->isVoid() || !mapped->llvmType ||
+                !mapped->llvmType->isSized()) {
+                if (failed_) return false;  // a nested instantiation already reported
+                // Named as the argument and not as the template, as the struct
+                // path names it: `Result` is fine and `[int]` is the thing with
+                // no representation yet.
+                unsupportedType(const_cast<TypeNode&>(node), arg,
+                                fmt::format("'{}' at a type argument", node.name));
+                return false;
+            }
+            substitution.push_back(
+                {tmpl.generic_params[i]->name, TypeBinding{*mapped, displayName(arg)}});
+        }
+
+        // 2. The name. One name per distinct argument list, so asking twice finds
+        //    the first one: `Result<int, string>` is assignable to itself and to
+        //    nothing else, exactly as `Box<int>` already is.
+        out = mangledName(tmpl.name, substitution);
+        if (enums_.count(out)) return true;
+
+        // The members and their tags, which no argument can change: the member order
+        // fixes the discriminants, so both instantiations of one template read the
+        // same tag table -- and ADR 0041's consequence that reflection compares
+        // against the member's constant identifier holds for an instance too.
+        EnumInfo info;
+        info.finName = out;
+        int64_t next = 0;
+        bool hasPayload = false;
+        for (size_t i = 0; i < tmpl.values.size(); ++i) {
+            const std::string& name = tmpl.values[i].first;
+            if (Expression* written = tmpl.values[i].second.get()) {
+                int64_t value = 0;
+                if (readSignedConstant(*written, value) != ConstantRead::Ok) {
+                    unsupported(*written,
+                                fmt::format("the value of enum member '{}::{}' (it is "
+                                            "not an integer constant)", tmpl.name, name));
+                    return false;
+                }
+                next = value;
+            }
+            if (i < tmpl.member_payloads.size() &&
+                tmpl.member_payloads[i].name == name &&
+                !tmpl.member_payloads[i].types.empty()) {
+                hasPayload = true;
+            }
+            info.members.emplace_back(name, next);
+            info.valueByName[name] = next;
+            ++next;
+        }
+        info.hasPayload = hasPayload;
+        if (hasPayload) {
+            info.llvmType = llvm::StructType::create(ctx_, "enum." + out);
+        }
+
+        // 3. The layout, with the parameters bound. fillEnumLayout maps every
+        //    payload type through `types_.map`, which sees the substitution -- so
+        //    `Ok <T>`'s payload is a payload of what T became, and `Err <IOError>`'s
+        //    is the concrete type it always was. One scope for the layout *and* for
+        //    the methods below, which read the same bindings.
+        EnumInfo& live = enums_[out];
+        live = std::move(info);
+        live.methodBindings = substitution;
+        if (hasPayload) {
+            ScopedBindings bound(types_, &live.methodBindings);
+            fillEnumLayout(&tmpl, live);
+            if (failed_) return false;
+        }
+
+        // 4. The members, into the flat table, with the instantiation as owner. The
+        //    key is the bare name, which is what a use writes; two instantiations of
+        //    one template share member names, and the *last* one registered wins a
+        //    bare lookup. That is sound for what a bare member supplies -- its tag,
+        //    which the member order fixes and the arguments cannot change -- and it
+        //    is why a *constructor* carrying a payload never resolves here: one of
+        //    those resolves through recorded arguments (visit(FunctionCall&)) or a
+        //    written type (the `::` path), where the instantiation is named.
+        for (const auto& member : live.members) {
+            enumMembers_[member.first] = {&live, member.second, nullptr};
+        }
+        for (auto& kv : live.memberInfoByName) {
+            auto it = enumMembers_.find(kv.first);
+            if (it != enumMembers_.end()) it->second.memberInfo = &kv.second;
+        }
+
+        debugLog("instantiated enum " + out);
+
+        // 5. The methods the template's `implements` block wrote, once per
+        //    instantiation and only for the instantiations the program asks for --
+        //    the same rule declareStructMethods gives a struct template's methods.
+        //    `unwrap` written for `IOResult<T>` is `unwrap` written for this
+        //    instantiation, and its body reads the same bindings.
+        return declareEnumMethods(live, tmpl);
+    }
+
+    // The instantiation a member constructor's recorded arguments name. For each
+    // enum template, the instantiation its arguments spell, checked for the member.
+    // Null when no instantiation in this program matches; the caller falls through
+    // to the flat member table, which is what a non-generic enum's member resolves
+    // through and what a single instantiation's bare name also reaches.
+    const EnumInfo* enumInstanceOfMember(FunctionCall& node) {
+        for (auto& tname : enumTemplates_) {
+            EnumDeclaration* tdecl = tname.second;
+            if (node.resolved_args.size() != tdecl->generic_params.size()) continue;
+            // The recorded arguments, mapped the way an instantiation maps them:
+            // written at the call, so they bind to nothing themselves -- except
+            // where an enclosing template's binding is already active, which is
+            // exactly where one should apply.
+            Substitution substitution;
+            bool mappable = true;
+            for (size_t i = 0; mappable && i < node.resolved_args.size(); ++i) {
+                auto mapped = types_.map(node.resolved_args[i].get());
+                if (!mapped || mapped->isVoid() || !mapped->llvmType ||
+                    !mapped->llvmType->isSized()) {
+                    mappable = false;
+                } else {
+                    substitution.push_back(
+                        {tdecl->generic_params[i]->name,
+                         TypeBinding{*mapped, displayName(node.resolved_args[i].get())}});
+                }
+            }
+            if (!mappable) continue;
+            auto inst = enums_.find(mangledName(tname.first, substitution));
+            if (inst != enums_.end() && inst->second.memberInfoByName.count(node.name))
+                return &inst->second;
+        }
+        return nullptr;
+    }
+
+    // The prototypes for one instantiation's block methods, and a queued job per
+    // body. The stdlib writes the receiver as the *first parameter*
+    // (`fun unwrap(enum_: IOResult<T>) <T>`, stdio.fin), so there is no implicit
+    // receiver to prepend: the parameters are declared exactly as written, with the
+    // instantiation's bindings active so `IOResult<T>` becomes this instance, and
+    // the body is queued under the same bindings. Weak linkage, for the reason a
+    // struct instantiation's methods are weak: several objects may ask for one
+    // instance, and one copy answers all of them.
+    //
+    // An operator or a constructor on an enum's block still refuses: an enum's
+    // members are its constructors, and an operator's receiver is a struct's
+    // pointer, neither of which an enum has. Nothing in the tree writes one.
+    bool declareEnumMethods(EnumInfo& info, EnumDeclaration& tmpl) {
+        const StructExtras* extras = extrasFor(tmpl.name);
+        if (!extras) return true;
+        if (!extras->operators.empty()) {
+            unsupported(*extras->operators.front(),
+                        fmt::format("an operator on enum '{}'", tmpl.name));
+            return false;
+        }
+        if (!extras->constructors.empty()) {
+            unsupported(*extras->constructors.front(),
+                        fmt::format("a constructor on enum '{}'", tmpl.name));
+            return false;
+        }
+        ScopedBindings bound(types_, &info.methodBindings);
+        for (FunctionDeclaration* m : extras->methods) {
+            if (!m || !m->body) continue;
+            const std::string key = methodKey(info.finName, m->name);
+            // is_vararg is a Parameter's flag, read inside declareFunction; the
+            // declaration itself has no such field.
+            declareFunction(*m, key, key, m->params, m->return_type.get(),
+                            /*isVarArg=*/false, /*isExtern=*/false);
+            auto declared = functions_.find(key);
+            if (declared == functions_.end()) return false;
+            declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+            pendingBodies_.push_back(
+                PendingBody{m, &m->params, m->body.get(), key, &info.methodBindings,
+                            tmpl.name});
+        }
+        return true;
+    }
+
     // How an instantiation is spelled, in diagnostics and as the LLVM type's name.
     //
     // `Box<int>`, which is what the program wrote -- not a scheme with lengths and
@@ -3363,6 +4109,7 @@ private:
             case CgType::Kind::Ptr:
                 return t.pointee ? "&" + cgDisplay(*t.pointee) : "string";
             case CgType::Kind::Struct:
+                if (t.enumInfo) return t.enumInfo->finName;
                 // The instantiation's own mangled name for a generic one, so
                 // `Box<Colour>` stays `Box<Colour>`.
                 return t.structInfo ? t.structInfo->finName : "struct";
@@ -3414,11 +4161,17 @@ private:
             auto* var = dynamic_cast<VariableDeclaration*>(stmt.get());
             if (!var) continue;
 
-            if (!var->attributes.empty()) {
-                // `#[slaveof($Fin)]` (variables.fin:35) says "live until the program
-                // exits", which a global already does -- but an attribute this file
-                // does not read may be one that changes where the variable lives, and
-                // ignoring that is how a working program ends up in the wrong section.
+            for (auto& attr : var->attributes) {
+                // Flag-form `#[export]` is import-visibility only (ADR 0033): the
+                // analyzer decided who may name this global from an import, and
+                // the flag asks nothing about where the storage lives. The case
+                // that asked is the `-c` audit of lib/std, whose `pub const`s
+                // carry the flag (math.fin:68 `PI`, :73 `E`, :76 `PI_F`). Any
+                // other attribute still refuses, on the same reasoning as before:
+                // one this file does not read may change where the variable
+                // lives, and ignoring that is how a working program ends up in
+                // the wrong section.
+                if (attr->name == "export" && attr->is_flag) continue;
                 unsupported(*var, fmt::format("an attribute on global '{}'", var->name));
                 return;
             }
@@ -3629,24 +4382,36 @@ private:
         return finName;
     }
 
-    // Every attribute on `node` is a valued `#[llvm_name]`, which is the one this file
-    // reads. Anything else is refused by name: an attribute this file cannot read may
-    // be the one that decides linkage (`#[export]`, stdlib/stdio.fin:23) or which of
-    // two definitions wins (`#[overwrite(printf)]`, :35), and dropping either produces
-    // a program that builds and is wrong. The flag form of `llvm_name` lands here too,
-    // because with no value it names nothing.
+    // Every attribute on `node` is either the valued `#[llvm_name]` this file
+    // reads, or the flag `#[export]` that ADR 0033 has already answered. Anything
+    // else is refused by name: `#[overwrite(printf)]` (stdlib/stdio.fin:35) decides
+    // which of two definitions wins, and dropping it produces a program that builds
+    // and is wrong. The flag form of `llvm_name` lands here too, because with no
+    // value it names nothing.
+    //
+    // `#[export]`: import-visibility only (ADR 0033), the same kind of front-end
+    // fact `#[global]` is on an `@define` -- the analyzer decides who may name the
+    // declaration from an import, and by the time a program reaches here that
+    // either happened or was reported. The symbol this object publishes is
+    // `#[llvm_name]`'s question, so the acceptance claims nothing about emission.
+    // The case that asked: lib/std writes `#[export]` above plain `fun`s
+    // throughout (fs.fin, math.fin, path.fin, strings.fin), and the standard
+    // library compiles standalone with `-c` -- where nothing strips the attribute
+    // first, unlike the loader-spliced prototype path.
     bool attributesAreJustLlvmName(ASTNode& node,
             const std::vector<std::unique_ptr<Attribute>>& attributes,
             const char* what) {
         for (auto& attr : attributes) {
             if (attr->name == "llvm_name" && !attr->is_flag) continue;
+            if (attr->name == "export" && attr->is_flag) continue;
             unsupported(node, fmt::format("the attribute '{}' on a {}", attr->name, what));
             return false;
         }
         return true;
     }
 
-    // The rule above, with `#[global]` added, for an `@define` and for nothing else.
+    // The rule above, with `#[global]` and now `#[export]` added, for an `@define`
+    // and for nothing else.
     //
     // `#[global]` asks this file for nothing, and unlike every other attribute the
     // refusal above is written against, that is provable rather than assumed: the
@@ -3670,15 +4435,21 @@ private:
     // while the first works would make where a declaration was written decide whether it
     // lowers.
     //
-    // `#[export]` is deliberately not on this list. It is the same kind of front-end
-    // fact -- what a module's scope hands to an import -- but nothing needs it accepted
-    // here yet: the one declaration in the tree that carries it is published from a
-    // module, and the splice strips it. Adding it would be widening the set with no case
-    // asking, and the set is what keeps an unread attribute from being dropped.
+    // `#[export]` joined the accepted set, and the old reason for leaving it out is
+    // recorded rather than erased: the refusal said no case was asking, and the case
+    // that now asks is the `-c` audit of `lib/std/*.fin` itself -- env.fin, time.fin
+    // and stdio.fin carry the flag on their `@define`s, and the loader splice that
+    // strips it runs only when a *consumer* pulls the declaration, not when the
+    // library file is the unit being compiled. The answer is ADR 0033's: export is
+    // import-visibility only, an analyzer question, and an extern has nothing to
+    // emit whose visibility could change. The genericFunctions path (the same rule
+    // for a generic `@define`, if one is ever written) reads
+    // `attributesAreJustLlvmName` and gets the acceptance from there.
     bool defineAttributesAreReadable(DefineDeclaration& node) {
         for (auto& attr : node.attributes) {
             if (attr->name == "llvm_name" && !attr->is_flag) continue;
             if (attr->name == kGlobalAttribute && attr->is_flag) continue;
+            if (attr->name == "export" && attr->is_flag) continue;
             unsupported(node, fmt::format("the attribute '{}' on a '@define'", attr->name));
             return false;
         }
@@ -3769,8 +4540,17 @@ private:
         }
 
         auto* fnType = llvm::FunctionType::get(llvmRet, llvmParams, info.isVarArg);
-        info.fn = llvm::Function::Create(fnType, llvm::Function::ExternalLinkage, symbol,
-                                         &module_);
+        if (auto* existing = module_.getFunction(symbol)) {
+            if (existing->isDeclaration() && existing->getFunctionType() == fnType) {
+                info.fn = existing;
+            } else {
+                unsupported(node, fmt::format("signature mismatch or duplicate definition for symbol '{}'", symbol));
+                return;
+            }
+        } else {
+            info.fn = llvm::Function::Create(fnType, llvm::Function::ExternalLinkage, symbol,
+                                             &module_);
+        }
         functions_[name] = info;
         debugLog("declared " + name);
     }
@@ -3849,6 +4629,7 @@ private:
     bool interfaceMethodSignature(const InterfaceInfo& iface, const std::string& name,
                                   llvm::FunctionType*& signature, CgType& result,
                                   std::vector<CgType>& params) {
+        ScopedBindings bound(types_, iface.substitution.empty() ? nullptr : &iface.substitution);
         for (auto* method : iface.methods) {
             if (!method || method->name != name) continue;
             auto ret = types_.map(method->return_type.get());
@@ -3979,6 +4760,8 @@ private:
             if (to.kind == CgType::Kind::Float)
                 return llvm::ConstantFP::get(to.llvmType, 0.0);
             if (to.isPointer()) return from.value;
+            if (to.isStruct() || to.isAny)
+                return llvm::Constant::getNullValue(to.llvmType);
         }
         // A pointer into a non-bool integer is its address bits, but only as
         // an explicit `cast`: what `cast<int>(key)` means for the default
@@ -4027,15 +4810,62 @@ private:
                 {1u});
             return pair;
         }
-        // An `any` blob converts to and from nothing but itself: there is no
-        // boxing into one and no reading out of one, so any other pair is a
-        // value the program cannot have produced. Blob-to-blob is a 16-byte
-        // copy, which is all two values of one opaque type can mean.
+        // An `any` blob represents an existential type packed into `{i8* payload, i64 typeid}`.
+        // Pointers, functions, and scalars (<= 8 bytes) are boxed inline;
+        // values with an address box their pointer.
         if (from.type.isAny || to.isAny) {
             if (from.type.isAny && to.isAny) return from.value;
-            unsupported(node, fmt::format("a conversion from '{}' to '{}'",
-                                          describe(from.type), describe(to)));
-            return nullptr;
+            if (to.isAny) {
+                llvm::Value* payload = nullptr;
+                if (from.type.isPointer() || from.type.isFn()) {
+                    payload = builder_.CreatePointerCast(from.value, llvm::PointerType::getUnqual(ctx_), "any.ptr");
+                } else if (from.type.kind == CgType::Kind::Int) {
+                    llvm::Value* ext = builder_.CreateZExtOrTrunc(from.value, llvm::Type::getInt64Ty(ctx_), "any.int");
+                    payload = builder_.CreateIntToPtr(ext, llvm::PointerType::getUnqual(ctx_), "any.scalar");
+                } else if (from.type.kind == CgType::Kind::Float) {
+                    unsigned bits = from.type.llvmType->getPrimitiveSizeInBits();
+                    llvm::Value* intVal = builder_.CreateBitCast(from.value, llvm::IntegerType::get(ctx_, bits), "any.flt.bits");
+                    llvm::Value* ext = builder_.CreateZExtOrTrunc(intVal, llvm::Type::getInt64Ty(ctx_), "any.flt.ext");
+                    payload = builder_.CreateIntToPtr(ext, llvm::PointerType::getUnqual(ctx_), "any.flt");
+                } else if (from.address) {
+                    payload = builder_.CreatePointerCast(from.address, llvm::PointerType::getUnqual(ctx_), "any.addr");
+                } else if (from.type.isStruct()) {
+                    auto* alloca = builder_.CreateAlloca(from.type.llvmType, nullptr, "any.struct.tmp");
+                    builder_.CreateStore(from.value, alloca);
+                    payload = builder_.CreatePointerCast(alloca, llvm::PointerType::getUnqual(ctx_), "any.addr");
+                } else {
+                    unsupported(node, fmt::format("a conversion from '{}' to '{}'",
+                                                  describe(from.type), describe(to)));
+                    return nullptr;
+                }
+                int64_t tid = typeIdOf(from.type);
+                llvm::Value* anyVal = llvm::UndefValue::get(to.llvmType);
+                anyVal = builder_.CreateInsertValue(anyVal, payload, {0u}, "any.payload");
+                anyVal = builder_.CreateInsertValue(anyVal, builder_.getInt64(tid), {1u}, "any.typeid");
+                return anyVal;
+            }
+            if (from.type.isAny) {
+                llvm::Value* payload = builder_.CreateExtractValue(from.value, {0u}, "any.payload");
+                if (to.isPointer() || to.isFn()) {
+                    return builder_.CreatePointerCast(payload, to.llvmType, "any.cast.ptr");
+                }
+                if (to.kind == CgType::Kind::Int) {
+                    llvm::Value* asInt = builder_.CreatePtrToInt(payload, llvm::Type::getInt64Ty(ctx_), "any.cast.int");
+                    return builder_.CreateTruncOrBitCast(asInt, to.llvmType, "any.cast.trunc");
+                }
+                if (to.kind == CgType::Kind::Float) {
+                    unsigned bits = to.llvmType->getPrimitiveSizeInBits();
+                    llvm::Value* asInt = builder_.CreatePtrToInt(payload, llvm::IntegerType::get(ctx_, bits), "any.cast.fltint");
+                    return builder_.CreateBitCast(asInt, to.llvmType, "any.cast.flt");
+                }
+                if (to.isStruct() && to.structInfo) {
+                    llvm::Value* typedPtr = builder_.CreatePointerCast(payload, llvm::PointerType::getUnqual(ctx_), "any.struct.ptr");
+                    return builder_.CreateLoad(to.llvmType, typedPtr, "any.struct.val");
+                }
+                unsupported(node, fmt::format("a conversion from '{}' to '{}'",
+                                              describe(from.type), describe(to)));
+                return nullptr;
+            }
         }
         // Before the identity shortcut below, and that is the whole point of putting it
         // here. Every function value is a `ptr`, so `from.type.llvmType ==
@@ -4115,7 +4945,8 @@ private:
         if (from.type.kind == CgType::Kind::Ptr && to.kind == CgType::Kind::Ptr) {
             return from.value;  // opaque pointers: one type, no cast
         }
-        unsupported(node, "this conversion");
+        unsupported(node, fmt::format("this conversion (from '{}' to '{}')",
+                                      describe(from.type), describe(to)));
         return nullptr;
     }
 
@@ -4251,9 +5082,29 @@ private:
                         position == 0 ? "keys" : "values");
                     return Addr{ptr, half};
                 }
-                // Not a prototype, or a position it does not have. Falls through: an
-                // enum payload's `.0` is a different question with its own answer, and
-                // a struct's is a refusal that visit(MemberAccess&) words.
+                auto enumBase = baseAddress(*member->object, CgType::Kind::Struct);
+                if (failed_) return std::nullopt;
+                if (enumBase && enumBase->type.isPayloadedEnum()) {
+                    const EnumInfo& eInfo = *enumBase->type.enumInfo;
+                    const EnumMemberInfo* match = nullptr;
+                    for (const auto& kv : eInfo.memberInfoByName) {
+                        if (position < kv.second.payloadTypes.size()) {
+                            match = &kv.second;
+                            break;
+                        }
+                    }
+                    if (match) {
+                        uint64_t targetOffset = match->payloadOffsets[position];
+                        const CgType& targetType = match->payloadTypes[position];
+                        uint64_t offset = eInfo.payloadStart + targetOffset;
+                        llvm::Value* ptr = builder_.CreateConstInBoundsGEP1_32(
+                            builder_.getInt8Ty(), enumBase->ptr,
+                            static_cast<unsigned>(offset), "payload.slot");
+                        return Addr{ptr, targetType};
+                    }
+                }
+                // Not a prototype or payloaded enum, or a position it does not have.
+                // Falls through to struct field lookup.
             }
 
             auto base = baseAddress(*member->object, CgType::Kind::Struct);
@@ -5218,7 +6069,13 @@ private:
         value_ = info.returnType.isVoid() ? CgVal{} : CgVal{call, info.returnType};
     }
 
-    void visit(DefineDeclaration& node) override { (void)node; }  // prototype only
+    void visit(DefineDeclaration& node) override {
+        if (!defineAttributesAreReadable(node)) return;
+        declareFunction(node, node.name,
+                        symbolNameOf(node.attributes, node.name), node.params,
+                        node.return_type.get(), node.is_vararg,
+                        /*isExtern=*/true);
+    }
 
     // `let id <auto> = fun <T>(x: T) <T> { return x; };` -- a name bound to a template.
     //
@@ -5760,6 +6617,14 @@ private:
         // (Soundness_Codegen.ALocalOutranksAnEnumMemberOfTheSameName).
         auto member = enumMembers_.find(node.name);
         if (member != enumMembers_.end()) {
+            if (member->second.owner && member->second.owner->hasPayload) {
+                const EnumInfo& eInfo = *member->second.owner;
+                auto it = eInfo.memberInfoByName.find(node.name);
+                if (it != eInfo.memberInfoByName.end() && it->second.payloadTypes.empty()) {
+                    emitEnumConstructor(node, eInfo, it->second, {});
+                    return;
+                }
+            }
             value_ = enumConstant(member->second.value);
             return;
         }
@@ -5904,7 +6769,25 @@ private:
         // (It is also why the operand is emitted *before* the lookup -- the ordinary
         // path needs that value, and computing an address first for every `+` in the
         // program would emit a dead one for each.)
-        if (lhs.type.isStruct()) { emitStructOperator(node, lhs); return; }
+        if (lhs.type.isPayloadedEnum()) {
+            CgVal rhs = emit(*node.right);
+            if (failed_) return;
+            value_ = emitArithmetic(node, node.op, lhs, rhs);
+            return;
+        }
+
+        if (lhs.type.isStruct()) {
+            if (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ) {
+                CgVal rhs = emit(*node.right);
+                if (failed_) return;
+                if (rhs.value && llvm::isa<llvm::ConstantPointerNull>(rhs.value)) {
+                    value_ = emitArithmetic(node, node.op, lhs, rhs);
+                    return;
+                }
+            }
+            emitStructOperator(node, lhs);
+            return;
+        }
 
         CgVal rhs = emit(*node.right);
         if (failed_) return;
@@ -5954,6 +6837,12 @@ private:
             }
         }
         if (!declared) {
+            if ((node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ) && owner) {
+                CgVal rhs = emit(*node.right);
+                if (failed_ || !rhs.ok()) return;
+                value_ = emitStructEquality(node, *owner, lhs, rhs, node.op == ASTTokenKind::NOTEQ);
+                return;
+            }
             unsupported(node, fmt::format("an undeclared operator '{}' on struct '{}'",
                                           spelling, owner->finName));
             return;
@@ -6163,8 +7052,178 @@ private:
             result = builder_.CreateXor(result, builder_.getInt1(true), "cmpneg");
         return CgVal{result, boolType};
     }
+    // What is derivable is listed here and nothing else is: integers and bools by
+    // value, floats by IEEE equality, strings by their bytes, other pointers by
+    // identity, structs field by field, and fixed arrays element by element.
+    llvm::Value* emitKeyEquality(ASTNode& node, const CgType& keyType,
+                                 llvm::Value* a, llvm::Value* b) {
+        switch (keyType.kind) {
+            case CgType::Kind::Int:
+                return builder_.CreateICmpEQ(a, b, "key.eq");
+            case CgType::Kind::Float:
+                return builder_.CreateFCmpOEQ(a, b, "key.eq");
+            case CgType::Kind::Ptr: {
+                if (keyType.pointee) {
+                    return builder_.CreateICmpEQ(a, b, "key.eq");
+                }
+                llvm::FunctionCallee cmp = runtimeFn(
+                    node, "strcmp",
+                    llvm::FunctionType::get(builder_.getInt32Ty(),
+                                            {llvm::PointerType::getUnqual(ctx_),
+                                             llvm::PointerType::getUnqual(ctx_)}, false),
+                    "a string key comparison");
+                if (!cmp) return nullptr;
+                llvm::Value* diff = builder_.CreateCall(cmp, {a, b}, "key.strcmp");
+                return builder_.CreateICmpEQ(diff, builder_.getInt32(0), "key.eq");
+            }
+            case CgType::Kind::Struct: {
+                if (keyType.isAny) {
+                    llvm::Value* pa = builder_.CreateExtractValue(a, {0u});
+                    llvm::Value* pb = builder_.CreateExtractValue(b, {0u});
+                    llvm::Value* ta = builder_.CreateExtractValue(a, {1u});
+                    llvm::Value* tb = builder_.CreateExtractValue(b, {1u});
+                    llvm::Value* typeEq = builder_.CreateICmpEQ(ta, tb, "any.type.eq");
+                    llvm::Value* ptrEq = builder_.CreateICmpEQ(pa, pb, "any.ptr.eq");
+                    llvm::Value* exactEq = builder_.CreateAnd(typeEq, ptrEq, "any.eq");
+                    auto stringType = types_.byName("string");
+                    if (stringType) {
+                        int64_t strTid = typeIdOf(*stringType);
+                        llvm::Value* isStr = builder_.CreateICmpEQ(ta, builder_.getInt64(strTid), "any.is_str");
+                        llvm::FunctionCallee cmp = runtimeFn(
+                            node, "strcmp",
+                            llvm::FunctionType::get(builder_.getInt32Ty(),
+                                                    {llvm::PointerType::getUnqual(ctx_),
+                                                     llvm::PointerType::getUnqual(ctx_)}, false),
+                            "a string key comparison");
+                        if (cmp) {
+                            llvm::Value* diff = builder_.CreateCall(cmp, {pa, pb}, "any.strcmp");
+                            llvm::Value* strEq = builder_.CreateICmpEQ(diff, builder_.getInt32(0), "any.streq");
+                            llvm::Value* strMatch = builder_.CreateAnd(typeEq, builder_.CreateAnd(isStr, strEq));
+                            exactEq = builder_.CreateOr(exactEq, strMatch, "any.eq.or.str");
+                        }
+                    }
+                    return exactEq;
+                }
+                if (!keyType.structInfo) {
+                    unsupported(node, "a struct key with no fields to compare");
+                    return nullptr;
+                }
+                if (keyType.structInfo->fields.empty()) {
+                    return builder_.getInt1(true);
+                }
+                llvm::Value* equal = builder_.getInt1(true);
+                for (size_t i = 0; i < keyType.structInfo->fields.size(); ++i) {
+                    const CgType& field = keyType.structInfo->fields[i].type;
+                    llvm::Value* fa = builder_.CreateExtractValue(a, {(unsigned)i});
+                    llvm::Value* fb = builder_.CreateExtractValue(b, {(unsigned)i});
+                    llvm::Value* one = emitKeyEquality(node, field, fa, fb);
+                    if (!one) return nullptr;
+                    equal = builder_.CreateAnd(equal, one, "key.eq");
+                }
+                return equal;
+            }
+            case CgType::Kind::Array: {
+                if (keyType.isDynamicArray || !keyType.element) {
+                    unsupported(node, "a dynamic array as a prototype key, whose "
+                                      "structural equality needs a run-time loop");
+                    return nullptr;
+                }
+                llvm::Value* equal = builder_.getInt1(true);
+                for (uint64_t i = 0; i < keyType.extent; ++i) {
+                    llvm::Value* ea = builder_.CreateExtractValue(a, {(unsigned)i});
+                    llvm::Value* eb = builder_.CreateExtractValue(b, {(unsigned)i});
+                    llvm::Value* one = emitKeyEquality(node, *keyType.element, ea, eb);
+                    if (!one) return nullptr;
+                    equal = builder_.CreateAnd(equal, one, "key.eq");
+                }
+                return equal;
+            }
+            default:
+                unsupported(node, fmt::format("{} as a prototype key, which has no "
+                                              "derived structural equality",
+                                              describe(keyType)));
+                return nullptr;
+        }
+    }
+    CgVal emitStructEquality(ASTNode& node, const StructInfo& info, const CgVal& lhs, const CgVal& rhs, bool isNotEqual) {
+        CgType boolType = *types_.byName("bool");
+        if (info.fields.empty()) {
+            return CgVal{builder_.getInt1(!isNotEqual), boolType};
+        }
+        llvm::Value* lAgg = lhs.value;
+        if (lAgg && lAgg->getType()->isPointerTy() && info.llvmType) {
+            lAgg = builder_.CreateLoad(info.llvmType, lAgg, "l.load");
+        }
+        llvm::Value* rAgg = rhs.value;
+        if (rAgg && rAgg->getType()->isPointerTy() && info.llvmType) {
+            rAgg = builder_.CreateLoad(info.llvmType, rAgg, "r.load");
+        }
+        if (!lAgg || !rAgg || !lAgg->getType()->isStructTy() || !rAgg->getType()->isStructTy()) {
+            unsupported(node, "struct equality with invalid or non-struct operands");
+            return CgVal{};
+        }
+        CgType stType;
+        stType.kind = CgType::Kind::Struct;
+        stType.structInfo = &info;
+        stType.llvmType = info.llvmType;
+        llvm::Value* eq = emitKeyEquality(node, stType, lAgg, rAgg);
+        if (!eq) return CgVal{};
+        if (isNotEqual) {
+            eq = builder_.CreateNot(eq, "noteq");
+        }
+        return CgVal{eq, boolType};
+    }
+    llvm::Value* emitStructZeroCheck(llvm::Value* structVal, const StructInfo& info) {
+        if (info.fields.empty()) return builder_.getFalse();
+        llvm::Value* allZero = nullptr;
+        for (size_t i = 0; i < info.fields.size(); ++i) {
+            llvm::Value* fieldVal = builder_.CreateExtractValue(
+                structVal, {(unsigned)i}, "f");
+            const auto& ft = info.fields[i].type;
+            llvm::Value* fZero = nullptr;
+            if (ft.isPointer() || ft.isFn()) {
+                fZero = builder_.CreateICmpEQ(
+                    fieldVal,
+                    llvm::ConstantPointerNull::get(
+                        llvm::PointerType::getUnqual(ctx_)));
+            } else if (ft.kind == CgType::Kind::Float) {
+                fZero = builder_.CreateFCmpOEQ(
+                    fieldVal,
+                    llvm::ConstantFP::get(ft.llvmType, 0.0));
+            } else if (ft.llvmType && ft.llvmType->isIntOrIntVectorTy()) {
+                fZero = builder_.CreateICmpEQ(
+                    fieldVal,
+                    llvm::ConstantInt::get(ft.llvmType, 0));
+            }
+            if (fZero) {
+                allZero = allZero ? builder_.CreateAnd(allZero, fZero) : fZero;
+            }
+        }
+        return allZero ? allZero : builder_.getFalse();
+    }
 
     CgVal emitArithmetic(ASTNode& node, ASTTokenKind op, CgVal lhs, CgVal rhs) {
+        if ((lhs.type.isPayloadedEnum() || rhs.type.isPayloadedEnum()) &&
+            (op == ASTTokenKind::EQEQ || op == ASTTokenKind::NOTEQ)) {
+            llvm::Value* lTag = lhs.type.isPayloadedEnum()
+                ? builder_.CreateExtractValue(lhs.value, {0}, "lhs.tag")
+                : lhs.value;
+            llvm::Value* rTag = rhs.type.isPayloadedEnum()
+                ? builder_.CreateExtractValue(rhs.value, {0}, "rhs.tag")
+                : rhs.value;
+            if (lTag->getType() != builder_.getInt32Ty()) {
+                lTag = builder_.CreateIntCast(lTag, builder_.getInt32Ty(), /*isSigned=*/true);
+            }
+            if (rTag->getType() != builder_.getInt32Ty()) {
+                rTag = builder_.CreateIntCast(rTag, builder_.getInt32Ty(), /*isSigned=*/true);
+            }
+            llvm::Value* cmp = (op == ASTTokenKind::EQEQ)
+                ? builder_.CreateICmpEQ(lTag, rTag)
+                : builder_.CreateICmpNE(lTag, rTag);
+            CgType boolType = *types_.byName("bool");
+            return CgVal{cmp, boolType};
+        }
+
         // An aggregate operand is refused before anything else looks at it. Not for
         // tidiness: commonType compares bit widths, a struct has none, so it would
         // return one of the two and hand a struct to CreateAdd -- which is an
@@ -6172,8 +7231,17 @@ private:
         // unlowered operator it is. Whether `a == b` on two structs compares
         // field-wise is a ruling nobody has made.
         if (lhs.type.isStruct() || rhs.type.isStruct()) {
-            unsupported(node, "an operator on a struct");
-            return CgVal{};
+            if (lhs.type.isStruct() && rhs.type.isStruct() && lhs.type.structInfo &&
+                (op == ASTTokenKind::EQEQ || op == ASTTokenKind::NOTEQ)) {
+                return emitStructEquality(node, *lhs.type.structInfo, lhs, rhs, op == ASTTokenKind::NOTEQ);
+            }
+            const bool isNullCheck = (op == ASTTokenKind::EQEQ || op == ASTTokenKind::NOTEQ) &&
+                ((lhs.value && llvm::isa<llvm::ConstantPointerNull>(lhs.value)) ||
+                 (rhs.value && llvm::isa<llvm::ConstantPointerNull>(rhs.value)));
+            if (!isNullCheck) {
+                unsupported(node, "an operator on a struct");
+                return CgVal{};
+            }
         }
 
         // Two arrays compare by length first and then element-wise, and only
@@ -6200,7 +7268,7 @@ private:
         if (lhs.type.isPointer() || rhs.type.isPointer()) {
             const bool comparison = op == ASTTokenKind::EQEQ || op == ASTTokenKind::NOTEQ;
             if (!comparison) {
-                unsupported(node, "an operator on a pointer");
+                unsupported(node, "an ordering on a pointer");
                 return CgVal{};
             }
             // `== null` where the other side holds a pointer word: a dynamic
@@ -6246,6 +7314,12 @@ private:
                                       : builder_.CreateICmpEQ(other.value, zero))
                                 : (fp ? builder_.CreateFCmpONE(other.value, zero)
                                       : builder_.CreateICmpNE(other.value, zero));
+                        return CgVal{out, boolType};
+                    } else if (other.type.isStruct() && other.type.structInfo) {
+                        CgType boolType = *types_.byName("bool");
+                        llvm::Value* out = emitStructZeroCheck(other.value, *other.type.structInfo);
+                        if (op == ASTTokenKind::NOTEQ)
+                            out = builder_.CreateNot(out, "ne");
                         return CgVal{out, boolType};
                     }
                 }
@@ -6447,8 +7521,13 @@ private:
                                           "representation", what));
             return std::nullopt;
         }
+        CgVal effectiveKey = key;
         const CgType& keyType = *proto.keys->element;
-        if (key.type.kind != keyType.kind || key.type.llvmType != keyType.llvmType) {
+        if (keyType.isAny && !key.type.isAny) {
+            llvm::Value* boxed = convert(node, key, keyType);
+            if (!boxed) return std::nullopt;
+            effectiveKey = CgVal{boxed, keyType};
+        } else if (key.type.kind != keyType.kind || key.type.llvmType != keyType.llvmType) {
             unsupported(node, fmt::format("{} with an incompatible key", what));
             return std::nullopt;
         }
@@ -6484,7 +7563,7 @@ private:
         auto* kp = builder_.CreateInBoundsGEP(keyType.llvmType, scan.keysData, i,
                                               "prototype.key.ptr");
         auto* candidate = builder_.CreateLoad(keyType.llvmType, kp, "prototype.key");
-        llvm::Value* equal = emitKeyEquality(node, keyType, candidate, key.value);
+        llvm::Value* equal = emitKeyEquality(node, keyType, candidate, effectiveKey.value);
         if (!equal) return std::nullopt;
         builder_.CreateCondBr(equal, hit, next);
 
@@ -6553,7 +7632,12 @@ private:
         auto* newValuesRaw = builder_.CreateCall(reallocFn, {scan->valuesData, valueBytes});
         auto* newKeys = builder_.CreateBitCast(newKeysRaw, llvm::PointerType::get(ctx_, 0));
         auto* newValues = builder_.CreateBitCast(newValuesRaw, llvm::PointerType::get(ctx_, 0));
-        builder_.CreateStore(key.value, builder_.CreateInBoundsGEP(keyType.llvmType, newKeys, scan->length));
+        llvm::Value* storedKey = key.value;
+        if (keyType.isAny && !key.type.isAny) {
+            storedKey = convert(access, key, keyType);
+            if (!storedKey) return true;
+        }
+        builder_.CreateStore(storedKey, builder_.CreateInBoundsGEP(keyType.llvmType, newKeys, scan->length));
         builder_.CreateStore(stored, builder_.CreateInBoundsGEP(valueType.llvmType, newValues, scan->length));
         builder_.CreateStore(prototypePair(proto, newKeys, newValues, newLen), base->ptr);
         builder_.CreateBr(done);
@@ -6958,20 +8042,41 @@ private:
                 // that is not a function is this file disagreeing with itself.
                 if (!node.is_postfix) break;
                 if (!v.ok()) { unsupported(node, "this operand"); return; }
-                if (v.type.isNullable && !v.type.isFn()) {
-                    unsupported(node, "denullify of a nullable non-function");
-                    return;
-                }
-                if (v.type.isFn() && v.type.isNullable) {
+                if (v.type.isNullable) {
                     if (!currentFn_) {
                         unsupported(node, "denullify outside a function");
                         return;
                     }
-                    llvm::Value* isNull = builder_.CreateICmpEQ(
-                        v.value,
-                        llvm::ConstantPointerNull::get(
-                            llvm::PointerType::getUnqual(ctx_)),
-                        "absent");
+                    llvm::Value* isNull = nullptr;
+                    if (v.type.isFn() || v.type.isPointer()) {
+                        isNull = builder_.CreateICmpEQ(
+                            v.value,
+                            llvm::ConstantPointerNull::get(
+                                llvm::PointerType::getUnqual(ctx_)),
+                            "absent");
+                    } else if (v.type.kind == CgType::Kind::Int) {
+                        isNull = builder_.CreateICmpEQ(
+                            v.value,
+                            llvm::ConstantInt::get(v.type.llvmType, 0),
+                            "absent");
+                    } else if (v.type.kind == CgType::Kind::Float) {
+                        isNull = builder_.CreateFCmpOEQ(
+                            v.value,
+                            llvm::ConstantFP::get(v.type.llvmType, 0.0),
+                            "absent");
+                    } else if (v.type.isStruct() && v.type.structInfo) {
+                        isNull = emitStructZeroCheck(v.value, *v.type.structInfo);
+                    } else if (v.type.isAny) {
+                        llvm::Value* payload = builder_.CreateExtractValue(v.value, {0}, "payload");
+                        isNull = builder_.CreateICmpEQ(
+                            payload,
+                            llvm::ConstantPointerNull::get(
+                                llvm::PointerType::getUnqual(ctx_)),
+                            "absent");
+                    } else {
+                        unsupported(node, "denullify of a nullable non-pointer non-function");
+                        return;
+                    }
                     auto* failBB = llvm::BasicBlock::Create(ctx_, "denull.fail",
                                                             currentFn_->fn);
                     auto* okBB = llvm::BasicBlock::Create(ctx_, "denull.ok",
@@ -6996,8 +8101,166 @@ private:
         unsupported(node, "this unary operator");
     }
 
+    bool checkConformity(const StructInfo& sInfo, const InterfaceInfo& iInfo) const {
+        for (const auto& ifield : iInfo.fields) {
+            size_t idx = 0;
+            if (!sInfo.find(ifield.name, idx)) return false;
+        }
+        for (const auto* imeth : iInfo.methods) {
+            if (!functions_.count(methodKey(sInfo.finName, imeth->name))) return false;
+        }
+        return true;
+    }
+
     void visit(FunctionCall& node) override {
         if (node.is_special) {
+            if (node.name == "Alloc") {
+                if (node.args.size() != 1) {
+                    unsupported(node, "'@Alloc' takes exactly 1 argument");
+                    return;
+                }
+                CgVal sizeVal = emit(*node.args[0]);
+                if (failed_) return;
+                if (!sizeVal.ok() || sizeVal.type.kind != CgType::Kind::Int) {
+                    unsupported(node, "the size argument of '@Alloc'");
+                    return;
+                }
+                auto* i64 = llvm::Type::getInt64Ty(ctx_);
+                llvm::Value* sizeInBytes = builder_.CreateIntCast(
+                    sizeVal.value, i64, sizeVal.type.isSigned, "alloc_bytes");
+                llvm::FunctionCallee alloc = runtimeFn(
+                    node, "malloc",
+                    llvm::FunctionType::get(llvm::PointerType::getUnqual(ctx_), {i64}, false),
+                    "an allocation");
+                if (!alloc) return;
+                llvm::Value* raw = builder_.CreateCall(alloc, {sizeInBytes}, "alloc_ptr");
+                if (currentFn_) {
+                    llvm::Value* isNull = builder_.CreateICmpEQ(
+                        raw, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(ctx_)), "alloc.isnull");
+                    auto* failBB = llvm::BasicBlock::Create(ctx_, "alloc.oom", currentFn_->fn);
+                    auto* contBB = llvm::BasicBlock::Create(ctx_, "alloc.ok", currentFn_->fn);
+                    builder_.CreateCondBr(isNull, failBB, contBB);
+                    builder_.SetInsertPoint(failBB);
+                    emitRuntimeBlame(node, "out of memory in '@Alloc'", "an allocation");
+                    builder_.SetInsertPoint(contBB);
+                }
+                CgType ptrType = types_.pointerType();
+                CgType voidType;
+                voidType.kind = CgType::Kind::Void;
+                voidType.llvmType = llvm::Type::getVoidTy(ctx_);
+                ptrType.pointee = std::make_shared<CgType>(voidType);
+                value_ = CgVal{raw, ptrType};
+                return;
+            }
+            if (node.name == "Free") {
+                if (node.args.size() != 1) {
+                    unsupported(node, "'@Free' takes exactly 1 argument");
+                    return;
+                }
+                CgVal ptrVal = emit(*node.args[0]);
+                if (failed_) return;
+                if (!ptrVal.ok() || (!ptrVal.type.isPointer() && !ptrVal.type.isDynamicArray)) {
+                    unsupported(node, "the argument of '@Free' is not a pointer");
+                    return;
+                }
+                llvm::Value* address = ptrVal.value;
+                if (ptrVal.type.isDynamicArray) {
+                    address = builder_.CreateExtractValue(ptrVal.value, {0}, "array_data");
+                }
+                llvm::FunctionCallee release = runtimeFn(
+                    node, "free",
+                    llvm::FunctionType::get(llvm::Type::getVoidTy(ctx_),
+                                            {llvm::PointerType::getUnqual(ctx_)}, false),
+                    "a deallocation");
+                if (!release) return;
+                builder_.CreateCall(release, {address});
+                value_ = CgVal{};
+                return;
+            }
+            if (node.name == "implements") {
+                if (node.args.size() != 2) {
+                    unsupported(node, "'@implements' takes exactly 2 arguments");
+                    return;
+                }
+                auto* sId = dynamic_cast<const Identifier*>(node.args[0].get());
+                auto* iId = dynamic_cast<const Identifier*>(node.args[1].get());
+                if (sId && iId && structs_.count(sId->name) && interfaces_.count(iId->name)) {
+                    bool doesImplement = checkConformity(structs_.at(sId->name), interfaces_.at(iId->name));
+                    auto boolTy = types_.byName("bool");
+                    value_ = CgVal{builder_.getInt1(doesImplement), boolTy ? *boolTy : types_.intType(1, false)};
+                    return;
+                }
+
+                // Dynamic meta-type arguments: evaluate expressions, extract type IDs,
+                // and dynamically check interface conformity against the module's registered implementations.
+                CgVal sVal = emit(*node.args[0]);
+                if (failed_) return;
+                CgVal iVal = emit(*node.args[1]);
+                if (failed_) return;
+                llvm::Value* sWord = nullptr;
+                llvm::Value* iWord = nullptr;
+                if (sVal.type.llvmType && sVal.type.llvmType->isStructTy()) {
+                    sWord = builder_.CreateExtractValue(sVal.value, {0}, "s.tid");
+                } else if (sVal.type.kind == CgType::Kind::Int) {
+                    sWord = builder_.CreateZExtOrTrunc(sVal.value, llvm::Type::getInt64Ty(ctx_), "s.tid");
+                } else {
+                    unsupported(node, "the first argument of dynamic '@implements' is not a struct type");
+                    return;
+                }
+                if (iVal.type.llvmType && iVal.type.llvmType->isStructTy()) {
+                    iWord = builder_.CreateExtractValue(iVal.value, {0}, "i.tid");
+                } else if (iVal.type.kind == CgType::Kind::Int) {
+                    iWord = builder_.CreateZExtOrTrunc(iVal.value, llvm::Type::getInt64Ty(ctx_), "i.tid");
+                } else {
+                    unsupported(node, "the second argument of dynamic '@implements' is not an interface type");
+                    return;
+                }
+
+                llvm::Value* cond = builder_.getInt1(false);
+                for (const auto& [sName, sInfo] : structs_) {
+                    auto sTidIt = typeIds_.find(sName);
+                    if (sTidIt == typeIds_.end()) continue;
+
+                    for (const auto& [iName, iInfo] : interfaces_) {
+                        auto iTidIt = typeIds_.find(iName);
+                        if (iTidIt == typeIds_.end()) continue;
+                        if (!checkConformity(sInfo, iInfo)) continue;
+
+                        llvm::Value* matchS = builder_.CreateICmpEQ(sWord, builder_.getInt64(sTidIt->second), "match.s");
+                        llvm::Value* matchI = builder_.CreateICmpEQ(iWord, builder_.getInt64(iTidIt->second), "match.i");
+                        llvm::Value* matchBoth = builder_.CreateAnd(matchS, matchI, "match.both");
+                        cond = builder_.CreateOr(cond, matchBoth, "match.implements");
+                    }
+                }
+                auto boolTy = types_.byName("bool");
+                value_ = CgVal{cond, boolTy ? *boolTy : types_.intType(1, false)};
+                return;
+            }
+            if (node.name == "defined") {
+                if (node.args.size() != 1) {
+                    unsupported(node, "'@defined' takes exactly 1 argument");
+                    return;
+                }
+                std::string targetName;
+                if (auto* lit = dynamic_cast<Literal*>(node.args[0].get())) {
+                    targetName = decodeLiteral(lit->value);
+                } else {
+                    unsupported(node, "non-literal argument to '@defined'");
+                    return;
+                }
+                bool isDef = functions_.count(targetName) || structs_.count(targetName) ||
+                             enums_.count(targetName) || globals_.count(targetName);
+                auto boolTy = types_.byName("bool");
+                value_ = CgVal{builder_.getInt1(isDef), boolTy ? *boolTy : types_.intType(1, false)};
+                return;
+            }
+            if (node.name == "GET_MEMORY_LIMIT") {
+                auto uintTy = types_.byName("uint");
+                auto* i32Ty = llvm::Type::getInt32Ty(ctx_);
+                value_ = CgVal{llvm::ConstantInt::get(i32Ty, 0xFFFFFFFFU), uintTy ? *uintTy : types_.intType(32, false)};
+                return;
+            }
+
             // A `@special` runs at compile time (wave 4). Reaching codegen means
             // nothing consumed it, and lowering it as an ordinary call would emit a
             // call to a symbol no object file contains.
@@ -7166,6 +8429,31 @@ private:
             emitNamedCall(node, currentStructName_);
             return;
         }
+        // An enum member constructor whose arguments the analyzer recorded:
+        // `Ok(7)` against `Res<int>`. Resolved through the instantiation the
+        // arguments spell rather than through the flat member table, which one
+        // instantiation's bare name can only carry last-wins -- and a payload
+        // constructor's payload types are per-instantiation, which is exactly what
+        // the table cannot say for two of them.
+        if (!node.resolved_args.empty()) {
+            if (const EnumInfo* inst = enumInstanceOfMember(node)) {
+                auto inst_member = inst->memberInfoByName.find(node.name);
+                if (inst_member != inst->memberInfoByName.end()) {
+                    emitEnumConstructor(node, *inst, inst_member->second,
+                                        argList(node.args));
+                    return;
+                }
+            }
+        }
+        auto enumMem = enumMembers_.find(node.name);
+        if (enumMem != enumMembers_.end() && enumMem->second.owner && enumMem->second.owner->hasPayload) {
+            const EnumInfo& eInfo = *enumMem->second.owner;
+            auto it = eInfo.memberInfoByName.find(node.name);
+            if (it != eInfo.memberInfoByName.end()) {
+                emitEnumConstructor(node, eInfo, it->second, argList(node.args));
+                return;
+            }
+        }
         emitNamedCall(node, node.name);
     }
 
@@ -7179,7 +8467,23 @@ private:
         auto asStruct = structs_.find(name);
         const bool isCtorCall = asStruct != structs_.end();
         if (isCtorCall) emittedName = methodKey(name, "constructor");
+        // The tag intrinsics, before any found-lookup: `getkeyid` and `keyidof`
+        // are declared bodiless in lib/std's enum modules, and a bodiless
+        // declaration still reaches functions_ as a declaration -- which is what
+        // made `keyidof(Ok)` lower as a call and then refuse its own argument (a
+        // conversion from the tag constant to whatever `$enum_member` mapped to).
+        if (!isCtorCall && tryEnumTagIntrinsic(node, name)) return;
+        if (!isCtorCall && tryMetaIntrinsic(node, name)) return;
         auto found = functions_.find(emittedName);
+        if (found == functions_.end() && !isCtorCall) {
+            // A function or `@define` the module declares: `c_socket` from
+            // lib/std/networking.fin, or a plain `fun` a stdlib module defines.
+            // Lazily declared and queued, so the object contains the callee and
+            // the call links. After the intrinsics above, which have no body to
+            // declare, and after the template probes in visit(FunctionCall&),
+            // which run before this is reached.
+            if (ensureModuleCallable(name)) found = functions_.find(emittedName);
+        }
         if (found == functions_.end()) {
             // A struct with no declared constructor, or a name that is neither. Not a
             // zeroed default-construct: a constructor is the only thing that runs field
@@ -7187,10 +8491,6 @@ private:
             // synthesising one would hand back an object whose `= null` fields were
             // never written -- an answer, and the wrong one. `P{}` is the spelling that
             // means "the defaults", and it already works.
-            //
-            // Before that refusal: the `resolve_type*` intrinsics, which have no
-            // body anywhere by design and evaluate at compile time instead.
-            if (!isCtorCall && tryMetaIntrinsic(node, name)) return;
             unsupported(node, fmt::format("a call to '{}'", name));
             return;
         }
@@ -7226,6 +8526,50 @@ private:
             value_ = CgVal{builder_.CreateLoad(object->llvmType, ctorStorage, "constructed"),
                            *object};
         }
+    }
+
+    void emitEnumConstructor(ASTNode& loc, const EnumInfo& enumInfo,
+                             const EnumMemberInfo& memInfo,
+                             const std::vector<Expression*>& args) {
+        if (!enumInfo.hasPayload) {
+            value_ = enumConstant(memInfo.tag);
+            return;
+        }
+        if (args.size() != memInfo.payloadTypes.size()) {
+            unsupported(loc, fmt::format("enum constructor '{}::{}' requires {} argument(s), got {}",
+                                         enumInfo.finName, memInfo.name,
+                                         memInfo.payloadTypes.size(), args.size()));
+            return;
+        }
+
+        auto enumTypeOpt = types_.enumByName(enumInfo.finName);
+        if (!enumTypeOpt) {
+            unsupported(loc, fmt::format("unknown enum type '{}'", enumInfo.finName));
+            return;
+        }
+        CgType enumType = *enumTypeOpt;
+
+        llvm::AllocaInst* slot = builder_.CreateAlloca(enumInfo.llvmType, nullptr, "enum.tmp");
+        builder_.CreateStore(llvm::Constant::getNullValue(enumInfo.llvmType), slot);
+
+        llvm::Value* tagPtr = builder_.CreateStructGEP(enumInfo.llvmType, slot, 0, "tag");
+        builder_.CreateStore(builder_.getInt32(static_cast<uint32_t>(memInfo.tag)), tagPtr);
+
+        for (size_t i = 0; i < args.size(); ++i) {
+            args[i]->accept(*this);
+            if (failed_) return;
+            CgVal argVal = value_;
+            llvm::Value* stored = convert(loc, argVal, memInfo.payloadTypes[i]);
+            if (!stored) return;
+
+            uint64_t offset = enumInfo.payloadStart + memInfo.payloadOffsets[i];
+            llvm::Value* fieldPtr = builder_.CreateConstInBoundsGEP1_32(
+                builder_.getInt8Ty(), slot, static_cast<unsigned>(offset), "payload.arg");
+            builder_.CreateStore(stored, fieldPtr);
+        }
+
+        llvm::Value* loaded = builder_.CreateLoad(enumInfo.llvmType, slot, "enum.val");
+        value_ = CgVal{loaded, enumType, slot};
     }
 
     // The arguments of a call, each offered the type of the parameter it lands on.
@@ -7268,6 +8612,11 @@ private:
             llvm::Value* promoted = promoteVararg(node, a);
             if (!promoted) return false;
             args.push_back(promoted);
+        }
+        for (size_t p = args.size(); p < info.paramTypes.size(); ++p) {
+            if (info.paramTypes[p].isNullable) {
+                args.push_back(llvm::Constant::getNullValue(info.paramTypes[p].llvmType));
+            }
         }
         if (args.size() < info.paramTypes.size()) {
             unsupported(node, fmt::format("a call to '{}' with too few arguments", name));
@@ -7834,6 +9183,14 @@ private:
         // which does not name it, so there is no call site to refuse at -- and a
         // constructor runs implicitly, which is the same objection a destructor gets.
         if (registered_.count(&node)) return;
+        // A forward declaration (`#[future] struct Stream;`, lib/std/stdio.fin:233)
+        // is *deliberately* unregistered: declareStructs leaves it out because a
+        // name whose size nothing knows refuses at the use that needs one. What it
+        // declares is the name and nothing else -- no Block, no member, no
+        // initialiser -- so emitting nothing for the statement is lowering it
+        // completely, the same state visit(TypeDefinition&) reasons its way to. A
+        // bodied declaration this file never registered still refuses below.
+        if (node.is_forward_declaration && node.members.empty()) return;
         unsupported(node, fmt::format("a declaration of struct '{}' here", node.name));
     }
     // An interface emits nothing, and nothing is the whole of its lowering.
@@ -7969,13 +9326,10 @@ private:
     // that an alias of a type is still a type, and that a wildcard extern is a no-op
     // because a namespace's contents are already spliced into the enclosing statement
     // list. So a *declaration* never needs the alias table. A *use* of a renaming
-    // alias does, and this backend resolves names literally -- `shortname()` for
-    // `myns::realname` reaches no function, `myglobv_diffname` reaches no global,
-    // `<Integer>` reaches no type. Each of those refuses at its own use site, in
-    // visitCall, in the identifier path and in the type mapper respectively, which is
-    // why nothing needs refusing here to keep the boundary visible. Three
-    // KnownDefect_Codegen tests hold that boundary; if resolution lands before codegen
-    // they invert.
+    // alias does, and this backend resolves names through the alias tables:
+    // `shortname()` for `myns::realname` reaches the target in functions_,
+    // `myglobv_diffname` reaches the target in globals_, and `<Integer>` reaches the
+    // target type in the type mapper.
     //
     // The attributes are the exception, because an attribute is a demand and not a
     // name. `#[llvm_name]` is honoured on a struct and on a function, so discarding one
@@ -7985,10 +9339,15 @@ private:
         for (auto& attr : node.attributes) {
             // Flag-form `#[export]` is import-visibility only (ADR 0033), and
             // an alias emits nothing to rename or relink -- so there is
-            // nothing here to honour beyond not dropping it. Any other
-            // attribute still refuses: `#[llvm_name]` on an alias would be a
-            // naming request silently dropped.
+            // nothing here to honour beyond not dropping it.
             if (attr->name == "export" && attr->is_flag) continue;
+            // `#[type(enum)]` (lib/std/enums.fin:20, on `EnumType`) classifies
+            // the alias for the analyzer's type system: it says what the alias
+            // stands for, not what to emit. An alias has no representation and
+            // nothing to relink, so like `export` above there is nothing to
+            // honour beyond not dropping it -- and like `export`, the case that
+            // asked is the stdlib's own `-c` audit.
+            if (attr->name == "type" && !attr->is_flag) continue;
             unsupported(node, fmt::format("an attribute on the alias '{}'", node.name));
             return;
         }
@@ -9001,24 +10360,56 @@ private:
         }
         auto receiver = baseOf(direct, CgType::Kind::Struct);
         if (failed_) return;
+        if (!receiver && !dynamic_cast<Identifier*>(node.object.get())) {
+            CgVal val = emit(*node.object);
+            if (failed_) return;
+            if (val.ok()) {
+                if (val.address) {
+                    receiver = Addr{val.address, val.type};
+                } else if (val.type.isStruct() && val.value) {
+                    llvm::Value* tmpSlot = builder_.CreateAlloca(val.type.llvmType, nullptr, "rvalue.receiver");
+                    builder_.CreateStore(val.value, tmpSlot);
+                    receiver = Addr{tmpSlot, val.type};
+                } else if (val.type.isPointer() && val.type.pointee && val.type.pointee->isStruct() && val.value) {
+                    receiver = Addr{val.value, *val.type.pointee};
+                }
+            }
+        }
         if (receiver && receiver->type.isInterface && receiver->type.interfaceInfo) {
             auto object = builder_.CreateLoad(receiver->type.llvmType, receiver->ptr, "interface");
             emitInterfaceMethodCall(node, CgVal{object, receiver->type}, *receiver->type.interfaceInfo);
             return;
         }
         if (!receiver) {
-            // `Point::make(1).get()`. The struct is a value with no home, so there is
-            // no pointer to pass -- and a method takes a pointer because it may assign
-            // through it. Copying to a temporary would work for a method that only
-            // reads, and would silently discard the assignment of one that does not,
-            // and this file cannot tell the two apart (whether a read-only method
-            // should accept a temporary is an owner ruling). Refused the same way
-            // `make()[0]` is refused: consistently, and at the receiver.
             unsupported(node, fmt::format("the receiver of a call to the method '{}' on "
                                           "a value with no address", node.method_name));
             return;
         }
         if (!receiver->type.structInfo) {
+            // An enum's method, before the refusal that used to be the whole
+            // answer. The stdlib's enum methods take the enum as their first
+            // *parameter* (Soundness_EnumMethodReceiver), so the receiver is
+            // argument 0 and the written arguments start at parameter 1: the value
+            // is pre-pushed and emitCallArgs offsets off `args.size()`.
+            if (receiver->type.enumInfo) {
+                const EnumInfo& eInfo = *receiver->type.enumInfo;
+                auto found =
+                    functions_.find(methodKey(eInfo.finName, node.method_name));
+                if (found == functions_.end()) {
+                    unsupported(node, fmt::format("a call to the method '{}' on enum '{}'",
+                                                  node.method_name, eInfo.finName));
+                    return;
+                }
+                const FnInfo& info = found->second;
+                llvm::Value* self = builder_.CreateLoad(receiver->type.llvmType,
+                                                        receiver->ptr, "enum.recv");
+                std::vector<llvm::Value*> args{self};
+                if (!emitCallArgs(node, info, node.method_name, argList(node.args),
+                                  args))
+                    return;
+                emitCall(info, args);
+                return;
+            }
             unsupported(node, fmt::format("a call to the method '{}' on this receiver",
                                           node.method_name));
             return;
@@ -9215,20 +10606,23 @@ private:
     // `Point::make(1, 2)` (struct_methods.fin:8), and `Box::<int>::zero()` where the
     // type arguments are on the *type* and not on the method.
     void visit(StaticMethodCall& node) override {
-        if (!node.generic_args.empty()) {
+        const TypeNode* target_type = node.resolved_target ? node.resolved_target.get()
+                                                           : node.target_type.get();
+        std::unique_ptr<TypeNode> synthTarget;
+        if (target_type && target_type->generics.empty() && !node.generic_args.empty() &&
+            templates_.count(target_type->name)) {
+            synthTarget = std::make_unique<TypeNode>(target_type->name);
+            synthTarget->setLoc(target_type->loc);
+            CloneVisitor cv;
+            for (auto& arg : node.generic_args) {
+                synthTarget->generics.push_back(cv.clone(arg.get()));
+            }
+            target_type = synthTarget.get();
+        } else if (!node.generic_args.empty()) {
             unsupported(node, fmt::format("a '::' call to '{}' with explicit generic "
                                           "arguments", node.method_name));
             return;
         }
-        // The target with its type arguments, which for `Vec2::from_angle(0.7854)`
-        // (letssee.fin:59) is not the target the source wrote: the analyzer inferred
-        // `Vec2<float>` and recorded it, because the annotation on the left of that line
-        // is what says which Vec2 it is and an annotation is not a thing this pass has.
-        // Written where a `::` call on a non-generic struct, on `Self`, or on a template
-        // that already spells its arguments (`Box::<int>::zero()`) leaves it null, so
-        // those go through the same map() of the same node they always did.
-        const TypeNode* target_type = node.resolved_target ? node.resolved_target.get()
-                                                           : node.target_type.get();
         // Through the mapper, so `Box::<int>::zero()` instantiates `Box<int>` on the way
         // -- including its methods, which is what puts `Box<int>.zero` in functions_ for
         // the lookup below to find. A bare `Box` written inside `Box<T>`'s own method
@@ -9253,6 +10647,21 @@ private:
             return;
         }
         if (!target->isStruct() || !target->structInfo) {
+            if (target->isEnum()) {
+                const EnumInfo& eInfo = *target->enumInfo;
+                auto it = eInfo.memberInfoByName.find(node.method_name);
+                if (it != eInfo.memberInfoByName.end()) {
+                    emitEnumConstructor(node, eInfo, it->second, argList(node.args));
+                    return;
+                }
+                auto valIt = eInfo.valueByName.find(node.method_name);
+                if (valIt != eInfo.valueByName.end()) {
+                    if (!eInfo.hasPayload) {
+                        value_ = enumConstant(valIt->second);
+                        return;
+                    }
+                }
+            }
             // An enum, or a scalar. `Colour::Red` is a member access and not this, and
             // a `::` call on anything but a struct is a shape the corpus does not have.
             unsupported(node, fmt::format("a '::' call to '{}' on type '{}'",
@@ -9299,6 +10708,13 @@ private:
             if (auto* id = dynamic_cast<Identifier*>(node.object.get())) {
                 auto e = enums_.find(id->name);
                 if (e != enums_.end()) {
+                    if (e->second.hasPayload) {
+                        auto memIt = e->second.memberInfoByName.find(node.member);
+                        if (memIt != e->second.memberInfoByName.end() && memIt->second.payloadTypes.empty()) {
+                            emitEnumConstructor(node, e->second, memIt->second, {});
+                            return;
+                        }
+                    }
                     auto value = e->second.valueByName.find(node.member);
                     if (value != e->second.valueByName.end()) {
                         value_ = enumConstant(value->second);
@@ -9487,6 +10903,47 @@ private:
                 return;
             }
             unsupported(node, fmt::format("the member '{}' of a prototype", node.member));
+            return;
+        }
+        const EnumInfo* enumInfo = object.type.enumInfo;
+        bool isEnumPtr = false;
+        if (!enumInfo && object.type.isPointer() && object.type.pointee && object.type.pointee->enumInfo) {
+            enumInfo = object.type.pointee->enumInfo;
+            isEnumPtr = true;
+        }
+        if (enumInfo && enumInfo->hasPayload) {
+            size_t position = 0;
+            if (positionalMember(node.member, position)) {
+                const EnumMemberInfo* match = nullptr;
+                for (const auto& kv : enumInfo->memberInfoByName) {
+                    if (position < kv.second.payloadTypes.size()) {
+                        match = &kv.second;
+                        break;
+                    }
+                }
+                if (match) {
+                    uint64_t targetOffset = match->payloadOffsets[position];
+                    const CgType& targetType = match->payloadTypes[position];
+                    uint64_t offset = enumInfo->payloadStart + targetOffset;
+
+                    llvm::Value* addr = nullptr;
+                    if (isEnumPtr) {
+                        addr = object.value;
+                    } else if (object.address) {
+                        addr = object.address;
+                    } else {
+                        addr = builder_.CreateAlloca(enumInfo->llvmType, nullptr, "enum.tmp");
+                        builder_.CreateStore(object.value, addr);
+                    }
+
+                    llvm::Value* fieldPtr = builder_.CreateConstInBoundsGEP1_32(
+                        builder_.getInt8Ty(), addr, static_cast<unsigned>(offset), "payload.slot");
+                    llvm::Value* loaded = builder_.CreateLoad(targetType.llvmType, fieldPtr, "slot.val");
+                    value_ = CgVal{loaded, targetType, fieldPtr};
+                    return;
+                }
+            }
+            unsupported(node, fmt::format("the member '{}' of enum '{}'", node.member, enumInfo->finName));
             return;
         }
         if (!object.type.isStruct() || !object.type.structInfo) {
@@ -9739,11 +11196,24 @@ private:
     // literal with no hint is refused rather than guessed, which is what makes
     // `let p <auto> = { 10: 1.5 }` a refusal and not an invented prototype.
     void visit(PrototypeLiteral& node) override {
-        if (!prototypeHint_ || !prototypeHint_->keys || !prototypeHint_->values) {
+        const CgType* hintType =
+            (prototypeHint_ && prototypeHint_->keys && prototypeHint_->values) ? prototypeHint_ : nullptr;
+        CgType recordedType;
+        bool haveRecorded = false;
+        if (!hintType && node.resolved_type) {
+            auto mapped = types_.map(node.resolved_type.get());
+            if (mapped && mapped->keys && mapped->values &&
+                mapped->keys->element && mapped->keys->element->isAny &&
+                mapped->values->element && mapped->values->element->isAny) {
+                recordedType = *mapped;
+                haveRecorded = true;
+            }
+        }
+        if (!hintType && !haveRecorded) {
             unsupported(node, "a prototype literal with no declared type");
             return;
         }
-        const CgType type = *prototypeHint_;
+        const CgType type = hintType ? *hintType : recordedType;
 
         std::vector<Expression*> keys;
         std::vector<Expression*> values;
@@ -9850,99 +11320,6 @@ private:
     // stdlib/memory.fin:32 writes, `info["MemoryCardModel"] = ...`, where the key is a
     // literal in one place and a literal in another and the two are not one pointer.
     //
-    // What is derivable is listed here and nothing else is: integers and bools by
-    // value, floats by IEEE equality, strings by their bytes, other pointers by
-    // identity, structs field by field, and fixed arrays element by element. A dynamic
-    // array key needs a run-time length loop, and `object` needs a run-time type, so
-    // both are refused at compile time with a reason rather than answered wrongly.
-    //
-    // Returns null having already reported.
-    llvm::Value* emitKeyEquality(ASTNode& node, const CgType& keyType,
-                                 llvm::Value* a, llvm::Value* b) {
-        switch (keyType.kind) {
-            case CgType::Kind::Int:
-                // Bools included: a bool is an i1 here, and `true == true` is the same
-                // instruction `1 == 1` is.
-                return builder_.CreateICmpEQ(a, b, "key.eq");
-            case CgType::Kind::Float:
-                // Ordered equality, so a NaN key never matches -- itself included. ADR
-                // 0028 reserves the NaN and signed-zero ruling for the hashing trait;
-                // until that lands this is the one behaviour that cannot silently claim
-                // two different values are one.
-                return builder_.CreateFCmpOEQ(a, b, "key.eq");
-            case CgType::Kind::Ptr: {
-                if (keyType.pointee) {
-                    // A real pointer. Identity is the only equality a `&T` has here:
-                    // comparing pointees would be a load through a key the program may
-                    // have freed, and Fin has no ruling that two addresses holding equal
-                    // values are one key.
-                    return builder_.CreateICmpEQ(a, b, "key.eq");
-                }
-                // A string: the bytes, through libc's own comparison. Address equality
-                // would make two spellings of the same key two keys.
-                llvm::FunctionCallee cmp = runtimeFn(
-                    node, "strcmp",
-                    llvm::FunctionType::get(builder_.getInt32Ty(),
-                                            {llvm::PointerType::getUnqual(ctx_),
-                                             llvm::PointerType::getUnqual(ctx_)}, false),
-                    "a string key comparison");
-                if (!cmp) return nullptr;
-                llvm::Value* diff = builder_.CreateCall(cmp, {a, b}, "key.strcmp");
-                return builder_.CreateICmpEQ(diff, builder_.getInt32(0), "key.eq");
-            }
-            case CgType::Kind::Struct: {
-                if (!keyType.structInfo) {
-                    unsupported(node, "a struct key with no fields to compare");
-                    return nullptr;
-                }
-                if (keyType.structInfo->fields.empty()) {
-                    // A fieldless struct is one value, so every one of them is the same
-                    // key. tests/samples/prototype_test.fin:37 keys a prototype on
-                    // exactly that (`struct CustomDT {}`), and saying `true` here is the
-                    // honest answer rather than a refusal: there is nothing to differ.
-                    return builder_.getInt1(true);
-                }
-                llvm::Value* equal = builder_.getInt1(true);
-                for (size_t i = 0; i < keyType.structInfo->fields.size(); ++i) {
-                    const CgType& field = keyType.structInfo->fields[i].type;
-                    llvm::Value* fa = builder_.CreateExtractValue(a, {(unsigned)i});
-                    llvm::Value* fb = builder_.CreateExtractValue(b, {(unsigned)i});
-                    llvm::Value* one = emitKeyEquality(node, field, fa, fb);
-                    if (!one) return nullptr;
-                    equal = builder_.CreateAnd(equal, one, "key.eq");
-                }
-                return equal;
-            }
-            case CgType::Kind::Array: {
-                if (keyType.isDynamicArray || !keyType.element) {
-                    // `[int]` as a key. Its length is a run-time value, so the
-                    // comparison is a loop and not an expression -- and a loop here
-                    // would have to be built in the caller's blocks, which is a unit of
-                    // its own. prototype_test.fin:41 writes one and is booked as
-                    // unimplemented; refused rather than compared by pointer, which
-                    // would make two equal arrays two keys.
-                    unsupported(node, "a dynamic array as a prototype key, whose "
-                                      "structural equality needs a run-time loop");
-                    return nullptr;
-                }
-                llvm::Value* equal = builder_.getInt1(true);
-                for (uint64_t i = 0; i < keyType.extent; ++i) {
-                    llvm::Value* ea = builder_.CreateExtractValue(a, {(unsigned)i});
-                    llvm::Value* eb = builder_.CreateExtractValue(b, {(unsigned)i});
-                    llvm::Value* one = emitKeyEquality(node, *keyType.element, ea, eb);
-                    if (!one) return nullptr;
-                    equal = builder_.CreateAnd(equal, one, "key.eq");
-                }
-                return equal;
-            }
-            default:
-                unsupported(node, fmt::format("{} as a prototype key, which has no "
-                                              "derived structural equality",
-                                              describe(keyType)));
-                return nullptr;
-        }
-    }
-
     // A prototype subscript is a key search, never an array offset. The current
     // representation stores parallel dynamic arrays, so this baseline scans them in
     // insertion order. The intrinsic boundary can later replace this body with a hash
@@ -10422,8 +11799,38 @@ private:
         }
         value_ = CgVal{declared->second.fn, *type};
     }
+    void visit(TypeLiteralExpression& node) override {
+        std::string metaName = node.is_interface ? "$interface" : "$struct";
+        std::optional<CgType> meta = types_.mapMetaType(metaName);
+        if (!meta) {
+            unsupported(node, "a type literal");
+            return;
+        }
+        std::string name;
+        if (auto* s = dynamic_cast<StructDeclaration*>(node.decl.get())) {
+            name = s->name;
+        } else if (auto* i = dynamic_cast<InterfaceDeclaration*>(node.decl.get())) {
+            name = i->name;
+        }
+        if (name.empty()) {
+            unsupported(node, "a type literal for an unsupported declaration");
+            return;
+        }
+        int64_t tid = 0;
+        auto found = typeIds_.find(name);
+        if (found != typeIds_.end()) {
+            tid = found->second;
+        } else {
+            tid = nextTypeId_++;
+            typeIds_[name] = tid;
+        }
+        llvm::Value* word = llvm::ConstantInt::get(
+            llvm::Type::getInt64Ty(ctx_), tid);
+        llvm::Value* agg = llvm::ConstantAggregateZero::get(meta->llvmType);
+        agg = builder_.CreateInsertValue(agg, word, {0}, "typeid");
+        value_ = CgVal{agg, *meta};
+    }
     void visit(SuperExpression& node) override { unsupported(node, "'super'"); }
-    void visit(TypeLiteralExpression& node) override { unsupported(node, "a type literal"); }
 
     // A type node reached as an expression is a bug in whoever dispatched, not a
     // construct: TypeMapper is the only thing that should read one.
@@ -10473,6 +11880,7 @@ private:
     struct EnumMember {
         const EnumInfo* owner = nullptr;
         int64_t value = 0;
+        const EnumMemberInfo* memberInfo = nullptr;
     };
     std::unordered_map<std::string, EnumMember> enumMembers_;
     std::set<const EnumDeclaration*> registeredEnums_;
@@ -10527,6 +11935,8 @@ private:
     std::set<std::string> interfaceNames_;
     std::unordered_map<std::string, InterfaceInfo> interfaces_;
     std::unordered_map<std::string, llvm::GlobalVariable*> interfaceVtables_;
+    std::unordered_map<std::string, const TypeNode*> typeAliases_;
+    std::unordered_map<std::string, std::string> symbolAliases_;
 
     // Every generic struct declaration, by name, borrowed from the AST -- which
     // outlives the emitter (run() takes the Program by reference). Not in structs_,
@@ -10539,6 +11949,13 @@ private:
     // signature: `fun ident<T>(a: T) <T>` names no LLVM type until something calls it,
     // and a call site is the only place the argument is known.
     std::unordered_map<std::string, FunctionDeclaration*> fnTemplates_;
+
+    // Every generic enum declaration, by name, borrowed from the AST for the same
+    // reason the struct templates are: a template is not a type, has no layout and
+    // no llvm::StructType, and `enum Res <T> { Ok <T> }` that nothing instantiates
+    // is not an error either (the same evidence `struct M <T> {}` gives).
+    // instantiateEnumGeneric is the only reader.
+    std::unordered_map<std::string, EnumDeclaration*> enumTemplates_;
 
     // One instantiation's bindings, by the instance's mangled name, kept alive for as
     // long as the emitter is. The TypeMapper holds a *pointer* to the substitution

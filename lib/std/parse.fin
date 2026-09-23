@@ -1,0 +1,171 @@
+// Parser utilities, token streaming with lookahead, and Pratt precedence tables.
+//
+// Matches Go's `go/parser` token consumption and standard compiler Pratt /
+// precedence-climbing expression parsers.
+
+import { Token } from token::std;
+
+namespace std {
+
+// Operator precedence levels
+pub const PREC_NONE <int> = 0;
+pub const PREC_ASSIGNMENT <int> = 1;
+pub const PREC_OR <int> = 2;
+pub const PREC_AND <int> = 3;
+pub const PREC_EQUALITY <int> = 4;
+pub const PREC_COMPARISON <int> = 5;
+pub const PREC_TERM <int> = 6;
+pub const PREC_FACTOR <int> = 7;
+pub const PREC_UNARY <int> = 8;
+pub const PREC_CALL <int> = 9;
+pub const PREC_PRIMARY <int> = 10;
+
+#[export] pub fun prec_none() <int> { return 0; }
+#[export] pub fun prec_assignment() <int> { return 1; }
+#[export] pub fun prec_or() <int> { return 2; }
+#[export] pub fun prec_and() <int> { return 3; }
+#[export] pub fun prec_equality() <int> { return 4; }
+#[export] pub fun prec_comparison() <int> { return 5; }
+#[export] pub fun prec_term() <int> { return 6; }
+#[export] pub fun prec_factor() <int> { return 7; }
+#[export] pub fun prec_unary() <int> { return 8; }
+#[export] pub fun prec_call() <int> { return 9; }
+#[export] pub fun prec_primary() <int> { return 10; }
+
+// Returns the binary operator precedence for a token kind.
+#[export]
+pub fun binary_precedence(token_kind: int) <int> {
+    // Assignment: = (85), +=, -=, *=, /= (98..101)
+    if (token_kind == 85 || (token_kind >= 98 && token_kind <= 101)) {
+        return 1;
+    }
+    // Logical OR: || (93)
+    if (token_kind == 93) {
+        return 2;
+    }
+    // Logical AND: && (92)
+    if (token_kind == 92) {
+        return 3;
+    }
+    // Equality: == (86), != (87)
+    if (token_kind == 86 || token_kind == 87) {
+        return 4;
+    }
+    // Comparison: < (88), > (89), <= (90), >= (91)
+    if (token_kind >= 88 && token_kind <= 91) {
+        return 5;
+    }
+    // Term: + (80), - (81)
+    if (token_kind == 80 || token_kind == 81) {
+        return 6;
+    }
+    // Factor: * (82), / (83), % (84)
+    if (token_kind >= 82 && token_kind <= 84) {
+        return 7;
+    }
+    // Calls, member access, subscripts: ( (110), [ (114), . (119)
+    if (token_kind == 110 || token_kind == 114 || token_kind == 119) {
+        return 9;
+    }
+    return 0;
+}
+
+// Returns the unary operator precedence for a token kind.
+#[export]
+pub fun unary_precedence(token_kind: int) <int> {
+    // Unary: - (81), ! (94), ++ (96), -- (97)
+    if (token_kind == 81 || token_kind == 94 || token_kind == 96 || token_kind == 97) {
+        return 8;
+    }
+    return 0;
+}
+
+// Checks if an operator is right-associative (e.g. assignment).
+#[export]
+pub fun is_right_associative(token_kind: int) <bool> {
+    return token_kind == 85 || (token_kind >= 98 && token_kind <= 101);
+}
+
+// Buffered token stream with lookahead and backtracking for recursive-descent parsing.
+#[export]
+pub struct TokenStream {
+    priv:
+      _tokens <[Token]>,
+      _count <int> = 0,
+      cursor <int> = 0,
+
+    pub:
+      fun init(self: &Self, token_array: [Token], count: int) <noret> {
+          self._tokens = token_array;
+          self._count = count;
+          self.cursor = 0;
+      }
+
+      fun is_at_end(self: &Self) <bool> {
+          if (self.cursor >= self._count) { return true; }
+          return self._tokens[self.cursor].kind == 0;
+      }
+
+      fun peek(self: &Self) <Token> {
+          if (self.cursor >= self._count) {
+              return Token { kind: 0, text: "", line: 1, col: 1, offset: 0, len: 0 };
+          }
+          return self._tokens[self.cursor];
+      }
+
+      fun peek_at(self: &Self, offset: int) <Token> {
+          let idx <int> = self.cursor + offset;
+          if (idx < 0 || idx >= self._count) {
+              return Token { kind: 0, text: "", line: 1, col: 1, offset: 0, len: 0 };
+          }
+          return self._tokens[idx];
+      }
+
+      fun advance(self: &Self) <Token> {
+          if (self.is_at_end()) {
+              return self.peek();
+          }
+          self.cursor++;
+          return self._tokens[self.cursor - 1];
+      }
+
+      fun previous(self: &Self) <Token> {
+          if (self.cursor <= 0) {
+              return self.peek();
+          }
+          return self._tokens[self.cursor - 1];
+      }
+
+      fun check(self: &Self, kind: int) <bool> {
+          if (self.is_at_end()) { return false; }
+          return self.peek().kind == kind;
+      }
+
+      fun match_token(self: &Self, kind: int) <bool> {
+          if (self.check(kind)) {
+              self.advance();
+              return true;
+          }
+          return false;
+      }
+
+      fun expect(self: &Self, kind: int, error_msg: string) <Token> {
+          blame self.check(kind), error_msg;
+          return self.advance();
+      }
+
+      fun position(self: &Self) <int> {
+          return self.cursor;
+      }
+
+      fun seek(self: &Self, pos: int) <noret> {
+          self.cursor = pos;
+      }
+
+      fun remaining(self: &Self) <int> {
+          if (self.cursor >= self._count) { return 0; }
+          return self._count - self.cursor;
+      }
+}
+
+}

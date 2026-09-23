@@ -205,8 +205,8 @@ The reference and borrow counts are `&int` handles shared between every handle o
 value, so an increment through one is visible through all of them and `refs()` answers a
 question about the value rather than about the handle — chapter 12 has the protocol. What
 the library still cannot see is a raw `&rptr<T>` copied past a `release()`: that needs a
-borrow check and there is none. Nor does an `rptr` reach an executable — the example above
-type-checks and then reports `codegen: a variable of type 'rptr<int>' is not lowered yet`.
+borrow check and there is none. `rptr<T>` lowers cleanly to machine code, and programs using
+it compile and execute in binaries produced with `-o`.
 
 Bounds checking is also undecided. Nothing in the language says an index is checked against
 the length; `Collection`'s `__get` asserts with `blame` because the library chose to, not

@@ -1,0 +1,542 @@
+// finc/checker.fin: Semantic analyzer and type checker for Fin self-hosting compiler.
+
+import {
+    AstNode,
+    ast_program, ast_fun_decl, ast_struct_decl, ast_var_decl, ast_param,
+    ast_block, ast_if_stmt, ast_while_stmt, ast_for_stmt, ast_return_stmt, ast_blame_stmt,
+    ast_expr_stmt, ast_break_stmt, ast_continue_stmt,
+    ast_binary_expr, ast_unary_expr, ast_call_expr,
+    ast_member_access, ast_index_expr, ast_ident,
+    ast_literal_int, ast_literal_string, ast_literal_bool
+} from ast::std;
+
+import {
+    Scope, Symbol, new_scope, free_scope,
+    sym_variable, sym_function, sym_struct, sym_parameter,
+    make_var_sym, make_fn_sym
+} from scope::std;
+
+import {
+    DiagnosticBag, diag_error, format_snippet, free_diag_str
+} from diag::std;
+
+import { Buffer, new_buffer, free_buffer, free_string } from buffer::std;
+import { substr } from strings::std;
+
+#[llvm_name="strcmp"]
+@define chk_strcmp(a: string, b: string) <int>;
+
+#[llvm_name="strlen"]
+@define chk_raw_strlen(s: string) <ulong>;
+
+priv fun chk_strlen(s: string) <ulong> {
+    if (s == null) { return cast<ulong>(0); }
+    return chk_raw_strlen(s);
+}
+
+#[llvm_name="strchr"]
+@define chk_strchr(s: string, c: int) <string>;
+
+#[llvm_name="dprintf"]
+@define chk_dprintf(fd: int, fmt: string, ...) <int>;
+
+priv fun chk_str_eq(a: string, b: string) <bool> {
+    if (a == null && b == null) { return true; }
+    if (a == null || b == null) { return false; }
+    return chk_strcmp(a, b) == 0;
+}
+
+pub struct Checker {
+    pub:
+      global_scope <&Scope>,
+      current_scope <&Scope>,
+      diag <DiagnosticBag>,
+      source_file <string> = "",
+      had_error <bool> = false,
+      current_ret_type <string> = "void",
+      current_struct <string> = "",
+
+    pub:
+      fun report_error(self: &Self, msg: string, line: int, col: int) <noret> {
+          self.had_error = true;
+          self.diag.add_error();
+          let snip <string> = format_snippet(self.source_file, line, col, diag_error(), msg, "", 3);
+          chk_dprintf(2, "%s", snip);
+          free_diag_str(snip);
+      }
+
+      fun enter_scope(self: &Self) <noret> {
+          self.current_scope = new_scope(self.current_scope);
+      }
+
+      fun exit_scope(self: &Self) <noret> {
+          let old <&Scope> = self.current_scope;
+          self.current_scope = old.parent;
+          free_scope(old);
+      }
+
+      fun seed_builtins(self: &Self) <noret> {
+          self.global_scope.insert_symbol(make_fn_sym("printf", "void", true));
+          self.global_scope.insert_symbol(make_fn_sym("exit", "void", true));
+          self.global_scope.insert_symbol(make_fn_sym("abort", "void", true));
+          self.global_scope.insert_symbol(make_fn_sym("malloc", "string", true));
+          self.global_scope.insert_symbol(make_fn_sym("free", "void", true));
+          self.global_scope.insert_symbol(make_fn_sym("__fin_alloc_array", "void*", true));
+          self.global_scope.insert_symbol(make_fn_sym("__fin_alloc_struct", "void*", true));
+          self.global_scope.insert_symbol(make_fn_sym("__fin_alloc_scalar", "void*", true));
+          self.global_scope.insert_symbol(make_fn_sym("__fin_struct_init", "void*", true));
+          self.global_scope.insert_symbol(make_var_sym("NULL", "void*", true));
+      }
+
+      fun check_expression(self: &Self, expr: &AstNode) <string> {
+          if (expr == null) { return "void"; }
+
+          if (expr.kind == ast_literal_int()) {
+              return "int";
+          }
+          if (expr.kind == ast_literal_string()) {
+              return "string";
+          }
+          if (expr.kind == ast_literal_bool()) {
+              return "bool";
+          }
+
+          if (expr.kind == ast_ident()) {
+              if (chk_str_eq(expr.name, "m1778") || chk_str_eq(expr.name, "NULL")) {
+                  return "void";
+              }
+              if (!self.current_scope.has(expr.name)) {
+                  self.report_error("use of undeclared identifier", expr.line, expr.col);
+                  return "error";
+              }
+              let sym <Symbol> = self.current_scope.lookup(expr.name);
+              return sym.type_name;
+          }
+
+          if (expr.kind == ast_binary_expr()) {
+              let t_left <string> = self.check_expression(expr.left);
+              let t_right <string> = self.check_expression(expr.right);
+              if (chk_str_eq(expr.name, "==") || chk_str_eq(expr.name, "!=") ||
+                  chk_str_eq(expr.name, "<") || chk_str_eq(expr.name, ">") ||
+                  chk_str_eq(expr.name, "<=") || chk_str_eq(expr.name, ">=") ||
+                  chk_str_eq(expr.name, "&&") || chk_str_eq(expr.name, "||")) {
+                  return "bool";
+              }
+              return t_left;
+          }
+
+          if (expr.kind == ast_unary_expr()) {
+              if (chk_str_eq(expr.name, "cast")) {
+                  self.check_expression(expr.left);
+                  return expr.type_annotation;
+              }
+              let t_inner <string> = self.check_expression(expr.left);
+              if (chk_str_eq(expr.name, "!")) {
+                  return "bool";
+              }
+              if (chk_str_eq(expr.name, "?")) {
+                  let len <ulong> = chk_strlen(t_inner);
+                  if (len > cast<ulong>(1) && chk_strchr(t_inner, 63) != null) {
+                      return substr(t_inner, 0, cast<int>(len - 1));
+                  }
+                  return t_inner;
+              }
+              if (chk_str_eq(expr.name, "&")) {
+                  let b <Buffer> = new_buffer(32);
+                  b.write_string(t_inner);
+                  b.write_char('*');
+                  let res <string> = b.to_string();
+                  free_buffer(b);
+                  return res;
+              }
+              if (chk_str_eq(expr.name, "*")) {
+                  let len <ulong> = chk_strlen(t_inner);
+                  if (len > cast<ulong>(1) && chk_strchr(t_inner, 42) != null) {
+                      return substr(t_inner, 0, cast<int>(len - 1));
+                  }
+                  if (len > cast<ulong>(1) && chk_strchr(t_inner, 38) != null) {
+                      return substr(t_inner, 1, cast<int>(len - 1));
+                  }
+                  return t_inner;
+              }
+              return t_inner;
+          }
+
+          if (expr.kind == ast_call_expr()) {
+              if (chk_str_eq(expr.name, "__fin_alloc_array")) {
+                  self.check_expression(expr.left);
+                  return expr.type_annotation;
+              }
+              if (chk_str_eq(expr.name, "__fin_alloc_struct")) {
+                  return expr.type_annotation;
+              }
+              if (chk_str_eq(expr.name, "__fin_alloc_scalar")) {
+                  if (expr.left != null) {
+                      self.check_expression(expr.left);
+                  }
+                  return expr.type_annotation;
+              }
+              if (chk_str_eq(expr.name, "__fin_struct_init")) {
+                  let fld <&AstNode> = expr.left;
+                  while (fld != null) {
+                      self.check_expression(fld.left);
+                      fld = fld.right;
+                  }
+                  return expr.type_annotation;
+              }
+              let is_coll_method <bool> = false;
+              if (expr.left != null && !self.current_scope.has(expr.name)) {
+                  let rec_node <&AstNode> = expr.left;
+                  if (rec_node.kind == 0 && rec_node.left != null) {
+                      rec_node = rec_node.left;
+                  }
+                  let receiver_t <string> = self.check_expression(rec_node);
+                  if (receiver_t != null && !chk_str_eq(receiver_t, "void") && !chk_str_eq(receiver_t, "error")) {
+                      let base_st <string> = receiver_t;
+                      let rlen <ulong> = chk_strlen(receiver_t);
+                      if (chk_strchr(receiver_t, 42) != null) {
+                          if (rlen > cast<ulong>(1)) {
+                              base_st = substr(receiver_t, 0, cast<int>(rlen - 1));
+                          }
+                      } else if (chk_strchr(receiver_t, 38) != null) {
+                          if (rlen > cast<ulong>(1)) {
+                              base_st = substr(receiver_t, 1, cast<int>(rlen - 1));
+                          }
+                      }
+                      let b_len <int> = cast<int>(chk_strlen(base_st));
+                      for (let bi <int> = 0; bi < b_len; bi++) {
+                          let ch <string> = substr(base_st, bi, 1);
+                          if (chk_str_eq(ch, "<")) {
+                              base_st = substr(base_st, 0, bi);
+                              break;
+                          }
+                      }
+                      if (chk_str_eq(base_st, "Self") && chk_strlen(self.current_struct) > cast<ulong>(0)) {
+                          base_st = self.current_struct;
+                      }
+                      if (chk_str_eq(base_st, "Collection")) {
+                          is_coll_method = true;
+                      }
+                      let q_buf <Buffer> = new_buffer(64);
+                      q_buf.write_string(base_st);
+                      q_buf.write_char('_');
+                      q_buf.write_string(expr.name);
+                      let q_name <string> = q_buf.to_string();
+                      free_buffer(q_buf);
+                      if (self.global_scope.has(q_name)) {
+                          expr.name = q_name;
+                      }
+                  }
+              }
+              if (expr.name != null && chk_strlen(expr.name) > cast<ulong>(0)) {
+                  if (!self.current_scope.has(expr.name) && !is_coll_method) {
+                      let b <Buffer> = new_buffer(64);
+                      b.write_string("call to undeclared function: ");
+                      b.write_string(expr.name);
+                      self.report_error(b.to_string(), expr.line, expr.col);
+                      free_buffer(b);
+                  }
+                  let arg <&AstNode> = expr.left;
+                  while (arg != null) {
+                      let actual_arg <&AstNode> = arg.left;
+                      if (actual_arg == null) { actual_arg = arg; }
+                      self.check_expression(actual_arg);
+                      arg = arg.right;
+                  }
+                  if (self.current_scope.has(expr.name)) {
+                      let fn_sym <Symbol> = self.current_scope.lookup(expr.name);
+                      return fn_sym.type_name;
+                  }
+                  return "void";
+              }
+              if (expr.left != null) {
+                  let fn_t <string> = self.check_expression(expr.left);
+                  let arg <&AstNode> = expr.extra;
+                  while (arg != null) {
+                      self.check_expression(arg);
+                      arg = arg.right;
+                  }
+                  return "auto";
+              }
+              return "void";
+          }
+
+          if (expr.kind == ast_index_expr()) {
+              let t_arr <string> = self.check_expression(expr.left);
+              self.check_expression(expr.right);
+              if (t_arr != null) {
+                  let alen <ulong> = chk_strlen(t_arr);
+                  if (chk_str_eq(t_arr, "string")) {
+                      return "char";
+                  }
+                  if (alen > cast<ulong>(2) && chk_strchr(t_arr, 91) != null && chk_strchr(t_arr, 93) != null) {
+                      return substr(t_arr, 1, cast<int>(alen - 2));
+                  }
+                  if (alen > cast<ulong>(1) && chk_strchr(t_arr, 42) != null) {
+                      return substr(t_arr, 0, cast<int>(alen - 1));
+                  }
+              }
+              return "int";
+          }
+
+          if (expr.kind == ast_member_access()) {
+              let t_base <string> = self.check_expression(expr.left);
+              if (t_base != null) {
+                  let base_st <string> = t_base;
+                  let blen <ulong> = chk_strlen(t_base);
+                  if (chk_strchr(t_base, 42) != null) {
+                      expr.int_val = 1;
+                      if (blen > cast<ulong>(1)) {
+                          base_st = substr(t_base, 0, cast<int>(blen - 1));
+                      }
+                  } else if (chk_strchr(t_base, 38) != null) {
+                      expr.int_val = 1;
+                      if (blen > cast<ulong>(1)) {
+                          base_st = substr(t_base, 1, cast<int>(blen - 1));
+                      }
+                  } else {
+                      expr.int_val = 0;
+                  }
+                  if (chk_str_eq(base_st, "Self") && chk_strlen(self.current_struct) > cast<ulong>(0)) {
+                      base_st = self.current_struct;
+                  }
+                  let q_buf <Buffer> = new_buffer(64);
+                  q_buf.write_string(base_st);
+                  q_buf.write_char('_');
+                  q_buf.write_string(expr.name);
+                  let q_name <string> = q_buf.to_string();
+                  free_buffer(q_buf);
+                  if (self.global_scope.has(q_name)) {
+                      let fld_sym <Symbol> = self.global_scope.lookup(q_name);
+                      return fld_sym.type_name;
+                  }
+              }
+              return "auto";
+          }
+
+          return "void";
+      }
+
+      fun check_statement(self: &Self, stmt: &AstNode) <noret> {
+          if (stmt == null) { return; }
+
+          if (stmt.kind == ast_break_stmt() || stmt.kind == ast_continue_stmt()) {
+              return;
+          }
+
+          if (stmt.kind == ast_var_decl()) {
+              if (stmt.left != null) {
+                  self.check_expression(stmt.left);
+              }
+              let sym <Symbol> = make_var_sym(stmt.name, stmt.type_annotation, true);
+              let ok <bool> = self.current_scope.insert_symbol(sym);
+              if (!ok) {
+                  self.report_error("duplicate declaration of variable in current scope", stmt.line, stmt.col);
+              }
+              return;
+          }
+
+          if (stmt.kind == ast_return_stmt()) {
+              if (stmt.left != null) {
+                  self.check_expression(stmt.left);
+              }
+              return;
+          }
+
+          if (stmt.kind == ast_blame_stmt()) {
+              if (stmt.left != null) {
+                  self.check_expression(stmt.left);
+              }
+              return;
+          }
+
+          if (stmt.kind == ast_expr_stmt()) {
+              if (stmt.left != null) {
+                  self.check_expression(stmt.left);
+              }
+              return;
+          }
+
+          if (stmt.kind == ast_if_stmt()) {
+              if (stmt.left != null) {
+                  self.check_expression(stmt.left);
+              }
+              if (stmt.right != null) {
+                  self.check_statement(stmt.right);
+              }
+              if (stmt.extra != null) {
+                  self.check_statement(stmt.extra);
+              }
+              return;
+          }
+
+          if (stmt.kind == ast_while_stmt()) {
+              if (stmt.left != null) {
+                  self.check_expression(stmt.left);
+              }
+              if (stmt.right != null) {
+                  self.check_statement(stmt.right);
+              }
+              return;
+          }
+
+          if (stmt.kind == ast_for_stmt()) {
+              self.enter_scope();
+              if (stmt.left != null) {
+                  self.check_statement(stmt.left);
+              }
+              if (stmt.right != null) {
+                  self.check_expression(stmt.right);
+              }
+              if (stmt.extra != null) {
+                  if (stmt.extra.left != null) {
+                      self.check_expression(stmt.extra.left);
+                  }
+                  if (stmt.extra.right != null) {
+                      self.check_statement(stmt.extra.right);
+                  }
+              }
+              self.exit_scope();
+              return;
+          }
+
+          if (stmt.kind == ast_block()) {
+              self.enter_scope();
+              let cur <&AstNode> = stmt.left;
+              while (cur != null) {
+                  self.check_statement(cur.left);
+                  cur = cur.right;
+              }
+              self.exit_scope();
+              return;
+          }
+      }
+
+      fun check_function(self: &Self, fn_node: &AstNode) <noret> {
+          if (fn_node == null) { return; }
+
+          self.current_ret_type = fn_node.type_annotation;
+          self.enter_scope();
+
+          // Register parameters into function scope
+          let p_cur <&AstNode> = fn_node.extra;
+          while (p_cur != null) {
+              let p_sym <Symbol> = make_var_sym(p_cur.name, p_cur.type_annotation, false);
+              let ok <bool> = self.current_scope.insert_symbol(p_sym);
+              if (!ok) {
+                  self.report_error("duplicate parameter name", p_cur.line, p_cur.col);
+              }
+              p_cur = p_cur.right;
+          }
+
+          // Check body
+          if (fn_node.left != null) {
+              let b_cur <&AstNode> = fn_node.left.left;
+              while (b_cur != null) {
+                  self.check_statement(b_cur.left);
+                  b_cur = b_cur.right;
+              }
+          }
+
+          self.exit_scope();
+      }
+
+      fun check_program(self: &Self, root: &AstNode) <bool> {
+          if (root == null) { return true; }
+
+          // Pass 1: Declare top-level functions, structs, and globals in global scope
+          let decl <&AstNode> = root.left;
+          while (decl != null) {
+              if (decl.kind == ast_struct_decl()) {
+                  let st_sym <Symbol> = Symbol {
+                      name: decl.name,
+                      kind: sym_struct(),
+                      type_name: decl.name,
+                      is_pub: true,
+                      is_mut: false,
+                      line: decl.line,
+                      col: decl.col
+                  };
+                  if (!self.global_scope.has(decl.name)) {
+                      self.global_scope.insert_symbol(st_sym);
+                  }
+                  let fld <&AstNode> = decl.left;
+                  while (fld != null) {
+                      let fb <Buffer> = new_buffer(64);
+                      fb.write_string(decl.name);
+                      fb.write_char('_');
+                      fb.write_string(fld.name);
+                      let fq <string> = fb.to_string();
+                      free_buffer(fb);
+                      let fsym <Symbol> = make_var_sym(fq, fld.type_annotation, true);
+                      if (!self.global_scope.has(fq)) {
+                          self.global_scope.insert_symbol(fsym);
+                      }
+                      fld = fld.right;
+                  }
+                  let m <&AstNode> = decl.extra;
+                  while (m != null) {
+                      let m_sym <Symbol> = make_fn_sym(m.name, m.type_annotation, true);
+                      if (!self.global_scope.has(m.name)) {
+                          self.global_scope.insert_symbol(m_sym);
+                      }
+                      m = m.right;
+                  }
+              } else if (decl.kind == ast_fun_decl()) {
+                  let fn_sym <Symbol> = make_fn_sym(decl.name, decl.type_annotation, true);
+                  if (!self.global_scope.has(decl.name)) {
+                      self.global_scope.insert_symbol(fn_sym);
+                  }
+              } else if (decl.kind == ast_var_decl()) {
+                  let v_sym <Symbol> = make_var_sym(decl.name, decl.type_annotation, true);
+                  if (!self.global_scope.has(decl.name)) {
+                      self.global_scope.insert_symbol(v_sym);
+                  }
+              }
+              decl = decl.right;
+          }
+
+          // Pass 2: Check definitions
+          decl = root.left;
+          while (decl != null) {
+              if (decl.kind == ast_struct_decl()) {
+                  self.current_struct = decl.name;
+                  let m <&AstNode> = decl.extra;
+                  while (m != null) {
+                      self.check_function(m);
+                      m = m.right;
+                  }
+                  self.current_struct = "";
+              } else if (decl.kind == ast_fun_decl()) {
+                  self.check_function(decl);
+              } else if (decl.kind == ast_var_decl()) {
+                  if (decl.left != null) {
+                      self.check_expression(decl.left);
+                  }
+              }
+              decl = decl.right;
+          }
+
+          return !self.had_error;
+      }
+}
+
+pub fun new_checker(filename: string) <Checker> {
+    let g <&Scope> = new_scope(null);
+    let diag_bag <DiagnosticBag> = DiagnosticBag{};
+    let chk <Checker> = Checker {
+        global_scope: g,
+        current_scope: g,
+        diag: diag_bag,
+        source_file: filename,
+        had_error: false,
+        current_ret_type: "void",
+        current_struct: ""
+    };
+    chk.seed_builtins();
+    return chk;
+}
+
+pub fun free_checker(c: Checker) <noret> {
+    free_scope(c.global_scope);
+}

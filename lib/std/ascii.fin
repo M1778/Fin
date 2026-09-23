@@ -1,0 +1,103 @@
+// ASCII character classification and conversion operations.
+//
+// Reaches standard ASCII character properties matching Python's `string.ascii_*`
+// and `<ctype.h>` classification rules.
+
+namespace std {
+
+#[export]
+pub fun is_alpha(c: char) <bool> {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+#[export]
+pub fun is_digit(c: char) <bool> {
+    return c >= '0' && c <= '9';
+}
+
+#[export]
+pub fun is_alnum(c: char) <bool> {
+    return is_alpha(c) || is_digit(c);
+}
+
+#[export]
+pub fun is_space(c: char) <bool> {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+#[export]
+pub fun is_upper(c: char) <bool> {
+    return c >= 'A' && c <= 'Z';
+}
+
+#[export]
+pub fun is_lower(c: char) <bool> {
+    return c >= 'a' && c <= 'z';
+}
+
+#[export]
+pub fun is_ascii(c: char) <bool> {
+    let val <int> = cast<int>(c);
+    return val >= 0 && val <= 127;
+}
+
+#[export]
+pub fun is_print(c: char) <bool> {
+    return c >= ' ' && c <= '~';
+}
+
+#[export]
+pub fun is_cntrl(c: char) <bool> {
+    let val <int> = cast<int>(c);
+    return (val >= 0 && val < 32) || val == 127;
+}
+
+#[export]
+pub fun is_punct(c: char) <bool> {
+    return is_print(c) && !is_alnum(c) && c != ' ';
+}
+
+#[export]
+pub fun is_xdigit(c: char) <bool> {
+    return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+#[export]
+pub fun to_upper(c: char) <char> {
+    if (is_lower(c)) {
+        return cast<char>(cast<int>(c) - 32);
+    }
+    return c;
+}
+
+#[export]
+pub fun to_lower(c: char) <char> {
+    if (is_upper(c)) {
+        return cast<char>(cast<int>(c) + 32);
+    }
+    return c;
+}
+
+#[export]
+pub fun digit_value(c: char) <int> {
+    if (is_digit(c)) {
+        return cast<int>(c) - cast<int>('0');
+    }
+    return -1;
+}
+
+#[export]
+pub fun hex_value(c: char) <int> {
+    if (is_digit(c)) {
+        return cast<int>(c) - cast<int>('0');
+    }
+    if (c >= 'a' && c <= 'f') {
+        return 10 + (cast<int>(c) - cast<int>('a'));
+    }
+    if (c >= 'A' && c <= 'F') {
+        return 10 + (cast<int>(c) - cast<int>('A'));
+    }
+    return -1;
+}
+
+}

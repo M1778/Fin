@@ -9,6 +9,7 @@
 #include "CompilerApi.hpp"
 #include <vector>
 #include <string>
+#include <unordered_map>
 #include <fmt/core.h>
 #include <fmt/color.h>
 
@@ -518,6 +519,10 @@ private:
     //
     // Top level only. A namespace body is its own scope and gets no pre-pass.
     void hoistTopLevelSignatures(Program& node);
+
+    // Tracks top-level struct/class/interface/enum declarations hoisted during the pre-pass
+    // so that subsequent in-order visits reuse the exact type instance.
+    std::unordered_map<const ASTNode*, std::shared_ptr<StructType>> hoistedTypes_;
     
     template <typename... Args>
     void debugLog(const fmt::text_style& style, fmt::format_string<Args...> format, Args&&... args) {

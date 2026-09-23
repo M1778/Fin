@@ -1,0 +1,2157 @@
+// finc/codegen.fin: Pure LLVM IR lowering and code generator for Fin self-hosting compiler.
+// Conforms to ADR 0002 and ADR 0043: Refuses C generation; lowers exclusively to LLVM IR.
+
+import {
+    AstNode,
+    ast_program, ast_fun_decl, ast_struct_decl, ast_var_decl,
+    ast_block, ast_if_stmt, ast_while_stmt, ast_for_stmt, ast_return_stmt, ast_blame_stmt,
+    ast_expr_stmt, ast_break_stmt, ast_continue_stmt,
+    ast_binary_expr, ast_unary_expr, ast_call_expr,
+    ast_index_expr, ast_member_access,
+    ast_ident, ast_literal_int, ast_literal_string, ast_literal_bool
+} from ast::std;
+
+import {
+    LLVMModule, LLVMBuilder, LLVMValue, LLVMType, LLVMBasicBlock,
+    LLVMTarget, LLVMTargetMachine, LLVMTargetSlot, LLVMErrSlot,
+    LLVMTypeArgs, LLVMValueArgs, LLVMIndices, LLVMBlockArgs,
+    llvm_module_create, llvm_dispose_module, llvm_dump_module, llvm_write_bitcode_to_file,
+    llvm_i32_type, llvm_i64_type, llvm_i8_type, llvm_i1_type, llvm_void_type, llvm_pointer_type,
+    llvm_function_type, llvm_add_function, llvm_get_named_function, llvm_append_basic_block,
+    llvm_get_param, llvm_create_builder, llvm_dispose_builder, llvm_position_builder,
+    llvm_get_insert_block, llvm_get_basic_block_terminator,
+    llvm_const_int, llvm_const_string, llvm_const_null, llvm_build_global_string_ptr,
+    llvm_build_ret, llvm_build_ret_void,
+    llvm_build_add, llvm_build_sub, llvm_build_mul, llvm_build_sdiv, llvm_build_srem,
+    llvm_build_and, llvm_build_or, llvm_build_xor, llvm_build_not, llvm_build_neg,
+    llvm_build_shl, llvm_build_ashr, llvm_build_lshr,
+    llvm_build_icmp, llvm_build_alloca, llvm_build_load2, llvm_build_store,
+    llvm_build_br, llvm_build_cond_br, llvm_build_unreachable, llvm_build_call2,
+    llvm_build_phi, llvm_add_incoming, llvm_build_select,
+    llvm_build_gep2, llvm_build_struct_gep2,
+    llvm_build_sext, llvm_build_zext,
+    llvm_build_malloc, llvm_build_array_malloc, llvm_build_free, llvm_build_trunc, llvm_build_bitcast,
+    llvm_int_eq, llvm_int_ne, llvm_int_sgt, llvm_int_sge, llvm_int_slt, llvm_int_sle,
+    llvm_global_get_value_type, llvm_type_of,
+    init_native_target, emit_module_to_object, llvm_verify_module, llvm_verify_function,
+    llvm_get_return_type, llvm_get_param_types, llvm_build_ptr_to_int, llvm_build_int_to_ptr
+} from finc.llvm;
+
+import { substr } from strings::std;
+import { Buffer, new_buffer, free_buffer } from buffer::std;
+
+#[llvm_name="strcmp"]
+@define cg_strcmp(a: string, b: string) <int>;
+
+#[llvm_name="strlen"]
+@define cg_raw_strlen(s: string) <ulong>;
+
+priv fun cg_strlen(s: string) <ulong> {
+    if (s == null) { return cast<ulong>(0); }
+    return cg_raw_strlen(s);
+}
+
+priv fun cg_str_eq(a: string, b: string) <bool> {
+    if (a == null && b == null) { return true; }
+    if (a == null || b == null) { return false; }
+    return cg_strcmp(a, b) == 0;
+}
+
+pub struct LocalVar {
+    pub:
+      name <string> = "",
+      val <&LLVMValue> = null,
+      ty <&LLVMType> = null,
+      type_annotation <string> = "",
+      len_val <&LLVMValue> = null,
+      elem_ty <&LLVMType> = null,
+}
+
+pub struct FnSymbol {
+    pub:
+      name <string> = "",
+      fn_val <&LLVMValue> = null,
+      fn_ty <&LLVMType> = null,
+}
+
+pub struct StructFieldInfo {
+    pub:
+      name <string> = "",
+      index <int> = 0,
+      type_annotation <string> = "",
+}
+
+pub struct StructInfo {
+    pub:
+      name <string> = "",
+      fields <[&StructFieldInfo]>,
+      field_count <int> = 0,
+}
+
+pub struct FnContext {
+    pub:
+      vars <[&LocalVar]>,
+      var_count <int> = 0,
+      fn_syms <[&FnSymbol]>,
+      fn_sym_count <int> = 0,
+      fn_val <&LLVMValue> = null,
+      builder <&LLVMBuilder> = null,
+      module <&LLVMModule> = null,
+      i32_ty <&LLVMType> = null,
+      i64_ty <&LLVMType> = null,
+      i1_ty <&LLVMType> = null,
+      i8_ty <&LLVMType> = null,
+      ptr_ty <&LLVMType> = null,
+      void_ty <&LLVMType> = null,
+      break_bb <&LLVMBasicBlock> = null,
+      continue_bb <&LLVMBasicBlock> = null,
+      structs <[&StructInfo]>,
+      struct_count <int> = 0,
+}
+
+fun fn_ctx_add_var(ctx: &FnContext, name: string, val: &LLVMValue, ty: &LLVMType, type_ann: string) <noret> {
+    if (ctx.var_count < 1020) {
+        let v <&LocalVar> = new LocalVar{};
+        v.name = name;
+        v.val = val;
+        v.ty = ty;
+        v.type_annotation = type_ann;
+        v.len_val = null;
+        v.elem_ty = null;
+        ctx.vars[ctx.var_count] = v;
+        ctx.var_count = ctx.var_count + 1;
+    }
+}
+
+fun to_condition_i1(ctx: &FnContext, val: &LLVMValue) <&LLVMValue> {
+    if (val == null) { return null; }
+    let ty <&LLVMType> = llvm_type_of(val);
+    if (ty == ctx.i1_ty) {
+        return val;
+    }
+    if (ty == ctx.i32_ty) {
+        let zero <&LLVMValue> = llvm_const_int(ctx.i32_ty, 0, 0);
+        return llvm_build_icmp(ctx.builder, llvm_int_ne(), val, zero, "tobool");
+    }
+    if (ty == ctx.i64_ty) {
+        let zero64 <&LLVMValue> = llvm_const_int(ctx.i64_ty, 0, 0);
+        return llvm_build_icmp(ctx.builder, llvm_int_ne(), val, zero64, "tobool");
+    }
+    if (ty == ctx.ptr_ty) {
+        let null_val <&LLVMValue> = llvm_const_null(ctx.ptr_ty);
+        return llvm_build_icmp(ctx.builder, llvm_int_ne(), val, null_val, "tobool");
+    }
+    return val;
+}
+
+fun coerce_val(ctx: &FnContext, val: &LLVMValue, target_ty: &LLVMType) <&LLVMValue> {
+    if (val == null || target_ty == null) { return val; }
+    let v_ty <&LLVMType> = llvm_type_of(val);
+    if (v_ty == target_ty) { return val; }
+
+    if (target_ty == ctx.ptr_ty) {
+        if (v_ty == ctx.i32_ty) {
+            let z64 <&LLVMValue> = llvm_build_zext(ctx.builder, val, ctx.i64_ty, "z64");
+            return llvm_build_int_to_ptr(ctx.builder, z64, ctx.ptr_ty, "i2p");
+        }
+        if (v_ty == ctx.i64_ty) {
+            return llvm_build_int_to_ptr(ctx.builder, val, ctx.ptr_ty, "i2p");
+        }
+        return val;
+    }
+
+    if (v_ty == ctx.ptr_ty) {
+        if (target_ty == ctx.i64_ty) {
+            return llvm_build_ptr_to_int(ctx.builder, val, ctx.i64_ty, "p2i");
+        }
+        if (target_ty == ctx.i32_ty) {
+            let p64 <&LLVMValue> = llvm_build_ptr_to_int(ctx.builder, val, ctx.i64_ty, "p2i");
+            return llvm_build_trunc(ctx.builder, p64, ctx.i32_ty, "tr32");
+        }
+        if (target_ty == ctx.i1_ty) {
+            return to_condition_i1(ctx, val);
+        }
+        return val;
+    }
+
+    if (target_ty == ctx.i1_ty) {
+        return to_condition_i1(ctx, val);
+    }
+    if (target_ty == ctx.i8_ty) {
+        if (v_ty == ctx.i32_ty || v_ty == ctx.i64_ty) {
+            return llvm_build_trunc(ctx.builder, val, ctx.i8_ty, "tr8");
+        }
+        return val;
+    }
+    if (target_ty == ctx.i32_ty) {
+        if (v_ty == ctx.i64_ty) {
+            return llvm_build_trunc(ctx.builder, val, ctx.i32_ty, "tr32");
+        }
+        if (v_ty == ctx.i8_ty || v_ty == ctx.i1_ty) {
+            return llvm_build_zext(ctx.builder, val, ctx.i32_ty, "z32");
+        }
+        return val;
+    }
+    if (target_ty == ctx.i64_ty) {
+        if (v_ty == ctx.i32_ty || v_ty == ctx.i8_ty || v_ty == ctx.i1_ty) {
+            return llvm_build_zext(ctx.builder, val, ctx.i64_ty, "z64");
+        }
+        return val;
+    }
+    return val;
+}
+
+fun get_node_struct_name(ctx: &FnContext, node: &AstNode) <string> {
+    if (node == null) { return ""; }
+    if (node.kind == ast_ident()) {
+        let v <&LocalVar> = fn_ctx_find_var(ctx, node.name);
+        if (v != null && v.type_annotation != null) {
+            let t <string> = v.type_annotation;
+            let len <int> = cast<int>(cg_strlen(t));
+            if (len > 1) {
+                let f <string> = substr(t, 0, 1);
+                if (cg_str_eq(f, "&") || cg_str_eq(f, "*")) {
+                    return substr(t, 1, len - 1);
+                }
+                let last <string> = substr(t, len - 1, 1);
+                if (cg_str_eq(last, "*")) {
+                    return substr(t, 0, len - 1);
+                }
+            }
+            return t;
+        }
+    } else if (node.kind == ast_member_access()) {
+        let f_name <string> = node.name;
+        let si <int> = 0;
+        while (si < ctx.struct_count) {
+            let st <&StructInfo> = ctx.structs[si];
+            if (st != null) {
+                let fi <int> = 0;
+                while (fi < st.field_count) {
+                    let f <&StructFieldInfo> = st.fields[fi];
+                    if (f != null && cg_str_eq(f.name, f_name)) {
+                        let t <string> = f.type_annotation;
+                        let len <int> = cast<int>(cg_strlen(t));
+                        if (len > 1) {
+                            let fst <string> = substr(t, 0, 1);
+                            if (cg_str_eq(fst, "&") || cg_str_eq(fst, "*")) {
+                                return substr(t, 1, len - 1);
+                            }
+                            let lst <string> = substr(t, len - 1, 1);
+                            if (cg_str_eq(lst, "*")) {
+                                return substr(t, 0, len - 1);
+                            }
+                        }
+                        return t;
+                    }
+                    fi = fi + 1;
+                }
+            }
+            si = si + 1;
+        }
+    } else if (node.kind == ast_index_expr()) {
+        let arr_st <string> = get_node_struct_name(ctx, node.left);
+        let len <int> = cast<int>(cg_strlen(arr_st));
+        if (len > 2) {
+            let fst <string> = substr(arr_st, 0, 1);
+            let lst <string> = substr(arr_st, len - 1, 1);
+            if (cg_str_eq(fst, "[") && cg_str_eq(lst, "]")) {
+                return substr(arr_st, 1, len - 2);
+            }
+        }
+        return arr_st;
+    }
+    return "";
+}
+
+fun find_field_index(ctx: &FnContext, base_node: &AstNode, field_name: string) <int> {
+    if (field_name == null) { return 0; }
+
+    let s_name <string> = get_node_struct_name(ctx, base_node);
+    if (cg_strlen(s_name) > cast<ulong>(0)) {
+        let si <int> = 0;
+        while (si < ctx.struct_count) {
+            let st <&StructInfo> = ctx.structs[si];
+            if (st != null && cg_str_eq(st.name, s_name)) {
+                let fi <int> = 0;
+                while (fi < st.field_count) {
+                    let f <&StructFieldInfo> = st.fields[fi];
+                    if (f != null && cg_str_eq(f.name, field_name)) {
+                        return f.index;
+                    }
+                    fi = fi + 1;
+                }
+            }
+            si = si + 1;
+        }
+    }
+
+    let si <int> = 0;
+    while (si < ctx.struct_count) {
+        let st <&StructInfo> = ctx.structs[si];
+        if (st != null) {
+            let fi <int> = 0;
+            while (fi < st.field_count) {
+                let f <&StructFieldInfo> = st.fields[fi];
+                if (f != null && cg_str_eq(f.name, field_name)) {
+                    return f.index;
+                }
+                fi = fi + 1;
+            }
+        }
+        si = si + 1;
+    }
+
+    if (cg_str_eq(field_name, "y")) { return 1; }
+    if (cg_str_eq(field_name, "z")) { return 2; }
+    if (cg_str_eq(field_name, "w")) { return 3; }
+    return 0;
+}
+
+fun fn_ctx_find_var(ctx: &FnContext, name: string) <&LocalVar> {
+    let i <int> = 0;
+    while (i < ctx.var_count) {
+        let v <&LocalVar> = ctx.vars[i];
+        if (v != null && cg_str_eq(v.name, name)) {
+            return v;
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
+fun fn_ctx_find_fn(ctx: &FnContext, name: string) <&FnSymbol> {
+    let i <int> = 0;
+    while (i < ctx.fn_sym_count) {
+        let sym <&FnSymbol> = ctx.fn_syms[i];
+        if (sym != null) {
+            if (cg_str_eq(sym.name, name)) {
+                return sym;
+            }
+        }
+        i = i + 1;
+    }
+    return null;
+}
+
+fun map_type(ctx: &FnContext, fin_type: string) <&LLVMType> {
+    if (fin_type == null || cg_str_eq(fin_type, "void") || cg_str_eq(fin_type, "noret")) {
+        return ctx.void_ty;
+    }
+    if (cg_str_eq(fin_type, "bool")) {
+        return ctx.i1_ty;
+    }
+    if (cg_str_eq(fin_type, "char") || cg_str_eq(fin_type, "u8") || cg_str_eq(fin_type, "i8")) {
+        return ctx.i8_ty;
+    }
+    if (cg_str_eq(fin_type, "string")) {
+        return ctx.ptr_ty;
+    }
+    if (cg_str_eq(fin_type, "ulong") || cg_str_eq(fin_type, "long") || cg_str_eq(fin_type, "i64") || cg_str_eq(fin_type, "u64")) {
+        return ctx.i64_ty;
+    }
+    let flen <int> = cast<int>(cg_strlen(fin_type));
+    if (flen > 0) {
+        let first_char <string> = substr(fin_type, 0, 1);
+        let last_char <string> = substr(fin_type, flen - 1, 1);
+        if (cg_str_eq(first_char, "&") || cg_str_eq(first_char, "[") || cg_str_eq(last_char, "*")) {
+            return ctx.ptr_ty;
+        }
+    }
+    if (!cg_str_eq(fin_type, "int") && !cg_str_eq(fin_type, "uint") && !cg_str_eq(fin_type, "auto")) {
+        return ctx.ptr_ty;
+    }
+    return ctx.i32_ty;
+}
+
+fun get_struct_field_type(ctx: &FnContext, base_node: &AstNode, field_name: string) <&LLVMType> {
+    if (field_name == null) { return ctx.i32_ty; }
+
+    let s_name <string> = get_node_struct_name(ctx, base_node);
+    if (cg_strlen(s_name) > cast<ulong>(0)) {
+        let si <int> = 0;
+        while (si < ctx.struct_count) {
+            let st <&StructInfo> = ctx.structs[si];
+            if (st != null && cg_str_eq(st.name, s_name)) {
+                let fi <int> = 0;
+                while (fi < st.field_count) {
+                    let f <&StructFieldInfo> = st.fields[fi];
+                    if (f != null && cg_str_eq(f.name, field_name)) {
+                        return map_type(ctx, f.type_annotation);
+                    }
+                    fi = fi + 1;
+                }
+            }
+            si = si + 1;
+        }
+    }
+
+    let si <int> = 0;
+    while (si < ctx.struct_count) {
+        let st <&StructInfo> = ctx.structs[si];
+        if (st != null) {
+            let fi <int> = 0;
+            while (fi < st.field_count) {
+                let f <&StructFieldInfo> = st.fields[fi];
+                if (f != null && cg_str_eq(f.name, field_name)) {
+                    return map_type(ctx, f.type_annotation);
+                }
+                fi = fi + 1;
+            }
+        }
+        si = si + 1;
+    }
+
+    return ctx.i32_ty;
+}
+
+fun find_field_index_by_name(ctx: &FnContext, s_name: string, field_name: string) <int> {
+    if (field_name == null) { return 0; }
+    if (s_name != null && cg_strlen(s_name) > cast<ulong>(0)) {
+        let si <int> = 0;
+        while (si < ctx.struct_count) {
+            let st <&StructInfo> = ctx.structs[si];
+            if (st != null && cg_str_eq(st.name, s_name)) {
+                let fi <int> = 0;
+                while (fi < st.field_count) {
+                    let f <&StructFieldInfo> = st.fields[fi];
+                    if (f != null && cg_str_eq(f.name, field_name)) {
+                        return f.index;
+                    }
+                    fi = fi + 1;
+                }
+            }
+            si = si + 1;
+        }
+    }
+    return find_field_index(ctx, null, field_name);
+}
+
+fun get_struct_field_type_by_name(ctx: &FnContext, s_name: string, field_name: string) <&LLVMType> {
+    if (field_name == null) { return ctx.i32_ty; }
+    if (s_name != null && cg_strlen(s_name) > cast<ulong>(0)) {
+        let si <int> = 0;
+        while (si < ctx.struct_count) {
+            let st <&StructInfo> = ctx.structs[si];
+            if (st != null && cg_str_eq(st.name, s_name)) {
+                let fi <int> = 0;
+                while (fi < st.field_count) {
+                    let f <&StructFieldInfo> = st.fields[fi];
+                    if (f != null && cg_str_eq(f.name, field_name)) {
+                        return map_type(ctx, f.type_annotation);
+                    }
+                    fi = fi + 1;
+                }
+            }
+            si = si + 1;
+        }
+    }
+    return get_struct_field_type(ctx, null, field_name);
+}
+
+fun get_or_declare_calloc(ctx: &FnContext) <&LLVMValue> {
+    let calloc_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "calloc");
+    if (calloc_fn == null) {
+        let c_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
+        c_params.t0 = ctx.i64_ty;
+        c_params.t1 = ctx.i64_ty;
+        let c_ty <&LLVMType> = llvm_function_type(ctx.ptr_ty, c_params, 2, 0);
+        delete c_params;
+        calloc_fn = llvm_add_function(ctx.module, "calloc", c_ty);
+    }
+    return calloc_fn;
+}
+
+fun get_or_declare_malloc(ctx: &FnContext) <&LLVMValue> {
+    let malloc_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "malloc");
+    if (malloc_fn == null) {
+        let m_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
+        m_params.t0 = ctx.i64_ty;
+        let m_ty <&LLVMType> = llvm_function_type(ctx.ptr_ty, m_params, 1, 0);
+        delete m_params;
+        malloc_fn = llvm_add_function(ctx.module, "malloc", m_ty);
+    }
+    return malloc_fn;
+}
+
+fun get_or_declare_free(ctx: &FnContext) <&LLVMValue> {
+    let free_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "free");
+    if (free_fn == null) {
+        let f_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
+        f_params.t0 = ctx.ptr_ty;
+        let f_ty <&LLVMType> = llvm_function_type(ctx.void_ty, f_params, 1, 0);
+        delete f_params;
+        free_fn = llvm_add_function(ctx.module, "free", f_ty);
+    }
+    return free_fn;
+}
+
+fun get_or_declare_printf(ctx: &FnContext) <&LLVMValue> {
+    let p_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "printf");
+    if (p_fn == null) {
+        let p_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
+        p_params.t0 = ctx.ptr_ty;
+        let p_ty <&LLVMType> = llvm_function_type(ctx.i32_ty, p_params, 1, 1);
+        delete p_params;
+        p_fn = llvm_add_function(ctx.module, "printf", p_ty);
+    }
+    return p_fn;
+}
+
+fun get_fixed_array_extent(type_ann: string) <int> {
+    if (type_ann == null) { return -1; }
+    let len <int> = cast<int>(cg_strlen(type_ann));
+    if (len < 3) { return -1; }
+    let comma_idx <int> = -1;
+    let i <int> = 0;
+    while (i < len) {
+        let ch <string> = substr(type_ann, i, 1);
+        if (cg_str_eq(ch, ",")) {
+            comma_idx = i;
+        }
+        i = i + 1;
+    }
+    if (comma_idx < 0) { return -1; }
+
+    let extent <int> = 0;
+    let has_digits <bool> = false;
+    let j <int> = comma_idx + 1;
+    while (j < len) {
+        let ch <string> = substr(type_ann, j, 1);
+        if (!cg_str_eq(ch, " ") && !cg_str_eq(ch, "]") && !cg_str_eq(ch, ">")) {
+            let d <int> = -1;
+            if (cg_str_eq(ch, "0")) { d = 0; }
+            else if (cg_str_eq(ch, "1")) { d = 1; }
+            else if (cg_str_eq(ch, "2")) { d = 2; }
+            else if (cg_str_eq(ch, "3")) { d = 3; }
+            else if (cg_str_eq(ch, "4")) { d = 4; }
+            else if (cg_str_eq(ch, "5")) { d = 5; }
+            else if (cg_str_eq(ch, "6")) { d = 6; }
+            else if (cg_str_eq(ch, "7")) { d = 7; }
+            else if (cg_str_eq(ch, "8")) { d = 8; }
+            else if (cg_str_eq(ch, "9")) { d = 9; }
+            if (d >= 0) {
+                extent = extent * 10 + d;
+                has_digits = true;
+            }
+        }
+        j = j + 1;
+    }
+    if (has_digits) {
+        return extent;
+    }
+    return -1;
+}
+
+fun struct_has_field(ctx: &FnContext, base_node: &AstNode, field_name: string) <bool> {
+    if (field_name == null || base_node == null) { return false; }
+    if (base_node.kind == ast_ident()) {
+        let v <&LocalVar> = fn_ctx_find_var(ctx, base_node.name);
+        if (v != null && v.type_annotation != null) {
+            let ty_ann <string> = v.type_annotation;
+            let len <int> = cast<int>(cg_strlen(ty_ann));
+            let s_name <string> = ty_ann;
+            if (len > 1) {
+                let first <string> = substr(ty_ann, 0, 1);
+                if (cg_str_eq(first, "&") || cg_str_eq(first, "*")) {
+                    s_name = substr(ty_ann, 1, len - 1);
+                }
+            }
+            let si <int> = 0;
+            while (si < ctx.struct_count) {
+                let st <&StructInfo> = ctx.structs[si];
+                if (st != null && cg_str_eq(st.name, s_name)) {
+                    let fi <int> = 0;
+                    while (fi < st.field_count) {
+                        let f <&StructFieldInfo> = st.fields[fi];
+                        if (f != null && cg_str_eq(f.name, field_name)) {
+                            return true;
+                        }
+                        fi = fi + 1;
+                    }
+                }
+                si = si + 1;
+            }
+        }
+    }
+    return false;
+}
+
+fun get_index_elem_type(ctx: &FnContext, base_node: &AstNode) <&LLVMType> {
+    if (base_node == null) { return ctx.i32_ty; }
+    let ty_ann <string> = "";
+    if (base_node.kind == ast_ident()) {
+        let v <&LocalVar> = fn_ctx_find_var(ctx, base_node.name);
+        if (v != null) {
+            if (v.elem_ty != null) {
+                return v.elem_ty;
+            }
+            if (v.type_annotation != null) {
+                ty_ann = v.type_annotation;
+            }
+        }
+    } else if (base_node.kind == ast_member_access()) {
+        let f_name <string> = base_node.name;
+        let si <int> = 0;
+        while (si < ctx.struct_count) {
+            let st <&StructInfo> = ctx.structs[si];
+            if (st != null) {
+                let fi <int> = 0;
+                while (fi < st.field_count) {
+                    let f <&StructFieldInfo> = st.fields[fi];
+                    if (f != null && cg_str_eq(f.name, f_name)) {
+                        ty_ann = f.type_annotation;
+                        break;
+                    }
+                    fi = fi + 1;
+                }
+            }
+            if (cg_strlen(ty_ann) > cast<ulong>(0)) {
+                break;
+            }
+            si = si + 1;
+        }
+    } else if (base_node.kind == ast_call_expr() && cg_str_eq(base_node.name, "__fin_array_literal")) {
+        return ctx.i64_ty;
+    }
+
+    if (ty_ann != null && cg_strlen(ty_ann) > cast<ulong>(0)) {
+        if (cg_str_eq(ty_ann, "string") || cg_str_eq(ty_ann, "[char]") || cg_str_eq(ty_ann, "char*")) {
+            return ctx.i8_ty;
+        }
+        let len <int> = cast<int>(cg_strlen(ty_ann));
+        if (len > 5) {
+            let first6 <string> = substr(ty_ann, 0, 6);
+            if (cg_str_eq(first6, "[char,")) {
+                return ctx.i8_ty;
+            }
+        }
+        if (cg_str_eq(ty_ann, "[bool]") || cg_str_eq(ty_ann, "bool*")) {
+            return ctx.i1_ty;
+        }
+        if (len > 5) {
+            let first6 <string> = substr(ty_ann, 0, 6);
+            if (cg_str_eq(first6, "[bool,")) {
+                return ctx.i1_ty;
+            }
+        }
+        if (cg_str_eq(ty_ann, "[int]") || cg_str_eq(ty_ann, "int*") || cg_str_eq(ty_ann, "[uint]") || cg_str_eq(ty_ann, "uint*")) {
+            return ctx.i32_ty;
+        }
+        if (len > 4) {
+            let first5 <string> = substr(ty_ann, 0, 5);
+            if (cg_str_eq(first5, "[int,")) {
+                return ctx.i32_ty;
+            }
+        }
+        let first_ch <string> = substr(ty_ann, 0, 1);
+        let last_ch <string> = substr(ty_ann, len - 1, 1);
+        if (cg_str_eq(first_ch, "[") || cg_str_eq(first_ch, "&") || cg_str_eq(last_ch, "*")) {
+            return ctx.ptr_ty;
+        }
+    }
+    return ctx.i32_ty;
+}
+
+fun apply_compound_op(ctx: &FnContext, op: string, lhs: &LLVMValue, rhs: &LLVMValue) <&LLVMValue> {
+    let l_ty <&LLVMType> = llvm_type_of(lhs);
+    let r_ty <&LLVMType> = llvm_type_of(rhs);
+    if (l_ty != r_ty) {
+        if (l_ty == ctx.i64_ty && r_ty == ctx.i32_ty) {
+            rhs = llvm_build_sext(ctx.builder, rhs, ctx.i64_ty, "rhs_ext");
+        } else if (l_ty == ctx.i32_ty && r_ty == ctx.i64_ty) {
+            rhs = llvm_build_trunc(ctx.builder, rhs, ctx.i32_ty, "rhs_trunc");
+        }
+    }
+    if (cg_str_eq(op, "+=")) { return llvm_build_add(ctx.builder, lhs, rhs, "add"); }
+    if (cg_str_eq(op, "-=")) { return llvm_build_sub(ctx.builder, lhs, rhs, "sub"); }
+    if (cg_str_eq(op, "*=")) { return llvm_build_mul(ctx.builder, lhs, rhs, "mul"); }
+    if (cg_str_eq(op, "/=")) { return llvm_build_sdiv(ctx.builder, lhs, rhs, "div"); }
+    if (cg_str_eq(op, "%=")) { return llvm_build_srem(ctx.builder, lhs, rhs, "rem"); }
+    if (cg_str_eq(op, "&=")) { return llvm_build_and(ctx.builder, lhs, rhs, "and"); }
+    if (cg_str_eq(op, "|=")) { return llvm_build_or(ctx.builder, lhs, rhs, "or"); }
+    if (cg_str_eq(op, "^=")) { return llvm_build_xor(ctx.builder, lhs, rhs, "xor"); }
+    if (cg_str_eq(op, "<<=")) { return llvm_build_shl(ctx.builder, lhs, rhs, "shl"); }
+    if (cg_str_eq(op, ">>=")) { return llvm_build_ashr(ctx.builder, lhs, rhs, "shr"); }
+    return lhs;
+}
+
+fun unescape_string_literal(raw: string) <string> {
+    if (raw == null) { return ""; }
+    let len <int> = cast<int>(cg_strlen(raw));
+    if (len < 2) { return raw; }
+
+    let start <int> = 0;
+    let end_pos <int> = len;
+    let first_ch <string> = substr(raw, 0, 1);
+    let last_ch <string> = substr(raw, len - 1, 1);
+    if (cg_str_eq(first_ch, "\"") && cg_str_eq(last_ch, "\"")) {
+        start = 1;
+        end_pos = len - 1;
+    }
+
+    let b <Buffer> = new_buffer(len + 1);
+    let i <int> = start;
+    while (i < end_pos) {
+        let ch <string> = substr(raw, i, 1);
+        if (cg_str_eq(ch, "\\") && i + 1 < end_pos) {
+            let next_ch <string> = substr(raw, i + 1, 1);
+            if (cg_str_eq(next_ch, "n")) { b.write_char('\n'); i = i + 2; continue; }
+            if (cg_str_eq(next_ch, "r")) { b.write_char('\r'); i = i + 2; continue; }
+            if (cg_str_eq(next_ch, "t")) { b.write_char('\t'); i = i + 2; continue; }
+            if (cg_str_eq(next_ch, "0")) { b.write_char(cast<char>(0)); i = i + 2; continue; }
+            if (cg_str_eq(next_ch, "\"")) { b.write_char('\"'); i = i + 2; continue; }
+            if (cg_str_eq(next_ch, "\\")) { b.write_char('\\'); i = i + 2; continue; }
+        }
+        b.write_string(ch);
+        i = i + 1;
+    }
+    let res <string> = b.to_string();
+    free_buffer(b);
+    return res;
+}
+
+pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
+    if (n == null) { return null; }
+
+    if (n.kind == ast_literal_int()) {
+        return llvm_const_int(ctx.i32_ty, n.int_val, 0);
+    }
+    if (n.kind == ast_literal_bool()) {
+        return llvm_const_int(ctx.i1_ty, n.int_val, 0);
+    }
+    if (n.kind == ast_literal_string()) {
+        let unesc <string> = unescape_string_literal(n.str_val);
+        return llvm_build_global_string_ptr(ctx.builder, unesc, "str");
+    }
+    if (n.kind == ast_ident()) {
+        if (cg_str_eq(n.name, "NULL") || cg_str_eq(n.name, "null")) {
+            return llvm_const_null(ctx.ptr_ty);
+        }
+        if (cg_str_eq(n.name, "true")) {
+            return llvm_const_int(ctx.i1_ty, 1, 0);
+        }
+        if (cg_str_eq(n.name, "false")) {
+            return llvm_const_int(ctx.i1_ty, 0, 0);
+        }
+        let v <&LocalVar> = fn_ctx_find_var(ctx, n.name);
+        if (v != null) {
+            return llvm_build_load2(ctx.builder, v.ty, v.val, n.name);
+        }
+        return null;
+    }
+    if (n.kind == ast_unary_expr()) {
+        if (cg_str_eq(n.name, "cast")) {
+            let inner <&LLVMValue> = lower_expr(ctx, n.left);
+            if (inner == null) { return null; }
+            if (n.type_annotation != null) {
+                let target_ty <&LLVMType> = map_type(ctx, n.type_annotation);
+                return coerce_val(ctx, inner, target_ty);
+            }
+            return inner;
+        }
+        if (cg_str_eq(n.name, "&")) {
+            if (n.left != null) {
+                if (n.left.kind == ast_ident()) {
+                    let v <&LocalVar> = fn_ctx_find_var(ctx, n.left.name);
+                    if (v != null) {
+                        return v.val;
+                    }
+                } else if (n.left.kind == ast_index_expr()) {
+                    let arr_val <&LLVMValue> = lower_expr(ctx, n.left.left);
+                    let idx_val <&LLVMValue> = lower_expr(ctx, n.left.right);
+                    if (arr_val != null && idx_val != null) {
+                        let idx_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "idx64");
+                        let ind <&LLVMIndices> = new LLVMIndices{};
+                        ind.i0 = idx_i64;
+                        let elem_ty <&LLVMType> = get_index_elem_type(ctx, n.left.left);
+                        let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, elem_ty, arr_val, ind, 1, "arr_gep");
+                        delete ind;
+                        return gep;
+                    }
+                } else if (n.left.kind == ast_member_access()) {
+                    let base_val <&LLVMValue> = lower_expr(ctx, n.left.left);
+                    let f_idx <int> = find_field_index(ctx, n.left.left, n.left.name);
+                    if (base_val != null) {
+                        let ind <&LLVMIndices> = new LLVMIndices{};
+                        ind.i0 = llvm_const_int(ctx.i64_ty, f_idx, 0);
+                        let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, base_val, ind, 1, "field_gep");
+                        delete ind;
+                        return gep;
+                    }
+                }
+            }
+            return null;
+        }
+        if (cg_str_eq(n.name, "*")) {
+            let ptr_val <&LLVMValue> = lower_expr(ctx, n.left);
+            if (ptr_val != null) {
+                return llvm_build_load2(ctx.builder, ctx.i32_ty, ptr_val, "deref");
+            }
+            return null;
+        }
+        if (cg_str_eq(n.name, "++")) {
+            if (n.left != null) {
+                if (n.left.kind == ast_ident()) {
+                    let v <&LocalVar> = fn_ctx_find_var(ctx, n.left.name);
+                    if (v != null) {
+                        let cur_val <&LLVMValue> = llvm_build_load2(ctx.builder, v.ty, v.val, n.left.name);
+                        let one <&LLVMValue> = llvm_const_int(v.ty, 1, 0);
+                        let next_val <&LLVMValue> = llvm_build_add(ctx.builder, cur_val, one, "inc");
+                        llvm_build_store(ctx.builder, next_val, v.val);
+                        return cur_val;
+                    }
+                } else if (n.left.kind == ast_member_access()) {
+                    let base_val <&LLVMValue> = lower_expr(ctx, n.left.left);
+                    let f_idx <int> = find_field_index(ctx, n.left.left, n.left.name);
+                    let fld_ty <&LLVMType> = get_struct_field_type(ctx, n.left.left, n.left.name);
+                    if (base_val != null) {
+                        let ind <&LLVMIndices> = new LLVMIndices{};
+                        ind.i0 = llvm_const_int(ctx.i64_ty, f_idx, 0);
+                        let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, base_val, ind, 1, "field_gep");
+                        delete ind;
+                        let cur_val <&LLVMValue> = llvm_build_load2(ctx.builder, fld_ty, gep, n.left.name);
+                        let one <&LLVMValue> = llvm_const_int(fld_ty, 1, 0);
+                        let next_val <&LLVMValue> = llvm_build_add(ctx.builder, cur_val, one, "inc");
+                        llvm_build_store(ctx.builder, next_val, gep);
+                        return cur_val;
+                    }
+                }
+            }
+            return null;
+        }
+        if (cg_str_eq(n.name, "--")) {
+            if (n.left != null) {
+                if (n.left.kind == ast_ident()) {
+                    let v <&LocalVar> = fn_ctx_find_var(ctx, n.left.name);
+                    if (v != null) {
+                        let cur_val <&LLVMValue> = llvm_build_load2(ctx.builder, v.ty, v.val, n.left.name);
+                        let one <&LLVMValue> = llvm_const_int(v.ty, 1, 0);
+                        let next_val <&LLVMValue> = llvm_build_sub(ctx.builder, cur_val, one, "dec");
+                        llvm_build_store(ctx.builder, next_val, v.val);
+                        return cur_val;
+                    }
+                } else if (n.left.kind == ast_member_access()) {
+                    let base_val <&LLVMValue> = lower_expr(ctx, n.left.left);
+                    let f_idx <int> = find_field_index(ctx, n.left.left, n.left.name);
+                    let fld_ty <&LLVMType> = get_struct_field_type(ctx, n.left.left, n.left.name);
+                    if (base_val != null) {
+                        let ind <&LLVMIndices> = new LLVMIndices{};
+                        ind.i0 = llvm_const_int(ctx.i64_ty, f_idx, 0);
+                        let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, base_val, ind, 1, "field_gep");
+                        delete ind;
+                        let cur_val <&LLVMValue> = llvm_build_load2(ctx.builder, fld_ty, gep, n.left.name);
+                        let one <&LLVMValue> = llvm_const_int(fld_ty, 1, 0);
+                        let next_val <&LLVMValue> = llvm_build_sub(ctx.builder, cur_val, one, "dec");
+                        llvm_build_store(ctx.builder, next_val, gep);
+                        return cur_val;
+                    }
+                }
+            }
+            return null;
+        }
+        let inner <&LLVMValue> = lower_expr(ctx, n.left);
+        if (inner == null) { return null; }
+        if (cg_str_eq(n.name, "-")) {
+            let in_ty <&LLVMType> = llvm_type_of(inner);
+            let zero <&LLVMValue> = llvm_const_int(in_ty, 0, 0);
+            return llvm_build_sub(ctx.builder, zero, inner, "sub");
+        }
+        if (cg_str_eq(n.name, "+")) {
+            return inner;
+        }
+        if (cg_str_eq(n.name, "~")) {
+            return llvm_build_not(ctx.builder, inner, "bnot");
+        }
+        if (cg_str_eq(n.name, "!")) {
+            let inner_b <&LLVMValue> = to_condition_i1(ctx, inner);
+            return llvm_build_not(ctx.builder, inner_b, "not");
+        }
+        return inner;
+    }
+    if (n.kind == ast_index_expr()) {
+        let arr_val <&LLVMValue> = lower_expr(ctx, n.left);
+        let idx_val <&LLVMValue> = lower_expr(ctx, n.right);
+        if (arr_val != null && idx_val != null) {
+            let idx_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "idx64");
+            let ind <&LLVMIndices> = new LLVMIndices{};
+            ind.i0 = idx_i64;
+            let elem_ty <&LLVMType> = get_index_elem_type(ctx, n.left);
+            let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, elem_ty, arr_val, ind, 1, "arr_gep");
+            delete ind;
+            return llvm_build_load2(ctx.builder, elem_ty, gep, "arr_elem");
+        }
+        return null;
+    }
+    if (n.kind == ast_member_access()) {
+        if (cg_str_eq(n.name, "length")) {
+            let is_st_field <bool> = struct_has_field(ctx, n.left, "length");
+            if (!is_st_field) {
+                let base_node <&AstNode> = n.left;
+                if (base_node == null) { return llvm_const_int(ctx.i32_ty, 0, 0); }
+
+                // Case 1: Array literal [a, b, c].length
+                if (base_node.kind == ast_call_expr() && cg_str_eq(base_node.name, "__fin_array_literal")) {
+                    let cur <&AstNode> = base_node.left;
+                    let count <int> = 0;
+                    while (cur != null) {
+                        count = count + 1;
+                        cur = cur.right;
+                    }
+                    return llvm_const_int(ctx.i32_ty, count, 0);
+                }
+
+                // Case 2: __fin_alloc_array(n).length
+                if (base_node.kind == ast_call_expr() && cg_str_eq(base_node.name, "__fin_alloc_array")) {
+                    if (base_node.left != null) {
+                        return lower_expr(ctx, base_node.left);
+                    }
+                    return llvm_const_int(ctx.i32_ty, 0, 0);
+                }
+
+                // Case 3: Literal string "hello".length
+                if (base_node.kind == ast_literal_string()) {
+                    let slen <int> = cast<int>(cg_strlen(base_node.str_val));
+                    return llvm_const_int(ctx.i32_ty, slen, 0);
+                }
+
+                // Case 4: Identifier (local variable or parameter)
+                if (base_node.kind == ast_ident()) {
+                    let v <&LocalVar> = fn_ctx_find_var(ctx, base_node.name);
+                    if (v != null) {
+                        if (v.len_val != null) {
+                            return v.len_val;
+                        }
+                        if (v.type_annotation != null) {
+                            let ext <int> = get_fixed_array_extent(v.type_annotation);
+                            if (ext >= 0) {
+                                return llvm_const_int(ctx.i32_ty, ext, 0);
+                            }
+                            if (cg_str_eq(v.type_annotation, "string")) {
+                                let base_val <&LLVMValue> = lower_expr(ctx, base_node);
+                                if (base_val != null) {
+                                    let strlen_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "strlen");
+                                    if (strlen_fn == null) {
+                                        let s_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
+                                        s_params.t0 = ctx.ptr_ty;
+                                        let s_ty <&LLVMType> = llvm_function_type(ctx.i32_ty, s_params, 1, 0);
+                                        delete s_params;
+                                        strlen_fn = llvm_add_function(ctx.module, "strlen", s_ty);
+                                    }
+                                    let s_fn_ty <&LLVMType> = llvm_global_get_value_type(strlen_fn);
+                                    let s_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                                    s_args.v0 = base_val;
+                                    let s_res <&LLVMValue> = llvm_build_call2(ctx.builder, s_fn_ty, strlen_fn, s_args, 1, "strlen");
+                                    delete s_args;
+                                    return s_res;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Case 5: Dynamic array / slice at runtime: { ptr, len }
+                let base_val <&LLVMValue> = lower_expr(ctx, base_node);
+                if (base_val != null) {
+                    let ind <&LLVMIndices> = new LLVMIndices{};
+                    ind.i0 = llvm_const_int(ctx.i64_ty, 1, 0);
+                    let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, base_val, ind, 1, "slice_len_gep");
+                    delete ind;
+                    return llvm_build_load2(ctx.builder, ctx.i32_ty, gep, "slice_len");
+                }
+
+                return llvm_const_int(ctx.i32_ty, 0, 0);
+            }
+        }
+        let base_val <&LLVMValue> = lower_expr(ctx, n.left);
+        let f_idx <int> = find_field_index(ctx, n.left, n.name);
+        let fld_ty <&LLVMType> = get_struct_field_type(ctx, n.left, n.name);
+        if (base_val != null) {
+            let ind <&LLVMIndices> = new LLVMIndices{};
+            ind.i0 = llvm_const_int(ctx.i64_ty, f_idx, 0);
+            let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, base_val, ind, 1, "field_gep");
+            delete ind;
+            return llvm_build_load2(ctx.builder, fld_ty, gep, n.name);
+        }
+        return null;
+    }
+    if (n.kind == ast_binary_expr()) {
+        if (cg_str_eq(n.name, "&&")) {
+            let lhs_raw <&LLVMValue> = lower_expr(ctx, n.left);
+            let l <&LLVMValue> = to_condition_i1(ctx, lhs_raw);
+            let entry_bb <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+            let rhs_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "and_rhs");
+            let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "and_end");
+
+            llvm_build_cond_br(ctx.builder, l, rhs_bb, end_bb);
+
+            llvm_position_builder(ctx.builder, rhs_bb);
+            let rhs_raw <&LLVMValue> = lower_expr(ctx, n.right);
+            let r <&LLVMValue> = to_condition_i1(ctx, rhs_raw);
+            let rhs_exit <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+            llvm_build_br(ctx.builder, end_bb);
+
+            llvm_position_builder(ctx.builder, end_bb);
+            let phi <&LLVMValue> = llvm_build_phi(ctx.builder, ctx.i1_ty, "land");
+            let false_v <&LLVMValue> = llvm_const_int(ctx.i1_ty, 0, 0);
+
+            let vals <&LLVMValueArgs> = new LLVMValueArgs{};
+            vals.v0 = false_v;
+            vals.v1 = r;
+            let blks <&LLVMBlockArgs> = new LLVMBlockArgs{};
+            blks.b0 = entry_bb;
+            blks.b1 = rhs_exit;
+            llvm_add_incoming(phi, vals, blks, 2);
+            delete vals;
+            delete blks;
+            return phi;
+        }
+        if (cg_str_eq(n.name, "||")) {
+            let lhs_raw <&LLVMValue> = lower_expr(ctx, n.left);
+            let l <&LLVMValue> = to_condition_i1(ctx, lhs_raw);
+            let entry_bb <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+            let rhs_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "or_rhs");
+            let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "or_end");
+
+            llvm_build_cond_br(ctx.builder, l, end_bb, rhs_bb);
+
+            llvm_position_builder(ctx.builder, rhs_bb);
+            let rhs_raw <&LLVMValue> = lower_expr(ctx, n.right);
+            let r <&LLVMValue> = to_condition_i1(ctx, rhs_raw);
+            let rhs_exit <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+            llvm_build_br(ctx.builder, end_bb);
+
+            llvm_position_builder(ctx.builder, end_bb);
+            let phi <&LLVMValue> = llvm_build_phi(ctx.builder, ctx.i1_ty, "lor");
+            let true_v <&LLVMValue> = llvm_const_int(ctx.i1_ty, 1, 0);
+
+            let vals <&LLVMValueArgs> = new LLVMValueArgs{};
+            vals.v0 = true_v;
+            vals.v1 = r;
+            let blks <&LLVMBlockArgs> = new LLVMBlockArgs{};
+            blks.b0 = entry_bb;
+            blks.b1 = rhs_exit;
+            llvm_add_incoming(phi, vals, blks, 2);
+            delete vals;
+            delete blks;
+            return phi;
+        }
+        if (cg_str_eq(n.name, "=")) {
+            let rhs <&LLVMValue> = lower_expr(ctx, n.right);
+            if (n.left != null) {
+                if (n.left.kind == ast_ident()) {
+                    let v <&LocalVar> = fn_ctx_find_var(ctx, n.left.name);
+                    if (v != null && rhs != null) {
+                        rhs = coerce_val(ctx, rhs, v.ty);
+                        llvm_build_store(ctx.builder, rhs, v.val);
+                    }
+                } else if (n.left.kind == ast_index_expr()) {
+                    let arr_val <&LLVMValue> = lower_expr(ctx, n.left.left);
+                    let idx_val <&LLVMValue> = lower_expr(ctx, n.left.right);
+                    if (arr_val != null && idx_val != null && rhs != null) {
+                        let idx_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "idx64");
+                        let ind <&LLVMIndices> = new LLVMIndices{};
+                        ind.i0 = idx_i64;
+                        let elem_ty <&LLVMType> = get_index_elem_type(ctx, n.left.left);
+                        let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, elem_ty, arr_val, ind, 1, "arr_gep");
+                        delete ind;
+                        rhs = coerce_val(ctx, rhs, elem_ty);
+                        llvm_build_store(ctx.builder, rhs, gep);
+                    }
+                } else if (n.left.kind == ast_member_access()) {
+                    let base_val <&LLVMValue> = lower_expr(ctx, n.left.left);
+                    let f_idx <int> = find_field_index(ctx, n.left.left, n.left.name);
+                    let fld_ty <&LLVMType> = get_struct_field_type(ctx, n.left.left, n.left.name);
+                    if (base_val != null && rhs != null) {
+                        let ind <&LLVMIndices> = new LLVMIndices{};
+                        ind.i0 = llvm_const_int(ctx.i64_ty, f_idx, 0);
+                        let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, base_val, ind, 1, "field_gep");
+                        delete ind;
+                        rhs = coerce_val(ctx, rhs, fld_ty);
+                        llvm_build_store(ctx.builder, rhs, gep);
+                    }
+                } else if (n.left.kind == ast_unary_expr() && cg_str_eq(n.left.name, "*")) {
+                    let ptr_val <&LLVMValue> = lower_expr(ctx, n.left.left);
+                    if (ptr_val != null && rhs != null) {
+                        llvm_build_store(ctx.builder, rhs, ptr_val);
+                    }
+                }
+            }
+            return rhs;
+        }
+        if (cg_str_eq(n.name, "+=") || cg_str_eq(n.name, "-=") || cg_str_eq(n.name, "*=") || cg_str_eq(n.name, "/=") ||
+            cg_str_eq(n.name, "%=") || cg_str_eq(n.name, "&=") || cg_str_eq(n.name, "|=") || cg_str_eq(n.name, "^=") ||
+            cg_str_eq(n.name, "<<=") || cg_str_eq(n.name, ">>=")) {
+            let rhs <&LLVMValue> = lower_expr(ctx, n.right);
+            if (rhs == null) { return null; }
+            if (n.left != null) {
+                if (n.left.kind == ast_ident()) {
+                    let v <&LocalVar> = fn_ctx_find_var(ctx, n.left.name);
+                    if (v != null) {
+                        let cur <&LLVMValue> = llvm_build_load2(ctx.builder, v.ty, v.val, n.left.name);
+                        let res <&LLVMValue> = apply_compound_op(ctx, n.name, cur, rhs);
+                        llvm_build_store(ctx.builder, res, v.val);
+                        return res;
+                    }
+                } else if (n.left.kind == ast_index_expr()) {
+                    let arr_val <&LLVMValue> = lower_expr(ctx, n.left.left);
+                    let idx_val <&LLVMValue> = lower_expr(ctx, n.left.right);
+                    if (arr_val != null && idx_val != null) {
+                        let idx_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "idx64");
+                        let ind <&LLVMIndices> = new LLVMIndices{};
+                        ind.i0 = idx_i64;
+                        let elem_ty <&LLVMType> = get_index_elem_type(ctx, n.left.left);
+                        let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, elem_ty, arr_val, ind, 1, "arr_gep");
+                        delete ind;
+                        let cur <&LLVMValue> = llvm_build_load2(ctx.builder, elem_ty, gep, "elem");
+                        let res <&LLVMValue> = apply_compound_op(ctx, n.name, cur, rhs);
+                        llvm_build_store(ctx.builder, res, gep);
+                        return res;
+                    }
+                } else if (n.left.kind == ast_member_access()) {
+                    let base_val <&LLVMValue> = lower_expr(ctx, n.left.left);
+                    let f_idx <int> = find_field_index(ctx, n.left.left, n.left.name);
+                    let fld_ty <&LLVMType> = get_struct_field_type(ctx, n.left.left, n.left.name);
+                    if (base_val != null) {
+                        let ind <&LLVMIndices> = new LLVMIndices{};
+                        ind.i0 = llvm_const_int(ctx.i64_ty, f_idx, 0);
+                        let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, base_val, ind, 1, "field_gep");
+                        delete ind;
+                        let cur <&LLVMValue> = llvm_build_load2(ctx.builder, fld_ty, gep, n.left.name);
+                        let res <&LLVMValue> = apply_compound_op(ctx, n.name, cur, rhs);
+                        llvm_build_store(ctx.builder, res, gep);
+                        return res;
+                    }
+                } else if (n.left.kind == ast_unary_expr() && cg_str_eq(n.left.name, "*")) {
+                    let ptr_val <&LLVMValue> = lower_expr(ctx, n.left.left);
+                    if (ptr_val != null) {
+                        let cur <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i32_ty, ptr_val, "deref");
+                        let res <&LLVMValue> = apply_compound_op(ctx, n.name, cur, rhs);
+                        llvm_build_store(ctx.builder, res, ptr_val);
+                        return res;
+                    }
+                }
+            }
+            return rhs;
+        }
+        let lhs <&LLVMValue> = lower_expr(ctx, n.left);
+        let rhs <&LLVMValue> = lower_expr(ctx, n.right);
+        if (lhs == null || rhs == null) { return null; }
+
+        let l_ty <&LLVMType> = llvm_type_of(lhs);
+        let r_ty <&LLVMType> = llvm_type_of(rhs);
+        if (l_ty != r_ty) {
+            if (l_ty == ctx.i64_ty && r_ty == ctx.i32_ty) {
+                rhs = llvm_build_sext(ctx.builder, rhs, ctx.i64_ty, "rhs_ext");
+            } else if (l_ty == ctx.i32_ty && r_ty == ctx.i64_ty) {
+                lhs = llvm_build_sext(ctx.builder, lhs, ctx.i64_ty, "lhs_ext");
+            } else if (l_ty == ctx.i32_ty && (r_ty == ctx.i8_ty || r_ty == ctx.i1_ty)) {
+                rhs = llvm_build_zext(ctx.builder, rhs, ctx.i32_ty, "rhs_ext");
+            } else if ((l_ty == ctx.i8_ty || l_ty == ctx.i1_ty) && r_ty == ctx.i32_ty) {
+                lhs = llvm_build_zext(ctx.builder, lhs, ctx.i32_ty, "lhs_ext");
+            } else if (l_ty == ctx.i64_ty && (r_ty == ctx.i8_ty || r_ty == ctx.i1_ty)) {
+                rhs = llvm_build_zext(ctx.builder, rhs, ctx.i64_ty, "rhs_ext");
+            } else if ((l_ty == ctx.i8_ty || l_ty == ctx.i1_ty) && r_ty == ctx.i64_ty) {
+                lhs = llvm_build_zext(ctx.builder, lhs, ctx.i64_ty, "lhs_ext");
+            }
+        }
+
+        if (cg_str_eq(n.name, "+")) {
+            return llvm_build_add(ctx.builder, lhs, rhs, "add");
+        }
+        if (cg_str_eq(n.name, "-")) {
+            if (l_ty == ctx.ptr_ty && r_ty == ctx.ptr_ty) {
+                let l_i64 <&LLVMValue> = llvm_build_ptr_to_int(ctx.builder, lhs, ctx.i64_ty, "pdiff_l");
+                let r_i64 <&LLVMValue> = llvm_build_ptr_to_int(ctx.builder, rhs, ctx.i64_ty, "pdiff_r");
+                let diff_i64 <&LLVMValue> = llvm_build_sub(ctx.builder, l_i64, r_i64, "pdiff");
+                return llvm_build_trunc(ctx.builder, diff_i64, ctx.i32_ty, "diff32");
+            }
+            return llvm_build_sub(ctx.builder, lhs, rhs, "sub");
+        }
+        if (cg_str_eq(n.name, "*")) {
+            return llvm_build_mul(ctx.builder, lhs, rhs, "mul");
+        }
+        if (cg_str_eq(n.name, "/")) {
+            return llvm_build_sdiv(ctx.builder, lhs, rhs, "div");
+        }
+        if (cg_str_eq(n.name, "%")) {
+            return llvm_build_srem(ctx.builder, lhs, rhs, "rem");
+        }
+        if (cg_str_eq(n.name, "&")) {
+            return llvm_build_and(ctx.builder, lhs, rhs, "band");
+        }
+        if (cg_str_eq(n.name, "|")) {
+            return llvm_build_or(ctx.builder, lhs, rhs, "bor");
+        }
+        if (cg_str_eq(n.name, "^")) {
+            return llvm_build_xor(ctx.builder, lhs, rhs, "bxor");
+        }
+        if (cg_str_eq(n.name, "<<")) {
+            return llvm_build_shl(ctx.builder, lhs, rhs, "shl");
+        }
+        if (cg_str_eq(n.name, ">>")) {
+            return llvm_build_ashr(ctx.builder, lhs, rhs, "shr");
+        }
+        if (cg_str_eq(n.name, "==")) {
+            return llvm_build_icmp(ctx.builder, llvm_int_eq(), lhs, rhs, "eq");
+        }
+        if (cg_str_eq(n.name, "!=")) {
+            return llvm_build_icmp(ctx.builder, llvm_int_ne(), lhs, rhs, "ne");
+        }
+        if (cg_str_eq(n.name, "<")) {
+            return llvm_build_icmp(ctx.builder, llvm_int_slt(), lhs, rhs, "lt");
+        }
+        if (cg_str_eq(n.name, ">")) {
+            return llvm_build_icmp(ctx.builder, llvm_int_sgt(), lhs, rhs, "gt");
+        }
+        if (cg_str_eq(n.name, "<=")) {
+            return llvm_build_icmp(ctx.builder, llvm_int_sle(), lhs, rhs, "le");
+        }
+        if (cg_str_eq(n.name, ">=")) {
+            return llvm_build_icmp(ctx.builder, llvm_int_sge(), lhs, rhs, "ge");
+        }
+        return lhs;
+    }
+    if (n.kind == ast_call_expr()) {
+        if (cg_str_eq(n.name, "__fin_alloc_array")) {
+            let size_elem <&LLVMValue> = lower_expr(ctx, n.left);
+            let size_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, size_elem, ctx.i64_ty, "size64");
+            let eight <&LLVMValue> = llvm_const_int(ctx.i64_ty, 8, 0);
+            let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
+            let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
+            let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
+            c_args.v0 = size_i64;
+            c_args.v1 = eight;
+            let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "arr_alloc");
+            delete c_args;
+            return raw;
+        }
+        if (cg_str_eq(n.name, "__fin_alloc_scalar")) {
+            let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
+            let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
+            let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
+            c_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
+            c_args.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+            let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "scalar_alloc");
+            delete c_args;
+            if (n.left != null) {
+                let s_val <&LLVMValue> = lower_expr(ctx, n.left);
+                if (s_val != null) {
+                    llvm_build_store(ctx.builder, s_val, raw);
+                }
+            } else {
+                let zero <&LLVMValue> = llvm_const_int(ctx.i64_ty, 0, 0);
+                llvm_build_store(ctx.builder, zero, raw);
+            }
+            return raw;
+        }
+        if (cg_str_eq(n.name, "__fin_array_literal")) {
+            let cur_count <&AstNode> = n.left;
+            let n_elems <int> = 0;
+            while (cur_count != null) {
+                n_elems = n_elems + 1;
+                cur_count = cur_count.right;
+            }
+            let lit_byte_count <int> = n_elems * 8;
+            if (lit_byte_count == 0) {
+                lit_byte_count = 8;
+            }
+
+            let malloc_fn <&LLVMValue> = get_or_declare_malloc(ctx);
+            let m_fn_ty <&LLVMType> = llvm_global_get_value_type(malloc_fn);
+            let m_args <&LLVMValueArgs> = new LLVMValueArgs{};
+            m_args.v0 = llvm_const_int(ctx.i64_ty, lit_byte_count, 0);
+            let arr_ptr <&LLVMValue> = llvm_build_call2(ctx.builder, m_fn_ty, malloc_fn, m_args, 1, "arr_lit");
+            delete m_args;
+
+            let cur_elem <&AstNode> = n.left;
+            let idx <int> = 0;
+            while (cur_elem != null) {
+                let el_val <&LLVMValue> = lower_expr(ctx, cur_elem);
+                if (el_val != null) {
+                    let ind <&LLVMIndices> = new LLVMIndices{};
+                    ind.i0 = llvm_const_int(ctx.i64_ty, idx, 0);
+                    let elem_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, arr_ptr, ind, 1, "elem_gep");
+                    delete ind;
+                    let el_ty <&LLVMType> = llvm_type_of(el_val);
+                    if (el_ty == ctx.i32_ty) {
+                        el_val = llvm_build_sext(ctx.builder, el_val, ctx.i64_ty, "el_i64");
+                    } else if (el_ty == ctx.i1_ty) {
+                        el_val = llvm_build_zext(ctx.builder, el_val, ctx.i64_ty, "el_i64");
+                    }
+                    llvm_build_store(ctx.builder, el_val, elem_gep);
+                }
+                idx = idx + 1;
+                cur_elem = cur_elem.right;
+            }
+            return arr_ptr;
+        }
+        if (cg_str_eq(n.name, "__fin_alloc_struct")) {
+            let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
+            let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
+            let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
+            c_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
+            c_args.v1 = llvm_const_int(ctx.i64_ty, 256, 0);
+            let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "struct_alloc");
+            delete c_args;
+            return raw;
+        }
+        if (cg_str_eq(n.name, "__fin_struct_init")) {
+            let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
+            let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
+            let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
+            c_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
+            c_args.v1 = llvm_const_int(ctx.i64_ty, 256, 0);
+            let st_ptr <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "st_buf");
+            delete c_args;
+
+            let st_name <string> = n.type_annotation;
+            let f_cur <&AstNode> = n.left;
+            while (f_cur != null) {
+                let f_val <&LLVMValue> = lower_expr(ctx, f_cur.left);
+                let f_idx <int> = find_field_index_by_name(ctx, st_name, f_cur.name);
+                let ind <&LLVMIndices> = new LLVMIndices{};
+                ind.i0 = llvm_const_int(ctx.i64_ty, f_idx, 0);
+                let f_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, st_ptr, ind, 1, "f_gep");
+                delete ind;
+                llvm_build_store(ctx.builder, f_val, f_gep);
+                f_cur = f_cur.right;
+            }
+            return st_ptr;
+        }
+        if (cg_str_eq(n.name, "Alloc") || cg_str_eq(n.name, "@Alloc")) {
+            let size_val <&LLVMValue> = lower_expr(ctx, n.left);
+            let size_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, size_val, ctx.i64_ty, "alloc_size");
+            let malloc_fn <&LLVMValue> = get_or_declare_malloc(ctx);
+            let m_fn_ty <&LLVMType> = llvm_global_get_value_type(malloc_fn);
+            let m_args <&LLVMValueArgs> = new LLVMValueArgs{};
+            m_args.v0 = size_i64;
+            let raw <&LLVMValue> = llvm_build_call2(ctx.builder, m_fn_ty, malloc_fn, m_args, 1, "raw_alloc");
+            delete m_args;
+            return raw;
+        }
+        if (cg_str_eq(n.name, "free") || cg_str_eq(n.name, "Free") || cg_str_eq(n.name, "@Free")) {
+            let free_fn <&LLVMValue> = get_or_declare_free(ctx);
+            let f_fn_ty <&LLVMType> = llvm_global_get_value_type(free_fn);
+            let f_args <&LLVMValueArgs> = new LLVMValueArgs{};
+            f_args.v0 = lower_expr(ctx, n.left);
+            let free_res <&LLVMValue> = llvm_build_call2(ctx.builder, f_fn_ty, free_fn, f_args, 1, "");
+            delete f_args;
+            return free_res;
+        }
+
+        let callee <&LLVMValue> = null;
+        let callee_fn_ty <&LLVMType> = null;
+
+        if (cg_str_eq(n.name, "printf")) {
+            let p_fn <&LLVMValue> = get_or_declare_printf(ctx);
+            callee = p_fn;
+            callee_fn_ty = llvm_global_get_value_type(p_fn);
+        } else {
+            if (n.left != null) {
+                let actual_rec <&AstNode> = n.left.left;
+                if (actual_rec == null) { actual_rec = n.left; }
+                let rec_st <string> = get_node_struct_name(ctx, actual_rec);
+                if (cg_strlen(rec_st) > cast<ulong>(0)) {
+                    let b_dot <Buffer> = new_buffer(64);
+                    b_dot.write_string(rec_st);
+                    b_dot.write_char('.');
+                    b_dot.write_string(n.name);
+                    let m_dot_name <string> = b_dot.to_string();
+                    free_buffer(b_dot);
+
+                    let sym_m <&FnSymbol> = fn_ctx_find_fn(ctx, m_dot_name);
+                    if (sym_m != null) {
+                        callee = sym_m.fn_val;
+                        callee_fn_ty = sym_m.fn_ty;
+                    } else {
+                        callee = llvm_get_named_function(ctx.module, m_dot_name);
+                        if (callee != null) {
+                            callee_fn_ty = llvm_global_get_value_type(callee);
+                        }
+                    }
+
+                    if (callee == null) {
+                        let b_under <Buffer> = new_buffer(64);
+                        b_under.write_string(rec_st);
+                        b_under.write_char('_');
+                        b_under.write_string(n.name);
+                        let m_under_name <string> = b_under.to_string();
+                        free_buffer(b_under);
+
+                        let sym_u <&FnSymbol> = fn_ctx_find_fn(ctx, m_under_name);
+                        if (sym_u != null) {
+                            callee = sym_u.fn_val;
+                            callee_fn_ty = sym_u.fn_ty;
+                        } else {
+                            callee = llvm_get_named_function(ctx.module, m_under_name);
+                            if (callee != null) {
+                                callee_fn_ty = llvm_global_get_value_type(callee);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (callee == null) {
+                let sym <&FnSymbol> = fn_ctx_find_fn(ctx, n.name);
+                if (sym != null) {
+                    callee = sym.fn_val;
+                    callee_fn_ty = sym.fn_ty;
+                } else {
+                    callee = llvm_get_named_function(ctx.module, n.name);
+                    if (callee != null) {
+                        callee_fn_ty = llvm_global_get_value_type(callee);
+                    }
+                }
+            }
+        }
+        if (callee == null || callee_fn_ty == null) {
+            return null;
+        }
+
+        let args <&LLVMValueArgs> = new LLVMValueArgs{};
+        let param_tys <&LLVMTypeArgs> = new LLVMTypeArgs{};
+        llvm_get_param_types(callee_fn_ty, param_tys);
+        let arg_count <int> = 0;
+        let cur_wrap <&AstNode> = n.left;
+        while (cur_wrap != null && arg_count < 16) {
+            let actual_arg <&AstNode> = cur_wrap.left;
+            if (actual_arg == null) { actual_arg = cur_wrap; }
+            let av <&LLVMValue> = lower_expr(ctx, actual_arg);
+            if (av != null) {
+                let a_ty <&LLVMType> = llvm_type_of(av);
+                let exp_ty <&LLVMType> = null;
+                if (arg_count == 0) { exp_ty = param_tys.t0; }
+                else if (arg_count == 1) { exp_ty = param_tys.t1; }
+                else if (arg_count == 2) { exp_ty = param_tys.t2; }
+                else if (arg_count == 3) { exp_ty = param_tys.t3; }
+                else if (arg_count == 4) { exp_ty = param_tys.t4; }
+                else if (arg_count == 5) { exp_ty = param_tys.t5; }
+                else if (arg_count == 6) { exp_ty = param_tys.t6; }
+                else if (arg_count == 7) { exp_ty = param_tys.t7; }
+                else if (arg_count == 8) { exp_ty = param_tys.t8; }
+                else if (arg_count == 9) { exp_ty = param_tys.t9; }
+                else if (arg_count == 10) { exp_ty = param_tys.t10; }
+                else if (arg_count == 11) { exp_ty = param_tys.t11; }
+                else if (arg_count == 12) { exp_ty = param_tys.t12; }
+                else if (arg_count == 13) { exp_ty = param_tys.t13; }
+                else if (arg_count == 14) { exp_ty = param_tys.t14; }
+                else if (arg_count == 15) { exp_ty = param_tys.t15; }
+
+                if (exp_ty != null && exp_ty != a_ty) {
+                    av = coerce_val(ctx, av, exp_ty);
+                }
+            } else {
+                let exp_ty <&LLVMType> = null;
+                if (arg_count == 0) { exp_ty = param_tys.t0; }
+                else if (arg_count == 1) { exp_ty = param_tys.t1; }
+                else if (arg_count == 2) { exp_ty = param_tys.t2; }
+                else if (arg_count == 3) { exp_ty = param_tys.t3; }
+                else if (arg_count == 4) { exp_ty = param_tys.t4; }
+                else if (arg_count == 5) { exp_ty = param_tys.t5; }
+                else if (arg_count == 6) { exp_ty = param_tys.t6; }
+                else if (arg_count == 7) { exp_ty = param_tys.t7; }
+                else if (arg_count == 8) { exp_ty = param_tys.t8; }
+                else if (arg_count == 9) { exp_ty = param_tys.t9; }
+                else if (arg_count == 10) { exp_ty = param_tys.t10; }
+                else if (arg_count == 11) { exp_ty = param_tys.t11; }
+                else if (arg_count == 12) { exp_ty = param_tys.t12; }
+                else if (arg_count == 13) { exp_ty = param_tys.t13; }
+                else if (arg_count == 14) { exp_ty = param_tys.t14; }
+                else if (arg_count == 15) { exp_ty = param_tys.t15; }
+
+                if (exp_ty == ctx.i64_ty) {
+                    av = llvm_const_int(ctx.i64_ty, 0, 0);
+                } else if (exp_ty == ctx.i8_ty) {
+                    av = llvm_const_int(ctx.i8_ty, 0, 0);
+                } else if (exp_ty == ctx.i1_ty) {
+                    av = llvm_const_int(ctx.i1_ty, 0, 0);
+                } else if (exp_ty == ctx.i32_ty) {
+                    av = llvm_const_int(ctx.i32_ty, 0, 0);
+                } else {
+                    av = llvm_const_null(ctx.ptr_ty);
+                }
+            }
+            if (arg_count == 0) { args.v0 = av; }
+            else if (arg_count == 1) { args.v1 = av; }
+            else if (arg_count == 2) { args.v2 = av; }
+            else if (arg_count == 3) { args.v3 = av; }
+            else if (arg_count == 4) { args.v4 = av; }
+            else if (arg_count == 5) { args.v5 = av; }
+            else if (arg_count == 6) { args.v6 = av; }
+            else if (arg_count == 7) { args.v7 = av; }
+            else if (arg_count == 8) { args.v8 = av; }
+            else if (arg_count == 9) { args.v9 = av; }
+            else if (arg_count == 10) { args.v10 = av; }
+            else if (arg_count == 11) { args.v11 = av; }
+            else if (arg_count == 12) { args.v12 = av; }
+            else if (arg_count == 13) { args.v13 = av; }
+            else if (arg_count == 14) { args.v14 = av; }
+            else if (arg_count == 15) { args.v15 = av; }
+            arg_count = arg_count + 1;
+            cur_wrap = cur_wrap.right;
+        }
+        delete param_tys;
+        let ret_t <&LLVMType> = llvm_get_return_type(callee_fn_ty);
+        let call_res <&LLVMValue> = null;
+        if (ret_t == ctx.void_ty) {
+            call_res = llvm_build_call2(ctx.builder, callee_fn_ty, callee, args, arg_count, "");
+        } else {
+            call_res = llvm_build_call2(ctx.builder, callee_fn_ty, callee, args, arg_count, "call");
+        }
+        delete args;
+        return call_res;
+    }
+    return null;
+}
+
+pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
+    if (stmt == null) { return; }
+
+    if (stmt.kind == ast_var_decl()) {
+        let v <&LocalVar> = fn_ctx_find_var(ctx, stmt.name);
+        let alloca <&LLVMValue> = null;
+        let ty <&LLVMType> = null;
+        if (v != null) {
+            alloca = v.val;
+            ty = v.ty;
+        } else {
+            ty = map_type(ctx, stmt.type_annotation);
+            alloca = llvm_build_alloca(ctx.builder, ty, stmt.name);
+            fn_ctx_add_var(ctx, stmt.name, alloca, ty, stmt.type_annotation);
+            v = fn_ctx_find_var(ctx, stmt.name);
+        }
+        if (stmt.left != null) {
+            let init_val <&LLVMValue> = lower_expr(ctx, stmt.left);
+            if (init_val != null && alloca != null) {
+                let v_ty <&LLVMType> = llvm_type_of(init_val);
+                if (ty != v_ty) {
+                    if (ty == ctx.i8_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i64_ty)) {
+                        init_val = llvm_build_trunc(ctx.builder, init_val, ctx.i8_ty, "v_tr8");
+                    } else if (ty == ctx.i1_ty && v_ty != ctx.i1_ty) {
+                        init_val = to_condition_i1(ctx, init_val);
+                    } else if (ty == ctx.i32_ty && v_ty == ctx.i64_ty) {
+                        init_val = llvm_build_trunc(ctx.builder, init_val, ctx.i32_ty, "v_tr32");
+                    } else if (ty == ctx.i64_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i8_ty)) {
+                        init_val = llvm_build_zext(ctx.builder, init_val, ctx.i64_ty, "v_z64");
+                    } else if (ty == ctx.ptr_ty && v_ty != ctx.ptr_ty) {
+                        init_val = llvm_build_bitcast(ctx.builder, init_val, ctx.ptr_ty, "v_pcast");
+                    }
+                }
+                llvm_build_store(ctx.builder, init_val, alloca);
+            }
+            if (v != null) {
+                if (stmt.left.kind == ast_call_expr()) {
+                    if (cg_str_eq(stmt.left.name, "__fin_alloc_array") && stmt.left.left != null) {
+                        v.len_val = lower_expr(ctx, stmt.left.left);
+                    } else if (cg_str_eq(stmt.left.name, "__fin_array_literal")) {
+                        let c_cnt <int> = 0;
+                        let c_arg <&AstNode> = stmt.left.left;
+                        while (c_arg != null) {
+                            c_cnt = c_cnt + 1;
+                            c_arg = c_arg.right;
+                        }
+                        v.len_val = llvm_const_int(ctx.i32_ty, c_cnt, 0);
+                        v.elem_ty = ctx.i64_ty;
+                    }
+                } else if (stmt.left.kind == ast_ident()) {
+                    let src_v <&LocalVar> = fn_ctx_find_var(ctx, stmt.left.name);
+                    if (src_v != null) {
+                        v.len_val = src_v.len_val;
+                        v.elem_ty = src_v.elem_ty;
+                    }
+                }
+            }
+        }
+        if (v != null && v.len_val == null && stmt.type_annotation != null) {
+            let ext <int> = get_fixed_array_extent(stmt.type_annotation);
+            if (ext >= 0) {
+                v.len_val = llvm_const_int(ctx.i32_ty, ext, 0);
+            }
+        }
+        return;
+    }
+    if (stmt.kind == ast_return_stmt()) {
+        if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) != null) {
+            return;
+        }
+        let fn_ret_ty <&LLVMType> = llvm_get_return_type(llvm_global_get_value_type(ctx.fn_val));
+        if (fn_ret_ty == ctx.void_ty) {
+            llvm_build_ret_void(ctx.builder);
+            return;
+        }
+        if (stmt.left != null) {
+            let val <&LLVMValue> = lower_expr(ctx, stmt.left);
+            if (val != null) {
+                let v_ty <&LLVMType> = llvm_type_of(val);
+                if (fn_ret_ty != v_ty) {
+                    if (fn_ret_ty == ctx.i8_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i64_ty)) {
+                        val = llvm_build_trunc(ctx.builder, val, ctx.i8_ty, "ret_tr8");
+                    } else if (fn_ret_ty == ctx.i1_ty && v_ty != ctx.i1_ty) {
+                        val = to_condition_i1(ctx, val);
+                    } else if (fn_ret_ty == ctx.i32_ty && v_ty == ctx.i64_ty) {
+                        val = llvm_build_trunc(ctx.builder, val, ctx.i32_ty, "ret_tr32");
+                    } else if (fn_ret_ty == ctx.i64_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i8_ty)) {
+                        val = llvm_build_zext(ctx.builder, val, ctx.i64_ty, "ret_z64");
+                    } else if (fn_ret_ty == ctx.ptr_ty && v_ty != ctx.ptr_ty) {
+                        val = llvm_build_bitcast(ctx.builder, val, ctx.ptr_ty, "ret_pcast");
+                    }
+                }
+                llvm_build_ret(ctx.builder, val);
+            } else {
+                llvm_build_ret_void(ctx.builder);
+            }
+        } else {
+            llvm_build_ret_void(ctx.builder);
+        }
+        return;
+    }
+    if (stmt.kind == ast_expr_stmt()) {
+        lower_expr(ctx, stmt.left);
+        return;
+    }
+    if (stmt.kind == ast_if_stmt()) {
+        let cond_raw <&LLVMValue> = lower_expr(ctx, stmt.left);
+        let cond_val <&LLVMValue> = to_condition_i1(ctx, cond_raw);
+        if (cond_val == null) { return; }
+        let then_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "then");
+        let else_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "else");
+        let merge_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "ifcont");
+
+        llvm_build_cond_br(ctx.builder, cond_val, then_bb, else_bb);
+
+        llvm_position_builder(ctx.builder, then_bb);
+        lower_stmt(ctx, stmt.right);
+        if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+            llvm_build_br(ctx.builder, merge_bb);
+        }
+
+        llvm_position_builder(ctx.builder, else_bb);
+        if (stmt.extra != null) {
+            lower_stmt(ctx, stmt.extra);
+        }
+        if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+            llvm_build_br(ctx.builder, merge_bb);
+        }
+
+        llvm_position_builder(ctx.builder, merge_bb);
+        return;
+    }
+    if (stmt.kind == ast_while_stmt()) {
+        let cond_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "while_cond");
+        let body_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "while_body");
+        let exit_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "while_exit");
+
+        let prev_break <&LLVMBasicBlock> = ctx.break_bb;
+        let prev_continue <&LLVMBasicBlock> = ctx.continue_bb;
+        ctx.break_bb = exit_bb;
+        ctx.continue_bb = cond_bb;
+
+        llvm_build_br(ctx.builder, cond_bb);
+
+        llvm_position_builder(ctx.builder, cond_bb);
+        let cond_raw <&LLVMValue> = lower_expr(ctx, stmt.left);
+        let cond_val <&LLVMValue> = to_condition_i1(ctx, cond_raw);
+        if (cond_val != null) {
+            llvm_build_cond_br(ctx.builder, cond_val, body_bb, exit_bb);
+        } else {
+            llvm_build_br(ctx.builder, exit_bb);
+        }
+
+        llvm_position_builder(ctx.builder, body_bb);
+        lower_stmt(ctx, stmt.right);
+        if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+            llvm_build_br(ctx.builder, cond_bb);
+        }
+
+        ctx.break_bb = prev_break;
+        ctx.continue_bb = prev_continue;
+
+        llvm_position_builder(ctx.builder, exit_bb);
+        return;
+    }
+    if (stmt.kind == ast_for_stmt()) {
+        if (stmt.left != null) {
+            lower_stmt(ctx, stmt.left);
+        }
+        let cond_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "for_cond");
+        let body_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "for_body");
+        let step_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "for_step");
+        let exit_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "for_exit");
+
+        let prev_break <&LLVMBasicBlock> = ctx.break_bb;
+        let prev_continue <&LLVMBasicBlock> = ctx.continue_bb;
+        ctx.break_bb = exit_bb;
+        ctx.continue_bb = step_bb;
+
+        llvm_build_br(ctx.builder, cond_bb);
+
+        llvm_position_builder(ctx.builder, cond_bb);
+        if (stmt.right != null) {
+            let cond_raw <&LLVMValue> = lower_expr(ctx, stmt.right);
+            let cond_val <&LLVMValue> = to_condition_i1(ctx, cond_raw);
+            if (cond_val != null) {
+                llvm_build_cond_br(ctx.builder, cond_val, body_bb, exit_bb);
+            } else {
+                llvm_build_br(ctx.builder, body_bb);
+            }
+        } else {
+            llvm_build_br(ctx.builder, body_bb);
+        }
+
+        llvm_position_builder(ctx.builder, body_bb);
+        if (stmt.extra != null && stmt.extra.right != null) {
+            lower_stmt(ctx, stmt.extra.right);
+        }
+        if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+            llvm_build_br(ctx.builder, step_bb);
+        }
+
+        llvm_position_builder(ctx.builder, step_bb);
+        if (stmt.extra != null && stmt.extra.left != null) {
+            lower_expr(ctx, stmt.extra.left);
+        }
+        if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+            llvm_build_br(ctx.builder, cond_bb);
+        }
+
+        ctx.break_bb = prev_break;
+        ctx.continue_bb = prev_continue;
+
+        llvm_position_builder(ctx.builder, exit_bb);
+        return;
+    }
+    if (stmt.kind == ast_break_stmt()) {
+        if (ctx.break_bb != null && llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+            llvm_build_br(ctx.builder, ctx.break_bb);
+        }
+        return;
+    }
+    if (stmt.kind == ast_continue_stmt()) {
+        if (ctx.continue_bb != null && llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+            llvm_build_br(ctx.builder, ctx.continue_bb);
+        }
+        return;
+    }
+    if (stmt.kind == ast_blame_stmt()) {
+        if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) != null) {
+            return;
+        }
+        let is_unconditional <bool> = false;
+        if (stmt.left == null) {
+            is_unconditional = true;
+        } else if (stmt.left.kind == ast_ident() && cg_str_eq(stmt.left.name, "m1778")) {
+            is_unconditional = true;
+        }
+
+        let abort_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "abort");
+        if (abort_fn == null) {
+            let a_ty <&LLVMType> = llvm_function_type(ctx.void_ty, null, 0, 0);
+            abort_fn = llvm_add_function(ctx.module, "abort", a_ty);
+        }
+        let a_fn_ty <&LLVMType> = llvm_global_get_value_type(abort_fn);
+
+        if (is_unconditional) {
+            llvm_build_call2(ctx.builder, a_fn_ty, abort_fn, null, 0, "");
+            llvm_build_unreachable(ctx.builder);
+            return;
+        }
+
+        let cond_raw <&LLVMValue> = lower_expr(ctx, stmt.left);
+        let cond_val <&LLVMValue> = to_condition_i1(ctx, cond_raw);
+        if (cond_val == null) {
+            llvm_build_call2(ctx.builder, a_fn_ty, abort_fn, null, 0, "");
+            llvm_build_unreachable(ctx.builder);
+            return;
+        }
+
+        let ok_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "blame_ok");
+        let fail_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "blame_fail");
+
+        llvm_build_cond_br(ctx.builder, cond_val, ok_bb, fail_bb);
+
+        llvm_position_builder(ctx.builder, fail_bb);
+        llvm_build_call2(ctx.builder, a_fn_ty, abort_fn, null, 0, "");
+        llvm_build_unreachable(ctx.builder);
+
+        llvm_position_builder(ctx.builder, ok_bb);
+        return;
+    }
+    if (stmt.kind == ast_block()) {
+        let cur <&AstNode> = stmt.left;
+        while (cur != null) {
+            if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) != null) {
+                return;
+            }
+            lower_stmt(ctx, cur.left);
+            cur = cur.right;
+        }
+        return;
+    }
+}
+
+pub fun lower_block(ctx: &FnContext, block: &AstNode) <noret> {
+    if (block == null) { return; }
+    let cur <&AstNode> = block.left;
+    while (cur != null) {
+        if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) != null) {
+            return;
+        }
+        lower_stmt(ctx, cur.left);
+        cur = cur.right;
+    }
+}
+
+pub fun declare_function(module: &LLVMModule, fn_node: &AstNode, fn_syms: [&FnSymbol], sym_count: int) <int> {
+    if (fn_node == null) { return sym_count; }
+
+    let fn_name <string> = fn_node.name;
+    let is_extern <bool> = (fn_node.left == null);
+    let llvm_sym <string> = fn_name;
+
+    if (is_extern && fn_node.str_val != null && cg_strlen(fn_node.str_val) > 0) {
+        llvm_sym = fn_node.str_val;
+    }
+
+    let i32_t <&LLVMType> = llvm_i32_type();
+    let i64_t <&LLVMType> = llvm_i64_type();
+    let i1_t <&LLVMType> = llvm_i1_type();
+    let void_t <&LLVMType> = llvm_void_type();
+    let ptr_t <&LLVMType> = llvm_pointer_type(llvm_i8_type(), 0);
+
+    let ret_ty <&LLVMType> = i32_t;
+    let i8_t <&LLVMType> = llvm_i8_type();
+    if (cg_str_eq(fn_node.type_annotation, "void") || cg_str_eq(fn_node.type_annotation, "noret")) {
+        ret_ty = void_t;
+    } else if (cg_str_eq(fn_node.type_annotation, "bool")) {
+        ret_ty = i1_t;
+    } else if (cg_str_eq(fn_node.type_annotation, "char") || cg_str_eq(fn_node.type_annotation, "u8") || cg_str_eq(fn_node.type_annotation, "i8")) {
+        ret_ty = i8_t;
+    } else if (cg_str_eq(fn_node.type_annotation, "string")) {
+        ret_ty = ptr_t;
+    } else if (cg_str_eq(fn_node.type_annotation, "ulong") || cg_str_eq(fn_node.type_annotation, "long") || cg_str_eq(fn_node.type_annotation, "i64") || cg_str_eq(fn_node.type_annotation, "u64")) {
+        ret_ty = i64_t;
+    } else if (cg_str_eq(fn_node.type_annotation, "int") || cg_str_eq(fn_node.type_annotation, "uint")) {
+        ret_ty = i32_t;
+    } else {
+        ret_ty = ptr_t;
+    }
+
+    let param_types <&LLVMTypeArgs> = new LLVMTypeArgs{};
+    let p_count <int> = 0;
+    let is_var_arg <int> = 0;
+    let p_cur <&AstNode> = fn_node.extra;
+    while (p_cur != null && p_count < 16) {
+        if (cg_str_eq(p_cur.name, "...") || cg_str_eq(p_cur.type_annotation, "...")) {
+            is_var_arg = 1;
+            p_cur = p_cur.right;
+            continue;
+        }
+        let pt <&LLVMType> = i32_t;
+        if (cg_str_eq(p_cur.type_annotation, "bool")) { pt = i1_t; }
+        else if (cg_str_eq(p_cur.type_annotation, "char") || cg_str_eq(p_cur.type_annotation, "u8") || cg_str_eq(p_cur.type_annotation, "i8")) { pt = i8_t; }
+        else if (cg_str_eq(p_cur.type_annotation, "string")) { pt = ptr_t; }
+        else if (cg_str_eq(p_cur.type_annotation, "ulong") || cg_str_eq(p_cur.type_annotation, "long") || cg_str_eq(p_cur.type_annotation, "i64") || cg_str_eq(p_cur.type_annotation, "u64")) { pt = i64_t; }
+        else {
+            let plen <int> = cast<int>(cg_strlen(p_cur.type_annotation));
+            if (plen > 0) {
+                let p_first <string> = substr(p_cur.type_annotation, 0, 1);
+                let p_last <string> = substr(p_cur.type_annotation, plen - 1, 1);
+                if (cg_str_eq(p_first, "&") || cg_str_eq(p_first, "[") || cg_str_eq(p_last, "*")) {
+                    pt = ptr_t;
+                } else if (!cg_str_eq(p_cur.type_annotation, "int") && !cg_str_eq(p_cur.type_annotation, "uint") && !cg_str_eq(p_cur.type_annotation, "auto")) {
+                    pt = ptr_t;
+                }
+            }
+        }
+
+        if (p_count == 0) { param_types.t0 = pt; }
+        else if (p_count == 1) { param_types.t1 = pt; }
+        else if (p_count == 2) { param_types.t2 = pt; }
+        else if (p_count == 3) { param_types.t3 = pt; }
+        else if (p_count == 4) { param_types.t4 = pt; }
+        else if (p_count == 5) { param_types.t5 = pt; }
+        else if (p_count == 6) { param_types.t6 = pt; }
+        else if (p_count == 7) { param_types.t7 = pt; }
+        else if (p_count == 8) { param_types.t8 = pt; }
+        else if (p_count == 9) { param_types.t9 = pt; }
+        else if (p_count == 10) { param_types.t10 = pt; }
+        else if (p_count == 11) { param_types.t11 = pt; }
+        else if (p_count == 12) { param_types.t12 = pt; }
+        else if (p_count == 13) { param_types.t13 = pt; }
+        else if (p_count == 14) { param_types.t14 = pt; }
+        else if (p_count == 15) { param_types.t15 = pt; }
+
+        p_count = p_count + 1;
+        p_cur = p_cur.right;
+    }
+
+    let fn_type <&LLVMType> = llvm_function_type(ret_ty, param_types, p_count, is_var_arg);
+    delete param_types;
+
+    let fn_val <&LLVMValue> = llvm_get_named_function(module, llvm_sym);
+    if (fn_val == null) {
+        fn_val = llvm_add_function(module, llvm_sym, fn_type);
+    }
+
+    if (sym_count < 8180) {
+        let sym <&FnSymbol> = new FnSymbol{};
+        sym.name = fn_name;
+        sym.fn_val = fn_val;
+        sym.fn_ty = fn_type;
+        fn_syms[sym_count] = sym;
+        let new_count <int> = sym_count + 1;
+
+        if (!cg_str_eq(llvm_sym, fn_name) && new_count < 8180) {
+            let sym2 <&FnSymbol> = new FnSymbol{};
+            sym2.name = llvm_sym;
+            sym2.fn_val = fn_val;
+            sym2.fn_ty = fn_type;
+            fn_syms[new_count] = sym2;
+            new_count = new_count + 1;
+        }
+        return new_count;
+    }
+    return sym_count;
+}
+
+fun collect_var_allocas(ctx: &FnContext, node: &AstNode) <noret> {
+    if (node == null) { return; }
+    if (node.kind == ast_var_decl()) {
+        let v <&LocalVar> = fn_ctx_find_var(ctx, node.name);
+        if (v == null) {
+            let ty <&LLVMType> = map_type(ctx, node.type_annotation);
+            let alloca <&LLVMValue> = llvm_build_alloca(ctx.builder, ty, node.name);
+            fn_ctx_add_var(ctx, node.name, alloca, ty, node.type_annotation);
+        }
+    }
+    collect_var_allocas(ctx, node.left);
+    collect_var_allocas(ctx, node.right);
+    collect_var_allocas(ctx, node.extra);
+}
+
+pub fun lower_fun_decl(
+    module: &LLVMModule,
+    builder: &LLVMBuilder,
+    fn_node: &AstNode,
+    fn_syms: [&FnSymbol],
+    fn_sym_count: int,
+    structs: [&StructInfo],
+    struct_count: int
+) <noret> {
+    if (fn_node == null || fn_node.left == null) { return; }
+
+    let fn_name <string> = fn_node.name;
+    let is_extern <bool> = (fn_node.left == null);
+    let llvm_sym <string> = fn_name;
+    if (is_extern && fn_node.str_val != null && cg_strlen(fn_node.str_val) > 0) {
+        llvm_sym = fn_node.str_val;
+    }
+
+    let fn_val <&LLVMValue> = llvm_get_named_function(module, llvm_sym);
+    if (fn_val == null) { return; }
+
+    let i32_t <&LLVMType> = llvm_i32_type();
+    let i64_t <&LLVMType> = llvm_i64_type();
+    let i1_t <&LLVMType> = llvm_i1_type();
+    let i8_t <&LLVMType> = llvm_i8_type();
+    let void_t <&LLVMType> = llvm_void_type();
+    let ptr_t <&LLVMType> = llvm_pointer_type(llvm_i8_type(), 0);
+
+    let entry_bb <&LLVMBasicBlock> = llvm_append_basic_block(fn_val, "entry");
+    llvm_position_builder(builder, entry_bb);
+
+    let ctx <&FnContext> = new FnContext{};
+    ctx.vars = new [&LocalVar, 1024]{};
+    ctx.var_count = 0;
+    ctx.fn_syms = fn_syms;
+    ctx.fn_sym_count = fn_sym_count;
+    ctx.fn_val = fn_val;
+    ctx.builder = builder;
+    ctx.module = module;
+    ctx.i32_ty = i32_t;
+    ctx.i64_ty = i64_t;
+    ctx.i1_ty = i1_t;
+    ctx.i8_ty = i8_t;
+    ctx.ptr_ty = ptr_t;
+    ctx.void_ty = void_t;
+    ctx.break_bb = null;
+    ctx.continue_bb = null;
+    ctx.structs = structs;
+    ctx.struct_count = struct_count;
+
+    let p_idx <int> = 0;
+    let p_cur <&AstNode> = fn_node.extra;
+    while (p_cur != null) {
+        let p_val <&LLVMValue> = llvm_get_param(fn_val, p_idx);
+        let pt <&LLVMType> = map_type(ctx, p_cur.type_annotation);
+        let alloca <&LLVMValue> = llvm_build_alloca(builder, pt, p_cur.name);
+        llvm_build_store(builder, p_val, alloca);
+        fn_ctx_add_var(ctx, p_cur.name, alloca, pt, p_cur.type_annotation);
+        let pv <&LocalVar> = fn_ctx_find_var(ctx, p_cur.name);
+        if (pv != null && p_cur.type_annotation != null) {
+            let p_ext <int> = get_fixed_array_extent(p_cur.type_annotation);
+            if (p_ext >= 0) {
+                pv.len_val = llvm_const_int(ctx.i32_ty, p_ext, 0);
+            }
+        }
+
+        p_idx = p_idx + 1;
+        p_cur = p_cur.right;
+    }
+
+    if (fn_node.left != null) {
+        collect_var_allocas(ctx, fn_node.left);
+        lower_stmt(ctx, fn_node.left);
+    }
+
+    let cur_bb <&LLVMBasicBlock> = llvm_get_insert_block(builder);
+    if (llvm_get_basic_block_terminator(cur_bb) == null) {
+        if (cg_str_eq(fn_node.type_annotation, "void") || cg_str_eq(fn_node.type_annotation, "noret")) {
+            llvm_build_ret_void(builder);
+        } else if (cg_str_eq(fn_name, "main") || cg_str_eq(fn_node.type_annotation, "int")) {
+            let zero <&LLVMValue> = llvm_const_int(i32_t, 0, 0);
+            llvm_build_ret(builder, zero);
+        } else if (cg_str_eq(fn_node.type_annotation, "bool")) {
+            let zero_b <&LLVMValue> = llvm_const_int(i1_t, 0, 0);
+            llvm_build_ret(builder, zero_b);
+        } else {
+            llvm_build_ret_void(builder);
+        }
+    }
+
+    let fn_v_rc <int> = llvm_verify_function(fn_val, 1);
+
+    let vi <int> = 0;
+    while (vi < ctx.var_count) {
+        if (ctx.vars[vi] != null) {
+            delete ctx.vars[vi];
+        }
+        vi = vi + 1;
+    }
+    delete ctx.vars;
+    delete ctx;
+}
+
+pub fun lower_function_body(
+    module: &LLVMModule,
+    builder: &LLVMBuilder,
+    fn_node: &AstNode,
+    fn_syms: [&FnSymbol],
+    fn_sym_count: int,
+    structs: [&StructInfo],
+    struct_count: int
+) <noret> {
+    lower_fun_decl(module, builder, fn_node, fn_syms, fn_sym_count, structs, struct_count);
+}
+
+pub fun lower_decl(
+    module: &LLVMModule,
+    builder: &LLVMBuilder,
+    decl: &AstNode,
+    fn_syms: [&FnSymbol],
+    fn_sym_count: int,
+    structs: [&StructInfo],
+    struct_count: int
+) <noret> {
+    if (decl == null) { return; }
+    if (decl.kind == ast_fun_decl()) {
+        lower_fun_decl(module, builder, decl, fn_syms, fn_sym_count, structs, struct_count);
+    } else if (decl.kind == ast_struct_decl()) {
+        let m <&AstNode> = decl.extra;
+        while (m != null) {
+            lower_fun_decl(module, builder, m, fn_syms, fn_sym_count, structs, struct_count);
+            m = m.right;
+        }
+    }
+}
+
+pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int) <bool> {
+    if (root == null) { return false; }
+
+    init_native_target();
+
+    let module <&LLVMModule> = llvm_module_create("fin_module");
+    let builder <&LLVMBuilder> = llvm_create_builder();
+
+    let fn_syms <[&FnSymbol]> = new [&FnSymbol, 8192]{};
+    let fn_sym_count <int> = 0;
+
+    let structs <[&StructInfo]> = new [&StructInfo, 1024]{};
+    let struct_count <int> = 0;
+
+    // Pass 1: Declare all functions and struct methods, and record struct definitions
+    let decl <&AstNode> = root.left;
+    while (decl != null) {
+        if (decl.kind == ast_fun_decl()) {
+            fn_sym_count = declare_function(module, decl, fn_syms, fn_sym_count);
+        } else if (decl.kind == ast_struct_decl()) {
+            if (struct_count < 1020) {
+                let s_info <&StructInfo> = new StructInfo{};
+                s_info.name = decl.name;
+                s_info.fields = new [&StructFieldInfo, 64]{};
+                s_info.field_count = 0;
+                let f_cur <&AstNode> = decl.left;
+                let f_idx <int> = 0;
+                while (f_cur != null && f_idx < 64) {
+                    let f_item <&StructFieldInfo> = new StructFieldInfo{};
+                    f_item.name = f_cur.name;
+                    f_item.index = f_idx;
+                    f_item.type_annotation = f_cur.type_annotation;
+                    s_info.fields[f_idx] = f_item;
+                    s_info.field_count = s_info.field_count + 1;
+                    f_idx = f_idx + 1;
+                    f_cur = f_cur.right;
+                }
+                structs[struct_count] = s_info;
+                struct_count = struct_count + 1;
+            }
+            let m <&AstNode> = decl.extra;
+            while (m != null) {
+                fn_sym_count = declare_function(module, m, fn_syms, fn_sym_count);
+                m = m.right;
+            }
+        }
+        decl = decl.right;
+    }
+
+    // Pass 2: Lower declarations (functions and struct methods)
+    decl = root.left;
+    while (decl != null) {
+        lower_decl(module, builder, decl, fn_syms, fn_sym_count, structs, struct_count);
+        decl = decl.right;
+    }
+
+    let ok <bool> = emit_module_to_object(module, output_path, opt_level);
+    llvm_dispose_builder(builder);
+    llvm_dispose_module(module);
+
+    let si <int> = 0;
+    while (si < struct_count) {
+        if (structs[si] != null) {
+            let fi <int> = 0;
+            while (fi < structs[si].field_count) {
+                if (structs[si].fields[fi] != null) {
+                    delete structs[si].fields[fi];
+                }
+                fi = fi + 1;
+            }
+            delete structs[si].fields;
+            delete structs[si];
+        }
+        si = si + 1;
+    }
+    delete structs;
+
+    let fi2 <int> = 0;
+    while (fi2 < fn_sym_count) {
+        if (fn_syms[fi2] != null) {
+            delete fn_syms[fi2];
+        }
+        fi2 = fi2 + 1;
+    }
+    delete fn_syms;
+
+    return ok;
+}

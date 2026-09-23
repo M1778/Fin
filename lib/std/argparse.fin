@@ -1,0 +1,191 @@
+// ArgParse: command-line flag and argument parsing for compiler drivers and CLI tools.
+//
+// Supports boolean flags (`-c`, `-v`, `--emit-llvm`), value options (`-o <file>`,
+// `-I <dir>`, `--target <arch>`), and positional arguments (`main.fin`).
+
+namespace std {
+
+#[llvm_name="strcmp"]
+@define arg_strcmp(a: string, b: string) <int>;
+
+#[llvm_name="strlen"]
+@define arg_strlen(s: string) <ulong>;
+
+#[llvm_name="calloc"]
+@define arg_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="free"]
+@define arg_free(ptr: string) <noret>;
+
+#[llvm_name="snprintf"]
+@define arg_snprintf(buf: string, size: ulong, fmt: string) <int>;
+
+priv fun str_eq(a: string, b: string) <bool> {
+    if (a == null && b == null) { return true; }
+    if (a == null || b == null) { return false; }
+    return arg_strcmp(a, b) == 0;
+}
+
+#[export]
+pub struct FlagDef {
+    pub:
+      name <string> = "",
+      short_name <string> = "",
+      desc <string> = "",
+      value <bool> = false,
+}
+
+#[export]
+pub struct OptionDef {
+    pub:
+      name <string> = "",
+      short_name <string> = "",
+      desc <string> = "",
+      value <string> = "",
+      default_val <string> = "",
+}
+
+#[export]
+pub struct ArgParser {
+    pub:
+      prog <string> = "",
+      desc <string> = "",
+      flags <[FlagDef]>,
+      flag_count <int> = 0,
+      options <[OptionDef]>,
+      option_count <int> = 0,
+      positionals <[string]>,
+      positional_count <int> = 0,
+      error_msg <string> = "",
+
+    pub:
+      fun add_flag(self: &Self, name: string, short_name: string, desc: string) <noret> {
+          if (self.flag_count >= 32) { return; }
+          self.flags[self.flag_count] = FlagDef {
+              name: name,
+              short_name: short_name,
+              desc: desc,
+              value: false
+          };
+          self.flag_count++;
+      }
+
+      fun add_option(self: &Self, name: string, short_name: string, default_val: string, desc: string) <noret> {
+          if (self.option_count >= 32) { return; }
+          self.options[self.option_count] = OptionDef {
+              name: name,
+              short_name: short_name,
+              desc: desc,
+              value: default_val,
+              default_val: default_val
+          };
+          self.option_count++;
+      }
+
+      fun parse(self: &Self, args: [string], count: int) <bool> {
+          self.positional_count = 0;
+          let i <int> = 0;
+          while (i < count) {
+              let arg <string> = args[i];
+              let is_matched <bool> = false;
+
+              // 1. Check flags
+              for (let f <int> = 0; f < self.flag_count; f++) {
+                  if (str_eq(arg, self.flags[f].name) || str_eq(arg, self.flags[f].short_name)) {
+                      self.flags[f].value = true;
+                      is_matched = true;
+                  }
+              }
+
+              // 2. Check options
+              if (!is_matched) {
+                  for (let o <int> = 0; o < self.option_count; o++) {
+                      if (str_eq(arg, self.options[o].name) || str_eq(arg, self.options[o].short_name)) {
+                          if (i + 1 < count) {
+                              i++;
+                              self.options[o].value = args[i];
+                              is_matched = true;
+                          } else {
+                              self.error_msg = "missing argument for option";
+                              return false;
+                          }
+                      }
+                  }
+              }
+
+              // 3. Positional argument
+              if (!is_matched) {
+                  if (self.positional_count < 64) {
+                      self.positionals[self.positional_count] = arg;
+                      self.positional_count++;
+                  }
+              }
+
+              i++;
+          }
+          return true;
+      }
+
+      fun get_flag(self: &Self, name: string) <bool> {
+          for (let i <int> = 0; i < self.flag_count; i++) {
+              if (str_eq(self.flags[i].name, name) || str_eq(self.flags[i].short_name, name)) {
+                  return self.flags[i].value;
+              }
+          }
+          return false;
+      }
+
+      fun get_option(self: &Self, name: string) <string> {
+          for (let i <int> = 0; i < self.option_count; i++) {
+              if (str_eq(self.options[i].name, name) || str_eq(self.options[i].short_name, name)) {
+                  return self.options[i].value;
+              }
+          }
+          return "";
+      }
+
+      fun get_positional(self: &Self, index: int) <string> {
+          if (index < 0 || index >= self.positional_count) {
+              return "";
+          }
+          return self.positionals[index];
+      }
+
+      fun get_positional_count(self: &Self) <int> {
+          return self.positional_count;
+      }
+
+      fun has_flag(self: &Self, name: string) <bool> {
+          return self.get_flag(name);
+      }
+}
+
+// Allocates and initializes an ArgParser.
+#[export]
+pub fun new_arg_parser(prog: string, desc: string) <ArgParser> {
+    let flags_arr <[FlagDef]> = new [FlagDef, 32]{};
+    let options_arr <[OptionDef]> = new [OptionDef, 32]{};
+    let pos_arr <[string]> = new [string, 64]{};
+
+    return ArgParser {
+        prog: prog,
+        desc: desc,
+        flags: flags_arr,
+        flag_count: 0,
+        options: options_arr,
+        option_count: 0,
+        positionals: pos_arr,
+        positional_count: 0,
+        error_msg: ""
+    };
+}
+
+// Releases dynamic memory associated with an ArgParser.
+#[export]
+pub fun free_arg_parser(p: ArgParser) <noret> {
+    delete p.flags;
+    delete p.options;
+    delete p.positionals;
+}
+
+}

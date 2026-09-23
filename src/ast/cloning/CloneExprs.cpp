@@ -9,6 +9,9 @@ void CloneVisitor::visit(PrototypeLiteral& node) {
         elements.push_back({clone(e.first.get()), clone(e.second.get())});
     }
     auto res = std::make_unique<PrototypeLiteral>(std::move(elements));
+    if (node.resolved_type) {
+        res->resolved_type = clone(node.resolved_type.get());
+    }
     res->setLoc(node.loc);
     result = std::move(res);
 }
@@ -51,6 +54,7 @@ void CloneVisitor::visit(FunctionCall& node) {
         cloneVector(node.args)
     );
     res->generic_args = cloneVector(node.generic_args);
+    res->is_special = node.is_special;
     res->setLoc(node.loc);
     result = std::move(res);
 }

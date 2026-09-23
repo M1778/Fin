@@ -1,0 +1,239 @@
+// Printer: abstract syntax tree pretty-printer and canonical Fin code formatter.
+//
+// Reconstructs clean, formatted Fin source code directly from AST nodes.
+// Essential for compiler self-hosting, code formatting (`fin fmt`), and compiler debugging.
+
+import { Buffer, new_buffer, free_buffer } from buffer::std;
+import {
+    AstNode,
+    ast_ident,
+    ast_literal_int,
+    ast_literal_string,
+    ast_literal_bool,
+    ast_binary_expr,
+    ast_unary_expr,
+    ast_call_expr,
+    ast_var_decl,
+    ast_return_stmt,
+    ast_blame_stmt,
+    ast_if_stmt,
+    ast_block
+} from ast::std;
+
+namespace std {
+
+#[llvm_name="strcmp"]
+@define pr_strcmp(a: string, b: string) <int>;
+
+priv fun str_eq(a: string, b: string) <bool> {
+    if (a == null && b == null) { return true; }
+    if (a == null || b == null) { return false; }
+    return pr_strcmp(a, b) == 0;
+}
+
+// Maps token kinds to operator symbols.
+#[export]
+pub fun op_symbol(tok_kind: int) <string> {
+    if (tok_kind == 80) { return "+"; }
+    if (tok_kind == 81) { return "-"; }
+    if (tok_kind == 82) { return "*"; }
+    if (tok_kind == 83) { return "/"; }
+    if (tok_kind == 84) { return "%"; }
+    if (tok_kind == 85) { return "="; }
+    if (tok_kind == 86) { return "=="; }
+    if (tok_kind == 87) { return "!="; }
+    if (tok_kind == 88) { return "<"; }
+    if (tok_kind == 89) { return ">"; }
+    if (tok_kind == 90) { return "<="; }
+    if (tok_kind == 91) { return ">="; }
+    if (tok_kind == 92) { return "&&"; }
+    if (tok_kind == 93) { return "||"; }
+    if (tok_kind == 94) { return "!"; }
+    return "?";
+}
+
+#[export]
+pub struct AstPrinter {
+    pub:
+      buf <Buffer>,
+      indent_level <int> = 0,
+
+    pub:
+      fun indent(self: &Self) <noret> {
+          self.buf.write_repeat(' ', self.indent_level * 4);
+      }
+
+      fun print_expr(self: &Self, node: &AstNode) <noret> {
+          if (node == null) { return; }
+
+          if (node.kind == ast_ident()) {
+              self.buf.write_string(node.name);
+              return;
+          }
+          if (node.kind == ast_literal_int()) {
+              self.buf.write_int(node.int_val);
+              return;
+          }
+          if (node.kind == ast_literal_string()) {
+              self.buf.write_char('"');
+              self.buf.write_string(node.str_val);
+              self.buf.write_char('"');
+              return;
+          }
+          if (node.kind == ast_literal_bool()) {
+              if (node.int_val != 0) {
+                  self.buf.write_string("true");
+              } else {
+                  self.buf.write_string("false");
+              }
+              return;
+          }
+          if (node.kind == ast_binary_expr()) {
+              self.buf.write_char('(');
+              self.print_expr(node.left);
+              self.buf.write_char(' ');
+              if (node.name != null && !str_eq(node.name, "")) {
+                  self.buf.write_string(node.name);
+              } else {
+                  self.buf.write_string(op_symbol(node.int_val));
+              }
+              self.buf.write_char(' ');
+              self.print_expr(node.right);
+              self.buf.write_char(')');
+              return;
+          }
+          if (node.kind == ast_unary_expr()) {
+              if (node.name != null && !str_eq(node.name, "")) {
+                  self.buf.write_string(node.name);
+              } else {
+                  self.buf.write_string(op_symbol(node.int_val));
+              }
+              self.print_expr(node.left);
+              return;
+          }
+          if (node.kind == ast_call_expr()) {
+              self.buf.write_string(node.name);
+              self.buf.write_char('(');
+              if (node.left != null) {
+                  self.print_expr(node.left);
+              }
+              if (node.right != null) {
+                  self.buf.write_string(", ");
+                  self.print_expr(node.right);
+              }
+              self.buf.write_char(')');
+              return;
+          }
+      }
+
+      fun print_stmt(self: &Self, node: &AstNode) <noret> {
+          if (node == null) { return; }
+
+          if (node.kind == ast_var_decl()) {
+              self.indent();
+              self.buf.write_string("let ");
+              self.buf.write_string(node.name);
+              if (node.type_annotation != null && !str_eq(node.type_annotation, "")) {
+                  self.buf.write_string(" <");
+                  self.buf.write_string(node.type_annotation);
+                  self.buf.write_string(">");
+              }
+              if (node.left != null) {
+                  self.buf.write_string(" = ");
+                  self.print_expr(node.left);
+              }
+              self.buf.write_line(";");
+              return;
+          }
+
+          if (node.kind == ast_return_stmt()) {
+              self.indent();
+              self.buf.write_string("return");
+              if (node.left != null) {
+                  self.buf.write_char(' ');
+                  self.print_expr(node.left);
+              }
+              self.buf.write_line(";");
+              return;
+          }
+
+          if (node.kind == ast_blame_stmt()) {
+              self.indent();
+              self.buf.write_string("blame ");
+              if (node.left != null) {
+                  self.print_expr(node.left);
+              }
+              if (node.str_val != null && !str_eq(node.str_val, "")) {
+                  self.buf.write_string(", \"");
+                  self.buf.write_string(node.str_val);
+                  self.buf.write_char('"');
+              }
+              self.buf.write_line(";");
+              return;
+          }
+
+          if (node.kind == ast_if_stmt()) {
+              self.indent();
+              self.buf.write_string("if (");
+              self.print_expr(node.left);
+              self.buf.write_line(") {");
+              self.indent_level++;
+              self.print_stmt(node.right);
+              self.indent_level--;
+              self.indent();
+              self.buf.write_string("}");
+              if (node.extra != null) {
+                  self.buf.write_line(" else {");
+                  self.indent_level++;
+                  self.print_stmt(node.extra);
+                  self.indent_level--;
+                  self.indent();
+                  self.buf.write_line("}");
+              } else {
+                  self.buf.write_char('\n');
+              }
+              return;
+          }
+      }
+
+      fun get_formatted(self: &Self) <string> {
+          return self.buf.to_string();
+      }
+}
+
+// Allocates and initializes an AstPrinter.
+#[export]
+pub fun new_ast_printer() <AstPrinter> {
+    return AstPrinter {
+        buf: new_buffer(512),
+        indent_level: 0
+    };
+}
+
+// Releases dynamic memory associated with an AstPrinter.
+#[export]
+pub fun free_ast_printer(printer: AstPrinter) <noret> {
+    free_buffer(printer.buf);
+}
+
+// Formats an AST expression into a string.
+#[export]
+pub fun format_expr(node: &AstNode) <string> {
+    let p <AstPrinter> = new_ast_printer();
+    p.print_expr(node);
+    let res <string> = p.get_formatted();
+    free_ast_printer(p);
+    return res;
+}
+
+// Formats an AST statement into a string.
+#[export]
+pub fun format_stmt(node: &AstNode) <string> {
+    let p <AstPrinter> = new_ast_printer();
+    p.print_stmt(node);
+    let res <string> = p.get_formatted();
+    free_ast_printer(p);
+    return res;
+}
+
+}

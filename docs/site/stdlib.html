@@ -1,0 +1,2705 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fin Standard Library — Module Reference &amp; API Documentation</title>
+  <meta name="description" content="Comprehensive documentation and API reference for the 17 standard library modules of the Fin systems programming language: stdio, fs, path, collection, hashmap, env, time, random, math, strings, and more.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233B82F6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 2L2 7l10 5 10-5-10-5z'/><path d='M2 17l10 5 10-5'/><path d='M2 12l10 5 10-5'/></svg>">
+</head>
+<body class="stdlib-page">
+
+  <!-- Top Sticky Navigation Bar -->
+  <header class="site-header">
+    <div class="header-container">
+      <div class="header-left">
+        <button type="button" class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Toggle navigation drawer">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+          </svg>
+        </button>
+
+        <a href="index.html" class="logo-link">
+          <div class="logo-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 20h16a1 1 0 0 0 1-1C19.5 9 12 3 12 3S8 11 4 19a1 1 0 0 0 0 1z"></path>
+              <path d="M12 9v11"></path>
+            </svg>
+          </div>
+          <div class="logo-text-group">
+            <span class="logo-title">Fin</span>
+            <span class="version-badge">v0.4.0</span>
+          </div>
+        </a>
+
+        <nav class="header-nav" aria-label="Primary Navigation">
+          <a href="index.html#quickstart" class="header-nav-link">Guide</a>
+          <a href="index.html#variables-types" class="header-nav-link">Syntax</a>
+          <a href="stdlib.html" class="header-nav-link active">Standard Library <span class="header-nav-badge">17 Modules</span></a>
+        </nav>
+      </div>
+
+      <!-- Instant Search Trigger -->
+      <div class="header-search">
+        <button type="button" class="search-trigger-btn" id="search-trigger-btn" aria-label="Open search modal">
+          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <span class="search-placeholder">Search docs, stdlib, &amp; syntax...</span>
+          <kbd class="search-kbd">⌘K</kbd>
+        </button>
+      </div>
+
+      <!-- Action Items & Theme Toggle -->
+      <div class="header-right">
+        <a href="https://github.com/Fin-Lang" target="_blank" rel="noopener noreferrer" class="header-action-btn" aria-label="GitHub Repository">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+          </svg>
+        </a>
+
+        <button type="button" class="header-action-btn" id="theme-toggle-btn" aria-label="Toggle color theme">
+          <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Mobile Backdrop Overlay -->
+  <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+  <!-- Standard Library Layout -->
+  <div class="stdlib-layout">
+    <!-- Sticky Left Sidebar -->
+    <aside class="stdlib-sidebar" id="stdlib-sidebar">
+      <div class="stdlib-filter-box">
+        <svg class="stdlib-filter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        <input type="text" id="stdlib-search-input" class="stdlib-filter-input" placeholder="Filter 17 modules..." aria-label="Filter modules">
+      </div>
+      <div class="stdlib-category-group"><div class="stdlib-category-title">Core &amp; I/O</div><ul class="stdlib-module-list">
+<li><a href="#module-stdio" class="stdlib-module-link"><span>stdio</span><span class="stdlib-module-count">10</span></a></li>
+<li><a href="#module-fs" class="stdlib-module-link"><span>fs</span><span class="stdlib-module-count">7</span></a></li>
+<li><a href="#module-path" class="stdlib-module-link"><span>path</span><span class="stdlib-module-count">7</span></a></li>
+</ul></div>
+<div class="stdlib-category-group"><div class="stdlib-category-title">Collections</div><ul class="stdlib-module-list">
+<li><a href="#module-collection" class="stdlib-module-link"><span>collection</span><span class="stdlib-module-count">17</span></a></li>
+<li><a href="#module-hashmap" class="stdlib-module-link"><span>hashmap</span><span class="stdlib-module-count">7</span></a></li>
+</ul></div>
+<div class="stdlib-category-group"><div class="stdlib-category-title">System &amp; Runtime</div><ul class="stdlib-module-list">
+<li><a href="#module-env" class="stdlib-module-link"><span>env</span><span class="stdlib-module-count">6</span></a></li>
+<li><a href="#module-time" class="stdlib-module-link"><span>time</span><span class="stdlib-module-count">4</span></a></li>
+<li><a href="#module-random" class="stdlib-module-link"><span>random</span><span class="stdlib-module-count">6</span></a></li>
+</ul></div>
+<div class="stdlib-category-group"><div class="stdlib-category-title">Math &amp; Utilities</div><ul class="stdlib-module-list">
+<li><a href="#module-math" class="stdlib-module-link"><span>math</span><span class="stdlib-module-count">13</span></a></li>
+<li><a href="#module-strings" class="stdlib-module-link"><span>strings</span><span class="stdlib-module-count">8</span></a></li>
+</ul></div>
+<div class="stdlib-category-group"><div class="stdlib-category-title">Types &amp; Semantics</div><ul class="stdlib-module-list">
+<li><a href="#module-types" class="stdlib-module-link"><span>types</span><span class="stdlib-module-count">6</span></a></li>
+<li><a href="#module-typing" class="stdlib-module-link"><span>typing</span><span class="stdlib-module-count">2</span></a></li>
+<li><a href="#module-enums" class="stdlib-module-link"><span>enums</span><span class="stdlib-module-count">4</span></a></li>
+<li><a href="#module-error" class="stdlib-module-link"><span>error</span><span class="stdlib-module-count">2</span></a></li>
+<li><a href="#module-operators" class="stdlib-module-link"><span>operators</span><span class="stdlib-module-count">6</span></a></li>
+</ul></div>
+<div class="stdlib-category-group"><div class="stdlib-category-title">Memory &amp; Pointers</div><ul class="stdlib-module-list">
+<li><a href="#module-memory" class="stdlib-module-link"><span>memory</span><span class="stdlib-module-count">5</span></a></li>
+<li><a href="#module-stdptr" class="stdlib-module-link"><span>stdptr</span><span class="stdlib-module-count">2</span></a></li>
+</ul></div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="stdlib-content">
+      <div class="stdlib-hero-header">
+        <h1 class="stdlib-hero-title">Standard Library Reference</h1>
+        <p class="stdlib-hero-desc">
+          The Fin standard library lives in <code>lib/std/</code> and ships beside the <code>finc</code> compiler.
+          All modules declare their members under <code>namespace std</code> and are imported using <code>from &lt;module&gt;::std</code>.
+          Fin treats memory models as modular libraries rather than compiler burdens, providing zero-overhead, deterministic systems facilities.
+        </p>
+      </div>
+
+      <!-- Quick Jump Cards Grid -->
+      <div class="stdlib-modules-grid">
+        
+    <a href="#module-stdio" class="stdlib-card" data-category="Core &amp; I/O">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">stdio</span>
+        <span class="stdlib-card-badge">Core &amp; I/O</span>
+      </div>
+      <p class="stdlib-card-desc">Terminal I/O, formatted output, the Printable interface contract, in-memory Stream byte buffers, and static File operations. printf is ambient and available without imports via #[global].</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">printf</span><span class="stdlib-card-item-tag">print</span><span class="stdlib-card-item-tag">println</span><span class="stdlib-card-item-tag">eprint</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-fs" class="stdlib-card" data-category="Core &amp; I/O">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">fs</span>
+        <span class="stdlib-card-badge">Core &amp; I/O</span>
+      </div>
+      <p class="stdlib-card-desc">Direct filesystem interaction: checking file existence, querying file sizes, reading entire files into memory strings, writing, appending, and removing files.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">file_exists</span><span class="stdlib-card-item-tag">remove_file</span><span class="stdlib-card-item-tag">file_size</span><span class="stdlib-card-item-tag">read_to_string</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-path" class="stdlib-card" data-category="Core &amp; I/O">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">path</span>
+        <span class="stdlib-card-badge">Core &amp; I/O</span>
+      </div>
+      <p class="stdlib-card-desc">Filesystem path manipulation: safe segment joining, basename and dirname extraction, extension checking, and absolute vs relative path inspection.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">is_absolute</span><span class="stdlib-card-item-tag">is_relative</span><span class="stdlib-card-item-tag">join</span><span class="stdlib-card-item-tag">basename</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-collection" class="stdlib-card" data-category="Collections">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">collection</span>
+        <span class="stdlib-card-badge">Collections</span>
+      </div>
+      <p class="stdlib-card-desc">The primary growable dynamic array Collection&lt;T&gt;. Backed by [T] with geometric buffer doubling, capacity reservations, and strict runtime bounds checking via blame.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">push</span><span class="stdlib-card-item-tag">pop_last</span><span class="stdlib-card-item-tag">get</span><span class="stdlib-card-item-tag">set</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-hashmap" class="stdlib-card" data-category="Collections">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">hashmap</span>
+        <span class="stdlib-card-badge">Collections</span>
+      </div>
+      <p class="stdlib-card-desc">Associative key-value map HashMap&lt;K, V&gt; using open addressing with linear probing and a 0.75 load factor threshold for automatic rehashing.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">put</span><span class="stdlib-card-item-tag">get</span><span class="stdlib-card-item-tag">remove</span><span class="stdlib-card-item-tag">contains_key</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-env" class="stdlib-card" data-category="System &amp; Runtime">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">env</span>
+        <span class="stdlib-card-badge">System &amp; Runtime</span>
+      </div>
+      <p class="stdlib-card-desc">Access to process environment variables, environment inspection, process identification, and process exit codes.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">get_env</span><span class="stdlib-card-item-tag">has_env</span><span class="stdlib-card-item-tag">set_env</span><span class="stdlib-card-item-tag">unset_env</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-time" class="stdlib-card" data-category="System &amp; Runtime">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">time</span>
+        <span class="stdlib-card-badge">System &amp; Runtime</span>
+      </div>
+      <p class="stdlib-card-desc">Operating system clock timestamps (Unix epoch) and synchronous execution delays in whole seconds and milliseconds.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">now</span><span class="stdlib-card-item-tag">sleep_sec</span><span class="stdlib-card-item-tag">sleep_ms</span><span class="stdlib-card-item-tag">diff_sec</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-random" class="stdlib-card" data-category="System &amp; Runtime">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">random</span>
+        <span class="stdlib-card-badge">System &amp; Runtime</span>
+      </div>
+      <p class="stdlib-card-desc">Pseudo-random number generator (PRNG): deterministic integer seeds, automatic epoch-based seeding, uniform integer ranges, floats, and booleans.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">seed</span><span class="stdlib-card-item-tag">seed_now</span><span class="stdlib-card-item-tag">rand</span><span class="stdlib-card-item-tag">random_int</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-math" class="stdlib-card" data-category="Math &amp; Utilities">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">math</span>
+        <span class="stdlib-card-badge">Math &amp; Utilities</span>
+      </div>
+      <p class="stdlib-card-desc">Mathematical constants (PI, E, TAU, LN2, LN10, SQRT2), generic functions over Number (abs, min, max, clamp, signum), integer algorithms (gcd, lcm, ipow, isqrt), and C libm bindings.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">PI </span><span class="stdlib-card-item-tag">E </span><span class="stdlib-card-item-tag">abs</span><span class="stdlib-card-item-tag">min</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-strings" class="stdlib-card" data-category="Math &amp; Utilities">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">strings</span>
+        <span class="stdlib-card-badge">Math &amp; Utilities</span>
+      </div>
+      <p class="stdlib-card-desc">String query, validation, slicing, and manipulation routines: length calculation, prefix/suffix inspection, substring search, slicing, concatenation, and repetition.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">len</span><span class="stdlib-card-item-tag">starts_with</span><span class="stdlib-card-item-tag">ends_with</span><span class="stdlib-card-item-tag">contains</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-types" class="stdlib-card" data-category="Types &amp; Semantics">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">types</span>
+        <span class="stdlib-card-badge">Types &amp; Semantics</span>
+      </div>
+      <p class="stdlib-card-desc">Core numeric constraint sets (Number, Integer, Float, Signed, Unsigned) for generic function bounds, and numeric-to-string formatting.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">type Number</span><span class="stdlib-card-item-tag">type Signed</span><span class="stdlib-card-item-tag">type Unsigned</span><span class="stdlib-card-item-tag">type Float</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-typing" class="stdlib-card" data-category="Types &amp; Semantics">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">typing</span>
+        <span class="stdlib-card-badge">Types &amp; Semantics</span>
+      </div>
+      <p class="stdlib-card-desc">The tagged union Result&lt;T, U&gt; and polymorphic IResult interface for robust, exception-free error handling.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">Result</span><span class="stdlib-card-item-tag">IResult</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-enums" class="stdlib-card" data-category="Types &amp; Semantics">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">enums</span>
+        <span class="stdlib-card-badge">Types &amp; Semantics</span>
+      </div>
+      <p class="stdlib-card-desc">Reflection and inspection of Fin enum values, runtime discriminants, and compile-time member identifiers.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">EnumType</span><span class="stdlib-card-item-tag">getkeyid</span><span class="stdlib-card-item-tag">keyidof</span><span class="stdlib-card-item-tag">Enum</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-error" class="stdlib-card" data-category="Types &amp; Semantics">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">error</span>
+        <span class="stdlib-card-badge">Types &amp; Semantics</span>
+      </div>
+      <p class="stdlib-card-desc">Base Error class and standard error categorizations for structured failure modeling across libraries.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">class Error</span><span class="stdlib-card-item-tag">ErrorType</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-operators" class="stdlib-card" data-category="Types &amp; Semantics">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">operators</span>
+        <span class="stdlib-card-badge">Types &amp; Semantics</span>
+      </div>
+      <p class="stdlib-card-desc">Interfaces for user-defined operator overloading on structs: arithmetic, comparison, and index assignment.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">IndexAssign</span><span class="stdlib-card-item-tag">Add</span><span class="stdlib-card-item-tag">Sub</span><span class="stdlib-card-item-tag">Mul</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-memory" class="stdlib-card" data-category="Memory &amp; Pointers">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">memory</span>
+        <span class="stdlib-card-badge">Memory &amp; Pointers</span>
+      </div>
+      <p class="stdlib-card-desc">Explicit memory allocation mechanisms: native heap dynamic arrays new [T, n]{}, delete arr;, and user-defined arena allocators for high-throughput batch lifetimes.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">new [T, n]{}</span><span class="stdlib-card-item-tag">delete arr;</span><span class="stdlib-card-item-tag">new T;</span><span class="stdlib-card-item-tag">delete ptr;</span>
+      </div>
+    </a>
+    
+
+    <a href="#module-stdptr" class="stdlib-card" data-category="Memory &amp; Pointers">
+      <div class="stdlib-card-header">
+        <span class="stdlib-card-name">stdptr</span>
+        <span class="stdlib-card-badge">Memory &amp; Pointers</span>
+      </div>
+      <p class="stdlib-card-desc">Smart pointer rptr&lt;T&gt; providing sound reference-counted memory sharing with explicit retain/release lifecycle tracking.</p>
+      <div class="stdlib-card-items">
+        <span class="stdlib-card-item-tag">rptr</span><span class="stdlib-card-item-tag">OwnershipError</span>
+      </div>
+    </a>
+    
+      </div>
+
+      <!-- Detailed Module Documentation -->
+      
+    <section id="module-stdio" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">stdio</h2>
+        <span class="module-import-path">stdio::std</span>
+        <span class="badge-tag">Core &amp; I/O</span>
+      </div>
+      <p class="module-description">Terminal I/O, formatted output, the Printable interface contract, in-memory Stream byte buffers, and static File operations. printf is ambient and available without imports via #[global].</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> printf is declared ambiently in stdio with #[global]. Any file can call printf without an import statement.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { print, println, eprint, eprintln, Printable, Stream, IStream, File, IOResult, IOError } from stdio::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>printf(fmt: string, ...) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Global Function</span></td>
+          <td>Ambient C-style variadic formatted print to stdout.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>print&lt;X: Printable&gt;(item: X) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Generic Function</span></td>
+          <td>Outputs item to stdout using format_str().</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>println&lt;X: Printable&gt;(item: X) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Generic Function</span></td>
+          <td>Outputs item to stdout followed by a newline.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>eprint(msg: string) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Writes raw string to standard error (stderr).</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>eprintln(msg: string) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Writes string to standard error followed by a newline.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>struct Stream : &lt;IStream&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Struct</span></td>
+          <td>In-memory byte stream over [char] buffer. Methods: seek, tell, remaining, rewind, read, read_all, write, capacity, expand.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>struct File</code></td>
+          <td class="api-type"><span class="badge-tag">Struct</span></td>
+          <td>Static filesystem methods: exists(path) &lt;bool&gt;, size(path) &lt;long&gt;, read_all(path) &lt;string&gt;, write_text(path, text) &lt;bool&gt;, append_text(path, text) &lt;bool&gt;, remove(path) &lt;bool&gt;.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>enum IOResult&lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Enum</span></td>
+          <td>Result enum for I/O operations: Ok(T) or Err(IOError).</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>enum IOError</code></td>
+          <td class="api-type"><span class="badge-tag">Enum</span></td>
+          <td>I/O failure modes: NotFound, PermissionDenied, AlreadyExists, InvalidInput, UnexpectedEof.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>interface Printable</code></td>
+          <td class="api-type"><span class="badge-tag">Interface</span></td>
+          <td>pub fun format_str(self: &amp;Self) &lt;string&gt;;</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Stream buffers are caller-allocated. File::read_all produces a heap-allocated string that the caller owns. File methods open and close file descriptors deterministically.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">stdio_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { print, println, Printable } from stdio::std;
+
+struct Metric : &lt;Printable&gt; {
+    label &lt;string&gt;,
+    value &lt;int&gt;,
+
+    pub fun format_str(self: &amp;Self) &lt;string&gt; {
+        return self.label;
+    }
+}
+
+fun main() &lt;noret&gt; {
+    let m &lt;Metric&gt; = Metric { label: &quot;cpu_temperature_celsius&quot;, value: 45 };
+    println::&lt;Metric&gt;(m);
+
+    printf(&quot;Metric value: %d\n&quot;, m.value);
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-fs" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">fs</h2>
+        <span class="module-import-path">fs::std</span>
+        <span class="badge-tag">Core &amp; I/O</span>
+      </div>
+      <p class="module-description">Direct filesystem interaction: checking file existence, querying file sizes, reading entire files into memory strings, writing, appending, and removing files.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Reaches standard C runtime file I/O primitives (fopen, fclose, fseek, ftell, fread, fwrite, remove).</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { file_exists, remove_file, file_size, read_to_string, write_string, append_string, free_file_content } from fs::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>file_exists(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Checks if a file exists and can be opened for reading.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>remove_file(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Deletes the file at path. Returns true on success, false on failure.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>file_size(path: string) &lt;long&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns the size of the file in bytes, or -1 if the file cannot be accessed.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>read_to_string(path: string) &lt;string?&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Reads entire file into a newly allocated string. Returns null if read fails.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>write_string(path: string, content: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Overwrites the file at path with content. Returns true on success.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>append_string(path: string, content: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Appends content to the end of the file at path. Returns true on success.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>free_file_content(s?: string) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Frees the heap buffer returned by read_to_string.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Strings returned by read_to_string are heap-allocated via calloc. The caller owns the string and must release it with free_file_content(s).
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">fs_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { file_exists, write_string, read_to_string, free_file_content, remove_file } from fs::std;
+
+fun main() &lt;noret&gt; {
+    let path &lt;string&gt; = &quot;/tmp/fin_app.conf&quot;;
+    let written &lt;bool&gt; = write_string(path, &quot;debug=true\nworkers=4\n&quot;);
+    blame written, &quot;Failed to write configuration&quot;;
+
+    blame file_exists(path);
+
+    let content? &lt;string&gt; = read_to_string(path);
+    if (content != null) {
+        printf(&quot;Config loaded:\n%s&quot;, content?);
+        free_file_content(content);
+    }
+
+    remove_file(path);
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-path" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">path</h2>
+        <span class="module-import-path">path::std</span>
+        <span class="badge-tag">Core &amp; I/O</span>
+      </div>
+      <p class="module-description">Filesystem path manipulation: safe segment joining, basename and dirname extraction, extension checking, and absolute vs relative path inspection.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Path operations handle slashes cleanly without producing duplicate slashes.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { is_absolute, is_relative, join, basename, dirname, extname, free_path } from path::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>is_absolute(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns true if path starts with root slash /.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>is_relative(path: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns true if path does not start with root slash.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>join(p1: string, p2: string) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Joins two paths with / separator. Returns p2 if p2 is absolute.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>basename(path: string) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Extracts the final filename component after the last /.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>dirname(path: string) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Extracts the directory prefix preceding the last /.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>extname(path: string) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Extracts file extension including leading dot (e.g. &quot;.fin&quot;).</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>free_path(s: string) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Frees a heap-allocated path string returned by join, basename, dirname, or extname.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Strings produced by join, basename, dirname, and extname are heap-allocated. Caller owns the buffer and frees it via free_path(s).
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">path_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { is_absolute, join, basename, dirname, extname, free_path } from path::std;
+
+fun main() &lt;noret&gt; {
+    let full &lt;string&gt; = &quot;/home/user/src/main.fin&quot;;
+    blame is_absolute(full);
+
+    let base &lt;string&gt; = basename(full);
+    let dir &lt;string&gt; = dirname(full);
+    let ext &lt;string&gt; = extname(full);
+
+    blame ext == &quot;.fin&quot;;
+    printf(&quot;Dir: %s, File: %s, Ext: %s\n&quot;, dir, base, ext);
+
+    let next &lt;string&gt; = join(dir, &quot;build.sh&quot;);
+    printf(&quot;Next target: %s\n&quot;, next);
+
+    free_path(base);
+    free_path(dir);
+    free_path(ext);
+    free_path(next);
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-collection" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">collection</h2>
+        <span class="module-import-path">collection::std</span>
+        <span class="badge-tag">Collections</span>
+      </div>
+      <p class="module-description">The primary growable dynamic array Collection&lt;T&gt;. Backed by [T] with geometric buffer doubling, capacity reservations, and strict runtime bounds checking via blame.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Collection wraps a [T] heap array. Growth allocates a fresh buffer and copies elements.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { Collection } from collection::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>push(val: T) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Appends element to end of collection, doubling buffer capacity when full.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>pop_last() &lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Removes and returns the final element. Blames if empty.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>get(index: int) &lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Returns element at index. Blames if out of bounds.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>set(index: int, val: T) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Assigns element at index. Blames if out of bounds.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>len() &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Returns active element count.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>capacity() &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Returns current extent of allocated [T] buffer.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>is_empty() &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Returns true if len() == 0.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>clear() &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Resets count to 0 without releasing buffer.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>first() &lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Returns element at index 0. Blames if empty.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>last() &lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Returns element at index len() - 1. Blames if empty.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>contains(val: T) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Performs linear search for val, returning true if found.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>index_of(val: T) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Returns 0-based index of first matching element, or -1.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>insert(index: int, val: T) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Inserts element at index, shifting remaining elements right.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>remove(index: int) &lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Removes element at index, shifting remaining elements left and returning item.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>reverse() &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Reverses elements in-place.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>extend(other: &amp;Self) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Appends all elements from another Collection.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>reserve(additional: int) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Pre-allocates capacity to avoid intermediate reallocations.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Collection manages its own internal [T] heap buffer. Elements are stored contiguously in memory.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">collection_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { Collection } from collection::std;
+
+fun main() &lt;noret&gt; {
+    let numbers &lt;Collection&lt;int&gt;&gt; = Collection&lt;int&gt;{};
+    numbers.push(10);
+    numbers.push(20);
+    numbers.push(30);
+
+    blame numbers.len() == 3;
+    blame numbers.get(0) == 10;
+    blame numbers.get(2) == 30;
+
+    let popped &lt;int&gt; = numbers.pop_last();
+    blame popped == 30;
+    blame numbers.len() == 2;
+
+    printf(&quot;Numbers in list: %d, first: %d, last: %d\n&quot;, numbers.len(), numbers.first(), numbers.last());
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-hashmap" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">hashmap</h2>
+        <span class="module-import-path">hashmap::std</span>
+        <span class="badge-tag">Collections</span>
+      </div>
+      <p class="module-description">Associative key-value map HashMap&lt;K, V&gt; using open addressing with linear probing and a 0.75 load factor threshold for automatic rehashing.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Stores keys, values, hash codes, and bucket states in contiguous internal vectors.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { HashMap } from hashmap::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>put(key: K, value: V) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Inserts or updates key-value pair. Triggers rehash if load factor &gt; 0.75.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>get(key: K) &lt;V&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Retrieves value associated with key. Blames if key is absent.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>remove(key: K) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Removes key and value from table. Returns true if key was present.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>contains_key(key: K) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Returns true if key exists in hash table.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>size() &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Returns number of active key-value entries.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>is_empty() &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Returns true if size() == 0.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>clear() &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Method</span></td>
+          <td>Clears all entries and resets table to initial state.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> HashMap owns its internal allocation buffers. Keys and values are copied into table entries.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">hashmap_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { HashMap } from hashmap::std;
+
+fun main() &lt;noret&gt; {
+    let scores &lt;HashMap&lt;string, int&gt;&gt; = HashMap&lt;string, int&gt;{};
+    scores.put(&quot;Alice&quot;, 95);
+    scores.put(&quot;Bob&quot;, 88);
+    scores.put(&quot;Charlie&quot;, 92);
+
+    blame scores.size() == 3;
+    blame scores.contains_key(&quot;Alice&quot;);
+    blame scores.get(&quot;Charlie&quot;) == 92;
+
+    scores.remove(&quot;Bob&quot;);
+    blame !scores.contains_key(&quot;Bob&quot;);
+    blame scores.size() == 2;
+
+    printf(&quot;Active players: %d, Alice score: %d\n&quot;, scores.size(), scores.get(&quot;Alice&quot;));
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-env" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">env</h2>
+        <span class="module-import-path">env::std</span>
+        <span class="badge-tag">System &amp; Runtime</span>
+      </div>
+      <p class="module-description">Access to process environment variables, environment inspection, process identification, and process exit codes.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Bridges to C standard runtime getenv, setenv, unsetenv, getpid, and exit.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { get_env, has_env, set_env, unset_env, exit, get_pid } from env::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>get_env(name: string, default_val: string) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns value of environment variable name, or default_val if unset.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>has_env(name: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns true if environment variable is set in the environment.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>set_env(name: string, value: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Sets or updates environment variable with overwrite enabled.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>unset_env(name: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Deletes environment variable from process environment.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>exit(code: int) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Terminates calling process immediately with exit code.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>get_pid() &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns the operating system process ID.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> get_env returns a pointer into the process environment table. No caller allocation needed.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">env_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { get_env, has_env, set_env, get_pid } from env::std;
+
+fun main() &lt;noret&gt; {
+    let pid &lt;int&gt; = get_pid();
+    printf(&quot;Running under PID: %d\n&quot;, pid);
+
+    let host &lt;string&gt; = get_env(&quot;HOST&quot;, &quot;127.0.0.1&quot;);
+    let port &lt;string&gt; = get_env(&quot;PORT&quot;, &quot;3000&quot;);
+    printf(&quot;Server address: %s:%s\n&quot;, host, port);
+
+    set_env(&quot;FIN_ENV&quot;, &quot;production&quot;);
+    blame has_env(&quot;FIN_ENV&quot;);
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-time" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">time</h2>
+        <span class="module-import-path">time::std</span>
+        <span class="badge-tag">System &amp; Runtime</span>
+      </div>
+      <p class="module-description">Operating system clock timestamps (Unix epoch) and synchronous execution delays in whole seconds and milliseconds.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Synchronous delays bridge to C sleep and usleep runtime functions.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { now, sleep_sec, sleep_ms, diff_sec } from time::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>now() &lt;long&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns current Unix epoch timestamp in seconds (seconds since Jan 1, 1970 UTC).</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>sleep_sec(secs: uint) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Suspends thread execution for specified number of whole seconds.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>sleep_ms(ms: uint) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Suspends thread execution for specified milliseconds (via usleep).</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>diff_sec(start: long, end: long) &lt;long&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Calculates elapsed seconds: end - start.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Time values are 64-bit integer scalars (long); zero dynamic memory overhead.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">time_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { now, sleep_ms, diff_sec } from time::std;
+
+fun main() &lt;noret&gt; {
+    let t0 &lt;long&gt; = now();
+    printf(&quot;Start timestamp: %ld\n&quot;, t0);
+
+    sleep_ms(cast&lt;uint&gt;(25));
+
+    let t1 &lt;long&gt; = now();
+    let diff &lt;long&gt; = diff_sec(t0, t1);
+    printf(&quot;End timestamp: %ld, Diff: %ld s\n&quot;, t1, diff);
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-random" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">random</h2>
+        <span class="module-import-path">random::std</span>
+        <span class="badge-tag">System &amp; Runtime</span>
+      </div>
+      <p class="module-description">Pseudo-random number generator (PRNG): deterministic integer seeds, automatic epoch-based seeding, uniform integer ranges, floats, and booleans.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Bridges to C runtime rand/srand with modulo range mapping.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { seed, seed_now, rand, random_int, random_float, random_bool } from random::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>seed(val: uint) &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Initializes pseudo-random generator with a fixed integer seed.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>seed_now() &lt;noret&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Initializes generator with current epoch timestamp from system clock.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>rand() &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns raw non-negative pseudo-random integer.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>random_int(min: int, max: int) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns uniformly distributed integer in inclusive range [min, max].</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>random_float() &lt;float&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns uniform float in range [0.0, 1.0).</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>random_bool() &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns random boolean with 50% probability.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Pure scalar computations; no heap allocation.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">random_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { seed, random_int, random_float, random_bool } from random::std;
+
+fun main() &lt;noret&gt; {
+    seed(cast&lt;uint&gt;(42));
+
+    let roll &lt;int&gt; = random_int(1, 20);
+    blame roll &gt;= 1 &amp;&amp; roll &lt;= 20;
+
+    let chance &lt;float&gt; = random_float();
+    let heads &lt;bool&gt; = random_bool();
+
+    printf(&quot;D20 roll: %d, Float: %f, Coin: %s\n&quot;, roll, chance, heads : &quot;HEADS&quot; ? &quot;TAILS&quot;);
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-math" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">math</h2>
+        <span class="module-import-path">math::std</span>
+        <span class="badge-tag">Math &amp; Utilities</span>
+      </div>
+      <p class="module-description">Mathematical constants (PI, E, TAU, LN2, LN10, SQRT2), generic functions over Number (abs, min, max, clamp, signum), integer algorithms (gcd, lcm, ipow, isqrt), and C libm bindings.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> C libm functions (sqrt, sin, pow...) require linking with -lm.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { PI, E, TAU, LN2, LN10, SQRT2, abs, min, max, clamp, signum, gcd, lcm, ipow, isqrt, sqrt, sin, cos, tan, pow, log, floor, ceil, round, fmod } from math::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>const PI &lt;double&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Constant</span></td>
+          <td>Archimedes constant: 3.141592653589793</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>const E &lt;double&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Constant</span></td>
+          <td>Euler number: 2.718281828459045</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>abs&lt;T: Number&gt;(x: T) &lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Generic Function</span></td>
+          <td>Absolute value for any numeric type in Number.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>min&lt;T: Number&gt;(a: T, b: T) &lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Generic Function</span></td>
+          <td>Returns the smaller of two numeric values.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>max&lt;T: Number&gt;(a: T, b: T) &lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Generic Function</span></td>
+          <td>Returns the larger of two numeric values.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>clamp&lt;T: Number&gt;(x: T, low: T, high: T) &lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Generic Function</span></td>
+          <td>Clamps x into the range [low, high].</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>signum&lt;T: Number&gt;(x: T) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Generic Function</span></td>
+          <td>Returns -1 for negative, 0 for zero, 1 for positive.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>gcd(a: int, b: int) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Greatest common divisor using Euclidean algorithm.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>lcm(a: int, b: int) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Least common multiple: (|a*b|) / gcd(a, b).</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>ipow(base: int, exp: int) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Integer exponentiation via binary exponentiation.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>isqrt(x: int) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Integer square root: floor(sqrt(x)).</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>sqrt(x: double) &lt;double&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Square root from libm.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>pow(base: double, exp: double) &lt;double&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Floating point power from libm.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Pure mathematical calculations on register values.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">math_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { PI, abs, min, max, clamp, gcd, ipow, isqrt } from math::std;
+
+fun main() &lt;noret&gt; {
+    blame abs::&lt;int&gt;(-100) == 100;
+    blame min::&lt;int&gt;(5, 12) == 5;
+    blame max::&lt;int&gt;(5, 12) == 12;
+    blame clamp::&lt;int&gt;(200, 0, 100) == 100;
+
+    blame gcd(54, 24) == 6;
+    blame ipow(2, 8) == 256;
+    blame isqrt(49) == 7;
+
+    printf(&quot;PI=%f, gcd(54,24)=%d, 2^8=%d, sqrt(49)=%d\n&quot;, PI, gcd(54, 24), ipow(2, 8), isqrt(49));
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-strings" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">strings</h2>
+        <span class="module-import-path">strings::std</span>
+        <span class="badge-tag">Math &amp; Utilities</span>
+      </div>
+      <p class="module-description">String query, validation, slicing, and manipulation routines: length calculation, prefix/suffix inspection, substring search, slicing, concatenation, and repetition.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Built over standard C string routines with explicit buffer management.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { len, starts_with, ends_with, contains, index_of, slice, concat, repeat } from strings::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>len(s: string) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns string length in bytes.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>starts_with(s: string, prefix: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns true if s begins with prefix string.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>ends_with(s: string, suffix: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns true if s ends with suffix string.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>contains(s: string, sub: string) &lt;bool&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns true if sub is present within s.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>index_of(s: string, sub: string) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Returns 0-based index of first occurrence of sub, or -1.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>slice(s: string, start: int, length: int) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Extracts substring of given length from start. Returns new heap string.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>concat(s1: string, s2: string) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Allocates new string containing s1 concatenated with s2.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>repeat(s: string, n: int) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Allocates new string repeating s exactly n times.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Functions that return new strings (slice, concat, repeat) allocate memory on the heap. Caller owns the resulting string buffer.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">strings_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { len, starts_with, ends_with, contains, index_of, concat, repeat } from strings::std;
+
+fun main() &lt;noret&gt; {
+    let str &lt;string&gt; = &quot;finc-0.4.0-x86_64&quot;;
+    blame len(str) == 17;
+    blame starts_with(str, &quot;finc&quot;);
+    blame ends_with(str, &quot;x86_64&quot;);
+    blame contains(str, &quot;0.4.0&quot;);
+    blame index_of(str, &quot;0.4.0&quot;) == 5;
+
+    let banner &lt;string&gt; = repeat(&quot;=&quot;, 24);
+    let out &lt;string&gt; = concat(&quot;Release: &quot;, str);
+    printf(&quot;%s\n%s\n%s\n&quot;, banner, out, banner);
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-types" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">types</h2>
+        <span class="module-import-path">types::std</span>
+        <span class="badge-tag">Types &amp; Semantics</span>
+      </div>
+      <p class="module-description">Core numeric constraint sets (Number, Integer, Float, Signed, Unsigned) for generic function bounds, and numeric-to-string formatting.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Constraint sets are compile-time generic bounds, never runtime storage types.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { Number, Integer, Float, Signed, Unsigned, Any, number2str } from types::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>type Number</code></td>
+          <td class="api-type"><span class="badge-tag">Constraint Set</span></td>
+          <td>Union constraint: int | uint | float | short | long | ushort | ulong | double.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>type Signed</code></td>
+          <td class="api-type"><span class="badge-tag">Constraint Set</span></td>
+          <td>Union constraint: int | short | long.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>type Unsigned</code></td>
+          <td class="api-type"><span class="badge-tag">Constraint Set</span></td>
+          <td>Union constraint: uint | ushort | ulong.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>type Float</code></td>
+          <td class="api-type"><span class="badge-tag">Constraint Set</span></td>
+          <td>Union constraint: float | double.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>type Integer</code></td>
+          <td class="api-type"><span class="badge-tag">Constraint Set</span></td>
+          <td>Union constraint: Signed | Unsigned.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>number2str(n: int) &lt;string&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Converts signed integer to newly allocated decimal string representation.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> number2str allocates a heap string buffer. Constraint sets are compile-time type bounds.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">types_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { Number, number2str } from types::std;
+
+fun square_num&lt;T: Number&gt;(x: T) &lt;T&gt; {
+    return x * x;
+}
+
+fun main() &lt;noret&gt; {
+    let sq_i &lt;int&gt; = square_num::&lt;int&gt;(8);
+    let sq_f &lt;float&gt; = square_num::&lt;float&gt;(3.0);
+
+    blame sq_i == 64;
+    let s &lt;string&gt; = number2str(sq_i);
+    printf(&quot;Square int: %s, Square float: %f\n&quot;, s, sq_f);
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-typing" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">typing</h2>
+        <span class="module-import-path">typing::std</span>
+        <span class="badge-tag">Types &amp; Semantics</span>
+      </div>
+      <p class="module-description">The tagged union Result&lt;T, U&gt; and polymorphic IResult interface for robust, exception-free error handling.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Result is a tagged union enum: Ok(T) carries success value, Err(U) carries error payload.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { Result, IResult } from typing::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>enum Result&lt;T, U&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Enum</span></td>
+          <td>Tagged union enum: Ok(T) or Err(U). Positional member .0 accesses payload.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>interface IResult</code></td>
+          <td class="api-type"><span class="badge-tag">Interface</span></td>
+          <td>Conformance contract for result types.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Enums carry member payloads inline. No heap allocation required.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">typing_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { Result } from typing::std;
+
+extern Result::Ok as Ok;
+extern Result::Err as Err;
+
+fun divide(num: int, denom: int) &lt;Result&lt;int, string&gt;&gt; {
+    if (denom == 0) {
+        return Err(&quot;Division by zero&quot;);
+    }
+    return Ok(num / denom);
+}
+
+fun main() &lt;noret&gt; {
+    let ok_res &lt;Result&lt;int, string&gt;&gt; = divide(100, 4);
+    blame ok_res.0 == 25;
+
+    let err_res &lt;Result&lt;int, string&gt;&gt; = divide(10, 0);
+    printf(&quot;Success: %d, Failure: %s\n&quot;, ok_res.0, err_res.0);
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-enums" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">enums</h2>
+        <span class="module-import-path">enums::std</span>
+        <span class="badge-tag">Types &amp; Semantics</span>
+      </div>
+      <p class="module-description">Reflection and inspection of Fin enum values, runtime discriminants, and compile-time member identifiers.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Enums lower to standard C ABI discriminants.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { Enum, EnumType, getkeyid, keyidof } from enums::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>enum EnumType</code></td>
+          <td class="api-type"><span class="badge-tag">Enum</span></td>
+          <td>Discriminant category: Fieldless or Tagged.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>getkeyid(e: any) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Extracts the runtime 32-bit integer discriminant from an active enum value.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>keyidof(member: any) &lt;int&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Function</span></td>
+          <td>Resolves compile-time discriminant for an enum member name.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>interface Enum</code></td>
+          <td class="api-type"><span class="badge-tag">Interface</span></td>
+          <td>Base conformance contract for enum types.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Value-oriented; works over scalar discriminants.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">enums_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { EnumType, getkeyid, keyidof } from enums::std;
+
+enum Mode {
+    Debug = 0,
+    Release = 1,
+    Profile = 2
+}
+
+fun main() &lt;noret&gt; {
+    let m &lt;Mode&gt; = Mode::Release;
+    blame cast&lt;int&gt;(m) == 1;
+    printf(&quot;Mode discriminant: %d\n&quot;, cast&lt;int&gt;(m));
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-error" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">error</h2>
+        <span class="module-import-path">error::std</span>
+        <span class="badge-tag">Types &amp; Semantics</span>
+      </div>
+      <p class="module-description">Base Error class and standard error categorizations for structured failure modeling across libraries.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Custom error structures can inherit from or wrap Error.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { Error, ErrorType } from error::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>class Error</code></td>
+          <td class="api-type"><span class="badge-tag">Class</span></td>
+          <td>Base error object containing code &lt;int&gt; and message &lt;string&gt;. Methods: describe(self: &amp;Self) &lt;string&gt;.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>enum ErrorType</code></td>
+          <td class="api-type"><span class="badge-tag">Enum</span></td>
+          <td>Error classifications: Generic, OutOfBounds, NullPointer, InvalidState.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Class instances follow value or pointer semantics.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">error_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { Error, ErrorType } from error::std;
+
+fun main() &lt;noret&gt; {
+    let err &lt;Error&gt; = Error { code: 500, message: &quot;Internal compiler verification fault&quot; };
+    printf(&quot;Error code: %d, message: %s\n&quot;, err.code, err.message);
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-operators" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">operators</h2>
+        <span class="module-import-path">operators::std</span>
+        <span class="badge-tag">Types &amp; Semantics</span>
+      </div>
+      <p class="module-description">Interfaces for user-defined operator overloading on structs: arithmetic, comparison, and index assignment.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Struct conformance enables syntactic operator sugar with direct method dispatch.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { IndexAssign, Add, Sub, Mul, Div, Equals } from operators::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>interface IndexAssign&lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Interface</span></td>
+          <td>Enables arr[i] = val: pub operator []=(index: int, val: T) &lt;noret&gt;;</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>interface Add&lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Interface</span></td>
+          <td>Enables a + b: pub operator +(other: T) &lt;T&gt;;</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>interface Sub&lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Interface</span></td>
+          <td>Enables a - b: pub operator -(other: T) &lt;T&gt;;</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>interface Mul&lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Interface</span></td>
+          <td>Enables a * b: pub operator *(other: T) &lt;T&gt;;</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>interface Div&lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Interface</span></td>
+          <td>Enables a / b: pub operator /(other: T) &lt;T&gt;;</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>interface Equals&lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Interface</span></td>
+          <td>Enables a == b: pub operator ==(other: T) &lt;bool&gt;;</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Operators are lowered to direct method calls with zero allocation overhead.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">operators_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { Add } from operators::std;
+
+struct Vector2D : &lt;Add&lt;Vector2D&gt;&gt; {
+    x &lt;int&gt;,
+    y &lt;int&gt;,
+
+    pub operator +(other: Vector2D) &lt;Vector2D&gt; {
+        return Vector2D { x: self.x + other.x, y: self.y + other.y };
+    }
+}
+
+fun main() &lt;noret&gt; {
+    let a &lt;Vector2D&gt; = Vector2D { x: 10, y: 20 };
+    let b &lt;Vector2D&gt; = Vector2D { x: 5, y: 15 };
+    let c &lt;Vector2D&gt; = a + b;
+
+    blame c.x == 15 &amp;&amp; c.y == 35;
+    printf(&quot;Vector sum: (%d, %d)\n&quot;, c.x, c.y);
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-memory" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">memory</h2>
+        <span class="module-import-path">memory (Core &amp; Custom)</span>
+        <span class="badge-tag">Memory &amp; Pointers</span>
+      </div>
+      <p class="module-description">Explicit memory allocation mechanisms: native heap dynamic arrays new [T, n]{}, delete arr;, and user-defined arena allocators for high-throughput batch lifetimes.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Fin has no background garbage collector. Memory is explicitly managed via arrays or custom allocators.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">// Memory is an explicit library, not a rigid compiler burden\n// Core allocation: new [T, n]{} and delete arr;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>new [T, n]{}</code></td>
+          <td class="api-type"><span class="badge-tag">Syntax Operator</span></td>
+          <td>Allocates heap dynamic array of type T and length n, zero-initializing elements. Produces [T].</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>delete arr;</code></td>
+          <td class="api-type"><span class="badge-tag">Syntax Statement</span></td>
+          <td>Frees the heap element buffer associated with dynamic array [T].</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>new T;</code></td>
+          <td class="api-type"><span class="badge-tag">Syntax Operator</span></td>
+          <td>Allocates single instance of type T on heap, returning raw pointer *T.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>delete ptr;</code></td>
+          <td class="api-type"><span class="badge-tag">Syntax Statement</span></td>
+          <td>Frees single heap pointer *T.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>struct Arena</code></td>
+          <td class="api-type"><span class="badge-tag">Pattern</span></td>
+          <td>Linear bump allocator pattern: arena.alloc(bytes), arena.reset(), arena.destroy().</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> Explicit manual memory semantics. Every heap allocation must be paired with delete by its owner.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">memory_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+
+fun main() &lt;noret&gt; {
+    let size &lt;int&gt; = 16;
+    let buffer &lt;[int]&gt; = new [int, size]{};
+
+    for (let i &lt;int&gt; = 0; i &lt; buffer.length; i++) {
+        buffer[i] = i * i;
+    }
+
+    blame buffer.length == 16;
+    blame buffer[4] == 16;
+
+    printf(&quot;Allocated %d items, element 4 = %d\n&quot;, buffer.length, buffer[4]);
+
+    delete buffer;  // Explicit deallocation
+}</code></pre>
+      </div>
+    </section>
+    
+
+    <section id="module-stdptr" class="module-doc-section">
+      <div class="module-header-row">
+        <h2 class="module-name-title">stdptr</h2>
+        <span class="module-import-path">stdptr::std</span>
+        <span class="badge-tag">Memory &amp; Pointers</span>
+      </div>
+      <p class="module-description">Smart pointer rptr&lt;T&gt; providing sound reference-counted memory sharing with explicit retain/release lifecycle tracking.</p>
+      <div class="callout-box info" style="margin-bottom:16px;"><strong>Note:</strong> Tracks shared reference count to prevent use-after-free and double-free defects.</div>
+
+      <div class="code-block module-import-box">
+        <div class="code-header">
+          <span class="code-title">Import Statement</span>
+          <button type="button" class="copy-btn" aria-label="Copy import statement">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">import { rptr, OwnershipError } from stdptr::std;</code></pre>
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        API Interface &amp; Signatures
+      </h3>
+      <div class="api-table-wrapper">
+        <table class="api-table">
+          <thead>
+            <tr>
+              <th style="width: 45%;">Signature</th>
+              <th style="width: 15%;">Type</th>
+              <th style="width: 40%;">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+        <tr>
+          <td class="api-name"><code>struct rptr&lt;T&gt;</code></td>
+          <td class="api-type"><span class="badge-tag">Struct</span></td>
+          <td>Reference-counted pointer wrapping ptr &lt;&amp;T&gt; and ref_count &lt;int&gt;. Methods: retain(), release(), get() &lt;&amp;T&gt;, count() &lt;int&gt;.</td>
+        </tr>
+        
+
+        <tr>
+          <td class="api-name"><code>enum OwnershipError</code></td>
+          <td class="api-type"><span class="badge-tag">Enum</span></td>
+          <td>Ownership defect classification: DoubleFree, DanglingPointer, LeakDetected.</td>
+        </tr>
+        
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ownership-box">
+        <strong>Memory &amp; Safety Semantics:</strong> rptr tracks shared references. When the reference count reaches 0, the resource is released.
+      </div>
+
+      <h3 class="api-section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        Usage Example
+      </h3>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-title">stdptr_example.fin</span>
+          <button type="button" class="copy-btn" aria-label="Copy code sample">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+        <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+import { rptr } from stdptr::std;
+
+struct BufferHandle {
+    fd &lt;int&gt;,
+    capacity &lt;int&gt;
+}
+
+fun main() &lt;noret&gt; {
+    let handle &lt;BufferHandle&gt; = BufferHandle { fd: 3, capacity: 4096 };
+    let smart &lt;rptr&lt;BufferHandle&gt;&gt; = rptr&lt;BufferHandle&gt; { ptr: &amp;handle, ref_count: 1 };
+
+    smart.retain();
+    blame smart.count() == 2;
+
+    smart.release();
+    blame smart.count() == 1;
+
+    printf(&quot;Handle fd: %d, capacity: %d, active refs: %d\n&quot;, smart.get().fd, smart.get().capacity, smart.count());
+}</code></pre>
+      </div>
+    </section>
+    
+    </main>
+  </div>
+
+  <!-- Search Modal Backdrop & Dialog -->
+  <div class="search-modal-backdrop" id="search-modal-backdrop" role="dialog" aria-modal="true" aria-label="Search documentation">
+    <div class="search-modal">
+      <div class="search-modal-header">
+        <svg class="search-modal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        <input type="text" class="search-modal-input" id="search-input" placeholder="Search functions, modules, syntax, and types..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        <button type="button" class="search-close-btn" id="search-close-btn" aria-label="Close search">
+          <kbd class="search-modal-esc">ESC</kbd>
+        </button>
+      </div>
+      <div class="search-results-list" id="search-results">
+        <!-- Injected via JavaScript -->
+      </div>
+      <div class="search-modal-footer">
+        <div class="search-footer-hint">
+          <span class="search-footer-key">↑</span>
+          <span class="search-footer-key">↓</span>
+          <span>to navigate</span>
+        </div>
+        <div class="search-footer-hint">
+          <span class="search-footer-key">↵</span>
+          <span>to select</span>
+        </div>
+        <div class="search-footer-hint">
+          <span class="search-footer-key">ESC</span>
+          <span>to close</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="site-footer">
+    <div class="footer-container">
+      <p class="footer-copy">Fin Systems Programming Language &bull; Standard Library Reference v0.4.0</p>
+      <div class="footer-links">
+        <a href="index.html">Language Guide</a>
+        <a href="stdlib.html">Standard Library</a>
+        <a href="https://github.com/Fin-Lang" target="_blank" rel="noopener noreferrer">GitHub</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

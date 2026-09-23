@@ -28,7 +28,7 @@ Check that the binary works and identify it:
 
 ```
 $ finc --version
-finc 0.4.0 (contract 1)
+finc 0.4.0 (contract 2)
 ```
 
 The first number is the release. The second is the *machine contract* version — the number

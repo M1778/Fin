@@ -21,6 +21,46 @@ bool Preprocessor::shouldProcess() {
 }
 
 std::string Preprocessor::process(const std::string& source) {
+    // Fast path: with no directives and no line continuations the slow path
+    // below copies every line through an empty macro table, which is the
+    // identity (modulo a trailing newline). One linear scan replaces per-line
+    // trimming, string rebuilding and macro-table lookups. The scan mirrors
+    // the slow path's own rules line-for-line -- a trimmed `#c_`/`#cdef`
+    // prefix, a trailing backslash -- so either both paths agree or the slow
+    // path runs.
+    bool needsSlowPath = false;
+    {
+        size_t pos = 0;
+        const size_t n = source.size();
+        while (pos < n && !needsSlowPath) {
+            size_t end = source.find('\n', pos);
+            const bool hasNewline = end != std::string::npos;
+            if (!hasNewline) end = n;
+            // A trailing backslash joins this line with the next (slow path).
+            if (end > pos && source[end - 1] == '\\') {
+                needsSlowPath = true;
+                break;
+            }
+            // A directive line: leading blanks, then `#c_` or `#cdef`.
+            size_t t = pos;
+            while (t < end && (source[t] == ' ' || source[t] == '\t')) ++t;
+            const size_t rest = end - t;
+            if ((rest >= 3 && source[t] == '#' && source[t + 1] == 'c' &&
+                 source[t + 2] == '_') ||
+                (rest >= 5 && source[t] == '#' && source[t + 1] == 'c' &&
+                 source[t + 2] == 'd' && source[t + 3] == 'e' &&
+                 source[t + 4] == 'f')) {
+                needsSlowPath = true;
+                break;
+            }
+            pos = hasNewline ? end + 1 : end;
+        }
+    }
+    if (!needsSlowPath) {
+        if (!source.empty() && source.back() != '\n') return source + "\n";
+        return source;
+    }
+
     std::stringstream ss(source);
     std::string line;
     std::string result;

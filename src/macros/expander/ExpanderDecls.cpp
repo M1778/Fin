@@ -6,7 +6,7 @@
 #include "../../ast/exprs/FunctionCall.hpp"
 #include "../../ast/exprs/StructureExpr.hpp"
 #include <filesystem>
-#include <fmt/core.h>
+#include <fmt/format.h>
 
 namespace fin {
 

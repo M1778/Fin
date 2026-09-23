@@ -40,7 +40,8 @@ public:
     void beginRootFile(const std::string& path);
 
     std::shared_ptr<Scope> loadModule(const std::string& importPath, bool isPackage);
-    void loadGlobalModuleIfPresent(const std::string& importPath, bool isPackage);
+    void loadGlobalModuleIfPresent(const std::string& importPath, bool isPackage,
+                                   const std::string& skipIfRoot = "");
     std::shared_ptr<Scope> sharedGlobalScope() const { return globalScope; }
 
     // Every module that parsed and analysed cleanly, in load order (ADR 0032).

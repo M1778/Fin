@@ -8,6 +8,10 @@
 
 namespace fin {
 
+namespace {
+std::unique_ptr<TypeNode> spellType(const TypePtr& t);
+}
+
 // Signature now accepts std::shared_ptr<Scope>
 std::shared_ptr<StructType> getStructType(std::shared_ptr<Type> type, std::shared_ptr<Scope> scope) {
     if (!type) return nullptr;
@@ -371,6 +375,12 @@ void SemanticAnalyzer::visit(PrototypeLiteral& node) {
     if (!valueType) valueType = errorType();
 
     lastExprType = std::make_shared<PrototypeType>(keyType, valueType);
+    if (lastExprType && !isErrorType(lastExprType)) {
+        if (auto spelled = spellType(lastExprType)) {
+            spelled->setLoc(node.loc);
+            node.resolved_type = std::move(spelled);
+        }
+    }
 }
 
 void SemanticAnalyzer::visit(Literal& node) {
@@ -510,8 +520,29 @@ void SemanticAnalyzer::visit(Identifier& node) {
             // answer: the corpus spells that slot `Self` four times and `&Self` once
             // while every method it declares takes `self: &Self`, and no line here
             // says which of the two is the mistake.
-            // Soundness_MemberReference.AMethodOfTheEnclosingStructResolvesToItsType.
             if (auto methodType = st->getMethodType(node.name)) {
+                if (auto* fnType = methodType->as<FunctionType>()) {
+                    if (auto hint = hintFor(node)) {
+                        if (auto* hintFn = hint->as<FunctionType>()) {
+                            if (hintFn->param_types.size() == fnType->param_types.size() + 1) {
+                                auto firstParam = hintFn->param_types[0];
+                                bool isSelf = false;
+                                if (firstParam->as<SelfType>()) isSelf = true;
+                                else if (auto* ptr = firstParam->as<PointerType>()) {
+                                    if (ptr->pointee && (ptr->pointee->as<SelfType>() || ptr->pointee->equals(*st))) isSelf = true;
+                                } else if (firstParam->equals(*st)) {
+                                    isSelf = true;
+                                }
+                                if (isSelf) {
+                                    std::vector<TypePtr> params = { firstParam };
+                                    params.insert(params.end(), fnType->param_types.begin(), fnType->param_types.end());
+                                    lastExprType = std::make_shared<FunctionType>(params, fnType->return_type, fnType->is_vararg, fnType->param_defaults);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
                 lastExprType = methodType;
                 return;
             }
@@ -545,7 +576,8 @@ void SemanticAnalyzer::visit(Identifier& node) {
     // where identity travels as a type argument rather than as a value.
     if (auto hint = hintFor(node)) {
         if (auto* prim = hint->as<PrimitiveType>()) {
-            if (prim->name == "$type" && currentScope->resolveType(node.name)) {
+            if ((prim->name == "$type" || prim->name == "$struct" || prim->name == "$interface") &&
+                currentScope->resolveType(node.name)) {
                 lastExprType = hint;
                 return;
             }
@@ -1104,13 +1136,20 @@ std::unique_ptr<TypeNode> spellType(const TypePtr& t) {
         }
         return node;
     }
-    // A SelfType, a function type, a prototype, `any`, the error sentinel, the type of
-    // `null`. Each is a type whose written spelling this function does not build, and a
-    // node built wrong is worse than no node: it would replace a refusal that names the
-    // template with one that names a type the program never wrote. `Self` is the near
-    // miss -- the mapper does bind the name -- and it stays out because a `Self` reaching
-    // here is a `Box<Self>`, which no sample writes and which would be recorded relative
-    // to whichever struct's method the call sits in rather than to the one it names.
+    if (auto* proto = t->as<PrototypeType>()) {
+        auto keyNode = spellType(proto->keyType);
+        auto valNode = spellType(proto->valueType);
+        if (!keyNode || !valNode) return nullptr;
+        auto node = std::make_unique<TypeNode>("prototype");
+        node->is_prototype = true;
+        node->generics.push_back(std::move(keyNode));
+        node->generics.push_back(std::move(valNode));
+        return node;
+    }
+    if (auto* dyn = t->as<DynamicType>()) {
+        return std::make_unique<TypeNode>(dyn->name);
+    }
+    // A SelfType, a function type, the error sentinel, the type of `null`.
     return nullptr;
 }
 
@@ -1278,6 +1317,110 @@ std::shared_ptr<Type> SemanticAnalyzer::checkGenericCall(ASTNode& node, const ch
 }
 
 void SemanticAnalyzer::visit(FunctionCall& node) {
+    if (node.is_special) {
+        if (node.name == "Alloc") {
+            if (node.args.size() != 1) {
+                error(node, fmt::format("'@Alloc' expects 1 argument, got {}", node.args.size()));
+                lastExprType = nullptr;
+                return;
+            }
+            node.args[0]->accept(*this);
+            if (lastExprType && !isAnyIntegerType(lastExprType)) {
+                error(*node.args[0], fmt::format("Argument to '@Alloc' must be an integer, got '{}'",
+                                                 lastExprType->toString()));
+            }
+            auto voidType = currentScope->resolveType("void");
+            if (!voidType) voidType = std::make_shared<PrimitiveType>("void");
+            lastExprType = std::make_shared<PointerType>(voidType);
+            return;
+        }
+        if (node.name == "Free") {
+            if (node.args.size() != 1) {
+                error(node, fmt::format("'@Free' expects 1 argument, got {}", node.args.size()));
+                lastExprType = nullptr;
+                return;
+            }
+            node.args[0]->accept(*this);
+            const bool isPtr = lastExprType && (
+                lastExprType->as<PointerType>() ||
+                (lastExprType->as<NullableType>() && lastExprType->as<NullableType>()->inner->as<PointerType>()) ||
+                lastExprType->as<ArrayType>()
+            );
+            if (lastExprType && !isPtr) {
+                error(*node.args[0], fmt::format("Argument to '@Free' must be a pointer, got '{}'",
+                                                 lastExprType->toString()));
+            }
+            auto voidType = currentScope->resolveType("void");
+            if (!voidType) voidType = std::make_shared<PrimitiveType>("void");
+            lastExprType = voidType;
+            return;
+        }
+        if (node.name == "implements") {
+            if (node.args.size() != 2) {
+                error(node, fmt::format("'@implements' expects 2 arguments, got {}", node.args.size()));
+                lastExprType = nullptr;
+                return;
+            }
+            auto prevHintFor = typeHintFor;
+            auto prevHint = typeHint;
+
+            auto structHint = currentScope->resolveType("$struct");
+            if (!structHint) structHint = std::make_shared<PrimitiveType>("$struct");
+            typeHintFor = node.args[0].get();
+            typeHint = structHint;
+            node.args[0]->accept(*this);
+            TypePtr structArg = lastExprType;
+
+            auto ifaceHint = currentScope->resolveType("$interface");
+            if (!ifaceHint) ifaceHint = std::make_shared<PrimitiveType>("$interface");
+            typeHintFor = node.args[1].get();
+            typeHint = ifaceHint;
+            node.args[1]->accept(*this);
+            TypePtr ifaceArg = lastExprType;
+
+            typeHintFor = prevHintFor;
+            typeHint = prevHint;
+
+            bool isStructArgValid = structArg && (
+                (structArg->as<PrimitiveType>() && (structArg->as<PrimitiveType>()->name == "$struct" || structArg->as<PrimitiveType>()->name == "$type")) ||
+                (structArg->as<StructType>() && !structArg->as<StructType>()->is_interface)
+            );
+            if (!isStructArgValid) {
+                error(*node.args[0], "Argument 1 to '@implements' must be a struct or $struct");
+            }
+
+            bool isIfaceArgValid = ifaceArg && (
+                (ifaceArg->as<PrimitiveType>() && (ifaceArg->as<PrimitiveType>()->name == "$interface" || ifaceArg->as<PrimitiveType>()->name == "$type")) ||
+                (ifaceArg->as<StructType>() && ifaceArg->as<StructType>()->is_interface)
+            );
+            if (!isIfaceArgValid) {
+                error(*node.args[1], "Argument 2 to '@implements' must be an interface or $interface");
+            }
+
+            auto boolType = currentScope->resolveType("bool");
+            if (!boolType) boolType = std::make_shared<PrimitiveType>("bool");
+            lastExprType = boolType;
+            return;
+        }
+        if (node.name == "defined") {
+            if (node.args.size() != 1) {
+                error(node, fmt::format("'@defined' expects 1 argument, got {}", node.args.size()));
+                lastExprType = nullptr;
+                return;
+            }
+            node.args[0]->accept(*this);
+            if (!lastExprType || !lastExprType->as<PrimitiveType>() || lastExprType->as<PrimitiveType>()->name != "string") {
+                error(*node.args[0], "Argument to '@defined' must be a string");
+                lastExprType = nullptr;
+                return;
+            }
+            auto boolType = currentScope->resolveType("bool");
+            if (!boolType) boolType = std::make_shared<PrimitiveType>("bool");
+            lastExprType = boolType;
+            return;
+        }
+    }
+
     std::shared_ptr<FunctionType> funcType = nullptr;
     std::string funcName = node.name;
     // The struct this call constructs, when the name resolved to one (Case 2
@@ -1692,6 +1835,7 @@ void SemanticAnalyzer::checkIndexInBounds(const ArrayAccess& node, const ArrayTy
 }
 
 void SemanticAnalyzer::visit(ArrayAccess& node) {
+    auto savedHint = (typeHintFor == &node) ? typeHint : nullptr;
     node.array->accept(*this);
     auto arrExprType = lastExprType;
     
@@ -1766,7 +1910,11 @@ void SemanticAnalyzer::visit(ArrayAccess& node) {
     // this visitor cannot tell a read from a write anyway.
     if (auto* proto = dynamic_cast<const PrototypeType*>(arrExprType.get())) {
         checkType(*node.index, idxType, proto->keyType);
-        lastExprType = proto->valueType;
+        if (proto->valueType && proto->valueType->as<DynamicType>() && savedHint) {
+            lastExprType = savedHint;
+        } else {
+            lastExprType = proto->valueType;
+        }
         return;
     }
 

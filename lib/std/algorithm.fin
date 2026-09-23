@@ -1,0 +1,224 @@
+// Algorithms: sorting, searching, partition, and sequence manipulation.
+//
+// Matches C++'s `<algorithm>` and Python's `bisect`/`sorted` modules, providing
+// fundamental operations on integer sequences.
+
+namespace std {
+
+// Swaps two elements in an array by index.
+#[export]
+pub fun swap_ints(arr: [int], i: int, j: int) <noret> {
+    blame i >= 0, "Index i out of bounds";
+    blame j >= 0, "Index j out of bounds";
+    if (i == j) { return; }
+    let temp <int> = arr[i];
+    arr[i] = arr[j];
+    arr[j] = temp;
+}
+
+// In-place reversal of the first `len` elements of an array.
+#[export]
+pub fun reverse_ints(arr: [int], len: int) <noret> {
+    blame len >= 0, "len must be non-negative";
+    let i <int> = 0;
+    let j <int> = len - 1;
+    while (i < j) {
+        let temp <int> = arr[i];
+        arr[i] = arr[j];
+        arr[j] = temp;
+        i++;
+        j--;
+    }
+}
+
+// Index of the first minimum value in the array, or -1 if empty.
+#[export]
+pub fun min_element_ints(arr: [int], len: int) <int> {
+    blame len >= 0, "len must be non-negative";
+    if (len == 0) { return -1; }
+    let min_idx <int> = 0;
+    for (let i <int> = 1; i < len; i++) {
+        if (arr[i] < arr[min_idx]) {
+            min_idx = i;
+        }
+    }
+    return min_idx;
+}
+
+// Index of the first maximum value in the array, or -1 if empty.
+#[export]
+pub fun max_element_ints(arr: [int], len: int) <int> {
+    blame len >= 0, "len must be non-negative";
+    if (len == 0) { return -1; }
+    let max_idx <int> = 0;
+    for (let i <int> = 1; i < len; i++) {
+        if (arr[i] > arr[max_idx]) {
+            max_idx = i;
+        }
+    }
+    return max_idx;
+}
+
+// Checks if the array elements are in non-decreasing order.
+#[export]
+pub fun is_sorted_ints(arr: [int], len: int) <bool> {
+    blame len >= 0, "len must be non-negative";
+    for (let i <int> = 1; i < len; i++) {
+        if (arr[i] < arr[i - 1]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Fills the first `len` elements with `value`.
+#[export]
+pub fun fill_ints(arr: [int], len: int, value: int) <noret> {
+    blame len >= 0, "len must be non-negative";
+    for (let i <int> = 0; i < len; i++) {
+        arr[i] = value;
+    }
+}
+
+// Copies `len` elements from `src` to `dst`.
+#[export]
+pub fun copy_ints(dst: [int], src: [int], len: int) <noret> {
+    blame len >= 0, "len must be non-negative";
+    for (let i <int> = 0; i < len; i++) {
+        dst[i] = src[i];
+    }
+}
+
+// Returns the first index where arr[i] >= target, or len if none.
+#[export]
+pub fun lower_bound_ints(arr: [int], len: int, target: int) <int> {
+    blame len >= 0, "len must be non-negative";
+    let low <int> = 0;
+    let high <int> = len;
+    while (low < high) {
+        let mid <int> = low + (high - low) / 2;
+        if (arr[mid] < target) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+// Returns the first index where arr[i] > target, or len if none.
+#[export]
+pub fun upper_bound_ints(arr: [int], len: int, target: int) <int> {
+    blame len >= 0, "len must be non-negative";
+    let low <int> = 0;
+    let high <int> = len;
+    while (low < high) {
+        let mid <int> = low + (high - low) / 2;
+        if (arr[mid] <= target) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+// Returns the index of target in a sorted array, or -1 if absent.
+#[export]
+pub fun binary_search_ints(arr: [int], len: int, target: int) <int> {
+    blame len >= 0, "len must be non-negative";
+    let idx <int> = lower_bound_ints(arr, len, target);
+    if (idx < len) {
+        if (arr[idx] == target) {
+            return idx;
+        }
+    }
+    return -1;
+}
+
+priv fun insertion_sort_range(arr: [int], low: int, high: int) <noret> {
+    for (let i <int> = low + 1; i <= high; i++) {
+        let key <int> = arr[i];
+        let j <int> = i - 1;
+        while (j >= low) {
+            if (arr[j] > key) {
+                arr[j + 1] = arr[j];
+                j--;
+            } else {
+                break;
+            }
+        }
+        arr[j + 1] = key;
+    }
+}
+
+priv fun quicksort_range(arr: [int], low_idx: int, high_idx: int) <noret> {
+    let low <int> = low_idx;
+    let high <int> = high_idx;
+    while (low < high) {
+        if (high - low < 16) {
+            insertion_sort_range(arr, low, high);
+            return;
+        }
+
+        let mid <int> = low + (high - low) / 2;
+        if (arr[low] > arr[mid]) {
+            let t <int> = arr[low];
+            arr[low] = arr[mid];
+            arr[mid] = t;
+        }
+        if (arr[low] > arr[high]) {
+            let t <int> = arr[low];
+            arr[low] = arr[high];
+            arr[high] = t;
+        }
+        if (arr[mid] > arr[high]) {
+            let t <int> = arr[mid];
+            arr[mid] = arr[high];
+            arr[high] = t;
+        }
+
+        let pivot <int> = arr[mid];
+        let lt <int> = low;
+        let gt <int> = high;
+        let i <int> = low;
+        while (i <= gt) {
+            if (arr[i] < pivot) {
+                let temp <int> = arr[lt];
+                arr[lt] = arr[i];
+                arr[i] = temp;
+                lt++;
+                i++;
+            } else if (arr[i] > pivot) {
+                let temp <int> = arr[gt];
+                arr[gt] = arr[i];
+                arr[i] = temp;
+                gt--;
+            } else {
+                i++;
+            }
+        }
+
+        if (lt - 1 - low < high - (gt + 1)) {
+            if (low < lt - 1) {
+                quicksort_range(arr, low, lt - 1);
+            }
+            low = gt + 1;
+        } else {
+            if (gt + 1 < high) {
+                quicksort_range(arr, gt + 1, high);
+            }
+            high = lt - 1;
+        }
+    }
+}
+
+// In-place sort of the first `len` elements in non-decreasing order.
+#[export]
+pub fun sort_ints(arr: [int], len: int) <noret> {
+    blame len >= 0, "len must be non-negative";
+    if (len <= 1) { return; }
+    quicksort_range(arr, 0, len - 1);
+}
+
+}

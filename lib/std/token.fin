@@ -1,0 +1,453 @@
+// Token definitions, source location tracking, and lexical classification.
+//
+// Matches Go's `go/token` and Python's `token` modules, specialized for Fin's
+// lexical grammar. Provides token constants, source coordinate structures,
+// and keyword recognition.
+
+namespace std {
+
+// Special tokens
+pub const TOKEN_EOF <int> = 0;
+pub const TOKEN_UNKNOWN <int> = 1;
+
+// Literals
+pub const TOKEN_IDENT <int> = 2;
+pub const TOKEN_INT_LIT <int> = 3;
+pub const TOKEN_FLOAT_LIT <int> = 4;
+pub const TOKEN_STRING_LIT <int> = 5;
+pub const TOKEN_CHAR_LIT <int> = 6;
+pub const TOKEN_BOOL_LIT <int> = 7;
+
+// Keywords
+pub const KW_LET <int> = 10;
+pub const KW_CONST <int> = 11;
+pub const KW_AUTO <int> = 12;
+pub const KW_FUN <int> = 13;
+pub const KW_RETURN <int> = 14;
+pub const KW_PUB <int> = 15;
+pub const KW_PRIV <int> = 16;
+pub const KW_READONLY <int> = 17;
+pub const KW_STRUCT <int> = 18;
+pub const KW_ENUM <int> = 19;
+pub const KW_INTERFACE <int> = 20;
+pub const KW_NAMESPACE <int> = 21;
+pub const KW_MACRO <int> = 22;
+pub const KW_STATIC <int> = 23;
+pub const KW_NULL <int> = 24;
+pub const KW_TRUE <int> = 25;
+pub const KW_FALSE <int> = 26;
+pub const KW_WHILE <int> = 27;
+pub const KW_DO <int> = 28;
+pub const KW_FOR <int> = 29;
+pub const KW_FOREACH <int> = 30;
+pub const KW_BREAK <int> = 31;
+pub const KW_CONTINUE <int> = 32;
+pub const KW_IF <int> = 33;
+pub const KW_ELSE <int> = 34;
+pub const KW_IN <int> = 35;
+pub const KW_EXTERN <int> = 36;
+pub const KW_IMPORT <int> = 37;
+pub const KW_AS <int> = 38;
+pub const KW_FROM <int> = 39;
+pub const KW_NEW <int> = 40;
+pub const KW_DELETE <int> = 41;
+pub const KW_SIZEOF <int> = 42;
+pub const KW_TYPEOF <int> = 43;
+pub const KW_AS_PTR <int> = 44;
+pub const KW_CAST <int> = 45;
+pub const KW_OPERATOR <int> = 46;
+pub const KW_TRY <int> = 47;
+pub const KW_CATCH <int> = 48;
+pub const KW_BLAME <int> = 49;
+pub const KW_SUPER <int> = 50;
+pub const KW_SELF_TYPE <int> = 51;
+pub const KW_TYPE <int> = 52;
+pub const KW_CLASS <int> = 53;
+pub const KW_IMPLEMENTS <int> = 54;
+pub const KW_ANY <int> = 55;
+pub const KW_SPECIAL <int> = 56;
+pub const KW_FN_TYPE <int> = 57;
+pub const KW_DEFINE <int> = 58;
+pub const KW_QUOTE <int> = 59;
+pub const KW_M1778 <int> = 60;
+
+// Primitive types
+pub const TYPE_INT <int> = 70;
+pub const TYPE_LONG <int> = 71;
+pub const TYPE_FLOAT <int> = 72;
+pub const TYPE_DOUBLE <int> = 73;
+pub const TYPE_BOOL <int> = 74;
+pub const TYPE_STRING <int> = 75;
+pub const TYPE_CHAR <int> = 76;
+pub const TYPE_VOID <int> = 77;
+pub const TYPE_NORET <int> = 78;
+
+// Operators
+pub const TOKEN_PLUS <int> = 80;
+pub const TOKEN_MINUS <int> = 81;
+pub const TOKEN_STAR <int> = 82;
+pub const TOKEN_SLASH <int> = 83;
+pub const TOKEN_PERCENT <int> = 84;
+pub const TOKEN_EQUAL <int> = 85;
+pub const TOKEN_EQEQ <int> = 86;
+pub const TOKEN_NOTEQ <int> = 87;
+pub const TOKEN_LT <int> = 88;
+pub const TOKEN_GT <int> = 89;
+pub const TOKEN_LTEQ <int> = 90;
+pub const TOKEN_GTEQ <int> = 91;
+pub const TOKEN_AND <int> = 92;
+pub const TOKEN_OR <int> = 93;
+pub const TOKEN_NOT <int> = 94;
+pub const TOKEN_AMPERSAND <int> = 95;
+pub const TOKEN_INCREMENT <int> = 96;
+pub const TOKEN_DECREMENT <int> = 97;
+pub const TOKEN_PLUSEQUAL <int> = 98;
+pub const TOKEN_MINUSEQUAL <int> = 99;
+pub const TOKEN_MULTEQUAL <int> = 100;
+pub const TOKEN_DIVEQUAL <int> = 101;
+pub const TOKEN_ARROW <int> = 102;
+pub const TOKEN_RARROW <int> = 103;
+pub const TOKEN_DOUBLE_COLON <int> = 104;
+pub const TOKEN_ELLIPSIS <int> = 105;
+
+// Delimiters
+pub const TOKEN_LPAREN <int> = 110;
+pub const TOKEN_RPAREN <int> = 111;
+pub const TOKEN_LBRACE <int> = 112;
+pub const TOKEN_RBRACE <int> = 113;
+pub const TOKEN_LBRACKET <int> = 114;
+pub const TOKEN_RBRACKET <int> = 115;
+pub const TOKEN_SEMICOLON <int> = 116;
+pub const TOKEN_COLON <int> = 117;
+pub const TOKEN_COMMA <int> = 118;
+pub const TOKEN_DOT <int> = 119;
+pub const TOKEN_QUESTION <int> = 120;
+pub const TOKEN_AT <int> = 121;
+pub const TOKEN_HASH <int> = 122;
+pub const TOKEN_DOLLAR <int> = 123;
+
+// Token Kind Accessor Functions (for cross-module calls)
+#[export] pub fun tok_eof() <int> { return 0; }
+#[export] pub fun tok_unknown() <int> { return 1; }
+#[export] pub fun tok_ident() <int> { return 2; }
+#[export] pub fun tok_int_lit() <int> { return 3; }
+#[export] pub fun tok_float_lit() <int> { return 4; }
+#[export] pub fun tok_string_lit() <int> { return 5; }
+#[export] pub fun tok_char_lit() <int> { return 6; }
+#[export] pub fun tok_bool_lit() <int> { return 7; }
+
+#[export] pub fun kw_let() <int> { return 10; }
+#[export] pub fun kw_const() <int> { return 11; }
+#[export] pub fun kw_fun() <int> { return 13; }
+#[export] pub fun kw_return() <int> { return 14; }
+#[export] pub fun kw_pub() <int> { return 15; }
+#[export] pub fun kw_priv() <int> { return 16; }
+#[export] pub fun kw_struct() <int> { return 18; }
+#[export] pub fun kw_enum() <int> { return 19; }
+#[export] pub fun kw_interface() <int> { return 20; }
+#[export] pub fun kw_while() <int> { return 27; }
+#[export] pub fun kw_for() <int> { return 29; }
+#[export] pub fun kw_if() <int> { return 33; }
+#[export] pub fun kw_else() <int> { return 34; }
+#[export] pub fun kw_break() <int> { return 31; }
+#[export] pub fun kw_continue() <int> { return 32; }
+#[export] pub fun kw_import() <int> { return 37; }
+#[export] pub fun kw_from() <int> { return 39; }
+#[export] pub fun kw_new() <int> { return 40; }
+#[export] pub fun kw_delete() <int> { return 41; }
+#[export] pub fun kw_null() <int> { return 24; }
+#[export] pub fun kw_true() <int> { return 25; }
+#[export] pub fun kw_false() <int> { return 26; }
+#[export] pub fun kw_cast() <int> { return 45; }
+#[export] pub fun kw_blame() <int> { return 49; }
+#[export] pub fun kw_m1778() <int> { return 60; }
+#[export] pub fun kw_namespace() <int> { return 21; }
+#[export] pub fun kw_define() <int> { return 58; }
+#[export] pub fun kw_operator() <int> { return 46; }
+#[export] pub fun kw_implements() <int> { return 54; }
+
+#[export] pub fun tok_plus() <int> { return 80; }
+#[export] pub fun tok_minus() <int> { return 81; }
+#[export] pub fun tok_star() <int> { return 82; }
+#[export] pub fun tok_slash() <int> { return 83; }
+#[export] pub fun tok_percent() <int> { return 84; }
+#[export] pub fun tok_equal() <int> { return 85; }
+#[export] pub fun tok_eqeq() <int> { return 86; }
+#[export] pub fun tok_noteq() <int> { return 87; }
+#[export] pub fun tok_lt() <int> { return 88; }
+#[export] pub fun tok_gt() <int> { return 89; }
+#[export] pub fun tok_lteq() <int> { return 90; }
+#[export] pub fun tok_gteq() <int> { return 91; }
+#[export] pub fun tok_and() <int> { return 92; }
+#[export] pub fun tok_or() <int> { return 93; }
+#[export] pub fun tok_not() <int> { return 94; }
+#[export] pub fun tok_ampersand() <int> { return 95; }
+#[export] pub fun tok_increment() <int> { return 96; }
+#[export] pub fun tok_decrement() <int> { return 97; }
+#[export] pub fun tok_plusequal() <int> { return 98; }
+#[export] pub fun tok_minusequal() <int> { return 99; }
+#[export] pub fun tok_multequal() <int> { return 100; }
+#[export] pub fun tok_divequal() <int> { return 101; }
+
+#[export] pub fun tok_lparen() <int> { return 110; }
+#[export] pub fun tok_rparen() <int> { return 111; }
+#[export] pub fun tok_lbrace() <int> { return 112; }
+#[export] pub fun tok_rbrace() <int> { return 113; }
+#[export] pub fun tok_lbracket() <int> { return 114; }
+#[export] pub fun tok_rbracket() <int> { return 115; }
+#[export] pub fun tok_semicolon() <int> { return 116; }
+#[export] pub fun tok_colon() <int> { return 117; }
+#[export] pub fun tok_comma() <int> { return 118; }
+#[export] pub fun tok_dot() <int> { return 119; }
+#[export] pub fun tok_ellipsis() <int> { return 105; }
+#[export] pub fun tok_at() <int> { return 121; }
+#[export] pub fun tok_hash() <int> { return 122; }
+#[export] pub fun tok_double_colon() <int> { return 104; }
+#[export] pub fun tok_question() <int> { return 120; }
+
+#[export]
+pub struct SourceLocation {
+    pub:
+      file <string> = "",
+      line <int> = 1,
+      col <int> = 1,
+      offset <int> = 0,
+}
+
+#[export]
+pub struct Span {
+    pub:
+      start_line <int> = 1,
+      start_col <int> = 1,
+      end_line <int> = 1,
+      end_col <int> = 1,
+      offset <int> = 0,
+      len <int> = 0,
+}
+
+#[export]
+pub struct Token {
+    pub:
+      kind <int> = 0,
+      text <string> = "",
+      line <int> = 1,
+      col <int> = 1,
+      offset <int> = 0,
+      len <int> = 0,
+}
+
+// Returns a human-readable display name for a token kind.
+#[export]
+pub fun token_name(kind: int) <string> {
+    if (kind == 0) { return "end of file"; }
+    if (kind == 2) { return "identifier"; }
+    if (kind == 3) { return "integer literal"; }
+    if (kind == 4) { return "float literal"; }
+    if (kind == 5) { return "string literal"; }
+    if (kind == 6) { return "character literal"; }
+    if (kind == 7) { return "boolean literal"; }
+
+    if (kind == 10) { return "let"; }
+    if (kind == 11) { return "const"; }
+    if (kind == 12) { return "auto"; }
+    if (kind == 13) { return "fun"; }
+    if (kind == 14) { return "return"; }
+    if (kind == 15) { return "pub"; }
+    if (kind == 16) { return "priv"; }
+    if (kind == 17) { return "readonly"; }
+    if (kind == 18) { return "struct"; }
+    if (kind == 19) { return "enum"; }
+    if (kind == 20) { return "interface"; }
+    if (kind == 21) { return "namespace"; }
+    if (kind == 22) { return "macro"; }
+    if (kind == 23) { return "static"; }
+    if (kind == 24) { return "null"; }
+    if (kind == 25) { return "true"; }
+    if (kind == 26) { return "false"; }
+    if (kind == 27) { return "while"; }
+    if (kind == 28) { return "do"; }
+    if (kind == 29) { return "for"; }
+    if (kind == 30) { return "foreach"; }
+    if (kind == 31) { return "break"; }
+    if (kind == 32) { return "continue"; }
+    if (kind == 33) { return "if"; }
+    if (kind == 34) { return "else"; }
+    if (kind == 35) { return "in"; }
+    if (kind == 36) { return "extern"; }
+    if (kind == 37) { return "import"; }
+    if (kind == 38) { return "as"; }
+    if (kind == 39) { return "from"; }
+    if (kind == 40) { return "new"; }
+    if (kind == 41) { return "delete"; }
+    if (kind == 42) { return "sizeof"; }
+    if (kind == 43) { return "typeof"; }
+    if (kind == 44) { return "as_ptr"; }
+    if (kind == 45) { return "cast"; }
+    if (kind == 46) { return "operator"; }
+    if (kind == 47) { return "try"; }
+    if (kind == 48) { return "catch"; }
+    if (kind == 49) { return "blame"; }
+    if (kind == 50) { return "super"; }
+    if (kind == 51) { return "Self"; }
+    if (kind == 52) { return "type"; }
+    if (kind == 53) { return "class"; }
+    if (kind == 54) { return "implements"; }
+    if (kind == 55) { return "any"; }
+    if (kind == 56) { return "special"; }
+    if (kind == 57) { return "fn"; }
+    if (kind == 58) { return "define"; }
+    if (kind == 59) { return "quote"; }
+    if (kind == 60) { return "m1778"; }
+
+    if (kind == 70) { return "int"; }
+    if (kind == 71) { return "long"; }
+    if (kind == 72) { return "float"; }
+    if (kind == 73) { return "double"; }
+    if (kind == 74) { return "bool"; }
+    if (kind == 75) { return "string"; }
+    if (kind == 76) { return "char"; }
+    if (kind == 77) { return "void"; }
+    if (kind == 78) { return "noret"; }
+
+    if (kind == 80) { return "+"; }
+    if (kind == 81) { return "-"; }
+    if (kind == 82) { return "*"; }
+    if (kind == 83) { return "/"; }
+    if (kind == 84) { return "%"; }
+    if (kind == 85) { return "="; }
+    if (kind == 86) { return "=="; }
+    if (kind == 87) { return "!="; }
+    if (kind == 88) { return "<"; }
+    if (kind == 89) { return ">"; }
+    if (kind == 90) { return "<="; }
+    if (kind == 91) { return ">="; }
+    if (kind == 92) { return "&&"; }
+    if (kind == 93) { return "||"; }
+    if (kind == 94) { return "!"; }
+    if (kind == 95) { return "&"; }
+    if (kind == 96) { return "++"; }
+    if (kind == 97) { return "--"; }
+    if (kind == 98) { return "+="; }
+    if (kind == 99) { return "-="; }
+    if (kind == 100) { return "*="; }
+    if (kind == 101) { return "/="; }
+    if (kind == 102) { return "=>"; }
+    if (kind == 103) { return "->"; }
+    if (kind == 104) { return "::"; }
+    if (kind == 105) { return "..."; }
+
+    if (kind == 110) { return "("; }
+    if (kind == 111) { return ")"; }
+    if (kind == 112) { return "{"; }
+    if (kind == 113) { return "}"; }
+    if (kind == 114) { return "["; }
+    if (kind == 115) { return "]"; }
+    if (kind == 116) { return ";"; }
+    if (kind == 117) { return ":"; }
+    if (kind == 118) { return ","; }
+    if (kind == 119) { return "."; }
+    if (kind == 120) { return "?"; }
+    if (kind == 121) { return "@"; }
+    if (kind == 122) { return "#"; }
+    if (kind == 123) { return "$"; }
+
+    return "unknown";
+}
+
+// Checks if a token kind is a language keyword.
+#[export]
+pub fun is_keyword(kind: int) <bool> {
+    return kind >= 10 && kind <= 60;
+}
+
+// Checks if a token kind is a literal.
+#[export]
+pub fun is_literal(kind: int) <bool> {
+    return kind >= 2 && kind <= 7;
+}
+
+// Checks if a token kind is an operator.
+#[export]
+pub fun is_operator(kind: int) <bool> {
+    return kind >= 80 && kind <= 105;
+}
+
+#[llvm_name="strcmp"]
+@define tok_strcmp(a: string, b: string) <int>;
+
+priv fun tok_str_eq(a: string, b: string) <bool> {
+    if (a == null && b == null) { return true; }
+    if (a == null || b == null) { return false; }
+    return tok_strcmp(a, b) == 0;
+}
+
+// Matches an identifier against Fin keywords, returning its keyword token kind
+// or `TOKEN_IDENT` (2) if it is a general identifier.
+#[export]
+pub fun lookup_keyword(ident: string) <int> {
+    if (tok_str_eq(ident, "let")) { return 10; }
+    if (tok_str_eq(ident, "const")) { return 11; }
+    if (tok_str_eq(ident, "auto")) { return 12; }
+    if (tok_str_eq(ident, "fun")) { return 13; }
+    if (tok_str_eq(ident, "return")) { return 14; }
+    if (tok_str_eq(ident, "pub")) { return 15; }
+    if (tok_str_eq(ident, "priv")) { return 16; }
+    if (tok_str_eq(ident, "readonly")) { return 17; }
+    if (tok_str_eq(ident, "struct")) { return 18; }
+    if (tok_str_eq(ident, "enum")) { return 19; }
+    if (tok_str_eq(ident, "interface")) { return 20; }
+    if (tok_str_eq(ident, "namespace")) { return 21; }
+    if (tok_str_eq(ident, "macro")) { return 22; }
+    if (tok_str_eq(ident, "static")) { return 23; }
+    if (tok_str_eq(ident, "null")) { return 24; }
+    if (tok_str_eq(ident, "true")) { return 25; }
+    if (tok_str_eq(ident, "false")) { return 26; }
+    if (tok_str_eq(ident, "while")) { return 27; }
+    if (tok_str_eq(ident, "do")) { return 28; }
+    if (tok_str_eq(ident, "for")) { return 29; }
+    if (tok_str_eq(ident, "foreach")) { return 30; }
+    if (tok_str_eq(ident, "break")) { return 31; }
+    if (tok_str_eq(ident, "continue")) { return 32; }
+    if (tok_str_eq(ident, "if")) { return 33; }
+    if (tok_str_eq(ident, "else")) { return 34; }
+    if (tok_str_eq(ident, "in")) { return 35; }
+    if (tok_str_eq(ident, "extern")) { return 36; }
+    if (tok_str_eq(ident, "import")) { return 37; }
+    if (tok_str_eq(ident, "as")) { return 38; }
+    if (tok_str_eq(ident, "from")) { return 39; }
+    if (tok_str_eq(ident, "new")) { return 40; }
+    if (tok_str_eq(ident, "delete")) { return 41; }
+    if (tok_str_eq(ident, "sizeof")) { return 42; }
+    if (tok_str_eq(ident, "typeof")) { return 43; }
+    if (tok_str_eq(ident, "as_ptr")) { return 44; }
+    if (tok_str_eq(ident, "cast")) { return 45; }
+    if (tok_str_eq(ident, "operator")) { return 46; }
+    if (tok_str_eq(ident, "try")) { return 47; }
+    if (tok_str_eq(ident, "catch")) { return 48; }
+    if (tok_str_eq(ident, "blame")) { return 49; }
+    if (tok_str_eq(ident, "super")) { return 50; }
+    if (tok_str_eq(ident, "Self")) { return 51; }
+    if (tok_str_eq(ident, "type")) { return 52; }
+    if (tok_str_eq(ident, "class")) { return 53; }
+    if (tok_str_eq(ident, "implements")) { return 54; }
+    if (tok_str_eq(ident, "any")) { return 55; }
+    if (tok_str_eq(ident, "special")) { return 56; }
+    if (tok_str_eq(ident, "fn")) { return 57; }
+    if (tok_str_eq(ident, "define")) { return 58; }
+    if (tok_str_eq(ident, "quote")) { return 59; }
+    if (tok_str_eq(ident, "m1778")) { return 60; }
+
+    if (tok_str_eq(ident, "int")) { return 70; }
+    if (tok_str_eq(ident, "long")) { return 71; }
+    if (tok_str_eq(ident, "float")) { return 72; }
+    if (tok_str_eq(ident, "double")) { return 73; }
+    if (tok_str_eq(ident, "bool")) { return 74; }
+    if (tok_str_eq(ident, "string")) { return 75; }
+    if (tok_str_eq(ident, "char")) { return 76; }
+    if (tok_str_eq(ident, "void")) { return 77; }
+    if (tok_str_eq(ident, "noret")) { return 78; }
+
+    return 2;
+}
+
+}

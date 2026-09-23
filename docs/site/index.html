@@ -1,0 +1,1227 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fin — Systems Programming Language Documentation &amp; Reference</title>
+  <meta name="description" content="Official documentation for Fin, a modern systems programming language where memory management is a library, the sample corpus is the specification, and backend lowering adheres to explicit refusal invariants.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233B82F6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 2L2 7l10 5 10-5-10-5z'/><path d='M2 17l10 5 10-5'/><path d='M2 12l10 5 10-5'/></svg>">
+</head>
+<body>
+
+  <!-- Top Sticky Navigation Bar -->
+  <header class="site-header">
+    <div class="header-container">
+      <div class="header-left">
+        <button type="button" class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Toggle navigation drawer">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+          </svg>
+        </button>
+
+        <a href="index.html" class="logo-link">
+          <div class="logo-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 20h16a1 1 0 0 0 1-1C19.5 9 12 3 12 3S8 11 4 19a1 1 0 0 0 0 1z"></path>
+              <path d="M12 9v11"></path>
+            </svg>
+          </div>
+          <div class="logo-text-group">
+            <span class="logo-title">Fin</span>
+            <span class="version-badge">v0.4.0</span>
+          </div>
+        </a>
+
+        <nav class="header-nav" aria-label="Primary Navigation">
+          <a href="#quickstart" class="header-nav-link">Guide</a>
+          <a href="#variables-types" class="header-nav-link">Syntax</a>
+          <a href="stdlib.html" class="header-nav-link">Standard Library <span class="header-nav-badge">17 Modules</span></a>
+        </nav>
+      </div>
+
+      <!-- Instant Search Trigger -->
+      <div class="header-search">
+        <button type="button" class="search-trigger-btn" id="search-trigger-btn" aria-label="Open search modal">
+          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <span class="search-placeholder">Search docs, stdlib, &amp; syntax...</span>
+          <kbd class="search-kbd">⌘K</kbd>
+        </button>
+      </div>
+
+      <!-- Action Items & Theme Toggle -->
+      <div class="header-right">
+        <a href="https://github.com/Fin-Lang" target="_blank" rel="noopener noreferrer" class="header-action-btn" aria-label="GitHub Repository">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
+          </svg>
+        </a>
+
+        <button type="button" class="header-action-btn" id="theme-toggle-btn" aria-label="Toggle color theme">
+          <!-- Sun Icon (shown in dark mode) -->
+          <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3"></line>
+            <line x1="12" y1="21" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3" y2="12"></line>
+            <line x1="21" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+          </svg>
+          <!-- Moon Icon (shown in light mode) -->
+          <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Mobile Backdrop Overlay -->
+  <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+  <!-- Hero Section (Modern Stripe / Vercel Developer Standard) -->
+  <section class="hero-section" id="hero">
+    <div class="hero-container">
+      <div class="hero-left">
+        <a href="stdlib.html" class="hero-announcement-pill">
+          <span class="hero-pulse-dot"></span>
+          <span>Fin v0.4.0 is live: 17 Standard Library Modules &rarr;</span>
+        </a>
+        <h1 class="hero-title">A statically-typed systems language with explicit memory semantics.</h1>
+        <p class="hero-subtitle">
+          Fin delivers structural prototypes, first-class enums with payloads, compile-time type verification, and zero-overhead C interop without garbage collection.
+        </p>
+        <div class="hero-actions">
+          <a href="#quickstart" class="btn-primary">
+            <span>Get Started &rarr;</span>
+          </a>
+          <a href="stdlib.html" class="btn-secondary">
+            <span>Standard Library (17)</span>
+          </a>
+          <a href="#pipeline-architecture" class="btn-secondary">
+            <span>Compiler Pipeline</span>
+          </a>
+        </div>
+        <div class="hero-install-box">
+          <span class="hero-install-prompt">$</span>
+          <code class="hero-install-code">curl -fsSL https://fin-lang.org/install.sh | sh</code>
+          <button type="button" class="hero-copy-btn" id="hero-copy-install-btn" aria-label="Copy install command">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Interactive Code Block Showcase Window -->
+      <div class="code-showcase-window">
+        <div class="window-chrome">
+          <div class="window-dots">
+            <span class="window-dot red"></span>
+            <span class="window-dot yellow"></span>
+            <span class="window-dot green"></span>
+          </div>
+          <div class="window-tabs" role="tablist">
+            <button type="button" class="code-tab-btn active" role="tab" data-tab="tab-fin">main.fin (Arena)</button>
+            <button type="button" class="code-tab-btn" role="tab" data-tab="tab-c">main.c (malloc/free)</button>
+            <button type="button" class="code-tab-btn" role="tab" data-tab="tab-rust">main.rs (Lifetimes)</button>
+          </div>
+          <div class="window-actions">
+            <button type="button" class="copy-btn" aria-label="Copy code sample">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              <span>Copy</span>
+            </button>
+          </div>
+        </div>
+        <div class="code-showcase-body">
+          <!-- Fin Pane -->
+          <div class="code-tab-pane active" id="tab-fin">
+            <pre><code class="language-fin">@define printf(fmt: string, ...) &lt;noret&gt;;
+
+struct Point {
+    x &lt;int&gt;,
+    y &lt;int&gt; = 0,
+
+    pub fun sum(self: &amp;Self) &lt;int&gt; {
+        return self.x + self.y;
+    }
+}
+
+fun main() &lt;noret&gt; {
+    let p &lt;Point&gt; = Point { x: 10, y: 25 };
+    blame p.sum() == 35, "sum calculation failed";
+
+    let arr &lt;[int]&gt; = [1, 2, 3, 4];
+    blame arr.length == 4;
+
+    printf("Point sum: %d, array length: %d\n", p.sum(), arr.length);
+}</code></pre>
+          </div>
+          <!-- C Pane -->
+          <div class="code-tab-pane" id="tab-c">
+            <pre><code class="language-c">#include &lt;stdio.h&gt;
+#include &lt;assert.h&gt;
+
+typedef struct {
+    int x;
+    int y;
+} Point;
+
+int Point_sum(const Point* self) {
+    return self-&gt;x + self-&gt;y;
+}
+
+int main(void) {
+    Point p = { .x = 10, .y = 25 };
+    assert(Point_sum(&amp;p) == 35);
+
+    int arr[4] = { 1, 2, 3, 4 };
+    printf("Point sum: %d, array length: %zu\n", Point_sum(&amp;p), sizeof(arr)/sizeof(arr[0]));
+    return 0;
+}</code></pre>
+          </div>
+          <!-- Rust Pane -->
+          <div class="code-tab-pane" id="tab-rust">
+            <pre><code class="language-rust">struct Point {
+    x: i32,
+    y: i32,
+}
+
+impl Point {
+    fn sum(&amp;self) -&gt; i32 {
+        self.x + self.y
+    }
+}
+
+fn main() {
+    let p = Point { x: 10, y: 25 };
+    assert_eq!(p.sum(), 35);
+
+    let arr = [1, 2, 3, 4];
+    println!("Point sum: {}, array length: {}", p.sum(), arr.len());
+}</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- App Layout -->
+  <div class="app-layout">
+
+    <!-- Left Navigation Sidebar -->
+    <nav class="sidebar-nav" id="sidebar-nav" aria-label="Main Navigation">
+
+      <!-- Section: Getting Started -->
+      <div class="nav-section">
+        <button type="button" class="nav-section-header">
+          <span>Getting Started</span>
+          <svg class="nav-section-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </button>
+        <ul class="nav-section-items">
+          <li><a href="#intro" class="nav-item-link active"><span>Introduction</span></a></li>
+          <li><a href="#installation" class="nav-item-link"><span>Installation &amp; Build</span></a></li>
+          <li><a href="#quickstart" class="nav-item-link"><span>Quickstart</span></a></li>
+          <li><a href="#hello-world" class="nav-item-link"><span>Hello, World!</span></a></li>
+        </ul>
+      </div>
+
+      <!-- Section: Language Tour -->
+      <div class="nav-section">
+        <button type="button" class="nav-section-header">
+          <span>Language Tour</span>
+          <svg class="nav-section-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </button>
+        <ul class="nav-section-items">
+          <li><a href="#variables-types" class="nav-item-link"><span>Variables &amp; Types</span></a></li>
+          <li><a href="#control-flow" class="nav-item-link"><span>Control Flow</span></a></li>
+          <li><a href="#functions" class="nav-item-link"><span>Functions &amp; Lambdas</span></a></li>
+          <li><a href="#structs-classes" class="nav-item-link"><span>Structs &amp; Methods</span></a></li>
+          <li><a href="#interfaces" class="nav-item-link"><span>Interfaces &amp; Generics</span></a></li>
+          <li><a href="#enums" class="nav-item-link"><span>Enums &amp; Tagged Unions</span></a></li>
+          <li><a href="#pointers-memory" class="nav-item-link"><span>Pointers &amp; Memory (rptr, wptr)</span></a></li>
+          <li><a href="#blame" class="nav-item-link"><span>Blame Error Handling</span></a></li>
+          <li><a href="#prototypes" class="nav-item-link"><span>Prototypes {K,V}</span></a></li>
+          <li><a href="#macros-specials" class="nav-item-link"><span>Macros &amp; Specials</span></a></li>
+        </ul>
+      </div>
+
+      <!-- Section: Standard Library -->
+      <div class="nav-section">
+        <button type="button" class="nav-section-header">
+          <span>Standard Library</span>
+          <span class="nav-badge">17 modules</span>
+        </button>
+        <ul class="nav-section-items">
+          <li><a href="#stdlib-overview" class="nav-item-link"><span>Directory Overview</span></a></li>
+          <li><a href="stdlib.html" class="nav-item-link" style="color:var(--primary); font-weight:600;"><span>Full Stdlib Portal &rarr;</span></a></li>
+        </ul>
+      </div>
+
+      <!-- Section: Compiler Architecture -->
+      <div class="nav-section">
+        <button type="button" class="nav-section-header">
+          <span>Compiler Reference</span>
+          <svg class="nav-section-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </button>
+        <ul class="nav-section-items">
+          <li><a href="#pipeline-architecture" class="nav-item-link"><span>Pipeline Flow</span></a></li>
+          <li><a href="#compiler-cli" class="nav-item-link"><span>CLI Flags &amp; Modes</span></a></li>
+          <li><a href="#compiler-invariants" class="nav-item-link"><span>Refusal Guarantee</span></a></li>
+        </ul>
+      </div>
+
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <div class="content-container">
+
+        <!-- ===================================================================
+             1. GETTING STARTED
+             =================================================================== -->
+
+        <!-- Introduction -->
+        <article class="doc-section" id="intro">
+          <span class="section-tag">Getting Started</span>
+          <h1 class="doc-title">Introduction to Fin</h1>
+          <p class="doc-lead">
+            Fin is a modern, high-performance systems programming language designed around three core pillars:
+            <strong>memory management as an explicit library</strong>, the <strong>sample corpus as the normative specification</strong>,
+            and <strong>strict refusal invariants</strong> in backend code generation.
+          </p>
+
+          <p>
+            Unlike languages that hide runtime garbage collectors behind magical runtimes or mandate complex borrow-checker lifecycles into the compiler core, Fin treats memory models as modular libraries . The compiler frontend focuses on rigorous semantic analysis, structural typing with prototypes, and compile-time event handlers, while the LLVM backend enforces strict safety guarantees without silently guessing intermediate representations.
+          </p>
+
+          <div class="callout callout-invariant">
+            <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
+            <div class="callout-body">
+              <strong>The Non-Negotiable Backend Invariant</strong>
+              <p>If code generation cannot lower a construct, it reports an explicit refusal. The Fin compiler will never silently drop runtime code or emit guessed LLVM IR. Every refusal explicitly names the construct and the ruling or architectural gap that governs it.</p>
+            </div>
+          </div>
+
+          <h2 id="core-philosophy">Core Philosophy <a href="#core-philosophy" class="header-anchor">#</a></h2>
+          <ul>
+            <li><strong>No Prose Specification:</strong> The language specification lives as code in <code>tests/samples/*.fin</code> . Each sample carries an explicit <code>//@</code> expectation (<code>ok</code>, <code>error</code>, or <code>unimplemented</code>) that tests and convicts the compiler.</li>
+            <li><strong>Single Unified Error Construct:</strong> <code>blame</code> replaces <code>assert</code>, <code>panic</code>, and <code>throw</code>. <code>blame condition;</code> asserts conditions, <code>blame Error(...);</code> raises error values, and <code>blame m1778;</code> marks unimplemented paths.</li>
+            <li><strong>First-Class Structural Prototypes:</strong> <code>{K,V}</code> serves as an inference-first structural map type that converts cleanly to nominal containers like <code>HashMap</code> and <code>Collection</code>.</li>
+            <li><strong>Two-Moment Layout Engine:</strong> Struct layout cleanly separates the <em>decide</em> phase (where header words and alignments are requested) from the <em>observe</em> phase (where byte sizes and typed pointer maps are queried).</li>
+          </ul>
+        </article>
+
+        <!-- Installation -->
+        <article class="doc-section" id="installation">
+          <span class="section-tag">Getting Started</span>
+          <h2 id="installation-heading">Installation &amp; Build <a href="#installation-heading" class="header-anchor">#</a></h2>
+          <p>
+            The Fin compiler (<code>finc</code>) is built directly from source using modern CMake, Conan, Flex, Bison, and LLVM.
+          </p>
+
+          <h3 id="prerequisites">Prerequisites <a href="#prerequisites" class="header-anchor">#</a></h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Tool</th>
+                  <th>Minimum Version</th>
+                  <th>Purpose</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td><code>cmake</code></td><td>3.20+</td><td>Build system configuration and test runner</td></tr>
+                <tr><td><code>conan</code></td><td>2.0+</td><td>C++ package manager for build dependencies</td></tr>
+                <tr><td><code>clang / clang++</code></td><td>18+</td><td>Host C++20 compiler for building <code>finc</code></td></tr>
+                <tr><td><code>llvm</code></td><td>Pinned in <code>CMakeLists.txt</code></td><td>Code generation backend (LLVM IR &amp; MC)</td></tr>
+                <tr><td><code>flex &amp; bison</code></td><td>Latest stable</td><td>Lexer and LALR(1) parser generation</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3 id="building-finc">Building the Compiler <a href="#building-finc" class="header-anchor">#</a></h3>
+          <p>Run the repository build script from the project root:</p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">bash</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-bash"># Standard development build with tests
+./build.sh
+
+# Optimized release build
+./build.sh --release
+
+# Clean build directory before building
+./build.sh --clean
+
+# Build without running tests
+./build.sh --no-test</code></pre>
+          </div>
+
+          <p>Upon completion, the compiled binary is located at <code>build/finc</code>. Verify your compiler installation and machine contract:</p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">bash</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-bash">$ build/finc --version
+finc 0.4.0 (contract 1)</code></pre>
+          </div>
+        </article>
+
+        <!-- Quickstart -->
+        <article class="doc-section" id="quickstart">
+          <span class="section-tag">Getting Started</span>
+          <h2 id="quickstart-heading">Quickstart Guide <a href="#quickstart-heading" class="header-anchor">#</a></h2>
+          <p>
+            The <code>finc</code> compiler operates in two primary modes: <strong>Analysis Mode</strong> (type-checking only) and <strong>Compilation Mode</strong> (emitting object files or linking native binaries).
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">bash</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-bash"># 1. Check syntax and semantic types (exits 0 if valid)
+finc program.fin
+
+# 2. Compile to native object file (*.o)
+finc -c program.fin
+
+# 3. Compile and link directly to an executable binary
+finc program.fin -o program
+
+# 4. Dump the generated LLVM IR to stdout
+finc -S program.fin
+
+# 5. Inspect AST structure
+finc --dump-ast program.fin</code></pre>
+          </div>
+        </article>
+
+        <!-- Hello World -->
+        <article class="doc-section" id="hello-world">
+          <span class="section-tag">Getting Started</span>
+          <h2 id="hello-world-heading">Hello, World! <a href="#hello-world-heading" class="header-anchor">#</a></h2>
+          <p>
+            Create a file named <code>hello.fin</code>. In Fin, the entry point is a top-level function named <code>main</code> with a return type of <code>&lt;noret&gt;</code> (meaning returns no value):
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">//@ bundled
+// Declare C's standard printf using @define
+@define printf(fmt: string, ...) &lt;noret&gt;;
+
+fun main() &lt;noret&gt; {
+    printf("Hello, World from the Fin Systems Language!\n");
+}</code></pre>
+          </div>
+
+          <p>Compile and run the program:</p>
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">bash</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-bash">$ build/finc hello.fin -o hello
+Build Successful.
+$ ./hello
+Hello, World from the Fin Systems Language!</code></pre>
+          </div>
+
+          <div class="callout callout-tip">
+            <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="16" x2="12" y2="12"></line>
+              <line x1="12" y1="8" x2="12.01" y2="8"></line>
+            </svg>
+            <div class="callout-body">
+              <strong>Return Types in Angle Brackets</strong>
+              <p>In Fin, function return types are written after the parameter list inside angle brackets: <code>fun name(...) &lt;Type&gt;</code>. <code>&lt;noret&gt;</code> and <code>&lt;void&gt;</code> both represent functions that return no value.</p>
+            </div>
+          </div>
+        </article>
+
+        <!-- ===================================================================
+             2. LANGUAGE TOUR
+             =================================================================== -->
+
+        <!-- Variables & Types -->
+        <article class="doc-section" id="variables-types">
+          <span class="section-tag">Language Tour</span>
+          <h2 id="variables-types-heading">Variables &amp; Types <a href="#variables-types-heading" class="header-anchor">#</a></h2>
+          <p>
+            Local variables are declared using the <code>let</code> keyword with an angle-bracket type annotation immediately following the variable name.
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">fun demo_types() &lt;noret&gt; {
+    // Explicit declarations
+    let a &lt;int&gt; = 42;
+    let b &lt;float&gt; = 3.14159;
+    let flag &lt;bool&gt; = true;
+    let letter &lt;char&gt; = 'F';
+    let message &lt;string&gt; = "Systems programming in Fin";
+
+    // Uninitialized declaration with deferred assignment
+    let uninit &lt;int&gt;;
+    uninit = 100;
+
+    // Type inference via auto
+    let count &lt;auto&gt; = 10;                     // inferred as int
+    let square &lt;auto&gt; = (x: int) &lt;int&gt; =&gt; x * x; // inferred as fn(int) -&gt; int
+}</code></pre>
+          </div>
+
+          <h3 id="primitive-types">Built-in Primitive Types <a href="#primitive-types" class="header-anchor">#</a></h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Width / Semantics</th>
+                  <th>Aliases (<code>std::types</code>)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td><code>int</code></td><td>32-bit signed integer</td><td><code>i32</code></td></tr>
+                <tr><td><code>uint</code></td><td>32-bit unsigned integer</td><td><code>u32</code></td></tr>
+                <tr><td><code>short / ushort</code></td><td>16-bit signed / unsigned integer</td><td><code>i16 / u16</code></td></tr>
+                <tr><td><code>long / ulong</code></td><td>64-bit signed / unsigned integer</td><td><code>i64 / u64</code></td></tr>
+                <tr><td><code>float / double</code></td><td>32-bit / 64-bit IEEE 754 floating point</td><td><code>Float</code> constraint</td></tr>
+                <tr><td><code>bool</code></td><td>Boolean (<code>true</code> / <code>false</code>)</td><td>—</td></tr>
+                <tr><td><code>char</code></td><td>8-bit character / byte</td><td><code>byte</code>, <code>u8</code></td></tr>
+                <tr><td><code>string</code></td><td>NUL-terminated immutable pointer to bytes</td><td>—</td></tr>
+                <tr><td><code>any</code></td><td>Compile-time type erasure</td><td>—</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3 id="nullable-types">Nullable Types (<code>T?</code>) &amp; Denullify (<code>expr?</code>) <a href="#nullable-types" class="header-anchor">#</a></h3>
+          <p>
+            Fin provides native nullability without unmanaged NULL pointer exceptions. Nullable value types (like <code>int?</code> or <code>struct?</code>) carry a presence flag alongside the value, guaranteeing memory safety without raw null pointer dereferences.
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">fun find_user_id(name: string) &lt;int?&gt; {
+    if (name == "admin") {
+        return 1; // implicitly wrapped into { 1, true }
+    }
+    return null;  // wrapped into { 0, false }
+}
+
+fun run() &lt;noret&gt; {
+    let result &lt;int?&gt; = find_user_id("admin");
+
+    if (result != null) {
+        // Denullify operator (?) safely extracts the inner value
+        let id &lt;int&gt; = result?;
+        printf("User ID: %d\n", id);
+    }
+}</code></pre>
+          </div>
+        </article>
+
+        <!-- Control Flow -->
+        <article class="doc-section" id="control-flow">
+          <span class="section-tag">Language Tour</span>
+          <h2 id="control-flow-heading">Control Flow <a href="#control-flow-heading" class="header-anchor">#</a></h2>
+          <p>
+            Fin features structured control flow: <code>if / else if / else</code>, three-clause <code>for</code> loops, <code>while</code>, <code>do / while</code>, and a unique ternary syntax.
+          </p>
+
+          <h3 id="ternary-operator">Ternary Conditional Expression  <a href="#ternary-operator" class="header-anchor">#</a></h3>
+          <p>
+            Fin's ternary conditional operator is written: <code>condition : then ? otherwise</code> (colon precedes the true branch, question mark precedes the fallback):
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">let score &lt;int&gt; = 85;
+// Condition : TrueArm ? FalseArm
+let status &lt;string&gt; = score &gt;= 50 : "Pass" ? "Fail";</code></pre>
+          </div>
+
+          <h3 id="loops">Loops &amp; Scopes <a href="#loops" class="header-anchor">#</a></h3>
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">fun loop_demo() &lt;noret&gt; {
+    // Standard three-clause for loop
+    for (let i &lt;int&gt; = 0; i &lt; 5; i++) {
+        printf("Index: %d\n", i);
+    }
+
+    // While loop
+    let count &lt;int&gt; = 3;
+    while (count &gt; 0) {
+        count--;
+    }
+
+    // Bare brace opens a lexical scope
+    {
+        let isolated &lt;int&gt; = 999;
+        // isolated goes out of scope and frees resources at closing brace
+    }
+}</code></pre>
+          </div>
+        </article>
+
+        <!-- Functions -->
+        <article class="doc-section" id="functions">
+          <span class="section-tag">Language Tour</span>
+          <h2 id="functions-heading">Functions &amp; Lambdas <a href="#functions-heading" class="header-anchor">#</a></h2>
+          <p>
+            Functions are declared with <code>fun</code>. Parameters use <code>name: type</code> syntax, while return types appear in angle brackets.
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">// Generic function with type parameter
+pub fun max_val&lt;T&gt;(a: T, b: T) &lt;T&gt; {
+    return a &gt; b : a ? b;
+}
+
+// Immutable const parameter
+fun process_data(const buffer: &amp;char, len: int) &lt;noret&gt; {
+    // buffer itself cannot be reassigned; *buffer pointee remains writable
+}
+
+// First-class lambda expressions
+fun lambda_demo() &lt;noret&gt; {
+    let add_one &lt;fn(int) -&gt; int&gt; = (x: int) &lt;int&gt; =&gt; x + 1;
+    let result &lt;int&gt; = add_one(10); // 11
+}</code></pre>
+          </div>
+        </article>
+
+        <!-- Structs & Methods -->
+        <article class="doc-section" id="structs-classes">
+          <span class="section-tag">Language Tour</span>
+          <h2 id="structs-classes-heading">Structs &amp; Methods <a href="#structs-classes-heading" class="header-anchor">#</a></h2>
+          <p>
+            A <code>struct</code> is a nominal aggregate type. Methods define their receiver explicitly using <code>self: &amp;Self</code>. Sections of members and methods are scoped by <code>pub:</code> and <code>priv:</code> visibility labels.
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">pub struct Vector2D {
+    priv:
+        x &lt;float&gt;,
+        y &lt;float&gt;,
+
+    pub:
+        // Constructor
+        Vector2D(x: float, y: float) {
+            self.x = x;
+            self.y = y;
+        }
+
+        // Member method
+        fun length(self: &amp;Self) &lt;float&gt; {
+            return math_sqrt(cast&lt;double&gt;(self.x * self.x + self.y * self.y));
+        }
+
+        // Operator overloading
+        operator +(other: Vector2D) &lt;Vector2D&gt; {
+            return Vector2D(self.x + other.x, self.y + other.y);
+        }
+
+        // Static factory method
+        static fun zero() &lt;Vector2D&gt; {
+            return Vector2D(0.0, 0.0);
+        }
+}</code></pre>
+          </div>
+        </article>
+
+        <!-- Interfaces & Generics -->
+        <article class="doc-section" id="interfaces">
+          <span class="section-tag">Language Tour</span>
+          <h2 id="interfaces-heading">Interfaces &amp; Generics <a href="#interfaces-heading" class="header-anchor">#</a></h2>
+          <p>
+            Interfaces declare method signatures that types can implement nominally or via external <code>implements</code> blocks.
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">pub interface Drawable {
+    pub fun draw() &lt;noret&gt;;
+}
+
+// Nominal implementation on a struct
+pub struct Circle : &lt;Drawable&gt; {
+    radius &lt;float&gt;,
+
+    pub fun draw(self: &amp;Self) &lt;noret&gt; {
+        printf("Drawing circle of radius %f\n", self.radius);
+    }
+}
+
+// Generic function bounded by an interface
+pub fun render&lt;T: Drawable&gt;(item: T) &lt;noret&gt; {
+    item.draw();
+}</code></pre>
+          </div>
+
+          <div class="callout callout-important">
+            <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+              <line x1="12" y1="9" x2="12" y2="13"></line>
+              <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+            <div class="callout-body">
+              <strong>Constraint Sets vs. Storage Types</strong>
+              <p>Constraint sets (such as <code>type Number = int | uint | float;</code>) are bounds for generic parameters and never concrete storage types. You cannot declare a field or variable of type <code>Number</code> directly.</p>
+            </div>
+          </div>
+        </article>
+
+        <!-- Enums & Tagged Unions -->
+        <article class="doc-section" id="enums">
+          <span class="section-tag">Language Tour</span>
+          <h2 id="enums-heading">Enums &amp; Tagged Unions <a href="#enums-heading" class="header-anchor">#</a></h2>
+          <p>
+            Fin enums encompass both simple C-style enumerations and rich tagged unions with member payloads .
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">// Tagged union enum with member payloads
+pub enum WebEvent {
+    pub PageLoad,
+    pub KeyPress &lt;char&gt;,
+    pub Click &lt;int, int&gt;,
+}
+
+fun handle_event(e: WebEvent) &lt;noret&gt; {
+    if (getkeyid(e) == keyidof(KeyPress)) {
+        // Positional payload access
+        let key &lt;char&gt; = e.0;
+        printf("Key pressed: %c\n", key);
+    } else if (getkeyid(e) == keyidof(Click)) {
+        let x &lt;int&gt; = e.0;
+        let y &lt;int&gt; = e.1;
+        printf("Clicked at (%d, %d)\n", x, y);
+    }
+}</code></pre>
+          </div>
+        </article>
+
+        <!-- Pointers & Memory -->
+        <article class="doc-section" id="pointers-memory">
+          <span class="section-tag">Language Tour</span>
+          <h2 id="pointers-memory-heading">Pointers &amp; Memory (<code>rptr</code>, <code>wptr</code>) <a href="#pointers-memory-heading" class="header-anchor">#</a></h2>
+          <p>
+            Fin rejects language-mandated monolithic garbage collection. Memory management in Fin is implemented as explicit libraries. For automatic reference management, Fin standard library provides <code>rptr&lt;T&gt;</code> (sound reference-counted pointer with borrow tracking) and <code>wptr&lt;T&gt;</code> (weak non-owning observer).
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">import { rptr, wptr } from stdptr::std;
+
+fun memory_lifecycle() &lt;noret&gt; {
+    // 1. Allocate raw heap memory
+    let buf &lt;[int]&gt; = new [int, 16]{};
+    delete buf;
+
+    // 2. Safe shared reference counting with rptr
+    let ptr &lt;rptr&lt;int&gt;&gt; = rptr(42);
+    printf("Refs: %d, Borrows: %d\n", ptr.refs(), ptr.borrows()); // 1, 0
+
+    // Clone shared handle
+    let handle2 &lt;rptr&lt;int&gt;&gt; = ptr.alias();
+    printf("Refs after alias: %d\n", ptr.refs()); // 2
+
+    // Exclusive borrowing
+    let borrowed &lt;rptr&lt;int&gt;&gt; = ptr.borrow();
+    borrowed.set(100);
+    borrowed.giveback();
+
+    // Release drops reference and frees memory at 0
+    handle2.release();
+    ptr.release();
+}</code></pre>
+          </div>
+
+          <!-- Memory Model Systems Card -->
+          <div class="memory-model-diagram">
+            <h3 style="font-size: 15px; font-weight: 600; margin-bottom: 14px; color: var(--text-primary);">Memory Management Models in Fin</h3>
+            <div class="memory-pillars-grid">
+              <div class="memory-pillar-card">
+                <div class="pillar-title">
+                  <code>[T]</code> &amp; Heap Arrays
+                </div>
+                <p class="pillar-desc">Raw dynamic heap arrays allocated with <code>new [T, n]{}</code> and deallocated with <code>delete arr;</code>. Carries length and pointer with zero runtime overhead.</p>
+              </div>
+              <div class="memory-pillar-card">
+                <div class="pillar-title">
+                  <code>rptr&lt;T&gt;</code> &amp; <code>wptr&lt;T&gt;</code>
+                </div>
+                <p class="pillar-desc">Library-provided reference-counted smart pointers with shared handle tracking and weak non-owning observer handles to avoid reference cycles.</p>
+              </div>
+              <div class="memory-pillar-card">
+                <div class="pillar-title">
+                  Custom Allocators &amp; Arenas
+                </div>
+                <p class="pillar-desc">User-defined memory arenas for batch allocations. High-throughput bump allocation with unified lifetime reset at phase boundaries.</p>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <!-- Blame Error Handling -->
+        <article class="doc-section" id="blame">
+          <span class="section-tag">Language Tour</span>
+          <h2 id="blame-heading">Blame Error Handling <a href="#blame-heading" class="header-anchor">#</a></h2>
+          <p>
+            Fin has no separate <code>assert</code>, <code>panic</code>, or <code>throw</code> keywords. Instead, it provides a single, cohesive mechanism: <strong><code>blame</code></strong>.
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">import { Error } from error::std;
+
+fun divide(numerator: int, denominator: int) &lt;int&gt; {
+    // 1. Assertion form: condition check with optional diagnostic message
+    blame denominator != 0, "division by zero is forbidden";
+
+    // 2. Raise form: raises an Error instance
+    if (numerator &lt; 0) {
+        blame Error("negative numerators not supported in this domain");
+    }
+
+    return numerator / denominator;
+}
+
+fun incomplete_feature() &lt;noret&gt; {
+    // 3. Unimplemented expression: eliminated as dead code or halts
+    blame m1778;
+}</code></pre>
+          </div>
+        </article>
+
+        <!-- Prototypes -->
+        <article class="doc-section" id="prototypes">
+          <span class="section-tag">Language Tour</span>
+          <h2 id="prototypes-heading">Prototypes <code>{K,V}</code> <a href="#prototypes-heading" class="header-anchor">#</a></h2>
+          <p>
+            Prototypes are built-in structural map types written as <code>{K,V}</code>. Two prototypes with the same key and value types are identical types. They convert explicitly into nominal library maps like <code>HashMap</code> .
+          </p>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">import { HashMap } from hashmap::std;
+
+fun demo_prototype() &lt;noret&gt; {
+    // Structural literal value
+    let p &lt;{string, int}&gt; = { "port": 8080, "threads": 4 };
+
+    // Explicit conversion into nominal O(1) HashMap
+    let map &lt;&amp;HashMap&lt;string, int&gt;&gt; = HashMap::from_prototype(p);
+    printf("Port: %d\n", map["port"]);
+}</code></pre>
+          </div>
+        </article>
+
+        <!-- Macros & Specials -->
+        <article class="doc-section" id="macros-specials">
+          <span class="section-tag">Language Tour</span>
+          <h2 id="macros-specials-heading">Macros &amp; Specials <a href="#macros-specials-heading" class="header-anchor">#</a></h2>
+          <p>
+            Fin distinguishes syntax macros from compiler extensions:
+          </p>
+          <ul>
+            <li><strong><code>@macro</code>:</strong> Operates on typed ASTs and returns a <code>quote { ... }</code> block . Invoked with <code>!</code>.</li>
+            <li><strong><code>@special</code>:</strong> Compile-time execution functions running within the compiler. The only location where compiler components can be reached via <code>#[use(...)]</code> grants.</li>
+          </ul>
+
+          <div class="code-block">
+            <div class="code-header">
+              <span class="code-lang">fin</span>
+              <button type="button" class="copy-btn"><span>Copy</span></button>
+            </div>
+            <pre><code class="language-fin">// AST-substituting macro
+@macro magic_multiply(a, b) {
+    return quote { $a * $b; };
+}
+
+fun calculate() &lt;int&gt; {
+    // Invocation with exclamation point
+    return magic_multiply!(10, 5); // Expands to 10 * 5
+}</code></pre>
+          </div>
+        </article>
+
+        <!-- ===================================================================
+             3. STANDARD LIBRARY OVERVIEW
+             =================================================================== -->
+
+        <article class="doc-section" id="stdlib-overview">
+          <span class="section-tag">Standard Library</span>
+          <h2 id="stdlib-heading">Standard Library Modules <a href="#stdlib-heading" class="header-anchor">#</a></h2>
+          <p class="doc-lead">
+            The Fin standard library lives in <code>lib/std/</code> and ships beside the compiler.
+            All 17 modules declare their contents under <code>namespace std</code> and are imported using <code>from &lt;module&gt;::std</code>.
+          </p>
+
+          <div class="callout callout-tip" style="margin-bottom: 28px;">
+            <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+              <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+            </svg>
+            <div class="callout-body">
+              <strong>Dedicated Standard Library Documentation Portal</strong>
+              <p>For complete API signatures, parameters, return types, memory allocation lifecycles, and runnable Fin code examples for every module, visit the dedicated <a href="stdlib.html" style="text-decoration:underline; font-weight:600;">Fin Standard Library Portal &rarr;</a></p>
+            </div>
+          </div>
+
+          <div class="stdlib-modules-grid" style="margin-top: 24px;">
+            <a href="stdlib.html#module-stdio" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">stdio</span><span class="stdlib-card-badge">Core &amp; I/O</span></div>
+              <p class="stdlib-card-desc">Formatted printing, Printable contract, byte Stream, and File operations.</p>
+            </a>
+            <a href="stdlib.html#module-fs" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">fs</span><span class="stdlib-card-badge">Core &amp; I/O</span></div>
+              <p class="stdlib-card-desc">File existence check, reading to string, writing, appending, and deletion.</p>
+            </a>
+            <a href="stdlib.html#module-path" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">path</span><span class="stdlib-card-badge">Core &amp; I/O</span></div>
+              <p class="stdlib-card-desc">Path joining, basename, dirname, extname, and absolute/relative testing.</p>
+            </a>
+            <a href="stdlib.html#module-collection" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">collection</span><span class="stdlib-card-badge">Collections</span></div>
+              <p class="stdlib-card-desc">Dynamic growable array Collection&lt;T&gt; with geometric buffer doubling.</p>
+            </a>
+            <a href="stdlib.html#module-hashmap" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">hashmap</span><span class="stdlib-card-badge">Collections</span></div>
+              <p class="stdlib-card-desc">Associative hash map HashMap&lt;K,V&gt; with open addressing and linear probing.</p>
+            </a>
+            <a href="stdlib.html#module-env" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">env</span><span class="stdlib-card-badge">System &amp; Runtime</span></div>
+              <p class="stdlib-card-desc">Environment variables (get/set/unset), process ID, and process termination.</p>
+            </a>
+            <a href="stdlib.html#module-time" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">time</span><span class="stdlib-card-badge">System &amp; Runtime</span></div>
+              <p class="stdlib-card-desc">System epoch clock timestamps and synchronous delays in seconds/milliseconds.</p>
+            </a>
+            <a href="stdlib.html#module-random" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">random</span><span class="stdlib-card-badge">System &amp; Runtime</span></div>
+              <p class="stdlib-card-desc">Pseudo-random number generator (PRNG), bounded integers, floats, and booleans.</p>
+            </a>
+            <a href="stdlib.html#module-math" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">math</span><span class="stdlib-card-badge">Math &amp; Utilities</span></div>
+              <p class="stdlib-card-desc">Constants (PI, E), Number helpers (min, max, clamp, abs), and C libm bindings.</p>
+            </a>
+            <a href="stdlib.html#module-strings" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">strings</span><span class="stdlib-card-badge">Math &amp; Utilities</span></div>
+              <p class="stdlib-card-desc">String length, prefix/suffix check, substring search, slicing, and repetition.</p>
+            </a>
+            <a href="stdlib.html#module-types" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">types</span><span class="stdlib-card-badge">Types &amp; Semantics</span></div>
+              <p class="stdlib-card-desc">Numeric constraint sets (Number, Integer, Signed, Unsigned), and number2str.</p>
+            </a>
+            <a href="stdlib.html#module-typing" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">typing</span><span class="stdlib-card-badge">Types &amp; Semantics</span></div>
+              <p class="stdlib-card-desc">Tagged union Result&lt;T, U&gt; for robust error handling without exception overhead.</p>
+            </a>
+            <a href="stdlib.html#module-enums" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">enums</span><span class="stdlib-card-badge">Types &amp; Semantics</span></div>
+              <p class="stdlib-card-desc">Reflection utilities: getkeyid for runtime tags and keyidof for member IDs.</p>
+            </a>
+            <a href="stdlib.html#module-error" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">error</span><span class="stdlib-card-badge">Types &amp; Semantics</span></div>
+              <p class="stdlib-card-desc">Base Error class and standard error categorizations for structured failure modeling.</p>
+            </a>
+            <a href="stdlib.html#module-operators" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">operators</span><span class="stdlib-card-badge">Types &amp; Semantics</span></div>
+              <p class="stdlib-card-desc">Operator overloading interfaces for user-defined structs (Add, Sub, Mul, Equals...).</p>
+            </a>
+            <a href="stdlib.html#module-memory" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">memory</span><span class="stdlib-card-badge">Memory &amp; Pointers</span></div>
+              <p class="stdlib-card-desc">Native dynamic arrays new [T, n]{}, delete arr;, and user-defined arena allocators.</p>
+            </a>
+            <a href="stdlib.html#module-stdptr" class="stdlib-card">
+              <div class="stdlib-card-header"><span class="stdlib-card-name">stdptr</span><span class="stdlib-card-badge">Memory &amp; Pointers</span></div>
+              <p class="stdlib-card-desc">Smart pointer rptr&lt;T&gt; providing sound reference-counted memory sharing.</p>
+            </a>
+          </div>
+
+          <div style="margin-top: 32px; text-align: center;">
+            <a href="stdlib.html" class="btn-primary" style="display:inline-flex; padding: 12px 28px; font-size: 15px;">
+              <span>Open Standard Library Documentation Portal (17 Modules) &rarr;</span>
+            </a>
+          </div>
+        </article>
+
+        <!-- ===================================================================
+             4. COMPILER ARCHITECTURE & REFERENCE
+             =================================================================== -->
+<!-- Compiler Pipeline Flow Diagram & Refusal Invariants -->
+        <article class="doc-section" id="pipeline-architecture">
+          <span class="section-tag">Compiler Architecture</span>
+          <h2 id="pipeline-architecture-heading">The Fin Compiler Pipeline Flow <a href="#pipeline-architecture-heading" class="header-anchor">#</a></h2>
+          <p class="doc-lead">
+            From high-level source text to optimized machine code. Every stage guarantees type soundness, explicit memory layout, and deterministic refusal invariants.
+          </p>
+
+          <div class="pipeline-flow-container">
+            <div class="pipeline-steps-grid">
+              <!-- Step 1 -->
+              <div class="pipeline-step-card step-1">
+                <span class="pipeline-step-num">01 SOURCE</span>
+                <span class="pipeline-step-name">Source (.fin)</span>
+                <span class="pipeline-step-sub">tests/samples/*.fin</span>
+              </div>
+              <!-- Step 2 -->
+              <div class="pipeline-step-card step-2">
+                <span class="pipeline-step-num">02 PARSER</span>
+                <span class="pipeline-step-name">Lexer &amp; Parser</span>
+                <span class="pipeline-step-sub">Flex / Bison LALR(1)</span>
+              </div>
+              <!-- Step 3 -->
+              <div class="pipeline-step-card step-3">
+                <span class="pipeline-step-num">03 AST</span>
+                <span class="pipeline-step-name">AST Cloning</span>
+                <span class="pipeline-step-sub">Structural AST</span>
+              </div>
+              <!-- Step 4 -->
+              <div class="pipeline-step-card step-4">
+                <span class="pipeline-step-num">04 SEMANTICS</span>
+                <span class="pipeline-step-name">Semantic Analyzer</span>
+                <span class="pipeline-step-sub">Two-Moment Layout</span>
+              </div>
+              <!-- Step 5 -->
+              <div class="pipeline-step-card step-5">
+                <span class="pipeline-step-num">05 CODEGEN</span>
+                <span class="pipeline-step-name">LLVM Lowering</span>
+                <span class="pipeline-step-sub">Refusal Invariants</span>
+              </div>
+              <!-- Step 6 -->
+              <div class="pipeline-step-card step-6">
+                <span class="pipeline-step-num">06 EMIT</span>
+                <span class="pipeline-step-name">Machine Code</span>
+                <span class="pipeline-step-sub">x86_64 / AArch64 / WASM</span>
+              </div>
+            </div>
+
+            <!-- Refusal Invariant Banner -->
+            <div class="refusal-invariant-card">
+              <svg class="refusal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+              </svg>
+              <div class="refusal-content">
+                <h4>⭐ Key Architectural Guarantee: Strict Backend Refusal Invariant</h4>
+                <p>
+                  If the LLVM code generator encounters an unhandled construct or cannot prove layout invariants, it reports an explicit refusal. The Fin compiler will NEVER silently guess intermediate representations, drop code paths, or emit unsound LLVM IR.
+                </p>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <!-- CLI Reference & Flags -->
+        <article class="doc-section" id="compiler-cli">
+          <span class="section-tag">Compiler Reference</span>
+          <h2 id="compiler-cli-heading">Command-Line Interface &amp; Flags <a href="#compiler-cli-heading" class="header-anchor">#</a></h2>
+          <p>
+            The <code>finc</code> compiler provides a Unix-standard command-line interface. Exit code <code>0</code> indicates complete success.
+          </p>
+
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 25%;">Flag</th>
+                  <th style="width: 25%;">Argument</th>
+                  <th style="width: 50%;">Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td><code>-o &lt;file&gt;</code></td><td>Path to binary</td><td>Compiles and links source into a standalone executable.</td></tr>
+                <tr><td><code>-c</code></td><td>Source file</td><td>Compiles source to a native object file (<code>.o</code>) without linking.</td></tr>
+                <tr><td><code>-S</code></td><td>Source file</td><td>Emits human-readable LLVM intermediate representation (IR).</td></tr>
+                <tr><td><code>--emit-llvm</code></td><td>Source file</td><td>Emits LLVM bitcode representation.</td></tr>
+                <tr><td><code>--dump-ast</code></td><td>Source file</td><td>Dumps internal Abstract Syntax Tree after parsing.</td></tr>
+                <tr><td><code>--version</code></td><td>None</td><td>Displays compiler version and machine contract version.</td></tr>
+                <tr><td><code>--help</code></td><td>None</td><td>Displays complete list of available flags and diagnostic controls.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3 id="exit-codes">Compiler Exit Codes <a href="#exit-codes" class="header-anchor">#</a></h3>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 20%;">Exit Code</th>
+                  <th style="width: 30%;">Status</th>
+                  <th style="width: 50%;">Meaning</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td><code>0</code></td><td>Success</td><td>Compilation, type-checking, or linking finished with zero diagnostics.</td></tr>
+                <tr><td><code>1</code></td><td>Syntax Error</td><td>Bison parser or Flex lexer failed to parse input source.</td></tr>
+                <tr><td><code>2</code></td><td>Semantic Failure</td><td>Type mismatch, undeclared identifier, or invalid constraint bound.</td></tr>
+                <tr><td><code>3</code></td><td>Codegen Refusal</td><td>Explicit refusal: compiler halts when a construct cannot be lowered soundly.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <!-- Refusal Invariants -->
+        <article class="doc-section" id="compiler-invariants">
+          <span class="section-tag">Compiler Reference</span>
+          <h2 id="compiler-invariants-heading">The Explicit Refusal Guarantee <a href="#compiler-invariants-heading" class="header-anchor">#</a></h2>
+          <p>
+            A core principle of the Fin compiler is <strong>truth in code generation</strong>:
+          </p>
+          <div class="callout callout-invariant">
+            <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+            </svg>
+            <div class="callout-body">
+              <strong>Non-Negotiable Refusal Invariant</strong>
+              <p>Whenever the code generator encounters a type, operator, or construct that cannot be soundly lowered to machine code, it reports an explicit refusal: <code>codegen: &lt;construct&gt; is not lowered yet</code>. It will NEVER silently omit execution code or substitute stub IR.</p>
+            </div>
+          </div>
+        </article>
+      </div>
+</main>
+
+    <!-- Right On This Page TOC -->
+    <aside class="toc-sidebar" aria-label="Table of contents">
+      <div class="toc-title">On this page</div>
+      <ul class="toc-list">
+        <li class="toc-item"><a href="#intro" class="toc-link active">Introduction</a></li>
+        <li class="toc-item"><a href="#installation" class="toc-link">Installation &amp; Build</a></li>
+        <li class="toc-item"><a href="#quickstart" class="toc-link">Quickstart Guide</a></li>
+        <li class="toc-item"><a href="#hello-world" class="toc-link">Hello, World!</a></li>
+        <li class="toc-item"><a href="#variables-types" class="toc-link">Variables &amp; Types</a></li>
+        <li class="toc-item"><a href="#control-flow" class="toc-link">Control Flow</a></li>
+        <li class="toc-item"><a href="#functions" class="toc-link">Functions &amp; Lambdas</a></li>
+        <li class="toc-item"><a href="#structs-classes" class="toc-link">Structs &amp; Methods</a></li>
+        <li class="toc-item"><a href="#interfaces" class="toc-link">Interfaces &amp; Generics</a></li>
+        <li class="toc-item"><a href="#enums" class="toc-link">Enums &amp; Tagged Unions</a></li>
+        <li class="toc-item"><a href="#pointers-memory" class="toc-link">Pointers &amp; Memory</a></li>
+        <li class="toc-item"><a href="#blame" class="toc-link">Blame Error Handling</a></li>
+        <li class="toc-item"><a href="#prototypes" class="toc-link">Prototypes {K,V}</a></li>
+        <li class="toc-item"><a href="#macros-specials" class="toc-link">Macros &amp; Specials</a></li>
+        <li class="toc-item"><a href="#stdlib-overview" class="toc-link">Standard Library Overview</a></li>
+        <li class="toc-item"><a href="#pipeline-architecture" class="toc-link">Compiler Pipeline Flow</a></li>
+        <li class="toc-item"><a href="#compiler-cli" class="toc-link">CLI Reference &amp; Flags</a></li>
+        <li class="toc-item"><a href="#compiler-invariants" class="toc-link">Refusal Invariants</a></li>
+      </ul>
+    </aside>
+
+  </div>
+
+  <!-- Search Modal Dialog -->
+  <div class="search-modal-backdrop" id="search-modal-backdrop" role="dialog" aria-modal="true" aria-label="Search Documentation">
+    <div class="search-modal">
+      <div class="search-modal-header">
+        <svg class="search-modal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        <input type="text" class="search-modal-input" id="search-input" placeholder="Search guides, stdlib functions, and syntax..." autocomplete="off" spellcheck="false">
+        <button type="button" class="search-modal-close-btn" id="search-close-btn">ESC</button>
+      </div>
+      <div class="search-results" id="search-results">
+        <!-- Live search results injected dynamically by app.js -->
+      </div>
+      <div class="search-modal-footer">
+        <div class="search-shortcuts">
+          <span class="search-shortcut-item"><kbd class="search-kbd">↑</kbd><kbd class="search-kbd">↓</kbd> to navigate</span>
+          <span class="search-shortcut-item"><kbd class="search-kbd">↵</kbd> to select</span>
+          <span class="search-shortcut-item"><kbd class="search-kbd">esc</kbd> to close</span>
+        </div>
+        <span>Fin Documentation Search</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="fin-toast" id="fin-toast" role="status" aria-live="polite"></div>
+
+  <!-- Footer -->
+  <footer class="site-footer">
+    <div class="footer-container">
+      <p>© 2026 The Fin Language Project. Built with clean systems precision.</p>
+      <div class="footer-links">
+        <a href="#hero">Overview</a>
+        <a href="#quickstart">Quickstart</a>
+        <a href="stdlib.html">Standard Library</a>
+        <a href="#pipeline-architecture">Compiler Flow</a>
+        <a href="#compiler-cli">CLI Reference</a>
+        <a href="https://github.com/Fin-Lang" target="_blank" rel="noopener noreferrer">GitHub</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

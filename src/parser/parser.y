@@ -9,6 +9,9 @@
 %define parse.error detailed
 
 %code requires {
+    #if defined(_MSVC_LANG) && !defined(YY_CPLUSPLUS)
+    #  define YY_CPLUSPLUS _MSVC_LANG
+    #endif
     #include <string>
     #include <vector>
     #include <memory>

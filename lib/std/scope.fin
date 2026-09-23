@@ -1,0 +1,178 @@
+// Scope: lexical scoping, symbol tables, and identifier resolution for compiler frontends.
+//
+// Models nested scopes (global -> module -> function -> block) with lexical shadowing,
+// declaration validation, and upward scope resolution traversal.
+
+namespace std {
+
+#[llvm_name="strcmp"]
+@define scope_strcmp(a: string, b: string) <int>;
+
+priv fun str_eq(a: string, b: string) <bool> {
+    if (a == null && b == null) { return true; }
+    if (a == null || b == null) { return false; }
+    return scope_strcmp(a, b) == 0;
+}
+
+// Symbol kinds
+#[export] pub fun sym_variable() <int> { return 1; }
+#[export] pub fun sym_constant() <int> { return 2; }
+#[export] pub fun sym_function() <int> { return 3; }
+#[export] pub fun sym_struct() <int> { return 4; }
+#[export] pub fun sym_interface() <int> { return 5; }
+#[export] pub fun sym_enum() <int> { return 6; }
+#[export] pub fun sym_type_alias() <int> { return 7; }
+#[export] pub fun sym_parameter() <int> { return 8; }
+#[export] pub fun sym_field() <int> { return 9; }
+
+// Returns the human-readable description of a symbol kind.
+#[export]
+pub fun symbol_kind_name(kind: int) <string> {
+    if (kind == 1) { return "variable"; }
+    if (kind == 2) { return "constant"; }
+    if (kind == 3) { return "function"; }
+    if (kind == 4) { return "struct"; }
+    if (kind == 5) { return "interface"; }
+    if (kind == 6) { return "enum"; }
+    if (kind == 7) { return "type_alias"; }
+    if (kind == 8) { return "parameter"; }
+    if (kind == 9) { return "field"; }
+    return "unknown";
+}
+
+#[export]
+pub struct Symbol {
+    pub:
+      name <string> = "",
+      kind <int> = 0,
+      type_name <string> = "",
+      is_pub <bool> = false,
+      is_mut <bool> = false,
+      line <int> = 1,
+      col <int> = 1,
+}
+
+#[export]
+pub struct Scope {
+    pub:
+      parent <&Scope> = null,
+      symbols <[Symbol]>,
+      count <int> = 0,
+      capacity <int> = 0,
+
+    pub:
+      fun has_local(self: &Self, name: string) <bool> {
+          for (let i <int> = 0; i < self.count; i++) {
+              if (str_eq(self.symbols[i].name, name)) {
+                  return true;
+              }
+          }
+          return false;
+      }
+
+      fun lookup_local(self: &Self, name: string) <Symbol> {
+          for (let i <int> = 0; i < self.count; i++) {
+              if (str_eq(self.symbols[i].name, name)) {
+                  return self.symbols[i];
+              }
+          }
+          return Symbol { name: "", kind: 0, type_name: "", is_pub: false, is_mut: false, line: 1, col: 1 };
+      }
+
+      fun insert_symbol(self: &Self, sym: Symbol) <bool> {
+          if (self.has_local(sym.name)) {
+              return false; // Duplicate symbol in same scope
+          }
+          if (self.count >= self.capacity) {
+              let next_cap <int> = self.capacity * 2;
+              if (next_cap < 32) { next_cap = 32; }
+              let next_arr <[Symbol]> = new [Symbol, next_cap]{};
+              for (let i <int> = 0; i < self.count; i++) {
+                  next_arr[i] = self.symbols[i];
+              }
+              delete self.symbols;
+              self.symbols = next_arr;
+              self.capacity = next_cap;
+          }
+          self.symbols[self.count] = sym;
+          self.count++;
+          return true;
+      }
+
+      fun has(self: &Self, name: string) <bool> {
+          if (self.has_local(name)) {
+              return true;
+          }
+          if (self.parent != null) {
+              return self.parent.has(name);
+          }
+          return false;
+      }
+
+      fun lookup(self: &Self, name: string) <Symbol> {
+          if (self.has_local(name)) {
+              return self.lookup_local(name);
+          }
+          if (self.parent != null) {
+              return self.parent.lookup(name);
+          }
+          return Symbol { name: "", kind: 0, type_name: "", is_pub: false, is_mut: false, line: 1, col: 1 };
+      }
+
+      fun depth(self: &Self) <int> {
+          if (self.parent == null) {
+              return 0;
+          }
+          return 1 + self.parent.depth();
+      }
+}
+
+// Allocates and initializes a new Scope with an optional parent scope.
+#[export]
+pub fun new_scope(parent: &Scope) <&Scope> {
+    let s <&Scope> = new Scope{};
+    s.parent = parent;
+    s.symbols = new [Symbol, 32]{};
+    s.count = 0;
+    s.capacity = 32;
+    return s;
+}
+
+// Releases a Scope and its allocated symbol array.
+#[export]
+pub fun free_scope(s: &Scope) <noret> {
+    if (s != null) {
+        delete s.symbols;
+        delete s;
+    }
+}
+
+// Factory helper for variable symbols.
+#[export]
+pub fun make_var_sym(name: string, type_name: string, is_mut: bool) <Symbol> {
+    return Symbol {
+        name: name,
+        kind: sym_variable(),
+        type_name: type_name,
+        is_pub: false,
+        is_mut: is_mut,
+        line: 1,
+        col: 1
+    };
+}
+
+// Factory helper for function symbols.
+#[export]
+pub fun make_fn_sym(name: string, sig_name: string, is_pub: bool) <Symbol> {
+    return Symbol {
+        name: name,
+        kind: sym_function(),
+        type_name: sig_name,
+        is_pub: is_pub,
+        is_mut: false,
+        line: 1,
+        col: 1
+    };
+}
+
+}

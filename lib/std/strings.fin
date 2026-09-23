@@ -172,8 +172,8 @@ pub fun find(haystack: string, needle: string) <int> {
   }
 
 #[export]
-pub fun contains(haystack: string, needle: string) <bool> {
-    return find(haystack, needle) >= 0;
+pub fun contains(s: string, sub: string) <bool> {
+    return find(s, sub) >= 0;
   }
 
 #[export]
@@ -374,18 +374,153 @@ pub fun replace_char(s: string, target: char, replacement: char) <string> {
   }
 
 #[export]
-pub fun repeat(s: string, times: int) <string> {
-    blame times >= 0, "cannot repeat a string a negative number of times";
+pub fun repeat(s: string, n: int) <string> {
+    blame n >= 0, "cannot repeat a string a negative number of times";
     let unit <int> = cast<int>(strings_len(s));
-    let scratch <[char]> = new [char, unit * times + 1]{};
+    let scratch <[char]> = new [char, unit * n + 1]{};
     let source <[char]> = to_chars(s);
-    for (let r <int> = 0; r < times; r++) {
+    for (let r <int> = 0; r < n; r++) {
         for (let i <int> = 0; i < unit; i++) {
             scratch[r * unit + i] = source[i];
           }
       }
-    let out <string> = from_chars(scratch, 0, unit * times);
+    let out <string> = from_chars(scratch, 0, unit * n);
     delete source;
+    delete scratch;
+    return out;
+  }
+
+#[export]
+pub fun reverse(s: string) <string> {
+    let n <int> = cast<int>(strings_len(s));
+    let bytes <[char]> = to_chars(s);
+    let scratch <[char]> = new [char, n + 1]{};
+    for (let i <int> = 0; i < n; i++) {
+        scratch[i] = bytes[n - 1 - i];
+      }
+    scratch[n] = cast<char>(0);
+    let out <string> = from_chars(scratch, 0, n);
+    delete bytes;
+    delete scratch;
+    return out;
+  }
+
+priv fun is_digit_char(c: char) <bool> {
+    return c >= '0' && c <= '9';
+  }
+
+#[export]
+pub fun is_numeric(s: string) <bool> {
+    let n <int> = cast<int>(strings_len(s));
+    if (n == 0) { return false; }
+    let bytes <[char]> = to_chars(s);
+    for (let i <int> = 0; i < n; i++) {
+        if (!is_digit_char(bytes[i])) {
+            delete bytes;
+            return false;
+          }
+      }
+    delete bytes;
+    return true;
+  }
+
+#[export]
+pub fun parse_int(s: string) <int> {
+    let total <int> = cast<int>(strings_len(s));
+    blame total > 0, "cannot parse an empty string as an integer";
+    let bytes <[char]> = to_chars(s);
+    let start <int> = 0;
+    let neg <bool> = false;
+    if (bytes[0] == '-') {
+        neg = true;
+        start = 1;
+    } else if (bytes[0] == '+') {
+        start = 1;
+    }
+    blame start < total, "cannot parse a lone sign as an integer";
+    let acc <long> = cast<long>(0);
+    for (let i <int> = start; i < total; i++) {
+        let c <char> = bytes[i];
+        if (!is_digit_char(c)) {
+            delete bytes;
+            blame false, "invalid character in integer string";
+        }
+        let digit <long> = cast<long>(cast<int>(c) - cast<int>('0'));
+        acc = acc * cast<long>(10) + digit;
+        if (neg) {
+            if (acc > cast<long>(2147483648)) {
+                delete bytes;
+                blame false, "integer underflow in parse_int";
+            }
+        } else {
+            if (acc > cast<long>(2147483647)) {
+                delete bytes;
+                blame false, "integer overflow in parse_int";
+            }
+        }
+    }
+    delete bytes;
+    if (neg) {
+        return cast<int>(-acc);
+    }
+    return cast<int>(acc);
+}
+
+#[export]
+pub fun count(s: string, sub: string) <int> {
+    let sub_len <int> = cast<int>(strings_len(sub));
+    if (sub_len == 0) { return 0; }
+    let total <int> = cast<int>(strings_len(s));
+    let occurrences <int> = 0;
+    let idx <int> = 0;
+    while (idx + sub_len <= total) {
+        let piece <string> = substr(s, idx, sub_len);
+        if (equals(piece, sub)) {
+            occurrences++;
+            idx += sub_len;
+          } else {
+            idx++;
+          }
+        free_str(piece);
+      }
+    return occurrences;
+  }
+
+#[export]
+pub fun pad_left(s: string, width: int, pad_char: char) <string> {
+    let n <int> = cast<int>(strings_len(s));
+    if (n >= width) { return clone(s); }
+    let diff <int> = width - n;
+    let scratch <[char]> = new [char, width + 1]{};
+    for (let i <int> = 0; i < diff; i++) {
+        scratch[i] = pad_char;
+      }
+    let bytes <[char]> = to_chars(s);
+    for (let i <int> = 0; i < n; i++) {
+        scratch[diff + i] = bytes[i];
+      }
+    scratch[width] = cast<char>(0);
+    let out <string> = from_chars(scratch, 0, width);
+    delete bytes;
+    delete scratch;
+    return out;
+  }
+
+#[export]
+pub fun pad_right(s: string, width: int, pad_char: char) <string> {
+    let n <int> = cast<int>(strings_len(s));
+    if (n >= width) { return clone(s); }
+    let scratch <[char]> = new [char, width + 1]{};
+    let bytes <[char]> = to_chars(s);
+    for (let i <int> = 0; i < n; i++) {
+        scratch[i] = bytes[i];
+      }
+    for (let i <int> = n; i < width; i++) {
+        scratch[i] = pad_char;
+      }
+    scratch[width] = cast<char>(0);
+    let out <string> = from_chars(scratch, 0, width);
+    delete bytes;
     delete scratch;
     return out;
   }

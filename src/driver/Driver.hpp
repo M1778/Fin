@@ -13,6 +13,18 @@ namespace fin {
 
 namespace fin {
 
+// Whether compiling `processedSource` (the root file after preprocessing)
+// requires the ambient `#[global] printf` from the bundled stdio module, so
+// the driver must load it before analysis. True when the file has an import
+// (an imported module is analysed against the same shared scope and may reach
+// the ambient name), when it spells a bare `printf` without declaring its own
+// top-level `@define printf` (which would shadow the ambient), or when it
+// queries ambient state with `@defined`. Comments, strings and character
+// literals are skipped, so a mention that is not code never forces the load,
+// while an `@define printf` inside one never excuses it. Anything this cannot
+// prove needless loads, so the answer errs towards loading, never skipping.
+bool needsAmbientStdio(const std::string& processedSource);
+
 class Driver {
 public:
     Driver(CompilerOptions opts);

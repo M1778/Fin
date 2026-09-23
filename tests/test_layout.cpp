@@ -479,11 +479,60 @@ TEST(Soundness_Layout, AnInterfaceHasNoLayout) {
     EXPECT_NE(r.refusal.find("I"), std::string::npos) << r.refusal;
 }
 
-TEST(Soundness_Layout, AnEnumHasNoLayout) {
+TEST(Soundness_Layout, AFieldlessEnumHasA32BitLayout) {
+    // ADR 0041: A fieldless enum has an agreed 4-byte / 32-bit layout.
     auto t = typeFromSource("enum Status { OK, FAIL }\n", "Status");
     ASSERT_TRUE(t != nullptr);
     LayoutEngine e;
-    EXPECT_FALSE(e.layoutOf(t).ok());
+    auto l = e.layoutOf(t);
+    ASSERT_TRUE(l.ok()) << l.refusal;
+    EXPECT_EQ(l.layout.size, 4u);
+    EXPECT_EQ(l.layout.align, 4u);
+}
+
+TEST(Soundness_Layout, AnEnumWithPayloadsHasTaggedUnionLayout) {
+    // ADR 0041: An enum with payloads lowers as a tagged union { i32, [MaxPayloadSize x i8] }.
+    auto t = typeFromSource("enum Color { RGB(int, int, int) }\n", "Color");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto l = e.layoutOf(t);
+    ASSERT_TRUE(l.ok()) << l.refusal;
+    EXPECT_EQ(l.layout.size, 16u);
+    EXPECT_EQ(l.layout.align, 4u);
+}
+
+TEST(Soundness_Layout, AnEnumWithMixedPayloadsAlignsToMaxPayloadAlignment) {
+    // ADR 0041: Tag is 4 bytes, max payload is 8 bytes aligned to 8, so tag is padded to 8
+    // and total size is 8 + 8 = 16 bytes with alignment 8.
+    auto t = typeFromSource("enum Mixed { Small(uint{8}), Large(ulong) }\n", "Mixed");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto l = e.layoutOf(t);
+    ASSERT_TRUE(l.ok()) << l.refusal;
+    EXPECT_EQ(l.layout.size, 16u);
+    EXPECT_EQ(l.layout.align, 8u);
+}
+
+TEST(Soundness_Layout, AnOptionLikeEnumHasExpectedSize) {
+    // ADR 0041: None has no payload, Some has 4-byte int. Tag is 4, payload is 4 -> size 8, align 4.
+    auto t = typeFromSource("enum Opt { None, Some(int) }\n", "Opt");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto l = e.layoutOf(t);
+    ASSERT_TRUE(l.ok()) << l.refusal;
+    EXPECT_EQ(l.layout.size, 8u);
+    EXPECT_EQ(l.layout.align, 4u);
+}
+
+TEST(Soundness_Layout, AnEnumVariantHoldingAPointerIsRefused) {
+    // An enum variant with a pointer payload has no layout: tracing collector support
+    // for reading discriminants dynamically across variants is not yet ruled.
+    auto t = typeFromSource("enum OptPtr { None, Some(&int) }\n", "OptPtr");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto l = e.layoutOf(t);
+    EXPECT_FALSE(l.ok());
+    EXPECT_NE(l.refusal.find("holds a pointer"), std::string::npos) << l.refusal;
 }
 
 TEST(Soundness_Layout, ADynamicTypeHasNoLayout) {
@@ -502,19 +551,55 @@ TEST(Soundness_Layout, AFunctionTypeHasNoLayout) {
     EXPECT_FALSE(e.layoutOf(fn).ok());
 }
 
-TEST(Soundness_Layout, ANullablePointerLaysOutAndANullableValueDoesNot) {
+TEST(Soundness_Layout, ANullablePointerAndNullableValueLayout) {
+    // ADR 0040:
     // `null` is the null pointer, so `(&T)?` needs no discriminant and is the same
-    // eight bytes. `int?` needs somewhere to put "absent", and where that goes --
-    // a flag byte, a reserved bit pattern, a separate word -- is not decided.
+    // eight bytes. A nullable value type (`int?`, `float?`, `struct?`) lowers as
+    // a tagged aggregate `{ T, bool }`: a payload of type T paired with a boolean
+    // presence flag (`has_value`).
     LayoutEngine e;
     auto nullablePtr = std::make_shared<NullableType>(std::make_shared<PointerType>(prim("int")));
-    auto layout = must(e.layoutOf(nullablePtr));
-    EXPECT_EQ(layout.size, 8u);
-    EXPECT_EQ(layout.align, 8u);
-    ASSERT_EQ(layout.pointers.size(), 1u) << "a nullable pointer is still a traced slot";
-    EXPECT_EQ(layout.pointers[0].offset, 0u);
+    auto layoutPtr = must(e.layoutOf(nullablePtr));
+    EXPECT_EQ(layoutPtr.size, 8u);
+    EXPECT_EQ(layoutPtr.align, 8u);
+    ASSERT_EQ(layoutPtr.pointers.size(), 1u) << "a nullable pointer is still a traced slot";
+    EXPECT_EQ(layoutPtr.pointers[0].offset, 0u);
 
-    EXPECT_FALSE(e.layoutOf(std::make_shared<NullableType>(prim("int"))).ok());
+    // Nullable scalar: int? is { int, bool } -> payload 4, align 4, bool 1, padded to 8 bytes, align 4
+    auto nullableInt = std::make_shared<NullableType>(prim("int"));
+    auto layoutInt = must(e.layoutOf(nullableInt));
+    EXPECT_EQ(layoutInt.size, 8u);
+    EXPECT_EQ(layoutInt.align, 4u);
+    EXPECT_TRUE(layoutInt.pointers.empty());
+
+    // Nullable 64-bit int: long? is { long, bool } -> payload 8, align 8, bool 1, padded to 16 bytes, align 8
+    auto nullableLong = std::make_shared<NullableType>(prim("long"));
+    auto layoutLong = must(e.layoutOf(nullableLong));
+    EXPECT_EQ(layoutLong.size, 16u);
+    EXPECT_EQ(layoutLong.align, 8u);
+
+    // Nullable bool: bool? is { bool, bool } -> payload 1, align 1, bool 1, total 2 bytes, align 1
+    auto nullableBool = std::make_shared<NullableType>(prim("bool"));
+    auto layoutBool = must(e.layoutOf(nullableBool));
+    EXPECT_EQ(layoutBool.size, 2u);
+    EXPECT_EQ(layoutBool.align, 1u);
+
+    // Nullable struct with pointer:
+    auto sWithPtr = std::make_shared<StructType>("WithPtr");
+    sWithPtr->defineField("p", std::make_shared<PointerType>(prim("int")), true);
+    auto nullableStruct = std::make_shared<NullableType>(sWithPtr);
+    auto layoutStruct = must(e.layoutOf(nullableStruct));
+    EXPECT_EQ(layoutStruct.size, 16u);
+    EXPECT_EQ(layoutStruct.align, 8u);
+    ASSERT_EQ(layoutStruct.pointers.size(), 1u);
+    EXPECT_EQ(layoutStruct.pointers[0].offset, 0u);
+
+    // Struct containing a nullable value field:
+    auto sWithNullableVal = std::make_shared<StructType>("A");
+    sWithNullableVal->defineField("b", nullableInt, true);
+    auto layoutA = must(e.layoutOf(sWithNullableVal));
+    EXPECT_EQ(layoutA.size, 8u);
+    EXPECT_EQ(layoutA.align, 4u);
 }
 
 TEST(Soundness_Layout, ARefusalInAFieldNamesTheFieldAndSurvivesToTheOuterType) {

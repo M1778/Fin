@@ -28,6 +28,6 @@ namespace fin {
 // These are `kFincVersion`, not `FINC_VERSION`: the macro owns that spelling and
 // a same-named constant would be rewritten by the preprocessor.
 inline constexpr const char* kFincVersion = FINC_VERSION;
-inline constexpr int kFincContractVersion = 1;
+inline constexpr int kFincContractVersion = 2;
 
 }

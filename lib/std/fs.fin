@@ -1,0 +1,180 @@
+// Filesystem operations: reading, writing, appending, query, and removal.
+//
+// Reaches standard C library I/O facilities (fopen, fclose, fseek, ftell,
+// fread, fwrite, fputs, remove).
+//
+// Every string returned by `read_to_string` is dynamically allocated and
+// caller-owned. `free_file_content` is provided to release it.
+
+namespace std {
+
+#[llvm_name="fopen"]
+@define fs_fopen(filename: string, mode: string) <&void>;
+
+#[llvm_name="fclose"]
+@define fs_fclose(stream: &void) <int>;
+
+#[llvm_name="fseek"]
+@define fs_fseek(stream: &void, offset: long, whence: int) <int>;
+
+#[llvm_name="ftell"]
+@define fs_ftell(stream: &void) <long>;
+
+#[llvm_name="fread"]
+@define fs_fread(ptr: string, size: ulong, count: ulong, stream: &void) <ulong>;
+
+#[llvm_name="fwrite"]
+@define fs_fwrite(ptr: string, size: ulong, count: ulong, stream: &void) <ulong>;
+
+#[llvm_name="fputs"]
+@define fs_fputs(s: string, stream: &void) <int>;
+
+#[llvm_name="remove"]
+@define fs_remove(filename: string) <int>;
+
+#[llvm_name="calloc"]
+@define fs_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="free"]
+@define fs_free(p: string) <noret>;
+
+#[export]
+pub fun free_file_content(s?: string) <noret> {
+    if (s != null) {
+        fs_free(s?);
+    }
+}
+
+#[export]
+pub fun file_exists(path: string) <bool> {
+    if (path == null) { return false; }
+    let fp <&void> = fs_fopen(path, "rb");
+    if (fp == null) { return false; }
+    fs_fclose(fp);
+    return true;
+}
+
+#[export]
+pub fun remove_file(path: string) <bool> {
+    if (path == null) { return false; }
+    return fs_remove(path) == 0;
+}
+
+#[export]
+pub fun file_size(path: string) <long> {
+    if (path == null) { return cast<long>(-1); }
+    let fp <&void> = fs_fopen(path, "rb");
+    if (fp == null) { return cast<long>(-1); }
+    let seek_res <int> = fs_fseek(fp, cast<long>(0), 2);
+    if (seek_res != 0) {
+        fs_fclose(fp);
+        return cast<long>(-1);
+    }
+    let sz <long> = fs_ftell(fp);
+    fs_fclose(fp);
+    return sz;
+}
+
+#[export]
+pub fun? read_to_string(path: string) <string> {
+    if (path == null) { return null; }
+    let fp <&void> = fs_fopen(path, "rb");
+    if (fp == null) { return null; }
+
+    let seek_end <int> = fs_fseek(fp, cast<long>(0), 2);
+    if (seek_end != 0) {
+        fs_fclose(fp);
+        return null;
+    }
+    let sz <long> = fs_ftell(fp);
+    if (sz < cast<long>(0)) {
+        fs_fclose(fp);
+        return null;
+    }
+    fs_fseek(fp, cast<long>(0), 0);
+
+    let u_sz <ulong> = cast<ulong>(sz);
+    let buf <string> = fs_calloc(u_sz + cast<ulong>(1), cast<ulong>(1));
+    if (buf == null) {
+        fs_fclose(fp);
+        return null;
+    }
+    if (u_sz > cast<ulong>(0)) {
+        let n_read <ulong> = fs_fread(buf, cast<ulong>(1), u_sz, fp);
+    }
+    fs_fclose(fp);
+    return buf;
+}
+
+#[export]
+pub fun write_string(path: string, content: string) <bool> {
+    if (path == null) { return false; }
+    if (content == null) { return false; }
+    let fp <&void> = fs_fopen(path, "wb");
+    if (fp == null) { return false; }
+    let written <int> = fs_fputs(content, fp);
+    fs_fclose(fp);
+    return written >= 0;
+}
+
+#[export]
+pub fun append_string(path: string, content: string) <bool> {
+    if (path == null) { return false; }
+    if (content == null) { return false; }
+    let fp <&void> = fs_fopen(path, "ab");
+    if (fp == null) { return false; }
+    let written <int> = fs_fputs(content, fp);
+    fs_fclose(fp);
+    return written >= 0;
+}
+
+#[llvm_name="mkdir"]
+@define fs_mkdir(path: string, mode: int) <int>;
+
+#[llvm_name="rmdir"]
+@define fs_rmdir(path: string) <int>;
+
+#[llvm_name="rename"]
+@define fs_rename(old_path: string, new_path: string) <int>;
+
+#[llvm_name="opendir"]
+@define fs_opendir(name: string) <&void>;
+
+#[llvm_name="closedir"]
+@define fs_closedir(dirp: &void) <int>;
+
+#[export]
+pub fun create_dir(path: string) <bool> {
+    if (path == null) { return false; }
+    // 0755 octal = 493 decimal
+    return fs_mkdir(path, 493) == 0;
+}
+
+#[export]
+pub fun remove_dir(path: string) <bool> {
+    if (path == null) { return false; }
+    return fs_rmdir(path) == 0;
+}
+
+#[export]
+pub fun rename_path(old_path: string, new_path: string) <bool> {
+    if (old_path == null || new_path == null) { return false; }
+    return fs_rename(old_path, new_path) == 0;
+}
+
+#[export]
+pub fun is_dir(path: string) <bool> {
+    if (path == null) { return false; }
+    let dir <&void> = fs_opendir(path);
+    if (dir == null) { return false; }
+    fs_closedir(dir);
+    return true;
+}
+
+#[export]
+pub fun is_file(path: string) <bool> {
+    if (path == null) { return false; }
+    return file_exists(path) && !is_dir(path);
+}
+
+}

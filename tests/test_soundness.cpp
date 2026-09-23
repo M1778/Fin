@@ -11604,38 +11604,17 @@ TEST(Soundness_MemberReference, ANameThatIsNeitherAFieldNorAMethodStillReports) 
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_MemberReference, AMethodReferenceDoesNotCarryItsReceiver) {
-    // collection.fin:76 and :77 as the corpus writes them. The field type names the
-    // receiver and the registered method type does not, so the reference resolves and
-    // then fails to fit -- two diagnostics that changed identity rather than going
-    // away, from `Undefined variable '__get'` to a disagreement about the signature.
-    //
-    // Booked and not fixed because the corpus does not say which side is the mistake.
-    // The receiver slot of a function *type* is spelled `Self` four times
-    // (stdlib/collection.fin:76, :77, stdlib/hashmap.fin:50, :51) and `&Self` once
-    // (stdlib/collection.fin:18), while every method the corpus declares takes
-    // `self: &Self` and no method anywhere declares `self: Self`. So a fix needs two
-    // answers that are not here: whether a method reference prepends its receiver, and
-    // whether a `Self` in that slot matches a `&Self` receiver -- the second being the
-    // pointer-reads-as-pointee question `tests/samples/const.fin:82,84,89,102` raises
-    // and cannot answer on its own either.
+TEST(Soundness_MemberReference, AMethodReferenceCarriesItsReceiver) {
+    // collection.fin:76 and :77 as the corpus writes them. When a method is referenced
+    // as a function value, its type carries the receiver parameter when expected by
+    // the target function type annotation (e.g. `fn(Self, int) => int`).
     const FincRun r = compile(
         "struct Coll {\n"
         "  pub getitem <fn(Self, int) => int> = __get,\n"
         "  pub fun __get(self: &Self, index: int) <int> { return index; }\n"
         "}\n"
         "fun main() <noret> { }\n");
-    EXPECT_NE(r.exitCode, 0)
-        << "GOOD NEWS: a method reference fits a field type that names the receiver.\n"
-           "Invert this test -- the program should compile clean -- and rename it to\n"
-           "Soundness_MemberReference.AMethodReferenceCarriesItsReceiver.\n"
-        << stripAnsi(r.err);
-
-    // The name is not what is reported any more. This half is what stops the test from
-    // passing for the old reason if the resolution above is ever lost.
-    EXPECT_EQ(stripAnsi(r.err).find("Undefined variable"), std::string::npos)
-        << "the method name resolves; only its signature disagrees\n"
-        << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
 // ===========================================================================
@@ -12195,6 +12174,120 @@ TEST(Soundness_SpecialCalls, ThePlainSpellingResolvesToo) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
+TEST(Soundness_SpecialCalls, AllocReturnsPointerToVoid) {
+    const FincRun r = compile(
+        "fun test_alloc() <&void> {\n"
+        "  return @Alloc(64);\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SpecialCalls, AllocRequiresSingleIntegerArgument) {
+    const FincRun r1 = compile(
+        "fun main() <noret> {\n"
+        "  let p <auto> = @Alloc(\"not_an_int\");\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r1.err).find("must be an integer"), std::string::npos)
+        << stripAnsi(r1.err);
+
+    const FincRun r2 = compile(
+        "fun main() <noret> {\n"
+        "  let p <auto> = @Alloc(1, 2);\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r2.err).find("'@Alloc' expects 1 argument"), std::string::npos)
+        << stripAnsi(r2.err);
+}
+
+TEST(Soundness_SpecialCalls, FreeReturnsVoidAndRequiresPointer) {
+    const FincRun r1 = compile(
+        "fun test_free(p: &void) <noret> {\n"
+        "  @Free(p);\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r1.exitCode, 0) << stripAnsi(r1.err);
+
+    const FincRun r2 = compile(
+        "fun main() <noret> {\n"
+        "  @Free(42);\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r2.err).find("must be a pointer"), std::string::npos)
+        << stripAnsi(r2.err);
+
+    const FincRun r3 = compile(
+        "fun main() <noret> {\n"
+        "  @Free();\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r3.err).find("'@Free' expects 1 argument"), std::string::npos)
+        << stripAnsi(r3.err);
+}
+
+TEST(Soundness_SpecialCalls, ImplementsEvaluatesConformance) {
+    const FincRun r = compile(
+        "interface Greeter {\n"
+        "  pub fun greet() <noret>;\n"
+        "}\n"
+        "struct Person : <Greeter> {\n"
+        "  pub fun greet(self: &Self) <noret> {}\n"
+        "}\n"
+        "fun test_implements(iface: $interface, struct_: $struct) <bool> {\n"
+        "  return @implements(struct_, iface);\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  const b <bool> = @implements(Person, Greeter);\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SpecialCalls, ImplementsChecksArgumentTypes) {
+    const FincRun r1 = compile(
+        "fun main() <noret> {\n"
+        "  const b <bool> = @implements(1, 2);\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r1.err).find("must be a struct"), std::string::npos) << stripAnsi(r1.err);
+
+    const FincRun r2 = compile(
+        "fun main() <noret> {\n"
+        "  const b <bool> = @implements(1);\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r2.err).find("'@implements' expects 2 arguments"), std::string::npos) << stripAnsi(r2.err);
+}
+
+TEST(Soundness_SpecialCalls, DefinedChecksSymbolExistence) {
+    const FincRun r = compile(
+        "@define existing_extern() <noret>;\n"
+        "fun main() <noret> {\n"
+        "  const b1 <bool> = @defined(\"existing_extern\");\n"
+        "  const b2 <bool> = @defined(\"missing_extern\");\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SpecialCalls, DefinedRequiresStringLiteral) {
+    const FincRun r1 = compile(
+        "fun main() <noret> {\n"
+        "  const b <bool> = @defined(123);\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r1.err).find("must be a string"), std::string::npos) << stripAnsi(r1.err);
+
+    const FincRun r2 = compile(
+        "fun main() <noret> {\n"
+        "  const b <bool> = @defined();\n"
+        "}\n");
+    EXPECT_NE(stripAnsi(r2.err).find("'@defined' expects 1 argument"), std::string::npos) << stripAnsi(r2.err);
+}
+
+TEST(Soundness_SpecialCalls, GuardedDefinePublishesToSubsequentCode) {
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "  if (!@defined(\"puts\")) {\n"
+        "    @define puts(s: string) <noret>;\n"
+        "  }\n"
+        "  puts(\"hello\");\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
 // ---------------------------------------------------------------------------
 // A top-level function or `@special` is visible to the whole file, including
 // above its own declaration.
@@ -12315,18 +12408,12 @@ TEST(Soundness_DeclarationOrder, ALocalStillWinsOverAHoistedFunction) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_DeclarationOrder, AFunctionWhoseParameterIsDeclaredBelowIsNotHoisted) {
-    // The boundary the pre-pass draws, and why `AStructIsNotVisibleAboveItself`
-    // below is still a defect: `S` is not registered when the pre-pass reaches
-    // `take`, so `take`'s signature does not resolve and is skipped. Skipping is
-    // the deliberate half -- registering the sentinel instead would type-check
-    // the call above against a signature nobody wrote.
+TEST(Soundness_DeclarationOrder, AFunctionWhoseParameterIsDeclaredBelowIsHoisted) {
     const FincRun r = compile(
         "fun main() <noret> { const x <int> = take(S{v: 1}); }\n"
         "fun take(s: S) <int> { return s.v; }\n"
         "struct S { pub v <int>, }\n");
-    EXPECT_NE(stripAnsi(r.err).find("Undefined function or type 'take'"), std::string::npos)
-        << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
 TEST(Soundness_DeclarationOrder, ANamespaceSiblingIsVisibleAboveItself) {
@@ -12345,13 +12432,12 @@ TEST(Soundness_DeclarationOrder, ANamespaceSiblingIsVisibleAboveItself) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_DeclarationOrder, AStructIsNotVisibleAboveItself) {
+TEST(Soundness_DeclarationOrder, AStructIsVisibleAboveItself) {
     const FincRun r = compile(
         "fun make() <S> { return S{x: 1}; }\n"
         "struct S { pub x <int>, }\n"
         "fun main() <noret> { }\n");
-    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'S'"), std::string::npos)
-        << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
 TEST(Soundness_DeclarationOrder, AStructsMethodSeesAMethodBelowIt) {
