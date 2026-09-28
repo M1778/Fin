@@ -86,7 +86,7 @@ if(FIN_WITH_LLVM)
         # importing shared-library dependencies from LLVM's CMake targets.
         execute_process(
             COMMAND "${LLVM_TOOLS_BINARY_DIR}/llvm-config" --link-static
-                    --libfiles --system-libs core support bitwriter bitreader mc
+                    --libfiles --system-libs core support bitwriter bitreader mc passes
                     native
             OUTPUT_VARIABLE fin_llvm_link_flags
             OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -102,7 +102,7 @@ if(FIN_WITH_LLVM)
                 "where one was expected.")
         endif()
         llvm_map_components_to_libnames(fin_llvm_libs
-            Core Support BitWriter BitReader MC
+            Core Support BitWriter BitReader MC Passes
             native)
         message(STATUS "No monolithic LLVM target (MSVC); linking components: "
             "${fin_llvm_libs}")
