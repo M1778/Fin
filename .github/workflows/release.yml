@@ -133,8 +133,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
             runner: windows-2022
             conan_arch: x86_64
-            generator: Visual Studio 17 2022
-            vs_platform: x64
+            generator: Ninja
     env:
       FIN_VERSION: ${{ needs.preflight.outputs.version }}
       FIN_TARGET: ${{ matrix.target }}
@@ -150,6 +149,7 @@ jobs:
             --output-folder=build \
             --build=missing \
             -pr:a=conan/profiles/fin \
+            -c tools.cmake.cmaketoolchain:generator=Ninja \
             -s arch=${{ matrix.conan_arch }} \
             -s build_type="$FIN_BUILD_TYPE"
           tc="$(find build -name conan_toolchain.cmake -print | head -n 1)"
@@ -161,7 +161,6 @@ jobs:
                 -DFIN_WITH_LLVM=ON
                 -DFIN_LLVM_MAJOR="$FIN_LLVM_MAJOR"
                 -DLLVM_DIR="$LLVM_DIR")
-          if [ -n "${{ matrix.vs_platform }}" ]; then args+=(-A "${{ matrix.vs_platform }}"); fi
           cmake "${args[@]}"
           cmake --build build --config "$FIN_BUILD_TYPE" --parallel
           ctest --test-dir build --build-config "$FIN_BUILD_TYPE" --output-on-failure --no-tests=error

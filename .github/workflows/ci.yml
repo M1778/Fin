@@ -52,14 +52,12 @@ jobs:
             runner: windows-2022
             conan_arch: x86_64
             tar_arch: x86_64
-            generator: Visual Studio 17 2022
-            vs_platform: x64
+            generator: Ninja
           - name: windows-arm64
             runner: windows-11-arm
             conan_arch: armv8
             tar_arch: aarch64
-            generator: Visual Studio 17 2022
-            vs_platform: ARM64
+            generator: Ninja
 
     steps:
       - uses: actions/checkout@v4
@@ -86,6 +84,7 @@ jobs:
             --output-folder=build \
             --build=missing \
             -pr:a=conan/profiles/fin \
+            -c tools.cmake.cmaketoolchain:generator=Ninja \
             -s arch=${{ matrix.conan_arch }} \
             -s build_type="$FIN_BUILD_TYPE"
 
@@ -118,9 +117,6 @@ jobs:
                 -DFIN_WITH_LLVM=ON
                 -DFIN_LLVM_MAJOR="$FIN_LLVM_MAJOR"
                 -DLLVM_DIR="$LLVM_DIR")
-          if [ -n "${{ matrix.vs_platform }}" ]; then
-            args+=(-A "${{ matrix.vs_platform }}")
-          fi
           cmake "${args[@]}"
 
       - name: This build has the pinned backend in it
@@ -245,6 +241,7 @@ jobs:
             build/finc
             build/finc.exe
             build/tests/Release/fin_tests.exe
+            build/tests/fin_tests.exe
             build/Testing/Temporary/LastTest.log
             build/CMakeCache.txt
 

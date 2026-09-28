@@ -87,12 +87,12 @@ if(FIN_WITH_LLVM)
         execute_process(
             COMMAND "${LLVM_TOOLS_BINARY_DIR}/llvm-config" --link-static
                     --libfiles --system-libs core support bitwriter bitreader mc
-                    nativecodegen nativeasmparser
+                    native
             OUTPUT_VARIABLE fin_llvm_link_flags
             OUTPUT_STRIP_TRAILING_WHITESPACE
             COMMAND_ERROR_IS_FATAL ANY)
         separate_arguments(fin_llvm_libs UNIX_COMMAND "${fin_llvm_link_flags}")
-    elseif(NOT TARGET LLVM)
+    elseif(NOT TARGET LLVM OR FIN_STATIC_LLVM)
         if(NOT MSVC)
             message(FATAL_ERROR
                 "LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR} does not export "
@@ -103,7 +103,7 @@ if(FIN_WITH_LLVM)
         endif()
         llvm_map_components_to_libnames(fin_llvm_libs
             Core Support BitWriter BitReader MC
-            nativecodegen nativeasmparser)
+            native)
         message(STATUS "No monolithic LLVM target (MSVC); linking components: "
             "${fin_llvm_libs}")
     endif()
