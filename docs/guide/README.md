@@ -1,68 +1,57 @@
-# The Fin guide
+# The Fin language guide
 
-A tutorial introduction to the Fin programming language, in reading order. Each chapter
-assumes the ones before it and introduces every construct before it uses one.
+For an AI agent writing an application, start with the shorter
+[agent guide](../agent-guide.md). These chapters explain individual features and
+include complete programs you can copy into a `.fin` file.
 
-1. [Quick start](01-quick-start.md) — building `finc`, compiling and running a hello-world,
-   the flags a beginner needs, and how to read a diagnostic.
-2. [Variables and types](02-variables-and-types.md) — `let`, the angle-bracket annotation,
-   the builtin types, `auto`, `const`, `readonly`, type aliases, nullability, scopes.
-3. [Operators and expressions](03-operators-and-expressions.md) — arithmetic, comparison,
-   shifts, the conditional expression (`cond : then ? otherwise`), `cast`, `sizeof`,
-   `blame`.
-4. [Control flow](04-control-flow.md) — `if`/`else`, `for`, `foreach`, `while`, `do`/`while`,
-   the bare brace as a scope opener, lifetimes across scopes.
-5. [Functions](05-functions.md) — declaration syntax, the return type's position, parameters,
-   `noret`, function types, the three lambda forms, generic functions, `@define`.
-6. [Structs and classes](06-structs-and-classes.md) — fields, methods and `self`, static
-   methods, visibility, generics, operator overloading, constructors, `class` and
-   inheritance.
-7. [Interfaces and generics](07-interfaces-and-generics.md) — interfaces, `implements` at the
-   declaration and in a block, bounds, monomorphisation versus erasure, meta-types.
-8. [Enums](08-enums-and-pattern-data.md) — members and discriminants, payloads, positional
-   access, generic enums, attaching methods, enum reflection.
-9. [Arrays and pointers](09-arrays-and-pointers.md) — `[T, N]` and `[T]`, `.length`,
-   `new [T, n]`, references and pointers, `new`/`delete`, where memory management lives.
-10. [Modules and imports](10-modules-and-imports.md) — the four `import` forms, the `::`
-    selector, search paths, `namespace`, `pub`/`#[export]`, `extern ... as`, `#[global]`.
-11. [Macros, attributes and the preprocessor](11-macros-and-preprocessor.md) — `@macro` and
-    `quote`, the `#cdef` family, attributes, the `%{ ... }%` block, compiler operations.
-12. [A tour of the standard library](12-standard-library-tour.md) — what is in `lib/std` and
-    how to use each module.
+| Chapter | Contents |
+| --- | --- |
+| [1. Quick start](01-quick-start.md) | Build the compiler, compile a program, diagnose setup failures |
+| [2. Variables and types](02-variables-and-types.md) | Annotations, scalar widths, conversion, constants, nullability |
+| [3. Expressions](03-operators-and-expressions.md) | Operators, conditional order, casts, assertions, error handling |
+| [4. Control flow](04-control-flow.md) | Branches, loops, scopes, recursion |
+| [5. Functions](05-functions.md) | Parameters, callbacks, lambdas, defaults, foreign functions |
+| [6. Structs and classes](06-structs-and-classes.md) | Fields, methods, construction, cleanup, inheritance |
+| [7. Interfaces and generics](07-interfaces-and-generics.md) | Bounds, implementations, runtime interface references |
+| [8. Enums](08-enums-and-pattern-data.md) | Tags, payload syntax, runtime limits |
+| [9. Arrays and pointers](09-arrays-and-pointers.md) | Buffers, prototypes, allocation, ownership |
+| [10. Modules](10-modules-and-imports.md) | Imports, names, paths, multi-file limits |
+| [11. Macros and preprocessing](11-macros-and-preprocessor.md) | Quotes, `format!`, attributes, compiler components |
+| [12. Standard library](12-standard-library-tour.md) | Module names, signatures, usable paths and limits |
 
-## How to read this guide
+## What an example promises
 
-Every code example was compiled with `finc` before it was written down. Fin is a language
-under construction, and the two states a construct can be in are distinguished throughout:
+A plain `fin` code fence is a **complete runnable program**. Save it as `example.fin`,
+run `finc example.fin -o example`, then run the executable. A following `output`
+block gives exact stdout. Some programs instead check their result using `blame`.
 
-- **type-checks and builds** — `finc file.fin -o out` produces a working executable. Most of
-  the language is here.
-- **type-checks only** — `finc file.fin` exits 0, and `-o` reports `codegen: ... is not
-  lowered yet`. Where a chapter documents such a construct it says so in a sentence rather
-  than leaving you to discover it.
+Other fences name their scope explicitly:
 
-Nothing in this guide is documented from a design draft alone. Where a draft describes
-something the compiler does not do, the guide states the limitation instead of the feature.
+| Fence | Meaning |
+| --- | --- |
+| `fin fragment` | Syntax excerpt; surrounding declarations or files are required |
+| `fin check` | Complete input that must pass frontend checking; no claim about execution |
+| `fin error` | Deliberately rejected by the frontend |
+| `fin build-error` | Passes frontend checking; code generation must reject it |
 
-## Where the language is defined
+Run all classified examples from the repository root:
 
-The sample corpus is the specification. `tests/samples/*.fin` and `tests/samples/stdlib/*.fin`
-carry `//@` expectations that decide whether the compiler is at fault for a given construct,
-and `docs/adr/0008-sample-authority-is-per-expectation.md` explains why authority lives in
-those per-construct expectations rather than in per-file labels.
+```sh
+python3 tests/tools/check_docs.py --finc build/finc
+```
 
-`docs/adr/` holds the architecture decisions. They are short, and each one records why a
-choice was made rather than merely what it was. The ones this guide leans on most:
+The checker builds and runs every runnable fence, compares displayed stdout, and
+checks the expected exit code of negative examples. Fragments are explicitly
+excluded. It uses this checkout's `lib/std` and temporary output files.
 
-- `0005` — the conditional expression's operand order
-- `0011` — a bare brace opens a scope
-- `0018` — a constraint set is a bound, never a storage type
-- `0019`, `0027` — the representation of an interface reference
-- `0021` — `#[global]` and what it does and does not answer
-- `0023` — the shape of a `@macro`
-- `0025` — a dynamic array is a pointer and a length
-- `0026` — a class is a struct with a base, and `try` is a scope
+## Implementation versus design
 
-`docs/finc-interface-contract.md` specifies the compiler's command-line and diagnostic
-surface for tooling. `docs/compiler-api.md` specifies the compile-time API that chapter 11's
-special functions belong to, which is designed and not yet built.
+The [ADRs](../adr/) record intended language rules. The `//@` expectations in
+[the sample corpus](../../tests/samples/) specify individual accepted or rejected
+constructs; an `unimplemented` sample is not a working application template.
+[Backend tests](../../tests/test_codegen.cpp) check generated programs.
+
+[The compiler API document](../compiler-api.md) contains design beyond the executed
+compiler. Library headers and old handoff notes can also describe earlier states;
+use current code and runnable checks to settle implementation questions. Report
+contradictions instead of silently treating a bug as a new language rule.

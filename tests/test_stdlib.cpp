@@ -1,3 +1,4 @@
+#include "utils/Process.hpp"
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -82,18 +83,12 @@ std::string buildAndRun(const std::string& code, const std::vector<std::string>&
         return "compile failed: " + stripAnsi(c.err);
     }
     const fs::path outPath = uniqueTempPath("fin_stdlib_out");
-    const std::string cmd = "'" + exe.string() + "' > '" + outPath.string() + "' 2>&1";
-    const int status = std::system(cmd.c_str());
-    const std::string out = readWholeFile(outPath.string());
+    const int status = fin::runProcess({exe.string()}, outPath.string(), outPath.string());
+    const std::string out = readProcessOutput(outPath.string());
     std::error_code ec;
     fs::remove(exe, ec);
     fs::remove(outPath, ec);
-#ifdef WIFEXITED
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
-        return "program exited non-zero, output: " + out;
-#else
     if (status != 0) return "program exited non-zero, output: " + out;
-#endif
     return out;
 }
 

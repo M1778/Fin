@@ -1,0 +1,4 @@
+pub struct Box<T> {
+    pub value <T>,
+    pub fun get(self: &Self) <T> { return self.value; }
+}

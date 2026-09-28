@@ -1,3 +1,4 @@
+#include "utils/Process.hpp"
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -50,16 +51,6 @@ using namespace fin::testing;
 
 namespace {
 
-std::string shellQuoteLocal(const std::string& s) {
-    std::string out = "'";
-    for (char c : s) {
-        if (c == '\'') out += "'\\''";
-        else out += c;
-    }
-    out += "'";
-    return out;
-}
-
 // The compile and the run, together, because for a backend test neither half is
 // evidence alone: a compile that succeeds and produces a binary that crashes is
 // the failure this suite exists to catch, and a run that is never reached would
@@ -102,16 +93,9 @@ Built build(const std::string& code) {
 
     if (b.compileExit == 0 && fs::exists(exe)) {
         fs::path outPath = uniqueTempPath("fin_cg_out");
-        std::string cmd = shellQuoteLocal(exe.string()) + " > " +
-                          shellQuoteLocal(outPath.string()) + " 2>&1";
-        int status = std::system(cmd.c_str());
-#ifdef WIFEXITED
-        b.runExit = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-#else
-        b.runExit = status;
-#endif
+        b.runExit = fin::runProcess({exe.string()}, outPath.string(), outPath.string());
         b.ran = true;
-        b.out = readWholeFile(outPath.string());
+        b.out = readProcessOutput(outPath.string());
         std::error_code ec;
         fs::remove(outPath, ec);
     }
@@ -322,18 +306,12 @@ BACKEND_TEST(Soundness_Codegen, TwoObjectsFromCompileOnlyLinkIntoAProgram) {
         "fun main() <noret> { printf(\"%d\\n\", twice(21)); }\n", mainObj);
     ASSERT_EQ(mainPart.exitCode, 0) << mainPart.why();
 
-    const char* fromEnv = std::getenv("FIN_CC");
-    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
     const fs::path outPath = uniqueTempPath("fin_linked_out");
-    const std::string link = shellQuoteLocal(cc) + " " + shellQuoteLocal(libObj.string()) +
-                             " " + shellQuoteLocal(mainObj.string()) + " -o " +
-                             shellQuoteLocal(exe.string());
-    ASSERT_EQ(std::system(link.c_str()), 0) << link;
+    ASSERT_EQ(fin::runProcess(fin::linkCommand(
+        {libObj.string(), mainObj.string()}, exe.string())), 0);
 
-    const std::string run = shellQuoteLocal(exe.string()) + " > " +
-                            shellQuoteLocal(outPath.string()) + " 2>&1";
-    std::system(run.c_str());
-    EXPECT_EQ(readWholeFile(outPath.string()), "42\n");
+    EXPECT_EQ(fin::runProcess({exe.string()}, outPath.string(), outPath.string()), 0);
+    EXPECT_EQ(readProcessOutput(outPath.string()), "42\n");
 
     std::error_code ec;
     for (const fs::path& p : {libObj, mainObj, exe, outPath}) fs::remove(p, ec);
@@ -409,10 +387,8 @@ BACKEND_TEST(Soundness_Codegen, AnOptimisedBuildRunsTheSameProgram) {
     ASSERT_TRUE(fs::exists(exe)) << stripAnsi(c.err);
 
     const fs::path outPath = uniqueTempPath("fin_opt_out");
-    const std::string cmd = shellQuoteLocal(exe.string()) + " > " +
-                            shellQuoteLocal(outPath.string()) + " 2>&1";
-    EXPECT_EQ(std::system(cmd.c_str()), 0);
-    EXPECT_EQ(readWholeFile(outPath.string()), "30\n");
+    EXPECT_EQ(fin::runProcess({exe.string()}, outPath.string(), outPath.string()), 0);
+    EXPECT_EQ(readProcessOutput(outPath.string()), "30\n");
 
     std::error_code ec;
     fs::remove(src, ec);
@@ -6455,10 +6431,8 @@ BACKEND_TEST(Soundness_Codegen, AnImportedConcreteStructServesAsABase) {
     std::string out;
     if (c.exitCode == 0 && fs::exists(exe)) {
         const fs::path outPath = uniqueTempPath("fin_impbase_out");
-        const std::string cmd = shellQuoteLocal(exe.string()) + " > " +
-                                shellQuoteLocal(outPath.string()) + " 2>&1";
-        std::system(cmd.c_str());
-        out = readWholeFile(outPath.string());
+        EXPECT_EQ(fin::runProcess({exe.string()}, outPath.string(), outPath.string()), 0);
+        out = readProcessOutput(outPath.string());
         fs::remove(outPath, ec);
     }
     EXPECT_EQ(out, "3\n") << stripAnsi(c.err);
@@ -7152,10 +7126,8 @@ BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     std::string out;
     if (c.exitCode == 0 && fs::exists(exe)) {
         const fs::path outPath = uniqueTempPath("fin_impmod_out");
-        const std::string cmd = shellQuoteLocal(exe.string()) + " > " +
-                                shellQuoteLocal(outPath.string()) + " 2>&1";
-        std::system(cmd.c_str());
-        out = readWholeFile(outPath.string());
+        EXPECT_EQ(fin::runProcess({exe.string()}, outPath.string(), outPath.string()), 0);
+        out = readProcessOutput(outPath.string());
         fs::remove(outPath, ec);
     }
     EXPECT_EQ(out, "3\n") << stripAnsi(c.err);
@@ -7512,18 +7484,12 @@ BACKEND_TEST(Soundness_Codegen, AFunctionsLlvmNameIsItsSymbol) {
         "fun main() <noret> { printf(\"%d\\n\", fin_twice(21)); }\n", mainObj);
     ASSERT_EQ(mainPart.exitCode, 0) << mainPart.why();
 
-    const char* fromEnv = std::getenv("FIN_CC");
-    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
     const fs::path outPath = uniqueTempPath("fin_linked_rn_out");
-    const std::string link = shellQuoteLocal(cc) + " " + shellQuoteLocal(libObj.string()) +
-                             " " + shellQuoteLocal(mainObj.string()) + " -o " +
-                             shellQuoteLocal(exe.string());
-    ASSERT_EQ(std::system(link.c_str()), 0) << link;
+    ASSERT_EQ(fin::runProcess(fin::linkCommand(
+        {libObj.string(), mainObj.string()}, exe.string())), 0);
 
-    const std::string run = shellQuoteLocal(exe.string()) + " > " +
-                            shellQuoteLocal(outPath.string()) + " 2>&1";
-    std::system(run.c_str());
-    EXPECT_EQ(readWholeFile(outPath.string()), "42\n");
+    EXPECT_EQ(fin::runProcess({exe.string()}, outPath.string(), outPath.string()), 0);
+    EXPECT_EQ(readProcessOutput(outPath.string()), "42\n");
 
     std::error_code ec;
     for (const fs::path& p : {libObj, mainObj, exe, outPath}) fs::remove(p, ec);
@@ -7879,18 +7845,12 @@ BACKEND_TEST(Soundness_Codegen, AGenericFunctionsInstanceIsOneSymbolAcrossTwoObj
         "fun main() <noret> { printf(\"%d\\n\", ident(libval()) * 2); }\n", mainObj);
     ASSERT_EQ(mainPart.exitCode, 0) << mainPart.why();
 
-    const char* fromEnv = std::getenv("FIN_CC");
-    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
     const fs::path outPath = uniqueTempPath("fin_linked_gi_out");
-    const std::string link = shellQuoteLocal(cc) + " " + shellQuoteLocal(libObj.string()) +
-                             " " + shellQuoteLocal(mainObj.string()) + " -o " +
-                             shellQuoteLocal(exe.string());
-    ASSERT_EQ(std::system(link.c_str()), 0) << link;
+    ASSERT_EQ(fin::runProcess(fin::linkCommand(
+        {libObj.string(), mainObj.string()}, exe.string())), 0);
 
-    const std::string run = shellQuoteLocal(exe.string()) + " > " +
-                            shellQuoteLocal(outPath.string()) + " 2>&1";
-    std::system(run.c_str());
-    EXPECT_EQ(readWholeFile(outPath.string()), "42\n");
+    EXPECT_EQ(fin::runProcess({exe.string()}, outPath.string(), outPath.string()), 0);
+    EXPECT_EQ(readProcessOutput(outPath.string()), "42\n");
 
     std::error_code ec;
     for (const fs::path& p : {libObj, mainObj, exe, outPath}) fs::remove(p, ec);
@@ -8984,17 +8944,11 @@ BACKEND_TEST(Soundness_Codegen, AGenericMethodIsOneSymbolAcrossTwoObjects) {
         "}\n", mainObj);
     ASSERT_EQ(mainPart.exitCode, 0) << mainPart.why();
 
-    const char* fromEnv = std::getenv("FIN_CC");
-    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
-    const std::string link = shellQuoteLocal(cc) + " " + shellQuoteLocal(libObj.string()) +
-                             " " + shellQuoteLocal(mainObj.string()) + " -o " +
-                             shellQuoteLocal(exe.string());
-    ASSERT_EQ(std::system(link.c_str()), 0) << link;
+    ASSERT_EQ(fin::runProcess(fin::linkCommand(
+        {libObj.string(), mainObj.string()}, exe.string())), 0);
 
-    const std::string run = shellQuoteLocal(exe.string()) + " > " +
-                            shellQuoteLocal(outPath.string()) + " 2>&1";
-    std::system(run.c_str());
-    EXPECT_EQ(readWholeFile(outPath.string()), "42\n");
+    EXPECT_EQ(fin::runProcess({exe.string()}, outPath.string(), outPath.string()), 0);
+    EXPECT_EQ(readProcessOutput(outPath.string()), "42\n");
 
     std::error_code ec;
     for (const fs::path& q : {libObj, mainObj, exe, outPath}) fs::remove(q, ec);
@@ -9116,17 +9070,11 @@ BACKEND_TEST(Soundness_Codegen, AStructMethodIsOneSymbolAcrossTwoObjects) {
         "}\n", mainObj);
     ASSERT_EQ(mainPart.exitCode, 0) << mainPart.why();
 
-    const char* fromEnv = std::getenv("FIN_CC");
-    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
-    const std::string link = shellQuoteLocal(cc) + " " + shellQuoteLocal(libObj.string()) +
-                             " " + shellQuoteLocal(mainObj.string()) + " -o " +
-                             shellQuoteLocal(exe.string());
-    ASSERT_EQ(std::system(link.c_str()), 0) << link;
+    ASSERT_EQ(fin::runProcess(fin::linkCommand(
+        {libObj.string(), mainObj.string()}, exe.string())), 0);
 
-    const std::string run = shellQuoteLocal(exe.string()) + " > " +
-                            shellQuoteLocal(outPath.string()) + " 2>&1";
-    std::system(run.c_str());
-    EXPECT_EQ(readWholeFile(outPath.string()), "42\n");
+    EXPECT_EQ(fin::runProcess({exe.string()}, outPath.string(), outPath.string()), 0);
+    EXPECT_EQ(readProcessOutput(outPath.string()), "42\n");
 
     std::error_code ec;
     for (const fs::path& q : {libObj, mainObj, exe, outPath}) fs::remove(q, ec);
@@ -12052,12 +12000,9 @@ BACKEND_TEST(Soundness_Codegen, AFailedBlameGoesToStderrAndNotToStdout) {
 
     const fs::path outOnly = uniqueTempPath("fin_blame_out");
     const fs::path errOnly = uniqueTempPath("fin_blame_err");
-    const std::string cmd = shellQuoteLocal(exe.string()) + " > " +
-                            shellQuoteLocal(outOnly.string()) + " 2> " +
-                            shellQuoteLocal(errOnly.string());
-    std::system(cmd.c_str());
-    const std::string onOut = readWholeFile(outOnly.string());
-    const std::string onErr = readWholeFile(errOnly.string());
+    fin::runProcess({exe.string()}, outOnly.string(), errOnly.string());
+    const std::string onOut = readProcessOutput(outOnly.string());
+    const std::string onErr = readProcessOutput(errOnly.string());
 
     EXPECT_EQ(onOut, "") << "a failed assertion reached stdout:\n" << onOut;
     EXPECT_NE(onErr.find("assertion failed: to stderr"), std::string::npos) << onErr;

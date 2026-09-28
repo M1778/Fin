@@ -1,265 +1,115 @@
 # 7. Interfaces and generics
 
-## Declaring an interface
+## Declare an interface
 
-An `interface` lists what an implementor must provide. Members are terminated with `;`,
-methods have no body, and `pub` marks what is visible:
-
-```fin
-interface Printable {
-    pub fun to_string() <string>;
-}
-```
-
-An interface may require a *field* as well as a method:
+An interface describes required fields, methods, or operators. Required methods
+end in `;`. A struct can name the interface in `: <...>`.
 
 ```fin
-interface Person {
-    readonly name <string>,
-}
-```
-
-and it may take generic parameters:
-
-```fin
-interface GetVal<T> {
-    pub fun get_val() <T>;
-}
-```
-
-An interface may declare operators, which is how `operators::std` describes every
-overloadable operator:
-
-```fin
-interface Addable<T> {
-    pub operator + (other: <T>) <T>;
-}
-```
-
-Interfaces can use the section-label form too:
-
-```fin
-interface IStream {
-  priv:
-      stream_length <int>;
-      pointer <int>;
-
-  pub:
-    fun seek(offset: int) <bool>;
-    fun read(nbytes: int) <[char]>;
-}
-```
-
-## Implementing at the declaration
-
-A struct names the interfaces it satisfies with a colon and angle brackets — the same
-syntax as naming a base type:
-
-```fin
-@define printf(fmt: string, ...) <noret>;
-
-interface GetVal<T> {
-    pub fun get_val() <T>;
+interface Readable {
+    pub fun read() <int>;
 }
 
-struct Holder: <GetVal<int>> {
-    val <int>,
+struct Reading : <Readable> {
+    pub value <int>,
+    pub fun read(self: &Self) <int> { return self.value; }
+}
 
-    pub fun get_val(self: &Self) <int> {
-        return self.val;
-    }
+fun read_twice(item: Readable) <int> {
+    return item.read() + item.read();
 }
 
 fun main() <noret> {
-    let h <Holder> = Holder { val: 7 };
-    printf("%d\n", h.get_val());
+    let reading <Reading> = Reading{value: 6};
+    blame read_twice(reading) == 12;
 }
 ```
 
-Multiple interfaces are comma-separated: `struct Fin: <Person, Beautiful> { ... }`.
+An interface reference contains a pointer to the implementor's storage and a
+vtable pointer. It does not own the implementor. Keep that storage alive for every
+use of the interface, including after a function returns. A reference escaping a
+local can dangle because there is no lifetime checker.
 
-## Implementing in a separate block
+Required fields have offset entries in the vtable. Reading fields through the
+interface works; writing fields through an interface reference is currently
+refused. Interface-to-interface conversions and generic interfaces used as runtime
+value types also have backend limits.
 
-`implements` attaches an implementation to an already-declared type:
+## Attach an implementation
 
-```fin
-struct MyStruct {
-    val <int>
-}
-
-MyStruct implements <GetVal<int>> {
-    pub fun get_val() <int> {
-        return self.val;
-    }
-}
-```
-
-This is how the corpus adds an interface to a type it did not declare, and it works for
-operators as well:
+A separate `implements` block adds methods to an already declared struct. This
+form now generates machine code for supported struct implementations.
 
 ```fin
-Point implements <Addable<Point>> {
-    pub operator + (other: <Point>) <Point> {
-        return Point { x: self.x + other.x, y: self.y + other.y };
-    }
-}
-```
+interface Readable { pub fun read() <int>; }
+struct Reading { pub value <int> }
 
-An `implements` block type-checks and registers its members, but it is not yet lowered to
-machine code — a program containing one will not build with `-o`. Declaration-site
-`struct X: <Iface>` is the form that runs today.
-
-There is also a single-member form, `@implements Type::name = <expression>;`, which
-overwrites a member the type declares or adds one it does not. It is what
-`tests/samples/enums.fin` uses to attach an `unwrap` to an enum. Its `$type`-level
-counterpart `@implements(struct, iface)` — asking at compile time whether a type satisfies
-an interface — is declared in `docs/compiler-api.md` but has no implementation yet.
-
-## Interfaces as bounds
-
-The most common use of an interface is as a generic bound. `T: Printable` constrains a type
-parameter:
-
-```fin
-@define printf(fmt: string, ...) <noret>;
-
-interface Printable {
-    pub fun to_string() <string>;
-}
-
-struct User {
-    name <string>,
-
-    pub fun to_string(self: &Self) <string> {
-        return self.name;
-    }
-}
-
-fun show<T: Printable>(item: T) <noret> {
-    printf("%s\n", item.to_string());
+Reading implements <Readable> {
+    pub fun read(self: &Self) <int> { return self.value; }
 }
 
 fun main() <noret> {
-    let u <User> = User { name: "Fin" };
-    show::<User>(u);
+    let reading <Reading> = Reading{value: 9};
+    blame reading.read() == 9;
 }
 ```
 
-Writing the interface directly as a parameter type is the shorter equivalent:
-`fun show(item: Printable) <noret>`.
+`@implements Type::member = expression;` is another member-attachment form.
+Its syntax is distinct from a special-function call `@implements(type, interface)`.
+Enum implementations have runtime limits because enum payloads themselves do.
 
-## Interfaces as runtime types
+## Bounds and specialization
 
-A struct converts to an interface it implements, and a value of interface type can hold
-either implementor:
+A type parameter follows a declaration name; its bound follows a colon. Ordinary
+generics specialize once per concrete type.
 
 ```fin
-@define printf(fmt: string, ...) <noret>;
-
-interface Person {
-    readonly name <string>,
+interface Readable { pub fun read() <int>; }
+struct Reading : <Readable> {
+    pub value <int>,
+    pub fun read(self: &Self) <int> { return self.value; }
 }
 
-struct Fin: <Person> {
-    readonly hate <Person>,
-    name <string>,
-
-    fun hate(someone: Person) <noret> {
-        self.hate = someone;
-        printf("Fin started hating %s\n", self.hate.name);
-    }
+fun read_generic<T: Readable>(item: T) <int> {
+    return item.read();
 }
-```
 
-An interface reference is two words at runtime — a pointer to the implementor's storage and
-a pointer to a per-`(struct, interface)` vtable — and the vtable carries a byte offset for
-every required *field* alongside a function pointer for every required method, because two
-implementors need not agree on where a field sits.
-`docs/adr/0027-an-interface-reference-carries-field-offsets-in-its-vtable.md` specifies the
-layout. This lowers: `tests/samples/love.fin` is the corpus witness, and it builds with `-o`
-and runs. The conversion is one-directional: an interface does not convert back to a struct.
-
-## Generic parameters and bounds
-
-Type parameters appear after the name of a function, struct, interface, enum or type alias:
-
-```fin
-fun identity<T>(a: T) <T> { return a; }
-struct Box<T> { val <T> }
-interface GetVal<T> { pub fun get_val() <T>; }
-type ArrayType<T> = [T];
-```
-
-A bound follows a colon. It may be an interface, or a constraint set:
-
-```fin
-type Number = int | uint | float | short | long | ushort | ulong | double;
-
-fun sort<T: Number>(array: &[T]) <noret> { ... }
-```
-
-Two bounds mean two different implementation strategies:
-
-- An **unbounded** parameter, or one bounded by an ordinary interface, is
-  *monomorphised* — the compiler emits one specialisation per concrete type.
-- A parameter bounded by an **erasure marker** is *erased* — one implementation, with the
-  type carried at runtime. `Castable` is the erasure marker the corpus uses. Erasure
-  type-checks but is not yet lowered, so a `-o` build refuses at the first place the
-  representation is needed: a **call** to an erased function, an **instantiation** of an
-  erased struct, or a call to an erased method. *Declaring* one costs nothing — a template
-  is a recipe, and one nothing uses emits nothing, so the file below builds with `-o`
-  exactly as long as `erased` is never called.
-
-```fin
-fun normal_generics<T>(a: T) <T> { return a; }                     // monomorphised
-fun erased<T: Castable, U: Castable>(a: T, b: U) <int> {           // erased
-    return cast<int>(a) + cast<int>(b);
+fun main() <noret> {
+    let reading <Reading> = Reading{value: 8};
+    blame read_generic::<Reading>(reading) == 8;
 }
 ```
 
-A constraint set is only ever a bound, never a storage type — see
-`docs/adr/0018-a-constraint-set-is-a-bound-never-a-storage-type.md`. `any implements <X>`
-is the erased form that *does* have a representation, and it is how the standard library
-spells "checked at runtime, carrying this bound":
+`item: T` with `T: Readable` and `item: Readable` are different runtime choices:
+the former specializes for the concrete type; the latter dispatches through an
+interface reference. Generic-bound checking has gaps at some instantiation sites;
+write implementations that satisfy the declared contract even if an invalid call
+currently passes the frontend.
 
-```fin
-pub type EnumType = any implements <Enum>;
+Type parameters can appear on functions, structs, interfaces, enums, aliases, and
+generic lambdas. For calls use `identity::<int>(value)`; for a type annotation use
+`Box<int>`; for a struct expression use `Box::<int>{value: 1}`.
+
+A constraint set is a bound, not a storage type:
+
+```fin check
+type Number = int | uint | float;
+fun identity<T: Number>(value: T) <T> { return value; }
 ```
 
-## Explicit generic arguments
+## Erasure and meta-types
 
-At a call site, `::<...>` supplies the arguments the compiler would otherwise infer:
+An erasure marker such as `Castable` changes the generic strategy. The backend
+cannot perform general boxing, casts, or calls through `any` yet. Some opaque
+`any` storage can have a layout without supporting reads or writes; that is not
+a dynamically typed application value. A template that nobody instantiates may
+check and build while a call to it fails.
 
-```fin
-show::<User>(u);
-identity::<int>(7);
-```
+`$type`, `$struct`, `$interface`, and `$enum_member` describe compile-time values.
+They are distinct types. Their presence in a signature does not imply that the
+compiler can execute arbitrary reflection code. Component names and grants have
+semantic checking; the broader execution design is in
+[compiler-api.md](../compiler-api.md). See
+[macros and compiler components](11-macros-and-preprocessor.md).
 
-For a generic struct, the same `::<...>` goes between the type name and the brace:
-
-```fin
-let b <Box<int>> = Box::<int>{ val: 100 };
-let c <&Collection<int>> = new Collection::<int>{};
-```
-
-Inference works from the arguments written at the call, and an annotation supplies what an
-argument cannot say. Both directions are in use in the corpus.
-
-## Meta-types
-
-Four `$`-prefixed names are types whose values *are* types, for compile-time work:
-`$type`, `$struct`, `$interface` and `$enum_member`.
-
-```fin
-fun compatible(iface: $interface, struct_: $struct) <bool> { ... }
-pub fun keyidof(enum_member: $enum_member) <int>;
-```
-
-They resolve in every type position, and only these four — an unrecognised `$name` is an
-undefined type rather than a silently accepted one. Nothing in the language produces a
-`$type` *value* yet, so functions taking one are compiler intrinsics: declared without a
-body, implemented in the compiler. Type literals (`struct { ... }` and `interface { ... }`
-as expressions) parse and type-check as `$struct` and `$interface`, but instantiating one
-needs the compiler API, which is not built.
-
-Next: [enums and pattern data](08-enums-and-pattern-data.md).
+Next: [enums](08-enums-and-pattern-data.md).

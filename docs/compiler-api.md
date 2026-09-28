@@ -1,5 +1,11 @@
 # The Fin compiler API
 
+For current application guidance, read [the agent guide](agent-guide.md) and
+[the compiler-component status](guide/11-macros-and-preprocessor.md#special-functions-and-compiler-components).
+The substrate measurements below describe the design's original baseline, not a
+live support matrix. Component names and grants now have semantic checking;
+that does not imply the full execution design has been implemented.
+
 Design of the compile-time compiler API: the **compiler component** surface and the **event**
 system. Ratified before implementation, per the project owner's mandate that this be "a strong
 compiler API that surpasses any other compiler".

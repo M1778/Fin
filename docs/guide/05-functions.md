@@ -1,321 +1,143 @@
 # 5. Functions
 
-## Declaration
+## Declare and call
 
-`fun`, a name, a parenthesised parameter list, then the return type in angle brackets:
+A named function uses `fun name(parameters) <ReturnType> { body }`. Parameters use
+`name: Type`; local declarations use `name <Type>`. Call arguments bind by position.
 
 ```fin
-fun add(x: int, y: int) <int> {
-    return x + y;
+fun add(left: int, right: int) <int> {
+    return left + right;
+}
+
+fun main() <noret> {
+    blame add(2, 3) == 5;
 }
 ```
 
-The return type's position is the thing to notice: it comes *after* the parameters, in
-angle brackets, the same bracket that annotates a variable. `<noret>` (equivalently
-`<void>`) means the function returns nothing:
+`noret` and `void` both mean no return value. `main` must be a top-level function
+with a body when building an executable. Use `return value;` in value-returning
+functions and return on every path.
+
+A `const` parameter cannot be rebound. For `const pointer: &int`, that protects
+the pointer binding while still permitting `*pointer = value`.
+
+## Function values and lambdas
+
+A function type is `fn(ArgumentTypes) -> ReturnType`; `=>` is also accepted as its
+arrow. Lambda return annotations occupy the same position as named functions.
 
 ```fin
-@define printf(fmt: string, ...) <noret>;
-
-fun greet(name: string) <noret> {
-    printf("hello %s\n", name);
-}
-```
-
-Parameters use `name: type` — a colon, with no angle brackets. This is the one place in Fin
-where a type is written without them, and it is worth memorising early because it differs
-from every `let` you write:
-
-```fin
-let a <int> = 1;            // declaration: angle brackets
-fun f(a: int) <int> { ... } // parameter: colon
-```
-
-A parameter type *may* be written bracketed (`fun f(a: <int>)`) and parses to the same
-type, but the corpus writes nineteen parameters unbracketed and none bracketed, so the
-colon form is the idiom.
-
-`main` is the entry point, and building an executable with `-o` requires a top-level
-`fun main` with a body.
-
-## `const` parameters
-
-A `const` parameter cannot be reassigned inside the body:
-
-```fin
-fun test(const a: int) <noret> {
-    let copy <int> = a;    // read and copy freely
-    copy = 5;              // the copy is writable
-    // a = 10;             // rejected: Cannot assign to immutable variable 'a'
-}
-```
-
-For a pointer parameter, `const` protects the pointer and not the pointee:
-
-```fin
-fun test_2(const a: &int) <noret> {
-    // a = new int(1);     // rejected
-    *a = 20;               // allowed: writes through
-}
-```
-
-## Function types
-
-A function's type is written `fn(params) -> ret`. Both `->` and `=>` are accepted as the
-arrow:
-
-```fin
-fun compute(a: int, b: int, operation: fn(int, int) => int) <int> {
+fun add(a: int, b: int) <int> { return a + b; }
+fun apply(a: int, b: int, operation: fn(int, int) -> int) <int> {
     return operation(a, b);
 }
 
 fun main() <noret> {
-    let my_op <fn(int, int) => int> = add;
-    let res <int> = my_op(5, 5);
+    let named <fn(int, int) -> int> = add;
+    let block <auto> = fun (x: int) <int> { return x * 2; };
+    let arrow_block <auto> = (x: int) <int> => { return x + 5; };
+    let expression <auto> = (x: int) <int> => x - 3;
+    blame apply(4, 5, named) == 9;
+    blame block(4) == 8;
+    blame arrow_block(4) == 9;
+    blame expression(4) == 1;
 }
 ```
 
-A named function can be passed wherever a matching function type is expected:
+Lambdas are function values without captured environments. Pass state explicitly.
+This attempted capture is deliberately rejected:
 
-```fin
-let res1 <int> = compute(10, 20, add);
-```
-
-## Lambdas
-
-There are three spellings, and they differ only in punctuation.
-
-**`fun` with a block body** — an anonymous function:
-
-```fin
-let f1 <fn(int) -> int> = fun (x: int) <int> {
-    return x * 2;
-};
-```
-
-**Arrow with a block body**:
-
-```fin
-let f2 <fn(int) -> int> = (x: int) <int> => { return x + 5; };
-```
-
-**Arrow with an expression body** — no `return`, no braces:
-
-```fin
-let f3 <fn(int) -> int> = (x: int) <int> => x - 3;
-```
-
-In every form the return type is annotated in angle brackets, in the same position as a
-named function's. `auto` infers the whole function type:
-
-```fin
-let inferred <auto> = (x: int) <int> => x * x;
-let logger <auto> = (msg: string) <void> => printf("Log: %s\n", msg);
-```
-
-A lambda can be written inline at a call site:
-
-```fin
-let res <int> = compute(100, 50, fun (a: int, b: int) <int> {
-    return a - b;
-});
-
-compute(20, 10, (a: int, b: int) <int> => a + b);
-```
-
-Here is the whole set, verified together:
-
-```fin
-@define printf(fmt: string, ...) <noret>;
-
-fun add(x: int, y: int) <int> {
-    return x + y;
+```fin build-error
+fun main() <noret> {
+    let offset <int> = 10;
+    let add_offset <auto> = (x: int) <int> => x + offset;
+    printf("%d\n", add_offset(2));
 }
+```
 
-fun compute(a: int, b: int, operation: fn(int, int) => int) <int> {
-    return operation(a, b);
+## Generics
+
+Declare parameters after the function name. Supply explicit type arguments with
+`::<...>` or let the compiler infer them from arguments.
+
+```fin
+fun identity<T>(value: T) <T> { return value; }
+fun swap<T>(left: &T, right: &T) <noret> {
+    let saved <T> = *left;
+    *left = *right;
+    *right = saved;
 }
 
 fun main() <noret> {
-    let f1 <fn(int) -> int> = fun (x: int) <int> { return x * 2; };
-    let f2 <fn(int) -> int> = (x: int) <int> => { return x + 5; };
-    let f3 <fn(int) -> int> = (x: int) <int> => x - 3;
-    let f4 <auto> = (x: int) <int> => x * x;
-
-    printf("%d %d %d %d\n", f1(10), f2(10), f3(10), f4(5));
-    printf("%d\n", compute(10, 20, add));
-    printf("%d\n", compute(100, 50, fun (a: int, b: int) <int> { return a - b; }));
+    let a <int> = identity::<int>(7);
+    let b <int> = identity(9);
+    swap(&a, &b);
+    blame a == 9 && b == 7;
+    let local_identity <auto> = fun <T>(value: T) <T> { return value; };
+    blame local_identity::<int>(5) == 5;
 }
 ```
 
-A function can also return a function type:
+A generic lambda is a template specialized when called, not a first-class function
+pointer. It cannot be passed as an unspecialized `fn` value. A bound uses a colon,
+for example `T: Printable`; see [interfaces and generics](07-interfaces-and-generics.md).
+Erasure markers such as `Castable` require runtime support that is incomplete.
 
-```fin
-fun get_adder() <fn(int, int) -> int> {
-    return (a: int, b: int) <int> => a + b;
+## Default and nullable parameters
+
+A default expression is type-checked against its parameter. Trailing defaulted or
+nullable parameters may be omitted by the frontend:
+
+```fin build-error
+fun greet(name: string, count: int = 2) <noret> {
+    printf("%s %d\n", name, count);
+}
+fun main() <noret> {
+    greet("Fin");
+    greet("Fin", 3);
 }
 ```
 
-This type-checks. Capturing the enclosing environment is not implemented, so treat a
-returned lambda as a function pointer rather than a closure.
+The backend does not yet fill in omitted arguments. Supply all values explicitly
+when writing executable code. Defaults are positional: a required parameter after
+a defaulted one still forces the earlier position to be supplied. A default is a
+property of the declaration, not part of `fn(...) -> ...`.
 
-## Generic functions
+`fun?` permits an absent return value, and `name?: Type` permits a nullable
+parameter. General nullable runtime representation remains incomplete; see
+[nullability](02-variables-and-types.md#nullable-declarations).
 
-Type parameters go in angle brackets after the name, and a bound after a colon:
+## Foreign declarations and ABI
 
-```fin
-fun identity<T>(a: T) <T> {
-    return a;
-}
-
-fun using_erasure<T: Castable, U: Castable>(a: T, b: U) <int> {
-    return cast<int>(a) + cast<int>(b);
-}
-```
-
-An unbounded parameter is monomorphised — one instantiation per concrete type. A parameter
-bound by an erasure marker such as `Castable` is erased instead; erasure type-checks but is
-not yet lowered, so **calling** one will not build with `-o`. Declaring it will: a template
-is not code until a use says what its parameters are, so `using_erasure` above is emitted as
-nothing until something calls it. Generic arguments can be supplied explicitly with `::<...>`
-at the call site, or inferred from the arguments:
+`@define` declares a function provided by an external library. It has no body.
+`#[llvm_name="symbol"]` gives it a different linker name.
 
 ```fin
-printf("%d\n", identity::<int>(7));
-```
-
-A lambda can be generic too:
-
-```fin
-import { Addable } from operators::std;
-
-let g <auto> = fun <G: Addable>(a: G, b: G) <G> { return a + b; };
-```
-
-A generic lambda is a *template*, in the same sense a generic `fun` is: the `let` declares a recipe
-and the call is what turns it into code, one instantiation per set of type arguments. So `g` is not
-a value — it cannot be passed to something taking an `fn`, and its address cannot be taken — and a
-generic one nobody calls compiles to nothing at all. Calling it builds:
-
-```fin
-let id <auto> = fun <T>(x: T) <T> { return x; };
-printf("%d\n", id(7));
-printf("%d\n", id::<int>(7));
-```
-
-## Variadic and foreign declarations
-
-`@define` declares a function implemented outside Fin. It has a signature and no body, and
-`...` makes it variadic:
-
-```fin
-@define printf(fmt: string, ...) <noret>;
-@define sqrt(f: float) <float>;
-```
-
-A `@define` accepts anything through `...` — there is no format checking.
-
-## Missing returns
-
-The compiler requires a return on every path of a value-returning function:
-
-```
-error: Function 'add' is missing a return statement on some paths
-```
-
-`fun?` relaxes this to "returns the type or null", and falling off the end returns null:
-
-```fin
-fun? make_a(n?: int) <A> {
-    if (n == null) {
-        return null;
-    }
-    if (n > 0) {
-        return A{};
-    }
-    // returns null implicitly
-}
-```
-
-## Default parameter values
-
-A parameter may carry a default value, and it is checked against the parameter's declared
-type exactly as an initialiser is:
-
-```fin
-fun greet(name: string, times: int = 2) <noret> {
-    printf("%s %d\n", name, times);
-}
-```
-
-Writing a default of the wrong type is a diagnostic on the default itself:
-
-```
-error: Type mismatch: expected 'string', got 'int'
-   --> f.fin:1:19
-   |
- 1 | fun f(n: string = 3) <noret> { }
-   |                   ^ here
-```
-
-It is an *initialiser* check, which is what settles the three edge cases. `= null` is
-accepted whatever the declared type is (chapter 2's rule for a declaration, and
-`lib/std/error.fin`'s draft writes `err_code: int = null`). A narrower constant widens, so
-`n: ulong = 5` is fine. And a negative constant is still not an unsigned value, so
-`n: ulong = -1` is refused for the same reason `let x <ulong> = -1;` is.
-
-A default may also name something already in scope, including an earlier parameter in the
-same list:
-
-```fin
-fun span(lo: int, hi: int = lo) <int> { return hi - lo; }
-```
-
-(`from` is a keyword — it is `import`'s — so a parameter cannot be called that.)
-
-A default makes the parameter optional at the call site, so `span(1)` is a call and
-`hi` is 2:
-
-```fin
-fun greet(name: string, times: int = 2) <noret> { }
+@define strlen(text: string) <ulong>;
+#[llvm_name="strcmp"]
+@define compare_bytes(left: string, right: string) <int>;
 
 fun main() <noret> {
-    greet("hi");
-    greet("hi", 3);
+    blame strlen("Fin") == 3;
+    blame compare_bytes("same", "same") == 0;
 }
 ```
 
-Two limits on that, both about where the optionality comes from rather than about
-defaults. It is *positional*: arguments bind by position, so only a trailing run of
-optional parameters can be omitted. `fun f(a: int = 1, b: int)` still requires both, and
-`f(2)` reports `Function 'f' expects 2 arguments, got 1` — there is no way to write the
-second without the first. And a default does not yet supply the *value*: the argument
-stops being required, and a call to an ordinary imported function is not lowered at all
-yet (chapter 10), so nothing in the language observes what the omitted argument would have
-been. Within a single file the same holds — the arity check is what a default reaches, and
-codegen for the missing argument is a separate unit.
+This example uses the 64-bit Unix C ABI, where `size_t` matches `ulong`.
+Match widths and signedness to the actual C declaration on your target. A function
+called `sqrt` in C usually takes and returns `double`, so a Fin `float` declaration
+would be wrong even if it type-checks. Foreign aggregate parameters also have
+backend restrictions.
 
-Defaults and nullable parameters (chapter 2) are the same mechanism from the arity check's
-point of view, and a signature may mix them:
+`...` marks a variadic declaration, as in the library's
+`@define printf(fmt: string, ...) <noret>;`. There is no format-string checking.
+Use `%d` for an `int`, `%s` for a `string`, and keep user text in a value argument:
+`printf("%s", text)`. The ambient `printf` declaration intentionally ignores C's
+integer return value.
 
-```fin
-fun g(a: int, b?: int, c: int = 3) <int> { return a; }
-```
-
-`g(1)`, `g(1, null)` and `g(1, null, 4)` are all calls. The minimum is the last parameter
-that is neither nullable nor defaulted, and a parameter that is both counts once — so this
-signature reports `expects between 1 and 3 arguments` when given none.
-
-A default is not part of the function's type. `fn(int) -> int` describes both of these,
-and either may be assigned to a variable of that type:
-
-```fin
-fun a(x: int) <int> { return x; }
-fun b(x: int = 1) <int> { return x; }
-```
-
-That follows from what a default is: a fact about the declaration, observable only by
-omitting an argument. A `fn` annotation has nowhere to write one, so making the two types
-disagree would split them over a difference no call site can see.
+A foreign declaration does not add linker flags or supply an implementation.
+The driver links through `cc` (or `FIN_CC`); a library outside the default C runtime
+needs a separately supported linking setup.
 
 Next: [structs and classes](06-structs-and-classes.md).

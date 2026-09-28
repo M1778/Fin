@@ -1,306 +1,195 @@
-# 12. A tour of the standard library
+# 12. Standard library reference
 
-The standard library lives in `lib/std/` and ships beside the compiler. Nothing configures
-it: if you do not pass `--fin-libs` and do not set `$FIN_LIBS`, `finc` finds it relative to
-its own binary.
+The shipped library is [lib/std](../../lib/std/), not the design drafts under
+`tests/samples/stdlib`. Import spelling is `from <module>::std`. All ordinary
+library names need an import; `printf` is ambient and `format!` is a compiler builtin.
 
-Every module declares its contents inside `namespace std`, so the import spelling is always
-`from <module>::std`:
+**Importable does not mean executable.** The loader publishes signatures and
+retains generic templates, but ordinary imported Fin function bodies still do not
+reach the backend. Template methods can encounter further limits such as `any`
+conversions or unsupported calls. The examples below mark those boundaries.
+
+## Choose a module
+
+| Module | Main declarations | Application boundary |
+| --- | --- | --- |
+| [stdio](../../lib/std/stdio.fin) | `printf`, `Printable`, printing helpers, `Stream`, `File`, `IOResult<T>` | Ambient `printf` runs; ordinary helper calls and payload results have backend limits |
+| [strings](../../lib/std/strings.fin) | Length, byte comparison, search, transforms, splitting/joining | Ordinary imported functions are frontend-only; allocating calls require caller cleanup |
+| [math](../../lib/std/math.fin) | Numeric helpers, integer algorithms | Check each imported call before using it in an executable |
+| [collection](../../lib/std/collection.fin) | `Collection<T>`, `CollectionError`, `coll!` | The concrete integer example below runs; buffer cleanup is incomplete; `from_prototype` discards input |
+| [hashmap](../../lib/std/hashmap.fin) | `HashMap<K,V>`, `HashMapError`, `map!` | Erased/custom-hasher paths and method emission have limits; `from_prototype` discards input |
+| [types](../../lib/std/types.fin) | Numeric aliases, `Number`, `Any`, `number2str` | Alias/bound declarations do not imply working dynamic values or conversion helpers |
+| [typing](../../lib/std/typing.fin) | `Result<T,E>`, `IResult` | Generic payload enums do not build |
+| [enums](../../lib/std/enums.fin) | `Enum`, `EnumType`, `getkeyid`, `keyidof` | Reflection declarations are not general runtime payload dispatch |
+| [operators](../../lib/std/operators.fin) | `Add`, `Equal`, `Index`, `IndexAssign`, other operator interfaces | Some declared operators have no expression grammar or use erased results |
+| [error](../../lib/std/error.fin) | `Error`, message/code accessors | Error values do not enable catchable exceptions |
+| [stdptr](../../lib/std/stdptr.fin) | `rptr<T>`, `wptr<T>`, `OwnershipError` | Incomplete execution/safety paths; no borrow checker |
+| [networking](../../lib/std/networking.fin) | Placeholder module | No networking implementation |
+
+`strings` and `math` exist in the shipped library. `somelib` does not; it appears
+only in the sample drafts. A module cannot be named `string` through a pathless
+import because `string` is a keyword.
+
+## Printing and formatting
+
+For a runnable program, use `printf` with the correct C conversion for each value.
+`format!` accepts only literal format strings and `{}` placeholders; see
+[macros](11-macros-and-preprocessor.md#format).
 
 ```fin
-import { HashMap } from hashmap::std;
+fun main() <noret> {
+    printf("%s: %d\n", "count", 3);
+}
 ```
 
-Read this chapter as a map rather than a reference. Each module's own header comment lists
-what it diverges from in its design draft and why, and that comment is the authoritative
-description of the module's current state.
+```output
+count: 3
+```
 
-An important caveat throughout: a call to an imported function is not yet lowered to machine
-code, so — with one exception — everything here type-checks and none of it yet reaches an
-executable. Import it, check it, and read the code: that is what the library supports today.
-The exception is the ambient `printf`, which builds and runs with nothing written above it,
-because it is an extern rather than a Fin function and chapter 10 explains the mechanism.
+The typed helpers are declared as `print<X: Printable>(object: X)` and
+`println<X: Printable>(object: X)`; implement `format_str() <string>` to satisfy
+`Printable`. A plain string is not automatically an implementation of that interface.
+String-specific helpers include `print_str`, `println_str`, `eprint_str`, and
+`eprintln_str`. These declarations type-check, but ordinary imported helper calls
+are not emitted. `println("hello")` is not a universal print builtin.
 
-## The modules
+## `Collection<T>`
 
-| Module | Contents |
+Common signatures (receiver omitted from this table):
+
+| Method | Result / effect |
 | --- | --- |
-| `stdio` | `printf`, `print`, `println`, `Printable`, `Stream`, `IStream`, `IOResult`, `IOError` |
-| `collection` | `Collection<T>`, the dynamic array; `CollectionError` |
-| `hashmap` | `HashMap<T, U>`, the associative array; `HashMapError` |
-| `error` | `Error`, the base error class |
-| `types` | numeric aliases, `Number`, `Any`, `number2str` |
-| `typing` | `Result<T, U>`, `IResult` |
-| `enums` | `Enum`, `EnumType`, `getkeyid`, `keyidof` |
-| `operators` | one interface per overloadable operator |
-| `stdptr` | `rptr<T>`, the reference-counted pointer; `OwnershipError` |
-| `networking` | empty — a placeholder so the import resolves |
-| `somelib` | empty — a directory-shaped module, present to exercise directory resolution |
+| `push(item: T)` / `pop_last()` | Append / remove and return the last element |
+| `get(index: int)` / `set(index: int, value: T)` | Checked access / replacement |
+| `len()` / `capacity()` | Filled cells / allocated cells |
+| `reserve(amount: int)` | Ensure buffer capacity |
+| `insert(index: int, item: T)` / `remove(index: int)` | Insert / remove and return an element |
+| `first()` / `last()` | Read an endpoint; assert when empty |
+| `contains(item: T)` / `index_of(item: T)` | Equality-based search; index or `-1` |
+| `clear()` / `reverse()` / `extend(other: &Collection<T>)` | Mutate contents |
 
-## `stdio`
-
-`printf` is C's, declared with `@define` under `#[llvm_name="printf"]` and marked
-`#[global]` — the one name in the language that needs no import (chapter 10). It is variadic
-with no format checking, and it both checks and builds with nothing written above it:
-
-```fin
-fun main() <noret> {
-    printf("%d %s\n", 42, "ambient");
-}
-```
-
-Above it sits a small typed layer built on the `Printable` interface:
-
-```fin
-import { print, println, Printable } from stdio::std;
-
-struct Word : <Printable> {
-    text <string>,
-
-    pub fun format_str(self: &Self) <string> {
-        return self.text;
-    }
-}
-
-fun main() <noret> {
-    let w <Word> = Word{text: "hi\n"};
-    print::<Word>(w);
-    println::<Word>(w);
-}
-```
-
-`Stream` is an in-memory byte stream implementing `IStream`: `seek`, `read(nbytes)`,
-`read_all()` and `expand(nbytes)` over a `[char]` buffer, with the length and read pointer
-carried as fields. `read` copies forward from the pointer and leaves it past what it read;
-`expand` allocates a larger buffer and copies into it.
-
-`IOResult<T>` is the result enum, with `Err <IOError>` and `Ok <T>` members. Its
-`implements` block is not present — the `keyidof` question from chapter 8 blocks all three
-of its bodies.
-
-`File` and `FileIO` are absent. Their draft depends on names nothing declares.
-
-## `collection`
-
-`Collection<T>` is the growable array, and it is the most-used library type in the corpus. It
-wraps a `[T]` and grows by allocating a fresh buffer and copying, which is exactly why a
-`[T]` itself has no capacity field (chapter 9).
+This concrete integer example builds and runs:
 
 ```fin
 import { Collection } from collection::std;
-
 fun main() <noret> {
-    let c <&Collection<int>> = new Collection::<int>{};
-    c.push(1);
-    c.push(2);
-    let n <int> = c.len();
-    let first <int> = c.get(0);
-    let last <int> = c.pop_last();
-    let via_index <int> = c[0];
+    let values <Collection<int>> = Collection::<int>{};
+    values.push(7);
+    values.set(0, 8);
+    blame values.get(0) == 8;
+    blame values.len() == 1;
+    printf("%d %d\n", values.get(0), values.len());
+    // ponytail: Collection has no buffer destructor; process exit reclaims this demo's buffer.
 }
 ```
 
-The surface is `push`, `pop_last`, `get(index)`, `len()`, `__get`/`__set`, `operator []` and
-`operator []=`, plus a static `from_prototype`. `__get` and `__set` bounds-check with `blame`.
+```output
+8 1
+```
 
-`Collection::from_prototype({0: 10, 1: 20})` is declared because the corpus calls it, and it
-returns an empty collection: nothing in the language can walk a prototype's entries yet, so
-the keys are dropped. Do not use it expecting the values to arrive.
+The current `Collection` declares no buffer destructor. For repeated allocation
+where reclamation matters, use a raw `[T]` with explicit `delete` until the library
+provides cleanup; deleting a heap-allocated wrapper alone does not free its buffer.
 
-## `hashmap`
+The buffer grows geometrically. Index-taking accessors assert bounds with `blame`.
+`foreach` does not walk a `Collection`; use `for` with `len()` and `get()`.
+`contains` uses `==`, so string elements compare pointers and struct elements need
+an equality operator. Removing a pointer element does not free its pointee.
 
-`HashMap<T, U>` is a real hash table: open addressing with linear probing over a bucket
-vector, tombstones for erasure, and a rehash at a 0.75 load factor. A key and its value share
-a *slot* in two parallel `Collection`s, and the bucket vector holds slot numbers.
+`Collection::from_prototype` currently returns an empty collection. `coll![...]`
+forwards to it, so it does not preserve the supplied elements. Use an array or the
+builtin [prototype](09-arrays-and-pointers.md#prototypes-builtin-structural-maps)
+when you need a working literal.
 
-```fin
+## `HashMap<K,V>`
+
+`get_index(key)` returns a slot or `-1`; `exists(key)` checks membership.
+`__get(key)` and `__set(key, value)` implement access, with `get_or(key, fallback)`
+for expected absence. `remove`, `clear`, `len`, `capacity`, and `is_empty` manage
+the table. Iterate via `slot_count`, `is_live`, `key_at`, and `value_at`.
+
+The following example type-checks but fails code generation on conversion to
+`any` in the hash path:
+
+```fin build-error
 import { HashMap } from hashmap::std;
-
 fun main() <noret> {
-    let m <auto> = HashMap::<string, int>();
-    m["a"] = 1;
-    let v <int> = m["a"];
-    let has <bool> = m.exists("a");
-    let n <int> = m.len();
+    let counts <auto> = HashMap::<string, int>();
+    counts.__set("Fin", 1);
+    let present <bool> = counts.exists("Fin");
+    let value <int> = counts.get_or("Fin", 0);
 }
 ```
 
-`get_index(key)` returns the slot or `-1`, `exists(key)` and `len()` answer the obvious
-questions, and `__get`/`__set` do the work that `operator []` and `operator []=` forward to.
-`remove(key)`, `clear()`, `capacity()` and `is_empty()` are there too, and
-`slot_count()`/`is_live(s)`/`key_at(s)`/`value_at(s)` are how you iterate, since `foreach` over
-a struct is not a thing the language defines. A missing key is an assertion
-(`blame idx >= 0, "key not found"`) rather than a returned sentinel, and `get_or(key, fallback)`
-is the one-call form for a caller who does not know whether the key is there.
-`from_prototype` is empty for the same reason `Collection`'s is.
+The implementation uses open addressing. Its default string hash and equality
+use pointer identity, unlike builtin prototype string keys. Reconstructed strings
+with equal bytes are not interchangeable keys. Supplying only a content hash does
+not repair pointer equality. `with_hasher(fn(any) -> int)` also depends on incomplete
+erased-call support.
 
-**The hash is over the key's machine value, and for a `string` key that is the pointer, not the
-bytes.** That is deliberate: `==` on two `string`s in this compiler compares pointers, so a
-content hash paired with a pointer equality would be the one broken combination — two keys equal
-by `==` landing in different buckets. So a `string`-keyed map works for keys that are literals or
-are kept alive by the caller. A caller who needs a different hash supplies one:
-`HashMap::with_hasher(f)` sets a `hasher <fn(any) -> int>` field that `hash_key` consults. It is a
-function field rather than a `Hashable` bound because a generic bound is not dispatched on today.
+Growth can retain old storage; removed slots retain key/value storage.
+`from_prototype` and `map!{...}` currently discard the supplied entries. Do not use
+these as populated-map constructors.
 
-Two limits worth knowing before storing much: a growth drops the old bucket vector rather than
-freeing it, and an erased entry's key and value stay in their `Collection`s forever, because
-compacting them would move every slot number the bucket vector holds.
+## Strings and math
 
-## `error`
+`strings::std` declares `len`, `equals`, `compare`, `find`, `contains`,
+`index_of_char`, `starts_with`, `ends_with`, `substr`, `concat`, `trim`,
+`to_upper`, `to_lower`, `split`, `join`, `to_chars`, `from_chars`, and `free_str`.
+Search functions return indices or `-1`; `equals` compares bytes.
 
-`Error` is the base error class — a `struct` marked `#[class]`, with a `message`, an
-`error_id` defaulting to `-1`, a two-parameter constructor, a `format()`, a `describe()`
-and a `has_code()`:
+These ordinary string and integer-algorithm imports type-check, but their calls
+do not build:
 
-```fin
-import { Error } from error::std;
-
-struct MyError : <Error> {}
-
+```fin build-error
+import { len, equals } from strings::std;
+import { gcd, clamp } from math::std;
 fun main() <noret> {
-    let e <Error> = Error("boom");
-    let coded <Error> = Error("boom", 7);
-    let msg <string> = e.format();
-    let full <string> = coded.describe();
+    let length <int> = len("Fin");
+    let same <bool> = equals("Fin", "Fin");
+    let divisor <int> = gcd(12, 18);
+    let bounded <int> = clamp::<int>(12, 0, 10);
 }
 ```
 
-Both calls are calls: `Error(msg: string, err_code: int = -1)` has a defaulted second
-parameter, and a default has been optional at the call site since `d7a91df` (chapter 5).
-An earlier version of this chapter said the constructor took one argument because a
-defaulted parameter was still required — that stopped being true, and `lib/std/error.fin`
-now carries the draft's two.
+Allocating string helpers return owned storage. `to_chars` returns a fresh buffer;
+`split` returns a collection containing separately allocated strings. Freeing the
+outer container alone does not free each string. Case conversion is ASCII-based.
+Use direct C declarations for a small executable path such as `strcmp` or `strlen`
+when the imported helper cannot lower; see [foreign calls](05-functions.md#foreign-declarations-and-abi).
 
-`format()` returns the message unchanged; `describe()` is the formatter, producing
-`Error 7: boom` through C's `snprintf` into a buffer the caller owns — there is no
-destructor to free it on. `has_code()` asks whether a code was supplied, which is the
-comparison against `-1` a caller would otherwise write out.
+`math::std` declares generic `min`, `max`, `clamp`, `abs`, `signum`, and `in_range`;
+integer algorithms include `gcd`, `lcm`, `ipow`, `isqrt`, `floor_div`, `floor_mod`,
+`is_even`, and `is_odd`. Read the function body for domain checks and overflow
+limits; the existence of a function does not add checked arithmetic to the language.
 
-Subclassing it is the load-bearing use — `IOError`, `CollectionError`, `HashMapError` and
-`OwnershipError` are all `struct X : <Error> {}`.
+## Files, streams, and results
 
-## `types`
+`Stream` is an in-memory `[char]` buffer with `seek`, `tell`, `remaining`, `rewind`,
+`read`, `read_all`, `write`, `expand`, and `capacity` methods. `File` **is declared**
+and exposes static `exists`, `size`, `read_all`, `write_text`, `append_text`,
+`remove`, and `open`. For example, `write_text(path: string, text: string, count: int)`
+requires the byte count; it does not infer it from the string.
 
-Numeric aliases and the constraint set every numeric generic uses:
+These APIs use C wrappers and imported method bodies. They are not a verified
+end-to-end file API merely because their declarations are available. A direct C
+FFI operation is often the smallest executable path until those imports lower.
 
-```fin
-import { i32, i64, u32, u64, f32, f64, Number, number2str, Any } from types::std;
+`typing::std` declares `Result<T,E>` with `Ok`/`Err`; `stdio::std` declares
+`IOResult<T>`. Their implementation blocks contain methods including `unwrap`,
+`unwrap_or`, `expect`, `select`, `is_ok`, and `is_err`. The methods exist, but
+payload enum code generation is still missing. Use an explicit status and concrete
+data when recoverable errors must run today.
 
-fun main() <noret> {
-    let a <i32> = 1;
-    let s <string> = number2str::<int>(42);
-}
-```
+## Smart pointers
 
-`i32 = int`, `i64 = int{64}`, `u32 = uint`, `u64 = uint{64}`, `f32 = float`, `f64 = double`.
-`Number` is the constraint set from chapter 2. `Any = any` and `nullptr = any`.
+`rptr<T>` declares `get`, `set`, `alias`, `readonly_view`, `weak`, `own`, `borrow`,
+`giveback`, `release`, `refs`, and `borrows`. `get()` returns `&T`, not `T`.
+`wptr<T>` is non-owning. The library's checks cannot prevent dangling raw pointers,
+and a released handle can still contain pointers to freed counters. Do not read,
+release again, or inspect a weak handle after its counter storage has died.
 
-`array<T> = [T]` is declared and marked `#[export]`, but importing it reports `Module 'types'
-does not export 'array'` — a generic alias does not reach the export table yet. Write `[T]`
-directly.
-
-`resolve_type` and `resolve_arr_type` are declared with no body: nothing in the language
-produces a `$type` value, so they are compiler intrinsics rather than stubs.
-
-## `typing`
-
-`Result<T, U>` with `Ok(T)` and `Err(U)`, and the `IResult` interface describing `unwrap`,
-`expect` and `select`:
-
-```fin
-import { Result } from typing::std;
-
-fun main() <noret> {
-    let r <Result<int, string>> = Result::Ok(1);
-}
-```
-
-`IResult` is declared and not implemented — its three bodies all guard on `keyidof(Ok)`,
-which is the undecided question from chapter 8.
-
-## `enums`
-
-Enum reflection: the `Enum` marker interface, `EnumType = any implements <Enum>`, and the two
-intrinsics `getkeyid(value)` and `keyidof(member)`. Chapter 8 covers how they pair up.
-
-## `operators`
-
-One interface per overloadable operator, inside `namespace std { namespace ops { ... } }`:
-`Equal`, `NotEqual`, `GreaterThan`, `LessThan`, `Add`, `AddAssign`, `Sub`, `Mul`, `Div`,
-`Mod`, `BitAnd`, `BitOr`, `ShiftLeft`, `ShiftRight`, their assigning forms, `Unary`, `Not`,
-`Index`, `IndexAssign`, `Deref`, `FnCall`, and `Addable` (which is `Add` under the name the
-corpus uses).
-
-Each requires its operator and returns `Output`, which is `any`:
-
-```fin
-import { Add } from operators::std;
-
-struct N : <Add> {
-    v <int>,
-    pub operator +(rhs: any) <any> { return self.v; }
-}
-```
-
-`Collection` and `HashMap` both declare `: <Index, IndexAssign>`, which is where these
-interfaces earn their place.
-
-Two of them describe operators the expression grammar does not have yet — `BitAnd` and
-`BitOr` (chapter 3).
-
-## `stdptr`
-
-`rptr<T>`, a reference-counted pointer with an explicit ownership protocol, and `wptr<T>`,
-the non-owning handle beside it:
-
-```fin
-import { rptr } from stdptr::std;
-
-fun main() <noret> {
-    let p <rptr<int>> = rptr(5);
-    let owned <bool> = p.is_owned();
-    let q <&rptr<int>> = p.alias();
-    let n <int> = p.refs();
-    p.set(7);
-    p.release();
-}
-```
-
-Fields: `owned`, `borrowed`, `readonly restrict` (a readonly copy of itself), `readonly
-value`, and two private `&int` counters. Methods: `is_owned`, `is_borrowed`, `is_givenback`,
-`refs`, `borrows`, `alias`, `readonly_view`, `weak`, `own`, `borrow`, `giveback`, `release`,
-`set`, `get`.
-
-The count counts. `ref_counter` and `borrow_counter` are `&int` handles *shared* between
-every handle over one value, so `alias()` builds a second `rptr` over the same two cells and
-an increment through one is visible through all of them. That is what makes `refs()` and
-`borrows()` answers about the value rather than about the handle, and what lets `own()`
-refuse a move while a borrow taken through some *other* handle is outstanding. `release()`
-decrements, frees the value and both counters at zero, and raises rather than double-freeing
-if called twice. Every `blame` in the module guards a specific memory error; the module's own
-header lists them one by one.
-
-`wptr<T>` holds the value and the shared count but never increments it, so it does not keep
-the value alive, and `is_alive()` reads the count `release()` decrements.
-
-There is no working destructor, because `~Self()` does not parse and a `~rptr()` body would
-need scope exit the backend does not run — it is declared and empty, and `release()` is the
-explicit form. What no library can enforce is a raw `&rptr<T>` copied past a `release()`;
-that needs a borrow check and there is none. And none of it runs yet: an `rptr` reaches
-`codegen: a variable of type 'rptr<int>' is not lowered yet`.
-
-## Reading the library as documentation
-
-Two habits are worth adopting.
-
-First, `lib/std/<module>.fin` opens with a comment naming the sample that specifies it and
-listing every divergence with its reason. That comment is where "why does the library spell
-it this way" is answered.
-
-Second, `tests/samples/stdlib/*.fin` holds the *drafts* — the fuller designs the shipped
-modules are cut down from. They are the design intent, not the current behaviour. When the two
-disagree, `lib/std` is what the compiler will accept.
-
-Two modules do not type-check standalone (`finc lib/std/stdio.fin` and `finc
-lib/std/error.fin` report a circular dependency), which is a loader limitation rather than a
-problem with either file — both work fine when reached through an `import`.
+Treat these APIs as incomplete library work, not automatic memory safety.
+The language's ordinary destructor support does not imply that this library's
+ownership protocol is complete. For a small application, use explicit allocation,
+a clear owner, and one cleanup path.

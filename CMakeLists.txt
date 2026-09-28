@@ -118,6 +118,7 @@ add_library(fin_core STATIC
     src/driver/Driver.cpp
     src/utils/ModuleLoader.cpp
     src/utils/IntegerConstant.cpp
+    src/utils/Process.cpp
 
     # AST Base & Utilities
     src/ast/ASTNode.cpp
@@ -247,13 +248,17 @@ if(MSVC)
     target_compile_definitions(fin_core PUBLIC YY_NO_UNISTD_H)
     # /utf-8: the sources contain UTF-8 literals and MSVC otherwise reads them
     # in the active code page.  /bigobj: parser.cpp is 300k lines of tables.
-    target_compile_options(fin_core PUBLIC /utf-8 /bigobj)
+    # Bison uses __cplusplus to enable moves for unique_ptr semantic values.
+    target_compile_options(fin_core PUBLIC /utf-8 /bigobj /Zc:__cplusplus)
     target_compile_definitions(fin_core PUBLIC _CRT_SECURE_NO_WARNINGS NOMINMAX)
 endif()
 
 # --- CLI Executable ---
 add_executable(finc src/main.cpp)
 target_link_libraries(finc PRIVATE fin_core)
+# Keep <exe dir>/../lib/std valid with multi-config generators as well.
+set_target_properties(finc PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<1:${CMAKE_CURRENT_BINARY_DIR}>")
 
 # --- Install / package layout (ADR 0010) --------------------------------------
 # A release archive unpacks to exactly `bin/finc[.exe]` and `lib/std/**`, with

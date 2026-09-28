@@ -169,6 +169,12 @@ TEST(MachineContract, TheBaselineArgvReproducerNoLongerCompilesTheWrongFile) {
         << "the operand of -o must not become the input file";
 }
 
+TEST(MachineContract, SourcePathsAreLiteralArguments) {
+    TempFin source("fun main() <noret> {}", "space & %FIN_PROCESS_TEST% 'literal'");
+    const auto result = runFinc({source.str()}, {{"FIN_PROCESS_TEST", "expanded"}});
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_TRUE(result.out.empty());
+}
 #ifdef FIN_TESTS_HAVE_BACKEND
 TEST(MachineContract, DashOProducesTheNamedExecutable) {
     // This test used to be DashOIsAcceptedAndIgnored, and asserted the opposite:
@@ -185,6 +191,7 @@ TEST(MachineContract, DashOProducesTheNamedExecutable) {
     std::error_code ec;
     fs::remove(target, ec);
 }
+
 #else
 // The same contract, for the build that has no backend to honour it with.
 //
@@ -575,7 +582,13 @@ TEST(LibraryPaths, AListIsSplitOnTheSeparator) {
 // It guards the opposite mistake — someone hardcoding `';'` — and the actual
 // regression assertion is in SearchPaths.TheSeparatorIsThePlatforms below.
 TEST(LibraryPaths, TheOtherPlatformsSeparatorIsJustACharacterInAPath) {
+#ifdef _WIN32
+    // A colon is valid in the drive prefix, not inside a Windows directory name.
+    TempLib lib;
+    ASSERT_NE(lib.dir().find(':'), std::string::npos);
+#else
     TempLib lib("od;d");
+#endif
     TempFin f(kImportsMyLib, "othersep");
     auto r = runFinc({f.str(), "--fin-libs=" + lib.dir()}, noFinLibs());
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);

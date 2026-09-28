@@ -1,3 +1,4 @@
+#include "utils/Process.hpp"
 #include "Driver.hpp"
 #include "lexer/lexer.hpp"
 #include "parser.hpp"
@@ -368,31 +369,14 @@ bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag,
 }
 
 bool Driver::runLinker(const std::string& objectPath, DiagnosticEngine& diag) {
-    // `cc` rather than a linker directly: the C driver is what knows this
-    // platform's crt files, its dynamic loader, and where libc is. Fin has no
-    // runtime of its own to add yet, and when it does this is the one line that
-    // grows a `-lfin`.
-    //
-    // `FIN_CC` overrides it, because a cross build and a distro whose compiler
-    // is not on PATH as `cc` are both real and neither is worth a rebuild of
-    // finc to accommodate.
-    const char* fromEnv = std::getenv("FIN_CC");
-    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
-
-    auto quote = [](const std::string& s) {
-        std::string out = "'";
-        for (char c : s) {
-            if (c == '\'') out += "'\\''";
-            else out += c;
-        }
-        return out + "'";
-    };
-
-    std::string command = fmt::format("{} {} -o {}", quote(cc), quote(objectPath),
-                                      quote(options.outputPath));
-    if (options.debugCodegen) diag.note("[codegen] " + command);
-
-    int rc = std::system(command.c_str());
+    const auto command = linkCommand({objectPath}, options.outputPath);
+    if (options.debugCodegen) {
+        std::string display;
+        for (const auto& arg : command) display += " [" + arg + "]";
+        diag.note("[codegen]" + display);
+    }
+    const auto& cc = command.front();
+    const int rc = runProcess(command);
     if (rc != 0) {
         diag.reportError(fmt::format("link failed: {} exited with {}", cc, rc),
                          "the object file was emitted, so this is the C toolchain "
