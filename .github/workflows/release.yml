@@ -20,6 +20,11 @@ on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+*']
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the validated archives as a GitHub release
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -30,8 +35,6 @@ defaults:
 
 env:
   FIN_BUILD_TYPE: Release
-  WINFLEXBISON_URL: https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip
-  WINFLEXBISON_SHA256: 8d324b62be33604b2c45ad1dd34ab93d722534448f55a16ca7292de32b6ac135
 
 jobs:
   preflight:
@@ -44,12 +47,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.12'
 
       - name: Install Conan
-        run: python -m pip install "conan>=2.4,<3"
+        run: uv tool install "conan>=2.4,<3"
 
       - name: Resolve and check the version
         id: v
@@ -138,45 +141,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install Conan
-        run: python -m pip install "conan>=2.4,<3"
-
-      - name: Install Ninja
-        if: matrix.generator == 'Ninja'
-        run: python -m pip install ninja
-
-      - name: Install bison and flex (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bison flex
-
-      - name: Install bison and flex (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install bison flex
-          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
-          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
-
-      - name: Install bison and flex (Windows)
-        if: runner.os == 'Windows'
-        # PowerShell rather than bash for this one step: Git for Windows does not
-        # reliably ship unzip, and Expand-Archive is on every Windows runner
-        # including the arm64 one.
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri $env:WINFLEXBISON_URL -OutFile winflexbison.zip
-          $got = (Get-FileHash winflexbison.zip -Algorithm SHA256).Hash.ToLower()
-          if ($got -ne $env:WINFLEXBISON_SHA256) {
-            throw "winflexbison.zip has sha256 $got, expected $env:WINFLEXBISON_SHA256"
-          }
-          $dest = Join-Path $env:RUNNER_TEMP 'winflexbison'
-          Expand-Archive -Path winflexbison.zip -DestinationPath $dest -Force
-          Add-Content -Path $env:GITHUB_PATH -Value $dest
+      - uses: ./.github/actions/setup-toolchain
 
       - name: Build
         run: |
@@ -192,10 +157,14 @@ jobs:
           args=(-S . -B build -G "${{ matrix.generator }}"
                 -DCMAKE_TOOLCHAIN_FILE="$tc"
                 -DCMAKE_BUILD_TYPE="$FIN_BUILD_TYPE"
-                -DFIN_BUILD_TESTS=OFF)
+                -DFIN_BUILD_TESTS=ON
+                -DFIN_WITH_LLVM=ON
+                -DFIN_LLVM_MAJOR="$FIN_LLVM_MAJOR"
+                -DLLVM_DIR="$LLVM_DIR")
           if [ -n "${{ matrix.vs_platform }}" ]; then args+=(-A "${{ matrix.vs_platform }}"); fi
           cmake "${args[@]}"
           cmake --build build --config "$FIN_BUILD_TYPE" --parallel
+          ctest --test-dir build --build-config "$FIN_BUILD_TYPE" --output-on-failure --no-tests=error
 
       - name: Stage the archive layout
         run: |
@@ -217,7 +186,8 @@ jobs:
           # field out of the binary and refuses to ship a name that lies.
           binary=stage/bin/finc
           [ -f "$binary" ] || binary=stage/bin/finc.exe
-          python3 .github/scripts/check_arch.py "$binary" "$FIN_TARGET"
+          uv run --no-project python .github/scripts/check_arch.py "$binary" "$FIN_TARGET"
+          uv run --no-project python tests/tools/check_docs.py --finc "$binary"
           ls -R stage
 
       - name: Archive (tar.gz)
@@ -270,10 +240,12 @@ jobs:
 
       - name: Build and stage in Alpine
         run: |
-          docker run --rm -v "$PWD:/src" -w /src alpine:3.20 sh -eux -c '
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.24 sh -eux -c '
             apk add --no-cache build-base cmake ninja bison flex flex-dev \
-                               python3 py3-pip git perl linux-headers
-            pip install --break-system-packages "conan>=2.4,<3"
+                               python3 uv git perl linux-headers llvm22-dev llvm22-static \
+                               zlib-static zstd-static libxml2-static libffi-dev curl-static
+            uv tool install "conan>=2.4,<3"
+            export PATH="$HOME/.local/bin:$PATH"
             conan profile detect --force
             conan install . --output-folder=build-musl --build=missing \
               -pr:a=conan/profiles/fin -s build_type=Release
@@ -281,12 +253,18 @@ jobs:
             cmake -S . -B build-musl -G Ninja \
               -DCMAKE_TOOLCHAIN_FILE="/src/$tc" \
               -DCMAKE_BUILD_TYPE=Release \
-              -DFIN_BUILD_TESTS=OFF \
-              -DCMAKE_EXE_LINKER_FLAGS=-static
-            cmake --build build-musl --parallel
+              -DFIN_BUILD_TESTS=ON \
+              -DFIN_WITH_LLVM=ON -DFIN_LLVM_MAJOR=22 \
+              -DLLVM_DIR="$(llvm-config-22 --cmakedir)" \
+              -DFIN_STATIC_LLVM=ON -DCMAKE_EXE_LINKER_FLAGS=-static
+            cmake --build build-musl --parallel 2
+            ctest --test-dir build-musl --output-on-failure --no-tests=error
             rm -rf stage-musl
             cmake --install build-musl --prefix stage-musl
-            ldd stage-musl/bin/finc || true
+            if readelf -l stage-musl/bin/finc | grep -q INTERP; then
+              echo "musl compiler unexpectedly needs a dynamic loader"; exit 1
+            fi
+            uv run --no-project tests/tools/check_docs.py --finc stage-musl/bin/finc
           '
           if [ ! -f stage-musl/bin/finc ]; then
             echo "::error::stage-musl/bin/finc is missing after install"
@@ -379,6 +357,7 @@ jobs:
           cat index.json
 
       - name: Create the release
+        if: github.ref_type == 'tag' || inputs.publish
         run: |
           notes="finc $FIN_VERSION
           
@@ -387,8 +366,15 @@ jobs:
           what \`finn\` reads."
           flags=()
           if [ "${{ needs.preflight.outputs.prerelease }}" = "true" ]; then flags+=(--prerelease); fi
-          gh release create "$FIN_TAG" \
+          gh release create "$FIN_TAG" --target "$GITHUB_SHA" \
             --title "finc $FIN_VERSION" \
             --notes "$notes" \
             "${flags[@]}" \
             dist/* index.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validated-release
+          path: |
+            dist/*
+            index.json

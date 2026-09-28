@@ -46,6 +46,7 @@ set(FIN_LLVM_MAJOR 22 CACHE STRING
     "The single LLVM major version finc is built against (ADR 0010)")
 option(FIN_WITH_LLVM
     "Find and link LLVM ${FIN_LLVM_MAJOR}. Required from wave 5 (codegen)." ON)
+option(FIN_STATIC_LLVM "Link LLVM components statically (musl release packaging)." OFF)
 
 # --- Dependencies ---
 find_package(BISON 3.2 REQUIRED)
@@ -80,7 +81,18 @@ if(FIN_WITH_LLVM)
     # static libraries via llvm_map_components_to_libnames, which is also what
     # the `TARGET LLVM` branch below yields to -- if LLVM's MSVC story ever
     # grows a dylib, that branch prefers it with no edit here.
-    if(NOT TARGET LLVM)
+    if(FIN_STATIC_LLVM AND NOT MSVC)
+        # llvm-config supplies the dependency order and system libraries without
+        # importing shared-library dependencies from LLVM's CMake targets.
+        execute_process(
+            COMMAND "${LLVM_TOOLS_BINARY_DIR}/llvm-config" --link-static
+                    --libfiles --system-libs core support bitwriter bitreader mc
+                    nativecodegen nativeasmparser
+            OUTPUT_VARIABLE fin_llvm_link_flags
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            COMMAND_ERROR_IS_FATAL ANY)
+        separate_arguments(fin_llvm_libs UNIX_COMMAND "${fin_llvm_link_flags}")
+    elseif(NOT TARGET LLVM)
         if(NOT MSVC)
             message(FATAL_ERROR
                 "LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR} does not export "
@@ -214,7 +226,7 @@ endif()
 target_link_libraries(fin_core PUBLIC fmt::fmt)
 
 if(FIN_WITH_LLVM)
-    if(TARGET LLVM)
+    if(TARGET LLVM AND NOT FIN_STATIC_LLVM)
         target_link_libraries(fin_core PUBLIC LLVM)
     else()
         # MSVC only (see above): the component static libraries.

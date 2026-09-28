@@ -22,3 +22,12 @@ API use must add its component here rather than silently gaining one.
 direct uses only. The backend uses LLVM-style casts throughout, so the static
 libs' lack of RTTI is not a mismatch. If LLVM's MSVC story ever grows a dylib,
 the `TARGET LLVM` branch below already prefers it with no edit.
+
+## Amendment: static musl releases
+
+The Alpine release uses `FIN_STATIC_LLVM=ON` and `-static`. It asks the pinned
+LLVM installation's `llvm-config --link-static` for the same component list and
+its system libraries. This avoids shared-library dependencies in exported CMake
+targets. Release validation runs the compiler tests and documentation examples,
+and rejects a musl executable containing a dynamic-loader (`INTERP`) segment.
+The default Unix build continues to use the monolithic shared LLVM target.
