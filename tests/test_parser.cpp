@@ -11,6 +11,27 @@
 #include "diagnostics/DiagnosticEngine.hpp"
 #include "preprocessor/Preprocessor.hpp"
 
+TEST(Preprocessor, CRLFDirectivesAndContinuationsMatchLF) {
+    const std::string source =
+        "#cdef VERBOSE\n"
+        "#c_ifdef VERBOSE\n"
+        "#cdef COUNT 1 + \\\n"
+        "2\n"
+        "COUNT\n"
+        "#c_else\n"
+        "wrong_branch\n"
+        "#c_endif\n";
+    std::string windowsSource;
+    for (char c : source) {
+        if (c == '\n') windowsSource += '\r';
+        windowsSource += c;
+    }
+    fin::Preprocessor lf, crlf;
+    const auto expected = lf.process(source);
+    EXPECT_NE(expected.find("1 + 2"), std::string::npos);
+    EXPECT_EQ(crlf.process(windowsSource), expected);
+}
+
 namespace fs = std::filesystem;
 
 // --- Helper Functions ---

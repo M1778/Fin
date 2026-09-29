@@ -183,8 +183,10 @@ jobs:
           fi
           # The archive name promises an architecture; this reads the machine
           # field out of the binary and refuses to ship a name that lies.
+          # MSYS also reports finc.exe as an existing extensionless finc. Python
+          # opens the literal path, so choose the actual filename explicitly.
           binary=stage/bin/finc
-          [ -f "$binary" ] || binary=stage/bin/finc.exe
+          if [ "$RUNNER_OS" = Windows ]; then binary=stage/bin/finc.exe; fi
           uv run --no-project python .github/scripts/check_arch.py "$binary" "$FIN_TARGET"
           uv run --no-project python tests/tools/check_docs.py --finc "$binary"
           ls -R stage

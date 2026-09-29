@@ -28,6 +28,7 @@ std::string Preprocessor::process(const std::string& source) {
     bool inMultiLine = false;
 
     while (std::getline(ss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (!line.empty() && line.back() == '\\') {
             currentMultiLine += line.substr(0, line.size() - 1);
             inMultiLine = true;
