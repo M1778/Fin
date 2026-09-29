@@ -42,18 +42,19 @@ Set these paths to your extracted tools, then run from this repository:
 
 ```powershell
 $env:LLVM_DIR = 'C:/tools/llvm/lib/cmake/llvm'
-$env:PATH = "C:/tools/llvm/bin;C:/tools/winflexbison;$env:PATH"
+uv tool install ninja
+$env:PATH = "$(uv tool dir --bin);C:/tools/llvm/bin;C:/tools/winflexbison;$env:PATH"
 uvx --from 'conan>=2.4,<3' conan profile detect --force
-uvx --from 'conan>=2.4,<3' conan install . --output-folder=build --build=missing -pr:a=conan/profiles/fin -s build_type=Release
+uvx --from 'conan>=2.4,<3' conan install . --output-folder=build --build=missing -pr:a=conan/profiles/fin -c tools.cmake.cmaketoolchain:generator=Ninja -s build_type=Release
 $toolchain = (Get-ChildItem build -Filter conan_toolchain.cmake -Recurse | Select-Object -First 1).FullName
-cmake -S . -B build -G 'Visual Studio 17 2022' -A x64 "-DCMAKE_TOOLCHAIN_FILE=$toolchain" "-DLLVM_DIR=$env:LLVM_DIR" -DFIN_WITH_LLVM=ON -DFIN_LLVM_MAJOR=22
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=$toolchain" "-DLLVM_DIR=$env:LLVM_DIR" -DFIN_WITH_LLVM=ON -DFIN_LLVM_MAJOR=22
 cmake --build build --config Release --parallel 2
 ctest --test-dir build -C Release --output-on-failure --no-tests=error
 uv run --no-project tests/tools/check_docs.py --finc build/finc.exe
 ```
 
-Use `-A ARM64` and the ARM64 LLVM archive for native ARM64. Match the Visual Studio
-generator to your installed version. `uv` runs Python and Conan natively; CMake
+For native ARM64, use an ARM64 Developer shell and the ARM64 LLVM archive.
+The Visual Studio installation must include the DIA SDK. `uv` runs Python and Conan natively; CMake
 builds the C++ compiler. Keep compilation and execution in the same environment.
 
 Windows links generated programs with `clang` by default, using the Visual Studio

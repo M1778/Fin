@@ -104,7 +104,8 @@ Keep that order when translating code from another language.
   small build before splitting application logic across it.
 - **Foreign calls:** `@define` declares a linker symbol, not an implementation.
   Match the real C ABI. Variadic calls such as `printf` have no format checking;
-  use `printf("%s", text)` for variable text.
+  use `printf("%s", text)` for variable text. Fin `long`/`ulong` are always 64-bit:
+  print them with `%lld`/`%llu`; C's `%ld`/`%lu` read only 32 bits on Windows.
 
 ## Current limits and usable alternatives
 

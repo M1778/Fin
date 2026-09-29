@@ -61,6 +61,21 @@ if(FIN_WITH_LLVM)
     # place for it: it compares the major that ADR 0010 names against the major
     # that was found, and it says which one it found and where.
     find_package(LLVM REQUIRED CONFIG)
+    if(MSVC AND TARGET LLVMDebugInfoPDB)
+        # LLVM's Windows archive embeds the packager's Visual Studio DIA path.
+        # Resolve a missing path against the active Developer shell's SDK.
+        get_target_property(fin_pdb_deps LLVMDebugInfoPDB INTERFACE_LINK_LIBRARIES)
+        foreach(dependency IN LISTS fin_pdb_deps)
+            if(dependency MATCHES "/DIA SDK/lib/(.*diaguids\\.lib)$" AND NOT EXISTS "${dependency}")
+                file(TO_CMAKE_PATH "$ENV{VSINSTALLDIR}/DIA SDK/lib/${CMAKE_MATCH_1}" fin_dia_guids)
+                if(NOT EXISTS "${fin_dia_guids}")
+                    message(FATAL_ERROR "LLVM requires ${fin_dia_guids}; use a Visual Studio Developer shell with the DIA SDK installed.")
+                endif()
+                string(REPLACE "${dependency}" "${fin_dia_guids}" fin_pdb_deps "${fin_pdb_deps}")
+            endif()
+        endforeach()
+        set_property(TARGET LLVMDebugInfoPDB PROPERTY INTERFACE_LINK_LIBRARIES "${fin_pdb_deps}")
+    endif()
     if(NOT LLVM_VERSION_MAJOR VERSION_EQUAL FIN_LLVM_MAJOR)
         message(FATAL_ERROR
             "ADR 0010: finc is built against exactly one LLVM major, "

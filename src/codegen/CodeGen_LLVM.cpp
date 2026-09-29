@@ -10640,6 +10640,15 @@ bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngin
 
     if (!emitter.run(ast, modules)) return false;
 
+    // COFF needs a COMDAT group to coalesce shared definitions across objects;
+    // linkonce_odr alone does not give Windows linkers that information.
+    if (triple.isOSBinFormatCOFF()) {
+        for (auto& object : module.global_objects()) {
+            if (object.hasLinkOnceODRLinkage())
+                object.setComdat(module.getOrInsertComdat(object.getName()));
+        }
+    }
+
     // Verified before anything is written. An invalid module that reaches the
     // object writer is an assertion failure deep in LLVM, which reads as a
     // compiler crash rather than as the compiler bug it is.

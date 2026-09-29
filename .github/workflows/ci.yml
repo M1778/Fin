@@ -203,7 +203,7 @@ jobs:
             echo "Tests that did not run:"
             echo "$skips"
           fi
-          quiet="$(printf '%s' "$skips" | grep -cE '[A-Za-z_]+_Codegen\.' || true)"
+          quiet="$(printf '%s' "$skips" | grep -E '\(Skipped\)|\(Not Run\)' | grep -cE '[A-Za-z_]+_Codegen\.' || true)"
           if [ "${quiet:-0}" -gt 0 ]; then
             echo "::error::$quiet codegen tests did not run; this build has no backend"
             exit 1

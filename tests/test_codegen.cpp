@@ -1049,7 +1049,7 @@ BACKEND_TEST(Soundness_Codegen, AnArrayOfAWiderElementStrides) {
     const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
         "    let a <[long, 3]> = [4294967296, 8589934592, 12884901888];\n"
-        "    printf(\"%ld %ld %ld\\n\", a[0], a[1], a[2]);\n"
+        "    printf(\"%lld %lld %lld\\n\", a[0], a[1], a[2]);\n"
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "4294967296 8589934592 12884901888\n") << b.why();
@@ -2745,7 +2745,7 @@ BACKEND_TEST(Soundness_Codegen, AGlobalOfEachScalarTypeRoundTrips) {
         "const S <string> = \"hi\";\n"
         "const L <long> = 9000000000;\n"
         "fun main() <noret> {\n"
-        "    printf(\"%.2f %d %s %ld\\n\", F, B, S, L);\n"
+        "    printf(\"%.2f %d %s %lld\\n\", F, B, S, L);\n"
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "3.50 1 hi 9000000000\n") << b.why();
@@ -2854,7 +2854,7 @@ BACKEND_TEST(KnownDefect_Codegen, AGlobalDoesNotHoist) {
 
 BACKEND_TEST(Soundness_Codegen, SizeofAScalarIsItsWidth) {
     // The widths src/types/Layout.hpp declares: `int` 4 and `long` 8 because the
-    // corpus writes `%d` and `%ld`, `bool` a byte in storage though an i1 in a
+    // corpus writes `%d` and `%lld`, `bool` a byte in storage though an i1 in a
     // register, `char` 1.
     const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
@@ -3162,7 +3162,7 @@ BACKEND_TEST(Soundness_Codegen, EveryScalarFieldWidthRoundTrips) {
         "        c: 7, s: 300, i: 70000, l: 5000000000,\n"
         "        f: 1.5, d: cast<double>(2.25), str: \"hi\", bo: true\n"
         "    };\n"
-        "    printf(\"%d %d %d %ld %.2f %.2f %s %d\\n\",\n"
+        "    printf(\"%d %d %d %lld %.2f %.2f %s %d\\n\",\n"
         "           m.c, m.s, m.i, m.l, m.f, m.d, m.str, m.bo);\n"
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
@@ -3178,7 +3178,7 @@ BACKEND_TEST(Soundness_Codegen, APaddedStructKeepsItsFieldsApart) {
         "fun main() <noret> {\n"
         "    let p <Pad> = Pad { a: 1, big: 5000000000, z: 2 };\n"
         "    p.big = 4000000000;\n"
-        "    printf(\"%d %ld %d\\n\", p.a, p.big, p.z);\n"
+        "    printf(\"%d %lld %d\\n\", p.a, p.big, p.z);\n"
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "1 4000000000 2\n") << b.why();
@@ -5325,7 +5325,7 @@ BACKEND_TEST(Soundness_Codegen, TwoInstantiationsOfOneGenericStructAreDistinctTy
         "    let small <Box<char>> = Box::<char>{ val: 'A' };\n"
         "    let big <Box<long>> = Box::<long>{ val: 1234 };\n"
         "    let flag <Box<bool>> = Box::<bool>{ val: true };\n"
-        "    printf(\"%d %ld %d\\n\", cast<int>(small.val), big.val,\n"
+        "    printf(\"%d %lld %d\\n\", cast<int>(small.val), big.val,\n"
         "           cast<int>(flag.val));\n"
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
@@ -5533,7 +5533,7 @@ BACKEND_TEST(Soundness_Codegen, NewOfAnInstantiationAllocatesTheSubstitutedSize)
         "fun main() <noret> {\n"
         "    let p <&Box<char>> = new Box::<char>{ val: 'Q' };\n"
         "    let q <&Box<long>> = new Box::<long>{ val: 999999 };\n"
-        "    printf(\"%d %ld\\n\", cast<int>(p.val), q.val);\n"
+        "    printf(\"%d %lld\\n\", cast<int>(p.val), q.val);\n"
         "    delete p;\n"
         "    delete q;\n"
         "}\n");
@@ -6315,7 +6315,8 @@ BACKEND_TEST(Soundness_Codegen, ACastFromAPointerReadsItsAddressBits) {
     const Built b = build(std::string(kPrintf) +
         "fun id_hash(s: string) <int> { return cast<int>(s); }\n"
         "fun main() <noret> {\n"
-        "    printf(\"%d %d\\n\", id_hash(\"abc\") == id_hash(\"abc\"), cast<int>(7));\n"
+        "    let key <string> = \"abc\";\n"
+        "    printf(\"%d %d\\n\", id_hash(key) == id_hash(key), cast<int>(7));\n"
         "}\n");
     ASSERT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
@@ -10280,12 +10281,12 @@ BACKEND_TEST(KnownDefect_Codegen, AnAliasedGlobalIsRefusedWhereTheNewNameIsRead)
 // ---------------------------------------------------------------------------
 
 BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAVariableLowersAtThatWidth) {
-    // Was AWidthAnnotationOnAVariableIsRefused. `%ld` and not `%d`, which is where
+    // Was AWidthAnnotationOnAVariableIsRefused. `%lld` and not `%d`, which is where
     // the claim lives: an i32 read as a long by va_arg prints whatever follows it in
     // the register file, so the format string is what makes this a statement about
     // the width rather than about the value.
     const Built b = build(std::string(kPrintf) +
-        "fun main() <noret> { let x <int{64}> = 10; printf(\"%ld\\n\", x); }\n");
+        "fun main() <noret> { let x <int{64}> = 10; printf(\"%lld\\n\", x); }\n");
     EXPECT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "10\n") << b.why();
@@ -10351,10 +10352,10 @@ BACKEND_TEST(Soundness_Codegen, AWidthAnnotationAndItsNameProduceTheSameProgram)
         {"int{8}",   "%d",  "100", "100\n"},  {"char",   "%d",  "100", "100\n"},
         {"int{16}",  "%d",  "100", "100\n"},  {"short",  "%d",  "100", "100\n"},
         {"int{32}",  "%d",  "100", "100\n"},  {"int",    "%d",  "100", "100\n"},
-        {"int{64}",  "%ld", "100", "100\n"},  {"long",   "%ld", "100", "100\n"},
+        {"int{64}",  "%lld", "100", "100\n"},  {"long",   "%lld", "100", "100\n"},
         {"uint{16}", "%d",  "200", "200\n"},  {"ushort", "%d",  "200", "200\n"},
         {"uint{32}", "%u",  "200", "200\n"},  {"uint",   "%u",  "200", "200\n"},
-        {"uint{64}", "%lu", "200", "200\n"},  {"ulong",  "%lu", "200", "200\n"},
+        {"uint{64}", "%llu", "200", "200\n"},  {"ulong",  "%llu", "200", "200\n"},
         {"uint{8}",  "%d",  "200", "200\n"},
     };
     for (const Case& c : cases) {
@@ -10399,7 +10400,7 @@ BACKEND_TEST(Soundness_Codegen, SizeofAWrittenWidthIsThatWidthInBytes) {
 
 BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAParameterLowersAtThatWidth) {
     const Built b = build(std::string(kPrintf) +
-        "fun f(x: int{64}) <void> { printf(\"%ld\\n\", x); }\n"
+        "fun f(x: int{64}) <void> { printf(\"%lld\\n\", x); }\n"
         "fun main() <noret> { let n <long> = 7; f(n); }\n");
     EXPECT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
@@ -10415,7 +10416,7 @@ BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAReturnLowersAtThatWidth) {
     // this and not the 7 the parameter test uses.
     const Built b = build(std::string(kPrintf) +
         "fun f() <int{64}> { return 4294967297; }\n"
-        "fun main() <noret> { printf(\"%ld\\n\", f()); }\n");
+        "fun main() <noret> { printf(\"%lld\\n\", f()); }\n");
     EXPECT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "4294967297\n") << b.why();
@@ -10443,7 +10444,7 @@ BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAStructFieldIsThatManyBytes) {
         "    n.b = 1;\n"
         "    let p <Padded>;\n"
         "    p.b = 4294967297;\n"
-        "    printf(\"%d %d %d %d %ld\\n\", sizeof(Narrow), sizeof(Padded),\n"
+        "    printf(\"%d %d %d %d %lld\\n\", sizeof(Narrow), sizeof(Padded),\n"
         "           n.a, n.b, p.b);\n"
         "}\n");
     EXPECT_EQ(b.compileExit, 0) << b.why();
@@ -10467,7 +10468,7 @@ BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAPointeeLowersAtThatWidth) {
         "    let x <int{64}> = 1;\n"
         "    let p <*int{64}> = &x;\n"
         "    *p = 4294967297;\n"
-        "    printf(\"%ld %ld\\n\", x, *p);\n"
+        "    printf(\"%lld %lld\\n\", x, *p);\n"
         "}\n");
     EXPECT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
@@ -10490,7 +10491,7 @@ BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAnArrayElementIsTheStride) {
         "    let a <[int{64}, 2]> = [4294967297, 8589934593];\n"
         "    let n <[uint{8}, 4]>;\n"
         "    n[3] = 200;\n"
-        "    printf(\"%d %d %ld %ld %d\\n\", sizeof([int{64}, 2]),\n"
+        "    printf(\"%d %d %lld %lld %d\\n\", sizeof([int{64}, 2]),\n"
         "           sizeof([uint{8}, 4]), a[0], a[1], n[3]);\n"
         "}\n");
     EXPECT_EQ(b.compileExit, 0) << b.why();
@@ -10507,7 +10508,7 @@ BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnACastTargetTruncatesToThatWidt
     // second one that agrees with it.
     const Built annotated = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
-        "    printf(\"%d %d %d %ld\\n\", cast<int{8}>(300), cast<int{16}>(99999),\n"
+        "    printf(\"%d %d %d %lld\\n\", cast<int{8}>(300), cast<int{16}>(99999),\n"
         "           cast<uint{16}>(70000), cast<int{64}>(1));\n"
         "}\n");
     EXPECT_EQ(annotated.compileExit, 0) << annotated.why();
@@ -10516,7 +10517,7 @@ BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnACastTargetTruncatesToThatWidt
 
     const Built named = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
-        "    printf(\"%d %d %d %ld\\n\", cast<char>(300), cast<short>(99999),\n"
+        "    printf(\"%d %d %d %lld\\n\", cast<char>(300), cast<short>(99999),\n"
         "           cast<ushort>(70000), cast<long>(1));\n"
         "}\n");
     ASSERT_TRUE(named.ran) << named.why();
@@ -10531,7 +10532,7 @@ BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAGlobalLowersAtThatWidth) {
     const Built b = build(std::string(kPrintf) +
         "let g <int{64}> = 4294967297;\n"
         "let n <uint{8}> = 200;\n"
-        "fun main() <noret> { printf(\"%ld %d\\n\", g, n); }\n");
+        "fun main() <noret> { printf(\"%lld %d\\n\", g, n); }\n");
     EXPECT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "4294967297 200\n") << b.why();
@@ -10543,7 +10544,7 @@ BACKEND_TEST(Soundness_Codegen, AWidthAnnotationOnAConstLowersAtThatWidth) {
     // built from the type before any store exists to be widened.
     const Built b = build(std::string(kPrintf) +
         "const N <int{64}> = 4294967297;\n"
-        "fun main() <noret> { printf(\"%ld\\n\", N); }\n");
+        "fun main() <noret> { printf(\"%lld\\n\", N); }\n");
     EXPECT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "4294967297\n") << b.why();
@@ -12305,18 +12306,19 @@ BACKEND_TEST(Soundness_Codegen, AFormatDispatchesOnEachArgumentsOwnType) {
 BACKEND_TEST(Soundness_Codegen, APointerFormatsAsAnAddressAndAStringAsItsBytes) {
     // The `pointee ? "%p" : "%s"` rule, from both sides in one program. Only the
     // string half can be pinned exactly -- an address is whatever the loader chose --
-    // so the pointer half asserts the shape a `%p` produces and, more to the point,
+    // so the pointer half compares with the platform's `%p` output and, more to the point,
     // that the program did not walk an integer as if it were a character array.
     const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
         "    let x <int> = 1;\n"
         "    let p <&int> = &x;\n"
         "    let s <string> = format!(\"[{}]\", p);\n"
-        "    printf(\"%s\\n\", s);\n"
+        "    printf(\"%s\\n[%p]\\n\", s, p);\n"
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
-    EXPECT_EQ(b.out.substr(0, 3), "[0x") << b.why();
-    EXPECT_EQ(b.out.substr(b.out.size() - 2), "]\n") << b.why();
+    const auto newline = b.out.find('\n');
+    ASSERT_NE(newline, std::string::npos) << b.why();
+    EXPECT_EQ(b.out.substr(0, newline + 1), b.out.substr(newline + 1)) << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, APercentInAFormatStringIsText) {

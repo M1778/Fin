@@ -27,6 +27,11 @@ The official Windows archive uses the static C runtime. The Conan profile sets
 `compiler.runtime=static` for Fin and its dependencies so fmt and GTest agree with
 LLVM's runtime selection.
 
+The archive also embeds its build machine's absolute DIA SDK library path.
+If that path is missing, CMake resolves the same architecture's `diaguids.lib`
+from the active Visual Studio Developer shell. This supports installations in
+other locations and newer Visual Studio versions without changing LLVM's pin.
+
 ## Amendment: static musl releases
 
 The Alpine release uses `FIN_STATIC_LLVM=ON` and `-static`. It asks the pinned
