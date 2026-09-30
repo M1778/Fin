@@ -1,172 +1,145 @@
 # 1. Quick start
 
-This guide teaches Fin as the compiler in this repository actually implements it. Every
-example in it was compiled with `finc` before it was written down, and where a construct
-type-checks but does not yet produce machine code, the chapter says so.
+## Get a compiler that can generate code
 
-## Building the compiler
+If `finc` is already installed, run `finc --version` and `finc --help`. Keep the
+release layout intact: `bin/finc` sits beside `lib/std`. Moving the binary alone
+can make standard-library imports disappear.
 
-`finc` is built by the script at the repository root:
+To build this repository on Linux or macOS, install:
 
-```
-./build.sh
-```
+- A C++20 compiler and CMake 3.20 or newer.
+- Conan 2, Bison 3.2 or newer, and Flex.
+- LLVM development headers and libraries for the major pinned in
+  [CMakeLists.txt](../../CMakeLists.txt), currently 22. A `clang` executable alone
+  is not the LLVM development package.
+- A C compiler driver, normally `cc`, to link generated programs.
 
-It needs `cmake`, `conan`, `bison` and `flex` on `PATH`, plus LLVM at the major version
-pinned in `CMakeLists.txt`. The script reads that version out of `CMakeLists.txt` rather
-than keeping its own copy. Useful options:
+Then run from the repository root:
 
-```
-./build.sh --release      # Release instead of Debug
-./build.sh --clean        # discard the build directory first
-./build.sh --no-test      # skip the test suite
-```
-
-When it finishes it prints the path to the compiler, which is `build/finc`.
-
-Check that the binary works and identify it:
-
-```
-$ finc --version
-finc 0.4.0 (contract 2)
+```sh
+./build.sh --release
+./build/finc --version
 ```
 
-The first number is the release. The second is the *machine contract* version — the number
-that tooling wrapping `finc` should branch on. `docs/finc-interface-contract.md` is the
-full specification of that surface.
+`build.sh` installs the Conan dependencies, configures CMake, builds, and runs the
+compiler tests. `--no-test` skips tests; `--no-llvm` creates a frontend-only compiler
+that cannot build applications. `--clean` deletes the existing build directory.
 
-## Your first program
+The commands below use `finc` on `PATH`; for a source build, substitute
+`./build/finc` on Unix or `.\build\finc.exe` on Windows.
 
-Put this in `hello.fin`:
+### Native Windows with uv
 
-```fin
-@define printf(fmt: string, ...) <noret>;
+Use PowerShell in a Visual Studio Developer shell with the C++ desktop workload,
+CMake, and [uv](https://docs.astral.sh/uv/getting-started/installation/) installed.
+Install winflexbison 2.5.25 and extract the full LLVM 22.1.8 development archive
+for your architecture. The `LLVM-*.exe` installer does not include the LLVM
+libraries needed to build Fin. The exact download and checksum steps are in
+[the shared CI setup](../../.github/actions/setup-toolchain/action.yml).
 
-fun main() <noret> {
-    printf("Hello, world!\n");
-}
+Set these paths to your extracted tools, then run from this repository:
+
+```powershell
+$env:LLVM_DIR = 'C:/tools/llvm/lib/cmake/llvm'
+uv tool install ninja
+$env:PATH = "$(uv tool dir --bin);C:/tools/llvm/bin;C:/tools/winflexbison;$env:PATH"
+uvx --from 'conan>=2.4,<3' conan profile detect --force
+uvx --from 'conan>=2.4,<3' conan install . --output-folder=build --build=missing -pr:a=conan/profiles/fin -c tools.cmake.cmaketoolchain:generator=Ninja -s build_type=Release
+$toolchain = (Get-ChildItem build -Filter conan_toolchain.cmake -Recurse | Select-Object -First 1).FullName
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=$toolchain" "-DLLVM_DIR=$env:LLVM_DIR" -DFIN_WITH_LLVM=ON -DFIN_LLVM_MAJOR=22
+cmake --build build --config Release --parallel 2
+ctest --test-dir build -C Release --output-on-failure --no-tests=error
+uv run --no-project tests/tools/check_docs.py --finc build/finc.exe
 ```
 
-Two things are happening.
+For native ARM64, use an ARM64 Developer shell and the ARM64 LLVM archive.
+The Visual Studio installation must include the DIA SDK. `uv` runs Python and Conan natively; CMake
+builds the C++ compiler. Keep compilation and execution in the same environment.
 
-`@define` declares a function that exists outside Fin — here, C's `printf`. The
-declaration gives its name, its parameters and its return type, and no body. `...` marks
-it variadic. Fourteen files in the sample corpus open with this exact line, so it is the
-idiomatic way to reach C's output for now.
+Windows links generated programs with `clang` by default, using the Visual Studio
+SDK and libraries available in the Developer shell. Use `hello.exe` as the output
+name and `.\hello.exe` to run it.
 
-`fun main() <noret>` declares the entry point. The return type goes in angle brackets
-after the parameter list, and `noret` means the function returns nothing.
+## First program
 
-## Compiling and running
-
-With no output flag, `finc` only checks the program:
-
-```
-$ finc hello.fin
-Build Successful.
-$ echo $?
-0
-```
-
-Exit `0` means zero diagnostics. Add `-o` to produce an executable:
-
-```
-$ finc hello.fin -o hello
-Build Successful.
-$ ./hello
-Hello, world!
-```
-
-A note on `printf` specifically: it is *ambient*, so a program may call it with no
-declaration and no import at all. This checks and builds too:
+Save this complete file as `hello.fin`:
 
 ```fin
 fun main() <noret> {
-    printf("Hello, world!\n");
+    printf("Hello, Fin!\n");
 }
 ```
 
-`printf` is the one name in the standard library marked `#[global]`
-(`lib/std/stdio.fin`), which is what makes it visible everywhere with no import. Writing
-the `@define` line yourself is still fine and still idiomatic — the two declarations are
-identical, so the compiler treats them as one fact rather than a conflict. Every other
-name in the standard library must be imported; see chapter 10.
+```output
+Hello, Fin!
+```
 
-## Exit codes
+`fun` declares a function. Its return type follows the parameters in `<...>`;
+`noret` means no value. Statements end in semicolons. The bundled library makes
+`printf` available without an import.
 
-`finc` communicates entirely through its exit code and stderr:
+```sh
+finc hello.fin             # syntax and type checking only
+finc hello.fin -o hello    # object generation and linking
+./hello                   # run the program
+```
 
-| Code | Meaning |
+**A successful first command does not prove the second will succeed.** Fin's
+frontend supports some forms the backend cannot generate yet.
+
+## Commands for application work
+
+| Command / option | Meaning |
 | --- | --- |
-| `0` | compiled with zero diagnostics |
-| `1` | the source was rejected |
-| `2` | bad command line, or the input could not be read |
-| `3` | the compiler itself failed |
+| `finc main.fin` | Check one root file and its imports |
+| `finc main.fin -o app` | Build an executable; requires a top-level `main` body |
+| `finc library.fin -c -o library.o` | Emit an object without linking or requiring `main` |
+| `-I ./src` | Add an import search directory; repeat for more paths |
+| `--fin-libs <paths>` | Pin library paths, replacing `FIN_LIBS` and suppressing bundled-library fallback |
+| `--diagnostics=json` | Newline-delimited JSON diagnostics on stderr |
+| `--color=never` | Plain diagnostic output |
+| `--debug-codegen` | Show backend and linker details |
+| `-O0` through `-O3` | Optimization level; default `-O0` |
 
-stdout is reserved: only `--help` and `--version` are ever written there. Diagnostics go
-to stderr, which means you can pipe a program's own output without compiler chatter mixing
-into it.
+A library path list uses `:` on Unix and `;` on Windows. `-I` alone does not remove
+the bundled standard library. See [module resolution](10-modules-and-imports.md).
+The full option and diagnostic contract lives in
+[finc-interface-contract.md](../finc-interface-contract.md).
 
-## The flags you need first
+## Diagnose the correct stage
 
-**`-o <path>`** — build an executable at `<path>`. Without it, `finc` type-checks and
-stops. Building requires a top-level `fun main` with a body.
+This program deliberately fails type-checking:
 
-**`-c`** — compile to an object file and do not link. Combine with `-o` to name it:
-
-```
-$ finc hello.fin -c -o hello.o
-```
-
-**`-I <path>`, `--include <path>`** — add a module search path. Repeatable. This is how
-`import` finds a module that is not beside the importing file:
-
-```
-$ finc main.fin -I ./src -I ./vendor
-```
-
-**`--fin-libs <paths>`** — library search paths, separated by the platform's path
-separator (`:` on Linux). This *replaces* the `FIN_LIBS` environment variable rather than
-adding to it, and it also suppresses the standard library that ships beside the compiler.
-That is deliberate: a build that pins its library paths gets exactly those paths, so
-nothing can appear underneath the pin. Leave it off and you get the bundled `lib/std`,
-which is what the standard-library chapter assumes.
-
-## The rest of the surface
-
-```
--O0, -O1, -O2, -O3     optimisation level for a -o build (default -O0)
---diagnostics=<fmt>    human (default) or json
---color=<when>         auto (default), always or never
---debug-ast            print the parsed AST
---debug-sema           print semantic analysis details
---debug-codegen        print what the backend lowers and the link command
---no-check             skip semantic analysis (unsafe)
-```
-
-`--diagnostics=json` emits one JSON object per line on stderr, ending with a summary
-object. It exists for tooling; `docs/finc-interface-contract.md` documents the schema and
-its compatibility rules.
-
-## Reading a diagnostic
-
-Make a deliberate mistake — annotate an integer as a string:
-
-```fin
+```fin error
 fun main() <noret> {
-    let x <string> = 10;
+    let value <string> = 10;
 }
 ```
 
-```
-error: Type mismatch: expected 'string', got 'int'
-   --> bad.fin:2:22
-   |
- 2 |     let x <string> = 10;
-   |                      ^^ here
+The diagnostic names a type mismatch and points at the integer expression.
+Fix the reported expression or declaration, then check again.
+
+| Failure | Next action |
+| --- | --- |
+| `syntax error` | Check punctuation, parameter colons, and angle-bracket annotations |
+| `Undefined variable` / missing export | Check spelling and the actual imported declaration |
+| `module not found` | Read the listed search paths; verify `-I` and `FIN_LIBS` |
+| `codegen: ... not lowered yet` | Reduce the unsupported construct; type-checking alone cannot validate it |
+| `link failed` | Check the C driver and foreign symbols; object generation already succeeded |
+
+`FIN_CC` selects a GCC-compatible C driver when the default (`cc` on Unix,
+`clang` on Windows) is unavailable:
+
+```sh
+FIN_CC=clang finc hello.fin -o hello
 ```
 
-The caret span points at the expression whose type was wrong, not at the declaration. Fin
-diagnostics aim at the thing that has to change.
+Use a driver executable path, not a command plus arbitrary flags.
+
+Compiler exit codes are `0` for success, `1` for source rejection, `2` for command
+line or input errors, and `3` for compiler failure. Diagnostics go to stderr;
+stdout is reserved for help/version output. Do not use `--no-check` to make an
+application appear to compile: it bypasses semantic validation.
 
 Next: [variables and types](02-variables-and-types.md).

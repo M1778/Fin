@@ -53,6 +53,8 @@ const std::vector<std::string>& scratchFinFiles();
 std::vector<std::string> allFinFilesInTestTree();
 
 std::string readWholeFile(const std::string& path);
+// Normalize Windows text-stream line endings without changing source-file reads.
+std::string readProcessOutput(const std::string& path);
 
 // The name gtest shows for a parameterised sample: "stdlib/stdio.fin" becomes
 // "stdlib_stdio".

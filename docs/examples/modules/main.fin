@@ -1,0 +1,7 @@
+import { Box } from "box.fin";
+
+fun main() <noret> {
+    let box <Box<int>> = Box::<int>{value: 42};
+    blame box.get() == 42;
+    printf("%d\n", box.get());
+}

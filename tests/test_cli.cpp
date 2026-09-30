@@ -10,7 +10,6 @@
 #include <string>
 
 #include "Corpus.hpp"
-#include "driver/Driver.hpp"
 #include "driver/SearchPaths.hpp"
 #include "driver/Version.hpp"
 
@@ -170,6 +169,12 @@ TEST(MachineContract, TheBaselineArgvReproducerNoLongerCompilesTheWrongFile) {
         << "the operand of -o must not become the input file";
 }
 
+TEST(MachineContract, SourcePathsAreLiteralArguments) {
+    TempFin source("fun main() <noret> {}", "space & %FIN_PROCESS_TEST% 'literal'");
+    const auto result = runFinc({source.str()}, {{"FIN_PROCESS_TEST", "expanded"}});
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_TRUE(result.out.empty());
+}
 #ifdef FIN_TESTS_HAVE_BACKEND
 TEST(MachineContract, DashOProducesTheNamedExecutable) {
     // This test used to be DashOIsAcceptedAndIgnored, and asserted the opposite:
@@ -186,6 +191,7 @@ TEST(MachineContract, DashOProducesTheNamedExecutable) {
     std::error_code ec;
     fs::remove(target, ec);
 }
+
 #else
 // The same contract, for the build that has no backend to honour it with.
 //
@@ -328,101 +334,6 @@ TEST(MachineContract, ADirectoryIsNotReadableAsSource) {
     auto r = runFinc({samplesDir()});
     EXPECT_EQ(r.exitCode, 2);
 }
-
-// --- Ambient stdio fast path ------------------------------------------------
-// The bundled stdio module is loaded upfront only when the root file can reach
-// its ambient `#[global] printf` (see needsAmbientStdio in driver/Driver.hpp).
-// The predicate tests below pin the rule; the end-to-end tests pin both sides
-// of it, that a file needing the ambient still resolves it and a file that
-// cannot reach it still compiles.
-
-TEST(AmbientStdio, EmptySourceNeedsNothing) {
-    EXPECT_FALSE(fin::needsAmbientStdio(""));
-    EXPECT_FALSE(fin::needsAmbientStdio("fun main() <noret> {}\n"));
-}
-
-TEST(AmbientStdio, MentionsInsideCommentsAndStringsNeedNothing) {
-    EXPECT_FALSE(fin::needsAmbientStdio("// printf(\"hi\")\nfun main() <noret> {}\n"));
-    EXPECT_FALSE(fin::needsAmbientStdio("/* printf */\nfun main() <noret> {}\n"));
-    EXPECT_FALSE(fin::needsAmbientStdio(
-        "/* outer /* printf */ still a comment */\nfun main() <noret> {}\n"));
-    EXPECT_FALSE(fin::needsAmbientStdio(
-        "fun main() <noret> { let s <string> = \"printf\"; }\n"));
-    EXPECT_FALSE(fin::needsAmbientStdio("// @define printf\nfun main() <noret> {}\n"));
-}
-
-TEST(AmbientStdio, OwnTopLevelDeclarationShadowsTheAmbient) {
-    EXPECT_FALSE(fin::needsAmbientStdio(
-        "@define printf(fmt: string, ...) <noret>;\n"
-        "fun main() <noret> { printf(\"hi\\n\"); }\n"));
-}
-
-TEST(AmbientStdio, BareUseNeedsTheAmbient) {
-    EXPECT_TRUE(fin::needsAmbientStdio("fun main() <noret> { printf(\"hi\\n\"); }\n"));
-}
-
-TEST(AmbientStdio, AnyImportNeedsTheAmbient) {
-    // An imported module is analysed against the same shared scope, so it may
-    // reach the ambient name even when the root file never spells it.
-    EXPECT_TRUE(fin::needsAmbientStdio(
-        "import { rptr } from stdptr::std;\nfun main() <noret> {}\n"));
-}
-
-TEST(AmbientStdio, FunctionLocalDeclarationDoesNotShadowFileWide) {
-    // A declaration inside a body is visible only in that body; a bare use
-    // elsewhere still resolves ambiently, so the load stays.
-    EXPECT_TRUE(fin::needsAmbientStdio(
-        "fun f() <noret> { @define printf(fmt: string, ...) <noret>; }\n"
-        "fun main() <noret> { printf(\"hi\\n\"); }\n"));
-}
-
-TEST(AmbientStdio, DefinedQueryNeedsTheAmbient) {
-    // `@defined("printf")` asks what the session knows, and the ambient is
-    // part of the answer, so the load stays.
-    EXPECT_TRUE(fin::needsAmbientStdio(
-        "fun main() <noret> { if (!@defined(\"printf\")) { printf(\"hi\\n\"); } }\n"));
-}
-
-TEST(AmbientStdio, LongerIdentifiersAreNotTheAmbient) {
-    EXPECT_FALSE(fin::needsAmbientStdio(
-        "fun main() <noret> { let my_printf <int> = 1; }\n"));
-}
-
-TEST(AmbientStdio, SelfDeclaredProgramStillCompiles) {
-    TempFin f("@define printf(fmt: string, ...) <noret>;\n"
-              "fun main() <noret> { printf(\"hi\\n\"); }\n");
-    auto r = runFinc({f.str()});
-    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
-}
-
-TEST(AmbientStdio, BareProgramStillResolvesTheAmbient) {
-    TempFin f("fun main() <noret> { printf(\"hi\\n\"); }\n");
-    auto r = runFinc({f.str()});
-    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
-}
-
-#ifdef FIN_TESTS_HAVE_BACKEND
-TEST(AmbientStdio, BareProgramLinksAndRunsAgainstTheAmbient) {
-    TempFin f("fun main() <noret> { printf(\"hi\\n\"); }\n");
-    const std::string target = uniqueTempPath("fin_ambient_printf_target");
-    auto r = runFinc({f.str(), "-o", target});
-    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
-    if (r.exitCode == 0 && fs::exists(target)) {
-        std::string output;
-        if (FILE* p = popen(target.c_str(), "r")) {
-            char buf[256];
-            size_t n;
-            while ((n = fread(buf, 1, sizeof buf, p)) > 0) output.append(buf, n);
-            EXPECT_EQ(pclose(p), 0);
-        } else {
-            FAIL() << "could not run " << target;
-        }
-        EXPECT_EQ(output, "hi\n");
-    }
-    std::error_code ec;
-    fs::remove(target, ec);
-}
-#endif
 
 // --- Colour -----------------------------------------------------------------
 
@@ -671,7 +582,13 @@ TEST(LibraryPaths, AListIsSplitOnTheSeparator) {
 // It guards the opposite mistake — someone hardcoding `';'` — and the actual
 // regression assertion is in SearchPaths.TheSeparatorIsThePlatforms below.
 TEST(LibraryPaths, TheOtherPlatformsSeparatorIsJustACharacterInAPath) {
+#ifdef _WIN32
+    // A colon is valid in the drive prefix, not inside a Windows directory name.
+    TempLib lib;
+    ASSERT_NE(lib.dir().find(':'), std::string::npos);
+#else
     TempLib lib("od;d");
+#endif
     TempFin f(kImportsMyLib, "othersep");
     auto r = runFinc({f.str(), "--fin-libs=" + lib.dir()}, noFinLibs());
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
@@ -2948,9 +2865,7 @@ TEST(Soundness_DiagnosticAttribution, NoDiagnosticPointsAtAnExpectationComment) 
     // 50 -> 40 for the same reason: the corpus is down to 43, as `&Self`
     // fields, elided generic arguments and the sample repairs cleared a dozen
     // diagnostics without touching the detector.
-    // 40 -> 30 as `literal_interface.fin` and `stdlib/memory.fin` resolved clean,
-    // bringing total located diagnostics to 40.
-    EXPECT_GT(census.considered, 30u)
+    EXPECT_GT(census.considered, 40u)
         << "the corpus emitted almost no located diagnostics about its own files, so the "
            "assertion below would pass without measuring anything. Fix the detector (or "
            "lower this floor on purpose) before trusting an empty census.";

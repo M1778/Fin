@@ -1,324 +1,172 @@
 # 6. Structs and classes
 
-## Fields
+## Fields, defaults, and methods
 
-A `struct` is a named group of fields. Fields are comma-separated and annotated in angle
-brackets, and a field may carry a default value:
+Fields use angle-bracket annotations and commas. Construct a value with
+`Type{field: value}`; omitted fields use declared defaults or zero initialization.
 
 ```fin
 struct Point {
-    x <int>,
-    y <int> = 0
-}
-```
+    pub x <int>,
+    pub y <int> = 4,
 
-A struct value is built with the type name followed by braces naming the fields. A field
-with a default may be omitted:
-
-```fin
-let p <Point> = Point { x: 3, y: 4 };
-let q <Point> = Point { x: 1 };        // y defaults to 0
-```
-
-Fields are read and written with `.`:
-
-```fin
-let sum <int> = p.x + p.y;
-p.x = 10;
-```
-
-## Methods
-
-A method is a `fun` declared inside the struct body. Its first parameter is the receiver,
-conventionally written `self: &Self`:
-
-```fin
-@define printf(fmt: string, ...) <noret>;
-
-struct Point {
-    x <int>,
-    y <int> = 0,
-
-    fun sum(self: &Self) <int> {
+    pub fun sum(self: &Self) <int> {
         return self.x + self.y;
+    }
+    pub fun move_x(self: &Self, amount: int) <noret> {
+        self.x += amount;
     }
 }
 
 fun main() <noret> {
-    let p <Point> = Point { x: 3, y: 4 };
-    printf("%d\n", p.sum());
+    let point <Point> = Point{x: 3};
+    blame point.sum() == 7;
+    point.move_x(2);
+    blame point.x == 5;
 }
 ```
 
-`Self` names the enclosing type, so `&Self` is a pointer to it. Writing the struct's own
-name works equally well — `&Point` and `&Self` mean the same thing.
+`Self` means the enclosing type. `self: &Self` receives a pointer so mutation
+reaches the original value. The compiler can inject `self` when omitted; writing
+it explicitly makes the receiver clear. Call instance methods with `value.method()`.
 
-If a method omits the `self` parameter the compiler still injects the receiver, and `self`
-is available in the body:
-
-```fin
-struct Counter {
-    pub readonly count <int>,
-
-    pub fun bump(new_val: int) <noret> {
-        self.count = new_val;   // `self` is there even though it was not written
-    }
-}
-```
-
-Both spellings appear throughout the corpus. Writing `self: &Self` explicitly is clearer,
-and it is what the standard library does.
-
-Methods are called on values, not on types: `p.sum()`, never `Point.sum(p)`.
-
-## Static methods
-
-`static` declares a method with no receiver, called through the type with `::`:
-
-```fin
-struct Point {
-    x <int>,
-    y <int> = 0,
-
-    pub static fun origin() <&Self> {
-        return new Self{x: 0};
-    }
-}
-```
-
-`new` allocates on the heap, so a static factory that allocates returns a pointer. `new
-Self{...}` and `new Point{...}` are both correct.
+A `static fun` has no receiver and uses `Type::method()`. A factory returning
+`new Type{...}` returns `&Type`; a brace literal alone returns a value.
 
 ## Visibility
 
-`pub`, `priv` and `readonly` control access. They can be written per member:
+`pub` and `priv` can appear on a member or as section labels. `readonly` allows
+initialization and writes by the declaring type, while rejecting external writes.
+Use explicit visibility for library surfaces.
 
-```fin
-struct MyStruct {
-    pub readonly v1 <int>,
-
-    pub fun change_v1(new_val: int) <noret> {
-        self.v1 = new_val;
-    }
-}
-```
-
-or as a section label that applies to everything after it:
-
-```fin
-struct Vec2<T> {
+```fin fragment
+struct Account {
 priv:
-    x <T> = 0,
-    y <T> = 0,
-
+    balance <int>,
 pub:
-    fun length(self: &Self) <float> { ... }
+    fun amount(self: &Self) <int> { return self.balance; }
 }
 ```
-
-The section form is what the standard library uses for anything with more than a couple of
-members.
 
 ## Generic structs
 
-Type parameters go in angle brackets after the struct name:
+Type annotations use `Box<int>`; constructions use `Box::<int>{...}`.
 
 ```fin
-@define printf(fmt: string, ...) <noret>;
-
 struct Box<T> {
-    val <T>,
-
-    fun get(self: &Self) <T> {
-        return self.val;
-    }
+    pub value <T>,
+    pub fun get(self: &Self) <T> { return self.value; }
 }
 
 fun main() <noret> {
-    let b <Box<int>> = Box::<int>{ val: 100 };
-    printf("%d\n", b.get());
+    let box <Box<int>> = Box::<int>{value: 42};
+    blame box.get() == 42;
 }
 ```
 
-Note the two positions: `Box<int>` in a type annotation, `Box::<int>{...}` in a
-construction. A method may take its own generic parameters, which are separate from the
-struct's and may not reuse their names:
-
-```fin
-fun set_x<U>(new_x: U) <noret> {
-    self.x = cast<T>(new_x);
-}
-```
-
-## Operator overloading
-
-`operator` declares an overload inside a struct body. The operator's symbol follows the
-keyword:
-
-```fin
-@define printf(fmt: string, ...) <noret>;
-
-struct Vector2 {
-    x <int>,
-    y <int> = 10,
-
-    pub operator + (other: Vector2) <Vector2> {
-        return Vector2{
-            x: self.x + other.x,
-            y: self.y + other.y
-        };
-    }
-}
-
-fun main() <noret> {
-    let v1 <Vector2> = Vector2 { x: 1, y: 2 };
-    let v2 <Vector2> = Vector2 { x: 3, y: 4 };
-    let v3 <Vector2> = v1 + v2;
-    printf("%d %d\n", v3.x, v3.y);
-}
-```
-
-An operator's parameter may also be written bracketed — `operator + (other: <T>) <int>` —
-and an operator can be generic. `operator []` and `operator []=` are the index forms; the
-standard library declares both on its collection types, and a struct needs `operator []`
-declared before `a[i]` type-checks on it at all.
-
-An index expression's lowering goes directly through `operator []` (for reading `a[i]`) and
-`operator []=` (for writing `a[i] = v`), both in standalone structs and across generic
-implementations.
-
-> [!IMPORTANT]
-> **Held Ruling on Struct Equality (ADR 0036)**:
-> Equality (`==` and `!=`) on structs is strictly **declared-only, never synthesized**.
-> The compiler will never synthesize an automatic memberwise `==` operator for a struct.
-> To compare instances of a struct with `==`, the struct must explicitly declare an
-> `operator ==` overload. An attempt to compare a struct with no declared `==` operator
-> reports an explicit refusal: `an undeclared operator '==' on struct '<Name>'`.
+Methods can declare their own type parameters. Keep their names distinct from
+the enclosing struct's parameters. Unbounded concrete instantiations generate
+specialized code; erasure-marked instantiations have different runtime limits.
 
 ## Constructors
 
-A constructor is written as the struct's own name with a parameter list and a body:
+A constructor initializes `self` and is invoked by `Type(arguments)`. Both the
+`constructor` keyword and the enclosing type's name are accepted declarations.
+Constructors **do run** in the current backend.
 
 ```fin
-struct Temp {
-    degrees <int>,
+struct Counter {
+    pub value <int>,
+    constructor(initial: int) { self.value = initial; }
+}
 
-    Temp(d: int) {
-        self.degrees = d;
+fun main() <noret> {
+    let counter <Counter> = Counter(7);
+    blame counter.value == 7;
+}
+```
+
+Use one constructor per struct: constructor overload resolution is incomplete and
+multiple constructors are refused. `Type{...}` uses field initialization rather
+than invoking that constructor. Pass all constructor arguments explicitly even
+when the frontend accepts a default.
+
+## Destructors and ownership
+
+`~Type()` defines cleanup. Normal scope exit invokes it for local values; `delete`
+on a heap pointer invokes cleanup before freeing the allocation.
+
+```fin
+struct Tracked {
+    pub id <int>,
+    ~Tracked() { printf("drop %d\n", self.id); }
+}
+
+fun main() <noret> {
+    {
+        let value <Tracked> = Tracked{id: 1};
+    }
+    let heap <&Tracked> = new Tracked{id: 2};
+    delete heap;
+    printf("done\n");
+}
+```
+
+```output
+drop 1
+drop 2
+done
+```
+
+Fields clean up in reverse declaration order after the destructor body, followed
+by bases. `return`, `break`, and `continue` also leave scopes; aborting with `blame`
+does not unwind them. See [ADR 0030](../adr/0030-destructors-run-at-scope-exit.md).
+
+Assignment copies a struct. Fin has no move or borrow checker to make copying
+owning pointers safe. Avoid copying a struct whose destructor frees shared raw
+storage; each copy can run the same cleanup. `~Self()` is not the spelling to use
+in a generic type: use the declared type name.
+
+## Operator methods
+
+```fin
+struct Number {
+    pub value <int>,
+    pub operator +(other: Number) <Number> {
+        return Number{value: self.value + other.value};
     }
 }
 
 fun main() <noret> {
-    let t <auto> = Temp(20);
+    let a <Number> = Number{value: 2};
+    let b <Number> = Number{value: 5};
+    let total <Number> = a + b;
+    blame total.value == 7;
 }
 ```
 
-Constructors also support C++-style member-initialiser lists with a colon:
+Declare `operator ==` when you need struct equality; the compiler does not
+synthesize it. `operator []` and `operator []=` describe indexing. For library
+containers, check whether their indexing path builds; named `get`/`set` methods
+make the intended operation explicit.
+
+## Classes and inheritance
+
+A `class` is a value type like a struct. A base uses `: <Base>`; the same syntax
+also lists interfaces, separated by commas.
 
 ```fin
-struct Vector3 {
-    x <int>,
-    y <int>,
-    z <int>,
-
-    Vector3(x: int, y: int, z: int) : x(x), y(y), z(z) {}
-}
-```
-
-Constructors are lowered directly to LLVM IR and execute in binaries produced with `-o`,
-whether declared directly in the struct body or within an `implements` block. Direct brace
-initialisation (`Temp{degrees: 20}`) is also supported for field-by-field instantiation.
-
-Interfaces may also specify abstract constructor requirements using `Self(...)`:
-```fin
-interface Initializable {
-    Self(initial_val: int);
-}
-```
-
-## Destructors
-
-A destructor is declared using a tilde `~` followed by the struct name, taking no parameters:
-
-```fin
-struct Resource {
-    handle <int>,
-
-    ~Resource() {
-        // cleanup code executed on destruction
-    }
-}
-```
-
-Destructors are fully lowered to machine code and clean up resources in two ways:
-1. **Explicit deallocation**: Invoked when deleting a heap object with `delete ptr;`.
-2. **Scope-exit destruction**: Automatically invoked when stack-allocated struct locals leave
-   scope (at block ends, function returns, `break`, or `continue`) in **reverse declaration order**
-   (ADR 0016, ADR 0030).
-
-Destructor composition mirrors construction in reverse: the struct's own destructor body runs first,
-followed by field destructors in reverse order of declaration, followed by effective base class
-destructors (with diamond bases cleaned up exactly once per ADR 0029).
-
-Interfaces can specify abstract destructor requirements using `~Self();`:
-```fin
-interface Disposable {
-    ~Self();
-}
-```
-
-## Classes
-
-`class` declares a struct that may name a base type. Everything else is identical —
-including value semantics: a class is copied on assignment, exactly as a struct is.
-
-```fin
-@define printf(fmt: string, ...) <noret>;
-
-class Named {
-    pub:
-      label <string>,
-
-      fun show(self: &Self) <noret> {
-          printf("%s\n", self.label);
-      }
-}
+struct Base { pub id <int> }
+class Entry : <Base> { pub extra <int> }
 
 fun main() <noret> {
-    let n <Named> = Named { label: "class value" };
-    n.show();
+    let entry <Entry> = Entry{id: 1, extra: 2};
+    blame entry.id + entry.extra == 3;
 }
 ```
 
-Inheritance is spelled with a colon and the base in angle brackets. A struct can use the
-same form:
-
-```fin
-struct Base {
-    id <int>
-}
-
-struct Derived : <Base> {
-    extra <int>
-}
-
-fun main() <noret> {
-    let d <Derived> = Derived{id: 1, extra: 2};   // both fields, base first
-}
-```
-
-The base's fields splice in at offset 0, so a derived value contains its base. Two
-consequences of that are worth knowing:
-
-- A `&Derived` is **not** accepted where a `&Base` is expected. The layout makes the
-  conversion free, but no corpus sample exercises it, so the rule is left unruled and the
-  analyzer refuses it.
-- `class` buys no vtable and no dynamic dispatch. Nothing here makes a method virtual.
-
-`#[class]` is an attribute form that marks a `struct` as a class, which is how
-`lib/std/error.fin` declares `Error`.
-
-The reasoning behind class-as-value-type is in
-`docs/adr/0026-a-class-is-a-struct-with-a-base-and-try-is-a-scope.md`.
+`class` alone adds neither a vtable nor virtual dispatch. Interface references
+provide runtime dispatch. Derived-pointer conversion and multiple-base method
+layout have restrictions; test the exact conversion instead of assuming C++ rules.
 
 Next: [interfaces and generics](07-interfaces-and-generics.md).

@@ -1,3 +1,4 @@
+#include "utils/Process.hpp"
 #include "Driver.hpp"
 #include "lexer/lexer.hpp"
 #include "parser.hpp"
@@ -11,7 +12,6 @@
 #include "SearchPaths.hpp"
 
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -44,137 +44,8 @@ std::optional<std::string> Driver::readFile(const std::string& path) {
     return buffer.str();
 }
 
-// Whether one identifier character continues another. Matches the lexer's word
-// classes closely enough for a conservative scan: missing a keyword inside an
-// exotic-but-valid spelling only ever loads the ambient module needlessly.
-static bool isWordChar(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_';
-}
-
-// The word `w` spelled at `pos` with identifier boundaries on both sides, so
-// `printf` never matches `my_printf` or `printf2` (and `import` never matches
-// `important`). A match inside a longer identifier is not the keyword.
-static bool matchWord(const std::string& src, size_t pos, const char* w) {
-    const size_t len = std::strlen(w);
-    if (pos + len > src.size() || src.compare(pos, len, w) != 0) return false;
-    if (pos > 0 && isWordChar(src[pos - 1])) return false;
-    if (pos + len < src.size() && isWordChar(src[pos + len])) return false;
-    return true;
-}
-
-bool needsAmbientStdio(const std::string& processedSource) {
-    const std::string& src = processedSource;
-    const size_t n = src.size();
-    bool hasImport = false;
-    bool hasPrintf = false;
-    bool hasDefinePrintf = false;
-    bool hasDefinedQuery = false;
-    // Brace depth of the scanner. Only a top-level `@define printf` shadows the
-    // ambient file-wide; one inside a body, a block or a namespace is visible
-    // only there, so it never excuses the load.
-    int depth = 0;
-
-    size_t i = 0;
-    while (i < n) {
-        const char c = src[i];
-        // Line comment.
-        if (c == '/' && i + 1 < n && src[i + 1] == '/') {
-            i += 2;
-            while (i < n && src[i] != '\n') ++i;
-            continue;
-        }
-        // Block comment, nested like the lexer (lexer.l).
-        if (c == '/' && i + 1 < n && src[i + 1] == '*') {
-            int level = 1;
-            i += 2;
-            while (i < n && level > 0) {
-                if (src[i] == '/' && i + 1 < n && src[i + 1] == '*') {
-                    ++level;
-                    i += 2;
-                } else if (src[i] == '*' && i + 1 < n && src[i + 1] == '/') {
-                    --level;
-                    i += 2;
-                } else {
-                    ++i;
-                }
-            }
-            continue;
-        }
-        // String literal, with backslash escapes as in Preprocessor::expandMacros.
-        if (c == '"') {
-            ++i;
-            while (i < n && src[i] != '"') {
-                if (src[i] == '\\' && i + 1 < n) i += 2;
-                else ++i;
-            }
-            if (i < n) ++i;
-            continue;
-        }
-        // Character literal (lexer.l: single quotes with escapes).
-        if (c == '\'') {
-            ++i;
-            while (i < n && src[i] != '\'') {
-                if (src[i] == '\\' && i + 1 < n) i += 2;
-                else ++i;
-            }
-            if (i < n) ++i;
-            continue;
-        }
-        // `@define printf` and `@defined`: the only `@` spellings that read
-        // ambient state. The lexer splits `@` from the keyword, so whitespace
-        // may stand between them.
-        if (c == '@') {
-            size_t p = i + 1;
-            while (p < n && (src[p] == ' ' || src[p] == '\t' || src[p] == '\n' ||
-                             src[p] == '\r' || src[p] == '\f' || src[p] == '\v'))
-                ++p;
-            if (matchWord(src, p, "define")) {
-                size_t q = p + 6;
-                while (q < n && (src[q] == ' ' || src[q] == '\t' || src[q] == '\n' ||
-                                 src[q] == '\r' || src[q] == '\f' || src[q] == '\v'))
-                    ++q;
-                if (depth == 0 && matchWord(src, q, "printf")) hasDefinePrintf = true;
-            } else if (matchWord(src, p, "defined")) {
-                hasDefinedQuery = true;
-            }
-            ++i;
-            continue;
-        }
-        if (c == '{') {
-            ++depth;
-            ++i;
-            continue;
-        }
-        if (c == '}') {
-            if (depth > 0) --depth;
-            ++i;
-            continue;
-        }
-        if (isWordChar(c)) {
-            if (matchWord(src, i, "import")) {
-                hasImport = true;
-            } else if (matchWord(src, i, "printf")) {
-                hasPrintf = true;
-            }
-            while (i < n && isWordChar(src[i])) ++i;
-            // An import or a `@defined` query settles the answer whatever the
-            // rest of the file holds.
-            if (hasImport || hasDefinedQuery) return true;
-            continue;
-        }
-        ++i;
-    }
-
-    if (hasImport || hasDefinedQuery) return true;
-    return hasPrintf && !hasDefinePrintf;
-}
-
-// Helper to configure the loader. Returns whether library paths were named
-// (`--fin-libs` or a non-empty `FIN_LIBS`), which is when the bundled
-// standard library stays out of the search: the caller needs the same answer
-// to decide whether the ambient module may be skipped.
-bool configureLoader(ModuleLoader& loader, const CompilerOptions& options) {
+// Helper to configure the loader
+void configureLoader(ModuleLoader& loader, const CompilerOptions& options) {
     // 1. Add CLI Include Paths
     for (const auto& path : options.includePaths) {
         loader.addSearchPath(path);
@@ -241,7 +112,6 @@ bool configureLoader(ModuleLoader& loader, const CompilerOptions& options) {
     if (!librariesSpecified) {
         loader.addSearchPath(".");
     }
-    return librariesSpecified;
 }
 
 int Driver::compile() {
@@ -292,24 +162,14 @@ int Driver::compile() {
 
     ModuleLoader loader(basePath);
     loader.setDiagnostics(&diag);
-    const bool librariesSpecified = configureLoader(loader, options);
-    // The standard I/O module owns the explicit ambient `#[global] printf`
-    // declaration. Load it before the root analyzer so its published binding is
-    // available without an import, while all other std names remain import-only.
-    // If the root file is itself stdio, loading it as a background global module
-    // is skipped since the root compilation will analyze it directly.
-    //
-    // The load parses and analyses the whole module (~11ms; the rest of the
-    // frontend is under a millisecond combined), so it is skipped when the root
-    // file cannot reach the ambient name (see needsAmbientStdio). A pinned
-    // library environment (`--fin-libs`/`FIN_LIBS`) always loads: a custom
-    // stdio there may publish further ambient names this scan does not know.
-    if (librariesSpecified || needsAmbientStdio(processedCode)) {
-        loader.loadGlobalModuleIfPresent("stdio", true, options.inputFile);
-    }
+    configureLoader(loader, options);
     // This file is already being compiled, so an import of it is a cycle and not a module
     // to go and load. See `ModuleLoader::beginRootFile`.
     loader.beginRootFile(options.inputFile);
+    // The standard I/O module owns the explicit ambient `#[global] printf`
+    // declaration. Load it before the root analyzer so its published binding is
+    // available without an import, while all other std names remain import-only.
+    loader.loadGlobalModuleIfPresent("stdio", true);
     // ----------------------------
 
     // 3.5 Macro Expansion
@@ -509,45 +369,14 @@ bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag,
 }
 
 bool Driver::runLinker(const std::string& objectPath, DiagnosticEngine& diag) {
-    // `cc` rather than a linker directly: the C driver is what knows this
-    // platform's crt files, its dynamic loader, and where libc is. Fin has no
-    // runtime of its own to add yet, and when it does this is the one line that
-    // grows a `-lfin`.
-    //
-    // `FIN_CC` overrides it, because a cross build and a distro whose compiler
-    // is not on PATH as `cc` are both real and neither is worth a rebuild of
-    // finc to accommodate.
-    const char* fromEnv = std::getenv("FIN_CC");
-    const std::string cc = (fromEnv && *fromEnv) ? fromEnv : "cc";
-
-    auto quote = [](const std::string& s) {
-        std::string out = "'";
-        for (char c : s) {
-            if (c == '\'') out += "'\\''";
-            else out += c;
-        }
-        return out + "'";
-    };
-
-#ifdef FIN_LLVM_MAJOR
-#define FIN_STRINGIFY_HELPER(x) #x
-#define FIN_STRINGIFY(x) FIN_STRINGIFY_HELPER(x)
-    const std::string defaultLdflags = "-Wl,--as-needed -lLLVM-" FIN_STRINGIFY(FIN_LLVM_MAJOR) " -lm";
-#undef FIN_STRINGIFY
-#undef FIN_STRINGIFY_HELPER
-#else
-    const std::string defaultLdflags = "-Wl,--as-needed -lLLVM-22 -lm";
-#endif
-
-    const char* ldflagsEnv = std::getenv("FIN_LDFLAGS");
-    std::string ldflags = (ldflagsEnv && *ldflagsEnv) ? std::string(" ") + ldflagsEnv
-                                                      : std::string(" ") + defaultLdflags;
-
-    std::string command = fmt::format("{} {} -o {}{}", quote(cc), quote(objectPath),
-                                      quote(options.outputPath), ldflags);
-    if (options.debugCodegen) diag.note("[codegen] " + command);
-
-    int rc = std::system(command.c_str());
+    const auto command = linkCommand({objectPath}, options.outputPath);
+    if (options.debugCodegen) {
+        std::string display;
+        for (const auto& arg : command) display += " [" + arg + "]";
+        diag.note("[codegen]" + display);
+    }
+    const auto& cc = command.front();
+    const int rc = runProcess(command);
     if (rc != 0) {
         diag.reportError(fmt::format("link failed: {} exited with {}", cc, rc),
                          "the object file was emitted, so this is the C toolchain "

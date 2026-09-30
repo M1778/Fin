@@ -1,214 +1,96 @@
 # 8. Enums
 
-## Plain enums
+## Plain enums run
 
-An `enum` names a set of members. A member may carry an explicit discriminant; the ones
-that follow continue from it:
-
-```fin
-enum Status {
-    OK = 0,
-    ERROR
-}
-```
-
-A member is referenced through its enum with `::`, and converted to an integer with `cast`:
+An enum names members, optionally assigning integer discriminants. The next
+member continues from the previous discriminant. Refer to a member with `::`.
 
 ```fin
-@define printf(fmt: string, ...) <noret>;
-
-enum Status {
-    OK = 0,
-    ERROR
+enum State {
+    Ready = 3,
+    Busy,
+    Done
 }
 
 fun main() <noret> {
-    let a <Status> = Status::OK;
-    printf("%d\n", cast<int>(a));
+    let state <State> = State::Busy;
+    blame cast<int>(state) == 4;
+    if (state == State::Busy) { printf("busy\n"); }
 }
 ```
 
-## Bringing members into scope
-
-Writing `Status::` every time is noise. `extern ... as` gives a member a short name, and
-`extern * from` lifts every member out at once:
-
-```fin
-@define printf(fmt: string, ...) <noret>;
-
-enum Status {
-    OK = 0,
-    ERROR
-}
-
-extern * from Status;
-
-fun main() <noret> {
-    let a <Status> = Status::OK;   // still works
-    let b <Status> = ERROR;        // and so does this
-    printf("%d %d\n", cast<int>(a), cast<int>(b));
-}
+```output
+busy
 ```
 
-The single-member form is `extern Status::OK as OK;`. Both are covered again in chapter 10 —
-they are general symbol operations, not enum-specific.
+`extern State::Ready as Ready;` introduces an alias and `extern * from State;`
+brings members into scope. Prefer qualified member names when clarity matters;
+renamed-symbol lowering has limitations outside simple enum use.
 
-## Payloads
+## Payload syntax and its limit
 
-A member may carry values. The payload types are written in parentheses after the member
-name:
+Payload types follow a member name in parentheses. Generic parameters follow the
+enum name. This example is deliberately **frontend-only**:
 
-```fin
-enum Color {
-    RGB(uint{8}, uint{8}, uint{8}),
-    RGBA(uint{8}, uint{8}, uint{8}, uint{8})
-}
-```
-
-A payloaded member is a *constructor*: name it with arguments and you get a value of the
-enum.
-
-```fin
-fun main() <noret> {
-    let c <Color> = Color::RGB(100, 200, 50);
-    let d <Color> = Color::RGBA(0, 0, 0, 100);
-}
-```
-
-Payload arguments are type-checked against the declared payload types.
-
-## Positional members
-
-`.N` reads slot `N` of whichever member the value holds:
-
-```fin
-enum Color {
-    RGB(uint{8}, uint{8}, uint{8}),
-    RGBA(uint{8}, uint{8}, uint{8}, uint{8})
-}
-
-fun main() <noret> {
-    let c <Color> = Color::RGB(100, 200, 50);
-    blame c.0 == 100;
-}
-```
-
-Two things follow from "slot N of whichever member the value holds", and both matter:
-
-- `.N` is *not* an index over the members. `Result`'s `Ok(T)` and `Err(E)` each carry one
-  payload, so position `1` exists on neither and `c.1` is a diagnostic:
-  `Enum 'Result' has no payload at position 1`.
-- When the members disagree about what sits at position `N`, and which member the value
-  holds is not statically known, the slot's type is `any`.
-
-Reading a payload out of an enum whose members agree — as `Color` does, `uint{8}` at
-position 0 either way — is fully checked.
-
-## Generic enums
-
-Type parameters go after the enum name, and members reference them in their payloads:
-
-```fin
-enum Result<T, U> {
+```fin build-error
+enum Result<T, E> {
     Ok(T),
-    Err(U),
-}
-
-extern Result::Ok as Ok;
-extern Result::Err as Err;
-
-fun main() <noret> {
-    let r <Result<int, string>> = Ok(10);
-    r = Err("boom");
-}
-```
-
-Note what fills in the type arguments there. An enumerator is a constructor whose generic
-arguments come from what is written to it, so `Ok(10)` says `T` is `int`; `U` comes from the
-annotation on the declaration. Where each member mentions only one parameter, one argument
-plus the annotation is enough.
-
-A member can also be declared with a field-style annotation, which is what
-`lib/std/stdio.fin` does:
-
-```fin
-pub enum IOResult<T> {
-    pub Err <IOError>,
-    pub Ok <T>,
-}
-```
-
-## Attaching methods
-
-`@implements Type::name = <lambda>;` adds a member to an already-declared type, and an enum
-can be the target. This is how the corpus gives `Result` an `unwrap`:
-
-```fin
-enum Result<T, U> {
-    Ok(T),
-    Err(U),
-}
-
-@implements Result<T, U>::unwrap = fun(enum_: Result<T, U>) <T> {
-    return enum_.0;
+    Err(E)
 }
 
 fun main() <noret> {
-    let r <Result<int, string>> = Result::Ok(10);
-    r.unwrap();
+    let result <Result<int, string>> = Result::Ok(42);
 }
 ```
 
-The receiver of an enum method is its *first parameter* — `r.unwrap()` passes nothing
-because `enum_` is the receiver. The block form, `Result<T, U> implements <IResult> { ... }`,
-also parses and declares its target's generic parameters.
+The backend refuses generic enums and enums with payloads. Their syntax is useful
+for understanding library declarations, but a successful type-check does not
+make `Result`, `IOResult`, or their methods runnable.
 
-## Enum reflection
+Payload member access uses `.0`, `.1`, and so on. The number selects a payload
+slot of the current member, not a member of the enum. If members disagree about
+that slot's type, the frontend may produce `any`; it does not establish safe
+runtime narrowing.
 
-`enums::std` provides two intrinsics:
+## Representing a recoverable result today
+
+For an executable, a plain enum plus concrete fields can represent a result.
+Keep the status check beside every read of the corresponding value.
 
 ```fin
-import { getkeyid, keyidof } from enums::std;
+enum ParseState { Valid, Invalid }
+struct CheckedNumber {
+    pub state <ParseState>,
+    pub value <int>
+}
 
-enum Status { OK, ERROR }
+fun positive(number: int) <CheckedNumber> {
+    if (number > 0) {
+        return CheckedNumber{state: ParseState::Valid, value: number};
+    }
+    return CheckedNumber{state: ParseState::Invalid, value: 0};
+}
 
 fun main() <noret> {
-    let s <Status> = Status::OK;
-    let k <int> = getkeyid(s);
+    let result <CheckedNumber> = positive(7);
+    blame result.state == ParseState::Valid;
+    blame result.value == 7;
+    let invalid <CheckedNumber> = positive(-1);
+    blame invalid.state == ParseState::Invalid;
 }
 ```
 
-`getkeyid(value)` takes a *value* of an enum and returns its key id. `keyidof(member)`
-takes an enum *member* — a name, not a value — using the `$enum_member` meta-type. The
-intended idiom for asking which member a value holds is
-`getkeyid(enum_) == keyidof(Ok)`, and it is what the standard library drafts write:
+This pattern has no automatic tag/payload safety. The function and its callers
+must preserve the relationship between status and fields.
 
-```fin
-import { getkeyid, keyidof } from enums::std;
+## Reflection and matching
 
-enum Result<T, U> { Ok(T), Err(U) }
-extern Result::Ok as Ok;
+Fin has no `match` statement. Use `if` and plain-enum comparisons for executable
+branches. `enums::std` declares `getkeyid(value)` and `keyidof(member)`; `keyidof`
+expects the `$enum_member` meta-type. A bare alias to the member can type-check
+where a qualified expression resolves as a constructor or value instead.
 
-fun main() <noret> {
-    let r <Result<int, string>> = Ok(1);
-    let is_ok <bool> = getkeyid(r) == keyidof(Ok);
-}
-```
-
-`keyidof` needs the member reachable as a bare name, which is what the `extern ... as` line
-provides. The qualified spelling `keyidof(Result::Ok)` reports a type error — that path
-resolves the member as a value or a constructor rather than as a `$enum_member`.
-
-## What is not here
-
-Fin has no `match` statement. It is on the roadmap and it will be keyword-introduced, for
-the reason chapter 4 gives: a brace at statement start already means a block. Until it
-arrives, comparison and `getkeyid` are how an enum is discriminated.
-
-Enums with payloads and generic enums are fully lowered to machine code as tagged unions
-(ADR 0041), represented as a 32-bit tag discriminant and a max-payload byte buffer
-`{ i32, [MaxPayload x i8] }`. Member constructors, positional `.N` reads, reflection
-via `getkeyid(e)`, and member comparisons (`e == Ok(T)`, ADR 0037) compile and run in
-binaries produced with `-o`.
+The library's enum reflection declarations and attached `Result` methods are
+not evidence that payload dispatch executes. See [the library reference](12-standard-library-tour.md).
 
 Next: [arrays and pointers](09-arrays-and-pointers.md).

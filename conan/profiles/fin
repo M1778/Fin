@@ -17,6 +17,9 @@ include(default)
 # gnu20 asks ConanCenter for binaries that were never built and turns every
 # dependency into a from-source build.
 {% if platform.system() == "Windows" %}
+# LLVM's official MSVC development archive uses the static CRT. Dependencies
+# must use the same runtime as finc and LLVM (including GTest).
+compiler.runtime=static
 &:compiler.cppstd=20
 {% else %}
 &:compiler.cppstd=gnu20

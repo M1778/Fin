@@ -1,0 +1,105 @@
+name: Fin build toolchain
+description: Install LLVM, parser generators, and Conan for CI and releases.
+inputs:
+  llvm-arch:
+    description: Windows LLVM architecture
+    default: x86_64
+runs:
+  using: composite
+  steps:
+      - name: Check LLVM pin
+        shell: bash
+        run: |
+          major="$(sed -n 's/^set(FIN_LLVM_MAJOR \([0-9][0-9]*\) CACHE STRING.*/\1/p' CMakeLists.txt)"
+          version=22.1.8
+          case "$version" in
+            "$major".*) ;;
+            *) echo "::error::LLVM archive $version disagrees with CMake pin $major"; exit 1 ;;
+          esac
+          echo "FIN_LLVM_MAJOR=$major" >> "$GITHUB_ENV"
+          echo "FIN_LLVM_VERSION=$version" >> "$GITHUB_ENV"
+          echo "WINFLEXBISON_URL=https://github.com/lexxmark/winflexbison/releases/download/v2.5.25/win_flex_bison-2.5.25.zip" >> "$GITHUB_ENV"
+          echo "WINFLEXBISON_SHA256=8d324b62be33604b2c45ad1dd34ab93d722534448f55a16ca7292de32b6ac135" >> "$GITHUB_ENV"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Python build tools
+        shell: bash
+        run: |
+          uv tool install "conan>=2.4,<3"
+          uv tool install ninja
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: ${{ inputs.llvm-arch == 'aarch64' && 'arm64' || 'x64' }}
+
+      - name: Install bison and flex (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison flex
+
+      - name: Install bison and flex (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install bison flex
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Install bison and flex (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:WINFLEXBISON_URL -OutFile winflexbison.zip
+          $got = (Get-FileHash winflexbison.zip -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:WINFLEXBISON_SHA256) {
+            throw "winflexbison.zip has sha256 $got, expected $env:WINFLEXBISON_SHA256"
+          }
+          $dest = Join-Path $env:RUNNER_TEMP 'winflexbison'
+          Expand-Archive -Path winflexbison.zip -DestinationPath $dest -Force
+          Add-Content -Path $env:GITHUB_PATH -Value $dest
+
+      - name: Install LLVM ${{ env.FIN_LLVM_MAJOR }} (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          codename="$(lsb_release -cs)"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/$codename/ llvm-toolchain-$codename-$FIN_LLVM_MAJOR main" \
+            | sudo tee "/etc/apt/sources.list.d/llvm-$FIN_LLVM_MAJOR.list"
+          sudo apt-get update
+          sudo apt-get install -y "llvm-$FIN_LLVM_MAJOR-dev"
+          echo "LLVM_DIR=$(llvm-config-$FIN_LLVM_MAJOR --cmakedir)" >> "$GITHUB_ENV"
+
+      - name: Install LLVM ${{ env.FIN_LLVM_MAJOR }} (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install "llvm@$FIN_LLVM_MAJOR"
+          prefix="$(brew --prefix "llvm@$FIN_LLVM_MAJOR")"
+          echo "LLVM_DIR=$prefix/lib/cmake/llvm" >> "$GITHUB_ENV"
+
+      - name: Install LLVM ${{ env.FIN_LLVM_MAJOR }} (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          tar_arch="${{ inputs.llvm-arch }}"
+          if [ -z "$tar_arch" ]; then
+            echo "::error::matrix row ${{ runner.os }} names no LLVM tarball arch"
+            exit 1
+          fi
+          name="clang+llvm-$FIN_LLVM_VERSION-$tar_arch-pc-windows-msvc"
+          url="https://github.com/llvm/llvm-project/releases/download/llvmorg-$FIN_LLVM_VERSION/$name.tar.xz"
+          curl -fL --retry 3 --retry-all-errors -o llvm.tar.xz "$url"
+          dest="$(cygpath -u "$RUNNER_TEMP")/llvm"
+          mkdir -p "$dest"
+          tar -xf llvm.tar.xz -C "$dest" --strip-components=1
+          "$dest/bin/llvm-config.exe" --version
+          echo "$(cygpath -m "$dest")/bin" >> "$GITHUB_PATH"
+          echo "LLVM_DIR=$(cygpath -m "$dest")/lib/cmake/llvm" >> "$GITHUB_ENV"

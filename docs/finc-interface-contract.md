@@ -1,17 +1,17 @@
-# The `finc` interface, contract 2
+# The `finc` interface, contract 1
 
-This is what `finn` may rely on when it runs `finc`. Everything here was **measured against the binary**,
-not read off a plan — every claim below was produced by running `finc` at version `0.4.0 (contract 2)`.
-ADR 0009 and ADR 0032 define the reasoning; this document is the live surface.
+This is the command-line interface used by `finn` and other tools. It describes
+the current compiler, `0.4.0 (contract 1)`. ADR 0009 records the contract's design;
+`tests/test_cli.cpp` and `tests/test_codegen.cpp` check its behavior.
 
-Under Contract 2, `finc` produces native executables via `-o <path>`, alongside complete semantic
-analysis, the bundled standard library (`lib/std/`), and machine-readable JSONL diagnostics.
+`finc file.fin` checks source. Add `-o app` to build an executable or `-c` to emit
+an object. Code generation requires a build with the LLVM backend enabled.
 
 ## Discovering the contract
 
 ```
 $ finc --version
-finc 0.4.0 (contract 2)
+finc 0.4.0 (contract 1)
 ```
 
 Format: `finc <semver> (contract <int>)`, one line, on **stdout**, exit `0`. The two numbers move
@@ -47,8 +47,12 @@ to a user, that is stderr. This holds on every exit path, including `2` and `3`.
 
 ## `--diagnostics=json`
 
-JSONL on stderr: one object per line, each with a `kind`. Nothing else appears on stderr in this mode —
-including for a mistake in the command line, and including when `--color=always` is also passed.
+Fin writes JSONL on stderr: one object per line, each with a `kind`. This also
+applies to command-line errors and when `--color=always` is passed.
+
+Current linking limitation: an external C driver can write its own output to the
+inherited streams. Its messages are not converted into Fin JSON diagnostics.
+Use `-c` and a separate link step when a tool needs strict stream control.
 
 One diagnostic:
 
@@ -111,22 +115,28 @@ file — a bad flag, a file that could not be read. Check for null; do not print
 ## Flags
 
 ```
--o <path>              Output path — honoured; writes native binary on clean compile (see below)
--c                     Compile to an object file and do not link
--O0, -O1, -O2, -O3     Optimisation level for a '-o' build (default -O0)
+-o <path>              Build an executable at this path (or name the object with -c)
+-c                     Emit an object file without linking
+-O0, -O1, -O2, -O3     Optimisation level (default -O0)
 -I, --include <path>   Add a module search path
 --fin-libs <paths>     Library search paths, platform-separated
---diagnostics=<fmt>    Diagnostic format: human (default) or json
+--diagnostics=<fmt>    human (default) or json
 --color=<when>         auto (default), always or never
 --debug-ast            Print the parsed AST
 --debug-sema           Print semantic analysis details
---debug-codegen        Print what the backend lowers and the link command
+--debug-codegen        Print backend and linker details
 --no-check             Skip semantic analysis (unsafe)
 --version / --help
 ```
 
 **An unknown flag is an error (`2`), never ignored.** A toolchain whose flags fail silently is the worst
 case for a caller that builds argv programmatically. A second positional argument is also `2`.
+
+Without `-o` or `-c`, success means the source passed frontend checks. With `-o`,
+success means the executable was linked at the requested path. With `-c`, success
+means the object was written; the default name is `<input stem>.o` in the working
+directory. Supplying `-o` alongside `-c` overrides that object path. An executable
+needs `main`; a library object does not. Unsupported lowering produces a diagnostic.
 
 `--diagnostics=` and `--color=` are honoured for command-line errors too, and **may be written after the
 mistake they render** — `finn` does not need to order argv to get parseable errors.
@@ -144,6 +154,8 @@ glued (`--fin-libs=<paths>`) and it is **repeatable**.
   fixed `:` would split one path into a bogus `C` and a rootless `\libs`. Repeating the flag is the way
   to pass a path that itself contains the separator.
 - Empty entries are dropped, not read as the working directory.
+- An empty `FIN_LIBS` environment variable is treated as unset. To explicitly
+  suppress library defaults, use `--fin-libs=`.
 - **Repeating the flag accumulates.** `--fin-libs=a --fin-libs=b` is the same as `--fin-libs=a:b` on a
   POSIX host. It is not "last one wins", which is why repeating it is a sound way to pass a path that
   contains the separator character.
@@ -162,8 +174,8 @@ glued (`--fin-libs=<paths>`) and it is **repeatable**.
 - The standard library that shipped with the binary, found at `<directory of the executable>/../lib/std`.
   One rule covers both layouts: a release archive unpacks to `bin/finc` beside `lib/std`, and a build tree
   puts `finc` in `build/` beside the source `lib/std`. It is resolved from the executable's own location,
-  never from the working directory, and it is skipped when the directory does not exist. In release and build trees,
-  `lib/std` is present and ships all 37 standard library modules.
+  never from the working directory, and it is skipped when the directory does not exist.
+  Keep the binary and bundled library in this layout when installing or moving them.
 - Then the working directory, for the convenience of a bare `finc foo.fin` typed by hand.
 
 Search order overall: `-I` paths, then the `--fin-libs`/`FIN_LIBS` set, then (only if that set was never
@@ -184,56 +196,29 @@ configured at all, and it means a project's internal imports do not depend on wh
 
 ## Environment
 
-`finc` reads exactly two environment variables, and this list is exhaustive as of contract 2:
+The compiler reads these environment variables:
 
 - `FIN_LIBS` — library search paths, as above.
 - `NO_COLOR` — any value disables colour, as the de-facto standard requires.
+- `FIN_CC` — the C compiler driver used to link executables. An unset or empty
+  value selects `cc` on Unix and `clang` on Windows. Supply one executable name
+  or path, not a shell command with flags. Arguments are passed literally.
 
-A caller pinning a build needs to neutralise only `FIN_LIBS`. If a third variable is ever added it is a
-change to this document.
+A caller pinning a build should supply explicit library paths and a known C
+toolchain. The linker also uses its normal environment, including `PATH` and
+the Visual Studio SDK environment on Windows.
 
-## What contract 2 adds
+## Current limitations
 
-- **`finc` produces executables.** `-o <path>` is honoured: on a clean compilation
-  it writes a native binary at that path, and a `0` exit means both "accepted the
-  source" and "wrote the binary". A `0` without a binary at the requested path is a
-  compiler bug, not a contract 2 success.
-- **`finn build` links and produces a runnable binary.** `finn build` passes `-o
-  out/<project>` (see `src/commands/build.rs`), creates the `out/` directory if
-  needed, and after a clean compile verifies the binary exists before reporting
-  success. `finn run` then executes that binary.
-- **The standard library ships.** `lib/std/` is present and compiles, so the
-  search-path defaults resolve real modules and the bundled `printf` is available
-  without an import.
-- **Most real Fin source compiles.** The frontend is no longer the bottleneck; the
-  corpus measures what actually compiles rather than a historical refusal count.
-
-### Contract 2 still inherits contract 1 where it already worked
-
-Everything contract 1 defined — argv grammar, exit codes, stream discipline, the
-`--diagnostics=json` schema, the `FIN_LIBS`/`NO_COLOR` environment, the search-path
-rules, and the compatibility promise on JSON keys — is unchanged. Contract 2 only
-adds the code-generation half. A build of `finn` that speaks contract 1 can still
-read a contract 2 finc's JSONL (the schema did not change) but must not assume the
-binary exists, because contract 1 finc ignores `-o`.
-
-### What changed since contract 1
-
-| Contract 1 said | Contract 2 says |
-| --- | --- |
-| `-o` is accepted and ignored | `-o` is honoured and writes a binary |
-| `0` means "accepted the source" | `0` means "accepted the source and wrote the binary" |
-| No standard library ships | `lib/std/` ships and compiles |
-| finn build produces no executable | finn build produces `out/<project>` |
-
-### What has not changed
-
-- The default standard-library location is still `<exe dir>/../lib/std`, with the
-  working directory as a fallback only when nothing names a library path.
-- The JSON schema is unchanged: the same keys, the same `kind` values, the same
-  `summary`/`diagnostic` split. Contract 2 finc writes the same JSON as contract 1.
-- The exit codes are unchanged: `0`, `1`, `2`, `3` keep their meanings.
-- stdout is still reserved for `--help` and `--version` only.
+- There is no `finc check` subcommand. Use `finc <file> --diagnostics=json`.
+- A successful frontend check does not establish backend support. Build and run
+  applications; consult the [agent guide](agent-guide.md) for known language limits.
+- Bundled modules live in `lib/std`, but some library APIs only type-check.
+  See the [library guide](guide/12-standard-library-tour.md) before relying on an API.
+- Windows filesystem and process paths use the active code page. Paths containing
+  characters outside that code page are not reliably supported.
+- Release validation builds archives without publishing by default. Archive names,
+  checksums, and the version index are validated by `.github/workflows/release.yml`.
 
 ## Changing this document
 
@@ -247,8 +232,8 @@ side is how `download.rs:62-65` came to match on OS alone and hand arm64 users a
 Contract 1 gained a bundled-stdlib default, lost the `tests/samples/stdlib` default, and narrowed the
 working-directory default to invocations that name no library paths. The version stayed at 1, deliberately:
 
-- Nothing has been released against contract 1. No release is published and CI has never run, so no build
-  of `finn` can be depending on the behaviour that changed.
+- At the time of that change, nothing had been released against contract 1 and CI
+  had not run. No released `finn` build depended on the behavior that changed.
 - The behaviour that changed was documented, in this file, as something not to rely on.
 - The one narrowing — the working directory no longer being searched by a pinned build — is a *fix to* the
   guarantee this section of the document makes, not a break in it. A caller that asked for hermeticity was

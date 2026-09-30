@@ -2,217 +2,155 @@
 
 ## Declarations
 
-A local variable is introduced with `let`, and its type goes in angle brackets after the
-name:
+Use `let name <Type> = value;`. `auto` asks the compiler to infer the type from
+that value. Initialize a local before reading it.
 
 ```fin
 fun main() <noret> {
-    let a <int> = 100;
-    let b <float> = 2.5;
-    let c <bool> = true;
-    let s <string> = "hello";
-    let ch <char> = 'x';
+    let count <int> = 3;
+    let inferred <auto> = 4;
+    let enabled <bool> = true;
+    let text <string> = "Fin";
+    let letter <char> = 'F';
+    let ratio <float> = 1.5;
+    count += inferred;
+    blame count == 7 && enabled;
+    printf("%s %d\n", text, count);
 }
 ```
 
-The annotation is not optional in general, but it can be deferred. A declaration without an
-initialiser is legal, and the variable is assigned later:
-
-```fin
-let uninit <int>;
-uninit = 5;
+```output
+Fin 7
 ```
 
-## Inference with `auto`
-
-`auto` asks the compiler to determine the type from the initialiser, at compile time:
-
-```fin
-let kilo <auto> = 19;              // int
-let squarer <auto> = (x: int) <int> => x * x;   // fn(int) -> int
-```
-
-If the compiler cannot determine a type, that is a diagnostic rather than a fallback. An
-empty array literal is the common case: `let a <auto> = [];` reports that it cannot infer
-the element type, while `let a <[int]> = [];` is fine because the annotation says what the
-literal could not.
+`let value <int>;` permits later assignment. `let value <auto>;` has no initializer
+from which to infer a type. For an empty array, write the element type:
+`let items <[int]> = [];`.
 
 ## Builtin types
 
-The compiler registers these names in the global scope, so they need no import:
+These need no import. Aliases such as `i32` belong to `types::std` instead.
 
-| Name | Meaning |
+| Type | Representation / use |
 | --- | --- |
-| `int` | signed integer |
-| `uint` | unsigned integer |
-| `short`, `ushort` | narrower signed/unsigned integer |
-| `long`, `ulong` | wider signed/unsigned integer |
-| `float`, `double` | floating point |
-| `bool` | `true` / `false` |
-| `char` | a single character |
-| `string` | text |
-| `void`, `noret` | no value; both spell the same return type |
-| `auto` | infer from the initialiser |
-| `any` | compile-time erasure — checked at runtime, not here |
-| `object` | a runtime box that can hold any value |
+| `char` | 8-bit character/integer representation |
+| `short`, `ushort` | Signed/unsigned 16-bit integers |
+| `int`, `uint` | Signed/unsigned 32-bit integers |
+| `long`, `ulong` | Signed/unsigned 64-bit integers |
+| `float`, `double` | 32-bit / 64-bit floating point |
+| `bool` | `true` or `false` |
+| `string` | Pointer to NUL-terminated bytes |
+| `noret`, `void` | No return value; equivalent spellings |
+| `auto` | Inferred type, not a runtime box |
+| `any`, `object` | Dynamic/erased type machinery with runtime limits; prefer concrete types |
 
-`any` and `object` are distinguished deliberately: `any` is erasure, `object` is a box that
-pays memory and speed to hold anything.
+A sized integer uses braces: `int{8}`, `uint{64}`, or `int{8 * 8}`. The expression
+must produce a supported constant width. Pointers preserve their pointee type;
+`&int{64}` and `&int{32}` are not interchangeable.
 
-There is one sharp edge worth knowing early. Integer and float literals get a default type,
-and there is no implicit narrowing or widening between the numeric types, so a `double`
-needs its literal converted:
+## Numeric conversion
 
-```fin
-let d <double> = cast<double>(1.5);   // `= 1.5` reports: expected 'double', got 'float'
-```
-
-## Sized types
-
-A builtin numeric type can carry a width in braces. The width is an expression evaluated at
-compile time, not just a literal:
+Integers widen implicitly by width, including `int` to `long`. A narrower target
+or an equal-width sign change needs `cast<T>`. Integer constants that fit a target
+can initialize it directly. Negative constants cannot initialize unsigned types.
+The integer widening rule does not imply that `float` converts to `double`.
 
 ```fin
-let x <int{64}> = 10;
-let z <int{8 * 8}> = 42;       // the annotation's expression is evaluated
-let p <*int{32}> = &x;         // pointer to a 32-bit int
-```
-
-## Constants and module-scope variables
-
-`const` declares a binding that cannot be reassigned. `let` at module scope declares a
-mutable global. Both require a type the compiler can determine at compile time:
-
-```fin
-const PI <float> = 3.14;
-const MAX_FILE_SIZE <auto> = 1000;
-
-let Counter <int> = 0;
-```
-
-A `const` parameter is the same idea applied to an argument — the callee may read and copy
-it but not reassign it:
-
-```fin
-fun test(const a: int) <noret> {
-    let scope_a <int> = a;   // copying is fine
-    scope_a = 5;             // and the copy is writable
-    // a = 10;               // rejected: `a` is const
+fun main() <noret> {
+    let small <int{8}> = 7;
+    let wider <long> = small;
+    let precise <double> = cast<double>(1.5);
+    let ordinary <int> = cast<int>(wider);
+    blame ordinary == 7;
+    blame precise > cast<double>(1.0);
 }
 ```
 
-`const` restricts the *binding*, not what it points through. A `const a: &int` cannot be
-re-pointed, but `*a = 20;` writes the pointee.
+```fin error
+fun main() <noret> {
+    let negative <ulong> = -1;
+}
+```
 
-## `readonly`
+Use explicit casts for mixed integer/floating-point calculations so the intended
+precision is visible. [Expressions](03-operators-and-expressions.md) explains casts.
 
-`readonly` is the struct-member counterpart: the field is visible outside its declaring
-type but writable only from inside it.
+## `const` and `readonly`
+
+`const` prevents rebinding. At module scope, use constant initializers; arbitrary
+runtime initialization is not supported. A `const` pointer binding does not make
+its pointee immutable.
+
+```fin
+const LIMIT <int> = 8;
+
+fun change(const target: &int) <noret> {
+    *target = LIMIT;
+}
+
+fun main() <noret> {
+    let count <int> = 0;
+    change(&count);
+    blame count == 8;
+}
+```
+
+A `readonly` field permits initialization and writes inside its declaring type,
+while rejecting later writes from outside. This check is implemented.
 
 ```fin
 struct Counter {
-    pub readonly count <int>,
-
-    pub fun bump(new_val: int) <noret> {
-        self.count = new_val;    // fine: inside the struct
-    }
+    pub readonly value <int>,
+    pub fun bump(self: &Self) <noret> { self.value++; }
 }
 
 fun main() <noret> {
-    let c <Counter> = Counter { count: 1 };   // first initialisation is allowed
-    let copy <int> = c.count;                 // reading and copying is allowed
-    c.bump(10);                               // the intended way to change it
+    let counter <Counter> = Counter{value: 4};
+    counter.bump();
+    blame counter.value == 5;
 }
 ```
 
-A `readonly` field can be copied out and the copy modified freely; what is protected is the
-field itself.
+```fin error
+struct Counter { pub readonly value <int> }
+fun main() <noret> {
+    let counter <Counter> = Counter{value: 4};
+    counter.value = 5;
+}
+```
 
-Writes to a `readonly` field from outside its declaring type are rejected at compile time
-by semantic analysis (`Cannot assign to readonly field 'count' of struct 'Counter'`), as
-demonstrated in `tests/samples/readonly.fin`. Only methods within the struct's declaration
-scope may mutate `readonly` fields.
+## Aliases and constraint sets
 
-## Type aliases
+A type alias names one type. A constraint set uses `|` and describes allowed
+choices for a generic bound; it is not a tagged runtime union.
 
-`type` gives a name to an existing type:
-
-```fin
+```fin check
 type IntArray = [int];
-type PtrIntArray = &[int];
-type ArrayType<T> = [T];      // aliases take generic parameters
+type ArrayType<T> = [T];
+type Number = int | uint | float;
+fun identity<T: Number>(value: T) <T> { return value; }
 ```
 
-`type` also declares a *constraint set*, using `|`:
+Use concrete types for storage. Generic bound enforcement still has gaps, so
+passing a check is not proof that every declared bound was enforced.
 
-```fin
-type Number = int | uint | float | short | long | ushort | ulong | double;
-```
+## Nullable declarations
 
-A constraint set is a bound and never a storage type. `fun sort<T: Number>(...)` is what it
-is for. `let x <Number>;` is specified to be a diagnostic at the point of use, and that
-check is not yet implemented — such a declaration compiles today — so treat the bound
-position as the only supported one. The reasoning is in
-`docs/adr/0018-a-constraint-set-is-a-bound-never-a-storage-type.md`: storage would need a
-tag, and Fin already has a tagged sum in `enum`.
+`?` on a declaration permits absence; postfix `?` on a value denullifies it.
+A nullable function declaration starts with `fun?`. This is syntax/type-checking
+support, not a promise that nullable structs or scalars build.
 
-## Nullability
-
-A `?` after the name makes a declaration nullable. Its default value is null, and `null` is
-a permitted initialiser:
-
-```fin
-struct A {
-    pub b? <int>,           // same as `b <int> = null,`
+```fin check
+struct Record { pub number? <int> }
+fun? make_record(number?: int) <Record> {
+    if (number == null) { return null; }
+    return Record{number: number};
 }
 ```
 
-A postfix `?` on an expression *denullifies* it — it yields the value or panics:
-
-```fin
-let sure <A> = make_a(1)?;
-```
-
-A function whose return type may be null is declared `fun?`, and a nullable parameter is
-optional at the call site:
-
-```fin
-fun? make_a(n?: int) <A> {
-    if (n == null) {
-        return null;
-    }
-    return A{};
-}
-```
-
-Per ADR 0040, nullable types lower cleanly in LLVM IR:
-- **Nullable pointers and functions** (`(&T)?`, `fn?`): Use standard 8-byte pointers with `0x0`
-  as the `null` sentinel.
-- **Nullable value types** (`int?`, `float?`, `struct?`): Lower as tagged aggregates
-  `{ T, bool }` (a payload paired with a boolean presence flag). Struct instantiation initializes
-  absent fields to `{ 0, false }`, and denullify `expr?` tests this discriminant flag at runtime.
-
-Note that `?` means two unrelated things in Fin: this denullify, and the `otherwise` arm of
-the conditional expression covered in the next chapter.
-
-## Scopes
-
-A variable lives until the end of the block that declares it, and a bare `{` in statement
-position opens a block:
-
-```fin
-fun main() <noret> {
-    let a <int> = 1;
-    {
-        let b <int> = a + 1;   // `a` is visible here
-    }
-    // `b` is not visible here
-}
-```
-
-That rule is positional and it matters: `{` at the start of a statement is *always* a
-block, never a brace-initialised value. A value written with braces only ever appears after
-something that introduces it — `Point{x: 1}`, `= {...}` — so the two never compete. See
-`docs/adr/0011-a-bare-brace-opens-a-scope.md`.
+The backend has limited nullable support, including nullable function values.
+For general application data, a concrete value plus an explicit presence flag
+avoids relying on an unimplemented representation. See
+[functions](05-functions.md) for omitted-argument limits.
 
 Next: [operators and expressions](03-operators-and-expressions.md).

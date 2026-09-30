@@ -16,6 +16,10 @@ instantiation stays lazy per use with the `LinkOnceODR` linkage the backend
 already gives shared symbols. A concrete struct or function from a module is
 never declared or emitted from the import side.
 
+On Windows COFF, each `LinkOnceODR` definition also receives a COMDAT group
+named after its symbol. This lets the linker merge shared methods, template
+instances, and vtables emitted by multiple objects, as the linkage requires.
+
 ## Considered Options
 
 - Clone-splice imported declarations into the root: reuses all passes

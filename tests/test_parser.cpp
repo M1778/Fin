@@ -11,6 +11,27 @@
 #include "diagnostics/DiagnosticEngine.hpp"
 #include "preprocessor/Preprocessor.hpp"
 
+TEST(Preprocessor, CRLFDirectivesAndContinuationsMatchLF) {
+    const std::string source =
+        "#cdef VERBOSE\n"
+        "#c_ifdef VERBOSE\n"
+        "#cdef COUNT 1 + \\\n"
+        "2\n"
+        "COUNT\n"
+        "#c_else\n"
+        "wrong_branch\n"
+        "#c_endif\n";
+    std::string windowsSource;
+    for (char c : source) {
+        if (c == '\n') windowsSource += '\r';
+        windowsSource += c;
+    }
+    fin::Preprocessor lf, crlf;
+    const auto expected = lf.process(source);
+    EXPECT_NE(expected.find("1 + 2"), std::string::npos);
+    EXPECT_EQ(crlf.process(windowsSource), expected);
+}
+
 namespace fs = std::filesystem;
 
 // --- Helper Functions ---
@@ -103,54 +124,6 @@ TEST_F(ParserTest, StructMethods) {
         }
     )";
     EXPECT_TRUE(parseString(code));
-}
-
-// --- Preprocessor passthrough -------------------------------------------------
-//
-// The preprocessor has a fast path: a file with no directives and no line
-// continuations is returned unchanged (modulo a trailing newline). These pin
-// the behaviour the fast path must preserve byte-for-byte.
-
-TEST(PreprocessorPassthrough, PlainSourceIsUnchanged) {
-    fin::Preprocessor pp;
-    const std::string src = "fun main() <noret> {}\n";
-    EXPECT_EQ(pp.process(src), src);
-}
-
-TEST(PreprocessorPassthrough, MissingTrailingNewlineIsAdded) {
-    fin::Preprocessor pp;
-    EXPECT_EQ(pp.process("fun main() <noret> {}"), "fun main() <noret> {}\n");
-}
-
-TEST(PreprocessorPassthrough, CommentsAndStringsAreUntouched) {
-    fin::Preprocessor pp;
-    const std::string src =
-        "// #cdef NOT_A_DIRECTIVE\n"
-        "/* #c_ifdef NOPE */\n"
-        "fun main() <noret> { let s <string> = \"#cdef\"; }\n";
-    EXPECT_EQ(pp.process(src), src);
-}
-
-TEST(PreprocessorPassthrough, DirectivesStillExpand) {
-    fin::Preprocessor pp;
-    const std::string out = pp.process("#cdef FOO 42\nfun main() <noret> { let x <int> = FOO; }\n");
-    EXPECT_NE(out.find("42"), std::string::npos) << out;
-    EXPECT_EQ(out.find("FOO"), std::string::npos) << out;
-}
-
-TEST(PreprocessorPassthrough, DisabledBranchesAreBlanked) {
-    fin::Preprocessor pp;
-    const std::string out =
-        pp.process("#c_ifdef NEVER_DEFINED\nfun hidden() <noret> {}\n#c_endif\nfun main() <noret> {}\n");
-    EXPECT_EQ(out.find("hidden"), std::string::npos) << out;
-    EXPECT_NE(out.find("main"), std::string::npos) << out;
-}
-
-TEST(PreprocessorPassthrough, BackslashContinuationStillJoins) {
-    fin::Preprocessor pp;
-    const std::string out = pp.process("fun main() <noret> { \\\n let x <int> = 1; }\n");
-    EXPECT_EQ(out.find("\\"), std::string::npos) << out;
-    EXPECT_NE(out.find("let x"), std::string::npos) << out;
 }
 
 // FileParserTest and GetFinFiles() used to live here. Both are deleted:

@@ -1,3 +1,4 @@
+#include "utils/Process.hpp"
 #include "Corpus.hpp"
 
 #include <gtest/gtest.h>
@@ -46,6 +47,15 @@ std::string readWholeFile(const std::string& path) {
     std::stringstream buffer;
     buffer << t.rdbuf();
     return buffer.str();
+}
+
+std::string readProcessOutput(const std::string& path) {
+    auto text = readWholeFile(path);
+#ifdef _WIN32
+    size_t pos = 0;
+    while ((pos = text.find("\r\n", pos)) != std::string::npos) text.erase(pos, 1);
+#endif
+    return text;
 }
 
 namespace {
@@ -279,20 +289,6 @@ std::string stripAnsi(const std::string& s) {
     return out;
 }
 
-namespace {
-
-std::string shellQuote(const std::string& s) {
-    std::string out = "'";
-    for (char c : s) {
-        if (c == '\'') out += "'\\''";
-        else out += c;
-    }
-    out += "'";
-    return out;
-}
-
-} // namespace
-
 std::string uniqueTempPath(const std::string& prefix, const std::string& suffix) {
     // Atomic because gtest can be built to run tests on more than one thread,
     // and a torn counter here reintroduces exactly the collision this function
@@ -325,28 +321,12 @@ FincRun runFinc(const std::vector<std::string>& args,
     fs::path outPath = uniqueTempPath("finc_out");
     fs::path errPath = uniqueTempPath("finc_err");
 
-    std::string cmd;
-    // `env -u` so NO_COLOR can be *removed* as well as set: an inherited
-    // NO_COLOR would otherwise make the colour test vacuous.
-    cmd += "env";
-    for (const auto& kv : env) {
-        if (kv.second == "\x01unset") cmd += " -u " + kv.first;
-        else cmd += " " + kv.first + "=" + shellQuote(kv.second);
-    }
-    cmd += " " + shellQuote(fincBinary());
-    for (const auto& a : args) cmd += " " + shellQuote(a);
-    cmd += " > " + shellQuote(outPath.string());
-    cmd += " 2> " + shellQuote(errPath.string());
+    std::vector<std::string> command{fincBinary()};
+    command.insert(command.end(), args.begin(), args.end());
+    r.exitCode = fin::runProcess(command, outPath.string(), errPath.string(), env);
 
-    int status = std::system(cmd.c_str());
-#ifdef WIFEXITED
-    r.exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-#else
-    r.exitCode = status;
-#endif
-
-    r.out = readWholeFile(outPath.string());
-    r.err = readWholeFile(errPath.string());
+    r.out = readProcessOutput(outPath.string());
+    r.err = readProcessOutput(errPath.string());
 
     std::error_code ec;
     fs::remove(outPath, ec);
