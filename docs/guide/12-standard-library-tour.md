@@ -16,8 +16,8 @@ conversions or unsupported calls. The examples below mark those boundaries.
 | [stdio](../../lib/std/stdio.fin) | `printf`, `Printable`, printing helpers, `Stream`, `File`, `IOResult<T>` | Ambient `printf` runs; ordinary helper calls and payload results have backend limits |
 | [strings](../../lib/std/strings.fin) | Length, byte comparison, search, transforms, splitting/joining | Ordinary imported functions are frontend-only; allocating calls require caller cleanup |
 | [math](../../lib/std/math.fin) | Numeric helpers, integer algorithms | Check each imported call before using it in an executable |
-| [collection](../../lib/std/collection.fin) | `Collection<T>`, `CollectionError`, `coll!` | The concrete integer example below runs; buffer cleanup is incomplete; `from_prototype` discards input |
-| [hashmap](../../lib/std/hashmap.fin) | `HashMap<K,V>`, `HashMapError`, `map!` | Erased/custom-hasher paths and method emission have limits; `from_prototype` discards input |
+| [collection](../../lib/std/collection.fin) | `Collection<T>`, `CollectionError`, `coll!` | The concrete integer example below runs; buffer cleanup is incomplete; `from_prototype` stores entries via `push`, so `coll![...]` builds a populated collection |
+| [hashmap](../../lib/std/hashmap.fin) | `HashMap<K,V>`, `HashMapError`, `map!` | Erased/custom-hasher paths and method emission have limits; `from_prototype` stores entries via `__set`, so `map!{...}` builds a populated map |
 | [types](../../lib/std/types.fin) | Numeric aliases, `Number`, `Any`, `number2str` | Alias/bound declarations do not imply working dynamic values or conversion helpers |
 | [typing](../../lib/std/typing.fin) | `Result<T,E>`, `IResult` | Generic payload enums do not build |
 | [enums](../../lib/std/enums.fin) | `Enum`, `EnumType`, `getkeyid`, `keyidof` | Reflection declarations are not general runtime payload dispatch |
@@ -96,10 +96,8 @@ The buffer grows geometrically. Index-taking accessors assert bounds with `blame
 `contains` uses `==`, so string elements compare pointers and struct elements need
 an equality operator. Removing a pointer element does not free its pointee.
 
-`Collection::from_prototype` currently returns an empty collection. `coll![...]`
-forwards to it, so it does not preserve the supplied elements. Use an array or the
-builtin [prototype](09-arrays-and-pointers.md#prototypes-builtin-structural-maps)
-when you need a working literal.
+`Collection::from_prototype` stores the supplied values in order through `push`,
+so `coll![1, 2, 3]` builds a populated collection holding the written elements.
 
 ## `HashMap<K,V>`
 
@@ -108,10 +106,9 @@ when you need a working literal.
 for expected absence. `remove`, `clear`, `len`, `capacity`, and `is_empty` manage
 the table. Iterate via `slot_count`, `is_live`, `key_at`, and `value_at`.
 
-The following example type-checks but fails code generation on conversion to
-`any` in the hash path:
+The following example builds and runs:
 
-```fin build-error
+```fin
 import { HashMap } from hashmap::std;
 fun main() <noret> {
     let counts <auto> = HashMap::<string, int>();
@@ -128,8 +125,8 @@ not repair pointer equality. `with_hasher(fn(any) -> int)` also depends on incom
 erased-call support.
 
 Growth can retain old storage; removed slots retain key/value storage.
-`from_prototype` and `map!{...}` currently discard the supplied entries. Do not use
-these as populated-map constructors.
+`from_prototype` stores each pair through `__set`, so `map!{...}` builds a
+populated map holding the written entries.
 
 ## Strings and math
 
@@ -138,10 +135,9 @@ these as populated-map constructors.
 `to_upper`, `to_lower`, `split`, `join`, `to_chars`, `from_chars`, and `free_str`.
 Search functions return indices or `-1`; `equals` compares bytes.
 
-These ordinary string and integer-algorithm imports type-check, but their calls
-do not build:
+These ordinary string and integer-algorithm imports build and run:
 
-```fin build-error
+```fin
 import { len, equals } from strings::std;
 import { gcd, clamp } from math::std;
 fun main() <noret> {

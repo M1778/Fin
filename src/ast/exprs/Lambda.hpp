@@ -19,6 +19,23 @@ public:
 
 class LambdaExpression : public Expression {
 public:
+    // One free variable the body reads from an enclosing function scope.
+    //
+    // Computed by SemanticAnalyzer::visit(LambdaExpression&) (capture analysis):
+    // each Identifier in the body that resolves to a binding declared in a
+    // function-local scope outside this lambda, excluding globals, functions,
+    // and the lambda's own parameters and locals (shadowing wins). Ordered by
+    // first use, so codegen's env struct layout is deterministic.
+    //
+    // `byRef` marks reference-typed bindings (`&T`): the env field holds a copy
+    // of the pointer, so reads and writes through it alias the referent, while a
+    // value-typed capture is a snapshot copy. The lowering is the same copy
+    // sequence either way; the flag documents which meaning the copy has.
+    struct Capture {
+        std::string name;
+        bool byRef = false;
+    };
+    std::vector<Capture> captures;
     std::vector<std::unique_ptr<Parameter>> params;
     std::unique_ptr<TypeNode> return_type;
     std::unique_ptr<Block> body;

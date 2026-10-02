@@ -1287,6 +1287,20 @@ interface_item_rest:
         $$ = std::make_unique<fin::DestructorDeclaration>("Self", nullptr);
         $$->setLoc(@$);
     }
+
+    /* A `@special` inside an interface body is a named refusal, not a syntax
+       error (docs/compiler-api.md Q13): dispatch chosen at run time cannot
+       select a function that only exists at compile time, the same reason D
+       forbids `@__ctfe` on virtual methods. The item yields null and the
+       accumulator above drops a null item, so the interface still parses and
+       the diagnostic is the rule rather than "unexpected AT". */
+    | special_declaration {
+        auto* sp = static_cast<fin::SpecialDeclaration*>($1.get());
+        error(@$, "A '@special' function may not be an interface method: '" +
+                  (sp ? sp->name : std::string("?")) + "' only exists at compile time, "
+                  "and dispatch chosen at run time cannot select it (docs/compiler-api.md Q13)");
+        $$ = nullptr;
+    }
     ;
 
 /* --- PARAMETERS --- */
@@ -1968,6 +1982,14 @@ base_type:
         $$->setLoc(@$);
     }
     | KW_ANY { $$ = std::make_unique<fin::TypeNode>("any"); $$->setLoc(@$); }
+    /* `quote` as a type: the layout projections (`compiler.layout.pointer_map_quote`)
+       and the provider slots return one (docs/compiler-api.md §2.5, steps 8+16), so
+       the signature is nameable. Beside KW_ANY for the same reason it is there: a
+       keyword the language already has, admitted in type position and nowhere else.
+       Measured, not assumed: bison reports no new conflicts with this production,
+       and `quote { ... }` still parses as the quote expression (macros.fin and the
+       macro suite hold it). */
+    | KW_QUOTE { $$ = std::make_unique<fin::TypeNode>("quote"); $$->setLoc(@$); }
     | KW_ANY LT type_list GT %prec TYPE_PREC {
         $$ = std::make_unique<fin::TypeNode>("any");
         $$->generics = std::move($3);

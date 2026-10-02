@@ -55,6 +55,12 @@ void CloneVisitor::visit(FunctionCall& node) {
     );
     res->generic_args = cloneVector(node.generic_args);
     res->is_special = node.is_special;
+    // The method binding travels with the node, for the reason
+    // MethodCall::resolved_call's comment states: cloning after semantics is
+    // what the generic instantiations do, and a clone without it would lower
+    // by name to the free function the frontend did not bind.
+    res->resolved_method_owner = node.resolved_method_owner;
+    res->resolved_method_static = node.resolved_method_static;
     res->setLoc(node.loc);
     result = std::move(res);
 }

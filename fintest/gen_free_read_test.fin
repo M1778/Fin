@@ -1,0 +1,18 @@
+import { assert_eq_int, assert_true } from testing::std;
+
+// Pins gen_b01: a free generic fn reading Box<T> works at int and char.
+// Green on both compilers (finc + finc_stage2).
+struct Box<T> {
+    val <T>
+}
+
+fun read<T>(b: Box<T>) <T> { return b.val; }
+
+fun main() <noret> {
+    let bi <Box<int>> = Box::<int>{ val: 42 };
+    let bc <Box<char>> = Box::<char>{ val: 'z' };
+    let ri <int> = read(bi);
+    let rc <char> = read(bc);
+    assert_eq_int(ri, 42, "free_read: int box reads back");
+    assert_true(rc == 'z', "free_read: char box reads back");
+}

@@ -17,8 +17,11 @@ namespace std {
 #[llvm_name="free"]
 @define arg_free(ptr: string) <noret>;
 
+#[llvm_name="strncmp"]
+@define arg_strncmp(a: string, b: string, count: ulong) <int>;
+
 #[llvm_name="snprintf"]
-@define arg_snprintf(buf: string, size: ulong, fmt: string) <int>;
+@define arg_snprintf(buf: string, size: ulong, fmt: string, ...) <int>;
 
 priv fun str_eq(a: string, b: string) <bool> {
     if (a == null && b == null) { return true; }
@@ -113,8 +116,18 @@ pub struct ArgParser {
                   }
               }
 
-              // 3. Positional argument
+              // 3. Positional argument. An unmatched dash-arg is a usage
+              // error, never a positional: silently compiling the wrong
+              // thing is the worst failure mode for a caller that builds
+              // argv programmatically.
               if (!is_matched) {
+                  if (arg_strncmp(arg, "-", cast<ulong>(1)) == 0) {
+                      let need <ulong> = arg_strlen(arg) + cast<ulong>(32);
+                      let msg <string> = arg_calloc(need, cast<ulong>(1));
+                      arg_snprintf(msg, need, "unknown option '%s'", arg);
+                      self.error_msg = msg;
+                      return false;
+                  }
                   if (self.positional_count < 64) {
                       self.positionals[self.positional_count] = arg;
                       self.positional_count++;
@@ -157,6 +170,26 @@ pub struct ArgParser {
 
       fun has_flag(self: &Self, name: string) <bool> {
           return self.get_flag(name);
+      }
+
+      fun has_option(self: &Self, name: string) <bool> {
+          for (let i <int> = 0; i < self.option_count; i++) {
+              if (str_eq(self.options[i].name, name) || str_eq(self.options[i].short_name, name)) {
+                  return str_eq(self.options[i].value, "") == false;
+              }
+          }
+          return false;
+      }
+
+      fun reset(self: &Self) <noret> {
+          for (let i <int> = 0; i < self.flag_count; i++) {
+              self.flags[i].value = false;
+          }
+          for (let j <int> = 0; j < self.option_count; j++) {
+              self.options[j].value = self.options[j].default_val;
+          }
+          self.positional_count = 0;
+          self.error_msg = "";
       }
 }
 

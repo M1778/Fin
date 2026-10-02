@@ -102,6 +102,17 @@ TypePtr StructType::getMethodType(const std::string& n) {
     return nullptr;
 }
 
+bool StructType::isMethodPublic(const std::string& n) {
+    auto it = method_visibility.find(n);
+    if (it != method_visibility.end()) return it->second;
+    for (const auto& parent : parents) {
+        if (auto p = std::dynamic_pointer_cast<StructType>(parent)) {
+            if (p->getMethodType(n)) return p->isMethodPublic(n);
+        }
+    }
+    return true;
+}
+
 TypePtr StructType::getOperatorType(int op) const {
     auto it = operators.find(op);
     if (it != operators.end()) return it->second;
@@ -146,7 +157,10 @@ TypePtr StructType::clone() const {
     // In order, so the copy lays out the way the original does. defineField rebuilds
     // field_index as it goes, which is why the index is never copied directly.
     for(const auto& f : fields) s->defineField(f.name, f.type->clone(), f.is_public, f.is_readonly);
-    for(auto& kv : methods) s->defineMethod(kv.first, kv.second->clone());
+    for(auto& kv : methods) {
+        auto vit = method_visibility.find(kv.first);
+        s->defineMethod(kv.first, kv.second->clone(), vit == method_visibility.end() ? true : vit->second);
+    }
     for(auto& kv : operators) s->defineOperator(kv.first, kv.second->clone());
     for(const auto& p : parents) s->parents.push_back(p->clone());
     
@@ -177,7 +191,11 @@ TypePtr StructType::substitute(const TypeMap& mapping, TypePtr selfReplacement) 
     // In order: `Pair<int, string>` laid out differently from `Pair<T, U>` would be
     // an ABI split between a generic function and its caller.
     for(const auto& f : fields) newStruct->defineField(f.name, f.type->substitute(mapping, nextSelf), f.is_public, f.is_readonly);
-    for(auto& kv : methods) newStruct->defineMethod(kv.first, kv.second->substitute(mapping, nextSelf));
+    for(auto& kv : methods) {
+        auto vit = method_visibility.find(kv.first);
+        newStruct->defineMethod(kv.first, kv.second->substitute(mapping, nextSelf),
+                                vit == method_visibility.end() ? true : vit->second);
+    }
     for(auto& kv : operators) newStruct->defineOperator(kv.first, kv.second->substitute(mapping, nextSelf));
     for(const auto& p : parents) newStruct->parents.push_back(p->substitute(mapping, nextSelf));
 

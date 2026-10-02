@@ -15,6 +15,32 @@ struct Symbol {
     bool is_mutable;
     bool is_initialized;
 
+    // Wave-5 slice 4: `#[slaveof(...)]` on the declaration that defined this
+    // binding. Empty when untied, "$Fin" when pinned to program exit, else
+    // the referent variable whose scope exit ends this storage. Recorded at
+    // declaration (after the referent resolved in scope) so a use can tell a
+    // live tie from a dangling one; the scope owns the entry, so the tie
+    // dies with the binding and shadowing resolves by construction.
+    //
+    // Defaulted, so the aggregate initialisations of Symbol elsewhere mean
+    // what they meant: a symbol is untied unless something says otherwise.
+    std::string slaveof;
+
+    // Whether this binding is a compile-time callable rather than frame data.
+    //
+    // `is_function` marks names bound by a `fun` declaration (nested or module):
+    // calling one needs its symbol, never a frame slot. `is_template` marks a
+    // variable bound to a generic recipe (`let id <auto> = fun <T>...`): it has
+    // no value until a call instantiates it. Both are excluded from lambda
+    // capture analysis -- capturing one would snapshot a slot that does not
+    // exist -- while an `fn`-typed parameter or closure variable stays
+    // capturable: it holds a runtime closure pair.
+    //
+    // Defaulted, so the aggregate initialisations of Symbol elsewhere mean
+    // what they meant: a symbol is data unless something says otherwise.
+    bool is_function = false;
+    bool is_template = false;
+
     // Whether a prototype for this name was retained for the splice into the root
     // program (ADR 0021's backend half: ModuleLoader::retainAmbientPrototype).
     //

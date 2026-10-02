@@ -46,6 +46,7 @@ set(FIN_LLVM_MAJOR 22 CACHE STRING
     "The single LLVM major version finc is built against (ADR 0010)")
 option(FIN_WITH_LLVM
     "Find and link LLVM ${FIN_LLVM_MAJOR}. Required from wave 5 (codegen)." ON)
+option(FIN_STATIC_LLVM "Link LLVM components statically (musl release packaging)." OFF)
 
 # --- Dependencies ---
 find_package(BISON 3.2 REQUIRED)
@@ -60,6 +61,21 @@ if(FIN_WITH_LLVM)
     # place for it: it compares the major that ADR 0010 names against the major
     # that was found, and it says which one it found and where.
     find_package(LLVM REQUIRED CONFIG)
+    if(MSVC AND TARGET LLVMDebugInfoPDB)
+        # LLVM's Windows archive embeds the packager's Visual Studio DIA path.
+        # Resolve a missing path against the active Developer shell's SDK.
+        get_target_property(fin_pdb_deps LLVMDebugInfoPDB INTERFACE_LINK_LIBRARIES)
+        foreach(dependency IN LISTS fin_pdb_deps)
+            if(dependency MATCHES "/DIA SDK/lib/(.*diaguids\\.lib)$" AND NOT EXISTS "${dependency}")
+                file(TO_CMAKE_PATH "$ENV{VSINSTALLDIR}/DIA SDK/lib/${CMAKE_MATCH_1}" fin_dia_guids)
+                if(NOT EXISTS "${fin_dia_guids}")
+                    message(FATAL_ERROR "LLVM requires ${fin_dia_guids}; use a Visual Studio Developer shell with the DIA SDK installed.")
+                endif()
+                string(REPLACE "${dependency}" "${fin_dia_guids}" fin_pdb_deps "${fin_pdb_deps}")
+            endif()
+        endforeach()
+        set_property(TARGET LLVMDebugInfoPDB PROPERTY INTERFACE_LINK_LIBRARIES "${fin_pdb_deps}")
+    endif()
     if(NOT LLVM_VERSION_MAJOR VERSION_EQUAL FIN_LLVM_MAJOR)
         message(FATAL_ERROR
             "ADR 0010: finc is built against exactly one LLVM major, "
@@ -80,7 +96,18 @@ if(FIN_WITH_LLVM)
     # static libraries via llvm_map_components_to_libnames, which is also what
     # the `TARGET LLVM` branch below yields to -- if LLVM's MSVC story ever
     # grows a dylib, that branch prefers it with no edit here.
-    if(NOT TARGET LLVM)
+    if(FIN_STATIC_LLVM AND NOT MSVC)
+        # llvm-config supplies the dependency order and system libraries without
+        # importing shared-library dependencies from LLVM's CMake targets.
+        execute_process(
+            COMMAND "${LLVM_TOOLS_BINARY_DIR}/llvm-config" --link-static
+                    --libfiles --system-libs core support bitwriter bitreader mc passes
+                    native
+            OUTPUT_VARIABLE fin_llvm_link_flags
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            COMMAND_ERROR_IS_FATAL ANY)
+        separate_arguments(fin_llvm_libs UNIX_COMMAND "${fin_llvm_link_flags}")
+    elseif(NOT TARGET LLVM OR FIN_STATIC_LLVM)
         if(NOT MSVC)
             message(FATAL_ERROR
                 "LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR} does not export "
@@ -90,8 +117,8 @@ if(FIN_WITH_LLVM)
                 "where one was expected.")
         endif()
         llvm_map_components_to_libnames(fin_llvm_libs
-            Core Support BitWriter BitReader MC
-            nativecodegen nativeasmparser)
+            Core Support BitWriter BitReader MC Passes
+            native)
         message(STATUS "No monolithic LLVM target (MSVC); linking components: "
             "${fin_llvm_libs}")
     endif()
@@ -118,6 +145,7 @@ add_library(fin_core STATIC
     src/driver/Driver.cpp
     src/utils/ModuleLoader.cpp
     src/utils/IntegerConstant.cpp
+    src/utils/Process.cpp
 
     # AST Base & Utilities
     src/ast/ASTNode.cpp
@@ -169,7 +197,14 @@ add_library(fin_core STATIC
 
     # Semantic Analysis
     src/semantics/BuiltinMacros.cpp
+    src/semantics/ComptimeInterp.cpp
     src/semantics/CompilerApi.cpp
+    src/semantics/EventRegistry.cpp
+    src/semantics/EventFiring.cpp
+    src/semantics/EventPayloads.cpp
+    src/semantics/LoopBackEdge.cpp
+    src/semantics/MovedAnalysis.cpp
+    src/semantics/LivePointers.cpp
     src/semantics/impl/Analyzer_CompilerApi.cpp
     src/semantics/impl/Analyzer_Core.cpp
     src/semantics/impl/Analyzer_Decl.cpp
@@ -180,6 +215,7 @@ add_library(fin_core STATIC
     src/types/Type.cpp
     src/types/ErrorType.cpp
     src/types/DynamicType.cpp
+    src/types/UnionType.cpp
     src/types/ArrayType.cpp
     src/types/FunctionType.cpp
     src/types/GenericType.cpp
@@ -213,7 +249,7 @@ endif()
 target_link_libraries(fin_core PUBLIC fmt::fmt)
 
 if(FIN_WITH_LLVM)
-    if(TARGET LLVM)
+    if(TARGET LLVM AND NOT FIN_STATIC_LLVM)
         target_link_libraries(fin_core PUBLIC LLVM)
     else()
         # MSVC only (see above): the component static libraries.
@@ -258,6 +294,13 @@ endif()
 # --- CLI Executable ---
 add_executable(finc src/main.cpp)
 target_link_libraries(finc PRIVATE fin_core)
+# Keep <exe dir>/../lib/std valid with multi-config generators as well.
+set_target_properties(finc PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<1:${CMAKE_CURRENT_BINARY_DIR}>")
+
+# fintest: minimal end-to-end TAP runner over `fintest/**/*_test.fin` (slice 1:
+# standalone binary, run directly; ctest wiring arrives in slice 2).
+add_subdirectory(tools/fintest)
 
 # --- Install / package layout (ADR 0010) --------------------------------------
 # A release archive unpacks to exactly `bin/finc[.exe]` and `lib/std/**`, with

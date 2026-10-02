@@ -1,215 +1,143 @@
 # 9. Arrays and pointers
 
-## Two kinds of array
+## Fixed and dynamic arrays
 
-`[T, N]` has its extent in its type. `[T]` does not:
-
-```fin
-let fixed <[int, 3]> = [1, 2, 3];
-let dyn <[int]> = [4, 5, 6];
-```
-
-They are different types, not one type with a number missing. Indexing and assignment work
-the same on both:
+`[T, N]` includes its extent in its type. `[T]` carries a data pointer and a runtime
+length, without a capacity field. Indexing begins at zero.
 
 ```fin
-@define printf(fmt: string, ...) <noret>;
-
 fun main() <noret> {
     let fixed <[int, 3]> = [1, 2, 3];
-    printf("%d\n", fixed[0]);
-
-    let dyn <[int]> = [4, 5, 6];
-    printf("%d %d\n", dyn[1], dyn.length);
-    dyn[0] = 9;
-    printf("%d\n", dyn[0]);
+    let dynamic <[int]> = [4, 5, 6];
+    blame fixed[2] == 3;
+    blame dynamic.length == 3;
+    dynamic[0] = 9;
+    blame dynamic[0] == 9;
+    delete dynamic;
 }
 ```
 
-An array literal is checked element by element against its annotation's element type, so
-`let a <[uint]> = [7, 3, 4];` is fine — the literal is offered `uint` rather than defaulting
-to `int`.
+A constant out-of-range index into a fixed array is rejected. Runtime indices and
+dynamic extents do not get automatic bounds checks. Validate them explicitly.
+`foreach` over an array avoids manual indexing for a simple traversal.
 
-## `.length`
-
-A `[T]` carries its length as an `int`:
-
-```fin
-let n <int> = dyn.length;
-```
-
-This works through a pointer as well — a callee handed a `&[T]` can still ask. That is the
-fact that fixes the representation: a `[T]` is exactly two words, a pointer to
-heap-allocated elements and a length, and a `&[T]` is a pointer to that pair rather than to
-the elements. There is no capacity field; growth is something a library builds *on* `[T]`,
-never *into* it. See `docs/adr/0025-a-dynamic-array-is-a-pointer-and-a-length.md`.
-
-`string` also has a `.length`, which type-checks but is not yet lowered.
-
-## Allocating an array
-
-`new [T, n]{}` allocates on the heap, and `n` may be computed at runtime:
+A `[T]` copy copies the handle, so its elements remain shared. An `&[T]` points to
+the handle itself, allowing a callee to replace its pointer or length. A `[&T]`
+is instead an array of pointers.
 
 ```fin
 fun main() <noret> {
-    let n <int> = 4;
-    let heap <[int]> = new [int, n]{};
-    heap[0] = 1;
+    let original <[int]> = [1, 2];
+    let alias <[int]> = original;
+    alias[0] = 8;
+    blame original[0] == 8;
+    delete original;
+    // alias now refers to freed storage; do not use or delete it.
+}
+```
+
+## Allocate a buffer
+
+`new [T, count]{}` allocates zeroed elements and returns `[T]`. The count may be
+computed at runtime. A bare `new [T]` has no allocation size and is refused.
+
+```fin
+fun main() <noret> {
+    let count <int> = 4;
+    let buffer <[int]> = new [int, count]{};
+    blame buffer.length == 4;
+    blame buffer[0] == 0;
+    buffer[3] = 12;
+    blame buffer[3] == 12;
+    delete buffer;
+}
+```
+
+`delete` releases the buffer; it does not recursively invent ownership for
+pointer elements. Keep one owner and free each allocation once.
+
+## Raw pointers
+
+`&T` means pointer to `T`, `&value` takes an address, and `*pointer` dereferences.
+Pass an address explicitly when a function expects a pointer.
+
+```fin
+fun increment(pointer: &int) <noret> { *pointer = *pointer + 1; }
+
+fun main() <noret> {
+    let local <int> = 4;
+    increment(&local);
+    blame local == 5;
+    let heap <&int> = new int(7);
+    increment(heap);
+    blame *heap == 8;
     delete heap;
 }
 ```
 
-The result is a `[T]`, not a pointer to a fixed-size array — this is the one `new` that
-does not produce a pointer. `delete` frees it, and it frees the pair's data word.
+`new Point{x: 1}` returns `&Point`; `Point{x: 1}` returns a value. For a generic
+parameter, allocate with `new T{}` and assign through the result; `new T(value)`
+is not the primitive-allocation grammar.
 
-This builds and runs. The elements are zeroed, which is what the empty `{}` means; `new [int]`
-with no extent at all is refused, because there is no count to allocate and zero would be a
-guess. Array literals, indexing, assignment and `.length` build and run too, including
-`.length` on an array that never had an address (`give().length`).
-
-## Passing arrays
-
-A `[T]` passed by value is copied; passed as `&[T]` it is not:
-
-```fin
-@define printf(fmt: string, ...) <noret>;
-
-type Number = int | uint | float;
-
-fun total<T: Number>(array: &[T]) <int> {
-    let acc <int> = 0;
-    for (let i <int> = 0; i < array.length; i++) {
-        acc += cast<int>(array[i]);
-    }
-    return acc;
-}
-
-fun main() <noret> {
-    let a <[int]> = [1, 2, 3];
-    printf("%d\n", total(&a));
-}
-```
-
-Array types can be named:
-
-```fin
-type ArrayType<T> = [T];      // generic array alias
-type IntArray = [int];        // array of ints
-type PtrIntArray = &[int];    // pointer to an array of ints
-type IntPtrArray = [&int];    // array of pointers to int
-```
-
-The last two are worth reading twice. `&[int]` is a pointer to an array; `[&int]` is an
-array of pointers.
-
-## References and pointers
-
-`&T` is a pointer to `T`. `&expr` takes an address, `*expr` dereferences:
-
-```fin
-@define printf(fmt: string, ...) <noret>;
-
-fun bump(p: &int) <noret> {
-    *p = *p + 1;
-}
-
-fun main() <noret> {
-    let a <int> = 10;
-    let p <&int> = &a;
-    printf("%d\n", *p);
-    bump(&a);
-    printf("%d\n", a);     // 11
-}
-```
-
-The address must be taken explicitly. `bump(a)` where `&int` is expected is a type error
-(`expected '&int', got 'int'`); the corpus describes a future mode where the compiler passes
-by reference automatically with a warning, but that is not what happens today.
-
-A generic function can take pointers, which is how a swap is written:
-
-```fin
-fun swap<T>(a: &T, b: &T) <noret> {
-    let temp <T> = *b;
-    *b = *a;
-    *a = temp;
-}
-```
-
-## Heap allocation with `new`
-
-`new` allocates. The parenthesised form initialises a primitive; the braced form initialises
-a struct or an array:
-
-```fin
-let h <&int> = new int(5);              // primitive, with a value
-let p <&Point> = new Point{x: 1, y: 2}; // struct
-let a <[int]> = new [int, 4]{};         // array
-```
-
-`delete` frees:
-
-```fin
-delete h;
-delete a;
-```
-
-Pointers nest arbitrarily, and each level is allocated with a `*` per remaining level:
+Pointers can nest, but every level needs valid storage. Initialize the cells
+before dereferencing them:
 
 ```fin
 fun main() <noret> {
-    let x <&&int>;
-    *x = new int*;
-    **x = 10;
+    let value <int> = 7;
+    let pointer <&int> = &value;
+    let outer <&&int> = &pointer;
+    blame **outer == 7;
 }
 ```
 
-`&&int` is a pointer to a pointer to an int; `new int*` allocates a cell that holds an
-`int*`. This generalises — `&&&&int` with `new int***`, `new int**`, `new int*` down the
-chain — but past two levels it is rarely what you want.
+No borrow checker prevents returning an address into expired local storage.
+Use caller-owned storage or an explicitly owned heap allocation for escaping data.
 
-There is one restriction on `new` with a generic type. `new T(v)` is a syntax error, because
-`new` accepts `(...)` after a primitive type keyword and `{...}` after an identifier, and a
-type parameter lexes as an identifier whatever it is bound to. The standard library's
-smart pointer works around it by allocating zeroed and writing through:
+## Prototypes: builtin structural maps
 
-```fin
-self.value = new T{};
-*self.value = initial_value;
-```
-
-## Where memory management lives
-
-Fin's answer to lifetimes is deliberately not in the compiler:
-`docs/adr/0003-memory-management-is-a-library.md` makes allocation and reclamation a library
-concern. Two pieces of that are visible from here.
-
-`#[slaveof(x)]` ties a declaration's lifetime to another variable's, and `#[slaveof($Fin)]`
-extends it to program exit (chapter 4). Both parse; neither has a backend reader yet.
-
-`stdptr::std` provides `rptr<T>`, a reference-counted pointer with an ownership protocol —
-`owned`, `borrowed`, `restrict`, and the methods `alias`, `refs`, `borrows`, `set`, `own`,
-`borrow`, `giveback`, `release`:
+A prototype type is `{KeyType, ValueType}` and a literal is `{key: value}`.
+Use an explicit type when empty or when inference would lose needed information.
+The runtime stores parallel key and value arrays, available as `.0` and `.1`.
 
 ```fin
-import { rptr } from stdptr::std;
-
 fun main() <noret> {
-    let p <rptr<int>> = rptr(5);
-    let q <&rptr<int>> = p.alias();
-    let n <int> = p.refs();
+    let scores <{string, int}> = {"Ada": 7, "Lin": 9};
+    blame scores.contains("Ada");
+    blame scores["Lin"] == 9;
+    scores["Ada"] = 10;
+    blame scores.get("Ada") == 10;
+    blame scores.0.length == 2;
+    blame scores.remove("Lin");
+    blame scores.0.length == 1;
+    delete scores.0;
+    delete scores.1;
 }
 ```
 
-The reference and borrow counts are `&int` handles shared between every handle over one
-value, so an increment through one is visible through all of them and `refs()` answers a
-question about the value rather than about the handle — chapter 12 has the protocol. What
-the library still cannot see is a raw `&rptr<T>` copied past a `release()`: that needs a
-borrow check and there is none. `rptr<T>` lowers cleanly to machine code, and programs using
-it compile and execute in binaries produced with `-o`.
+Lookup uses keys; `.0`/`.1` use positions to select the two arrays. String keys
+compare bytes, unlike general string `==`. `get`/indexing a missing key aborts;
+use `contains` first when absence is expected. `try_get` needs nullable runtime
+support and is currently refused. `delete prototype[key]` removes an entry.
 
-Bounds checking is also undecided. Nothing in the language says an index is checked against
-the length; `Collection`'s `__get` asserts with `blame` because the library chose to, not
-because indexing does.
+Current lookup scans entries. It is not a promise of hash-table performance or a
+stable ordering contract. A nominal `HashMap` is a separate library type; conversion
+through its `from_prototype` stores each entry via `__set`.
+
+## Strings and ownership
+
+A `string` is a NUL-terminated byte pointer, not a `[char]`. It does not support
+the same direct indexing or `.length` lowering. Use a C declaration such as
+`strlen`, a supported cast to `[char]`, or a verified library operation. A borrowed
+view does not extend the original string's lifetime.
+
+Struct destructors run at scope exit, but raw pointer and array ownership remains
+explicit. A `#[slaveof(...)]` tie adjusts when a local is destroyed — pinning it
+to `$Fin` or a global, or delaying a struct's destruction to its referent's scope
+exit — and refuses ties that would dangle or cross a loop body or branch arm; it
+does not borrow-check or collect. See [control flow](04-control-flow.md). The
+`stdptr` library exposes reference-counting methods with incomplete safety and
+execution paths; it is not a compiler-enforced ownership system. See
+[the library reference](12-standard-library-tour.md).
 
 Next: [modules and imports](10-modules-and-imports.md).

@@ -1,14 +1,31 @@
 #include "../SemanticAnalyzer.hpp"
+#include "../EventPayloads.hpp"
 #include "../../types/TypeImpl.hpp" 
 namespace fin {
 
 void SemanticAnalyzer::visit(Block& node) {
     enterScope();
+    // Wave-4 step 17 (W7): a bare brace opens a scope (ADR 0011), and leaving
+    // it is a scope exit for its locals. The frame unwinds here with a
+    // fallthrough point per variable; jumps out recorded their own exits on
+    // the way. Skipped on the check walk (§3.3).
+    if (!injectedWalk_) moved_.enterBlock();
     for (auto& stmt : node.statements) stmt->accept(*this);
+    if (!injectedWalk_) {
+        auto w7report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
+        moved_.exitBlock(node, w7report);
+    }
     exitScope();
 }
 
 void SemanticAnalyzer::visit(ReturnStatement& node) {
+    // Wave-4 step 17 (W6 floor): a `return` is a function_exit fire point
+    // (docs/compiler-api.md §3.2). Recorded with no diagnostic of its own.
+    // Nothing is recorded outside a FunctionDeclaration body: returns in
+    // constructors, operators, destructors and lambdas wait until those
+    // bodies track the site too (see currentFunction()).
+    if (current_function_ != "<root>")
+        noteFirePoint({"function_exit", current_function_, node.loc.begin.line, "return"});
     if (node.value) {
         // The declared return type is a hint for the expression, which is what a
         // declaration's annotation is: `return Err("File don't exists");` inside
@@ -44,6 +61,13 @@ void SemanticAnalyzer::visit(ReturnStatement& node) {
             checkType(node, voidType, context.currentFuncReturnType);
         }
     }
+    // Wave-4 step 17 (W7): a `return` unwinds every scope to the function
+    // boundary with ExitNormal. After the value walk: `@move(x)` in the
+    // value marks x before the exit is recorded. Skipped on the check walk.
+    if (!injectedWalk_) {
+        auto w7report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
+        moved_.onReturn(node, w7report);
+    }
 }
 
 void SemanticAnalyzer::visit(ExpressionStatement& node) {
@@ -52,45 +76,128 @@ void SemanticAnalyzer::visit(ExpressionStatement& node) {
 
 void SemanticAnalyzer::visit(IfStatement& node) {
     node.condition->accept(*this);
-    // Ensure condition is bool (optional, C++ allows int)
-    // checkType(*node.condition, lastExprType, currentScope->resolveType("bool"));
-    
+    // Wave-4 step 17 (W7): the two branches fork the moved state and join it
+    // after. A move on one side only is MovedMaybe past the join; agreement
+    // holds. The walk order is unchanged: only the state forks.
+    if (injectedWalk_) {
+        node.then_block->accept(*this);
+        if (node.else_stmt) node.else_stmt->accept(*this);
+        return;
+    }
+    auto snap = moved_.snapshot();
     node.then_block->accept(*this);
-    if(node.else_stmt) node.else_stmt->accept(*this);
+    auto thenEnd = moved_.snapshot();
+    if (node.else_stmt) {
+        moved_.restore(snap);
+        node.else_stmt->accept(*this);
+        moved_.installJoin(thenEnd, moved_.snapshot());
+    } else {
+        moved_.installJoin(thenEnd, snap);
+    }
 }
 
 void SemanticAnalyzer::visit(WhileLoop& node) {
     bool prevLoop = context.inLoop;
     context.inLoop = true;
-    
+    // Wave-4 step 20 (W10): the loop's back edge. One static latch point per
+    // loop statement, recorded before the body walk so outer points precede
+    // inner ones in fire order. Skipped on the check walk: injected code does
+    // not fire events (§3.3).
+    if (!injectedWalk_) {
+        events::LoopBackEdgePoint point;
+        point.kind = node.is_do_while ? "do-while" : "while";
+        point.line = node.loc.begin.line;
+        point.depth = ++loopDepth_;
+        point.body = node.body.get();
+        w10_points_.push_back(point);
+    }
+
     node.condition->accept(*this);
-    node.body->accept(*this);
-    
+    // Wave-4 step 17 (W7): the body may run zero or more times, so its end
+    // joins its start. A move in the body is Maybe past the loop.
+    if (injectedWalk_) {
+        node.body->accept(*this);
+    } else {
+        moved_.enterLoop();
+        auto pre = moved_.snapshot();
+        node.body->accept(*this);
+        moved_.installJoin(pre, moved_.snapshot());
+        moved_.exitLoop();
+    }
+
+    if (!injectedWalk_) --loopDepth_;
     context.inLoop = prevLoop;
 }
 
 void SemanticAnalyzer::visit(ForLoop& node) {
     bool prevLoop = context.inLoop;
     context.inLoop = true;
-    
+
+    // Wave-4 step 20 (W10): the loop's back edge (see visit(WhileLoop&)).
+    const bool w10track = !injectedWalk_;
+    if (w10track) {
+        events::LoopBackEdgePoint point;
+        point.kind = "for";
+        point.line = node.loc.begin.line;
+        point.depth = ++loopDepth_;
+        point.body = node.body.get();
+        w10_points_.push_back(point);
+    }
+
     enterScope(); // For loop var
+    // Wave-4 step 17 (W7): the header scope holds the counter, which leaves
+    // scope when the loop does -- so its fallthrough point anchors after the
+    // loop statement, where the scope ends, rather than at a block end.
+    const bool track = !injectedWalk_;
+    if (track) {
+        moved_.enterLoop();
+        moved_.enterBlock();
+    }
     if(node.init) node.init->accept(*this);
     if(node.condition) node.condition->accept(*this);
+    events::MovedAnalysis::Snapshot pre;
+    if (track) pre = moved_.snapshot();
     if(node.increment) node.increment->accept(*this);
     if(node.body) node.body->accept(*this);
+    if (track) {
+        moved_.installJoin(pre, moved_.snapshot());
+        auto w7report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
+        moved_.exitBlockAfter(node, w7report);
+        moved_.exitLoop();
+    }
     exitScope();
-    
+
+    if (w10track) --loopDepth_;
     context.inLoop = prevLoop;
 }
 
 void SemanticAnalyzer::visit(ForeachLoop& node) {
     bool prevLoop = context.inLoop;
     context.inLoop = true;
-    
+
+    // Wave-4 step 20 (W10): the loop's back edge (see visit(WhileLoop&)).
+    const bool w10track = !injectedWalk_;
+    if (w10track) {
+        events::LoopBackEdgePoint point;
+        point.kind = "foreach";
+        point.line = node.loc.begin.line;
+        point.depth = ++loopDepth_;
+        point.body = node.body.get();
+        w10_points_.push_back(point);
+    }
+
     enterScope();
+    // Wave-4 step 17 (W7): the element/index scope, like the for header. Its
+    // fallthrough anchors after the loop statement.
+    const bool track = !injectedWalk_;
+    if (track) {
+        moved_.enterLoop();
+        moved_.enterBlock();
+    }
     // Define loop variable
     auto type = resolveTypeFromAST(node.var_type.get());
     if(type) currentScope->define({node.var_name, type, false, true});
+    if (track && type) moved_.declare(node.var_name, type->toString());
 
     // And the index binding of the two-binding form. The parser has stored it on the
     // node since `foreach (idx <int>, element <int> in a)` began to parse (parser.y:2047
@@ -111,12 +218,22 @@ void SemanticAnalyzer::visit(ForeachLoop& node) {
     if (!node.index_name.empty()) {
         auto indexType = resolveTypeFromAST(node.index_type.get());
         if (indexType) currentScope->define({node.index_name, indexType, false, true});
+        if (track && indexType) moved_.declare(node.index_name, indexType->toString());
     }
 
+    events::MovedAnalysis::Snapshot pre;
+    if (track) pre = moved_.snapshot();
     if(node.iterable) node.iterable->accept(*this);
     if(node.body) node.body->accept(*this);
+    if (track) {
+        moved_.installJoin(pre, moved_.snapshot());
+        auto w7report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
+        moved_.exitBlockAfter(node, w7report);
+        moved_.exitLoop();
+    }
     exitScope();
-    
+
+    if (w10track) --loopDepth_;
     context.inLoop = prevLoop;
 }
 
@@ -124,11 +241,23 @@ void SemanticAnalyzer::visit(BreakStatement& node) {
     if (!context.inLoop) {
         error(node, "'break' used outside of loop");
     }
+    // Wave-4 step 17 (W7): a `break` unwinds to the innermost loop boundary
+    // with ExitNormal. On the check walk, or outside any loop, this records
+    // nothing.
+    if (!injectedWalk_) {
+        auto w7report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
+        moved_.onBreak(node, w7report);
+    }
 }
 
 void SemanticAnalyzer::visit(ContinueStatement& node) {
     if (!context.inLoop) {
         error(node, "'continue' used outside of loop");
+    }
+    // Wave-4 step 17 (W7): like `break`.
+    if (!injectedWalk_) {
+        auto w7report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
+        moved_.onContinue(node, w7report);
     }
 }
 
@@ -148,8 +277,16 @@ void SemanticAnalyzer::visit(DeleteStatement& node) {
     // allocator, and no corpus line deletes one. What the type cannot tell us is
     // provenance -- a `[T]` that decayed from a literal is accepted here -- but that is
     // the latitude `delete p` already has over a pointer to a local.
-    if (dynamic_cast<PointerType*>(type.get())) return;
-    if (auto* arr = dynamic_cast<ArrayType*>(type.get()); arr && !arr->isFixed()) return;
+    if (dynamic_cast<PointerType*>(type.get())) {
+        // Wave-4 step 17 (W6 floor): each `delete` is a delete_site fire
+        // point carrying the deleted type (docs/compiler-api.md §3.2).
+        noteFirePoint({"delete_site", current_function_, node.loc.begin.line, type->toString()});
+        return;
+    }
+    if (auto* arr = dynamic_cast<ArrayType*>(type.get()); arr && !arr->isFixed()) {
+        noteFirePoint({"delete_site", current_function_, node.loc.begin.line, type->toString()});
+        return;
+    }
 
     error(node, fmt::format("Cannot delete non-pointer type '{}'", type->toString()));
 }
@@ -160,11 +297,19 @@ void SemanticAnalyzer::visit(TryCatch& node) {
     // Define catch var
     auto type = resolveTypeFromAST(node.catch_type.get());
     if(type) currentScope->define({node.catch_var, type, false, true});
+    // Wave-4 step 17 (W7): the catch variable lives in a scope with no Block
+    // node of its own, so it is tracked in the enclosing frame and its exit
+    // is recorded when that frame ends -- an approximation the exceptional
+    // path owes, not a scope the walk can name.
+    if (!injectedWalk_ && type) moved_.declare(node.catch_var, type->toString());
     node.catch_block->accept(*this);
     exitScope();
 }
 
 void SemanticAnalyzer::visit(BlameStatement& node) {
+    // Wave-4 step 17 (W7): only the raising form unwinds. Read off the same
+    // operand-type rule below that tells the two `blame` statements apart.
+    bool raises = false;
     if (node.condition) {
         node.condition->accept(*this);
         // One keyword, two statements, told apart by the operand's type -- they are
@@ -196,18 +341,27 @@ void SemanticAnalyzer::visit(BlameStatement& node) {
         // whose type is `bool`, and nothing erases a `bool`.
         const bool isRaise = lastExprType &&
                              (lastExprType->as<StructType>() || lastExprType->as<DynamicType>());
+        raises = isRaise;
         auto boolType = currentScope->resolveType("bool");
         if (lastExprType && !isRaise) {
             checkType(*node.condition, lastExprType, boolType);
         }
     }
-    
+
     if (node.message) {
         node.message->accept(*this);
         auto stringType = currentScope->resolveType("string");
         if (lastExprType) {
             checkType(*node.message, lastExprType, stringType);
         }
+    }
+    // A raising `blame` unwinds the function with ExitBlamed (§3.2's blame
+    // unwind; ADR 0030's destructors do not run there, but the event still
+    // fires so a handler can tell the paths apart). The asserting form
+    // continues execution and is no exit. Skipped on the check walk.
+    if (!injectedWalk_ && raises) {
+        auto w7report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
+        moved_.onBlame(node, w7report);
     }
 }
 

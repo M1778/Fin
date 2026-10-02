@@ -527,12 +527,12 @@ TEST(Soundness_Modules, AnImportedGenericStructInstantiatesOnDemand) {
     // int>()` refused first with "a call to 'HashMap'", then with `#[export]`,
     // then with the `fn(any) -> int` field, then with pointer operators,
     // null-to-scalar conversions, bare `Collection{...}` literals and the
-    // denullify. Each landing moved the refusal one step further in: the
-    // template is now found, checked, and instantiated -- transitively, with
-    // Collection<string/int/bool> and HashMap's methods -- and what refuses
-    // is boxing the string key into `any` for the custom-hasher call. Lazy
-    // per use, as designed: nothing here instantiates what the root never
-    // names.
+    // denullify. Each landing moved the refusal one step further in -- until
+    // the amended ADR 0034 (any-boxing with value semantics) overturned the
+    // last one: boxing the string key into `any` for the custom-hasher call
+    // lowers, so the program builds. Inverted rather than deleted, because
+    // the build is the contract now. Lazy per use, as designed: nothing here
+    // instantiates what the root never names.
     const std::string prog =
         "import { HashMap } from hashmap::std;\n"
         "fun main() <noret> { let a <auto> = HashMap::<string, int>(); }\n";
@@ -541,8 +541,17 @@ TEST(Soundness_Modules, AnImportedGenericStructInstantiatesOnDemand) {
               std::string::npos)
         << "the imported template must instantiate, not merely be found\n"
         << trace;
+    // The instantiated method symbols exist, not just the instance.
+    EXPECT_NE(trace.find("declared HashMap<string, int>.get_index"),
+              std::string::npos)
+        << "instantiation must declare the method symbols the root links\n"
+        << trace;
+    // And the full `-o` build succeeds: no refusal, old or new.
     const std::string err = buildErr(prog);
-    EXPECT_NE(err.find("a conversion from 'a pointer' to 'any'"),
+    EXPECT_EQ(err.find("error:"), std::string::npos)
+        << "GOOD NEWS: the any-boxing refusal is gone and the build succeeds\n"
+        << err;
+    EXPECT_EQ(err.find("a conversion from 'a pointer' to 'any'"),
               std::string::npos)
         << err;
     // And specifically none of the old misses, any of which would mean the

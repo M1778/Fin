@@ -1,0 +1,17 @@
+import { assert_true } from testing::std;
+import { Collection } from collection::std;
+
+// PT1 no-regression guard: `==` inside `Collection<T>` instantiated at a
+// primitive (`int`) must keep lowering -- the tripwire fires only when an
+// argument names a struct WITHOUT a declared `==` (Collection<Data>
+// refuses, mirroring C++ `an undeclared operator '==' on struct 'Data'`).
+// C++ runs this green; the self-host stage must keep lowering it (its
+// runtime `index_of` on stage is a separate pre-existing gap, not this
+// guard's verdict: this guard is compile + C++ run).
+fun main() <noret> {
+    let c <&Collection<int>> = new Collection::<int>{};
+    c.push(10);
+    c.push(20);
+    assert_true(c.index_of(20) == 1, "coll_int: index_of finds the second element");
+    assert_true(c.contains(10), "coll_int: contains finds the first element");
+}

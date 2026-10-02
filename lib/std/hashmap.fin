@@ -355,12 +355,19 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
       }
 
     // `HashMap::from_prototype({ "a" : 10, "b" : 20 })` in prototype_test.fin:27.
-    // Still empty, and still for the reason it always was: a prototype resolves no
-    // member and no index, so nothing in the language can walk its entries. Declared
-    // because the corpus calls it.
+    // The prototype arrives as two parallel arrays -- `prtp.0` the keys, `prtp.1`
+    // the values (stdlib/prototypes.fin:11-15) -- so each pair is stored in order
+    // through the existing `__set` path, which is what hashes the key and grows
+    // the table.
     pub static fun from_prototype(prtp: {T, U}) <Self> {
-        return HashMap{keys: null, values: null, live: null, buckets: null,
-                       cap: 0, used: 0, dead: 0, hasher: null};
+        let out <HashMap<T, U>> = HashMap{keys: null, values: null, live: null, buckets: null,
+                                          cap: 0, used: 0, dead: 0, hasher: null};
+        let ks <[T]> = prtp.0;
+        let vs <[U]> = prtp.1;
+        for (let i <int> = 0; i < ks.length; i++) {
+            out.__set(ks[i], vs[i]);
+          }
+        return out;
       }
 
     // The extension point named in the header. `f` is handed the key as an `any` and
@@ -382,8 +389,8 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
 // construction. The brace form also accepts a trailing comma where a prototype literal
 // written directly does not, which is why useful_macros.fin:9 can end in one. `HashMap::` is
 // qualified because a body may spell nothing but qualified paths and `$` unquotes (ADR 0020,
-// ADR 0023). It inherits `from_prototype`'s limit: the entries are dropped until something
-// can walk a prototype, so the call types as a `HashMap<string, int>` and is empty.
+// ADR 0023). The entries arrive through `from_prototype`, so the call builds a
+// `HashMap<string, int>` holding the written pairs.
 @macro map(p) { return quote { HashMap::from_prototype($p); }; }
 
 }

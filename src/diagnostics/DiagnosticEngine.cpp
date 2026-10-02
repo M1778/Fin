@@ -413,6 +413,23 @@ void DiagnosticEngine::reportError(const fin::location& loc, const std::string& 
     emit(d);
 }
 
+void DiagnosticEngine::reportError(const fin::location& loc, const std::string& msg,
+                                   const std::string& help,
+                                   const DiagnosticAttribution& attribution) {
+    Diagnostic d;
+    d.severity = DiagnosticSeverity::Error;
+    d.message = msg;
+    d.file = filename;
+    d.line = loc.begin.line;
+    d.column = loc.begin.column;
+    d.endLine = loc.end.line;
+    d.endColumn = loc.end.column;
+    d.help = help;
+    d.attribution = attribution;
+    errorCount++;
+    emit(d);
+}
+
 void DiagnosticEngine::reportError(const std::string& msg) {
     Diagnostic d;
     d.severity = DiagnosticSeverity::Error;
@@ -442,6 +459,18 @@ void DiagnosticEngine::reportWarning(const fin::location& loc, const std::string
     d.endLine = loc.end.line;
     d.endColumn = loc.end.column;
     warningCount++;
+    emit(d);
+}
+
+void DiagnosticEngine::reportNote(const fin::location& loc, const std::string& msg) {
+    Diagnostic d;
+    d.severity = DiagnosticSeverity::Note;
+    d.message = msg;
+    d.file = filename;
+    d.line = loc.begin.line;
+    d.column = loc.begin.column;
+    d.endLine = loc.end.line;
+    d.endColumn = loc.end.column;
     emit(d);
 }
 

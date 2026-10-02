@@ -1,0 +1,18 @@
+import { assert_eq_int, assert_true } from testing::std;
+import { popcount, get_bit, set_bit, clear_bit, toggle_bit, rotate_left, rotate_right, bit_length } from bits::std;
+
+// Pins battery e01: the bits::std vector (popcount, bit ops, rotates, length).
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+fun main() <noret> {
+    assert_eq_int(popcount(cast<uint>(0)), 0, "bits: popcount 0");
+    assert_eq_int(popcount(cast<uint>(255)), 8, "bits: popcount 255");
+    assert_eq_int(popcount(cast<uint>(4294967295)), 32, "bits: popcount all bits");
+    assert_true(get_bit(cast<uint>(5), 0), "bits: get_bit 5.0 set");
+    assert_true(!get_bit(cast<uint>(5), 1), "bits: get_bit 5.1 clear");
+    assert_true(set_bit(cast<uint>(8), 0) == cast<uint>(9), "bits: set_bit");
+    assert_true(clear_bit(cast<uint>(9), 0) == cast<uint>(8), "bits: clear_bit");
+    assert_true(toggle_bit(cast<uint>(8), 0) == cast<uint>(9), "bits: toggle_bit");
+    assert_true(rotate_left(cast<uint>(1), cast<uint>(1)) == cast<uint>(2), "bits: rotate_left");
+    assert_true(rotate_right(cast<uint>(2), cast<uint>(1)) == cast<uint>(1), "bits: rotate_right");
+    assert_eq_int(bit_length(cast<uint>(255)), 8, "bits: bit_length 255");
+}

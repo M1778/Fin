@@ -1,0 +1,25 @@
+import { assert_eq_int } from testing::std;
+
+// Pins p06: explicit turbofish on a free fn (pick::<int,int>) plus nested
+// generic method extraction (nested.get() into a flat Box<int>).
+// Green on both compilers (finc + finc_stage2); bare prints converted to asserts.
+fun pick<A, B>(a: A, b: B) <B> {
+    return b;
+}
+
+struct Box<T> {
+    val <T>,
+
+    fun get(self: &Self) <T> {
+        return self.val;
+    }
+}
+
+fun main() <noret> {
+    assert_eq_int(pick::<int, int>(1, 2), 2, "turbofish_fn: explicit args pick second");
+    let b <Box<int>> = Box::<int>{ val: 8 };
+    assert_eq_int(b.get(), 8, "turbofish_fn: box get reads back");
+    let nested <Box<Box<int>>> = Box::<Box<int>>{ val: Box::<int>{ val: 9 } };
+    let flat <Box<int>> = nested.get();
+    assert_eq_int(flat.get(), 9, "turbofish_fn: nested get flattens");
+}

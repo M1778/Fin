@@ -1,0 +1,22 @@
+import { assert_true } from testing::std;
+import { i32, f32 } from types::std;
+
+// Pins float twins: every spelling of one scalar converts like its canonical
+// twin — `i32` like `int`, `f32` like `float` — for variable-to-variable
+// `int` -> `float`. Other widths/signs and `-> double` stay refused and are
+// pinned in test_soundness.cpp, not here (fintest only runs passing programs).
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+fun main() <noret> {
+    let a <int> = 42;
+    let b <float> = a;
+    assert_true(b == 42.0, "float_twin: int -> float converts");
+    let c <i32> = 42;
+    let d <float> = c;
+    assert_true(d == 42.0, "float_twin: i32 -> float converts like twin");
+    let e <int> = 42;
+    let f <f32> = e;
+    assert_true(f == 42.0, "float_twin: int -> f32 converts like twin");
+    let g <i32> = 42;
+    let h <f32> = g;
+    assert_true(h == 42.0, "float_twin: i32 -> f32 converts like twin");
+}

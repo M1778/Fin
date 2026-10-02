@@ -1,4 +1,5 @@
 #include "../SemanticAnalyzer.hpp"
+#include "../EventPayloads.hpp"
 #include "../../utils/ModuleLoader.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../BuiltinMacros.hpp"
@@ -9,6 +10,7 @@
 namespace fin {
 
 void SemanticAnalyzer::visit(VariableDeclaration& node) {
+    validateAttributes(node.attributes);
     auto type = resolveTypeFromAST(node.type.get());
 
     // Not an early return. It was one, and that made a single unresolved annotation
@@ -51,9 +53,73 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
         }
     }
 
+    // Wave-5 slice 4: `#[slaveof(...)]` ties this storage to its referent's
+    // scope exit (or to program exit for `$Fin`), so the referent must name
+    // a live binding. Shape was checked at the attribute; what is checked
+    // here is that the name resolves: a tie to a dead or unknown referent
+    // would dangle from birth, and every read through it with it. Resolved
+    // before the binding is defined, so the name cannot meet itself.
+    std::string slaveofTie;
+    {
+        size_t ties = 0;
+        for (const auto& a : node.attributes) {
+            if (!a || a->name != "slaveof") continue;
+            if (++ties > 1) {
+                error(*a, "A declaration ties its lifetime once: '#[slaveof]' is written twice on '" +
+                          node.name + "'");
+                continue;
+            }
+            if (a->value_str == "$Fin") { slaveofTie = "$Fin"; continue; }
+            if (a->is_flag || a->value_str.empty() || a->value_str[0] == '$' ||
+                a->value_str.find('.') != std::string::npos)
+                continue;  // malformed: visit(Attribute&) already reported it
+            if (!currentScope->resolve(a->value_str)) {
+                error(node, "'#[slaveof(" + a->value_str + ")]' on '" + node.name + "' names '" +
+                            a->value_str + "', which is not in scope: tied storage outlives " +
+                            "its referent, so a read through it would dangle");
+                continue;
+            }
+            slaveofTie = a->value_str;
+        }
+    }
+
     Symbol sym{node.name, type, node.is_mutable, node.initializer != nullptr};
+    if (!slaveofTie.empty()) sym.slaveof = slaveofTie;
+    // A generic lambda is a recipe, not a value: it has no slot until a call
+    // instantiates it, so a lambda body naming it is instantiating, not
+    // capturing. Marked here so capture analysis can tell it apart from an
+    // `fn`-typed variable, which does hold a runtime closure pair.
+    if (auto* lam = dynamic_cast<LambdaExpression*>(node.initializer.get())) {
+        if (!lam->generic_params.empty()) sym.is_template = true;
+    }
     currentScope->define(sym);
-    
+
+    // Wave-4 step 17 (W7): the binding enters moved tracking Live. Skipped
+    // on the check walk: injected code does not fire events (§3.3).
+    if (!injectedWalk_) moved_.declare(node.name, type->toString());
+
+    // Wave-4 step 17 (W5 floor): the variable_declared point. Recorded after
+    // the initialiser is analysed and the binding enters scope (§3.2); fired
+    // deferred at the end of visit(Program&), gated on the armed set, so an
+    // unarmed program compiles exactly as before.
+    //
+    // Step 19: the live scope chain travels with the point, so the
+    // post-splice check walks injected statements where the declaration's
+    // own names resolve. Skipped on the check walk itself: injected code
+    // does not fire events (§3.3), so a `let` inside a spliced quote records
+    // no point.
+    if (!injectedWalk_) {
+        events::W5FirePoint w5point;
+        w5point.event = "variable_declared";
+        w5point.varDecl = &node;
+        w5point.varName = node.name;
+        w5point.varType = type ? type->toString() : "<unresolved>";
+        w5point.varMutable = node.is_mutable;
+        w5point.line = node.loc.begin.line;
+        w5_points_.push_back(std::move(w5point));
+        w5_scopes_[&node] = scopeStack;
+    }
+
     debugLog(fg(fmt::color::gray), "[DEBUG] Defined variable '{}' of type '{}'\n", node.name, type->toString());
 }
 
@@ -245,6 +311,8 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     // Soundness_CompilerApi.APlainFunctionCanGrantItToo.
     currentGrants.clear();
     applyUseAttributes(node, node.attributes);
+    // `use` was just checked above, where it binds; the rest walks here.
+    validateAttributes(node.attributes, false);
 
     // 2. Register Generics (e.g. <T>) and resolve their constraints
     declareGenericParams(node.generic_params);
@@ -279,6 +347,20 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
             debugLog(fg(fmt::color::gray), "      [Magic] Injected implicit 'self' into '{}'\n", node.name);
         }
     }
+
+    // Wave-4 step 17 (W7): the function frame. Parameters (and an injected
+    // `self`) enter Live; the frame unwinds at the matching exit below, so
+    // the two stay balanced on every path through this function. Skipped on
+    // the check walk with everything else (§3.3).
+    if (!injectedWalk_) {
+        moved_.enterFunction();
+        for (auto& param : node.params) {
+            if (auto* sym = currentScope->resolve(param->name))
+                if (sym->type) moved_.declare(param->name, sym->type->toString());
+        }
+        if (auto* self = currentScope->resolve("self"))
+            if (self->type) moved_.declare("self", self->type->toString());
+    }
     
     // 5. Resolve Return Type
     std::shared_ptr<Type> retType;
@@ -310,13 +392,47 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     if (currentScope->parent) {
         auto funcType = std::make_shared<FunctionType>(
             paramTypes, retType ? retType : errorType(), false, paramDefaults);
-        // Mark as immutable and initialized
-        currentScope->parent->define({node.name, funcType, false, true});
+        // Mark as immutable and initialized. A `fun` binding is its symbol:
+        // calling it needs no frame slot, so a lambda body naming one is
+        // calling across the boundary, not capturing. The flag is what keeps
+        // capture analysis from snapshotting a slot that does not exist.
+        Symbol funSym{node.name, funcType, false, true};
+        funSym.is_function = true;
+        currentScope->parent->define(funSym);
         debugLog(fg(fmt::color::gray), "      [Register] Registered function '{}' in parent scope\n", node.name);
+    }
+    // The declaration-order names a turbofish binds to. Free functions here;
+    // methods are recorded beside defineMethod, where the struct name is known.
+    // A method body re-enters here with the struct context set, so recording it
+    // as a free function would let `S::m<T>` and a free `m<U>` trade orders.
+    if (!currentStructContext) {
+        recordFunctionGenerics(node.name, node.generic_params);
+    } else if (auto st = std::dynamic_pointer_cast<StructType>(currentStructContext)) {
+        recordMethodGenerics(st->name, node.name, node.generic_params);
     }
 
     // 7. Analyze Body
+    // Wave-4 step 17 (W6 floor): function_entry fires before the first
+    // statement, after parameters are bound (docs/compiler-api.md §3.2) --
+    // which is here, with params defined and the body about to be walked.
+    // function_exit's fallthrough is recorded after the walk when the body
+    // can fall off the end; each `return` records its own exit in
+    // visit(ReturnStatement&). No diagnostic of their own: a program that
+    // fires them compiles exactly as before, and W5's firing pass reads the
+    // points from the analyzer rather than re-deriving them.
+    const std::string prevFunction = current_function_;
+    current_function_ = node.name;
+    // Wave-4 step 20 (W10): loop depth is function-local. A loop inside this
+    // body starts at 1 however deeply the declaration itself is nested.
+    const int savedLoopDepth = loopDepth_;
+    loopDepth_ = 0;
+    if (node.body)
+        noteFirePoint({"function_entry", node.name, node.loc.begin.line, ""});
     if (node.body) node.body->accept(*this);
+    if (node.body && !checkReturnPaths(node.body.get()))
+        noteFirePoint({"function_exit", node.name, node.loc.begin.line, "fallthrough"});
+    loopDepth_ = savedLoopDepth;
+    current_function_ = prevFunction;
     
     // `node.return_type` is null for a function that declared none -- the
     // grammar does not currently admit one, but the AST does, and step 5 above
@@ -343,6 +459,15 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
         }
     }
 
+    // Wave-4 step 17 (W7): the function frame unwinds. The fallthrough half
+    // mirrors W6's function_exit enumeration: only a body that can fall off
+    // the end has a fallthrough path. Each `return` recorded its own exit on
+    // the way (see visit(ReturnStatement&)).
+    if (!injectedWalk_ && node.body) {
+        auto w7report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
+        moved_.exitFunction(*node.body, !checkReturnPaths(node.body.get()), w7report);
+    }
+
     exitScope();
     context.currentFuncReturnType = prevRet;
     currentGrants = std::move(prevGrants);
@@ -350,6 +475,7 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
 
 void SemanticAnalyzer::visit(StructDeclaration& node) {
     debugLog(fg(fmt::color::orange), "[INFO] Analyzing struct '{}'\n", node.name);
+    validateAttributes(node.attributes);
 
     std::shared_ptr<StructType> structType;
     auto it = hoistedTypes_.find(&node);
@@ -364,6 +490,15 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
     }
 
     enterScope();
+    // The scope method bodies register their names in (visit(Function-
+    // Declaration&)), so visit(FunctionCall&) can tell a bare call that binds
+    // one of this struct's own methods apart from a free call of the same
+    // name. Popped with the scope below.
+    {
+        StructBodyScope bodyScope{structType, currentScope.get(), {}};
+        for (auto& m : node.methods) bodyScope.methodStatic[m->name] = m->is_static;
+        structScopes_.push_back(std::move(bodyScope));
+    }
 
     // --- SETUP GENERICS ---
     declareGenericParams(node.generic_params, &structType->generic_args);
@@ -389,9 +524,23 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
     
     // 1. Members
     for (auto& member : node.members) {
+        validateAttributes(member->attributes);
         auto memberType = resolveTypeOrError(member->type.get());
         if (memberType->equals(*structType) && member->type->pointer_depth == 0) {
             error(*member, "Recursive struct member '" + member->name + "' must be a pointer");
+        }
+        // A union-typed field is refused (docs/compiler-api.md Q12): a field's
+        // offset is fixed in the type's static layout, which is what
+        // `pointer_map_quote` reads, and a union has no single layout -- which
+        // alternative a value holds is known only at run time. The diagnostic
+        // is the map's refusal at declaration time, never a zero map. Locals
+        // of union type stay accepted (sized as the first alternative at
+        // lowering, with scope exit firing for them); unifying the two is open.
+        if (auto* un = memberType ? memberType->as<UnionType>() : nullptr) {
+            error(*member, "field '" + member->name + "' has union type '" + un->alias +
+                               "': a union has no single layout, "
+                               "so its pointer map is a diagnostic rather than a map "
+                               "(docs/compiler-api.md Q12)");
         }
         // Defined even when the type did not resolve, so `s.field` says nothing
         // further: the annotation is the diagnostic, not every use of the field.
@@ -424,8 +573,10 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
             // nothing beyond the annotation.
             //
             // Do not call accept here -- that triggers body analysis too early.
-            if (auto sig = buildMethodSignature(*method))
-                structType->defineMethod(method->name, sig);
+            if (auto sig = buildMethodSignature(*method)) {
+                structType->defineMethod(method->name, sig, method->is_public);
+                recordMethodGenerics(node.name, method->name, method->generic_params);
+            }
         }
 
         for (auto& op : node.operators) {
@@ -556,8 +707,39 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         }
     }
 
+    // Wave-4 step 17 (W7, slice 3): composition (ADR 0016). Every member body
+    // ran above, so every field type's flag is final; a field with a
+    // destructor now marks the generated parent. Idempotent, and silent on
+    // the check walk like everything else that records rather than reports.
+    if (!injectedWalk_) events::propagateComposedDestructor(*structType);
+
+    structScopes_.pop_back();
     currentStructContext = prevContext;
     exitScope();
+
+    // Wave-4 step 17 (W5 floor): struct_layout_finalised fires here, after
+    // the type's fields are registered (its front-end layout finalised) and
+    // before any later body is analysed (§3.2). Inline, not deferred: this
+    // event takes no injection, so nothing it does can mutate the walk, and
+    // firing now keeps the "before any body that mentions it" half of the
+    // contract. Without the program handle (unreachable in practice: structs
+    // are only visited from the program walk) the point waits for the
+    // deferred pass instead of being dropped.
+    events::W5FirePoint w5point;
+    w5point.event = "struct_layout_finalised";
+    w5point.structDecl = &node;
+    w5point.structName = node.name;
+    w5point.line = node.loc.begin.line;
+    auto w5report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
+    auto w5warn = [this](ASTNode& at, const std::string& msg) { warning(at, msg); };
+    auto w5note = [this](ASTNode& at, const std::string& msg) { note(at, msg); };
+    if (w5_program_) {
+        for (auto& fired : events::fireW5Events(*w5_program_, event_registry_, {w5point},
+                                                w5_refused_, w5report, w5warn, w5note))
+            w5_fired_.push_back(std::move(fired));
+    } else {
+        w5_points_.push_back(std::move(w5point));
+    }
 }
 
 
@@ -644,6 +826,7 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
 
 void SemanticAnalyzer::visit(MacroDeclaration& node) {
     debugLog(fg(fmt::color::magenta), "[INFO] Registering macro '{}'\n", node.name);
+    validateAttributes(node.attributes);
 
     // A macro with a body is the expander's, and it has already run: by the time this
     // node is reached its every invocation has been replaced by the expansion, so there
@@ -693,6 +876,7 @@ void SemanticAnalyzer::visit(DestructorDeclaration& node) {
 
 void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     debugLog(fg(fmt::color::magenta), "[INFO] Analyzing interface '{}'\n", node.name);
+    validateAttributes(node.attributes);
     std::shared_ptr<StructType> ifaceType;
     auto it = hoistedTypes_.find(&node);
     if (it != hoistedTypes_.end()) {
@@ -720,6 +904,7 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
     // declaration site: the sentinel is what keeps checkInitializer below quiet about
     // a type that has already reported.
     for (auto& member : node.members) {
+        validateAttributes(member->attributes);
         auto memberType = resolveTypeOrError(member->type.get());
         // Registered on the interface's own type, so that a value of interface type
         // can be read through. Before this, an interface member was resolved and then
@@ -745,6 +930,15 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
         // never fields. Registering the member is what makes a read type-check; the
         // requirement is a separate rule with its own test.
         if (memberType) ifaceType->defineField(member->name, memberType, member->is_public, member->is_readonly);
+        // A union-typed member is refused for the reason stated at the struct
+        // members loop above (docs/compiler-api.md Q12): an interface member
+        // implemented by value needs the same static layout a struct field does.
+        if (auto* un = memberType ? memberType->as<UnionType>() : nullptr) {
+            error(*member, "field '" + member->name + "' has union type '" + un->alias +
+                               "': a union has no single layout, "
+                               "so its pointer map is a diagnostic rather than a map "
+                               "(docs/compiler-api.md Q12)");
+        }
         // literal_interface.fin:21 gives an interface member a default
         // (`pub picked_first <bool> = true;`), so a default on one is part of the
         // language and is checked exactly as a struct member's is (pass 2 step 1 of
@@ -772,7 +966,10 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
         // The parameters used to be resolved here and thrown away -- and resolved
         // without the method's own generic scope, so `pub fun m<T>(a: T) <T>;` reported
         // "Undefined type 'T'" twice. buildMethodSignature keeps them, and declares T.
-        if (auto sig = buildMethodSignature(*method)) ifaceType->defineMethod(method->name, sig);
+        if (auto sig = buildMethodSignature(*method)) {
+            ifaceType->defineMethod(method->name, sig, method->is_public);
+            recordMethodGenerics(node.name, method->name, method->generic_params);
+        }
     }
     
     for (auto& op : node.operators) {
@@ -809,6 +1006,7 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
 
 void SemanticAnalyzer::visit(EnumDeclaration& node) {
     debugLog(fg(fmt::color::yellow), "[INFO] Analyzing enum '{}'\n", node.name);
+    validateAttributes(node.attributes);
     // A StructType, not the PrimitiveType this replaces. The reason is in
     // StructType.hpp on `is_enum`: an enum needs a method table, generic arguments
     // and parents, and a PrimitiveType has nowhere to put any of them. tests/samples/
@@ -881,6 +1079,7 @@ void SemanticAnalyzer::visit(EnumDeclaration& node) {
 }
 
 void SemanticAnalyzer::visit(ImportModule& node) {
+    validateAttributes(node.attributes);
     if (!loader) return;
 
     auto moduleScope = loader->loadModule(node.source, node.is_package);
@@ -993,6 +1192,7 @@ void SemanticAnalyzer::visit(ImportModule& node) {
 
 void SemanticAnalyzer::visit(DefineDeclaration& node) {
     debugLog(fg(fmt::color::magenta), "[INFO] Registering extern '{}'\n", node.name);
+    validateAttributes(node.attributes);
     // Was `if (!retType) return;`, which abandoned the whole declaration: the
     // extern went unregistered so every call to it reported an undefined name,
     // and -- because the bare return also skipped the walk below -- its parameter
@@ -1009,7 +1209,12 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
 
     auto funcType = std::make_shared<FunctionType>(paramTypes, retType, node.is_vararg,
                                                   paramDefaults);
-    currentScope->define({node.name, funcType, false, true});
+    // An `@define` is a symbol like a `fun` (a C function reached by name),
+    // so the same capture exclusion applies: a lambda calling `printf` reads
+    // no frame slot.
+    Symbol defineSym{node.name, funcType, false, true};
+    defineSym.is_function = true;
+    currentScope->define(defineSym);
     if (globalScope && currentScope != globalScope) {
         globalScope->define({node.name, funcType, false, true});
     }
@@ -1030,7 +1235,12 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
             //
             // Re-defined rather than mutated in place: `Scope::define` is the only
             // writer, and reaching into `symbols` here would be the second one.
-            currentScope->define({node.name, funcType, false, true, /*is_ambient=*/true});
+            // Written field by field: a positional literal would silently bind
+            // `is_ambient` to whichever flag the struct grows next.
+            Symbol retained{node.name, funcType, false, true};
+            retained.is_function = true;
+            retained.is_ambient = true;
+            currentScope->define(retained);
         }
     }
 }
@@ -1163,6 +1373,7 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveExternPathAsSymbol(const std::str
 
 void SemanticAnalyzer::visit(TypeDefinition& node) {
     debugLog(fg(fmt::color::cyan), "[INFO] Analyzing type definition '{}'\n", node.name);
+    validateAttributes(node.attributes);
 
     // `extern * from a_namespace;` and `extern * from MyEnum;` -- extern_as.fin:32
     // and :39. A no-op, and quiet, which is the whole of what it takes to be right
@@ -1235,6 +1446,24 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
 
     // 2. Resolve Aliased Type
     std::shared_ptr<Type> type = nullptr;
+    // A union alias: `type Number = int | uint | float;` (tests/samples/
+    // arrays.fin:9). The alternatives are resolved each for its own typos --
+    // before this only the first was resolved at all -- and the alias defines
+    // a UnionType holding all of them rather than the first alone, so that a
+    // consumer which cannot answer for a union (the layout pass, Q12) refuses
+    // instead of answering the first member's. Value positions delegate to the
+    // first alternative (UnionType.hpp), which is what the alias meant before.
+    if (!node.union_members.empty() && node.aliased_type) {
+        std::vector<std::shared_ptr<Type>> alternatives;
+        alternatives.push_back(resolveTypeOrError(node.aliased_type.get()));
+        for (auto& member : node.union_members)
+            alternatives.push_back(resolveTypeOrError(member.get()));
+        type = std::make_shared<UnionType>(node.name, std::move(alternatives));
+        currentScope->defineType(node.name, type);
+        debugLog(fg(fmt::color::gray), "      [Type] Defined union alias '{}' -> '{}'\n",
+                 node.name, type->toString());
+        return;
+    }
     // `type EnumType = any implements <Enum>;` (stdlib/enums.fin:6),
     // `type nullptr = any implements <&void>;` (stdlib/types.fin:78).
     //
@@ -1294,6 +1523,10 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
     // body's scope.
     currentGrants.clear();
     applyUseAttributes(node, node.attributes);
+    // `use` was just checked above, where it binds; the rest walks here.
+    // A `@special` is the one bearer `#[provides(...)]` means something on,
+    // so it is collected whole by collectProvider rather than walked.
+    validateAttributes(node.attributes, false, true);
 
     std::vector<std::shared_ptr<Type>> paramTypes;
     std::vector<bool> paramDefaults;
@@ -1336,14 +1569,47 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
         debugLog(fg(fmt::color::gray), "      [Register] Registered special '{}' in parent scope\n", node.name);
     }
 
+    // Wave-4 step 19: inside a handler for a known event a `quote` is data,
+    // not code — visit(QuoteExpression&) skips the block, and the quote is
+    // checked once, after splicing, attributed to the handler at its event
+    // point. Every other `@special` (providers, stdlib helpers) walks its
+    // quotes exactly as before.
+    bool handler = false;
+    for (const auto& a : node.attributes) {
+        if (a && a->name == "on" && !a->is_flag && events::isKnownEvent(a->value_str)) {
+            handler = true;
+            break;
+        }
+    }
+    const bool prevHandler = inHandler_;
+    inHandler_ = handler;
     if (node.body) node.body->accept(*this);
+    inHandler_ = prevHandler;
+
+    // Round 3, Q11: branching on a host read is a warning naming the operation.
+    // Checked after the walk, on the tree, so an unanalysable body still gets
+    // its errors first and the warning never stands in for one.
+    warnOnHostBranch(node, hasComponentGrant("system"));
     
     exitScope();
     currentGrants = std::move(prevGrants);
+
+    // The provider registry's collection point (§3.9): `#[provides(<slot>)]`
+    // turns this declaration into a slot claimant, contracting its signature
+    // and its body shape. A no-op for every `@special` without the attribute.
+    collectProvider(node);
+    // The protocol registry's collection point (wave-5 slice 0, §3.7):
+    // `#[protocol(<slot>)]` turns this declaration into a slot claimant,
+    // contracting its slot and its signature. A no-op for every `@special`
+    // without the attribute; exclusivity and the not-lowered refusal live in
+    // collectProtocol / reportSingleProtocolClaims, never in codegen, so the
+    // default lowering stays byte-identical.
+    collectProtocol(node);
 }
 
 void SemanticAnalyzer::visit(ClassDeclaration& node) {
     debugLog(fg(fmt::color::orange), "[INFO] Analyzing class '{}'\n", node.name);
+    validateAttributes(node.attributes);
 
     std::shared_ptr<StructType> structType;
     auto it = hoistedTypes_.find(&node);
@@ -1358,6 +1624,13 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
     }
 
     enterScope();
+    // The class half of the struct body's rule above: same scope, same
+    // registrations, same pop below.
+    {
+        StructBodyScope bodyScope{structType, currentScope.get(), {}};
+        for (auto& m : node.methods) bodyScope.methodStatic[m->name] = m->is_static;
+        structScopes_.push_back(std::move(bodyScope));
+    }
 
     // --- SETUP GENERICS ---
     declareGenericParams(node.generic_params, &structType->generic_args);
@@ -1383,9 +1656,19 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
     
     // 1. Members
     for (auto& member : node.members) {
+        validateAttributes(member->attributes);
         auto memberType = resolveTypeOrError(member->type.get());
         if (memberType->equals(*structType) && member->type->pointer_depth == 0) {
             error(*member, "Recursive class member '" + member->name + "' must be a pointer");
+        }
+        // A union-typed field is refused for the reason stated at the struct
+        // members loop above (docs/compiler-api.md Q12): a class lowers exactly
+        // as a struct (ADR 0026), so its fields need the same static layout.
+        if (auto* un = memberType ? memberType->as<UnionType>() : nullptr) {
+            error(*member, "field '" + member->name + "' has union type '" + un->alias +
+                               "': a union has no single layout, "
+                               "so its pointer map is a diagnostic rather than a map "
+                               "(docs/compiler-api.md Q12)");
         }
         // Defined even when the type did not resolve, so `s.field` says nothing
         // further: the annotation is the diagnostic, not every use of the field.
@@ -1404,8 +1687,10 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
         QuietPass quiet(*this);
 
         for (auto& method : node.methods) {
-            if (auto sig = buildMethodSignature(*method))
-                structType->defineMethod(method->name, sig);
+            if (auto sig = buildMethodSignature(*method)) {
+                structType->defineMethod(method->name, sig, method->is_public);
+                recordMethodGenerics(node.name, method->name, method->generic_params);
+            }
         }
 
         for (auto& op : node.operators) {
@@ -1491,6 +1776,10 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
         }
     }
 
+    // Wave-4 step 17 (W7, slice 3): composition (ADR 0016), the class half.
+    if (!injectedWalk_) events::propagateComposedDestructor(*structType);
+
+    structScopes_.pop_back();
     currentStructContext = prevContext;
     exitScope();
 }
@@ -1523,6 +1812,14 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
     enterScope();
     
     currentScope->defineType("Self", structType);
+    // The implements-block half of the struct body's rule: the block's methods
+    // register their names in this scope, so bare calls inside them resolve the
+    // same way. Popped with the scope below.
+    {
+        StructBodyScope bodyScope{structType, currentScope.get(), {}};
+        for (auto& m : node.methods) bodyScope.methodStatic[m->name] = m->is_static;
+        structScopes_.push_back(std::move(bodyScope));
+    }
     auto prevContext = currentStructContext;
     currentStructContext = structType;
 
@@ -1626,9 +1923,24 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
                 // vector is undefined rather than a no-op.
                 if (!defaults.empty()) defaults.erase(defaults.begin());
             }
+            // The single-member overwrite's visibility is tri-state: an explicit
+            // `@implements(pub)` / `@implements(priv)` is honored as written,
+            // while a bare `@implements T::m = ...` must not privatise a public
+            // method (enums.fin:25 `unwrap` is called from outside), so an
+            // existing entry keeps its visibility and a new one defaults to
+            // public.
+            bool overwritePub;
+            if (node.overwrite_public.has_value()) {
+                overwritePub = *node.overwrite_public;
+            } else if (structType->getMethodType(node.overwrite_member)) {
+                overwritePub = structType->isMethodPublic(node.overwrite_member);
+            } else {
+                overwritePub = true;
+            }
             structType->defineMethod(node.overwrite_member,
                                      std::make_shared<FunctionType>(params, fn->return_type,
-                                                                    false, defaults));
+                                                                    false, defaults),
+                                     overwritePub);
             debugLog(fg(fmt::color::green), "      [Implements] Registered member '{}::{}' with {} params\n",
                      node.target_type, node.overwrite_member, params.size());
         }
@@ -1659,7 +1971,10 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
             QuietPass quiet(*this);
             sig = buildMethodSignature(*method, structType);
         }
-        if (sig) structType->defineMethod(method->name, sig);
+        if (sig) {
+            structType->defineMethod(method->name, sig, method->is_public);
+            recordMethodGenerics(structType->name, method->name, method->generic_params);
+        }
 
         // Outside the signature scope: visit(FunctionDeclaration&) opens its own
         // and declares the same parameters there, so declaring them twice in
@@ -1741,6 +2056,7 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
     }
     
     currentStructContext = prevContext;
+    structScopes_.pop_back();
     exitScope();
     
     debugLog(fg(fmt::color::green), "      [OK] Implements block for '{}' analyzed successfully\n", node.target_type);

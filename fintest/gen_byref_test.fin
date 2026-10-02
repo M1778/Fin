@@ -1,0 +1,14 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_d02: by-ref struct mutation (&P) writes through to the caller.
+// Green on both compilers (finc + finc_stage2).
+struct P { a <int>, b <int> }
+
+fun bump(q: &P) <noret> { q.a = q.a + 1; }
+
+fun main() <noret> {
+    let v <P> = P { a: 10, b: 20 };
+    bump(&v);
+    assert_eq_int(v.a, 11, "byref: field bump writes through");
+    assert_eq_int(v.b, 20, "byref: untouched field preserved");
+}

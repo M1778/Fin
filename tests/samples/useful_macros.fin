@@ -33,11 +33,11 @@ fun main() <noret> {
 // lib/std/hashmap.fin, lib/std/collection.fin and the note below all cite this file by line,
 // and inserting at the top would have staled every one of them at once.
 //
-// What the two calls do at runtime is still nothing: `from_prototype` drops its entries in both
-// libraries, because a prototype resolves no member and no index so nothing in the language can
-// walk one. Line 7 types as a `HashMap<string, int>` and line 12 as a `Collection<int>`, and
-// both are empty. That is a gap in the libraries and not in this file, which is why the
-// expectation is `ok` -- ADR 0008 makes an expectation a claim about diagnostics.
+// What the two calls do at runtime is populate: `from_prototype` walks the halves
+// (`prtp.0` keys, `prtp.1` values) and stores each entry through `push`/`__set`, so
+// line 7 builds a two-entry map and line 12 a five-element collection whose `b[2]`
+// reads `3`. The self-host backend miscompiles the same walk (halves lower as raw
+// buffers there), and the expectation stays `ok` -- a claim about diagnostics.
 //
 // Line 14's `format!("{}", b[2])` resolved one step earlier, under ADR 0023 step 6, and lowers
 // as of step 7. The note this replaced recorded that, and recorded the count falling from five

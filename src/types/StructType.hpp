@@ -62,6 +62,12 @@ public:
     // with a FunctionType, and `implements` compares names. The receiver is not among
     // the parameters -- see SemanticAnalyzer::buildMethodSignature for why.
     std::unordered_map<std::string, TypePtr> methods;
+    // Name -> whether the method is public. Beside `methods` rather than in it
+    // because a signature is a type and visibility is not one; the one writer is
+    // defineMethod so the two cannot disagree. Mirrors the field rule: unwritten
+    // means public (parser defaults `label_public` to true), `priv` means the
+    // declaring type's own methods may still call it.
+    std::unordered_map<std::string, bool> method_visibility;
     // Operator key (ASTTokenKind) -> the operator's FunctionType, the receiver not
     // among its parameters. This held a bare return type until a subscript needed a
     // parameter to be checked against; Analyzer_Decl.cpp's comment on the old
@@ -107,7 +113,10 @@ public:
         auto found = field_index.find(n);
         return found == field_index.end() ? nullptr : &fields[found->second];
     }
-    void defineMethod(std::string n, TypePtr t) { methods[n] = t; }
+    void defineMethod(std::string n, TypePtr t, bool pub = true) {
+        methods[n] = std::move(t);
+        method_visibility[n] = pub;
+    }
     void defineOperator(int op, TypePtr t) { operators[op] = t; }
     void addConstructor(TypePtr t) { constructors.push_back(t); }
     void defineEnumerator(std::string n, TypePtr t) { enumerators[n] = t; }
@@ -163,6 +172,10 @@ public:
 
     TypePtr getFieldType(const std::string& n);
     bool isFieldPublic(const std::string& n);
+    // Whether the method may be called from outside the declaring type. Walks
+    // `parents` exactly as getMethodType does, so an inherited method keeps the
+    // visibility it was declared with.
+    bool isMethodPublic(const std::string& n);
     // The method's whole signature, or null when the type has no such method.
     // Walks `parents` exactly as getMethodReturnType does, so an inherited method is
     // as checkable as a declared one.

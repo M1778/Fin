@@ -1,0 +1,16 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_c04: a global of generic struct type reads and writes through
+// its field.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+struct Box<T> {
+    val <T>
+}
+
+let GBox <Box<int>> = Box::<int>{ val: 77 };
+
+fun main() <noret> {
+    assert_eq_int(GBox.val, 77, "global_box: field reads the init value");
+    GBox.val = 88;
+    assert_eq_int(GBox.val, 88, "global_box: field store reads back");
+}

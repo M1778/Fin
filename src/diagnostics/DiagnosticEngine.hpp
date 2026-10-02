@@ -54,6 +54,11 @@ public:
     // names a place had no way to say why until `@macro`'s hygiene rule (ADR 0023).
     void reportError(const fin::location& loc, const std::string& msg,
                      const std::string& help);
+    // The sure explanation plus handler attribution, for a diagnostic raised
+    // while checking injected code: the help still displaces the typo
+    // heuristic, and the attribution still reaches the JSON path.
+    void reportError(const fin::location& loc, const std::string& msg,
+                     const std::string& help, const DiagnosticAttribution& attribution);
     // A diagnostic with no source location: a file that could not be read, a
     // module that could not be found, or a mistake in the command line itself.
     // `file` is emitted as null and `line` as 0 for these, which is what the
@@ -61,6 +66,10 @@ public:
     void reportError(const std::string& msg);
     void reportError(const std::string& msg, const std::string& help);
     void reportWarning(const fin::location& loc, const std::string& msg);
+    // A remark, not a warning: `compiler.diag.note` from a handler. Emitted
+    // and recorded like a warning but counted as neither, so a note can never
+    // turn a clean build into a failing one.
+    void reportNote(const fin::location& loc, const std::string& msg);
 
     // Takes over another engine's counts. A module is diagnosed by an engine of its
     // own so its diagnostics can point into its own source, but it prints to the same

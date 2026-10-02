@@ -1,0 +1,15 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_e02: chained free-fn calls over a generic struct (bump(bump(a))).
+// Green on both compilers (finc + finc_stage2).
+struct Box<T> {
+    val <T>
+}
+
+fun bump(b: Box<int>) <Box<int>> { return Box::<int>{ val: b.val + 1 }; }
+
+fun main() <noret> {
+    let a <Box<int>> = Box::<int>{ val: 5 };
+    let c <Box<int>> = bump(bump(a));
+    assert_eq_int(c.val, 7, "chain: double bump adds two");
+}

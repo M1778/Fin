@@ -40,6 +40,54 @@ pub struct LLVMTypeArgs {
       t13 <&LLVMType> = null,
       t14 <&LLVMType> = null,
       t15 <&LLVMType> = null,
+      t16 <&LLVMType> = null,
+      t17 <&LLVMType> = null,
+      t18 <&LLVMType> = null,
+      t19 <&LLVMType> = null,
+      t20 <&LLVMType> = null,
+      t21 <&LLVMType> = null,
+      t22 <&LLVMType> = null,
+      t23 <&LLVMType> = null,
+      t24 <&LLVMType> = null,
+      t25 <&LLVMType> = null,
+      t26 <&LLVMType> = null,
+      t27 <&LLVMType> = null,
+      t28 <&LLVMType> = null,
+      t29 <&LLVMType> = null,
+      t30 <&LLVMType> = null,
+      t31 <&LLVMType> = null,
+      t32 <&LLVMType> = null,
+      t33 <&LLVMType> = null,
+      t34 <&LLVMType> = null,
+      t35 <&LLVMType> = null,
+      t36 <&LLVMType> = null,
+      t37 <&LLVMType> = null,
+      t38 <&LLVMType> = null,
+      t39 <&LLVMType> = null,
+      t40 <&LLVMType> = null,
+      t41 <&LLVMType> = null,
+      t42 <&LLVMType> = null,
+      t43 <&LLVMType> = null,
+      t44 <&LLVMType> = null,
+      t45 <&LLVMType> = null,
+      t46 <&LLVMType> = null,
+      t47 <&LLVMType> = null,
+      t48 <&LLVMType> = null,
+      t49 <&LLVMType> = null,
+      t50 <&LLVMType> = null,
+      t51 <&LLVMType> = null,
+      t52 <&LLVMType> = null,
+      t53 <&LLVMType> = null,
+      t54 <&LLVMType> = null,
+      t55 <&LLVMType> = null,
+      t56 <&LLVMType> = null,
+      t57 <&LLVMType> = null,
+      t58 <&LLVMType> = null,
+      t59 <&LLVMType> = null,
+      t60 <&LLVMType> = null,
+      t61 <&LLVMType> = null,
+      t62 <&LLVMType> = null,
+      t63 <&LLVMType> = null,
 }
 
 pub struct LLVMValueArgs {
@@ -60,6 +108,54 @@ pub struct LLVMValueArgs {
       v13 <&LLVMValue> = null,
       v14 <&LLVMValue> = null,
       v15 <&LLVMValue> = null,
+      v16 <&LLVMValue> = null,
+      v17 <&LLVMValue> = null,
+      v18 <&LLVMValue> = null,
+      v19 <&LLVMValue> = null,
+      v20 <&LLVMValue> = null,
+      v21 <&LLVMValue> = null,
+      v22 <&LLVMValue> = null,
+      v23 <&LLVMValue> = null,
+      v24 <&LLVMValue> = null,
+      v25 <&LLVMValue> = null,
+      v26 <&LLVMValue> = null,
+      v27 <&LLVMValue> = null,
+      v28 <&LLVMValue> = null,
+      v29 <&LLVMValue> = null,
+      v30 <&LLVMValue> = null,
+      v31 <&LLVMValue> = null,
+      v32 <&LLVMValue> = null,
+      v33 <&LLVMValue> = null,
+      v34 <&LLVMValue> = null,
+      v35 <&LLVMValue> = null,
+      v36 <&LLVMValue> = null,
+      v37 <&LLVMValue> = null,
+      v38 <&LLVMValue> = null,
+      v39 <&LLVMValue> = null,
+      v40 <&LLVMValue> = null,
+      v41 <&LLVMValue> = null,
+      v42 <&LLVMValue> = null,
+      v43 <&LLVMValue> = null,
+      v44 <&LLVMValue> = null,
+      v45 <&LLVMValue> = null,
+      v46 <&LLVMValue> = null,
+      v47 <&LLVMValue> = null,
+      v48 <&LLVMValue> = null,
+      v49 <&LLVMValue> = null,
+      v50 <&LLVMValue> = null,
+      v51 <&LLVMValue> = null,
+      v52 <&LLVMValue> = null,
+      v53 <&LLVMValue> = null,
+      v54 <&LLVMValue> = null,
+      v55 <&LLVMValue> = null,
+      v56 <&LLVMValue> = null,
+      v57 <&LLVMValue> = null,
+      v58 <&LLVMValue> = null,
+      v59 <&LLVMValue> = null,
+      v60 <&LLVMValue> = null,
+      v61 <&LLVMValue> = null,
+      v62 <&LLVMValue> = null,
+      v63 <&LLVMValue> = null,
 }
 
 pub struct LLVMIndices {
@@ -131,8 +227,17 @@ pub struct LLVMBlockArgs {
 #[llvm_name="LLVMInt8Type"]
 @define llvm_i8_type() <&LLVMType>;
 
+#[llvm_name="LLVMInt16Type"]
+@define llvm_i16_type() <&LLVMType>;
+
 #[llvm_name="LLVMInt1Type"]
 @define llvm_i1_type() <&LLVMType>;
+
+#[llvm_name="LLVMFloatType"]
+@define llvm_float_type() <&LLVMType>;
+
+#[llvm_name="LLVMDoubleType"]
+@define llvm_double_type() <&LLVMType>;
 
 #[llvm_name="LLVMVoidType"]
 @define llvm_void_type() <&LLVMType>;
@@ -183,6 +288,30 @@ pub struct LLVMBlockArgs {
 @define llvm_type_of(val: &LLVMValue) <&LLVMType>;
 
 // Functions & Blocks
+#[llvm_name="LLVMAddGlobal"]
+@define llvm_add_global(module: &LLVMModule, ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMGetNamedGlobal"]
+@define llvm_get_named_global(module: &LLVMModule, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMSetInitializer"]
+@define llvm_set_initializer(global_var: &LLVMValue, const_val: &LLVMValue) <noret>;
+
+#[llvm_name="LLVMSetGlobalConstant"]
+@define llvm_set_global_constant(global_var: &LLVMValue, is_constant: int) <noret>;
+
+#[llvm_name="LLVMConstArray"]
+@define llvm_const_array(elem_ty: &LLVMType, const_values: &LLVMValueArgs, num_values: int) <&LLVMValue>;
+
+#[llvm_name="LLVMConstPointerNull"]
+@define llvm_const_pointer_null(elem_ty: &LLVMType) <&LLVMValue>;
+
+#[llvm_name="LLVMConstBitCast"]
+@define llvm_const_bitcast(val: &LLVMValue, dest_ty: &LLVMType) <&LLVMValue>;
+
+#[llvm_name="LLVMConstIntToPtr"]
+@define llvm_const_int_to_ptr(val: &LLVMValue, dest_ty: &LLVMType) <&LLVMValue>;
+
 #[llvm_name="LLVMAddFunction"]
 @define llvm_add_function(module: &LLVMModule, name: string, fn_type: &LLVMType) <&LLVMValue>;
 
@@ -215,11 +344,20 @@ pub struct LLVMBlockArgs {
 #[llvm_name="LLVMConstInt"]
 @define llvm_const_int(int_type: &LLVMType, val: int, sign_extend: int) <&LLVMValue>;
 
+// Full-width integer constant from decimal text (mirrors
+// LLVMConstRealOfString for floats): carries literals the int-carrying
+// llvm_const_int cannot spell (the C++ frontend types them long).
+#[llvm_name="LLVMConstIntOfString"]
+@define llvm_const_int_of_string(int_type: &LLVMType, text: string, radix: int) <&LLVMValue>;
+
 #[llvm_name="LLVMConstString"]
 @define llvm_const_string(s: string, len: int, dont_null_terminate: int) <&LLVMValue>;
 
 #[llvm_name="LLVMConstNull"]
 @define llvm_const_null(ty: &LLVMType) <&LLVMValue>;
+
+#[llvm_name="LLVMConstRealOfString"]
+@define llvm_const_real_of_string(ty: &LLVMType, text: string) <&LLVMValue>;
 
 #[llvm_name="LLVMGetUndef"]
 @define llvm_get_undef(ty: &LLVMType) <&LLVMValue>;
@@ -228,6 +366,42 @@ pub struct LLVMBlockArgs {
 @define llvm_build_global_string_ptr(b: &LLVMBuilder, s: string, name: string) <&LLVMValue>;
 
 // Instructions
+#[llvm_name="LLVMBuildFAdd"]
+@define llvm_build_fadd(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildFSub"]
+@define llvm_build_fsub(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildFMul"]
+@define llvm_build_fmul(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildFDiv"]
+@define llvm_build_fdiv(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildFRem"]
+@define llvm_build_frem(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildFNeg"]
+@define llvm_build_fneg(builder: &LLVMBuilder, v: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildFCmp"]
+@define llvm_build_fcmp(builder: &LLVMBuilder, op: int, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildSIToFP"]
+@define llvm_build_si_to_fp(builder: &LLVMBuilder, val: &LLVMValue, dest_ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildFPToSI"]
+@define llvm_build_fp_to_si(builder: &LLVMBuilder, val: &LLVMValue, dest_ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildFPExt"]
+@define llvm_build_fp_ext(builder: &LLVMBuilder, val: &LLVMValue, dest_ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildFPTrunc"]
+@define llvm_build_fp_trunc(builder: &LLVMBuilder, val: &LLVMValue, dest_ty: &LLVMType, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMSizeOf"]
+@define llvm_size_of(ty: &LLVMType) <&LLVMValue>;
+
 #[llvm_name="LLVMBuildRet"]
 @define llvm_build_ret(builder: &LLVMBuilder, val: &LLVMValue) <&LLVMValue>;
 
@@ -248,6 +422,12 @@ pub struct LLVMBlockArgs {
 
 #[llvm_name="LLVMBuildSRem"]
 @define llvm_build_srem(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildUDiv"]
+@define llvm_build_udiv(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
+
+#[llvm_name="LLVMBuildURem"]
+@define llvm_build_urem(builder: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
 
 #[llvm_name="LLVMBuildAnd"]
 @define llvm_build_and(b: &LLVMBuilder, lhs: &LLVMValue, rhs: &LLVMValue, name: string) <&LLVMValue>;
@@ -364,10 +544,22 @@ pub struct LLVMBlockArgs {
 // ICmp Predicates
 #[export] pub fun llvm_int_eq() <int> { return 32; }
 #[export] pub fun llvm_int_ne() <int> { return 33; }
+#[export] pub fun llvm_int_ugt() <int> { return 34; }
+#[export] pub fun llvm_int_uge() <int> { return 35; }
+#[export] pub fun llvm_int_ult() <int> { return 36; }
+#[export] pub fun llvm_int_ule() <int> { return 37; }
 #[export] pub fun llvm_int_sgt() <int> { return 38; }
 #[export] pub fun llvm_int_sge() <int> { return 39; }
 #[export] pub fun llvm_int_slt() <int> { return 40; }
 #[export] pub fun llvm_int_sle() <int> { return 41; }
+
+// FCmp Predicates (ordered: NaN compares false, matching C++ O-variants)
+#[export] pub fun llvm_real_oeq() <int> { return 1; }
+#[export] pub fun llvm_real_one() <int> { return 6; }
+#[export] pub fun llvm_real_ogt() <int> { return 2; }
+#[export] pub fun llvm_real_oge() <int> { return 3; }
+#[export] pub fun llvm_real_olt() <int> { return 4; }
+#[export] pub fun llvm_real_ole() <int> { return 5; }
 
 // Helper: Initialize native LLVM target machine
 #[export]

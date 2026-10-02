@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <optional>
 
 namespace fin {
 
@@ -42,7 +43,11 @@ public:
     // declarations. An empty name means this is not that form.
     std::string overwrite_member;
     std::unique_ptr<Expression> overwrite_value;
-    bool overwrite_public = false;
+    // The single-member form's visibility: `true` for `@implements(pub)`,
+    // `false` for `@implements(priv)`, and empty when written bare
+    // (`@implements T::m = ...`), which keeps an existing member's visibility
+    // and defaults a new one to public.
+    std::optional<bool> overwrite_public;
     
     ImplementsBlock(std::string target, std::unique_ptr<TypeNode> iface)
         : target_type(std::move(target)), interface_type(std::move(iface)) {}

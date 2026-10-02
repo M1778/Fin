@@ -118,6 +118,44 @@ TEST(Soundness_Layout, EveryScalarHasTheWidthTheBackendEmits) {
     }
 }
 
+TEST(Soundness_Layout, AliasedIntegerSpellingsHaveTheWidthTheyAlias) {
+    // GV1 leftover: the stage checker (finc/checker.fin:152-172) knows `u8`/`i8`/
+    // `u16`/`i16`/`u32`/`i32`/`u64`/`i64`/`f32`/`f64`/`usize`/`isize`/`size_t` as
+    // builtins with these widths and signs, while this table did not. Each row
+    // pairs the alias with the canonical name that already names the scalar, so
+    // the assertion is equality rather than a second copy of the literal sizes
+    // above -- the canonical half already pins those against the backend.
+    //
+    // Widths and signs read off the stage: chk_int_bits maps u8/i8 to 8,
+    // u16/i16 to 16, u32/i32 to 32, u64/i64/usize/isize/size_t to 64, and
+    // chk_int_is_signed leaves u8/u16/u32/u64/usize/size_t unsigned; f32/f64
+    // lower to float/double in stage codegen (map_type). usize/isize/size_t are
+    // 64-bit because lib/std/types.fin:79 spells `usize = uint{64}` and
+    // `isize = int{64}`, and stdlib/memory.fin:8 spells `size_t = uint{64}`.
+    LayoutEngine e;
+    struct Case { const char* alias; const char* canonical; };
+    const Case cases[] = {
+        {"u8", "uint8"},     {"i8", "int8"},     {"u16", "uint16"},
+        {"i16", "int16"},    {"u32", "uint32"},  {"i32", "int32"},
+        {"u64", "uint64"},   {"i64", "int64"},   {"f32", "float"},
+        {"f64", "double"},   {"usize", "uint64"}, {"isize", "int64"},
+        {"size_t", "uint64"},
+    };
+    for (const auto& c : cases) {
+        auto aliasInfo = scalarByName(c.alias);
+        auto canonicalInfo = scalarByName(c.canonical);
+        ASSERT_TRUE(canonicalInfo.has_value()) << c.canonical;
+        ASSERT_TRUE(aliasInfo.has_value()) << c.alias << " is missing from the table";
+        EXPECT_EQ(aliasInfo->kind, canonicalInfo->kind) << c.alias;
+        EXPECT_EQ(aliasInfo->bits, canonicalInfo->bits) << c.alias;
+        EXPECT_EQ(aliasInfo->isSigned, canonicalInfo->isSigned) << c.alias;
+        const auto aliasLayout = must(e.layoutOf(prim(c.alias)));
+        const auto canonicalLayout = must(e.layoutOf(prim(c.canonical)));
+        EXPECT_EQ(aliasLayout.size, canonicalLayout.size) << c.alias;
+        EXPECT_EQ(aliasLayout.align, canonicalLayout.align) << c.alias;
+    }
+}
+
 TEST(Soundness_Layout, APointerIsPointerSizedWhateverItPointsAt) {
     LayoutEngine e;
     // Including a pointee that has no layout of its own. This is not an
@@ -1158,4 +1196,261 @@ TEST(Soundness_Layout, AWidthSurvivesCloneAndSubstitute) {
         // means, so writing it changes nothing. Anything else would make `int{32}`
         // a fifth integer type that happens to have int's size.
         << "a width that matches the name is the name";
+}
+
+// --- typed pointer-map queries (step 8) --------------------------------------
+//
+// docs/compiler-api.md §1.9's surpassing capability as named questions on the
+// engine: `pointer_count`, `pointer_offset_at`, `pointee_type_at`. The
+// `compiler.layout.*` operations, the provider call path and any future
+// evaluator ask once here rather than each re-walking `TypeLayout::pointers`.
+// Each carries the file's third outcome -- a refusal, never a zero -- and the
+// cost rule (§3.9, normative): counted in fields, not bytes.
+
+TEST(Soundness_Layout, PointerCountOfAPointerFreeTypeIsZero) {
+    LayoutEngine e;
+    uint64_t n = 99;
+    EXPECT_TRUE(e.pointerCount(prim("int"), n).empty());
+    EXPECT_EQ(n, 0u);
+    EXPECT_TRUE(e.pointerCount(prim("string"), n).empty());
+    EXPECT_EQ(n, 0u) << "a string is pointer-sized and is not a traced slot";
+}
+
+TEST(Soundness_Layout, PointerQueriesNameTheirSlotsInOffsetOrder) {
+    auto t = typeFromSource("struct Node { pub v <int>, pub next <&Node>, }\n", "Node");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    uint64_t n = 0;
+    EXPECT_TRUE(e.pointerCount(t, n).empty());
+    ASSERT_EQ(n, 1u);
+    uint64_t off = 0;
+    EXPECT_TRUE(e.pointerOffsetAt(t, 0, off).empty());
+    EXPECT_EQ(off, 8u);
+    TypePtr pointee;
+    EXPECT_TRUE(e.pointeeTypeAt(t, 0, pointee).empty());
+    ASSERT_TRUE(pointee != nullptr);
+    EXPECT_EQ(pointee->toString(), "Node");
+}
+
+TEST(Soundness_Layout, APointerFreeArrayAnswersWithoutExpanding) {
+    // Fields, not bytes (§3.9): a 200M-element pointer-free array answers from
+    // one element walk -- count 0, size 800000000 -- allocating nothing. The
+    // shape D's bitmap gets wrong at ~0.3 s of zeroes (docs/compiler-api.md
+    // §1.3) is constant here by construction: the repeat loop only iterates
+    // when the element itself holds pointers.
+    LayoutEngine e;
+    auto huge = std::make_shared<ArrayType>(prim("int"), uint64_t{200000000});
+    uint64_t n = 99;
+    EXPECT_TRUE(e.pointerCount(huge, n).empty());
+    EXPECT_EQ(n, 0u);
+    EXPECT_EQ(must(e.layoutOf(huge)).size, 800000000u);
+}
+
+TEST(Soundness_Layout, EveryElementOfAPointerArrayIsIndexed) {
+    LayoutEngine e;
+    auto arr = std::make_shared<ArrayType>(std::make_shared<PointerType>(prim("int")), uint64_t{3});
+    uint64_t n = 0;
+    EXPECT_TRUE(e.pointerCount(arr, n).empty());
+    ASSERT_EQ(n, 3u);
+    for (int64_t i = 0; i < 3; ++i) {
+        uint64_t off = 0;
+        EXPECT_TRUE(e.pointerOffsetAt(arr, i, off).empty());
+        EXPECT_EQ(off, static_cast<uint64_t>(i) * 8u);
+        TypePtr p;
+        EXPECT_TRUE(e.pointeeTypeAt(arr, i, p).empty());
+        ASSERT_TRUE(p != nullptr);
+        EXPECT_EQ(p->toString(), "int");
+    }
+}
+
+TEST(Soundness_Layout, APointerQueryOnATypeWithNoLayoutRefusesWithItsReason) {
+    // The layout's own refusal travels, so a query about a generic parameter
+    // says monomorphisation rather than inventing a count.
+    LayoutEngine e;
+    auto t = std::make_shared<GenericType>("T");
+    uint64_t n = 0;
+    uint64_t off = 0;
+    TypePtr p;
+    EXPECT_NE(e.pointerCount(t, n).find("monomorphisation"), std::string::npos)
+        << "count refused with the layout's reason";
+    EXPECT_NE(e.pointerOffsetAt(t, 0, off).find("monomorphisation"), std::string::npos)
+        << "offset refused with the layout's reason";
+    EXPECT_NE(e.pointeeTypeAt(t, 0, p).find("monomorphisation"), std::string::npos)
+        << "pointee refused with the layout's reason";
+}
+
+TEST(Soundness_Layout, ANegativeOrPastTheEndIndexRefusesAndNamesBoth) {
+    auto t = typeFromSource("struct Node { pub next <&Node>, }\n", "Node");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    uint64_t off = 0;
+    TypePtr p;
+    const std::string neg = e.pointerOffsetAt(t, -1, off);
+    EXPECT_NE(neg.find("-1"), std::string::npos) << neg;
+    EXPECT_NE(neg.find("negative"), std::string::npos) << neg;
+    const std::string past = e.pointeeTypeAt(t, 1, p);
+    EXPECT_NE(past.find("only 1"), std::string::npos) << past;
+    EXPECT_NE(past.find("1"), std::string::npos) << past;
+}
+
+// --- Round 3, Q12: interfaces and unions in the pointer map ------------------
+//
+// docs/compiler-api.md §4 Q12, asked against D's two documented holes: a union
+// gets no destructor calls, and an interface reference gets an all-zero bitmap
+// even though it *is* a GC pointer. Fin's answers: `variable_scope_exit` fires
+// for every variable whatever its type (pinned in test_events_w7.cpp), a union
+// has no map at all (a diagnostic, never a zero map), and an interface-typed
+// field contributes exactly one traced slot.
+//
+// The interface field is two words in the backend (`{i8*, i8*}` per ADR 0019:
+// data plus vtable) and one entry in the map: the data word is traced, the
+// vtable word is absent rather than marked, because a collector must not follow
+// it. The three-state encoding of ADR 0019 (traced / not-a-pointer /
+// must-not-follow) is still open; absence is its two-state staging.
+
+TEST(Soundness_Layout, AnInterfaceTypedFieldIsOneTracedSlot) {
+    auto t = typeFromSource(
+        "interface I { pub fun f() <int>; }\n"
+        "struct S { pub h <I>, }\n",
+        "S");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto layout = must(e.layoutOf(t));
+    ASSERT_EQ(layout.fields.size(), 1u);
+    // Two words in the backend (`{data, vtable}`, ADR 0019), so the field is
+    // pointer-pair sized and aligned even though the map traces one word.
+    EXPECT_EQ(layout.fields[0].size, 16u);
+    EXPECT_EQ(layout.fields[0].align, 8u);
+    EXPECT_EQ(layout.fields[0].offset, 0u);
+    EXPECT_EQ(layout.size, 16u);
+    EXPECT_EQ(layout.align, 8u);
+    ASSERT_EQ(layout.pointers.size(), 1u) << "exactly one pointer, not zero and not two";
+    EXPECT_EQ(layout.pointers[0].offset, 0u);
+    ASSERT_TRUE(layout.pointers[0].pointee != nullptr);
+    EXPECT_EQ(layout.pointers[0].pointee->toString(), "I");
+}
+
+TEST(Soundness_Layout, FieldsAfterAnInterfaceFieldStartAfterBothWords) {
+    // The size half of the agreement with the backend: whatever follows the
+    // interface field must start past the vtable word, or the map and the
+    // object disagree about where everything is.
+    auto t = typeFromSource(
+        "interface I { pub fun f() <int>; }\n"
+        "struct S { pub h <I>, pub x <int>, }\n",
+        "S");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto layout = must(e.layoutOf(t));
+    ASSERT_EQ(layout.fields.size(), 2u);
+    EXPECT_EQ(layout.fields[0].offset, 0u);
+    EXPECT_EQ(layout.fields[1].name, "x");
+    EXPECT_EQ(layout.fields[1].offset, 16u);
+    EXPECT_EQ(layout.size, 24u);
+    EXPECT_EQ(layout.align, 8u);
+    ASSERT_EQ(layout.pointers.size(), 1u);
+    EXPECT_EQ(layout.pointers[0].offset, 0u);
+}
+
+TEST(Soundness_Layout, InterfacePointerQueriesNameTheInterfacePointee) {
+    auto t = typeFromSource(
+        "interface I { pub fun f() <int>; }\n"
+        "struct S { pub h <I>, }\n",
+        "S");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    uint64_t n = 99;
+    EXPECT_TRUE(e.pointerCount(t, n).empty());
+    EXPECT_EQ(n, 1u);
+    uint64_t off = 99;
+    EXPECT_TRUE(e.pointerOffsetAt(t, 0, off).empty());
+    EXPECT_EQ(off, 0u);
+    TypePtr pointee;
+    EXPECT_TRUE(e.pointeeTypeAt(t, 0, pointee).empty());
+    ASSERT_TRUE(pointee != nullptr);
+    // The surpassing bit (§1.9) for interfaces: the slot points *at the
+    // interface*, not at an unnamed word.
+    EXPECT_EQ(pointee->toString(), "I");
+}
+
+TEST(Soundness_Layout, AUnionHasNoLayout) {
+    // The diagnostic half of Q12: `pointer_map_quote` of a union is refused,
+    // never answered with its first member's map (which for `int | uint` would
+    // be a confident zero).
+    auto t = typeFromSource("type Number = int | uint | float;\n", "Number");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto r = e.layoutOf(t);
+    EXPECT_FALSE(r.ok()) << "a union has no single layout to give";
+    EXPECT_NE(r.refusal.find("union"), std::string::npos) << r.refusal;
+}
+
+TEST(Soundness_Layout, AUnionFieldRefusesByName) {
+    auto t = typeFromSource(
+        "type Number = int | uint | float;\n"
+        "struct S { pub v <Number>, }\n",
+        "S");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto r = e.layoutOf(t);
+    EXPECT_FALSE(r.ok());
+    EXPECT_NE(r.refusal.find("field 'v'"), std::string::npos) << r.refusal;
+    EXPECT_NE(r.refusal.find("union"), std::string::npos) << r.refusal;
+}
+
+TEST(Soundness_Layout, AUnionPointerQueryRefusesWithItsReason) {
+    auto t = typeFromSource("type Number = int | uint;\n", "Number");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    uint64_t n = 0;
+    uint64_t off = 0;
+    TypePtr p;
+    EXPECT_NE(e.pointerCount(t, n).find("union"), std::string::npos)
+        << "count refused with the union's reason, not zero";
+    EXPECT_NE(e.pointerOffsetAt(t, 0, off).find("union"), std::string::npos)
+        << "offset refused with the union's reason";
+    EXPECT_NE(e.pointeeTypeAt(t, 0, p).find("union"), std::string::npos)
+        << "pointee refused with the union's reason";
+}
+
+// --- ADR 0040 slice 1: nullable shapes ---------------------------------------
+//
+// Owner-adopted rule: nullable values lower as tagged pairs {T,i1}, presence =
+// tag ONLY. `string?` is 8B pointer-shaped (not a 16B pair); `fn?` is a
+// closure pair with code-null (not a refusal).
+TEST(Soundness_Layout, ANullableStringIsPointerShaped) {
+    LayoutEngine e;
+    auto nullableStr = std::make_shared<NullableType>(prim("string"));
+    auto l = must(e.layoutOf(nullableStr));
+    EXPECT_EQ(l.size, 8u) << "string? is a pointer, not a {ptr,bool} pair";
+    EXPECT_EQ(l.align, 8u);
+    EXPECT_TRUE(l.pointers.empty()) << "a string is not a traced slot, nullable or not";
+}
+
+TEST(Soundness_Layout, ANullableFunctionIsAClosurePairWithCodeNull) {
+    LayoutEngine e;
+    auto fn = std::make_shared<FunctionType>(std::vector<TypePtr>{prim("int")}, prim("int"));
+    auto nullableFn = std::make_shared<NullableType>(fn);
+    auto l = must(e.layoutOf(nullableFn));
+    EXPECT_EQ(l.size, 16u) << "fn? is {code,env}, absent is code==null";
+    EXPECT_EQ(l.align, 8u);
+}
+
+TEST(Soundness_Layout, ANullableMixedStructHasTaggedPairOffsets) {
+    // M{int?,char,long?} is 32B: int? at 0 (8B), char at 8, long? at 16 (16B).
+    auto nullableInt = std::make_shared<NullableType>(prim("int"));
+    auto nullableLong = std::make_shared<NullableType>(prim("long"));
+    auto m = std::make_shared<StructType>("M");
+    m->defineField("a", nullableInt, true);
+    m->defineField("b", prim("char"), true);
+    m->defineField("c", nullableLong, true);
+    LayoutEngine e;
+    auto l = must(e.layoutOf(m));
+    EXPECT_EQ(l.size, 32u);
+    EXPECT_EQ(l.align, 8u);
+    ASSERT_EQ(l.fields.size(), 3u);
+    EXPECT_EQ(l.fields[0].offset, 0u);
+    EXPECT_EQ(l.fields[0].size, 8u);
+    EXPECT_EQ(l.fields[1].offset, 8u);
+    EXPECT_EQ(l.fields[2].offset, 16u);
+    EXPECT_EQ(l.fields[2].size, 16u);
 }

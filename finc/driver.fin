@@ -4,7 +4,7 @@ import { Token, tok_eof, token_name } from token::std;
 import { Scanner, new_scanner, free_scanner } from scanner::std;
 import { AstNode, free_ast, ast_fun_decl } from ast::std;
 import { format_stmt } from printer::std;
-import { read_to_string, write_string, remove_file, free_file_content } from fs::std;
+import { read_to_string, write_string, remove_file, free_file_content, file_exists, file_size } from fs::std;
 import { run_command } from process::std;
 import { Buffer, new_buffer, free_buffer, free_string } from buffer::std;
 
@@ -12,7 +12,7 @@ import { Parser, new_parser, free_parser } from finc.parser;
 import { Checker, new_checker, free_checker } from finc.checker;
 import { generate_llvm_code } from finc.codegen;
 
-import { substr } from strings::std;
+import { substr, starts_with, ends_with, last_index_of_char, trim, concat, to_chars, from_chars } from strings::std;
 
 #[llvm_name="dprintf"]
 @define err_dprintf(fd: int, fmt: string, ...) <int>;
@@ -22,6 +22,12 @@ import { substr } from strings::std;
 
 #[llvm_name="strlen"]
 @define drv_raw_strlen(s: string) <ulong>;
+
+#[llvm_name="getpid"]
+@define drv_getpid() <int>;
+
+#[llvm_name="readlink"]
+@define drv_readlink(path: string, buf: &char, size: ulong) <long>;
 
 priv fun drv_strlen(s: string) <ulong> {
     if (s == null) { return cast<ulong>(0); }
@@ -34,46 +40,2347 @@ priv fun drv_str_eq(a: string, b: string) <bool> {
     return drv_strcmp(a, b) == 0;
 }
 
-priv fun resolve_module_spec(spec: string) <string> {
-    if (spec == null) { return ""; }
-    if (drv_str_eq(spec, "argparse::std")) { return "lib/std/argparse.fin"; }
-    if (drv_str_eq(spec, "collection::std")) { return ""; }
-    if (drv_str_eq(spec, "operators::std")) { return ""; }
-    if (drv_str_eq(spec, "error::std")) { return ""; }
-    if (drv_str_eq(spec, "token::std")) { return "lib/std/token.fin"; }
-    if (drv_str_eq(spec, "scanner::std")) { return "lib/std/scanner.fin"; }
-    if (drv_str_eq(spec, "parse::std")) { return "lib/std/parse.fin"; }
-    if (drv_str_eq(spec, "ast::std")) { return "lib/std/ast.fin"; }
-    if (drv_str_eq(spec, "diag::std")) { return "lib/std/diag.fin"; }
-    if (drv_str_eq(spec, "scope::std")) { return "lib/std/scope.fin"; }
-    if (drv_str_eq(spec, "buffer::std")) { return "lib/std/buffer.fin"; }
-    if (drv_str_eq(spec, "fs::std")) { return "lib/std/fs.fin"; }
-    if (drv_str_eq(spec, "strings::std")) { return "lib/std/strings.fin"; }
-    if (drv_str_eq(spec, "printer::std")) { return "lib/std/printer.fin"; }
-    if (drv_str_eq(spec, "process::std")) { return "lib/std/process.fin"; }
-    if (drv_str_eq(spec, "hashmap::std")) { return "lib/std/hashmap.fin"; }
-    if (drv_str_eq(spec, "typesys::std")) { return "lib/std/typesys.fin"; }
-    if (drv_str_eq(spec, "finc.driver") || drv_str_eq(spec, "finc::driver")) { return "finc/driver.fin"; }
-    if (drv_str_eq(spec, "finc.parser") || drv_str_eq(spec, "finc::parser")) { return "finc/parser.fin"; }
-    if (drv_str_eq(spec, "finc.checker") || drv_str_eq(spec, "finc::checker")) { return "finc/checker.fin"; }
-    if (drv_str_eq(spec, "finc.codegen") || drv_str_eq(spec, "finc::codegen")) { return "finc/codegen.fin"; }
-    if (drv_str_eq(spec, "finc.llvm") || drv_str_eq(spec, "finc::llvm")) { return "finc/llvm.fin"; }
+priv fun drv_unquote(spec: string) <string> {
+    let n <int> = cast<int>(drv_strlen(spec));
+    if (n >= 2 && starts_with(spec, "\"") && ends_with(spec, "\"")) {
+        return substr(spec, 1, n - 2);
+    }
+    return spec;
+}
 
-    let slen <ulong> = drv_strlen(spec);
+priv fun drv_dirname(path: string) <string> {
+    let idx <int> = last_index_of_char(path, cast<char>(47));
+    if (idx <= 0) { return ""; }
+    return substr(path, 0, idx);
+}
+
+priv fun drv_join_path(dir: string, base: string) <string> {
+    let b <Buffer> = new_buffer(64);
+    b.write_string(dir);
+    b.write_string("/");
+    b.write_string(base);
+    let res <string> = b.to_string();
+    free_buffer(b);
+    return res;
+}
+
+priv fun drv_stem_object(path: string) <string> {
+    let total <int> = cast<int>(drv_strlen(path));
+    let slash <int> = last_index_of_char(path, cast<char>(47));
+    let base_start <int> = 0;
+    if (slash >= 0) { base_start = slash + 1; }
+    let base <string> = substr(path, base_start, total - base_start);
+    let dot <int> = last_index_of_char(base, cast<char>(46));
+    let stem <string> = base;
+    if (dot > 0) {
+        stem = substr(base, 0, dot);
+        free_string(base);
+    }
+    let b <Buffer> = new_buffer(64);
+    b.write_string(stem);
+    b.write_string(".o");
+    let res <string> = b.to_string();
+    free_buffer(b);
+    free_string(stem);
+    return res;
+}
+
+// Temporary object beside the output, keyed by stem and pid. Mirrors C++
+// `objectPathFor` (src/driver/Driver.cpp): the pid keeps two concurrent
+// builds of one target from writing the same object, and sitting beside
+// the output keeps the object on the same filesystem as the link.
+priv fun drv_temp_object(out_bin: string) <string> {
+    let total <int> = cast<int>(drv_strlen(out_bin));
+    let slash <int> = last_index_of_char(out_bin, cast<char>(47));
+    let base_start <int> = 0;
+    if (slash >= 0) { base_start = slash + 1; }
+    let base_len <int> = total - base_start;
+    let b <Buffer> = new_buffer(128);
+    let dir <string> = drv_dirname(out_bin);
+    if (!drv_str_eq(dir, "")) {
+        b.write_string(dir);
+        b.write_string("/");
+    }
+    b.write_string(".");
+    if (base_len <= 0) {
+        b.write_string("a");
+    } else {
+        let base <string> = substr(out_bin, base_start, base_len);
+        let dot <int> = last_index_of_char(base, cast<char>(46));
+        if (dot > 0) {
+            let stem <string> = substr(base, 0, dot);
+            b.write_string(stem);
+            free_string(stem);
+        } else {
+            b.write_string(base);
+        }
+        free_string(base);
+    }
+    b.write_string(".");
+    b.write_int(drv_getpid());
+    b.write_string(".fin.o");
+    let res <string> = b.to_string();
+    free_buffer(b);
+    return res;
+}
+
+// ---- Preprocessor: conditional inclusion + line continuation ----
+//
+// Text stage before scanning, mirroring src/preprocessor/Preprocessor.cpp:
+// a `\`-ended line joins with the next (Preprocessor.cpp:71-83); a line whose
+// first non-blank characters are `#c_` or `#cdef` is a directive, otherwise it
+// is code. Disabled lines and consumed directive lines emit a blank line so
+// line numbers never shift. The `ifStack` nesting, the `#c_else` flip gated
+// on the outer levels, and the gating of `#cdef` recording on the current
+// state all mirror Preprocessor.cpp:16-21,90,113-134 exactly.
+//
+// Two deliberate divergences, both where the parser already owns the half:
+// `#cdef` lines in an enabled block are passed through (the parser absorbs
+// object-likes as globals and function-likes as functions, parser.fin:3385+,
+// instead of the C++ textual expansion), and `#c_ifndef` is stripped with
+// nothing pushed so its body always compiles -- the C++ behavior documented
+// in guide/11:318-321, kept as parity rather than fixed.
+//
+// Any other `#c_` directive (`#c_include`, `#c_undef`, `#c_if`, `#c_elif`,
+// `#c_error`, ...) is refused by name: the backend invariant forbids
+// silently dropping a directive the stage does not implement.
+
+priv fun drv_pp_is_word_char(c: char) <bool> {
+    if (c >= 'a' && c <= 'z') { return true; }
+    if (c >= 'A' && c <= 'Z') { return true; }
+    if (c >= '0' && c <= '9') { return true; }
+    if (c == '_') { return true; }
+    return false;
+}
+
+priv fun drv_pp_should_process(stack: [int], depth: int) <bool> {
+    for (let i <int> = 0; i < depth; i++) {
+        if (stack[i] == 0) { return false; }
+    }
+    return true;
+}
+
+priv fun drv_pp_is_defined(defines: [string], ndef: int, name: string) <bool> {
+    for (let i <int> = 0; i < ndef; i++) {
+        if (drv_str_eq(defines[i], name)) { return true; }
+    }
+    return false;
+}
+
+// The defined name of a `#cdef` line, or "". Like the C++ `#cdef\s+(\w+)`
+// match this needs a blank after `#cdef`, so `#cdefine` defines nothing.
+priv fun drv_pp_cdef_name(trimmed: string) <string> {
+    let total <int> = cast<int>(drv_strlen(trimmed));
+    if (total <= 5) { return ""; }
+    let b <[char]> = to_chars(trimmed);
+    let sep <char> = b[5];
+    delete b;
+    if (sep != ' ' && sep != '\t') { return ""; }
+    let rest <string> = trim(substr(trimmed, 5, total - 5));
+    let rb <[char]> = to_chars(rest);
+    let rn <int> = cast<int>(drv_strlen(rest));
+    let w <int> = 0;
+    while (w < rn) {
+        if (!drv_pp_is_word_char(rb[w])) { break; }
+        w++;
+    }
+    let name <string> = substr(rest, 0, w);
+    delete rb;
+    return name;
+}
+
+// The directive word itself (`#c_include` of `#c_include <x>`), for refusals.
+priv fun drv_pp_directive_token(trimmed: string) <string> {
+    let b <[char]> = to_chars(trimmed);
+    let n <int> = cast<int>(drv_strlen(trimmed));
+    let w <int> = 0;
+    while (w < n) {
+        if (b[w] == ' ') { break; }
+        if (b[w] == '\t') { break; }
+        w++;
+    }
+    let tok <string> = substr(trimmed, 0, w);
+    delete b;
+    return tok;
+}
+
+priv fun? drv_preprocess(source: string, filename: string) <string> {
+    if (source == null) { return null; }
+    if (filename == null) { return null; }
+    let total <int> = cast<int>(drv_strlen(source));
+    let bytes <[char]> = to_chars(source);
+    let out <Buffer> = new_buffer(total + 64);
+    let defines <[string]> = new [string, 256]{};
+    let ndef <int> = 0;
+    let stack <[int]> = new [int, 64]{};
+    let depth <int> = 0;
+    let pending <string> = "";
+    let in_cont <bool> = false;
+    let start <int> = 0;
+    let lineno <int> = 0;
+    for (let i <int> = 0; i <= total; i++) {
+        if (i < total && bytes[i] != '\n') { continue; }
+        if (i == total && i == start) { break; }
+        lineno++;
+        let line <string> = from_chars(bytes, start, i - start);
+        start = i + 1;
+        if (ends_with(line, "\\")) {
+            let llen <int> = cast<int>(drv_strlen(line));
+            let frag <string> = substr(line, 0, llen - 1);
+            pending = concat(pending, frag);
+            in_cont = true;
+            out.write_string("\n");
+            continue;
+        }
+        let logical <string> = line;
+        if (in_cont) {
+            logical = concat(pending, line);
+            pending = "";
+            in_cont = false;
+        }
+        let trimmed <string> = trim(logical);
+        if (starts_with(trimmed, "#cdef") || starts_with(trimmed, "#c_")) {
+            if (starts_with(trimmed, "#cdef")) {
+                if (drv_pp_should_process(stack, depth)) {
+                    let dname <string> = drv_pp_cdef_name(trimmed);
+                    if (!drv_str_eq(dname, "")) {
+                        if (!drv_pp_is_defined(defines, ndef, dname)) {
+                            if (ndef >= 256) {
+                                err_dprintf(2, "finc: error: %s:%d: out of preprocessor define slots\n", filename, lineno);
+                                delete bytes;
+                                free_buffer(out);
+                                delete defines;
+                                delete stack;
+                                return null;
+                            }
+                            defines[ndef] = dname;
+                            ndef++;
+                        }
+                    }
+                    out.write_string(logical);
+                    out.write_string("\n");
+                } else {
+                    out.write_string("\n");
+                }
+            } else if (starts_with(trimmed, "#c_ifdef")) {
+                let rest <string> = trim(substr(trimmed, 8, cast<int>(drv_strlen(trimmed)) - 8));
+                if (depth >= 64) {
+                    err_dprintf(2, "finc: error: %s:%d: preprocessor conditional nesting too deep\n", filename, lineno);
+                    delete bytes;
+                    free_buffer(out);
+                    delete defines;
+                    delete stack;
+                    return null;
+                }
+                if (drv_pp_should_process(stack, depth)) {
+                    if (drv_pp_is_defined(defines, ndef, rest)) {
+                        stack[depth] = 1;
+                    } else {
+                        stack[depth] = 0;
+                    }
+                } else {
+                    stack[depth] = 0;
+                }
+                depth++;
+                out.write_string("\n");
+            } else if (starts_with(trimmed, "#c_else")) {
+                if (depth > 0) {
+                    depth--;
+                    let last <int> = stack[depth];
+                    if (drv_pp_should_process(stack, depth)) {
+                        if (last == 0) {
+                            stack[depth] = 1;
+                        } else {
+                            stack[depth] = 0;
+                        }
+                    } else {
+                        stack[depth] = 0;
+                    }
+                    depth++;
+                }
+                out.write_string("\n");
+            } else if (starts_with(trimmed, "#c_endif")) {
+                if (depth > 0) { depth--; }
+                out.write_string("\n");
+            } else if (starts_with(trimmed, "#c_ifndef")) {
+                // Parity with the C++ omission (guide/11:318-321): stripped,
+                // pushes nothing, body always compiled. Not fixed, not silent.
+                out.write_string("\n");
+            } else {
+                let dir <string> = drv_pp_directive_token(trimmed);
+                err_dprintf(2, "finc: error: %s:%d: preprocessor directive '%s' is not implemented\n", filename, lineno, dir);
+                delete bytes;
+                free_buffer(out);
+                delete defines;
+                delete stack;
+                return null;
+            }
+        } else {
+            if (drv_pp_should_process(stack, depth)) {
+                out.write_string(logical);
+            }
+            out.write_string("\n");
+        }
+    }
+    delete bytes;
+    let res <string> = out.to_string();
+    free_buffer(out);
+    delete defines;
+    delete stack;
+    return res;
+}
+
+// ---- Macro expansion: text stage after preprocessing, before scanning ----
+//
+// What this is: the Fin pipeline's macro expander. The C++ compiler expands
+// macros on its AST (src/macros/**: MacroExpander, SubstitutionVisitor,
+// expander/*) between parsing (src/parser/parser.y macro productions) and
+// analysis, with `format!(fmt: string, ...)<string>` answered separately from
+// src/semantics/BuiltinMacros.cpp (sole builtin). This stage does the same
+// work on TEXT, right after drv_preprocess and before scanning, so the parser
+// keeps dropping `@macro` lines exactly as today and never sees an invocation
+// this stage expanded. The checker and codegen are untouched: whatever this
+// stage leaves standing reaches them exactly as before, and the kind-31/32
+// codegen refusal stays the backstop for it.
+//
+// Rules mirrored from the oracle (ADR 0023):
+//   `@macro name(p1, p2) { return quote { BODY; }; }` declares; `n!(a, b)` is
+//   positional, `n![...]`/`n!{...}` arrive as one prototype (`{0: a, ...}` /
+//   `{k: v, ...}`, both separators, trailing comma allowed), `alias.n!(...)`
+//   resolves through a whole-module import, a named import binds the names it
+//   names, `import *` binds nothing, and builtin `format!` needs no import.
+//   Hygiene (`macro 'f' names 'tmp' with no qualifier`) fires at collection,
+//   arity (`Macro 'm' expects exactly N args, got M`) at the call, a forward
+//   reference is `Undefined macro` like the single-pass C++ expander, and a
+//   `format!` whose string is a literal with a matching `{}` count lowers to
+//   an appended snprintf helper (same observable bytes as the C++ lowering).
+//   Anything else shaped like `format!` (runtime format, count mismatch, a
+//   non-`{}` placeholder) is passed through: the checker stays silent on it
+//   like the C++ analyzer, and the backstop refuses it at build time.
+//
+// Kept line-preserving on purpose: replacements carry no newlines beyond what
+// the consumed span held (the rest is padded), `@macro` spans are copied
+// verbatim, and helpers are appended after all code, so diagnostics before
+// and after this stage report the same lines.
+//
+// Known ceilings (no corpus site needs more; each is an explicit refusal or
+// a documented pass-through, never a silent drop):
+//   variadic calls pack trailing args into an array, mirroring C++
+//   (ExpanderExprs.cpp:150-160);
+//   `new Type` in a body is refused (C++ accepts it: a type is no capture);
+//   format conversions for non-literals default to `%d` (`&x` to `%p`,
+//   `null` to `%s`); unformattable-type refusals need checker integration.
+
+priv fun mx_is_space(c: char) <bool> {
+    if (c == ' ') { return true; }
+    if (c == '\t') { return true; }
+    if (c == '\r') { return true; }
+    if (c == '\n') { return true; }
+    return false;
+}
+
+priv fun mx_is_ident_start(c: char) <bool> {
+    if (c >= 'a' && c <= 'z') { return true; }
+    if (c >= 'A' && c <= 'Z') { return true; }
+    if (c == '_') { return true; }
+    return false;
+}
+
+priv fun mx_is_ident_char(c: char) <bool> {
+    if (mx_is_ident_start(c)) { return true; }
+    if (c >= '0' && c <= '9') { return true; }
+    return false;
+}
+
+priv fun mx_is_digit(c: char) <bool> {
+    if (c >= '0' && c <= '9') { return true; }
+    return false;
+}
+
+priv fun drv_itoa(v: int) <string> {
+    if (v == 0) { return "0"; }
+    let neg <bool> = false;
+    let x <int> = v;
+    if (x < 0) { neg = true; x = 0 - x; }
+    let digits <string> = "0123456789";
+    let b <Buffer> = new_buffer(16);
+    if (neg) { b.write_string("-"); }
+    let pow <int> = 1;
+    while (x / pow >= 10) { pow = pow * 10; }
+    while (pow >= 1) {
+        let d <int> = x / pow;
+        b.write_string(substr(digits, d, 1));
+        x = x - d * pow;
+        pow = pow / 10;
+    }
+    let res <string> = b.to_string();
+    free_buffer(b);
+    return res;
+}
+
+// First top-level `.` in a name, or -1. A `::` is not dotted access.
+priv fun mx_dot_pos(name: string) <int> {
+    let len <int> = cast<int>(drv_strlen(name));
+    let b <[char]> = to_chars(name);
+    let at <int> = -1;
+    let i <int> = 0;
+    while (i < len) {
+        if (b[i] == '.') { at = i; break; }
+        i++;
+    }
+    delete b;
+    return at;
+}
+
+// `a/b/c.fin` to `c`.
+priv fun mx_stem(path: string) <string> {
+    let total <int> = cast<int>(drv_strlen(path));
+    let pb <[char]> = to_chars(path);
+    let start <int> = 0;
+    let i <int> = 0;
+    while (i < total) {
+        if (pb[i] == '/') { start = i + 1; }
+        i++;
+    }
+    delete pb;
+    let base <string> = substr(path, start, total - start);
+    let blen <int> = cast<int>(drv_strlen(base));
+    let bb <[char]> = to_chars(base);
+    let dot <int> = -1;
+    let j <int> = 1;
+    while (j < blen) {
+        if (bb[j] == '.') { dot = j; }
+        j++;
+    }
+    delete bb;
+    if (dot > 0) { return substr(base, 0, dot); }
+    return base;
+}
+
+// Alias for a bare `import SPEC;`: after the last `/`, then after the last `::`.
+priv fun mx_spec_alias(spec: string) <string> {
+    let total <int> = cast<int>(drv_strlen(spec));
+    let sb <[char]> = to_chars(spec);
+    let start <int> = 0;
+    let i <int> = 0;
+    while (i < total) {
+        if (sb[i] == '/') { start = i + 1; }
+        i++;
+    }
+    delete sb;
+    let base <string> = substr(spec, start, total - start);
+    let blen <int> = cast<int>(drv_strlen(base));
+    let bb <[char]> = to_chars(base);
+    let dc <int> = -1;
+    let j <int> = 0;
+    while (j + 1 < blen) {
+        if (bb[j] == ':' && bb[j + 1] == ':') { dc = j; }
+        j++;
+    }
+    delete bb;
+    if (dc >= 0) { return substr(base, dc + 2, blen - dc - 2); }
+    return base;
+}
+
+// Top-level comma pieces of an argument list. Nesting, strings, chars and
+// comments are respected; the pieces are raw (trimmed by the accessor).
+priv fun mx_split_count(inner: string) <int> {
+    let total <int> = cast<int>(drv_strlen(inner));
+    if (total <= 0) { return 0; }
+    let b <[char]> = to_chars(inner);
+    let depth <int> = 0;
+    let seen <bool> = false;
+    let count <int> = 1;
+    let i <int> = 0;
+    while (i < total) {
+        let c <char> = b[i];
+        if (c == '"') {
+            seen = true;
+            i++;
+            while (i < total) {
+                if (b[i] == '\\') { i = i + 2; }
+                else if (b[i] == '"') { i++; break; }
+                else { i++; }
+            }
+        } else if (c == '\'') {
+            seen = true;
+            i++;
+            while (i < total) {
+                if (b[i] == '\\') { i = i + 2; }
+                else if (b[i] == '\'') { i++; break; }
+                else { i++; }
+            }
+        } else if (c == '/' && i + 1 < total && b[i + 1] == '/') {
+            while (i < total && b[i] != '\n') { i++; }
+        } else if (c == '/' && i + 1 < total && b[i + 1] == '*') {
+            i = i + 2;
+            while (i + 1 < total && !(b[i] == '*' && b[i + 1] == '/')) { i++; }
+            i = i + 2;
+        } else if (c == '(' || c == '[' || c == '{') {
+            depth = depth + 1;
+            seen = true;
+            i++;
+        } else if (c == ')' || c == ']' || c == '}') {
+            if (depth > 0) { depth = depth - 1; }
+            seen = true;
+            i++;
+        } else if (c == ',' && depth == 0) {
+            count = count + 1;
+            seen = true;
+            i++;
+        } else {
+            if (c != ' ' && c != '\t' && c != '\r' && c != '\n') { seen = true; }
+            i++;
+        }
+    }
+    delete b;
+    if (!seen) { return 0; }
+    return count;
+}
+
+priv fun mx_split_at(inner: string, k: int) <string> {
+    let total <int> = cast<int>(drv_strlen(inner));
+    let b <[char]> = to_chars(inner);
+    let depth <int> = 0;
+    let cur <int> = 0;
+    let start <int> = 0;
+    let i <int> = 0;
+    while (i <= total) {
+        let c <char> = cast<char>(0);
+        if (i < total) { c = b[i]; }
+        let is_end <bool> = false;
+        if (i >= total) { is_end = true; }
+        else if (c == ',' && depth == 0) { is_end = true; }
+        if (is_end) {
+            if (cur == k) {
+                let piece <string> = trim(substr(inner, start, i - start));
+                delete b;
+                return piece;
+            }
+            cur = cur + 1;
+            start = i + 1;
+            i++;
+        } else if (c == '"') {
+            i++;
+            while (i < total) {
+                if (b[i] == '\\') { i = i + 2; }
+                else if (b[i] == '"') { i++; break; }
+                else { i++; }
+            }
+        } else if (c == '\'') {
+            i++;
+            while (i < total) {
+                if (b[i] == '\\') { i = i + 2; }
+                else if (b[i] == '\'') { i++; break; }
+                else { i++; }
+            }
+        } else if (c == '/' && i + 1 < total && b[i + 1] == '/') {
+            while (i < total && b[i] != '\n') { i++; }
+        } else if (c == '/' && i + 1 < total && b[i + 1] == '*') {
+            i = i + 2;
+            while (i + 1 < total && !(b[i] == '*' && b[i + 1] == '/')) { i++; }
+            i = i + 2;
+        } else {
+            if (c == '(' || c == '[' || c == '{') { depth = depth + 1; }
+            else if (c == ')' || c == ']' || c == '}') {
+                if (depth > 0) { depth = depth - 1; }
+            }
+            i++;
+        }
+    }
+    delete b;
+    return "";
+}
+
+// `k => v` or `k : v` (never `::`) to `k: v`, or "" when the piece is no pair.
+priv fun mx_pair_normalize(piece: string) <string> {
+    let total <int> = cast<int>(drv_strlen(piece));
+    if (total <= 0) { return ""; }
+    let b <[char]> = to_chars(piece);
+    let arrow <int> = -1;
+    let colon <int> = -1;
+    let depth <int> = 0;
+    let i <int> = 0;
+    while (i < total) {
+        let c <char> = b[i];
+        if (c == '"') {
+            i++;
+            while (i < total) {
+                if (b[i] == '\\') { i = i + 2; }
+                else if (b[i] == '"') { i++; break; }
+                else { i++; }
+            }
+        } else if (c == '\'') {
+            i++;
+            while (i < total) {
+                if (b[i] == '\\') { i = i + 2; }
+                else if (b[i] == '\'') { i++; break; }
+                else { i++; }
+            }
+        } else if (c == '/' && i + 1 < total && b[i + 1] == '/') {
+            while (i < total && b[i] != '\n') { i++; }
+        } else if (c == '/' && i + 1 < total && b[i + 1] == '*') {
+            i = i + 2;
+            while (i + 1 < total && !(b[i] == '*' && b[i + 1] == '/')) { i++; }
+            i = i + 2;
+        } else {
+            if (c == '(' || c == '[' || c == '{') { depth = depth + 1; }
+            else if (c == ')' || c == ']' || c == '}') {
+                if (depth > 0) { depth = depth - 1; }
+            } else if (depth == 0 && c == '=' && i + 1 < total && b[i + 1] == '>') {
+                if (arrow < 0) { arrow = i; }
+            } else if (depth == 0 && c == ':') {
+                let prev_dc <bool> = false;
+                if (i > 0 && b[i - 1] == ':') { prev_dc = true; }
+                let next_dc <bool> = false;
+                if (i + 1 < total && b[i + 1] == ':') { next_dc = true; }
+                if (!prev_dc && !next_dc && colon < 0) { colon = i; }
+            }
+            i++;
+        }
+    }
+    delete b;
+    if (arrow >= 0) {
+        let k <string> = trim(substr(piece, 0, arrow));
+        let v <string> = trim(substr(piece, arrow + 2, total - arrow - 2));
+        if (drv_str_eq(k, "") || drv_str_eq(v, "")) { return ""; }
+        return concat(concat(k, ": "), v);
+    }
+    if (colon >= 0) {
+        let k2 <string> = trim(substr(piece, 0, colon));
+        let v2 <string> = trim(substr(piece, colon + 1, total - colon - 1));
+        if (drv_str_eq(k2, "") || drv_str_eq(v2, "")) { return ""; }
+        return concat(concat(k2, ": "), v2);
+    }
+    return "";
+}
+
+priv fun mx_csv_count(joined: string) <int> {
+    if (joined == null || drv_str_eq(joined, "")) { return 0; }
+    let total <int> = cast<int>(drv_strlen(joined));
+    let b <[char]> = to_chars(joined);
+    let count <int> = 1;
+    for (let i <int> = 0; i < total; i++) {
+        if (b[i] == ',') { count = count + 1; }
+    }
+    delete b;
+    return count;
+}
+
+priv fun mx_csv_at(joined: string, k: int) <string> {
+    let total <int> = cast<int>(drv_strlen(joined));
+    let b <[char]> = to_chars(joined);
+    let cur <int> = 0;
+    let start <int> = 0;
+    let i <int> = 0;
+    while (i <= total) {
+        if (i >= total || b[i] == ',') {
+            if (cur == k) {
+                let piece <string> = trim(substr(joined, start, i - start));
+                delete b;
+                return piece;
+            }
+            cur = cur + 1;
+            start = i + 1;
+        }
+        i++;
+    }
+    delete b;
+    return "";
+}
+
+// Substitute `$param` (word boundary) with arg, leaving strings, chars,
+// comments and other `$names` alone -- mirroring SubstitutionVisitor, which
+// never enters a Literal.
+priv fun mx_subst_one(body: string, param: string, arg: string) <string> {
+    let total <int> = cast<int>(drv_strlen(body));
+    let b <[char]> = to_chars(body);
+    let out <Buffer> = new_buffer(total + 16);
+    let i <int> = 0;
+    while (i < total) {
+        let c <char> = b[i];
+        if (c == '"') {
+            out.write_char(c);
+            i++;
+            while (i < total) {
+                out.write_char(b[i]);
+                if (b[i] == '\\') {
+                    i++;
+                    if (i < total) { out.write_char(b[i]); i++; }
+                } else if (b[i] == '"') { i++; break; }
+                else { i++; }
+            }
+        } else if (c == '\'') {
+            out.write_char(c);
+            i++;
+            while (i < total) {
+                out.write_char(b[i]);
+                if (b[i] == '\\') {
+                    i++;
+                    if (i < total) { out.write_char(b[i]); i++; }
+                } else if (b[i] == '\'') { i++; break; }
+                else { i++; }
+            }
+        } else if (c == '/' && i + 1 < total && b[i + 1] == '/') {
+            while (i < total && b[i] != '\n') {
+                out.write_char(b[i]);
+                i++;
+            }
+        } else if (c == '/' && i + 1 < total && b[i + 1] == '*') {
+            out.write_char(c);
+            out.write_char(b[i + 1]);
+            i = i + 2;
+            while (i + 1 < total && !(b[i] == '*' && b[i + 1] == '/')) {
+                out.write_char(b[i]);
+                i++;
+            }
+            if (i + 1 < total) {
+                out.write_char(b[i]);
+                out.write_char(b[i + 1]);
+                i = i + 2;
+            }
+        } else if (c == '$') {
+            let j <int> = i + 1;
+            while (j < total && mx_is_ident_char(b[j])) { j++; }
+            if (j > i + 1) {
+                let nm <string> = from_chars(b, i + 1, j - i - 1);
+                if (drv_str_eq(nm, param)) {
+                    out.write_string(arg);
+                } else {
+                    out.write_string(from_chars(b, i, j - i));
+                }
+                i = j;
+            } else {
+                out.write_char(c);
+                i++;
+            }
+        } else {
+            out.write_char(c);
+            i++;
+        }
+    }
+    delete b;
+    let res <string> = out.to_string();
+    free_buffer(out);
+    return res;
+}
+
+// Quote body up to the first top-level `;` (the C++ expander clones the one
+// expression statement), trimmed, with raw newlines folded to spaces so an
+// expansion never shifts later lines.
+priv fun mx_first_stmt(inner: string) <string> {
+    let total <int> = cast<int>(drv_strlen(inner));
+    let b <[char]> = to_chars(inner);
+    let depth <int> = 0;
+    let cut <int> = total;
+    let i <int> = 0;
+    while (i < total) {
+        let c <char> = b[i];
+        if (c == '"') {
+            i++;
+            while (i < total) {
+                if (b[i] == '\\') { i = i + 2; }
+                else if (b[i] == '"') { i++; break; }
+                else { i++; }
+            }
+        } else if (c == '\'') {
+            i++;
+            while (i < total) {
+                if (b[i] == '\\') { i = i + 2; }
+                else if (b[i] == '\'') { i++; break; }
+                else { i++; }
+            }
+        } else if (c == '/' && i + 1 < total && b[i + 1] == '/') {
+            while (i < total && b[i] != '\n') { i++; }
+        } else if (c == '/' && i + 1 < total && b[i + 1] == '*') {
+            i = i + 2;
+            while (i + 1 < total && !(b[i] == '*' && b[i + 1] == '/')) { i++; }
+            i = i + 2;
+        } else {
+            if (c == '(' || c == '[' || c == '{') { depth = depth + 1; }
+            else if (c == ')' || c == ']' || c == '}') {
+                if (depth > 0) { depth = depth - 1; }
+            } else if (c == ';' && depth == 0) { cut = i; break; }
+            i++;
+        }
+    }
+    let raw <string> = trim(substr(inner, 0, cut));
+    delete b;
+    let rlen <int> = cast<int>(drv_strlen(raw));
+    let rb <[char]> = to_chars(raw);
+    let ob <Buffer> = new_buffer(rlen + 1);
+    for (let k <int> = 0; k < rlen; k++) {
+        if (rb[k] == '\n' || rb[k] == '\r') { ob.write_char(' '); }
+        else { ob.write_char(rb[k]); }
+    }
+    delete rb;
+    let res <string> = trim(ob.to_string());
+    free_buffer(ob);
+    return res;
+}
+
+// `"a\nb"` (with quotes) to its decoded text.
+priv fun mx_decode_fmt(lit: string) <string> {
+    let total <int> = cast<int>(drv_strlen(lit));
+    let b <[char]> = to_chars(lit);
+    let ob <Buffer> = new_buffer(total + 1);
+    let i <int> = 1;
+    while (i + 1 < total) {
+        if (b[i] == '\\' && i + 1 < total - 1) {
+            let e <char> = b[i + 1];
+            if (e == 'n') { ob.write_char('\n'); }
+            else if (e == 't') { ob.write_char(cast<char>(9)); }
+            else if (e == 'r') { ob.write_char(cast<char>(13)); }
+            else if (e == '0') { ob.write_char(cast<char>(0)); }
+            else { ob.write_char(e); }
+            i = i + 2;
+        } else {
+            ob.write_char(b[i]);
+            i++;
+        }
+    }
+    delete b;
+    let res <string> = ob.to_string();
+    free_buffer(ob);
+    return res;
+}
+
+// Decoded text to a Fin string literal (with quotes).
+priv fun mx_encode_str(text: string) <string> {
+    let total <int> = cast<int>(drv_strlen(text));
+    let b <[char]> = to_chars(text);
+    let ob <Buffer> = new_buffer(total + 8);
+    ob.write_char('"');
+    for (let i <int> = 0; i < total; i++) {
+        if (b[i] == '\\') { ob.write_string("\\\\"); }
+        else if (b[i] == '"') { ob.write_string("\\\""); }
+        else if (b[i] == '\n') { ob.write_string("\\n"); }
+        else if (b[i] == cast<char>(9)) { ob.write_string("\\t"); }
+        else if (b[i] == cast<char>(13)) { ob.write_string("\\r"); }
+        else { ob.write_char(b[i]); }
+    }
+    delete b;
+    ob.write_char('"');
+    let res <string> = ob.to_string();
+    free_buffer(ob);
+    return res;
+}
+
+// The C conversion for one format argument, read off its text: literals are
+// exact, `&x` is an address, `null` reads bytes, and anything else defaults
+// to `%d` -- the safe direction (a number for a pointer, never a pointer
+// read for a number). Full type direction needs checker integration.
+priv fun mx_fmt_conv(arg: string) <string> {
+    let total <int> = cast<int>(drv_strlen(arg));
+    if (total <= 0) { return "%d"; }
+    let b <[char]> = to_chars(arg);
+    let first <char> = b[0];
+    let last <char> = b[total - 1];
+    if (first == '"' && last == '"' && total >= 2) { delete b; return "%s"; }
+    if (first == '\'' && last == '\'' && total >= 2) { delete b; return "%d"; }
+    if (first == '&') { delete b; return "%p"; }
+    let body <string> = arg;
+    if (first == '-') { body = substr(arg, 1, total - 1); }
+    let blen <int> = cast<int>(drv_strlen(body));
+    let bb <[char]> = to_chars(body);
+    let dots <int> = 0;
+    let digits <bool> = true;
+    if (blen <= 0) { digits = false; }
+    for (let i <int> = 0; i < blen; i++) {
+        if (bb[i] == '.') { dots = dots + 1; }
+        else if (!mx_is_digit(bb[i])) { digits = false; }
+    }
+    delete bb;
+    delete b;
+    if (drv_str_eq(arg, "true") || drv_str_eq(arg, "false")) { return "%d"; }
+    if (drv_str_eq(arg, "null") || drv_str_eq(arg, "NULL")) { return "%s"; }
+    if (digits && dots == 1) { return "%g"; }
+    if (digits && dots == 0) {
+        if (blen > 10) { return "%lld"; }
+        if (blen == 10 && !drv_str_eq(body, "2147483647")) {
+            let over <bool> = false;
+            let lim <string> = "2147483647";
+            let lb <[char]> = to_chars(lim);
+            let vb <[char]> = to_chars(body);
+            for (let k <int> = 0; k < 10; k++) {
+                if (vb[k] > lb[k]) { over = true; break; }
+                if (vb[k] < lb[k]) { break; }
+            }
+            delete lb;
+            delete vb;
+            if (over) { return "%lld"; }
+        }
+        return "%d";
+    }
+    return "%d";
+}
+
+priv fun mx_is_hygiene_kw(nm: string) <bool> {
+    if (drv_str_eq(nm, "return")) { return true; }
+    if (drv_str_eq(nm, "quote")) { return true; }
+    if (drv_str_eq(nm, "cast")) { return true; }
+    if (drv_str_eq(nm, "new")) { return true; }
+    if (drv_str_eq(nm, "sizeof")) { return true; }
+    if (drv_str_eq(nm, "true")) { return true; }
+    if (drv_str_eq(nm, "false")) { return true; }
+    if (drv_str_eq(nm, "null")) { return true; }
+    if (drv_str_eq(nm, "m1778")) { return true; }
+    if (drv_str_eq(nm, "int")) { return true; }
+    if (drv_str_eq(nm, "uint")) { return true; }
+    if (drv_str_eq(nm, "long")) { return true; }
+    if (drv_str_eq(nm, "ulong")) { return true; }
+    if (drv_str_eq(nm, "float")) { return true; }
+    if (drv_str_eq(nm, "double")) { return true; }
+    if (drv_str_eq(nm, "bool")) { return true; }
+    if (drv_str_eq(nm, "char")) { return true; }
+    if (drv_str_eq(nm, "string")) { return true; }
+    if (drv_str_eq(nm, "void")) { return true; }
+    if (drv_str_eq(nm, "auto")) { return true; }
+    if (drv_str_eq(nm, "noret")) { return true; }
+    return false;
+}
+
+priv fun mx_count_nl_str(s: string) <int> {
+    let total <int> = cast<int>(drv_strlen(s));
+    let b <[char]> = to_chars(s);
+    let k <int> = 0;
+    for (let i <int> = 0; i < total; i++) {
+        if (b[i] == '\n') { k = k + 1; }
+    }
+    delete b;
+    return k;
+}
+
+priv struct Mx {
+    priv:
+      bytes <[char]>,
+      n <int> = 0,
+      pos <int> = 0,
+      line <int> = 1,
+      filename <string> = "",
+      modidx <int> = 0,
+      names <[string]>,
+      nparams <[int]>,
+      vargs <[int]>,
+      params <[string]>,
+      bodies <[string]>,
+      starts <[int]>,
+      ends <[int]>,
+      origins <[string]>,
+      count <int> = 0,
+      anames <[string]>,
+      afiles <[string]>,
+      acount <int> = 0,
+      iowner <[string]>,
+      inames <[string]>,
+      ifiles <[string]>,
+      ialias <[int]>,
+      icount <int> = 0,
+      visited <[string]>,
+      vcount <int> = 0,
+      out <Buffer>,
+      helpers <string> = "",
+      prelude <bool> = false,
+      sn_name <string> = "",
+      m_name <string> = "",
+
+    pub:
+      fun mx_fail(self: &Self, msg: string) <bool> {
+          err_dprintf(2, "finc: error: %s:%d: %s\n", self.filename, self.line, msg);
+          return false;
+      }
+
+      fun mx_eof(self: &Self) <bool> {
+          return self.pos >= self.n;
+      }
+
+      fun mx_peek(self: &Self) <char> {
+          if (self.pos >= self.n) { return cast<char>(0); }
+          return self.bytes[self.pos];
+      }
+
+      fun mx_peek_at(self: &Self, off: int) <char> {
+          if (self.pos + off >= self.n) { return cast<char>(0); }
+          return self.bytes[self.pos + off];
+      }
+
+      fun mx_advance(self: &Self) <noret> {
+          if (self.pos < self.n) {
+              if (self.bytes[self.pos] == '\n') { self.line = self.line + 1; }
+              self.pos = self.pos + 1;
+          }
+      }
+
+      fun mx_skip_ws(self: &Self) <noret> {
+          while (!self.mx_eof()) {
+              let c <char> = self.mx_peek();
+              if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { self.mx_advance(); }
+              else { break; }
+          }
+      }
+
+      fun mx_skip_line_comment(self: &Self) <noret> {
+          while (!self.mx_eof() && self.mx_peek() != '\n') { self.mx_advance(); }
+      }
+
+      fun mx_skip_block_comment(self: &Self) <noret> {
+          while (!self.mx_eof()) {
+              if (self.mx_peek() == '*' && self.mx_peek_at(1) == '/') {
+                  self.mx_advance();
+                  self.mx_advance();
+                  break;
+              }
+              self.mx_advance();
+          }
+      }
+
+      fun mx_skip_ws_comments(self: &Self) <noret> {
+          while (!self.mx_eof()) {
+              let c <char> = self.mx_peek();
+              if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { self.mx_advance(); }
+              else if (c == '/' && self.mx_peek_at(1) == '/') {
+                  self.mx_advance();
+                  self.mx_advance();
+                  self.mx_skip_line_comment();
+              }
+              else if (c == '/' && self.mx_peek_at(1) == '*') {
+                  self.mx_advance();
+                  self.mx_advance();
+                  self.mx_skip_block_comment();
+              }
+              else { break; }
+          }
+      }
+
+      fun mx_skip_quoted(self: &Self, q: char) <noret> {
+          while (!self.mx_eof()) {
+              let c <char> = self.mx_peek();
+              if (c == '\\') {
+                  self.mx_advance();
+                  if (!self.mx_eof()) { self.mx_advance(); }
+              }
+              else if (c == q) { self.mx_advance(); break; }
+              else { self.mx_advance(); }
+          }
+      }
+
+      fun mx_skip_balanced(self: &Self, open: char, close: char) <bool> {
+          if (self.mx_eof() || self.mx_peek() != open) { return false; }
+          let depth <int> = 0;
+          while (!self.mx_eof()) {
+              let c <char> = self.mx_peek();
+              if (c == '"') { self.mx_advance(); self.mx_skip_quoted('"'); }
+              else if (c == '\'') { self.mx_advance(); self.mx_skip_quoted('\''); }
+              else if (c == '/' && self.mx_peek_at(1) == '/') {
+                  self.mx_advance();
+                  self.mx_advance();
+                  self.mx_skip_line_comment();
+              }
+              else if (c == '/' && self.mx_peek_at(1) == '*') {
+                  self.mx_advance();
+                  self.mx_advance();
+                  self.mx_skip_block_comment();
+              }
+              else {
+                  if (c == open) { depth = depth + 1; }
+                  else if (c == close) {
+                      depth = depth - 1;
+                      if (depth == 0) { self.mx_advance(); return true; }
+                  }
+                  self.mx_advance();
+              }
+          }
+          return false;
+      }
+
+      fun mx_parse_ident(self: &Self) <string> {
+          if (self.mx_eof() || !mx_is_ident_start(self.mx_peek())) { return ""; }
+          let start <int> = self.pos;
+          while (!self.mx_eof() && mx_is_ident_char(self.mx_peek())) { self.mx_advance(); }
+          return from_chars(self.bytes, start, self.pos - start);
+      }
+
+      // Advance past an `@define ... ;` declaration without emitting anything.
+      // Used by the collector for plain externs (not macro claims).
+      fun mx_skip_define_span(self: &Self) <noret> {
+          let depth <int> = 0;
+          while (!self.mx_eof()) {
+              let c <char> = self.mx_peek();
+              if (c == '"') { self.mx_advance(); self.mx_skip_quoted('"'); }
+              else if (c == '\'') { self.mx_advance(); self.mx_skip_quoted('\''); }
+              else if (c == ';' && depth == 0) { self.mx_advance(); break; }
+              else {
+                  if (c == '(' || c == '[' || c == '{') { depth = depth + 1; }
+                  else if (c == ')' || c == ']' || c == '}') {
+                      if (depth > 0) { depth = depth - 1; }
+                  }
+                  self.mx_advance();
+              }
+          }
+      }
+
+      fun mx_match_kw(self: &Self, kw: string) <bool> {
+          let kl <int> = cast<int>(drv_strlen(kw));
+          if (self.pos + kl > self.n) { return false; }
+          if (self.pos > 0 && mx_is_ident_char(self.bytes[self.pos - 1])) { return false; }
+          let got <string> = from_chars(self.bytes, self.pos, kl);
+          if (!drv_str_eq(got, kw)) { return false; }
+          if (self.pos + kl < self.n && mx_is_ident_char(self.bytes[self.pos + kl])) { return false; }
+          return true;
+      }
+
+      fun mx_parse_string_inner(self: &Self) <string> {
+          self.mx_advance();
+          let start <int> = self.pos;
+          while (!self.mx_eof() && self.mx_peek() != '"') {
+              if (self.mx_peek() == '\\') {
+                  self.mx_advance();
+                  if (!self.mx_eof()) { self.mx_advance(); }
+              } else { self.mx_advance(); }
+          }
+          let inner <string> = from_chars(self.bytes, start, self.pos - start);
+          if (!self.mx_eof()) { self.mx_advance(); }
+          return inner;
+      }
+
+      fun mx_parse_spec(self: &Self) <string> {
+          self.mx_skip_ws_comments();
+          if (self.mx_eof()) { return ""; }
+          if (self.mx_peek() == '"') {
+              let inner <string> = self.mx_parse_string_inner();
+              return concat(concat("\"", inner), "\"");
+          }
+          let start <int> = self.pos;
+          while (!self.mx_eof()) {
+              let c <char> = self.mx_peek();
+              if (mx_is_ident_char(c) || c == ':' || c == '.' || c == '/' || c == '-') { self.mx_advance(); }
+              else { break; }
+          }
+          return from_chars(self.bytes, start, self.pos - start);
+      }
+
+      fun mx_col_of(self: &Self, at: int) <int> {
+          let c <int> = 1;
+          let i <int> = at - 1;
+          while (i >= 0 && self.bytes[i] != '\n') {
+              c = c + 1;
+              i--;
+          }
+          return c;
+      }
+
+      fun mx_count_nl(self: &Self, a: int, b: int) <int> {
+          let k <int> = 0;
+          let i <int> = a;
+          while (i < b && i < self.n) {
+              if (self.bytes[i] == '\n') { k = k + 1; }
+              i++;
+          }
+          return k;
+      }
+
+      fun mx_copy_to(self: &Self, end: int) <noret> {
+          let stop <int> = end;
+          if (stop > self.n) { stop = self.n; }
+          while (self.pos < stop) {
+              self.out.write_char(self.mx_peek());
+              self.mx_advance();
+          }
+      }
+
+      fun mx_pad_nl(self: &Self, k: int) <noret> {
+          let i <int> = 0;
+          while (i < k) {
+              self.out.write_char('\n');
+              i++;
+          }
+      }
+
+      fun mx_lookup(self: &Self, name: string, call_pos: int) <int> {
+          let dot <int> = mx_dot_pos(name);
+          if (dot > 0) {
+              let alias <string> = substr(name, 0, dot);
+              let rest <string> = substr(name, dot + 1, cast<int>(drv_strlen(name)) - dot - 1);
+              for (let a <int> = 0; a < self.acount; a++) {
+                  if (drv_str_eq(self.anames[a], alias)) {
+                      let f <string> = self.afiles[a];
+                      for (let i <int> = 0; i < self.count; i++) {
+                          if (drv_str_eq(self.names[i], rest) && drv_str_eq(self.origins[i], f)) { return i; }
+                      }
+                      return -1;
+                  }
+              }
+              return -1;
+          }
+          for (let i <int> = 0; i < self.count; i++) {
+              if (drv_str_eq(self.names[i], name)) {
+                  if (drv_str_eq(self.origins[i], self.filename)) {
+                      if (self.ends[i] <= call_pos) { return i; }
+                  } else if (self.mx_allowed(name, self.origins[i])) {
+                      return i;
+                  }
+              }
+          }
+          return -1;
+      }
+
+      fun mx_allowed(self: &Self, name: string, origin: string) <bool> {
+          for (let i <int> = 0; i < self.icount; i++) {
+              if (self.ialias[i] == 0 && drv_str_eq(self.iowner[i], self.filename) && drv_str_eq(self.inames[i], name) && drv_str_eq(self.ifiles[i], origin)) {
+                  return true;
+              }
+          }
+          return false;
+      }
+
+      fun mx_add_macro(self: &Self, name: string, np: int, varg: int, pj: string, body: string, start: int, end: int, origin: string) <bool> {
+          for (let i <int> = 0; i < self.count; i++) {
+              if (drv_str_eq(self.names[i], name) && drv_str_eq(self.origins[i], origin)) { return true; }
+          }
+          if (self.count >= 64) { return self.mx_fail("too many macros (limit 64)"); }
+          self.names[self.count] = name;
+          self.nparams[self.count] = np;
+          self.vargs[self.count] = varg;
+          self.params[self.count] = pj;
+          self.bodies[self.count] = body;
+          self.starts[self.count] = start;
+          self.ends[self.count] = end;
+          self.origins[self.count] = origin;
+          self.count = self.count + 1;
+          return true;
+      }
+
+      fun mx_add_alias(self: &Self, alias: string, file: string) <bool> {
+          for (let i <int> = 0; i < self.acount; i++) {
+              if (drv_str_eq(self.anames[i], alias) && drv_str_eq(self.afiles[i], file)) { return true; }
+          }
+          if (self.acount >= 16) { return self.mx_fail("too many macro imports (limit 16 aliases)"); }
+          self.anames[self.acount] = alias;
+          self.afiles[self.acount] = file;
+          self.acount = self.acount + 1;
+          return true;
+      }
+
+      fun mx_add_imp(self: &Self, name: string, file: string) <bool> {
+          for (let i <int> = 0; i < self.icount; i++) {
+              if (self.ialias[i] == 0 && drv_str_eq(self.iowner[i], self.filename) && drv_str_eq(self.inames[i], name) && drv_str_eq(self.ifiles[i], file)) {
+                  return true;
+              }
+          }
+          if (self.icount >= 256) { return self.mx_fail("too many macro imports (limit 256)"); }
+          self.iowner[self.icount] = self.filename;
+          self.inames[self.icount] = name;
+          self.ifiles[self.icount] = file;
+          self.ialias[self.icount] = 0;
+          self.icount = self.icount + 1;
+          return true;
+      }
+
+      fun mx_visited_has(self: &Self, path: string) <bool> {
+          for (let i <int> = 0; i < self.vcount; i++) {
+              if (drv_str_eq(self.visited[i], path)) { return true; }
+          }
+          return false;
+      }
+
+      fun mx_visited_add(self: &Self, path: string) <bool> {
+          if (self.mx_visited_has(path)) { return true; }
+          if (self.vcount >= 32) { return self.mx_fail("too many macro import files (limit 32)"); }
+          self.visited[self.vcount] = path;
+          self.vcount = self.vcount + 1;
+          return true;
+      }
+
+      fun mx_collect_defs(self: &Self, is_root: bool) <bool> {
+          self.pos = 0;
+          self.line = 1;
+          // Hoisted out of the loop: a `let` inside the body allocates one
+          // stack slot per character scanned (in-loop allocas live to
+          // function end), so a whole-file scan exhausts the stack on
+          // large inputs instead of refusing loudly. One slot, reused.
+          let c <char> = cast<char>(0);
+          while (!self.mx_eof()) {
+              c = self.mx_peek();
+              if (c == '/' && self.mx_peek_at(1) == '/') {
+                  self.mx_advance();
+                  self.mx_advance();
+                  self.mx_skip_line_comment();
+              }
+              else if (c == '/' && self.mx_peek_at(1) == '*') {
+                  self.mx_advance();
+                  self.mx_advance();
+                  self.mx_skip_block_comment();
+              }
+              else if (c == '"') { self.mx_advance(); self.mx_skip_quoted('"'); }
+              else if (c == '\'') { self.mx_advance(); self.mx_skip_quoted('\''); }
+              else if (c == '@' && self.mx_match_kw("@macro")) {
+                  self.pos = self.pos + 6;
+                  if (!self.mx_collect_one_macro(is_root)) { return false; }
+              }
+              else if (c == '@' && self.mx_match_kw("@define")) {
+                  self.pos = self.pos + 7;
+                  if (!self.mx_collect_one_define()) { return false; }
+              }
+              else { self.mx_advance(); }
+          }
+          return true;
+      }
+
+      fun mx_collect_one_macro(self: &Self, is_root: bool) <bool> {
+          let def_line <int> = self.line;
+          let start <int> = self.pos - 6;
+          self.mx_skip_ws_comments();
+          let mname <string> = self.mx_parse_ident();
+          if (drv_str_eq(mname, "")) {
+              self.line = def_line;
+              return self.mx_fail("malformed macro declaration");
+          }
+          self.mx_skip_ws_comments();
+          if (self.mx_eof() || self.mx_peek() != '(') {
+              self.line = def_line;
+              let arms <string> = concat(concat("macro '", mname), "' uses the arms form, which is not implemented");
+              return self.mx_fail(arms);
+          }
+          self.mx_advance();
+          let pnames <[string]> = new [string, 16]{};
+          let np <int> = 0;
+          let varg <int> = 0;
+          let bad <bool> = false;
+          let over <bool> = false;
+          while (!self.mx_eof()) {
+              self.mx_skip_ws_comments();
+              if (self.mx_peek() == ')') { self.mx_advance(); break; }
+              let pn <string> = self.mx_parse_ident();
+              if (drv_str_eq(pn, "")) { bad = true; break; }
+              self.mx_skip_ws_comments();
+              if (self.mx_peek() == '.' && self.mx_peek_at(1) == '.' && self.mx_peek_at(2) == '.') {
+                  self.mx_advance();
+                  self.mx_advance();
+                  self.mx_advance();
+                  varg = 1;
+                  if (np >= 16) { over = true; bad = true; break; }
+                  pnames[np] = pn;
+                  np = np + 1;
+                  self.mx_skip_ws_comments();
+                  if (!self.mx_eof() && self.mx_peek() == ')') { self.mx_advance(); }
+                  else { bad = true; }
+                  break;
+              }
+              if (np >= 16) { over = true; bad = true; break; }
+              pnames[np] = pn;
+              np = np + 1;
+              self.mx_skip_ws_comments();
+              if (self.mx_peek() == ',') { self.mx_advance(); }
+              else if (self.mx_peek() == ')') { self.mx_advance(); break; }
+              else { bad = true; break; }
+          }
+          if (bad) {
+              delete pnames;
+              self.line = def_line;
+              if (over) {
+                  let omsg <string> = concat(concat("macro '", mname), "' has too many parameters (limit 16)");
+                  return self.mx_fail(omsg);
+              }
+              let mmsg <string> = concat(concat("malformed macro declaration '", mname), "'");
+              return self.mx_fail(mmsg);
+          }
+          self.mx_skip_ws_comments();
+          if (self.mx_eof() || self.mx_peek() != '{') {
+              delete pnames;
+              self.line = def_line;
+              let mmsg2 <string> = concat(concat("malformed macro declaration '", mname), "'");
+              return self.mx_fail(mmsg2);
+          }
+          self.mx_advance();
+          self.mx_skip_ws_comments();
+          if (!self.mx_match_kw("return")) {
+              delete pnames;
+              self.line = def_line;
+              let qmsg <string> = concat(concat("macro '", mname), "' must return a quote { ... } block");
+              return self.mx_fail(qmsg);
+          }
+          self.pos = self.pos + 6;
+          self.mx_skip_ws_comments();
+          if (!self.mx_match_kw("quote")) {
+              delete pnames;
+              self.line = def_line;
+              let qmsg2 <string> = concat(concat("macro '", mname), "' must return a quote { ... } block");
+              return self.mx_fail(qmsg2);
+          }
+          self.pos = self.pos + 5;
+          self.mx_skip_ws_comments();
+          if (self.mx_eof() || self.mx_peek() != '{') {
+              delete pnames;
+              self.line = def_line;
+              let qmsg3 <string> = concat(concat("macro '", mname), "' must return a quote { ... } block");
+              return self.mx_fail(qmsg3);
+          }
+          let qb <int> = self.pos;
+          if (!self.mx_skip_balanced('{', '}')) {
+              delete pnames;
+              self.line = def_line;
+              let qmsg4 <string> = concat(concat("macro '", mname), "' must return a quote { ... } block");
+              return self.mx_fail(qmsg4);
+          }
+          let qe <int> = self.pos;
+          let inner <string> = from_chars(self.bytes, qb + 1, qe - qb - 2);
+          let body <string> = mx_first_stmt(inner);
+          if (drv_str_eq(body, "")) {
+              delete pnames;
+              self.line = def_line;
+              return self.mx_fail("Macro quote block is empty");
+          }
+          self.mx_skip_ws_comments();
+          if (!self.mx_eof() && self.mx_peek() == ';') { self.mx_advance(); }
+          self.mx_skip_ws_comments();
+          if (self.mx_eof() || self.mx_peek() != '}') {
+              delete pnames;
+              self.line = def_line;
+              let mmsg3 <string> = concat(concat("malformed macro declaration '", mname), "'");
+              return self.mx_fail(mmsg3);
+          }
+          self.mx_advance();
+          let end <int> = self.pos;
+          if (!self.mx_check_hygiene(mname, body, def_line)) {
+              delete pnames;
+              return false;
+          }
+          let pj <string> = "";
+          for (let pi <int> = 0; pi < np; pi++) {
+              if (pi > 0) { pj = concat(pj, ","); }
+              pj = concat(pj, pnames[pi]);
+          }
+          delete pnames;
+          let eoff <int> = end;
+          if (!is_root) { eoff = -1; }
+          return self.mx_add_macro(mname, np, varg, pj, body, start, eoff, self.filename);
+      }
+
+      fun mx_collect_one_define(self: &Self) <bool> {
+          let entry <int> = self.pos;
+          let dline <int> = self.line;
+          self.mx_skip_ws_comments();
+          let dname <string> = self.mx_parse_ident();
+          if (drv_str_eq(dname, "")) {
+              self.pos = entry - 7;
+              self.mx_skip_define_span();
+              return true;
+          }
+          self.mx_skip_ws_comments();
+          if (self.mx_eof() || self.mx_peek() != '!') {
+              self.pos = entry - 7;
+              self.mx_skip_define_span();
+              return true;
+          }
+          self.mx_advance();
+          self.mx_skip_ws_comments();
+          if (self.mx_eof() || self.mx_peek() != '(') {
+              self.pos = entry - 7;
+              self.mx_skip_define_span();
+              return true;
+          }
+          if (!self.mx_skip_balanced('(', ')')) {
+              self.pos = entry - 7;
+              self.mx_skip_define_span();
+              return true;
+          }
+          let depth <int> = 0;
+          let closed <bool> = false;
+          while (!self.mx_eof()) {
+              let c <char> = self.mx_peek();
+              if (c == '"') { self.mx_advance(); self.mx_skip_quoted('"'); }
+              else if (c == '\'') { self.mx_advance(); self.mx_skip_quoted('\''); }
+              else if (c == ';' && depth == 0) { self.mx_advance(); closed = true; break; }
+              else {
+                  if (c == '(' || c == '[' || c == '{') { depth = depth + 1; }
+                  else if (c == ')' || c == ']' || c == '}') {
+                      if (depth > 0) { depth = depth - 1; }
+                  }
+                  self.mx_advance();
+              }
+          }
+          if (!closed) {
+              self.pos = entry - 7;
+              self.mx_skip_define_span();
+              return true;
+          }
+          if (!drv_str_eq(dname, "format")) {
+              self.line = dline;
+              let msg <string> = concat(concat("The compiler implements no macro named '", dname), "!'");
+              return self.mx_fail(msg);
+          }
+          return true;
+      }
+
+      fun mx_check_hygiene(self: &Self, mname: string, body: string, def_line: int) <bool> {
+          let total <int> = cast<int>(drv_strlen(body));
+          let b <[char]> = to_chars(body);
+          let bad <string> = "";
+          let i <int> = 0;
+    while (i < total) {
+        let c <char> = b[i];
+        if (c == '"') {
+            i++;
+            while (i < total) {
+                if (b[i] == '\\') { i = i + 2; }
+                else if (b[i] == '"') { i++; break; }
+                else { i++; }
+            }
+        } else if (c == '\'') {
+            i++;
+                  while (i < total) {
+                      if (b[i] == '\\') { i = i + 2; }
+                      else if (b[i] == '\'') { i++; break; }
+                      else { i++; }
+                  }
+              } else if (c == '/' && i + 1 < total && b[i + 1] == '/') {
+                  while (i < total && b[i] != '\n') { i++; }
+              } else if (c == '/' && i + 1 < total && b[i + 1] == '*') {
+                  i = i + 2;
+                  while (i + 1 < total && !(b[i] == '*' && b[i + 1] == '/')) { i++; }
+                  i = i + 2;
+              } else if (c == '$') {
+                  i++;
+                  while (i < total && mx_is_ident_char(b[i])) { i++; }
+              } else if (mx_is_ident_start(c)) {
+                  let s <int> = i;
+                  while (i < total && mx_is_ident_char(b[i])) { i++; }
+                  let nm <string> = from_chars(b, s, i - s);
+                  let exempt <bool> = false;
+                  if (s > 0 && (b[s - 1] == '$' || b[s - 1] == '.' || b[s - 1] == ':')) { exempt = true; }
+                  if (!exempt) {
+                      let q <int> = s - 1;
+                      while (q >= 0 && (b[q] == ' ' || b[q] == '\t')) { q--; }
+                      if (q >= 0 && b[q] == '$') { exempt = true; }
+                  }
+                  if (!exempt) {
+                      let r <int> = i;
+                      while (r < total && (b[r] == ' ' || b[r] == '\t')) { r++; }
+                      if (r + 1 < total && b[r] == ':' && b[r + 1] == ':') { exempt = true; }
+                  }
+                  if (!exempt && mx_is_hygiene_kw(nm)) { exempt = true; }
+                  if (!exempt) {
+                      let q2 <int> = s - 1;
+                      while (q2 >= 0 && (b[q2] == ' ' || b[q2] == '\t')) { q2--; }
+                      let we <int> = q2 + 1;
+                      while (q2 >= 0 && mx_is_ident_char(b[q2])) { q2--; }
+                      if (we - (q2 + 1) == 3) {
+                          let w <string> = from_chars(b, q2 + 1, 3);
+                          if (drv_str_eq(w, "new")) { exempt = true; }
+                      }
+                  }
+                  if (!exempt) { bad = nm; break; }
+              } else { i++; }
+          }
+          delete b;
+          if (!drv_str_eq(bad, "")) {
+              self.line = def_line;
+              let msg <string> = concat(concat(concat(concat("macro '", mname), "' names '"), bad), "' with no qualifier");
+              return self.mx_fail(msg);
+          }
+          return true;
+      }
+
+      fun mx_collect_imports(self: &Self) <bool> {
+          self.pos = 0;
+          self.line = 1;
+          // Same hoist as mx_collect_defs: one peek slot for the whole scan.
+          let c <char> = cast<char>(0);
+          while (!self.mx_eof()) {
+              c = self.mx_peek();
+              if (c == '/' && self.mx_peek_at(1) == '/') {
+                  self.mx_advance();
+                  self.mx_advance();
+                  self.mx_skip_line_comment();
+              }
+              else if (c == '/' && self.mx_peek_at(1) == '*') {
+                  self.mx_advance();
+                  self.mx_advance();
+                  self.mx_skip_block_comment();
+              }
+              else if (c == '"') { self.mx_advance(); self.mx_skip_quoted('"'); }
+              else if (c == '\'') { self.mx_advance(); self.mx_skip_quoted('\''); }
+              else if (c == '@' && self.mx_match_kw("@macro")) {
+                  let hit <bool> = false;
+                  for (let s <int> = 0; s < self.count; s++) {
+                      if (self.starts[s] == self.pos) {
+                          self.pos = self.ends[s];
+                          hit = true;
+                          break;
+                      }
+                  }
+                  if (!hit) { self.mx_advance(); }
+              }
+              else if (mx_is_ident_start(c)) {
+                  let w <string> = self.mx_parse_ident();
+                  if (drv_str_eq(w, "import")) {
+                      if (!self.mx_parse_import()) { return false; }
+                  }
+              }
+              else { self.mx_advance(); }
+          }
+          return true;
+      }
+
+      fun mx_parse_import(self: &Self) <bool> {
+          self.mx_skip_ws_comments();
+          if (self.mx_eof()) { return true; }
+          let c <char> = self.mx_peek();
+          if (c == '"') {
+              let inner <string> = self.mx_parse_string_inner();
+              let spec <string> = concat(concat("\"", inner), "\"");
+              self.mx_skip_ws_comments();
+              let alias <string> = "";
+              if (self.mx_match_kw("as")) {
+                  self.pos = self.pos + 2;
+                  self.mx_skip_ws_comments();
+                  alias = self.mx_parse_ident();
+              }
+              if (drv_str_eq(alias, "")) { alias = mx_stem(inner); }
+              return self.mx_import_file(spec, alias, "");
+          }
+          if (c == '*') {
+              self.mx_advance();
+              return true;
+          }
+          if (c == '{') {
+              self.mx_advance();
+              let only <string> = "";
+              let first <bool> = true;
+              let done <bool> = false;
+              while (!self.mx_eof() && !done) {
+                  self.mx_skip_ws_comments();
+                  if (self.mx_eof()) { break; }
+                  if (self.mx_peek() == '}') { done = true; break; }
+                  let nm <string> = self.mx_parse_ident();
+                  if (drv_str_eq(nm, "")) { break; }
+                  if (!first) { only = concat(only, ","); }
+                  only = concat(only, nm);
+                  first = false;
+                  self.mx_skip_ws_comments();
+                  if (!self.mx_eof() && self.mx_peek() == ',') { self.mx_advance(); }
+              }
+              if (!self.mx_eof() && self.mx_peek() == '}') { self.mx_advance(); }
+              self.mx_skip_ws_comments();
+              if (!self.mx_match_kw("from")) { return true; }
+              self.pos = self.pos + 4;
+              let spec2 <string> = self.mx_parse_spec();
+              return self.mx_import_file(spec2, "", only);
+          }
+          if (mx_is_ident_start(c)) {
+              let spec3 <string> = self.mx_parse_spec();
+              self.mx_skip_ws_comments();
+              let alias2 <string> = "";
+              if (self.mx_match_kw("as")) {
+                  self.pos = self.pos + 2;
+                  self.mx_skip_ws_comments();
+                  alias2 = self.mx_parse_ident();
+              }
+              if (drv_str_eq(alias2, "")) { alias2 = mx_spec_alias(spec3); }
+              return self.mx_import_file(spec3, alias2, "");
+          }
+          return true;
+      }
+
+      fun mx_import_file(self: &Self, spec: string, alias: string, only: string) <bool> {
+          if (spec == null || drv_str_eq(spec, "")) { return true; }
+          let mod_path <string> = resolve_module_spec(spec, self.filename);
+          if (drv_str_eq(mod_path, "")) { return true; }
+          if (!drv_str_eq(only, "")) {
+              let nn <int> = mx_csv_count(only);
+              for (let k <int> = 0; k < nn; k++) {
+                  if (!self.mx_add_imp(mx_csv_at(only, k), mod_path)) { return false; }
+              }
+          } else {
+              if (!self.mx_add_alias(alias, mod_path)) { return false; }
+          }
+          if (self.mx_visited_has(mod_path)) { return true; }
+          if (!self.mx_visited_add(mod_path)) { return false; }
+          let sub_src? <string> = read_to_string(mod_path);
+          if (sub_src == null) { return true; }
+          let sv_bytes <[char]> = self.bytes;
+          let sv_n <int> = self.n;
+          let sv_file <string> = self.filename;
+          let sv_line <int> = self.line;
+          let sv_pos <int> = self.pos;
+          self.bytes = to_chars(sub_src?);
+          self.n = cast<int>(drv_strlen(sub_src?));
+          self.filename = mod_path;
+          let ok <bool> = self.mx_collect_defs(false);
+          self.bytes = sv_bytes;
+          self.n = sv_n;
+          self.filename = sv_file;
+          self.line = sv_line;
+          self.pos = sv_pos;
+          free_file_content(sub_src);
+          return ok;
+      }
+
+      fun mx_result(self: &Self) <string> {
+          return self.out.to_string();
+      }
+
+      fun mx_expand(self: &Self) <bool> {
+          self.pos = 0;
+          self.line = 1;
+          // Same hoist as the collectors: one peek slot for the whole scan.
+          let c <char> = cast<char>(0);
+          while (!self.mx_eof()) {
+              c = self.mx_peek();
+              if (c == '/' && self.mx_peek_at(1) == '/') {
+                  let e <int> = self.pos;
+                  while (e < self.n && self.bytes[e] != '\n') { e++; }
+                  self.mx_copy_to(e);
+              }
+              else if (c == '/' && self.mx_peek_at(1) == '*') {
+                  let e2 <int> = self.pos + 2;
+                  while (e2 + 1 < self.n && !(self.bytes[e2] == '*' && self.bytes[e2 + 1] == '/')) { e2++; }
+                  if (e2 + 1 < self.n) { e2 = e2 + 2; } else { e2 = self.n; }
+                  self.mx_copy_to(e2);
+              }
+              else if (c == '"' || c == '\'') {
+                  self.mx_copy_quoted(c);
+              }
+              else if (c == '@' && self.mx_match_kw("@macro")) {
+                  self.mx_copy_def_span();
+              }
+              else if (c == '@' && self.mx_match_kw("@define")) {
+                  self.mx_copy_define_span();
+              }
+              else if (mx_is_ident_start(c)) {
+                  if (!self.mx_try_invocation()) { return false; }
+              }
+              else {
+                  self.out.write_char(c);
+                  self.mx_advance();
+              }
+          }
+          if (!drv_str_eq(self.helpers, "")) {
+              self.out.write_string("\n");
+              self.out.write_string(self.helpers);
+          }
+          return true;
+      }
+
+      fun mx_copy_def_span(self: &Self) <noret> {
+          for (let s <int> = 0; s < self.count; s++) {
+              if (self.starts[s] == self.pos) {
+                  self.mx_copy_to(self.ends[s]);
+                  return;
+              }
+          }
+          self.out.write_char(self.mx_peek());
+          self.mx_advance();
+      }
+
+      fun mx_copy_define_span(self: &Self) <noret> {
+          let depth <int> = 0;
+          while (!self.mx_eof()) {
+              let c <char> = self.mx_peek();
+              if (c == '"') {
+                  self.out.write_char(c);
+                  self.mx_advance();
+                  while (!self.mx_eof()) {
+                      let d <char> = self.mx_peek();
+                      self.out.write_char(d);
+                      if (d == '\\') {
+                          self.mx_advance();
+                          if (!self.mx_eof()) {
+                              self.out.write_char(self.mx_peek());
+                              self.mx_advance();
+                          }
+                      }
+                      else if (d == '"') { self.mx_advance(); break; }
+                      else { self.mx_advance(); }
+                  }
+              }
+              else if (c == '\'') {
+                  self.out.write_char(c);
+                  self.mx_advance();
+                  while (!self.mx_eof()) {
+                      let d2 <char> = self.mx_peek();
+                      self.out.write_char(d2);
+                      if (d2 == '\\') {
+                          self.mx_advance();
+                          if (!self.mx_eof()) {
+                              self.out.write_char(self.mx_peek());
+                              self.mx_advance();
+                          }
+                      }
+                      else if (d2 == '\'') { self.mx_advance(); break; }
+                      else { self.mx_advance(); }
+                  }
+              }
+              else if (c == ';' && depth == 0) {
+                  self.out.write_char(c);
+                  self.mx_advance();
+                  break;
+              }
+              else {
+                  if (c == '(' || c == '[' || c == '{') { depth = depth + 1; }
+                  else if (c == ')' || c == ']' || c == '}') {
+                      if (depth > 0) { depth = depth - 1; }
+                  }
+                  self.out.write_char(c);
+                  self.mx_advance();
+              }
+          }
+      }
+
+      fun mx_copy_quoted(self: &Self, q: char) <noret> {
+          self.out.write_char(self.mx_peek());
+          self.mx_advance();
+          while (!self.mx_eof()) {
+              let c <char> = self.mx_peek();
+              self.out.write_char(c);
+              if (c == '\\') {
+                  self.mx_advance();
+                  if (!self.mx_eof()) {
+                      self.out.write_char(self.mx_peek());
+                      self.mx_advance();
+                  }
+              }
+              else if (c == q) { self.mx_advance(); break; }
+              else { self.mx_advance(); }
+          }
+      }
+
+      fun mx_try_invocation(self: &Self) <bool> {
+          let start <int> = self.pos;
+          let start_line <int> = self.line;
+          let p <int> = self.pos;
+          while (p < self.n && mx_is_ident_char(self.bytes[p])) { p++; }
+          while (p < self.n && self.bytes[p] == '.' && p + 1 < self.n && mx_is_ident_start(self.bytes[p + 1])) {
+              p++;
+              while (p < self.n && mx_is_ident_char(self.bytes[p])) { p++; }
+          }
+          let name <string> = from_chars(self.bytes, start, p - start);
+          let j <int> = p;
+          while (j < self.n && (self.bytes[j] == ' ' || self.bytes[j] == '\t' || self.bytes[j] == '\r' || self.bytes[j] == '\n')) { j++; }
+          if (j < self.n && self.bytes[j] == '!' && (j + 1 >= self.n || self.bytes[j + 1] != '=')) {
+              let k <int> = j + 1;
+              while (k < self.n && (self.bytes[k] == ' ' || self.bytes[k] == '\t' || self.bytes[k] == '\r' || self.bytes[k] == '\n')) { k++; }
+              if (k < self.n && (self.bytes[k] == '(' || self.bytes[k] == '[' || self.bytes[k] == '{')) {
+                  return self.mx_expand_invocation(start, start_line, name, k, self.bytes[k]);
+              }
+          }
+          self.mx_copy_to(p);
+          return true;
+      }
+
+      fun mx_expand_invocation(self: &Self, start: int, start_line: int, name: string, bracket: int, open: char) <bool> {
+          while (self.pos < bracket) { self.mx_advance(); }
+          let close <char> = ')';
+          // `cast<char>` and not `']'`/`'}'`: the self-host checker types a char
+          // literal as int in an assignment (only let-init coerces), while the C++
+          // checker accepts both. Owned-file workaround, not a language ruling.
+          if (open == '[') { close = cast<char>(93); }
+          if (open == '{') { close = cast<char>(125); }
+          let inner_start <int> = self.pos + 1;
+          if (!self.mx_skip_balanced(open, close)) {
+              self.pos = start;
+              self.line = start_line;
+              self.out.write_char(self.mx_peek());
+              self.mx_advance();
+              return true;
+          }
+          let inner_end <int> = self.pos - 1;
+          let end <int> = self.pos;
+          let inner <string> = from_chars(self.bytes, inner_start, inner_end - inner_start);
+          let raw_count <int> = mx_split_count(inner);
+          let nargs <int> = raw_count;
+          while (nargs > 0 && drv_str_eq(mx_split_at(inner, nargs - 1), "")) { nargs = nargs - 1; }
+          if (nargs > 32) {
+              self.line = start_line;
+              return self.mx_fail("too many macro arguments (limit 32)");
+          }
+          let idx <int> = self.mx_lookup(name, start);
+          if (idx < 0) {
+              if (mx_dot_pos(name) < 0 && drv_str_eq(name, "format")) {
+                  if (open != '(') {
+                      self.line = start_line;
+                      return self.mx_fail("first argument of 'format!' must be a string");
+                  }
+                  return self.mx_expand_format(start, start_line, inner, nargs, end);
+              }
+              self.line = start_line;
+              let um <string> = concat(concat("Undefined macro '", name), "!'");
+              return self.mx_fail(um);
+          }
+          if (open == '(') {
+              let want <int> = self.nparams[idx];
+              let isv <bool> = false;
+              if (self.vargs[idx] == 1) { isv = true; }
+              let min <int> = want;
+              if (isv) { min = want - 1; }
+              if (nargs < min || (!isv && nargs > want)) {
+                  self.line = start_line;
+                  let kind <string> = "exactly";
+                  if (isv) { kind = "at least"; }
+                  let am <string> = concat(concat(concat(concat(concat("Macro '", name), "' expects "), kind), " "), drv_itoa(min));
+                  am = concat(am, " args, got ");
+                  am = concat(am, drv_itoa(nargs));
+                  return self.mx_fail(am);
+              }
+              if (isv) {
+                  let fixed <int> = want - 1;
+                  let bodyv <string> = self.bodies[idx];
+                  let resultv <string> = bodyv;
+                  for (let q <int> = 0; q < fixed; q++) {
+                      resultv = mx_subst_one(resultv, mx_csv_at(self.params[idx], q), mx_split_at(inner, q));
+                  }
+                  let vb <Buffer> = new_buffer(64);
+                  vb.write_string("[");
+                  for (let k <int> = fixed; k < nargs; k++) {
+                      if (k > fixed) { vb.write_string(", "); }
+                      vb.write_string(mx_split_at(inner, k));
+                  }
+                  vb.write_string("]");
+                  let packed <string> = vb.to_string();
+                  free_buffer(vb);
+                  let vp <string> = mx_csv_at(self.params[idx], fixed);
+                  resultv = mx_subst_one(resultv, vp, packed);
+                  let replacementv <string> = concat(concat("(", resultv), ")");
+                  let consumedv <int> = self.mx_count_nl(start, end);
+                  let producedv <int> = mx_count_nl_str(replacementv);
+                  self.out.write_string(replacementv);
+                  self.mx_pad_nl(consumedv - producedv);
+                  return true;
+              }
+              let body <string> = self.bodies[idx];
+              let result <string> = body;
+              for (let q <int> = 0; q < want; q++) {
+                  result = mx_subst_one(result, mx_csv_at(self.params[idx], q), mx_split_at(inner, q));
+              }
+              let replacement <string> = concat(concat("(", result), ")");
+              let consumed <int> = self.mx_count_nl(start, end);
+              let produced <int> = mx_count_nl_str(replacement);
+              self.out.write_string(replacement);
+              self.mx_pad_nl(consumed - produced);
+              return true;
+          }
+          let want1 <int> = self.nparams[idx];
+          let isv1 <bool> = false;
+          if (self.vargs[idx] == 1) { isv1 = true; }
+          let min1 <int> = want1;
+          if (isv1) { min1 = want1 - 1; }
+          if (1 < min1 || (!isv1 && 1 != want1)) {
+              self.line = start_line;
+              let kind1 <string> = "exactly";
+              if (isv1) { kind1 = "at least"; }
+              let am1 <string> = concat(concat(concat(concat(concat("Macro '", name), "' expects "), kind1), " "), drv_itoa(min1));
+              am1 = concat(am1, " args, got 1");
+              return self.mx_fail(am1);
+          }
+          if (isv1) {
+              self.line = start_line;
+              let vm1 <string> = concat(concat("macro '", name), "' takes variadic arguments, which are not expanded yet");
+              return self.mx_fail(vm1);
+          }
+          let arg0 <string> = "";
+          if (open == '[') {
+              let pb <Buffer> = new_buffer(64);
+              pb.write_string("{");
+              for (let a <int> = 0; a < nargs; a++) {
+                  if (a > 0) { pb.write_string(", "); }
+                  pb.write_string(drv_itoa(a));
+                  pb.write_string(": ");
+                  pb.write_string(mx_split_at(inner, a));
+              }
+              pb.write_string("}");
+              arg0 = pb.to_string();
+              free_buffer(pb);
+          } else {
+              let qb <Buffer> = new_buffer(64);
+              qb.write_string("{");
+              for (let a2 <int> = 0; a2 < nargs; a2++) {
+                  let pair <string> = mx_pair_normalize(mx_split_at(inner, a2));
+                  if (drv_str_eq(pair, "")) {
+                      free_buffer(qb);
+                      self.line = start_line;
+                      let pm <string> = concat(concat("macro '", name), "' argument entry is not a key-value pair");
+                      return self.mx_fail(pm);
+                  }
+                  if (a2 > 0) { qb.write_string(", "); }
+                  qb.write_string(pair);
+              }
+              qb.write_string("}");
+              arg0 = qb.to_string();
+              free_buffer(qb);
+          }
+          let p0 <string> = mx_csv_at(self.params[idx], 0);
+          let result2 <string> = mx_subst_one(self.bodies[idx], p0, arg0);
+          let replacement2 <string> = concat(concat("(", result2), ")");
+          let consumed2 <int> = self.mx_count_nl(start, end);
+          let produced2 <int> = mx_count_nl_str(replacement2);
+          self.out.write_string(replacement2);
+          self.mx_pad_nl(consumed2 - produced2);
+          return true;
+      }
+
+      fun mx_expand_format(self: &Self, start: int, start_line: int, inner: string, nargs: int, end: int) <bool> {
+          if (nargs <= 0) {
+              self.line = start_line;
+              return self.mx_fail("Macro 'format!' expects at least 1 argument, got 0");
+          }
+          let first <string> = mx_split_at(inner, 0);
+          let flen <int> = cast<int>(drv_strlen(first));
+          if (flen >= 2) {
+              let fb <[char]> = to_chars(first);
+              let q0 <char> = fb[0];
+              let q1 <char> = fb[flen - 1];
+              delete fb;
+              if (q0 == '"' && q1 == '"') {
+                  return self.mx_emit_format(start, start_line, inner, nargs, end, first);
+              }
+          }
+          let c0 <char> = cast<char>(0);
+          if (flen > 0) {
+              let fb2 <[char]> = to_chars(first);
+              c0 = fb2[0];
+              delete fb2;
+          }
+          if (mx_is_digit(c0) || c0 == '-' || c0 == '+' || c0 == '\'' || c0 == '{') {
+              self.line = start_line;
+              return self.mx_fail("first argument of 'format!' must be a string");
+          }
+          if (drv_str_eq(first, "true") || drv_str_eq(first, "false") || drv_str_eq(first, "null") || drv_str_eq(first, "NULL")) {
+              self.line = start_line;
+              return self.mx_fail("first argument of 'format!' must be a string");
+          }
+          self.pos = start;
+          self.line = start_line;
+          self.mx_copy_to(end);
+          return true;
+      }
+
+      fun mx_emit_format(self: &Self, start: int, start_line: int, inner: string, nargs: int, end: int, first: string) <bool> {
+          let fmt <string> = mx_decode_fmt(first);
+          let ftotal <int> = cast<int>(drv_strlen(fmt));
+          let fb <[char]> = to_chars(fmt);
+          let need <int> = 0;
+          let bad_ph <bool> = false;
+          let i <int> = 0;
+          while (i < ftotal) {
+              if (fb[i] == '{') {
+                  if (i + 1 < ftotal && fb[i + 1] == '}') { need = need + 1; i = i + 2; }
+                  else { bad_ph = true; break; }
+              } else { i++; }
+          }
+          delete fb;
+          if (bad_ph || need != nargs - 1) {
+              self.pos = start;
+              self.line = start_line;
+              self.mx_copy_to(end);
+              return true;
+          }
+          let convs <[string]> = new [string, 32]{};
+          for (let v <int> = 0; v < need; v++) {
+              convs[v] = mx_fmt_conv(mx_split_at(inner, v + 1));
+          }
+          let fb2 <[char]> = to_chars(fmt);
+          let cf <Buffer> = new_buffer(ftotal + 16);
+          let vi <int> = 0;
+          let j <int> = 0;
+          while (j < ftotal) {
+              if (fb2[j] == '%') { cf.write_string("%%"); j++; }
+              else if (fb2[j] == '{') { cf.write_string(convs[vi]); vi = vi + 1; j = j + 2; }
+              else { cf.write_char(fb2[j]); j++; }
+          }
+          delete fb2;
+          delete convs;
+          let cfmt <string> = cf.to_string();
+          free_buffer(cf);
+          let cfmt_lit <string> = mx_encode_str(cfmt);
+          if (!self.prelude) {
+              self.prelude = true;
+              self.sn_name = concat("__fin_snprintf_m", drv_itoa(self.modidx));
+              self.m_name = concat("__fin_malloc_m", drv_itoa(self.modidx));
+              self.helpers = concat(self.helpers, "#[llvm_name=\"snprintf\"]\n@define ");
+              self.helpers = concat(self.helpers, self.sn_name);
+              self.helpers = concat(self.helpers, "(buf: string, size: ulong, fmt: string, ...) <int>;\n#[llvm_name=\"malloc\"]\n@define ");
+              self.helpers = concat(self.helpers, self.m_name);
+              self.helpers = concat(self.helpers, "(bytes: ulong) <string>;\n");
+          }
+          let col <int> = self.mx_col_of(start);
+          let tag <string> = concat(concat(concat(concat(concat("m", drv_itoa(self.modidx)), "l"), drv_itoa(start_line)), "c"), drv_itoa(col));
+          let hname <string> = concat("__fin_format_", tag);
+          let pdecl <string> = "";
+          let cargs <string> = "";
+          let hargs <string> = "";
+          for (let a <int> = 1; a < nargs; a++) {
+              let av <string> = mx_split_at(inner, a);
+              if (a > 1) {
+                  pdecl = concat(pdecl, ", ");
+                  cargs = concat(cargs, ", ");
+                  hargs = concat(hargs, ", ");
+              }
+              pdecl = concat(pdecl, concat(concat("a", drv_itoa(a - 1)), ": auto"));
+              cargs = concat(cargs, av);
+              hargs = concat(hargs, concat("a", drv_itoa(a - 1)));
+          }
+          let hb <Buffer> = new_buffer(256);
+          hb.write_string("fun ");
+          hb.write_string(hname);
+          hb.write_string("(");
+          hb.write_string(pdecl);
+          hb.write_string(") <string> {\n    let __need <int> = ");
+          hb.write_string(self.sn_name);
+          hb.write_string("(null, cast<ulong>(0), ");
+          hb.write_string(cfmt_lit);
+          if (nargs > 1) {
+              hb.write_string(", ");
+              hb.write_string(hargs);
+          }
+          hb.write_string(");\n    let __size <int> = __need + 1;\n    if (__size < 1) { __size = 1; }\n    let __buf <string> = ");
+          hb.write_string(self.m_name);
+          hb.write_string("(cast<ulong>(__size));\n    let __w <int> = ");
+          hb.write_string(self.sn_name);
+          hb.write_string("(__buf, cast<ulong>(__size), ");
+          hb.write_string(cfmt_lit);
+          if (nargs > 1) {
+              hb.write_string(", ");
+              hb.write_string(hargs);
+          }
+          hb.write_string(");\n    return __buf;\n}\n");
+          let htext <string> = hb.to_string();
+          free_buffer(hb);
+          self.helpers = concat(self.helpers, htext);
+          let rb <Buffer> = new_buffer(64);
+          rb.write_string(hname);
+          rb.write_string("(");
+          rb.write_string(cargs);
+          rb.write_string(")");
+          let replacement <string> = rb.to_string();
+          free_buffer(rb);
+          let consumed <int> = self.mx_count_nl(start, end);
+          let produced <int> = mx_count_nl_str(replacement);
+          self.out.write_string(replacement);
+          self.mx_pad_nl(consumed - produced);
+          return true;
+      }
+}
+
+priv fun new_mx(bytes: [char], n: int, filename: string, modidx: int) <Mx> {
+    return Mx{
+        bytes: bytes,
+        n: n,
+        pos: 0,
+        line: 1,
+        filename: filename,
+        modidx: modidx,
+        names: new [string, 64]{},
+        nparams: new [int, 64]{},
+        vargs: new [int, 64]{},
+        params: new [string, 64]{},
+        bodies: new [string, 64]{},
+        starts: new [int, 64]{},
+        ends: new [int, 64]{},
+        origins: new [string, 64]{},
+        count: 0,
+        anames: new [string, 16]{},
+        afiles: new [string, 16]{},
+        acount: 0,
+        iowner: new [string, 256]{},
+        inames: new [string, 256]{},
+        ifiles: new [string, 256]{},
+        ialias: new [int, 256]{},
+        icount: 0,
+        visited: new [string, 32]{},
+        vcount: 0,
+        out: new_buffer(n + 64),
+        helpers: "",
+        prelude: false,
+        sn_name: "",
+        m_name: ""
+    };
+}
+
+priv fun? drv_macro_expand(source: string, filename: string, mod_idx: int) <string> {
+    if (source == null) { return null; }
+    if (filename == null) { return null; }
+    let total <int> = cast<int>(drv_strlen(source));
+    let bytes <[char]> = to_chars(source);
+    let mx <Mx> = new_mx(bytes, total, filename, mod_idx);
+    if (!mx.mx_collect_defs(true)) {
+        delete bytes;
+        return null;
+    }
+    if (!mx.mx_collect_imports()) {
+        delete bytes;
+        return null;
+    }
+    if (!mx.mx_expand()) {
+        delete bytes;
+        return null;
+    }
+    let res <string> = mx.mx_result();
+    delete bytes;
+    return res;
+}
+
+// Binary-relative standard-library fallback.
+//
+// The C++ driver never resolves the bundled stdlib from the working
+// directory (src/driver/Driver.cpp `configureLoader`, step 3): it searches
+// `<exe dir>/../lib/std`, located from the running binary itself rather
+// than `argv[0]` (SearchPaths::executablePath, which reads /proc/self/exe
+// on Linux). The stage only tried `lib/std/...` under the CWD, so any `-o`
+// build from another directory died with `module not found`.
+//
+// `drv_exe_dir` is the stage's equivalent of `executablePath` (empty when
+// the platform will not say, and then everything below is a no-op).
+// `drv_find_std` keeps the CWD candidate first so a build from the tree
+// root resolves exactly as before, then the binary-relative candidates,
+// then a walk up from the importing file (which is what lets a detached
+// stage binary, e.g. in /tmp, still build a sample inside the tree).
+// `drv_resolve_std` falls back to the historical CWD-relative spelling so
+// a total miss reports exactly as before.
+priv fun drv_exe_dir() <string> {
+    let linkbuf <[char]> = new [char, 4096]{};
+    let n <long> = drv_readlink("/proc/self/exe", &linkbuf[0], cast<ulong>(4096));
+    if (n <= cast<long>(0) || n >= cast<long>(4096)) {
+        delete linkbuf;
+        return "";
+    }
+    let exe <string> = from_chars(linkbuf, 0, cast<int>(n));
+    delete linkbuf;
+    let dir <string> = drv_dirname(exe);
+    let b <Buffer> = new_buffer(128);
+    if (!drv_str_eq(dir, "")) {
+        b.write_string(dir);
+        free_string(dir);
+    }
+    free_string(exe);
+    let out <string> = b.to_string();
+    free_buffer(b);
+    return out;
+}
+
+priv fun drv_std_join(base: string, mod: string) <string> {
+    let b <Buffer> = new_buffer(128);
+    if (!drv_str_eq(base, "")) {
+        b.write_string(base);
+        b.write_string("/");
+    }
+    b.write_string("lib/std/");
+    b.write_string(mod);
+    b.write_string(".fin");
+    let res <string> = b.to_string();
+    free_buffer(b);
+    return res;
+}
+
+priv fun drv_find_std(mod: string, importer: string) <string> {
+    // 1. CWD, the historical behavior.
+    let cwd_cand <string> = drv_std_join("", mod);
+    if (file_exists(cwd_cand)) { return cwd_cand; }
+    free_string(cwd_cand);
+    // 2. Binary-relative: `<exe>/../lib/std` (the C++ bundled rule) and the
+    // `<exe>/lib/std` sibling layout.
+    let exedir <string> = drv_exe_dir();
+    if (!drv_str_eq(exedir, "")) {
+        let parent <string> = drv_dirname(exedir);
+        if (!drv_str_eq(parent, "")) {
+            let up_cand <string> = drv_std_join(parent, mod);
+            free_string(parent);
+            if (file_exists(up_cand)) { free_string(exedir); return up_cand; }
+            free_string(up_cand);
+        }
+        let sib_cand <string> = drv_std_join(exedir, mod);
+        if (file_exists(sib_cand)) { free_string(exedir); return sib_cand; }
+        free_string(sib_cand);
+    }
+    free_string(exedir);
+    // 3. Walk up from the importing file.
+    let cur <string> = importer;
+    let cur_owned <bool> = false;
+    for (let d <int> = 0; d < 32; d++) {
+        let dir <string> = drv_dirname(cur);
+        if (drv_str_eq(dir, "")) { break; }
+        let cand <string> = drv_std_join(dir, mod);
+        if (file_exists(cand)) {
+            if (cur_owned) { free_string(cur); }
+            free_string(dir);
+            return cand;
+        }
+        free_string(cand);
+        if (cur_owned) { free_string(cur); }
+        cur = dir;
+        cur_owned = true;
+    }
+    if (cur_owned) { free_string(cur); }
+    return "";
+}
+
+priv fun drv_resolve_std(mod: string, importer: string) <string> {
+    let hit <string> = drv_find_std(mod, importer);
+    if (!drv_str_eq(hit, "")) { return hit; }
+    return drv_std_join("", mod);
+}
+
+priv fun resolve_module_spec(spec: string, importer: string) <string> {
+    if (spec == null) { return ""; }
+    let bare <string> = drv_unquote(spec);
+    if (drv_str_eq(bare, "argparse::std")) { return drv_resolve_std("argparse", importer); }
+    if (drv_str_eq(bare, "collection::std")) { return drv_resolve_std("collection", importer); }
+    if (drv_str_eq(bare, "operators::std")) { return ""; }
+    if (drv_str_eq(bare, "error::std")) { return ""; }
+    if (drv_str_eq(bare, "token::std")) { return drv_resolve_std("token", importer); }
+    if (drv_str_eq(bare, "scanner::std")) { return drv_resolve_std("scanner", importer); }
+    if (drv_str_eq(bare, "parse::std")) { return drv_resolve_std("parse", importer); }
+    if (drv_str_eq(bare, "ast::std")) { return drv_resolve_std("ast", importer); }
+    if (drv_str_eq(bare, "diag::std")) { return drv_resolve_std("diag", importer); }
+    if (drv_str_eq(bare, "scope::std")) { return drv_resolve_std("scope", importer); }
+    if (drv_str_eq(bare, "buffer::std")) { return drv_resolve_std("buffer", importer); }
+    if (drv_str_eq(bare, "fs::std")) { return drv_resolve_std("fs", importer); }
+    if (drv_str_eq(bare, "strings::std")) { return drv_resolve_std("strings", importer); }
+    if (drv_str_eq(bare, "printer::std")) { return drv_resolve_std("printer", importer); }
+    if (drv_str_eq(bare, "process::std")) { return drv_resolve_std("process", importer); }
+    if (drv_str_eq(bare, "hashmap::std")) { return drv_resolve_std("hashmap", importer); }
+    if (drv_str_eq(bare, "typesys::std")) { return drv_resolve_std("typesys", importer); }
+    if (drv_str_eq(bare, "finc.driver") || drv_str_eq(bare, "finc::driver")) { return "finc/driver.fin"; }
+    if (drv_str_eq(bare, "finc.parser") || drv_str_eq(bare, "finc::parser")) { return "finc/parser.fin"; }
+    if (drv_str_eq(bare, "finc.checker") || drv_str_eq(bare, "finc::checker")) { return "finc/checker.fin"; }
+    if (drv_str_eq(bare, "finc.codegen") || drv_str_eq(bare, "finc::codegen")) { return "finc/codegen.fin"; }
+    if (drv_str_eq(bare, "finc.llvm") || drv_str_eq(bare, "finc::llvm")) { return "finc/llvm.fin"; }
+
+    let slen <ulong> = drv_strlen(bare);
     if (slen > cast<ulong>(5)) {
-        let suf <string> = substr(spec, cast<int>(slen - cast<ulong>(5)), 5);
+        let suf <string> = substr(bare, cast<int>(slen - cast<ulong>(5)), 5);
         if (drv_str_eq(suf, "::std")) {
-            let mod_name <string> = substr(spec, 0, cast<int>(slen - cast<ulong>(5)));
-            let b <Buffer> = new_buffer(64);
-            b.write_string("lib/std/");
-            b.write_string(mod_name);
-            b.write_string(".fin");
-            let res <string> = b.to_string();
-            free_buffer(b);
+            let mod_name <string> = substr(bare, 0, cast<int>(slen - cast<ulong>(5)));
+            let res <string> = drv_resolve_std(mod_name, importer);
+            free_string(mod_name);
             return res;
         }
     }
-    return spec;
+
+    // Quoted file path: tried as given (covers CWD and absolute paths),
+    // then relative to the importing file. A miss returns the bare path so
+    // the caller reports `module not found` instead of skipping silently.
+    if (last_index_of_char(bare, cast<char>(47)) >= 0 || ends_with(bare, ".fin")) {
+        if (file_exists(bare)) { return bare; }
+        let dir <string> = drv_dirname(importer);
+        if (!drv_str_eq(dir, "")) {
+            let cand <string> = drv_join_path(dir, bare);
+            if (file_exists(cand)) { return cand; }
+        }
+        return bare;
+    }
+
+    // Bare library name (`stdio`, `networking`): bundled stdlib first,
+    // then as given. A miss returns the stdlib candidate so the caller
+    // reports `module not found` instead of skipping silently.
+    let lb <Buffer> = new_buffer(64);
+    lb.write_string("lib/std/");
+    lb.write_string(bare);
+    lb.write_string(".fin");
+    let std_cand <string> = lb.to_string();
+    free_buffer(lb);
+    if (file_exists(std_cand)) { return std_cand; }
+    if (file_exists(bare)) { return bare; }
+    return std_cand;
 }
 
 pub fun print_version() <int> {
@@ -86,13 +2393,25 @@ pub fun print_help() <int> {
     printf("Options:\n");
     printf("  -o <path>              Build an executable at <path>; without it finc only checks\n");
     printf("  -c                     Compile to an object file and do not link\n");
-    printf("  --emit-c               Emit C source code instead of compiling\n");
     printf("  --dump-tokens          Print the scanned tokens\n");
     printf("  --dump-ast             Print the parsed AST\n");
+    printf("  --no-check             Skip semantic analysis (unsafe)\n");
     printf("  --version              Print version and machine contract version\n");
     printf("  --help                 Show this message\n");
     printf("\nExit codes: 0 success, 1 diagnostics, 2 usage, 3 internal error.\n");
     return 0;
+}
+
+priv fun drv_has_main(root: &AstNode) <bool> {
+    if (root == null) { return false; }
+    let decl <&AstNode> = root.left;
+    while (decl != null) {
+        if (decl.kind == ast_fun_decl() && drv_str_eq(decl.name, "main") && decl.left != null) {
+            return true;
+        }
+        decl = decl.right;
+    }
+    return false;
 }
 
 pub fun compile_source_file(
@@ -101,7 +2420,8 @@ pub fun compile_source_file(
     is_compile_only: bool,
     dump_tokens: bool,
     dump_ast: bool,
-    emit_c_only: bool
+    emit_c_only: bool,
+    no_check: bool
 ) <int> {
     // 1. Read source code
     let source? <string> = read_to_string(filename);
@@ -109,20 +2429,64 @@ pub fun compile_source_file(
         err_dprintf(2, "finc: error: could not read input file '%s'\n", filename);
         return 2;
     }
+    let fsz <long> = file_size(filename);
+    if (fsz >= cast<long>(0) && fsz != cast<long>(drv_strlen(source?))) {
+        err_dprintf(2, "finc: error: unrecognised byte in source: '\\x00' in file '%s'\n", filename);
+        free_file_content(source);
+        return 1;
+    }
+
+    // 1b. Preprocessor: conditional inclusion + line continuation as a text
+    // stage before scanning (drv_preprocess mirrors the C++ preprocessor).
+    // A null return is an explicit refusal, already reported with file:line.
+    let presrc? <string> = drv_preprocess(source?, filename);
+    if (presrc == null) {
+        free_file_content(source);
+        return 1;
+    }
+    free_file_content(source);
+    source = presrc;
+
+    // 1c. Macro expansion: text stage after preprocessing, before scanning
+    // (drv_macro_expand mirrors src/macros/** plus the builtin table). A null
+    // return is an explicit refusal, already reported with file:line.
+    let expsrc? <string> = drv_macro_expand(source?, filename, 0);
+    if (expsrc == null) {
+        free_file_content(source);
+        return 1;
+    }
+    free_file_content(source);
+    source = expsrc;
 
     // 2. Lexical analysis / Scanning
     let sc <Scanner> = new_scanner(source?);
-    let tokens <[Token]> = new [Token, 65536]{};
+    // The token buffer doubles once full: codegen.fin already lexes past
+    // 65535 tokens, and a fixed cap silently truncated the stream mid-decl
+    // (the parser then blamed a bogus 1:1 location past the cut).
+    let tok_cap <int> = 65536;
+    let tokens <[Token]> = new [Token, tok_cap]{};
     let tok_count <int> = 0;
 
     let t <Token> = sc.scan_token();
-    while (t.kind != tok_eof() && tok_count < 65535) {
+    let t_done <bool> = false;
+    while (!t_done) {
+        if (t.kind == tok_eof()) { t_done = true; }
+        if (tok_count >= tok_cap) {
+            let tok_new_cap <int> = tok_cap * 2;
+            let tok_grown <[Token]> = new [Token, tok_new_cap]{};
+            for (let gi <int> = 0; gi < tok_count; gi++) {
+                tok_grown[gi] = tokens[gi];
+            }
+            delete tokens;
+            tokens = tok_grown;
+            tok_cap = tok_new_cap;
+        }
         tokens[tok_count] = t;
         tok_count++;
-        t = sc.scan_token();
+        if (!t_done) {
+            t = sc.scan_token();
+        }
     }
-    tokens[tok_count] = t; // EOF token
-    tok_count++;
     free_scanner(sc);
 
     // Option: --dump-tokens
@@ -155,11 +2519,12 @@ pub fun compile_source_file(
     let loaded_count <int> = 0;
     loaded_files[0] = filename;
     loaded_count = 1;
+    let had_module_error <bool> = false;
 
     let cur_decl <&AstNode> = root.left;
     while (cur_decl != null) {
         if (cur_decl.kind == 6) {
-            let mod_path <string> = resolve_module_spec(cur_decl.name);
+            let mod_path <string> = resolve_module_spec(cur_decl.name, filename);
             if (!drv_str_eq(mod_path, "")) {
                 let already_loaded <bool> = false;
                 for (let li <int> = 0; li < loaded_count; li++) {
@@ -169,22 +2534,55 @@ pub fun compile_source_file(
                     }
                 }
                 if (!already_loaded && loaded_count < 64) {
-                    loaded_files[loaded_count] = mod_path;
-                    loaded_count++;
-
                 let mod_src? <string> = read_to_string(mod_path);
                 if (mod_src != null) {
+                    // Same text stage as the root file: fresh defines and
+                    // nesting per module, mirroring the C++ ModuleLoader.
+                    let mod_proc? <string> = drv_preprocess(mod_src?, mod_path);
+                    if (mod_proc == null) {
+                        free_file_content(mod_src);
+                        had_module_error = true;
+                    } else {
+                    // Same macro stage as the root file: fresh macro tables
+                    // per module, mirroring the C++ per-module expansion pass.
+                    // The module index keeps generated helper names unique
+                    // across the files merged into one program below.
+                    let mod_exp? <string> = drv_macro_expand(mod_proc?, mod_path, loaded_count);
+                    free_file_content(mod_proc);
+                    if (mod_exp == null) {
+                        free_file_content(mod_src);
+                        had_module_error = true;
+                    } else {
+                    free_file_content(mod_src);
+                    mod_src = mod_exp;
+                    loaded_files[loaded_count] = mod_path;
+                    loaded_count++;
                     let mod_sc <Scanner> = new_scanner(mod_src?);
-                    let mod_toks <[Token]> = new [Token, 65536]{};
+                    // Same doubling token buffer as the root file above: an
+                    // imported module may itself lex past any fixed cap.
+                    let mod_cap <int> = 65536;
+                    let mod_toks <[Token]> = new [Token, mod_cap]{};
                     let mod_tc <int> = 0;
                     let mt <Token> = mod_sc.scan_token();
-                    while (mt.kind != tok_eof() && mod_tc < 65535) {
+                    let mt_done <bool> = false;
+                    while (!mt_done) {
+                        if (mt.kind == tok_eof()) { mt_done = true; }
+                        if (mod_tc >= mod_cap) {
+                            let mod_new_cap <int> = mod_cap * 2;
+                            let mod_grown <[Token]> = new [Token, mod_new_cap]{};
+                            for (let mi <int> = 0; mi < mod_tc; mi++) {
+                                mod_grown[mi] = mod_toks[mi];
+                            }
+                            delete mod_toks;
+                            mod_toks = mod_grown;
+                            mod_cap = mod_new_cap;
+                        }
                         mod_toks[mod_tc] = mt;
                         mod_tc++;
-                        mt = mod_sc.scan_token();
+                        if (!mt_done) {
+                            mt = mod_sc.scan_token();
+                        }
                     }
-                    mod_toks[mod_tc] = mt;
-                    mod_tc++;
                     free_scanner(mod_sc);
 
                     let mod_p <Parser> = new_parser(mod_toks, mod_tc, mod_path, mod_src?);
@@ -203,6 +2601,18 @@ pub fun compile_source_file(
                     delete mod_toks;
                     free_parser(mod_p);
                     free_file_content(mod_src);
+                    }
+                    }
+                } else {
+                    // Per-import-site diagnostics: each failed import reports
+                    // both the lookup miss and the load failure, matching the
+                    // C++ driver's `module not found` + `Failed to load`
+                    // pair. Failures are NOT recorded as loaded, so a second
+                    // import of the same missing module reports again.
+                    let missing <string> = drv_unquote(cur_decl.name);
+                    err_dprintf(2, "finc: error: module not found: '%s'\n", missing);
+                    err_dprintf(2, "finc: error: Failed to load module '%s'\n", missing);
+                    had_module_error = true;
                 }
             }
         }
@@ -211,28 +2621,23 @@ pub fun compile_source_file(
     }
     delete loaded_files;
 
+    if (had_module_error) {
+        delete tokens;
+        free_parser(p);
+        free_ast(root);
+        free_file_content(source);
+        return 1;
+    }
+
     // Option: --dump-ast
     if (dump_ast) {
         let decl <&AstNode> = root.left;
         while (decl != null) {
-            if (decl.kind == ast_fun_decl()) {
-                printf("fun %s() <%s> {\n", decl.name, decl.type_annotation);
-                let body_node <&AstNode> = decl.left;
-                if (body_node != null) {
-                    let cur_stmt <&AstNode> = body_node.left;
-                    while (cur_stmt != null) {
-                        let actual_stmt <&AstNode> = cur_stmt.left;
-                        if (actual_stmt == null) { actual_stmt = cur_stmt; }
-                        let stmt_str <string> = format_stmt(actual_stmt);
-                        printf("    %s", stmt_str);
-                        cur_stmt = cur_stmt.right;
-                    }
-                }
-                printf("}\n");
-            } else {
-                let decl_str <string> = format_stmt(decl);
-                printf("%s", decl_str);
-            }
+            // The whole decl goes through the printer, so function
+            // params (extra) reach print_param_list instead of being
+            // dropped by a hardcoded `fun name()` header here.
+            let decl_str <string> = format_stmt(decl);
+            printf("%s", decl_str);
             decl = decl.right;
         }
         delete tokens;
@@ -242,21 +2647,27 @@ pub fun compile_source_file(
         return 0;
     }
 
-    // 4. Semantic analysis & type checking
-    let chk <Checker> = new_checker(filename);
-    let check_ok <bool> = chk.check_program(root);
-    if (!check_ok) {
-        err_dprintf(2, "finc: %d semantic error(s) found\n", chk.diag.error_count);
-        delete tokens;
-        free_parser(p);
+    // 4. Semantic analysis & type checking. `--no-check` (mirroring C++
+    // `skipSemantics`, src/main.cpp:137 and Driver.cpp:331) skips only this
+    // call: scan, preprocess, parse, import-merge, and the codegen refusal
+    // machinery below all still run, so unchecked input is refused by name
+    // rather than crashing or lowering silently.
+    if (!no_check) {
+        let chk <Checker> = new_checker(filename);
+        let check_ok <bool> = chk.check_program(root);
+        if (!check_ok) {
+            err_dprintf(2, "finc: %d semantic error(s) found\n", chk.diag.error_count);
+            delete tokens;
+            free_parser(p);
+            free_checker(chk);
+            free_ast(root);
+            free_file_content(source);
+            return 1;
+        }
         free_checker(chk);
-        free_ast(root);
-        free_file_content(source);
-        return 1;
     }
-    free_checker(chk);
 
-    // If check-only mode (no -o, no -c, no --emit-c), clean up and exit 0
+    // If check-only mode (no -o, no -c), clean up and exit 0
     if (drv_str_eq(out_path, "") && !is_compile_only) {
         delete tokens;
         free_parser(p);
@@ -265,18 +2676,34 @@ pub fun compile_source_file(
         return 0;
     }
 
+    // An executable needs an entry point; `-c` is exempt (a library object
+    // has no `main`). Checked here so no object is emitted and no link is
+    // attempted — matches C++ Driver::runCodeGen early refusal.
+    if (!is_compile_only && !drv_has_main(root)) {
+        err_dprintf(2, "finc: error: this program has no 'main' ('-o' builds an executable; write 'fun main() <noret>')\n");
+        delete tokens;
+        free_parser(p);
+        free_ast(root);
+        free_file_content(source);
+        return 1;
+    }
+
     // 5. Pure LLVM IR Code Generation
     let target_o <string> = out_path;
     let is_temp_o <bool> = false;
+    let own_o <bool> = false;
     if (!is_compile_only) {
-        target_o = "/tmp/finc_stage_tmp.o";
+        let bin_for_tmp <string> = out_path;
+        if (drv_str_eq(bin_for_tmp, "")) { bin_for_tmp = "a.out"; }
+        target_o = drv_temp_object(bin_for_tmp);
         is_temp_o = true;
     }
     if (drv_str_eq(target_o, "")) {
-        target_o = "a.o";
+        target_o = drv_stem_object(filename);
+        own_o = true;
     }
 
-    let ok_gen <bool> = generate_llvm_code(root, target_o, 0);
+    let ok_gen <bool> = generate_llvm_code(root, target_o, 0, filename);
 
     delete tokens;
     free_parser(p);
@@ -285,10 +2712,13 @@ pub fun compile_source_file(
 
     if (!ok_gen) {
         err_dprintf(2, "finc: error: LLVM code generation failed\n");
+        remove_file(target_o);
+        if (own_o) { free_string(target_o); }
         return 1;
     }
 
     if (is_compile_only) {
+        if (own_o) { free_string(target_o); }
         return 0;
     }
 
@@ -299,7 +2729,9 @@ pub fun compile_source_file(
     }
 
     let b_bin <Buffer> = new_buffer(128);
-    b_bin.write_string("cc -no-pie /tmp/finc_stage_tmp.o -o ");
+    b_bin.write_string("cc -no-pie ");
+    b_bin.write_string(target_o);
+    b_bin.write_string(" -o ");
     b_bin.write_string(target_bin);
     b_bin.write_string(" -Wl,--as-needed -lLLVM-22 -lm");
     let bin_cmd_str <string> = b_bin.to_string();
@@ -307,7 +2739,8 @@ pub fun compile_source_file(
     free_string(bin_cmd_str);
     free_buffer(b_bin);
     if (is_temp_o) {
-        remove_file("/tmp/finc_stage_tmp.o");
+        remove_file(target_o);
+        free_string(target_o);
     }
     if (status != 0) {
         err_dprintf(2, "finc: linker failed with status %d\n", status);

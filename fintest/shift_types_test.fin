@@ -1,0 +1,17 @@
+import { assert_true } from testing::std;
+
+// Pins battery c01-c03: same-width uint/ulong shifts and widening mixes.
+// All green on both compilers (finc + finc_stage2); prints converted to asserts.
+// (c04-c09 are negative probes that must NOT compile, so they stay out of fintest.)
+fun main() <noret> {
+    let a <uint> = cast<uint>(1) << cast<uint>(3);
+    assert_true(a == cast<uint>(8), "shift: uint << uint");
+    let b <uint> = cast<uint>(16) >> cast<uint>(2);
+    assert_true(b == cast<uint>(4), "shift: uint >> uint");
+    let s <ulong> = cast<ulong>(5);
+    assert_true((cast<ulong>(1) << s) == cast<ulong>(32), "shift: ulong << ulong variable");
+    let w1 <ulong> = 1 << cast<ulong>(2);
+    assert_true(w1 == cast<ulong>(4), "shift: int widened by ulong count");
+    let w2 <ulong> = cast<ulong>(1) << 40;
+    assert_true(w2 == cast<ulong>(1073741824) * cast<ulong>(1024), "shift: ulong widened by int count is 2^40");
+}

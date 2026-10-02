@@ -277,13 +277,18 @@ pub struct Collection<T> : <Index, IndexAssign> {
         self.__set(index, value);
       }
 
-    // `Collection::from_prototype({ 0: 10, 1: 20 })` in prototype_test.fin:30. The body
-    // cannot read the prototype yet -- a prototype resolves no member and no index -- so
-    // it produces the empty collection and the keys are dropped. It is declared because
-    // the corpus calls it; it is empty because the language has no way to walk a
-    // prototype.
+    // `Collection::from_prototype({ 0: 10, 1: 20 })` in prototype_test.fin:30. The
+    // prototype arrives as two parallel arrays -- `prtp.0` the keys, `prtp.1` the
+    // values (stdlib/prototypes.fin:11-15) -- so the values are pushed in order
+    // through the existing `push` path. The keys are ignored: a `Collection` is
+    // positional, and `coll![...]` arrives keyed `0..n-1` in insertion order.
     pub static fun from_prototype(prtp: {int, T}) <Self> {
-        return Collection{filled: 0, _arr: new [T, 4]{}};
+        let out <Collection<T>> = Collection{filled: 0, _arr: new [T, 4]{}};
+        let vals <[T]> = prtp.1;
+        for (let i <int> = 0; i < vals.length; i++) {
+            out.push(vals[i]);
+          }
+        return out;
       }
   }
 
@@ -293,9 +298,8 @@ pub struct Collection<T> : <Index, IndexAssign> {
 // `from_prototype`'s parameter, so this macro is a rename and not a construction. `$p` is
 // the whole bracket and `Collection::` is qualified because a body may spell nothing else
 // (ADR 0020, ADR 0023) -- an unqualified `from_prototype` would bind whatever the caller
-// happened to have. It carries `from_prototype`'s limit with it: the keys are dropped
-// because nothing in the language can walk a prototype yet, so `coll![1, 2, 3]` type-checks
-// as a `Collection<int>` and is empty at runtime.
+// happened to have. The values arrive through `from_prototype`, so `coll![1, 2, 3]`
+// builds a `Collection<int>` holding the three elements in order.
 @macro coll(p) { return quote { Collection::from_prototype($p); }; }
 
 }

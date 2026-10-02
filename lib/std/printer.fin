@@ -13,11 +13,23 @@ import {
     ast_binary_expr,
     ast_unary_expr,
     ast_call_expr,
+    ast_member_access,
+    ast_index_expr,
+    ast_lambda_expr,
+    ast_prototype_literal,
+    ast_macro_invocation,
+    ast_fun_decl,
+    ast_param,
     ast_var_decl,
     ast_return_stmt,
     ast_blame_stmt,
     ast_if_stmt,
-    ast_block
+    ast_while_stmt,
+    ast_for_stmt,
+    ast_expr_stmt,
+    ast_block,
+    ast_break_stmt,
+    ast_continue_stmt
 } from ast::std;
 
 namespace std {
@@ -61,6 +73,69 @@ pub struct AstPrinter {
     pub:
       fun indent(self: &Self) <noret> {
           self.buf.write_repeat(' ', self.indent_level * 4);
+      }
+
+      // Prints one statement body: unwraps a block into its statements,
+      // otherwise prints the single statement as-is.
+      fun print_body_stmts(self: &Self, body: &AstNode) <noret> {
+          if (body == null) { return; }
+          if (body.kind == ast_block()) {
+              let cur <&AstNode> = body.left;
+              while (cur != null) {
+                  let s <&AstNode> = cur.left;
+                  if (s == null) { s = cur; }
+                  self.print_stmt(s);
+                  cur = cur.right;
+              }
+              return;
+          }
+          self.print_stmt(body);
+      }
+
+      // Prints a call/macro argument list. Arguments arrive either as wrapper
+      // nodes (kind 0, actual arg in left, e.g. `f(a, b)`) or as bare
+      // expressions chained by right (e.g. `[a, b]` literals). Struct-init
+      // fields (kind 0 with a name) render as `field: value`.
+      fun print_arg_list(self: &Self, args: &AstNode) <noret> {
+          let cur <&AstNode> = args;
+          let first <bool> = true;
+          while (cur != null) {
+              let a <&AstNode> = cur;
+              if (cur.kind == 0 && cur.left != null) { a = cur.left; }
+              if (!first) { self.buf.write_string(", "); }
+              if (cur.kind == 0 && cur.name != null && !str_eq(cur.name, "")) {
+                  self.buf.write_string(cur.name);
+                  self.buf.write_string(": ");
+              }
+              self.print_expr(a);
+              first = false;
+              cur = cur.right;
+          }
+      }
+
+      // Prints a function parameter list. Parameters arrive chained by
+      // right (`extra` of a fun decl is the head): each renders as
+      // `name <annotation>`, the same annotation spelling `let` uses.
+      // A bare `...` (extern variadic) renders as `...`. Defaults are
+      // not stored in the AST, so there is nothing more to render.
+      fun print_param_list(self: &Self, params: &AstNode) <noret> {
+          let cur <&AstNode> = params;
+          let first <bool> = true;
+          while (cur != null) {
+              if (!first) { self.buf.write_string(", "); }
+              if (str_eq(cur.name, "...")) {
+                  self.buf.write_string("...");
+              } else {
+                  self.buf.write_string(cur.name);
+                  if (cur.type_annotation != null && !str_eq(cur.type_annotation, "")) {
+                      self.buf.write_string(" <");
+                      self.buf.write_string(cur.type_annotation);
+                      self.buf.write_char('>');
+                  }
+              }
+              first = false;
+              cur = cur.right;
+          }
       }
 
       fun print_expr(self: &Self, node: &AstNode) <noret> {
@@ -112,22 +187,118 @@ pub struct AstPrinter {
               return;
           }
           if (node.kind == ast_call_expr()) {
+              if (str_eq(node.name, "__fin_struct_init")) {
+                  self.buf.write_string(node.type_annotation);
+                  self.buf.write_char('{');
+                  self.print_arg_list(node.left);
+                  self.buf.write_char('}');
+                  return;
+              }
+              if (str_eq(node.name, "__fin_array_literal")) {
+                  self.buf.write_char('[');
+                  self.print_arg_list(node.left);
+                  self.buf.write_char(']');
+                  return;
+              }
               self.buf.write_string(node.name);
+              if (node.type_annotation != null && !str_eq(node.type_annotation, "")) {
+                  self.buf.write_string("::<");
+                  self.buf.write_string(node.type_annotation);
+                  self.buf.write_char('>');
+              }
               self.buf.write_char('(');
-              if (node.left != null) {
+              self.print_arg_list(node.left);
+              self.buf.write_char(')');
+              return;
+          }
+          if (node.kind == ast_member_access()) {
+              self.print_expr(node.left);
+              self.buf.write_char('.');
+              self.buf.write_string(node.name);
+              return;
+          }
+          if (node.kind == ast_index_expr()) {
+              self.print_expr(node.left);
+              self.buf.write_char('[');
+              self.print_expr(node.right);
+              self.buf.write_char(']');
+              return;
+          }
+          if (node.kind == ast_prototype_literal()) {
+              self.buf.write_char('{');
+              let pair <&AstNode> = node.left;
+              let pfirst <bool> = true;
+              while (pair != null) {
+                  if (!pfirst) { self.buf.write_string(", "); }
+                  self.print_expr(pair.left);
+                  self.buf.write_string(": ");
+                  self.print_expr(pair.right);
+                  pfirst = false;
+                  pair = pair.extra;
+              }
+              self.buf.write_char('}');
+              return;
+          }
+          if (node.kind == ast_macro_invocation()) {
+              self.buf.write_string(node.name);
+              self.buf.write_char('!');
+              self.buf.write_char('(');
+              self.print_arg_list(node.left);
+              self.buf.write_char(')');
+              return;
+          }
+          if (node.kind == ast_lambda_expr()) {
+              self.buf.write_char('|');
+              let pp <&AstNode> = node.extra;
+              let qfirst <bool> = true;
+              while (pp != null) {
+                  if (!qfirst) { self.buf.write_string(", "); }
+                  self.buf.write_string(pp.name);
+                  qfirst = false;
+                  pp = pp.right;
+              }
+              self.buf.write_string("| ");
+              if (node.left != null && node.left.kind == ast_block()) {
+                  self.print_stmt(node.left);
+              } else {
                   self.print_expr(node.left);
               }
-              if (node.right != null) {
-                  self.buf.write_string(", ");
-                  self.print_expr(node.right);
-              }
-              self.buf.write_char(')');
               return;
           }
       }
 
       fun print_stmt(self: &Self, node: &AstNode) <noret> {
           if (node == null) { return; }
+
+          if (node.kind == ast_fun_decl()) {
+              self.indent();
+              self.buf.write_string("fun ");
+              self.buf.write_string(node.name);
+              if (node.str_val != null && !str_eq(node.str_val, "")) {
+                  self.buf.write_char('<');
+                  self.buf.write_string(node.str_val);
+                  self.buf.write_char('>');
+              }
+              self.buf.write_char('(');
+              self.print_param_list(node.extra);
+              self.buf.write_char(')');
+              if (node.type_annotation != null && !str_eq(node.type_annotation, "")) {
+                  self.buf.write_string(" <");
+                  self.buf.write_string(node.type_annotation);
+                  self.buf.write_char('>');
+              }
+              if (node.left == null) {
+                  self.buf.write_line(";");
+                  return;
+              }
+              self.buf.write_line(" {");
+              self.indent_level++;
+              self.print_body_stmts(node.left);
+              self.indent_level--;
+              self.indent();
+              self.buf.write_line("}");
+              return;
+          }
 
           if (node.kind == ast_var_decl()) {
               self.indent();
@@ -163,10 +334,9 @@ pub struct AstPrinter {
               if (node.left != null) {
                   self.print_expr(node.left);
               }
-              if (node.str_val != null && !str_eq(node.str_val, "")) {
-                  self.buf.write_string(", \"");
-                  self.buf.write_string(node.str_val);
-                  self.buf.write_char('"');
+              if (node.right != null) {
+                  self.buf.write_string(", ");
+                  self.print_expr(node.right);
               }
               self.buf.write_line(";");
               return;
@@ -178,20 +348,104 @@ pub struct AstPrinter {
               self.print_expr(node.left);
               self.buf.write_line(") {");
               self.indent_level++;
-              self.print_stmt(node.right);
+              self.print_body_stmts(node.right);
               self.indent_level--;
               self.indent();
               self.buf.write_string("}");
               if (node.extra != null) {
                   self.buf.write_line(" else {");
                   self.indent_level++;
-                  self.print_stmt(node.extra);
+                  self.print_body_stmts(node.extra);
                   self.indent_level--;
                   self.indent();
                   self.buf.write_line("}");
               } else {
                   self.buf.write_char('\n');
               }
+              return;
+          }
+
+          if (node.kind == ast_while_stmt()) {
+              self.indent();
+              self.buf.write_string("while (");
+              self.print_expr(node.left);
+              self.buf.write_line(") {");
+              self.indent_level++;
+              self.print_body_stmts(node.right);
+              self.indent_level--;
+              self.indent();
+              self.buf.write_line("}");
+              return;
+          }
+
+          if (node.kind == ast_for_stmt()) {
+              self.indent();
+              self.buf.write_string("for (");
+              if (node.left != null) {
+                  if (node.left.kind == ast_var_decl()) {
+                      self.buf.write_string("let ");
+                      self.buf.write_string(node.left.name);
+                      if (node.left.type_annotation != null && !str_eq(node.left.type_annotation, "")) {
+                          self.buf.write_string(" <");
+                          self.buf.write_string(node.left.type_annotation);
+                          self.buf.write_string(">");
+                      }
+                      if (node.left.left != null) {
+                          self.buf.write_string(" = ");
+                          self.print_expr(node.left.left);
+                      }
+                  } else if (node.left.kind == ast_expr_stmt()) {
+                      self.print_expr(node.left.left);
+                  } else {
+                      self.print_expr(node.left);
+                  }
+              }
+              self.buf.write_string("; ");
+              if (node.right != null) {
+                  self.print_expr(node.right);
+              }
+              self.buf.write_string("; ");
+              if (node.extra != null && node.extra.left != null) {
+                  self.print_expr(node.extra.left);
+              }
+              self.buf.write_line(") {");
+              self.indent_level++;
+              if (node.extra != null) {
+                  self.print_body_stmts(node.extra.right);
+              }
+              self.indent_level--;
+              self.indent();
+              self.buf.write_line("}");
+              return;
+          }
+
+          if (node.kind == ast_expr_stmt()) {
+              self.indent();
+              self.print_expr(node.left);
+              self.buf.write_line(";");
+              return;
+          }
+
+          if (node.kind == ast_block()) {
+              self.indent();
+              self.buf.write_line("{");
+              self.indent_level++;
+              self.print_body_stmts(node);
+              self.indent_level--;
+              self.indent();
+              self.buf.write_line("}");
+              return;
+          }
+
+          if (node.kind == ast_break_stmt()) {
+              self.indent();
+              self.buf.write_line("break;");
+              return;
+          }
+
+          if (node.kind == ast_continue_stmt()) {
+              self.indent();
+              self.buf.write_line("continue;");
               return;
           }
       }

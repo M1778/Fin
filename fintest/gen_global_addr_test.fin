@@ -1,0 +1,15 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_c01: a global's address taken into a local pointer reads and
+// writes through to the global.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+let G <int> = 7;
+
+fun main() <noret> {
+    let p <&int> = &G;
+    assert_eq_int(G, 7, "global_addr: global reads 7 directly");
+    assert_eq_int(*p, 7, "global_addr: pointer reads 7 through &G");
+    *p = 11;
+    assert_eq_int(*p, 11, "global_addr: store through pointer reads back");
+    assert_eq_int(G, 11, "global_addr: store is visible on the global");
+}

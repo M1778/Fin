@@ -160,6 +160,15 @@ bool Type::isAssignableTo(const Type& other) const {
 
     if (dynamic_cast<const GenericType*>(&other)) return true;
 
+    // A union alias as a target: `let x <Number> = 5` stores into the first
+    // alternative, which is what the alias resolved to before unions were
+    // types (UnionType.hpp). Kept exact so that preserving the union changes
+    // no value that stores today; alternative-wise rules are a separate ruling.
+    if (auto* target = dynamic_cast<const UnionType*>(&other)) {
+        if (target->alternatives.empty() || !target->alternatives[0]) return false;
+        return this->isAssignableTo(*target->alternatives[0]);
+    }
+
     // A struct converts to an interface it implements (owner ruling, 2026-08-28).
     //
     // `tests/samples/love.fin` is the corpus's first and only witness: `I.love(F)` at

@@ -1,0 +1,18 @@
+import { assert_eq_int } from testing::std;
+
+// Pins p04: free generic fns (ident<T>, pick<A,B>) with inferred and
+// explicit turbofish call sites.
+// Green on both compilers (finc + finc_stage2); bare prints converted to asserts.
+fun ident<T>(x: T) <T> {
+    return x;
+}
+
+fun pick<A, B>(a: A, b: B) <B> {
+    return b;
+}
+
+fun main() <noret> {
+    assert_eq_int(ident(3), 3, "free_fn: ident infers");
+    assert_eq_int(pick(1, 2), 2, "free_fn: pick returns the second arg");
+    assert_eq_int(ident::<int>(5), 5, "free_fn: ident::<int> is explicit");
+}

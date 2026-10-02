@@ -1,4 +1,5 @@
 #include "../SemanticAnalyzer.hpp"
+#include "../EventPayloads.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../../utils/IntegerConstant.hpp"
 #include "../../types/Layout.hpp"
@@ -159,12 +160,27 @@ bool negativeConstantAgainstUnsigned(const ASTNode& l, const TypePtr& lt,
     return false;
 }
 
+// A shift count through `cast<T>(...)` layers, so `cast<ulong>(64)` reads as
+// the literal 64 it spells. Stops at anything that is not a cast: a variable
+// inside a cast is still a variable, and stays untouchable runtime UB.
+static const Expression* peelShiftCount(const Expression* e) {
+    while (auto* c = dynamic_cast<const CastExpression*>(e)) {
+        if (!c->expr) return e;
+        e = c->expr.get();
+    }
+    return e;
+}
+
 bool isIncrementable(const TypePtr& type) {    if (!type || isErrorType(type)) return true;
     auto* prim = dynamic_cast<const PrimitiveType*>(type.get());
     if (!prim) return false;
     const std::string& n = prim->name;
     return n == "int" || n == "long" || n == "short" || n == "char" || n == "uint" ||
-           n == "ulong" || n == "ushort" || n == "float" || n == "double";
+           n == "ulong" || n == "ushort" || n == "float" || n == "double" ||
+           n == "u8" || n == "i8" || n == "u16" || n == "i16" ||
+           n == "u32" || n == "i32" || n == "u64" || n == "i64" ||
+           n == "f32" || n == "f64" ||
+           n == "usize" || n == "isize" || n == "size_t";
 }
 
 // `v.0`: is this member name a position rather than a name?
@@ -479,6 +495,19 @@ void SemanticAnalyzer::visit(Identifier& node) {
             }
         }
         lastExprType = sym->type;
+        // Wave-4 step 17 (W7): reading a binding is a use. A definitely-moved
+        // variable reports use-after-move here; maybe-moved stays readable.
+        // Skipped on the check walk (§3.3), and suspended for a plain
+        // assignment's target (see visit(BinaryOp&): rebinding is not reading).
+        if (!injectedWalk_) {
+            auto w7report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
+            moved_.use(node.name, node, w7report);
+        }
+        // Capture analysis: a scope-resolved use inside a lambda body records
+        // the binding on every enclosing lambda it is outside of. Reads and
+        // writes alike -- both need the env field -- and skipped on the check
+        // walk, which must not mutate analysis results.
+        if (!injectedWalk_) noteLambdaUse(node.name);
         return;
     } 
     
@@ -597,6 +626,68 @@ void SemanticAnalyzer::visit(Identifier& node) {
     lastExprType = nullptr;
 }
 
+// One free variable's capture registration.
+//
+// A use of `name` is a capture for every enclosing lambda whose scope sits
+// strictly inside the binding's defining scope: the value lives in a frame
+// the lambda's code pointer cannot reach, so codegen snapshots it into the
+// env struct. Module-scope bindings (globals, functions, `@define`s) are
+// symbols rather than frame slots and are never captures; neither are nested
+// functions and generic recipes, which are likewise reached by symbol rather
+// than by slot. The lambda's own parameters and body-locals resolve at or
+// inside its scope -- shadowing wins -- and are not captures either.
+//
+// `byRef` follows the binding's type, not the use: a reference-typed binding
+// (`&T`) copies as a pointer, so the env field aliases the referent, while a
+// value-typed one copies as a snapshot. The lowering is the same copy in both
+// cases; the flag documents which meaning the copy has.
+void SemanticAnalyzer::noteLambdaUse(const std::string& name) {
+    if (lambdaCaptures_.empty()) return;
+    std::vector<Scope*> chain;
+    for (Scope* s = currentScope.get(); s; s = s->parent) chain.push_back(s);
+    size_t defPos = chain.size();
+    Symbol* sym = nullptr;
+    for (size_t i = 0; i < chain.size(); ++i) {
+        auto found = chain[i]->symbols.find(name);
+        if (found != chain[i]->symbols.end()) {
+            defPos = i;
+            sym = &found->second;
+            break;
+        }
+    }
+    if (!sym) return;
+    if (sym->is_function || sym->is_template) return;
+    size_t globalPos = chain.size();
+    for (size_t i = 0; i < chain.size(); ++i) {
+        if (chain[i] == globalScope.get()) {
+            globalPos = i;
+            break;
+        }
+    }
+    // Below the global scope is frame data; at it or above it is a symbol.
+    if (defPos >= globalPos) return;
+    const bool byRef = sym->type && sym->type->as<PointerType>() != nullptr;
+    for (auto& frame : lambdaCaptures_) {
+        if (!frame.node || !frame.lambdaScope) continue;
+        size_t lamPos = chain.size();
+        for (size_t i = 0; i < chain.size(); ++i) {
+            if (chain[i] == frame.lambdaScope) {
+                lamPos = i;
+                break;
+            }
+        }
+        if (lamPos >= defPos) continue;  // defined at or inside this lambda
+        bool known = false;
+        for (const auto& c : frame.node->captures) {
+            if (c.name == name) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) frame.node->captures.push_back({name, byRef});
+    }
+}
+
 // One dereference for comparisons: `&T` reads as `T`. Single level, never
 // through a nullable or into another pointer -- narrowing those first stays
 // explicit. Shared by the equality-operand substitution below; call
@@ -651,7 +742,15 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         }
     }
 
+    // Wave-4 step 17 (W7): a plain `x = e` rebinds x rather than reading
+    // it, so the target suspends the use check for exactly this walk.
+    // Compound assignment reads its target, and member or index targets read
+    // their base, so only a bare identifier under plain `=` suspends.
+    const bool w7Rebind = !injectedWalk_ && node.op == ASTTokenKind::EQUAL &&
+                          dynamic_cast<Identifier*>(node.left.get()) != nullptr;
+    if (w7Rebind) moved_.suspendUses();
     node.left->accept(*this);
+    if (w7Rebind) moved_.resumeUses();
     auto leftType = lastExprType;
 
     // Assignments
@@ -662,7 +761,6 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         node.op == ASTTokenKind::MULTEQUAL ||
         node.op == ASTTokenKind::DIVEQUAL
     );
-
     // The target's type is a hint for the value, which is what a declaration's
     // annotation is: `r = Err("Blame ME!");` (tests/samples/enums.fin:47) is the same
     // statement as `let r <Result<int, string>> = Err("Blame ME!");` minus the place to
@@ -707,7 +805,15 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         }
         rightType = leftType;
     } else {
+        // Wave-4 step 17 (W7): `&&` and `||` short-circuit, so the
+        // right-hand side runs conditionally: its effects join the entry
+        // state, like a one-armed branch.
+        const bool w7Short = !injectedWalk_ &&
+                             (node.op == ASTTokenKind::AND || node.op == ASTTokenKind::OR);
+        events::MovedAnalysis::Snapshot w7pre;
+        if (w7Short) w7pre = moved_.snapshot();
         node.right->accept(*this);
+        if (w7Short) moved_.installJoin(w7pre, moved_.snapshot());
         typeHintFor = nullptr;
         typeHint = nullptr;
         rightType = lastExprType;
@@ -752,17 +858,36 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
 
         checkType(*node.right, rightType, leftType);
         lastExprType = leftType;
+        // Wave-4 step 17 (W6 floor): an assignment is an `assignment` fire
+        // point carrying the target identity (docs/compiler-api.md §3.2:
+        // `p.f = q` and `p[k] = e` included, so field writes need no
+        // separate event). Detail is the target as spelled with its type
+        // (`x:int`); the full payload (target/value quotes, $type) is what
+        // W5's firing loop carries to handlers.
+        noteFirePoint({"assignment", current_function_, node.loc.begin.line,
+                       events::spellFireTarget(*node.left) + ":" + leftType->toString()});
+        // Wave-4 step 17 (W7): rebinding revives. `x = ...` makes x live
+        // again on this path, which is what makes move-then-rebind the
+        // recovery from a move. Only a bare identifier rebinds: a member or
+        // index write does not revive the base. The right-hand side's reads
+        // were already checked above, so `x = x + 1` still reports a moved x.
+        if (!injectedWalk_) {
+            if (auto* id = dynamic_cast<Identifier*>(node.left.get())) moved_.assign(id->name);
+        }
         return;
     }
 
-    // Operator Overloading. The *return* type: `operators` holds a whole signature
-    // now, and a binary expression is typed by what its operator returns. Nothing
-    // checks the right-hand operand against the operator's parameter yet -- an
-    // operator call has no argument check at all, which is booked separately -- so
-    // this reads only the half it always read.
+    // Operator Overloading. The call is typed by what its operator returns, and
+    // the right-hand operand is checked against the operator's parameter -- the
+    // subscript path (visit(ArrayAccess&)) is the model, with the same words.
     if (auto structType = getStructType(leftType, currentScope)) {
-        if (auto retType = structType->getOperatorReturnType(static_cast<int>(node.op))) {
-            lastExprType = retType;
+        if (auto opType = structType->getOperatorType(static_cast<int>(node.op))) {
+            if (auto* sig = opType->as<FunctionType>()) {
+                if (!sig->param_types.empty()) checkType(*node.right, rightType, sig->param_types[0]);
+                lastExprType = sig->return_type;
+            } else {
+                lastExprType = opType;
+            }
             return;
         }
     }
@@ -858,6 +983,52 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         return;
     }
 
+    // A constant shift count is checked against the value's width: `1 << 32`
+    // on a 32-bit `int` is LLVM poison, which prints garbage, so it is a
+    // diagnostic naming the count and the width. Literals and unary minus only
+    // (through `cast<T>(...)` spellings); a variable count stays UB as today.
+    if (node.op == ASTTokenKind::SHIFTLEFT || node.op == ASTTokenKind::SHIFTRIGHT) {
+        if (auto* prim = dynamic_cast<const PrimitiveType*>(leftType.get())) {
+            if (const auto info = scalarOf(*prim);
+                info && info->kind == ScalarKind::Int && info->bits != 0) {
+                if (const auto* count = peelShiftCount(node.right.get())) {
+                    bool negative = false;
+                    if (integerConstant(*count, negative)) {
+                        if (negative) {
+                            int64_t signedValue = 0;
+                            std::string text = "-1";
+                            if (readSignedConstant(*count, signedValue) ==
+                                ConstantRead::Ok) {
+                                text = std::to_string(signedValue);
+                            }
+                            error(*node.right,
+                                  fmt::format("Shift count {} out of range for {}-bit '{}'",
+                                              text, info->bits, leftType->toString()));
+                            lastExprType = nullptr;
+                            return;
+                        }
+                        uint64_t magnitude = 0;
+                        if (readConstant(*count, magnitude) != ConstantRead::Ok ||
+                            magnitude >= info->bits) {
+                            std::string text = "large";
+                            if (readConstant(*count, magnitude) == ConstantRead::Ok) {
+                                text = std::to_string(magnitude);
+                            } else if (auto* lit =
+                                           dynamic_cast<const Literal*>(count)) {
+                                text = lit->value;
+                            }
+                            error(*node.right,
+                                  fmt::format("Shift count {} out of range for {}-bit '{}'",
+                                              text, info->bits, leftType->toString()));
+                            lastExprType = nullptr;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Arithmetic on two integers of different widths yields the wider of the two.
     //
     // tests/samples/stdlib/stdio.fin:115 writes `self.stream[i+self.pointer]` with `i`
@@ -916,6 +1087,12 @@ void SemanticAnalyzer::visit(UnaryOp& node) {
         }
         if (!isIncrementable(type)) {
             error(node, fmt::format("Cannot {} a value of type '{}'", verb, type->toString()));
+        }
+        // Wave-4 step 17 (W7): `i++` writes `i`, so it revives like the
+        // assignment it is checked as. The operand walk above already
+        // diagnosed a read of a moved variable, so this is write-only.
+        if (!injectedWalk_) {
+            if (auto* id = dynamic_cast<Identifier*>(node.operand.get())) moved_.assign(id->name);
         }
         // The type either way: `let n <int> = i++;` is an int, and reporting the
         // operand's type after refusing the operator keeps one diagnostic to one
@@ -1368,9 +1545,33 @@ std::shared_ptr<Type> SemanticAnalyzer::checkGenericCall(ASTNode& node, const ch
 
     checkCallArity(node, kind, name, sig, args.size());
 
+    // The seed and the hint already bound what they bind above, so a preliminary
+    // instantiation is available before the arguments are walked. Each argument of a
+    // static call is offered its preliminary parameter as a hint while it is walked --
+    // the same offer checkCallArguments makes -- so a nested elided call
+    // (`G::clone(G::zero())`) infers its Self from the outer call's instantiation
+    // instead of keeping the template. Gated on a static receiver: free functions
+    // and constructors keep the walk they always had, including the array-narrowing
+    // diagnostic their tests pin. The arguments still unify afterwards, so a wrong
+    // argument still refuses at the final check below.
+    std::shared_ptr<FunctionType> prelimSig;
+    if (owner) {
+        std::shared_ptr<Type> prelimOwner;
+        if (mentionsGenericParam(owner)) {
+            prelimOwner = owner->instantiate(orderedGenericArgs(owner, mapping));
+        }
+        prelimSig = std::dynamic_pointer_cast<FunctionType>(sig.substitute(mapping, prelimOwner));
+    }
+
     std::vector<std::shared_ptr<Type>> argTypes;
-    for (auto& arg : args) {
-        arg->accept(*this);
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (prelimSig && i < prelimSig->param_types.size()) {
+            typeHintFor = args[i].get();
+            typeHint = prelimSig->param_types[i];
+        }
+        args[i]->accept(*this);
+        typeHintFor = nullptr;
+        typeHint = nullptr;
         argTypes.push_back(lastExprType);
     }
     for (size_t i = 0; i < argTypes.size() && i < sig.param_types.size(); ++i) {
@@ -1428,11 +1629,35 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
             );
             if (lastExprType && !isPtr) {
                 error(*node.args[0], fmt::format("Argument to '@Free' must be a pointer, got '{}'",
-                                                 lastExprType->toString()));
+                                                  lastExprType->toString()));
             }
             auto voidType = currentScope->resolveType("void");
             if (!voidType) voidType = std::make_shared<PrimitiveType>("void");
             lastExprType = voidType;
+            return;
+        }
+        // Wave-4 step 17 (W7): `@move(x)` marks x moved (see MovedAnalysis).
+        // The owner's ownership spelling (docs/plan.md). Like Alloc/Free it
+        // wins over any user declaration of the same name on an `@`-call;
+        // the corpus declares none. The operand is walked first, so reading
+        // an already-moved variable reports there, once. The call's type is
+        // the operand's: moving changes ownership, not type. Lowering is the
+        // identity (ADR 0030: every binding copies); the `move_or_copy`
+        // protocol (wave 5) is what will change that.
+        if (node.name == "move") {
+            if (node.args.size() != 1) {
+                error(node, fmt::format("'@move' expects 1 argument, got {}", node.args.size()));
+                lastExprType = nullptr;
+                return;
+            }
+            node.args[0]->accept(*this);
+            if (!injectedWalk_) {
+                if (auto* id = dynamic_cast<Identifier*>(node.args[0].get())) {
+                    moved_.move(id->name);
+                } else {
+                    error(*node.args[0], "'@move' takes a named variable");
+                }
+            }
             return;
         }
         if (node.name == "implements") {
@@ -1503,6 +1728,154 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
 
     std::shared_ptr<FunctionType> funcType = nullptr;
     std::string funcName = node.name;
+    // A bare call that names a method of an enclosing struct binds the method
+    // (FRONTEND WINS, owner decision I1): `foo(self, v - 1)` inside `S::foo` is
+    // `S::foo`, not the free `foo` -- checked in the Method form with the
+    // receiver excluded (owner decision I2), and recorded for the backend to
+    // lower instead of the free function.
+    //
+    // The binding is the one the lookup below already computes: a method body
+    // registers its name in the struct body scope (visit(FunctionDeclaration&)),
+    // which shadows the global one. So this fires exactly where that
+    // registration is what the lookup would find. A name bound in a nearer
+    // scope (a parameter, a local, a nested function) keeps precedence and
+    // falls through, as does a name the struct scope does not carry (a free
+    // function, a later sibling, an inherited method), a name that builds a
+    // type (a constructor call), and a call with a written turbofish (whose
+    // free-path rule is booked elsewhere). Declaration order and inheritance
+    // keep their meaning; only the diagnostic identity changes, never the
+    // callee -- and the backend lowers what is recorded here.
+    if (funcName != "Self" && node.generic_args.empty() &&
+        !currentScope->resolveType(funcName)) {
+        const StructBodyScope* bodyEntry = nullptr;
+        for (Scope* s = currentScope.get(); s && !bodyEntry; s = s->parent) {
+            for (auto& e : structScopes_) {
+                if (e.scope == s) {
+                    bodyEntry = &e;
+                    break;
+                }
+            }
+        }
+        Scope* bodyScope = bodyEntry ? bodyEntry->scope : nullptr;
+        std::shared_ptr<StructType> bodyOwner =
+            bodyEntry ? std::dynamic_pointer_cast<StructType>(bodyEntry->structType)
+                      : nullptr;
+        if (bodyScope && bodyOwner) {
+            bool shadowed = false;
+            std::shared_ptr<Type> selfType;
+            for (Scope* s = currentScope.get(); s && s != bodyScope; s = s->parent) {
+                if (s->symbols.count(funcName)) shadowed = true;
+                if (!selfType) {
+                    auto sit = s->symbols.find("self");
+                    if (sit != s->symbols.end()) selfType = sit->second.type;
+                }
+            }
+            auto scopeIt = shadowed ? bodyScope->symbols.end()
+                                    : bodyScope->symbols.find(funcName);
+            auto mit = (scopeIt != bodyScope->symbols.end())
+                           ? bodyOwner->methods.find(funcName)
+                           : bodyOwner->methods.end();
+            auto staticIt = (mit != bodyOwner->methods.end())
+                                ? bodyEntry->methodStatic.find(funcName)
+                                : bodyEntry->methodStatic.end();
+            auto* scopeSig = (mit != bodyOwner->methods.end() &&
+                              staticIt != bodyEntry->methodStatic.end() &&
+                              scopeIt->second.type)
+                                 ? scopeIt->second.type->as<FunctionType>()
+                                 : nullptr;
+            auto* tableSig = (mit != bodyOwner->methods.end() && mit->second)
+                                 ? mit->second->as<FunctionType>()
+                                 : nullptr;
+            // All three present, or no branch owns the name: a registration in
+            // one table without the others is not a shape this pass writes, so
+            // it falls through to the lookup below rather than guessing which
+            // part is stale.
+            if (scopeSig && tableSig) {
+                // Static comes off the declaration, which is the only record
+                // that distinguishes it: an instance method without a written
+                // `self` registers the same bare parameter list a static one
+                // does, and whether `self` is in scope says what the caller
+                // is, not the callee.
+                const bool isInstance = !staticIt->second;
+                // The receiver an instance call is checked against: the
+                // written `self` where one is written, else the caller's own
+                // `self`, which is a value of the same struct. Empty where a
+                // static caller names an instance method with no `self` to
+                // offer -- that call falls through rather than inventing one.
+                std::shared_ptr<Type> receiverType;
+                if (isInstance) {
+                    const bool hasWrittenSelf = scopeSig->param_types.size() >
+                                                tableSig->param_types.size();
+                    if (hasWrittenSelf && !scopeSig->param_types.empty())
+                        receiverType = scopeSig->param_types[0];
+                    else
+                        receiverType = selfType;
+                }
+                if (!isInstance || receiverType) {
+                    if (!injectedWalk_) noteLambdaUse(funcName);
+                    node.resolved_method_owner = bodyOwner->name;
+                    node.resolved_method_static = !isInstance;
+                    // The generic gate is the free path's: a parameter or the
+                    // return type that still mentions a generic parameter has
+                    // not been told which type it is, and the receiver unifies
+                    // from its argument position like any other parameter.
+                    bool bareIsGeneric = tableSig->return_type &&
+                        mentionsGenericParam(tableSig->return_type);
+                    if (!bareIsGeneric) {
+                        for (const auto& p : tableSig->param_types) {
+                            if (mentionsGenericParam(p)) { bareIsGeneric = true; break; }
+                        }
+                    }
+                    if (bareIsGeneric) {
+                        std::vector<std::shared_ptr<Type>> synthParams;
+                        if (isInstance) synthParams.push_back(receiverType);
+                        synthParams.insert(synthParams.end(),
+                                           tableSig->param_types.begin(),
+                                           tableSig->param_types.end());
+                        auto synth = std::make_shared<FunctionType>(
+                            synthParams, tableSig->return_type);
+                        lastExprType = checkGenericCall(
+                            node, isInstance ? "Method" : "Static method", funcName,
+                            *synth, node.args, nullptr, {});
+                        return;
+                    }
+                    if (!isInstance) {
+                        checkCallArguments(node, "Static method", funcName, *tableSig,
+                                           node.args);
+                        lastExprType = tableSig->return_type;
+                        return;
+                    }
+                    // The receiver is args[0] and takes no part in the arity,
+                    // which counts the method's own parameters -- the same
+                    // split a dot call gets, with the object written first.
+                    checkCallArity(node, "Method", funcName, *tableSig,
+                                   node.args.empty() ? 0 : node.args.size() - 1);
+                    const size_t expected = tableSig->param_types.size();
+                    for (size_t i = 0; i < node.args.size(); ++i) {
+                        if (i == 0) {
+                            typeHintFor = node.args[i].get();
+                            typeHint = receiverType;
+                        } else if (i - 1 < expected) {
+                            typeHintFor = node.args[i].get();
+                            typeHint = tableSig->param_types[i - 1];
+                        }
+                        node.args[i]->accept(*this);
+                        typeHintFor = nullptr;
+                        typeHint = nullptr;
+                        if (i == 0) {
+                            checkType(*node.args[i], lastExprType, receiverType);
+                        } else if (i - 1 < expected) {
+                            checkType(*node.args[i], lastExprType,
+                                      tableSig->param_types[i - 1]);
+                        }
+                    }
+                    lastExprType = tableSig->return_type;
+                    return;
+                }
+            }
+        }
+    }
+
     // The struct this call constructs, when the name resolved to one (Case 2
     // below): a constructor call, as opposed to a free function or an
     // enumerator that happens to return a generic struct. Only a constructor
@@ -1555,6 +1928,13 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
             Symbol* sym = currentScope->resolve(funcName);
             if (sym) {
                 funcType = std::dynamic_pointer_cast<FunctionType>(sym->type);
+                // Calling a closure-typed local reads the binding: inside a
+                // lambda that binding may be an outer frame's, which makes it
+                // a capture exactly as an Identifier use would. Filtered by
+                // noteLambdaUse itself (nested functions, templates and
+                // globals are not frame data), and skipped on the check walk
+                // like every other capture recording.
+                if (!injectedWalk_) noteLambdaUse(funcName);
             }
         }
     }
@@ -1575,10 +1955,10 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
     //
     // Paired positionally against the *return type's* parameters, which for a
     // constructor are the constructed struct's own, in declaration order. A free
-    // function's turbofish binds nothing -- a FunctionType has parameter types and no
-    // parameter names, so there is nothing to pair with; KnownDefect_Written-
-    // GenericArguments.AFreeFunctionsTurbofishBindsNothing books it and
-    // tests/samples/interfaces.fin:25 is the site.
+    // function's turbofish pairs against the function's own parameters in
+    // declaration order (functionGenericOrder_): a FunctionType carries parameter
+    // types and no names, so the declaration is what supplies them.
+    // tests/samples/interfaces.fin:25 is the corpus site (`print_any::<User>`).
     TypeMap written;
     if (!node.generic_args.empty()) {
         if (auto* retStruct = funcType->return_type ? funcType->return_type->as<StructType>() : nullptr) {
@@ -1601,6 +1981,31 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
                 if (t && !isErrorType(t)) written[retStruct->generic_args[i]->toString()] = t;
             }
         }
+        // Constructors are the struct path above. A free function returning a
+        // struct is that path too. Everything else pairs against the callee's own
+        // parameters in declaration order: a bare `T` return, a `[T]` or `&T`, or
+        // a parameter-only `fn(T) -> int` all bind here, and a turbofish on a
+        // non-generic callee reports the count rather than passing silently.
+        const bool isStructReturn =
+            funcType->return_type && funcType->return_type->as<StructType>();
+        if (written.empty() && !ctorTarget && !isStructReturn) {
+            if (auto* order = lookupFunctionGenerics(funcName)) {
+                // Fewer written than declared is not a check error: the rest is
+                // inferred and the backend refuses the arity
+                // (Soundness_GenericInference.APartialTurbofishIsCheckedButNot-
+                // Lowered). More written than declared is a mistake about the type.
+                if (node.generic_args.size() > order->size()) {
+                    error(node, fmt::format("Generic count mismatch: '{}' declares {} parameter(s), "
+                                            "the call writes {}",
+                                            funcName, order->size(), node.generic_args.size()));
+                }
+                const size_t n = std::min(node.generic_args.size(), order->size());
+                for (size_t i = 0; i < n; ++i) {
+                    auto t = resolveTypeOrError(node.generic_args[i].get());
+                    if (t && !isErrorType(t)) written[(*order)[i]] = t;
+                }
+            }
+        }
     }
 
     // A generic callee is instantiated from what is written to it.
@@ -1610,15 +2015,18 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
     // characters to its left. The sample could not say what a smart pointer is for
     // without saying it wrong.
     //
-    // The gate is the return type and not what kind of callee this is. A constructor was
-    // the first callee whose return type is the thing being named at the call site, but
-    // an enumerator is another (`Ok(10)`, tests/samples/enums.fin:44, bound by `extern
+    // The gate is what mentions a generic parameter, not what kind of callee
+    // this is. A constructor was the first callee whose return type is the
+    // thing being named at the call site, but an enumerator is another
+    // (`Ok(10)`, tests/samples/enums.fin:44, bound by `extern
     // Result::Ok as Ok;` on 19) and a generic free function is a third
-    // (Soundness_EnumInference.AGenericFreeFunctionInfersItsReturnFromItsArgument). What
-    // they have in common is the whole rule: a return type that still mentions a
-    // parameter has not been told which type it is, and the arguments and the hint are
-    // what tell it. Every other call is unaffected -- it goes through
-    // checkCallArguments in the order it always did.
+    // (Soundness_EnumInference.AGenericFreeFunctionInfersItsReturnFromItsArgument).
+    // What they have in common is the whole rule: a signature that still
+    // mentions a parameter has not been told which type it is, and the
+    // arguments and the hint are what tell it -- whether the parameter is in
+    // the return type (`fun first<T>(a: [T]) <T>`) or only in the parameters
+    // (`fun take<T>(b: Box<T>) <int>`). Every other call is unaffected -- it
+    // goes through checkCallArguments in the order it always did.
     //
     // Which is why `as<StructType>()` is no longer part of the condition. It used to
     // sit in front of mentionsGenericParam and narrow the rule back down to the case
@@ -1628,7 +2036,18 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
     // return types in exactly the same sense a `Box<T>` is, and unifyGeneric already
     // matched all three from the parameter side -- the gate was the only thing that
     // had not been told. Soundness_GenericReturn.
-    if (funcType->return_type && mentionsGenericParam(funcType->return_type)) {
+    //
+    // A written turbofish routes the same way even when the signature mentions
+    // nothing: `f::<string>(1)` for `fun f<T>(a: T) <int>` still has to check its
+    // argument against `string`. Without this the explicit argument is silently
+    // dropped and the call checks against the template.
+    bool sigIsGeneric = funcType->return_type && mentionsGenericParam(funcType->return_type);
+    if (!sigIsGeneric) {
+        for (const auto& p : funcType->param_types) {
+            if (mentionsGenericParam(p)) { sigIsGeneric = true; break; }
+        }
+    }
+    if (sigIsGeneric || !written.empty()) {
         lastExprType = checkGenericCall(node, "Function", funcName, *funcType, node.args,
                                         nullptr, std::move(written));
         // A constructor that wrote no turbofish: what inference found is
@@ -1706,9 +2125,87 @@ void SemanticAnalyzer::lowerModuleCall(MethodCall& node, const NamespaceType& ns
 }
 
 void SemanticAnalyzer::visit(MethodCall& node) {
-    node.object->accept(*this);
+    // The receiver-side half of checkGenericCall's preliminary offer (ES1): the
+    // hint on the whole chain seeds the receiver. `Box::zero().get()` under
+    // `<int>` unifies `get`'s return `T` with `int`, instantiates the receiver
+    // to `&Box<int>`, and walks it once -- with that hint -- so the inner
+    // `zero()` infers instead of keeping the template and reporting
+    // `expected 'int', got 'T'`. Gated on a hint, a generic return and a
+    // generic receiver: concrete receivers and hintless chains walk as before,
+    // and an explicit turbofish stays checked outright. Discovery is quiet and
+    // injected (no diagnostic, no moved/lambda/fire side-effect); the real
+    // walk below reports once.
+    auto outerHint = hintFor(node);
+    std::shared_ptr<Type> prelimRecvHint;
+    if (outerHint && !isErrorType(outerHint)) {
+        auto savedHintFor = typeHintFor;
+        auto savedHint = typeHint;
+        auto savedLast = lastExprType;
+        const bool savedInjected = injectedWalk_;
+        typeHintFor = nullptr;
+        typeHint = nullptr;
+        injectedWalk_ = true;
+        std::shared_ptr<Type> discObj;
+        std::shared_ptr<StructType> discStruct;
+        std::shared_ptr<Type> discMethod;
+        {
+            QuietPass quiet(*this);
+            node.object->accept(*this);
+            discObj = lastExprType;
+            if (discObj && !isErrorType(discObj)) {
+                if (auto st = getStructType(discObj, currentScope)) {
+                    if (auto mt = st->getMethodType(node.method_name)) {
+                        discStruct = st;
+                        discMethod = mt;
+                    }
+                }
+            }
+        }
+        typeHintFor = savedHintFor;
+        typeHint = savedHint;
+        lastExprType = savedLast;
+        injectedWalk_ = savedInjected;
+        if (discStruct && discMethod) {
+            if (auto* sig = discMethod->as<FunctionType>()) {
+                if (mentionsGenericParam(sig->return_type) && mentionsGenericParam(discObj)) {
+                    TypeMap mapping;
+                    unifyGeneric(sig->return_type, outerHint, mapping);
+                    if (!mapping.empty()) {
+                        std::shared_ptr<Type> prelimOwner;
+                        if (mentionsGenericParam(discStruct)) {
+                            prelimOwner =
+                                discStruct->instantiate(orderedGenericArgs(discStruct, mapping));
+                        }
+                        if (auto prelim = discObj->substitute(mapping, prelimOwner)) {
+                            if (!typesEqual(prelim, discObj)) {
+                                const bool readable =
+                                    dynamic_cast<StaticMethodCall*>(node.object.get()) ||
+                                    dynamic_cast<FunctionCall*>(node.object.get()) ||
+                                    dynamic_cast<MethodCall*>(node.object.get()) ||
+                                    dynamic_cast<StructInstantiation*>(node.object.get()) ||
+                                    dynamic_cast<ArrayLiteral*>(node.object.get());
+                                if (readable) prelimRecvHint = prelim;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (prelimRecvHint) {
+        auto savedHintFor = typeHintFor;
+        auto savedHint = typeHint;
+        typeHintFor = node.object.get();
+        typeHint = prelimRecvHint;
+        node.object->accept(*this);
+        typeHintFor = savedHintFor;
+        typeHint = savedHint;
+    } else {
+        node.object->accept(*this);
+    }
     auto objType = lastExprType;
-    
+
     if (!objType) return; 
 
     // A call through a module qualifier: `stdio.printf("Big")`, complex.fin:14, whose
@@ -1790,13 +2287,64 @@ void SemanticAnalyzer::visit(MethodCall& node) {
         return;
     }
 
+    // Mirrors the field-visibility rule in visit(MemberAccess&): a `priv` method
+    // is callable from the declaring type's own methods and refused everywhere
+    // else, with the member named the same way. The call is still checked and
+    // typed below so one mistake stays one diagnostic.
+    if (!structType->isMethodPublic(node.method_name)) {
+        const bool internal = currentStructContext && currentStructContext->equals(*structType);
+        if (!internal) {
+            error(node, fmt::format("Cannot access private method '{}' of struct '{}'",
+                                    node.method_name, structType->name));
+        }
+    }
+
     // Assigned *after* the arguments are walked, and that is the whole of a bug this
     // unit found rather than set out to fix: `lastExprType = retType` used to come
     // first, so every argument overwrote the call's type and `s.m("x")` on a method
     // returning int was typed `string`. It reported a mismatch that did not exist and
     // accepted one that did. Soundness_MethodCalls.ACallsTypeIsItsReturnTypeNotIts-
     // LastArgument holds both halves.
+    //
+    // A generic method is instantiated from what is written to it -- the call's
+    // turbofish first, then the hint on the call's result, then the arguments --
+    // exactly as a free call is (checkGenericCall). Without this the parameters
+    // stay the template and every use reports `got 'T'` about a name only the
+    // declaration ever wrote.
     if (auto* sig = methodType->as<FunctionType>()) {
+        bool isGeneric = mentionsGenericParam(sig->return_type);
+        if (!isGeneric) {
+            for (auto& p : sig->param_types) {
+                if (mentionsGenericParam(p)) { isGeneric = true; break; }
+            }
+        }
+        if (isGeneric || !node.generic_args.empty()) {
+            TypeMap written;
+            if (!node.generic_args.empty()) {
+                if (auto* order = lookupMethodGenerics(structType, node.method_name)) {
+                    // Fewer written than declared infers the rest (the free-function
+                    // partial-turbofish rule); more written is a mistake about the type.
+                    if (node.generic_args.size() > order->size()) {
+                        error(node, fmt::format("Generic count mismatch: '{}' declares {} parameter(s), "
+                                                "the call writes {}",
+                                                node.method_name, order->size(),
+                                                node.generic_args.size()));
+                    }
+                    const size_t n = std::min(node.generic_args.size(), order->size());
+                    for (size_t i = 0; i < n; ++i) {
+                        auto t = resolveTypeOrError(node.generic_args[i].get());
+                        if (t && !isErrorType(t)) written[(*order)[i]] = t;
+                    }
+                } else if (!isGeneric) {
+                    error(node, fmt::format("Generic count mismatch: '{}' declares 0 parameter(s), "
+                                            "the call writes {}",
+                                            node.method_name, node.generic_args.size()));
+                }
+            }
+            lastExprType = checkGenericCall(node, "Method", node.method_name, *sig,
+                                            node.args, nullptr, std::move(written));
+            return;
+        }
         checkCallArguments(node, "Method", node.method_name, *sig, node.args);
         lastExprType = sig->return_type;
     } else {
@@ -2264,6 +2812,10 @@ void SemanticAnalyzer::visit(NewExpression& node) {
         }
         if (!element) { lastExprType = nullptr; return; }
         lastExprType = std::make_shared<ArrayType>(element);
+        // Wave-4 step 17 (W6 floor): `new [T, n]` is an allocation_site
+        // carrying the allocated (array) type (docs/compiler-api.md §3.2).
+        noteFirePoint({"allocation_site", current_function_, node.loc.begin.line,
+                       lastExprType->toString()});
         return;
     }
 
@@ -2296,6 +2848,10 @@ void SemanticAnalyzer::visit(NewExpression& node) {
     // draws anywhere else. An array *literal* is fixed instead: it states its
     // elements rather than an extent.
     lastExprType = std::make_shared<PointerType>(allocatedType);
+    // Wave-4 step 17 (W6 floor): each `new` is an allocation_site fire point
+    // carrying the allocated type (docs/compiler-api.md §3.2).
+    noteFirePoint({"allocation_site", current_function_, node.loc.begin.line,
+                   allocatedType->toString()});
 }
 
 void SemanticAnalyzer::visit(MemberAccess& node) {
@@ -2352,6 +2908,11 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
         lastExprType = resolveCompilerApi(node, *api, node.member, nullptr, nullptr);
         return;
     }
+
+    // The hybrid layout-member rule: `t.size` on a `$type`/`$struct` value reads
+    // through the `layout` component and needs its grant, exactly as the
+    // `compiler.layout.size_of(t)` call does. True means handled.
+    if (tryLayoutMember(node, objType)) return;
 
     // `v.0` -- a member by position, which two kinds of type have and no other does.
     //
@@ -2721,6 +3282,12 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
 
     declareGenericParams(node.generic_params);
 
+    // The capture frame, pushed after the lambda's scope exists so uses in the
+    // body can be told inside from outside: a name resolving at or inside
+    // lambdaScope is the lambda's own, one resolving outside it (but below the
+    // global scope) is a capture. Popped before exitScope below.
+    lambdaCaptures_.push_back({&node, currentScope.get()});
+
     std::shared_ptr<Type> retType = nullptr;
     if (node.return_type) {
         retType = resolveTypeFromAST(node.return_type.get());
@@ -2750,9 +3317,23 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
     // declaration and so was never in the list.
     visitParameterDefaults(node.params);
 
+    // Wave-4 step 17 (W7): a lambda may run later or never, so effects on
+    // outer variables join as maybe-run, and the boundary stops a `return`
+    // or `break` inside from unwinding the enclosing function or loop. The
+    // body block still tracks its own locals. Skipped on the check walk.
+    const bool w7track = !injectedWalk_;
+    events::MovedAnalysis::Snapshot w7pre;
+    if (w7track) {
+        moved_.enterLambda();
+        w7pre = moved_.snapshot();
+    }
+
     auto prevRet = context.currentFuncReturnType;
     context.currentFuncReturnType = retType;
-    
+
+    // Wave-4 step 20 (W10): loop depth is body-local, as in a function.
+    const int savedLoopDepth = loopDepth_;
+    loopDepth_ = 0;
     if (node.body) {
         node.body->accept(*this);
     } else if (node.expression_body) {
@@ -2761,8 +3342,14 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
             checkType(*node.expression_body, lastExprType, retType);
         }
     }
-    
+
+    if (w7track) {
+        moved_.installJoin(w7pre, moved_.snapshot());
+        moved_.exitLambda();
+    }
+    loopDepth_ = savedLoopDepth;
     context.currentFuncReturnType = prevRet;
+    lambdaCaptures_.pop_back();
     exitScope();
     
     // Not when the return type did not resolve: FunctionType dereferences it in
@@ -2780,16 +3367,48 @@ void SemanticAnalyzer::visit(LambdaExpression& node) {
 }
 
 void SemanticAnalyzer::visit(QuoteExpression& node) {
+    // Wave-4 step 19: inside a handler for a known event a quote is data, not
+    // code. The block is not analysed as live code at the declaration — doing
+    // so reports the handler's own text as a user error with no attribution —
+    // and is checked once, after splicing, with the handler's identity. The
+    // expression still types as a quote, exactly as when the block is walked.
+    if (inHandler_) {
+        lastExprType = currentScope->resolveType("auto");
+        return;
+    }
     if (node.block) node.block->accept(*this);
     lastExprType = currentScope->resolveType("auto");
 }
 
 void SemanticAnalyzer::visit(TernaryOp& node) {
     node.condition->accept(*this);
+    // Wave-4 step 17 (W7): exactly one arm runs, so the arms fork and join
+    // like an if/else. A move in one arm only is Maybe past the join.
+    if (injectedWalk_) {
+        node.true_expr->accept(*this);
+        auto t = lastExprType;
+        node.false_expr->accept(*this);
+        auto f = lastExprType;
+        if (t && f) {
+            if (constantFitsType(*node.false_expr, *t)) {
+                lastExprType = t;
+            } else if (constantFitsType(*node.true_expr, *f)) {
+                lastExprType = f;
+            } else {
+                checkType(*node.false_expr, f, t);
+                lastExprType = t;
+            }
+        }
+        return;
+    }
+    auto snap = moved_.snapshot();
     node.true_expr->accept(*this);
     auto t = lastExprType;
+    auto thenEnd = moved_.snapshot();
+    moved_.restore(snap);
     node.false_expr->accept(*this);
     auto f = lastExprType;
+    moved_.installJoin(thenEnd, moved_.snapshot());
     if (t && f) {
         // A ternary has no expected branch either. When one branch is an integer
         // constant it takes the other branch's type, and the *other* branch's type
@@ -2986,6 +3605,17 @@ void SemanticAnalyzer::visit(StaticMethodCall& node) {
         return;
     }
 
+    // Mirrors the instance-call rule in visit(MethodCall&): a `priv` method is
+    // callable from the declaring type's own methods and refused everywhere
+    // else, with the member named the same way.
+    if (!structType->isMethodPublic(node.method_name)) {
+        const bool internal = currentStructContext && currentStructContext->equals(*structType);
+        if (!internal) {
+            error(node, fmt::format("Cannot access private method '{}' of struct '{}'",
+                                    node.method_name, structType->name));
+        }
+    }
+
     // 5. Analyze Args
     //
     // Against the same stored signature as an instance call, which is the signature as
@@ -3009,8 +3639,9 @@ void SemanticAnalyzer::visit(StaticMethodCall& node) {
         // call already gets for free because its receiver was instantiated.
         //
         // Gated on the target still mentioning a parameter, so `Vec2::<float>::f(...)`
-        // and every static call on a non-generic struct go through checkCallArguments
-        // untouched, in the order they always did.
+        // and every static call whose signature mentions none go through
+        // checkCallArguments untouched, in the order they always did. A generic
+        // signature on a concrete target takes the branch below it.
         //
         // The hint is read for the same reason: two of the three corpus sites --
         // `Vec2::from_angle(0.7854)` (letssee.fin:59) and `Vec2::zero()` (:77) -- have no
@@ -3021,6 +3652,45 @@ void SemanticAnalyzer::visit(StaticMethodCall& node) {
             lastExprType = checkGenericCall(node, "Static method", node.method_name, *sig,
                                             node.args, structType, {}, &ownerInstance);
             recordResolvedTarget(node, ownerInstance);
+            return;
+        }
+
+        // A generic signature on a concrete target: `S::take(b)` for
+        // `static fun take<T>(b: Box<T>) <int>` has no generic target to
+        // infer from, but the arguments still say what T is. The free-call
+        // rule in the same file, with the target as `Self`'s answer where
+        // the signature spells it. A written turbofish binds first, exactly
+        // as a method call's does -- without this it is silently dropped
+        // and the call checks against the template.
+        bool staticSigIsGeneric = sig->return_type && mentionsGenericParam(sig->return_type);
+        if (!staticSigIsGeneric) {
+            for (const auto& p : sig->param_types) {
+                if (mentionsGenericParam(p)) { staticSigIsGeneric = true; break; }
+            }
+        }
+        if (staticSigIsGeneric || !node.generic_args.empty()) {
+            TypeMap staticWritten;
+            if (!node.generic_args.empty()) {
+                if (auto* order = lookupMethodGenerics(structType, node.method_name)) {
+                    if (node.generic_args.size() > order->size()) {
+                        error(node, fmt::format("Generic count mismatch: '{}' declares {} parameter(s), "
+                                                "the call writes {}",
+                                                node.method_name, order->size(),
+                                                node.generic_args.size()));
+                    }
+                    const size_t n = std::min(node.generic_args.size(), order->size());
+                    for (size_t i = 0; i < n; ++i) {
+                        auto t = resolveTypeOrError(node.generic_args[i].get());
+                        if (t && !isErrorType(t)) staticWritten[(*order)[i]] = t;
+                    }
+                } else if (!staticSigIsGeneric) {
+                    error(node, fmt::format("Generic count mismatch: '{}' declares 0 parameter(s), "
+                                            "the call writes {}",
+                                            node.method_name, node.generic_args.size()));
+                }
+            }
+            lastExprType = checkGenericCall(node, "Static method", node.method_name, *sig,
+                                            node.args, structType, std::move(staticWritten));
             return;
         }
 

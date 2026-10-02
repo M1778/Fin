@@ -109,6 +109,8 @@ pub const TOKEN_ARROW <int> = 102;
 pub const TOKEN_RARROW <int> = 103;
 pub const TOKEN_DOUBLE_COLON <int> = 104;
 pub const TOKEN_ELLIPSIS <int> = 105;
+pub const TOKEN_SHL <int> = 106;
+pub const TOKEN_SHR <int> = 107;
 
 // Delimiters
 pub const TOKEN_LPAREN <int> = 110;
@@ -126,6 +128,11 @@ pub const TOKEN_AT <int> = 121;
 pub const TOKEN_HASH <int> = 122;
 pub const TOKEN_DOLLAR <int> = 123;
 pub const TOKEN_PIPE <int> = 124;
+
+// Scanner hard-error token: the lexer could not produce source for this span
+// (unterminated literal/comment, bad byte). The diagnostic text rides in
+// Token.text so the parser reports it instead of guessing.
+pub const TOKEN_ERROR <int> = 125;
 
 // Token Kind Accessor Functions (for cross-module calls)
 #[export] pub fun tok_eof() <int> { return 0; }
@@ -189,6 +196,8 @@ pub const TOKEN_PIPE <int> = 124;
 #[export] pub fun tok_minusequal() <int> { return 99; }
 #[export] pub fun tok_multequal() <int> { return 100; }
 #[export] pub fun tok_divequal() <int> { return 101; }
+#[export] pub fun tok_shl() <int> { return 106; }
+#[export] pub fun tok_shr() <int> { return 107; }
 
 #[export] pub fun tok_lparen() <int> { return 110; }
 #[export] pub fun tok_rparen() <int> { return 111; }
@@ -204,10 +213,21 @@ pub const TOKEN_PIPE <int> = 124;
 #[export] pub fun tok_arrow() <int> { return 102; }
 #[export] pub fun tok_rarrow() <int> { return 103; }
 #[export] pub fun tok_pipe() <int> { return 124; }
+#[export] pub fun tok_error() <int> { return 125; }
 #[export] pub fun tok_at() <int> { return 121; }
 #[export] pub fun tok_hash() <int> { return 122; }
 #[export] pub fun tok_double_colon() <int> { return 104; }
 #[export] pub fun tok_question() <int> { return 120; }
+#[export] pub fun kw_macro() <int> { return 22; }
+#[export] pub fun kw_quote() <int> { return 59; }
+#[export] pub fun tok_dollar() <int> { return 123; }
+#[export] pub fun kw_extern() <int> { return 36; }
+#[export] pub fun kw_as() <int> { return 38; }
+#[export] pub fun kw_readonly() <int> { return 17; }
+#[export] pub fun kw_type() <int> { return 52; }
+#[export] pub fun kw_class() <int> { return 53; }
+#[export] pub fun kw_implements() <int> { return 54; }
+#[export] pub fun kw_special() <int> { return 56; }
 
 #[export]
 pub struct SourceLocation {
@@ -339,6 +359,8 @@ pub fun token_name(kind: int) <string> {
     if (kind == 103) { return "->"; }
     if (kind == 104) { return "::"; }
     if (kind == 105) { return "..."; }
+    if (kind == 106) { return "<<"; }
+    if (kind == 107) { return ">>"; }
 
     if (kind == 110) { return "("; }
     if (kind == 111) { return ")"; }
@@ -374,7 +396,7 @@ pub fun is_literal(kind: int) <bool> {
 // Checks if a token kind is an operator.
 #[export]
 pub fun is_operator(kind: int) <bool> {
-    return kind >= 80 && kind <= 105;
+    return kind >= 80 && kind <= 107;
 }
 
 #[llvm_name="strcmp"]

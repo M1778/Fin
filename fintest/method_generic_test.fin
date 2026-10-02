@@ -1,0 +1,21 @@
+import { assert_eq_int } from testing::std;
+
+// Pins p02: generic method set_x<U> with its own type param writes through.
+// Green on both compilers (finc + finc_stage2); bare prints converted to asserts.
+struct Box<T> {
+    val <T>,
+
+    fun set_x<U>(new_x: U) <noret> {
+        self.val = cast<T>(new_x);
+    }
+
+    fun get(self: &Self) <T> {
+        return self.val;
+    }
+}
+
+fun main() <noret> {
+    let b <Box<int>> = Box::<int>{ val: 0 };
+    b.set_x(41);
+    assert_eq_int(b.get(), 41, "method_generic: set_x<U> writes through");
+}

@@ -1,0 +1,9 @@
+import { assert_eq_int } from testing::std;
+
+// Pins `main(args: [string])` returning int: the argv shape composes with an
+// integer status, and 0 exits clean.
+// Green on both compilers (finc + finc_stage2).
+fun main(args: [string]) <int> {
+    assert_eq_int(args.length, 0, "argv_int: empty argv gives length 0");
+    return 0;
+}

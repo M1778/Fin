@@ -1,0 +1,20 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_b04: nested generics through free fns (unbox/rewrap, Box<Box<int>>).
+// Green on both compilers (finc + finc_stage2).
+struct Box<T> {
+    val <T>
+}
+
+fun unbox<T>(b: Box<T>) <T> { return b.val; }
+fun rewrap<T>(b: Box<T>) <Box<T>> { return Box::<T>{ val: b.val }; }
+
+fun main() <noret> {
+    let inner <Box<int>> = Box::<int>{ val: 9 };
+    let outer <Box<Box<int>>> = Box::<Box<int>>{ val: inner };
+    assert_eq_int(unbox(inner), 9, "nested_free: direct unbox");
+    let tmp <Box<int>> = unbox(outer);
+    assert_eq_int(unbox(tmp), 9, "nested_free: double unbox");
+    let rw <Box<int>> = rewrap(inner);
+    assert_eq_int(rw.val, 9, "nested_free: rewrap preserves value");
+}

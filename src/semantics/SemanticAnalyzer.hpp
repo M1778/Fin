@@ -7,6 +7,12 @@
 #include "../types/Type.hpp"
 #include "../types/CompilerApiType.hpp"
 #include "CompilerApi.hpp"
+#include "EventFiring.hpp"
+#include "EventPayloads.hpp"
+#include "EventRegistry.hpp"
+#include "LoopBackEdge.hpp"
+#include "MovedAnalysis.hpp"
+#include <set>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -24,6 +30,8 @@ class StructType; // buildOperatorSignature takes the owner, to look a method up
 class ArrayType;  // checkIndexInBounds reads its extent
 class PrototypeType; // checkPrototypeMethod reads its key and value types
 class NamespaceType; // lowerModuleCall names the qualifier it resolved through
+class SpecialDeclaration; // collectProvider reads the bearer's contract
+class MemberAccess; // tryLayoutMember reads the member-access site
 
 struct AnalysisContext {
     bool inLoop = false;
@@ -41,6 +49,61 @@ public:
     void setExternalGlobalScope(const std::shared_ptr<Scope>& scope);
     
     std::shared_ptr<Scope> getGlobalScope() { return globalScope; }
+
+    // Wave-4 step 15 (docs/compiler-api.md §3.4): the `#[on(...)]` subscription
+    // table this analyzer collected, and the set its Arm phase armed. A test
+    // hook and the firing slice's seam: firing reads the ordered armed handlers
+    // from here rather than re-deriving them. Each analyzer collects its own
+    // module; cross-module merging with loader-canonical paths is the firing
+    // slice's, not this one's.
+    const events::EventRegistry& eventRegistry() const { return event_registry_; }
+    // Wave-4 step 17 (W6 floor): fire points for function_entry/function_exit,
+    // assignment, allocation_site/delete_site (docs/compiler-api.md §3.2).
+    // Recorded during analysis with no diagnostic of their own, so a program
+    // that fires them compiles exactly as before. W5's firing pass reads the
+    // points from here rather than re-deriving where they are; each analyzer
+    // records its own module, as with the registry above.
+    const std::vector<events::FirePoint>& firePoints() const { return event_fire_points_; }
+    void noteFirePoint(events::FirePoint point) {
+        // Injected code does not fire events (§3.3): the post-splice check
+        // walk visits spliced statements, and a `return` or `delete` in them
+        // recording a fire point would arm a second firing off code no handler
+        // was ever invoked for.
+        if (injectedWalk_) return;
+        event_fire_points_.push_back(std::move(point));
+    }
+    // Wave-4 step 17 (W5 floor): this module's W5 fire points, the pre-pass
+    // refused set, and the fired log. variable_declared points accumulate
+    // during the walk and fire deferred at the end of visit(Program&)
+    // (splicing mid-walk would mutate the vector being walked);
+    // struct_layout_finalised fires inline at the end of
+    // visit(StructDeclaration&), so it lands before any later body is
+    // analysed. Both append to the same log in fire order.
+    const std::vector<events::W5FirePoint>& w5FirePoints() const { return w5_points_; }
+    const std::vector<events::FiredHandler>& w5Fired() const { return w5_fired_; }
+    // Wave-4 step 17 (W7): this module's variable_scope_exit points, the
+    // pre-pass refused set, and the fired log. Points accumulate during the
+    // walk (one per variable per exit path, carrying the moved state on that
+    // path) and fire deferred at the end of visit(Program&), like W5's.
+    const std::vector<events::ScopeExitPoint>& w7FirePoints() const { return moved_.points(); }
+    const std::vector<events::W7FiredHandler>& w7Fired() const { return w7_fired_; }
+    // Wave-4 step 20 (W10): this module's loop_back_edge latch points, the
+    // pre-pass refused set, and the fired log. Points accumulate during the
+    // walk (one per loop statement, carrying the form and the function-local
+    // nesting depth) and fire deferred at the end of visit(Program&), like
+    // W5's and W7's.
+    const std::vector<events::LoopBackEdgePoint>& w10FirePoints() const { return w10_points_; }
+    const std::vector<events::W10FiredHandler>& w10Fired() const { return w10_fired_; }
+    // The function whose body is being walked, or "<root>" outside one. Names
+    // the site a fire point belongs to. Set and restored by
+    // visit(FunctionDeclaration&), which also covers methods; returns in
+    // constructors, operators, destructors and lambdas record nothing until
+    // those bodies track it too.
+    const std::string& currentFunction() const { return current_function_; }
+    // Which module this analyzer is analysing, recorded on every handler for
+    // the Q10 ordering. The driver and loader do not set it yet (the firing
+    // slice wires them); until then every module reports "<root>".
+    void setModulePath(const std::string& path) { module_path_ = path; }
 
     // --- Visitor Implementation ---
     void visit(Program& node) override;
@@ -126,6 +189,10 @@ public:
     void visit(StaticMethodCall& node) override;
     void visit(Parameter& node) override;
     void visit(StructMember& node) override;
+    // Wave 4 slice 1b: attributes are checkable. The override validates one
+    // attribute (known name and shape); the declarations walk their vectors to
+    // it through validateAttributes below.
+    void visit(Attribute& node) override;
 
 private:
     DiagnosticEngine& diag;
@@ -203,6 +270,105 @@ private:
     // one written under it.
     std::vector<std::string> currentGrants;
 
+    // Wave-4 step 15: this module's event subscriptions and armed set, and the
+    // module path recorded on them. See eventRegistry()/setModulePath above.
+    events::EventRegistry event_registry_;
+    std::string module_path_ = "<root>";
+    // Wave-4 step 17 (W6 floor): the §3.2 fire points this module recorded,
+    // and the function whose body is being walked ("<root>" outside one).
+    std::vector<events::FirePoint> event_fire_points_;
+    std::string current_function_ = "<root>";
+    // Wave-4 step 17 (W5 floor): this module's W5 points, the pre-pass
+    // refused set, the fired log, and the program being walked (for the
+    // inline struct_layout_finalised fire, which needs the handler bodies).
+    std::vector<events::W5FirePoint> w5_points_;
+    std::set<std::string> w5_refused_;
+    std::vector<events::FiredHandler> w5_fired_;
+    Program* w5_program_ = nullptr;
+    // Wave-4 step 17 (W7): the moved-state machine (see MovedAnalysis.hpp),
+    // this module's scope-exit points, and the pre-pass refused set. The
+    // machine rides the main walk through one-liner hooks in the impl files;
+    // all state lives in it, so a bug there cannot corrupt a scope.
+    events::MovedAnalysis moved_;
+    std::set<std::string> w7_refused_;
+    std::vector<events::W7FiredHandler> w7_fired_;
+    // Wave-4 step 20 (W10): this module's loop_back_edge latch points, the
+    // pre-pass refused set, the fired log, and the function-local loop
+    // nesting depth (1 = outermost). Saved and reset on function and lambda
+    // entry, so a loop inside a nested body starts at 1 again.
+    std::vector<events::LoopBackEdgePoint> w10_points_;
+    std::set<std::string> w10_refused_;
+    std::vector<events::W10FiredHandler> w10_fired_;
+    int loopDepth_ = 0;
+    // Lambda capture analysis (closure slice 1). One frame per lambda whose
+    // body is being walked, innermost last. visit(LambdaExpression&) pushes
+    // after entering the lambda's scope and pops before leaving it; every
+    // Identifier resolved to a function-local binding outside the lambda is
+    // recorded on each enclosing frame it is outside of, so a nested lambda's
+    // captures propagate to the outer lambda whose env provides them at
+    // runtime. Codegen builds one env struct per lambda from `captures`.
+    struct LambdaCaptureFrame {
+        LambdaExpression* node = nullptr;
+        Scope* lambdaScope = nullptr;
+    };
+    std::vector<LambdaCaptureFrame> lambdaCaptures_;
+    // The scopes opened for struct/class bodies and implements blocks, innermost
+    // last, each with the type whose methods it holds. A bare call naming one of
+    // the struct's own methods resolves through this scope (visit(Function-
+    // Declaration&) registers the method there), which shadows a free function
+    // of the same name. visit(FunctionCall&) reads the stack to tell that
+    // binding apart from a free one with no change to lookup order: pushed where
+    // currentStructContext is set for bodies, popped with the scope.
+    struct StructBodyScope {
+        std::shared_ptr<Type> structType;
+        Scope* scope = nullptr;
+        // Whether each method the body declares is static, read off the
+        // declaration. The scope registration cannot say: an instance method
+        // without a written `self` registers the same bare parameter list a
+        // static one does, and whether `self` is in scope says what the
+        // *caller* is, not the callee.
+        std::unordered_map<std::string, bool> methodStatic;
+    };
+    std::vector<StructBodyScope> structScopes_;
+    // Records a use of `name` (read or write: both need the env field) on
+    // every enclosing lambda it is a capture for. No-op outside any lambda.
+    void noteLambdaUse(const std::string& name);
+    // Wave-4 step 19: the scope chain live at each variable_declared anchor,
+    // keyed by the anchored declaration. The post-splice check walks spliced
+    // statements inside a child of that scope, so injected code resolves the
+    // locals it was injected beside. The shared_ptrs keep the whole chain
+    // alive past the walk that built it (parents are raw pointers).
+    std::unordered_map<const Statement*, std::vector<std::shared_ptr<Scope>>> w5_scopes_;
+    // Wave-4 step 19: attribution active while the post-splice check walks
+    // injected code. Every diagnostic reported on a spliced node names the
+    // handler that wrote it and the event point that fired it (the
+    // Rust-derive lesson: an error in code the user never wrote must say
+    // whose handler wrote it). Empty outside that walk.
+    struct ActiveAttribution {
+        std::string handler;
+        std::string event;
+        std::string detail;
+        int line = -1;
+        bool active = false;
+    };
+    ActiveAttribution activeAttr_;
+    // Wave-4 step 19: inside a handler for a known event (`#[on(...)]`), a
+    // `quote` is data, not code: its block is not analysed as live code at
+    // the declaration. The quote is checked once, after splicing, attributed
+    // to the handler at its event point — which is also why an unarmed
+    // handler's bad quote compiles clean. Outside handlers nothing changes.
+    bool inHandler_ = false;
+    // Wave-4 step 19: inside the post-splice check walk. Fire-point
+    // recording is off (see noteFirePoint); the variable_declared recorder
+    // below reads this too.
+    bool injectedWalk_ = false;
+    // Checks spliced handler quotes after firing: walks each chunk's
+    // statements in a child of the anchor's scope with that chunk's
+    // attribution active, so a diagnostic in generated code names its
+    // handler and its event point. Analysis-time by design; codegen is
+    // untouched because a quote that does not check never reaches it.
+    void checkInjectedChunks(const std::vector<events::InjectedChunk>& chunks);
+
     // Reads `#[use(...)]` off a declaration's attributes: reports a malformed or
     // misspelled grant, fills `currentGrants`, and defines `compiler` in the current
     // scope when `#[use(compiler)]` is among them. Called from inside the
@@ -212,6 +378,75 @@ private:
     // one (parser.y says so at its own attribute helper), so this takes the vector.
     void applyUseAttributes(ASTNode& node,
                             const std::vector<std::unique_ptr<Attribute>>& attrs);
+
+    // Walks a declaration's attributes through accept, so visit(Attribute&)
+    // validates each. `withUse` is false where applyUseAttributes already
+    // checked `#[use(...)]` (function, @special): it binds there, and walking
+    // it again would report the same grant twice. `isSpecialBearer` is true on
+    // a `@special` only: `#[provides(...)]` is collected whole by
+    // collectProvider there, `#[protocol(...)]` by collectProtocol there, and
+    // both are refused on every other bearer here.
+    void validateAttributes(const std::vector<std::unique_ptr<Attribute>>& attrs,
+                            bool withUse = true, bool isSpecialBearer = false);
+
+    // The operations-layer gate (ADR 0012): reaching *through* a component
+    // needs its grant. Shared by the component-call path and the hybrid
+    // member-read path so the two cannot disagree about what "granted" means.
+    bool hasComponentGrant(const std::string& component) const;
+    bool requireComponentGrant(ASTNode& node, const std::string& component);
+
+    // The provider mechanism (§3.9, ADR 0014): one claim per slot per program.
+    // Collected from `#[provides(<slot>)]` on `@special` declarations; a
+    // second claimant for a slot is a diagnostic naming both.
+    struct ProviderClaim {
+        std::string slot;
+        std::string name;
+    };
+    std::vector<ProviderClaim> providerClaims_;
+    void collectProvider(SpecialDeclaration& node);
+
+    // The protocol mechanism (§3.7, ADR 0014, wave-5 slice 0): one claim per
+    // slot per program, mirroring the provider registry clause for clause.
+    // Collected from `#[protocol(<slot>)]` on `@special` declarations, armed
+    // by default (collecting IS the claim -- no per-site opt-in, exactly as
+    // providers need none). A second claimant for a slot is a diagnostic
+    // naming both sites; a lone well-formed claimant is recorded and refused
+    // by reportSingleProtocolClaims below (replacement is not lowered yet).
+    struct ProtocolClaim {
+        std::string slot;
+        std::string name;
+        int line = 0;
+        // The declaration, for the deferred not-lowered refusal's location.
+        // Non-owning and valid: claims are collected during visit(Program&)'s
+        // walk and reported before it returns, so the tree outlives every use.
+        SpecialDeclaration* node = nullptr;
+    };
+    std::vector<ProtocolClaim> protocolClaims_;
+    void collectProtocol(SpecialDeclaration& node);
+    // Refuses every slot with exactly one well-formed claimant except the
+    // ones whose slice landed (`move_or_copy` in slice 1, `destructor` in
+    // slice 2, `deallocate` in slice 3): the slot is recognized and the claimant recorded, but
+    // replacement is not lowered yet. Runs at the end of visit(Program&) so
+    // a second claimant still reports exclusivity instead of this. Slots
+    // with zero claimants report nothing: the default lowering stays
+    // byte-identical.
+    void reportSingleProtocolClaims();
+
+    // Wave-4 Round 3, Q11: warns when a `@special` body branches on a value
+    // read from the host (`compiler.system.get_*_memory`, `get_memorycard_model`).
+    // Reading is legal; branching makes the program depend on the build machine.
+    // Only direct reads and same-body `let`s are visible; taint through
+    // `@special` calls needs the interpreter's value model (ADR 0017) and stays
+    // open. `hasSystemGrant` gates the walk so an ungranted read (already an
+    // error) is not also a warning on the same line.
+    void warnOnHostBranch(SpecialDeclaration& node, bool hasSystemGrant);
+
+    // The hybrid layout-member rule: `t.size` on a `$type`/`$struct` value reads
+    // through the `layout` component and needs its grant, exactly as the
+    // `compiler.layout.size_of(t)` call does. True when the member was a layout
+    // member (handled, `lastExprType` set); false when this is not a layout
+    // read at all and the caller falls through to the old diagnostics.
+    bool tryLayoutMember(MemberAccess& node, const std::shared_ptr<Type>& objType);
 
     // Resolves `compiler.<member>` / `compiler.components.<member>` /
     // `compiler.<component>.<member>` for a *read*. `call` is the argument list when
@@ -242,12 +477,27 @@ private:
 
     void error(ASTNode& node, const std::string& msg);
 
-    // The same, with an explanation the compiler is sure of. It occupies the `= help:`
-    // row and so displaces the typo heuristic, which is the point: a rule the compiler
+    // The same, with an explanation the compiler is sure of. It occupies the `= help:`    // row and so displaces the typo heuristic, which is the point: a rule the compiler
     // can state outright is worth more than a guess at what the programmer meant. Added
     // for the builtin-macro table (ADR 0023 step 6), where the useful half of the
     // diagnostic is the list of macros the compiler does implement.
     void error(ASTNode& node, const std::string& msg, const std::string& help);
+
+    // A handler's `compiler.diag.warning` / `compiler.diag.note`, and any
+    // warning or note met while checking injected code. Reported, never
+    // failing: neither sets hasError, so neither can turn a clean build into
+    // a failing one. Both carry the active attribution, if any, exactly as
+    // error does.
+    void warning(ASTNode& node, const std::string& msg);
+    void note(ASTNode& node, const std::string& msg);
+
+    // Step 19 helpers: the active attribution as message suffix and as engine
+    // value. The suffix names the handler, the event, the point's human half
+    // and the event point's line; the struct carries handler and event for
+    // the JSON path (which already renders it). Both are empty when no check
+    // walk is active, so ordinary diagnostics read exactly as before.
+    std::string attributedMessage(const std::string& msg) const;
+    DiagnosticAttribution engineAttribution() const;
 
     // Nesting depth of the quiet pre-passes below. `error` returns before it reports
     // and before it sets hasError while this is non-zero.
@@ -350,6 +600,28 @@ private:
                                            const std::shared_ptr<StructType>& owner,
                                            TypeMap seed = {},
                                            std::shared_ptr<Type>* ownerInstanceOut = nullptr);
+
+    // A free function's generic parameters in declaration order (`fun id<T>` ->
+    // `["T"]`), so a written turbofish binds positionally. A FunctionType carries
+    // parameter types and no parameter names, which is why the call site cannot
+    // pair `id::<string>` without this. Recorded where the function is declared
+    // (hoist + in-order walk); read where it is called.
+    std::unordered_map<std::string, std::vector<std::string>> functionGenericOrder_;
+    // A method's own generic parameters in declaration order, keyed
+    // `Struct::method`. The struct's parameters are already substituted into the
+    // method's signature through the receiver's instantiation, so only the
+    // method's own remain to bind -- from the call's turbofish, the hint and the
+    // arguments. Recorded beside every defineMethod; read in visit(MethodCall&).
+    // Walks parents on lookup, because an inherited method keeps the declaration
+    // it was written with.
+    std::unordered_map<std::string, std::vector<std::string>> methodGenericOrder_;
+    void recordFunctionGenerics(const std::string& name,
+                                const std::vector<std::unique_ptr<GenericParam>>& params);
+    void recordMethodGenerics(const std::string& structName, const std::string& methodName,
+                              const std::vector<std::unique_ptr<GenericParam>>& params);
+    const std::vector<std::string>* lookupFunctionGenerics(const std::string& name) const;
+    const std::vector<std::string>* lookupMethodGenerics(
+        const std::shared_ptr<StructType>& structType, const std::string& methodName) const;
 
     // Records on a `::` call which instantiation of a generic target it resolved to,
     // for the backend to map instead of the bare template (HANDOFF section 6, item 6).

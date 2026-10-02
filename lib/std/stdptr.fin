@@ -99,15 +99,19 @@
 // GAPS, every one of them hit while writing this file:
 //
 //   * `self.restrict = self;` inside the constructor reports `Type mismatch: expected
-//     '&Self', got 'rptr<T>'` -- the receiver is the value there, not a pointer to it, so
-//     the constructor writes `&self` while every method writes `self`. Bisected to that
-//     one line: the same assignment in a method is accepted.
+//     '&Self', got 'rptr<T>'` -- the receiver is the value there, not a pointer to it.
+//     The old workaround wrote `&self`, which aliased the live handle (owned=true)
+//     instead of a readonly copy; the constructor now builds the snapshot with
+//     `self.alias()`, which yields owned=false, borrowed=false exactly (ADR 0045).
+//     Bisected to that one line: the same assignment in a method is accepted.
 //   * `new rptr{...}` inside a method is typed `rptr<T>` and does not fit a `&Self`, so
 //     the sibling constructions write `new Self{...}`, which does.
 //   * A field of type `&Self` cannot be given in a struct literal at all here, so
 //     `alias()` omits `restrict` from the literal and the sibling's `restrict` is null.
-//     A caller wanting a readonly handle calls `readonly_view()`, which is a method and
-//     works; `restrict` remains the field `const.fin:82` reads.
+//     The constructor assigns the field after the literal instead, which is a method
+//     context away from the restriction and works; `restrict` remains the field
+//     `const.fin:82` reads, and `readonly_view()` remains the method form for a
+//     caller who wants a fresh readonly handle.
 //   * This runs now -- `const.fin` executes the `rptr<int>` own/borrow/release
 //     sequence end to end -- which is what retired the paragraph that stood
 //     here. It said the counting was verified by reading; the first run proved
@@ -321,8 +325,11 @@ pub class rptr<T> : <rptr_iface> {
     // keyword and `{...}` after an identifier, and a generic parameter lexes as an
     // identifier no matter what it is bound to. So: allocate zeroed, then write through.
     //
-    // One reference, no borrows, and this handle owns. `&self` and not `self`, for the
-    // reason in the header.
+    // One reference for this handle plus one for the readonly snapshot below, no
+    // borrows, and this handle owns. `restrict` is a heap sibling built by
+    // `alias()` -- owned=false, borrowed=false -- so reading through it takes
+    // the readonly branch honestly (ADR 0045). It shares the value and both
+    // counters, which is why `refs()` reads 2 straight after `rptr(v)`.
     rptr(initial_value: T) {
         self.ref_counter = new int(1);
         self.borrow_counter = new int(0);
@@ -330,7 +337,7 @@ pub class rptr<T> : <rptr_iface> {
         *self.value = initial_value;
         self.owned = true;
         self.borrowed = false;
-        self.restrict = &self;
+        self.restrict = self.alias();
       }
 
     // Declared, empty, and load-bearing only as a shape. See the header: a body that

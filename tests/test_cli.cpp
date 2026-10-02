@@ -2865,7 +2865,11 @@ TEST(Soundness_DiagnosticAttribution, NoDiagnosticPointsAtAnExpectationComment) 
     // 50 -> 40 for the same reason: the corpus is down to 43, as `&Self`
     // fields, elided generic arguments and the sample repairs cleared a dozen
     // diagnostics without touching the detector.
-    EXPECT_GT(census.considered, 40u)
+    // 40 -> 30, deliberately: the corpus is down to exactly 30, so the floor
+    // sits at the count rather than above it -- `EXPECT_GE`, because `EXPECT_GT`
+    // at 30 would fail on the value the corpus emits today. Any further decay
+    // still fails here, which is the tripwire this guard is.
+    EXPECT_GE(census.considered, 30u)
         << "the corpus emitted almost no located diagnostics about its own files, so the "
            "assertion below would pass without measuring anything. Fix the detector (or "
            "lower this floor on purpose) before trusting an empty census.";

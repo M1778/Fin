@@ -1,0 +1,30 @@
+import { assert_eq_int } from testing::std;
+
+// Pins p05: nested generics through methods (Box<Box<int>>.get()) plus a
+// two-param struct method (Pair.sum).
+// Green on both compilers (finc + finc_stage2); bare prints converted to asserts.
+struct Box<T> {
+    val <T>,
+
+    fun get(self: &Self) <T> {
+        return self.val;
+    }
+}
+
+struct Pair<A, B> {
+    first <A>,
+    second <B>,
+
+    fun sum(self: &Self) <int> {
+        return cast<int>(self.first) + cast<int>(self.second);
+    }
+}
+
+fun main() <noret> {
+    let inner <Box<int>> = Box::<int>{ val: 7 };
+    let outer <Box<Box<int>>> = Box::<Box<int>>{ val: inner };
+    let got <Box<int>> = outer.get();
+    assert_eq_int(got.get(), 7, "nested_pair: outer.get().get() unwraps");
+    let p <Pair<int, int>> = Pair::<int, int>{ first: 3, second: 4 };
+    assert_eq_int(p.sum(), 7, "nested_pair: sum adds both fields");
+}

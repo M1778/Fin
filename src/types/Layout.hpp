@@ -263,6 +263,28 @@ public:
     // they asked for. Must be a power of two.
     std::string requestMinAlign(const std::shared_ptr<StructType>& type, uint64_t align);
 
+    // --- typed pointer-map queries ------------------------------------------
+    //
+    // Step 8 of docs/compiler-api.md's wave-4 order: the surpassing capability
+    // (§1.9) as named questions on the engine, so that the `compiler.layout.*`
+    // operations, the provider call path and any future evaluator ask once here
+    // rather than each re-walking `TypeLayout::pointers`.
+    //
+    // Each has this file's third outcome: "" on success, or the refusal -- the
+    // layout's own when the type has none, a sentence naming the index when the
+    // index names nothing. A negative or past-the-end index refuses rather than
+    // wrapping or answering zero, for the same reason a decide-phase query
+    // refuses (ADR 0015): a collector acting on slot 3 of a one-pointer type
+    // corrupts the heap, and zero would tell it to.
+    //
+    // Cost is counted in fields, not bytes (§3.9's normative constraint): a
+    // pointer-free type answers from one layout walk, never from an expansion.
+    // A `[int, 200000000]` contributes no slots and allocates none -- the array
+    // case below only iterates when the element itself holds pointers.
+    std::string pointerCount(const TypePtr& type, uint64_t& count);
+    std::string pointerOffsetAt(const TypePtr& type, int64_t index, uint64_t& offset);
+    std::string pointeeTypeAt(const TypePtr& type, int64_t index, TypePtr& pointee);
+
     // Forget every memoised layout and every open request. For a caller that
     // knows a type changed after it was laid out.
     void reset();

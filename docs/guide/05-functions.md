@@ -45,15 +45,19 @@ fun main() <noret> {
 }
 ```
 
-Lambdas are function values without captured environments. Pass state explicitly.
-This attempted capture is deliberately rejected:
+Lambdas close over their enclosing scope: a lambda body may read a surrounding
+local directly.
 
-```fin build-error
+```fin
 fun main() <noret> {
     let offset <int> = 10;
     let add_offset <auto> = (x: int) <int> => x + offset;
     printf("%d\n", add_offset(2));
 }
+```
+
+```output
+12
 ```
 
 ## Generics

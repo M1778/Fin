@@ -10,6 +10,7 @@
 // two apart. A second copy of the names in this file would be a second place the
 // truth lives, which is the failure ADR 0008 rejects by name.
 #include "../semantics/BuiltinMacros.hpp"
+#include "../semantics/ComptimeInterp.hpp"
 #include "../types/Layout.hpp"
 #include "../utils/IntegerConstant.hpp"
 
@@ -101,11 +102,12 @@
 //     inside a `try` would leave the `catch` unreached, and nothing in the corpus
 //     writes one there.
 //   * A *generic* lambda and a generic function used as a value. Ordinary function
-//     values and lambdas are lowered -- a Fin function value is a bare code pointer,
-//     and a lambda that captures an enclosing local is refused rather than lowered,
-//     which is what makes that representation sound. What is still missing for the
-//     generic ones is not a representation but the code: a template has no address
-//     until something says which instantiation is meant.
+//     values and lambdas are lowered -- a Fin function value is a closure pair,
+//     `{code, env}`, and a lambda that captures an enclosing local snapshots it
+//     into the env at its definition, which is what makes that representation
+//     sound. What is still missing for the generic ones is not a representation
+//     but the code: a template has no address until something says which
+//     instantiation is meant.
 //   * The compiler API and `@special`. Wave 4 executes those at compile time; a
 //     `@special` reaching codegen means the interpreter did not consume it.
 //
@@ -200,15 +202,25 @@ struct CgType {
     // Interface references are fat values: {data, vtable}.
     bool isInterface = false;
     std::string interfaceName;
+    // A value whose static type is a union alias (`type Number = int | uint`),
+    // lowered as its first alternative. The alias is carried so that the
+    // pointer-map walk can refuse what the layout cannot describe (Q12),
+    // rather than emitting the first member's map for a value that may hold
+    // another. `unionAlias` names the alias for that diagnostic.
+    bool isUnion = false;
+    std::string unionAlias;
     // An `any` blob (mapAny): the plan-fixed `{i8*, i64}` shape with no claim
     // about what a value in it means. Carried so value sites -- conversions,
     // operators, `sizeof` -- can refuse what the type mapping allowed.
     bool isAny = false;
-    // A value read through a nullable spelling (`fn?`). Only function types
-    // map nullable at all, so only they ever carry this -- and only `?`
-    // reads it. Anything else holding it is this file disagreeing with
-    // itself.
+    // A nullable spelling (`int?`, `A?`, `fn?`, `&T?`). Two representations:
+    // pointer/fn sentinels carry no payload (null is 0x0 / code==null) while
+    // nullable *values* lower as tagged pairs {T,i1} with presence = tag ONLY
+    // (ADR 0040). `nullablePayload` is set exactly for the pair shape and holds
+    // the payload's type; null for pointer/fn sentinels.
     bool isNullable = false;
+    std::shared_ptr<CgType> nullablePayload;
+    bool isNullableValue() const { return isNullable && nullablePayload != nullptr; }
 
     // Set for Kind::Ptr when this file knows what is at the other end, and null
     // when it does not.
@@ -231,12 +243,14 @@ struct CgType {
 
     // Set for Kind::Fn and null otherwise: what the function value's signature is.
     //
-    // A Fin function value is a bare code pointer -- see visit(LambdaExpression&) for
-    // why the corpus settles that and not a closure pair -- so its llvmType is the same
-    // `ptr` every other pointer is, and the signature is not recoverable from it. An
-    // indirect call needs it: `CreateCall` on a pointer callee takes the
-    // llvm::FunctionType explicitly, and getting it wrong reads argument registers the
-    // caller never set. So it is carried here or it is nowhere.
+    // A Fin function value is a closure pair, `{code, env}` -- see mapFunction:
+    // the code pointer beside the environment the definition snapshotted (null
+    // for a lambda that captures nothing), so its llvmType is that two-word
+    // struct and the signature is not recoverable from it. An indirect call
+    // threads the env back in: `CreateCall` on the code callee takes the
+    // env-first llvm::FunctionType explicitly, and getting it wrong reads
+    // argument registers the caller never set. So it is carried here or it is
+    // nowhere.
     //
     // `result` and `params` are the Fin-level types and `llvmSignature` is what the
     // call instruction wants. Both, rather than one derived from the other: the LLVM
@@ -484,6 +498,46 @@ struct Local {
     // order). Assigned wherever a Local is published; the counter never
     // resets, since only relative order inside one scope is ever read.
     size_t order = 0;
+    // Slice 1 (wave-5 slice 1, ADR 0030's moved-from case): whether this
+    // binding was moved-from on the path reaching the current emission
+    // point. Set by `@move(x)`, cleared by rebinding `x`, forked and joined
+    // across branches exactly like events::MovedAnalysis (which owns the
+    // lattice; this is only its lowering shadow). Read only by cleanScopeAt,
+    // and only when a `move_or_copy` claimant gates the skip -- without one
+    // every value destroys independently, exactly as before.
+    bool movedFrom = false;
+    // Slice 4 (wave-5 slice 4): how this binding's storage lifetime ends.
+    // None is the ordinary scope-exit destruction. Pinned (`#[slaveof($Fin)]`,
+    // or tied to a global, which outlives every frame) is never destroyed at
+    // scope exit. Deferred (`#[slaveof(z)]` to a strictly outer `z`) is
+    // destroyed when the master's scope exits instead of its own; a same-scope
+    // tie dies with its own scope anyway and is recorded as None. Only read
+    // by cleanScopeAt, which owns the deferral list below.
+    enum class SlaveofTie { None, Pinned, Deferred };
+    SlaveofTie tie = SlaveofTie::None;
+    // The scopes_ index holding the master, for Deferred only: the scope
+    // whose cleaning destroys this binding.
+    size_t masterScope = 0;
+    // The control-flow region this binding was declared in (see
+    // regionDepth_): a tie is deferred only within one region, where the
+    // declaration's block dominates the master's scope exit.
+    size_t region = 0;
+};
+
+// A struct-typed local whose own scope was cleaned while its master still
+// lived (wave-5 slice 4). The slot is a function-frame alloca, so the pointer
+// stays valid after the scope pops; destruction is emitted when the master's
+// scope is cleaned instead. `movedFrom` is captured at deferral: a moved-from
+// binding skips its destructor at the extended point exactly as it would have
+// at its own (slice-1 Maybe-skip stands -- deferral never resurrects).
+// `order` is the Local's declaration order, so the extended destruction keeps
+// reverse-declaration order with its peers.
+struct TiedPending {
+    llvm::AllocaInst* slot = nullptr;
+    CgType type;
+    size_t masterScope = 0;
+    bool movedFrom = false;
+    size_t order = 0;
 };
 
 // Where a `continue` and a `break` inside the innermost loop go. Declared out here
@@ -518,10 +572,18 @@ struct FnInfo {
     // different (a process status) and its LLVM signature is C's rather than
     // what Fin wrote.
     bool isMain = false;
+    // `main(args: [string])` lowers as `i32 main(i32 argc, i8** argv)` and
+    // bridges argv[1..] into the Fin `[string]` value. Set in declareFunction;
+    // read in emitBodyOf (build the pair) and in emitNamedCall (refuse calls).
+    bool isMainWithArgs = false;
     // Parameter 0 is a receiver the source never wrote. Read by emitCallArgs, to know
     // which parameter the first written argument lands on, and by emitBody, to know
     // which argument is `self`.
     bool hasReceiver = false;
+    // Parameter (0 or 1) is the closure env the source never wrote. Set only on
+    // lambdas (see declareFunction's `withEnv`): the body binds it to its env
+    // slot, and an indirect call threads the pair's second word into it.
+    bool hasEnvParam = false;
     bool isConstructor = false;
 };
 
@@ -547,6 +609,14 @@ public:
 
     void bindTypeAliases(const std::unordered_map<std::string, const TypeNode*>* aliases) {
         typeAliases_ = aliases;
+    }
+
+    // The union aliases among the bound names (`type Number = int | uint`),
+    // which lower as their first alternative but keep their union-ness on the
+    // mapped type so the metadata walk can refuse them (Q12). Bound beside the
+    // aliases because the flag is set where the alias is resolved.
+    void bindUnionAliases(const std::unordered_set<std::string>* unions) {
+        unionAliases_ = unions;
     }
 
     // How a `Box<int>` becomes a struct that exists.
@@ -650,7 +720,26 @@ public:
     std::optional<CgType> map(const TypeNode* node, bool allowIncomplete = false) const {
         auto res = mapRaw(node, allowIncomplete);
         if (res && node && node->is_nullable) {
-            res->isNullable = true;
+            // Pointer and fn sentinels keep their shape with a flag: null is
+            // 0x0 for pointers/strings and code==null for closure pairs.
+            if (res->isPointer() || res->isFn()) {
+                res->isNullable = true;
+                return res;
+            }
+            // `void?` has no value to pair with a tag.
+            if (res->isVoid()) return std::nullopt;
+            // Nullable values lower as tagged pairs {T,i1}, presence = tag ONLY
+            // (ADR 0040). The payload is the base mapping; the tag is i1.
+            CgType payload = *res;
+            payload.isNullable = false;
+            payload.nullablePayload = nullptr;
+            CgType t;
+            t.kind = CgType::Kind::Struct;
+            t.llvmType = llvm::StructType::get(
+                ctx_, {payload.llvmType, llvm::Type::getInt1Ty(ctx_)});
+            t.isNullable = true;
+            t.nullablePayload = std::make_shared<CgType>(payload);
+            return t;
         }
         return res;
     }
@@ -753,7 +842,9 @@ public:
         // An array is one of the decorations this slice lowers, and only when
         // its extent is written and constant. See mapArray.
         if (auto* arr = dynamic_cast<const ArrayTypeNode*>(node)) {
-            if (node->pointer_depth != 0 || node->is_nullable) return std::nullopt;
+            // `is_nullable` is allowed through: map() wraps the array in a
+            // {T,i1} pair, so `[int]?` is a tagged pair, not a refusal.
+            if (node->pointer_depth != 0) return std::nullopt;
             return mapArray(*arr);
         }
         // A pointer is the second. `pointer_depth` is checked and never set: the
@@ -848,12 +939,12 @@ public:
         }
         if (auto s = structByName(node->name, allowIncomplete)) return s;
         // `any` maps to its plan-fixed shape, `{i8*, i64}` (payload, typeid),
-        // as an opaque blob: big enough to hold, with no claim about what a
-        // value in it means. Only the TYPE maps -- boxing a value into one,
-        // converting either way, comparing, sizing, and calling through it
-        // all refuse where values are handled, because none of those has a
-        // rule yet. `object` stays unmapped: it is a distinct DynamicType
-        // whose meaning is even less settled.
+        // with real value semantics (ADR 0034 amendment): boxing a value in
+        // records its typeid, unboxing checks it and blames on mismatch, and
+        // `==`/`!=` compare typeid first, then payload (strings by bytes).
+        // `object` stays unmapped: it is a distinct DynamicType whose meaning
+        // is even less settled. Sizing and calling through `any` still refuse
+        // where values are handled, because neither has a rule yet.
         //
         // After the struct lookup, so a user declaration of the name still
         // wins -- mirroring scope resolution, where a shadowing declaration
@@ -890,6 +981,14 @@ public:
                 activeAliases_.insert(node->name);
                 auto res = map(it->second, allowIncomplete);
                 activeAliases_.erase(node->name);
+                // A union alias lowers as its first alternative -- the same
+                // answer the analyzer gives value positions -- but the result
+                // keeps the alias, so the metadata walk refuses a union's map
+                // (Q12) instead of emitting its first member's.
+                if (res && unionAliases_ && unionAliases_->count(node->name)) {
+                    res->isUnion = true;
+                    res->unionAlias = node->name;
+                }
                 return res;
             }
         }
@@ -951,9 +1050,13 @@ public:
 
         CgType t;
         t.kind = CgType::Kind::Fn;
-        // The same `ptr` every other pointer is: LLVM has had one since 15, and a
-        // function pointer was never a distinct type in the IR anyway.
-        t.llvmType = llvm::PointerType::getUnqual(ctx_);
+        // A closure pair, `{code, env}`: the code pointer beside the environment
+        // the definition snapshotted, null for a lambda that captures nothing.
+        // One uniqued literal struct type for every `fn`, so all of them agree
+        // the way all dynamic arrays do -- a `fn` stored, passed and returned
+        // is the same two words everywhere, whether or not it captured.
+        auto* ptrTy = llvm::PointerType::getUnqual(ctx_);
+        t.llvmType = llvm::StructType::get(ctx_, {ptrTy, ptrTy});
         t.result = std::make_shared<CgType>(*ret);
         // Nullable in, nullable out: whether `?` was written travels with the
         // value so the denullify has something to read. Nothing else sets it
@@ -961,6 +1064,11 @@ public:
         t.isNullable = node.is_nullable;
 
         std::vector<llvm::Type*> llvmParams;
+        // The env travels first: every indirect call threads element 1 of the
+        // pair back into the code it calls. A lambda's emitted function takes
+        // exactly this signature (see declareFunction's `withEnv`); a named
+        // function reached as a value is wrapped to it (closureWrapForValue).
+        llvmParams.push_back(ptrTy);
         for (auto& p : node.param_types) {
             auto mapped = map(p.get());
             if (!mapped) return std::nullopt;
@@ -1220,6 +1328,7 @@ private:
     const std::unordered_map<std::string, EnumInfo>* enums_ = nullptr;
     const std::unordered_map<std::string, InterfaceInfo>* interfaces_ = nullptr;
     const std::unordered_map<std::string, const TypeNode*>* typeAliases_ = nullptr;
+    const std::unordered_set<std::string>* unionAliases_ = nullptr;
     mutable std::unordered_set<std::string> activeAliases_;
     std::function<bool(const TypeNode&, std::string&)> instantiate_;
     std::function<bool(const TypeNode&, std::string&)> instantiateInterface_;
@@ -1301,6 +1410,7 @@ public:
         types_.bindEnums(&enums_);
         types_.bindInterfaces(&interfaces_);
         types_.bindTypeAliases(&typeAliases_);
+        types_.bindUnionAliases(&unionAliases_);
         types_.bindInstantiator([this](const TypeNode& node, std::string& out) {
             return instantiateGeneric(node, out);
         });
@@ -1319,6 +1429,13 @@ public:
     // instantiations it asked for, and nothing a module declares for itself.
     bool run(Program& program, const std::vector<const Program*>& modules = {}) {
         modules_ = modules;
+        rootProgram_ = &program;
+        // Before any body emits (no cleanup runs during registration): scope
+        // cleanup consults the answer from here on.
+        computeMoveOrCopyClaimant();
+        computeDestructorClaimant();
+        computeDeallocateClaimant();
+        if (failed_) return false;
         declareTypeAliases(program);
         if (failed_) return false;
         declareSymbolAliases(program);
@@ -1360,6 +1477,17 @@ public:
         if (failed_) return false;
         bindSymbolAliases();
         if (failed_) return false;
+        // The destructor claimant's one shared generation, if it supplies
+        // one. After the globals for the reason above (a generation may read
+        // one); before the bodies so the symbol exists before any destruction
+        // site in the statement walk reaches for it.
+        declareDestructorClaimant();
+        if (failed_) return false;
+        // The deallocate claimant's one shared generation, if it supplies
+        // one. Same position for the same reason: a generation may read a
+        // global, and the symbol must exist before any `delete` in the
+        // statement walk reaches for it.
+        declareDeallocateClaimant();
         // The methods of the structs written at module scope. After the globals, so a
         // method body may read one; before the statements, so the emitted order matches
         // the written order for a reader of `--emit-llvm`.
@@ -1390,10 +1518,607 @@ public:
         // middle of another body would work (ScopedEmission exists for exactly that)
         // and this way the queue is drained once, at a point with no live insert point.
         drainPendingBodies();
+        // After every instantiation the statements asked for: a call site may
+        // have materialised a type whose metadata is owed too.
+        if (!emitTypeMetadata(program)) return false;
         return !everFailed_;
     }
 
     llvm::Module& module() { return module_; }
+
+    // ---- type_metadata ------------------------------------------------------
+    // docs/compiler-api.md §3.9, ADR 0014: the provider the compiler calls once
+    // per subject, whose returned value it stores and emits. The analyzer owns
+    // the contract (one slot, one `$struct` subject, the projection-return
+    // body); what is here is the calling, the storing and the emitting.
+    //
+    // Calling, C++-first: the only body the analyzer accepts *is* the
+    // `pointer_map_quote` projection, so computing the map from the finalised
+    // lowering and memoising it per subject is calling the provider, not
+    // bypassing it. General `@special` execution waits on the comptime
+    // interpreter (ADR 0006); until then the body shape is the call.
+    //
+    // The record is `{ size, align, nentries, [(offset, stride, count, tag)] }`.
+    // Stride-encoded so its cost is counted in fields, not bytes (§3.9's
+    // normative constraint): a `[&T, N]` field is one entry whatever N is, and
+    // a pointer-free type is a constant-size record with no entries. The tag is
+    // ADR 0019's slot state and is 0 (traced) everywhere today -- the
+    // must-not-follow states have no producer yet, and the field exists so
+    // they fit without an ABI break when one does.
+    //
+    // Nothing is emitted without the declaration: every program that names no
+    // provider lowers exactly what it lowered before this slice.
+
+    // Whether this declaration claims the slot. The analyzer validated the
+    // contract; this only recognises the claimant, in the root and in every
+    // loaded module.
+    static bool providesTypeMetadata(const SpecialDeclaration& decl) {
+        for (auto& attr : decl.attributes) {
+            if (attr && attr->name == "provides" && !attr->is_flag &&
+                attr->value_str == "type_metadata")
+                return true;
+        }
+        return false;
+    }
+
+    // Whether this declaration claims the `move_or_copy` protocol slot
+    // (wave-5 slice 1, ADR 0014). Same shape as providesTypeMetadata above:
+    // the analyzer validated the contract (slot, signature, empty body);
+    // this only recognises the claimant, in the root and in every loaded
+    // module. A malformed claimant never reaches here with semantics on --
+    // the analyzer errors first -- and `--no-check` is unsafe throughout.
+    static bool claimsMoveOrCopy(const SpecialDeclaration& decl) {
+        for (auto& attr : decl.attributes) {
+            if (attr && attr->name == "protocol" && !attr->is_flag &&
+                attr->value_str == "move_or_copy")
+                return true;
+        }
+        return false;
+    }
+
+    // Whether the program claims `move_or_copy`, and so whether scope
+    // cleanup consults Local::movedFrom. Computed once in run(): every
+    // program that names no claimant lowers exactly what it lowered before
+    // this slice.
+    void computeMoveOrCopyClaimant() {
+        auto scan = [&](const Program* unit) {
+            if (!unit || hasMoveOrCopyClaimant_) return;
+            for (auto& stmt : unit->statements) {
+                const auto* special =
+                    dynamic_cast<const SpecialDeclaration*>(stmt.get());
+                if (special && claimsMoveOrCopy(*special)) {
+                    hasMoveOrCopyClaimant_ = true;
+                    return;
+                }
+            }
+        };
+        scan(rootProgram_);
+        for (const Program* unit : modules_) scan(unit);
+    }
+
+    // ---- the `destructor` claimant (wave-5 slice 2, ADR 0014) ----------------
+    // The claimant supplies GENERATION: the quote its body returns becomes the
+    // cleanup for structs that declare no `~T()`. Lookup order in
+    // emitDestructorCall is explicit `~T()` first (it keeps precedence --
+    // deeptest2.fin:46 "you can overwrite it"), then this generation, then
+    // ADR 0016's fields-then-bases composition, which still runs after either:
+    // the composition-preserving default, because a claimant that silently
+    // dropped field cleanup would leak exactly the way ADR 0016's
+    // body-after-fields rule exists to prevent. The claim shape (one `$struct`
+    // in, one `quote` out) carries no full-vs-partial channel, so there is no
+    // opt-out yet; per-subject specialization waits on the comptime
+    // interpreter (parameters do not bind), so the one generation serves every
+    // claimed type and names no `self` (refused in semantics; here `self`
+    // would fall through to the unknown-name refusal).
+    //
+    // Recognition mirrors claimsMoveOrCopy above: the analyzer validated the
+    // contract (slot, signature, evaluable body); this only recognises the
+    // claimant, in the root and in every loaded module. A malformed claimant
+    // never reaches here with semantics on -- the analyzer errors first --
+    // and `--no-check` is unsafe throughout.
+
+    // The lowered name of the one shared generation function. Dotted like a
+    // methodKey so it reads as one, with a two-part head no methodKey can
+    // spell (struct names are identifiers and carry no dot).
+    static const char* destructorClaimantKey() { return "fin.destructor.claimant"; }
+
+    static bool claimsDestructor(const SpecialDeclaration& decl) {
+        for (auto& attr : decl.attributes) {
+            if (attr && attr->name == "protocol" && !attr->is_flag &&
+                attr->value_str == "destructor")
+                return true;
+        }
+        return false;
+    }
+
+    // The generation subset codegen lowers, mirroring semantics'
+    // destructorGenerationBody: absent or empty bodies generate nothing (the
+    // claim is recorded and composition still runs); one `return quote {...};`
+    // generates its block. Straight-line lets/bare-calls with the subject
+    // param bound thread to a final quote, whose block is spliced/inlined as
+    // the generation body. Anything else is refused naming the gap rather
+    // than silently dropped (the backend never drops runtime code).
+    static const Block* threadedClaimantGeneration(const SpecialDeclaration& decl,
+                                                   const Program* program) {
+        if (!decl.body || decl.body->statements.empty()) return nullptr;
+        if (decl.body->statements.size() == 1) {
+            if (const auto* ret =
+                    dynamic_cast<const ReturnStatement*>(decl.body->statements[0].get())) {
+                if (ret->value) {
+                    if (const auto* quote =
+                            dynamic_cast<const QuoteExpression*>(ret->value.get())) {
+                        if (quote->block) return quote->block.get();
+                    }
+                }
+            }
+            if (!program) return nullptr;
+        } else if (!program) {
+            return nullptr;
+        }
+        comptime::Interpreter interp(*program);
+        comptime::Env env;
+        if (!decl.params.empty())
+            env.bind(decl.params[0]->name,
+                     comptime::Value::makeOpaque(decl.params[0]->name));
+        for (std::size_t i = 0; i < decl.body->statements.size(); ++i) {
+            const bool last = (i + 1 == decl.body->statements.size());
+            const Statement* stmt = decl.body->statements[i].get();
+            if (const auto* var = dynamic_cast<const VariableDeclaration*>(stmt)) {
+                if (last) return nullptr;
+                std::string detail;
+                if (interp.evaluateDeclaration(*var, env, &detail) !=
+                    comptime::ExprStatus::Ok)
+                    return nullptr;
+                continue;
+            }
+            if (const auto* ret = dynamic_cast<const ReturnStatement*>(stmt)) {
+                if (!last || !ret->value) return nullptr;
+                if (const auto* quote =
+                        dynamic_cast<const QuoteExpression*>(ret->value.get())) {
+                    if (quote->block) return quote->block.get();
+                    return nullptr;
+                }
+                comptime::ExprResult threaded =
+                    interp.evaluateExpression(*ret->value, env);
+                if (threaded.status == comptime::ExprStatus::Ok &&
+                    threaded.value.kind == comptime::ValueKind::Quote &&
+                    threaded.value.quote && threaded.value.quote->block)
+                    return threaded.value.quote->block.get();
+                return nullptr;
+            }
+            if (const auto* exprStmt =
+                    dynamic_cast<const ExpressionStatement*>(stmt)) {
+                if (last || !exprStmt->expr) return nullptr;
+                if (interp.evaluateExpression(*exprStmt->expr, env).status !=
+                    comptime::ExprStatus::Ok)
+                    return nullptr;
+                continue;
+            }
+            return nullptr;
+        }
+        return nullptr;
+    }
+
+    static const Block* destructorGeneration(const SpecialDeclaration& decl,
+                                            const Program* program) {
+        return threadedClaimantGeneration(decl, program);
+    }
+
+    // Whether the program claims `destructor`, and which generation it
+    // supplies. Computed once in run(): every program that names no claimant
+    // lowers exactly what it lowered before this slice.
+    void computeDestructorClaimant() {
+        const Program* claimantUnit = nullptr;
+        auto scan = [&](const Program* unit) {
+            if (!unit || hasDestructorClaimant_) return;
+            for (auto& stmt : unit->statements) {
+                const auto* special =
+                    dynamic_cast<const SpecialDeclaration*>(stmt.get());
+                if (special && claimsDestructor(*special)) {
+                    hasDestructorClaimant_ = true;
+                    destructorClaimant_ = special;
+                    claimantUnit = unit;
+                    return;
+                }
+            }
+        };
+        scan(rootProgram_);
+        for (const Program* unit : modules_) scan(unit);
+        if (!hasDestructorClaimant_ || !destructorClaimant_) return;
+        const Block* generation =
+            destructorGeneration(*destructorClaimant_, claimantUnit);
+        if (!generation && destructorClaimant_->body &&
+            !destructorClaimant_->body->statements.empty()) {
+            unsupported(*destructorClaimant_,
+                        "the 'destructor' claimant '@" + destructorClaimant_->name +
+                        "', whose body is outside the evaluable subset "
+                        "(an empty body, or one 'return quote { ... };')");
+            return;
+        }
+        if (generation && generation->statements.empty()) generation = nullptr;
+        destructorGeneration_ = generation;
+    }
+
+    // Declares the one shared generation function and queues its body.
+    // Called after declareTopLevel (a generation may call anything declared
+    // there) and before the first drainPendingBodies, so the symbol exists
+    // before any destruction site in the statement walk reaches for it.
+    // Nothing is declared without generation: an empty-bodied claim records
+    // the slot and changes no lowering.
+    void declareDestructorClaimant() {
+        if (!hasDestructorClaimant_ || failed_) return;
+        if (!destructorClaimant_ || !destructorGeneration_) return;
+        // Emission reads the borrowed AST without mutating it (the visitor
+        // API is non-const throughout); the casts are that adapter, not a
+        // write -- the module trees stay read-only.
+        auto* claimant = const_cast<SpecialDeclaration*>(destructorClaimant_);
+        auto* generation = const_cast<Block*>(destructorGeneration_);
+        static const std::vector<std::unique_ptr<Parameter>> noParams;
+        const std::string key = destructorClaimantKey();
+        declareFunction(*claimant, key, key, noParams, /*returnType=*/nullptr,
+                        /*isVarArg=*/false, /*isExtern=*/false, /*receiver=*/nullptr);
+        auto declared = functions_.find(key);
+        if (declared == functions_.end()) return;  // declareFunction reported
+        declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+        pendingBodies_.push_back(PendingBody{claimant, &noParams,
+                                             generation, key,
+                                             /*bindings=*/nullptr,
+                                             /*structName=*/""});
+    }
+
+    // ---- the `deallocate` claimant (wave-5 slice 3, ADR 0014) --------------
+    // The claimant substitutes the DEALLOCATION call: `delete` still runs the
+    // destructor first through emitDestructorCall above (deeptest3.fin:44's
+    // order holds by construction -- the claimant replaces ONLY the `free`,
+    // never the destructor call), then calls this generation instead of
+    // `free`. That keeps slices 1/2 orthogonal: scope-exit cleanup and
+    // destructor generation read nothing new here. `new` (the `malloc` site)
+    // is untouched. Recognition, the generation subset (absent or empty
+    // bodies supply none; one `return quote {...};` supplies its block) and
+    // the shared no-receiver lowering all mirror the `destructor` claimant
+    // above: the analyzer validated the contract and this only recognises
+    // the claimant, in the root and in every loaded module.
+
+    // The lowered name of the one shared generation function. Dotted like a
+    // methodKey so it reads as one, with a two-part head no methodKey can
+    // spell (struct names are identifiers and carry no dot).
+    static const char* deallocateClaimantKey() { return "fin.deallocate.claimant"; }
+
+    static bool claimsDeallocate(const SpecialDeclaration& decl) {
+        for (auto& attr : decl.attributes) {
+            if (attr && attr->name == "protocol" && !attr->is_flag &&
+                attr->value_str == "deallocate")
+                return true;
+        }
+        return false;
+    }
+
+    // The generation subset codegen lowers, mirroring destructorGeneration
+    // above: absent or empty bodies generate nothing (the claim is recorded
+    // and the default `free` stays); straight-line lets/bare-calls with the
+    // subject bound thread to a final quote, whose block is spliced/inlined.
+    // Anything else is refused naming the gap rather than
+    // silently dropped (the backend never drops runtime code).
+    static const Block* deallocateGeneration(const SpecialDeclaration& decl,
+                                            const Program* program) {
+        return threadedClaimantGeneration(decl, program);
+    }
+
+    // Whether the program claims `deallocate`, and which generation it
+    // supplies. Computed once in run(): every program that names no claimant
+    // lowers exactly what it lowered before this slice.
+    void computeDeallocateClaimant() {
+        const Program* claimantUnit = nullptr;
+        auto scan = [&](const Program* unit) {
+            if (!unit || hasDeallocateClaimant_) return;
+            for (auto& stmt : unit->statements) {
+                const auto* special =
+                    dynamic_cast<const SpecialDeclaration*>(stmt.get());
+                if (special && claimsDeallocate(*special)) {
+                    hasDeallocateClaimant_ = true;
+                    deallocateClaimant_ = special;
+                    claimantUnit = unit;
+                    return;
+                }
+            }
+        };
+        scan(rootProgram_);
+        for (const Program* unit : modules_) scan(unit);
+        if (!hasDeallocateClaimant_ || !deallocateClaimant_) return;
+        const Block* generation =
+            deallocateGeneration(*deallocateClaimant_, claimantUnit);
+        if (!generation && deallocateClaimant_->body &&
+            !deallocateClaimant_->body->statements.empty()) {
+            unsupported(*deallocateClaimant_,
+                        "the 'deallocate' claimant '@" + deallocateClaimant_->name +
+                        "', whose body is outside the evaluable subset "
+                        "(an empty body, or one 'return quote { ... };')");
+            return;
+        }
+        if (generation && generation->statements.empty()) generation = nullptr;
+        deallocateGeneration_ = generation;
+    }
+
+    // Declares the one shared generation function and queues its body.
+    // Called after declareTopLevel (a generation may call anything declared
+    // there) and before the first drainPendingBodies, so the symbol exists
+    // before any `delete` in the statement walk reaches for it. Nothing is
+    // declared without generation: an empty-bodied claim records the slot
+    // and the default `free` stays.
+    void declareDeallocateClaimant() {
+        if (!hasDeallocateClaimant_ || failed_) return;
+        if (!deallocateClaimant_ || !deallocateGeneration_) return;
+        // Emission reads the borrowed AST without mutating it (the visitor
+        // API is non-const throughout); the casts are that adapter, not a
+        // write -- the module trees stay read-only.
+        auto* claimant = const_cast<SpecialDeclaration*>(deallocateClaimant_);
+        auto* generation = const_cast<Block*>(deallocateGeneration_);
+        static const std::vector<std::unique_ptr<Parameter>> noParams;
+        const std::string key = deallocateClaimantKey();
+        declareFunction(*claimant, key, key, noParams, /*returnType=*/nullptr,
+                        /*isVarArg=*/false, /*isExtern=*/false, /*receiver=*/nullptr);
+        auto declared = functions_.find(key);
+        if (declared == functions_.end()) return;  // declareFunction reported
+        declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+        pendingBodies_.push_back(PendingBody{claimant, &noParams,
+                                             generation, key,
+                                             /*bindings=*/nullptr,
+                                             /*structName=*/""});
+    }
+
+    // Whether a lowered value can hold a heap pointer anywhere inside it. The
+    // question an enum field asks: a variant whose payload may hold a pointer
+    // needs discriminant-dependent tracing, which is undecided, so the field
+    // refuses rather than emitting a map that is right for one member.
+    // Conservative towards refusal: a struct this file cannot see inside
+    // answers true, so an unverifiable payload refuses instead of vanishing.
+    static bool containsDataPointer(const CgType& type) {
+        if (type.isAny || type.isInterface || type.isPrototype()) return true;
+        // A union lowered as its first alternative: whether the value holds a
+        // pointer depends on the alternative, which is known only at run time.
+        if (type.isUnion) return true;
+        if (type.isEnum()) {
+            if (!type.enumInfo) return true;
+            for (const auto& kv : type.enumInfo->memberInfoByName) {
+                for (const auto& payload : kv.second.payloadTypes) {
+                    if (containsDataPointer(payload)) return true;
+                }
+            }
+            return false;
+        }
+        switch (type.kind) {
+            case CgType::Kind::Ptr:
+                // A string (no recorded pointee) points at static bytes, and a
+                // function pointer at code: neither is a heap edge.
+                return type.pointee != nullptr && !type.pointee->isFn();
+            case CgType::Kind::Struct: {
+                if (!type.structInfo) return true;
+                for (const auto& f : type.structInfo->fields) {
+                    if (containsDataPointer(f.type)) return true;
+                }
+                return false;
+            }
+            case CgType::Kind::Array:
+                if (type.isDynamicArray) return true;  // the buffer pointer
+                return type.element ? containsDataPointer(*type.element) : true;
+            case CgType::Kind::Fn:
+            case CgType::Kind::Int:
+            case CgType::Kind::Float:
+            case CgType::Kind::Void:
+                return false;
+            case CgType::Kind::Prototype:
+                return true;
+        }
+        return true;
+    }
+
+    struct MetaEntry {
+        uint64_t offset = 0;
+        uint64_t stride = 0;
+        uint64_t count = 1;
+    };
+
+    // This file's pointer map for `type` laid at `base`: ascending offsets,
+    // nesting already resolved, arrays stride-encoded. "" on success; else the
+    // reason, naming the field that stopped it -- a refusal the emitter reports
+    // rather than a guess it emits.
+    std::string collectMetaSlots(const CgType& type, const std::string& fieldPath,
+                                 uint64_t base, std::vector<MetaEntry>& out,
+                                 std::set<const StructInfo*>& path) {
+        if (type.isAny)
+            return "field '" + fieldPath + "' holds an `any`, whose heap edges "
+                   "depend on what it boxes and no static entry can say";
+        // Q12's interface half: an interface-typed field contributes exactly one
+        // traced slot, the data word at the field's offset. The vtable word a
+        // collector must not follow (ADR 0019) is absent rather than marked --
+        // absence is the two-state staging of ADR 0019's third state.
+        if (type.isInterface) {
+            out.push_back(MetaEntry{base, 0, 1});
+            return "";
+        }
+        // Q12's union half: a union has no single pointer map -- which
+        // alternative a value holds is known only at run time -- so the map is
+        // a diagnostic naming the alias, never the first member's.
+        if (type.isUnion)
+            return "field '" + fieldPath + "' holds a union ('" + type.unionAlias +
+                   "'), which has no single pointer map: which alternative a value "
+                   "holds is known only at run time";
+        if (type.isPrototype())
+            return "field '" + fieldPath + "' holds a prototype, which has no "
+                   "static field list to lay out";
+        if (type.isEnum()) {
+            for (const auto& kv : type.enumInfo->memberInfoByName) {
+                for (const auto& payload : kv.second.payloadTypes) {
+                    if (containsDataPointer(payload))
+                        return "field '" + fieldPath + "' holds an enum whose '" +
+                               kv.first +
+                               "' variant may hold a pointer, and tracing a tagged union "
+                               "needs a discriminant rule nobody has written";
+                }
+            }
+            return "";
+        }
+        switch (type.kind) {
+            case CgType::Kind::Ptr:
+                if (!type.pointee || type.pointee->isFn()) return "";
+                out.push_back(MetaEntry{base, 0, 1});
+                return "";
+            case CgType::Kind::Fn:
+            case CgType::Kind::Int:
+            case CgType::Kind::Float:
+            case CgType::Kind::Void:
+                return "";
+            case CgType::Kind::Prototype:
+                return "field '" + fieldPath + "' holds a prototype, which has no "
+                       "static field list to lay out";
+            case CgType::Kind::Struct: {
+                const StructInfo* info = type.structInfo;
+                if (!info || !info->llvmType)
+                    return "field '" + fieldPath + "' is a struct this file did not lower";
+                if (!path.insert(info).second)
+                    return "field '" + fieldPath + "' reaches a struct cycle by value";
+                const llvm::StructLayout* layout =
+                    module_.getDataLayout().getStructLayout(info->llvmType);
+                for (size_t i = 0; i < info->fields.size(); ++i) {
+                    const StructField& f = info->fields[i];
+                    const std::string sub =
+                        fieldPath.empty() ? f.name : fieldPath + "." + f.name;
+                    const uint64_t at =
+                        base + layout->getElementOffset(static_cast<unsigned>(i));
+                    if (std::string r = collectMetaSlots(f.type, sub, at, out, path);
+                        !r.empty()) {
+                        path.erase(info);
+                        return r;
+                    }
+                }
+                path.erase(info);
+                return "";
+            }
+            case CgType::Kind::Array: {
+                if (type.isDynamicArray)
+                    return "field '" + fieldPath + "' holds a dynamic array, which has "
+                           "no static pointer map";
+                if (!type.element || !type.element->llvmType)
+                    return "field '" + fieldPath + "' is an array this file did not lower";
+                if (type.extent == 0) return "";
+                // Walked at zero, not at `base`: the entries below are
+                // element-relative and `base` is added once when composing.
+                // Walking at `base` would count it twice.
+                std::vector<MetaEntry> one;
+                if (std::string r = collectMetaSlots(*type.element, fieldPath + "[]",
+                                                     0, one, path);
+                    !r.empty())
+                    return r;
+                if (one.empty()) return "";  // pointer-free element: nothing,
+                                             // however large the extent
+                const uint64_t stride =
+                    module_.getDataLayout().getTypeAllocSize(type.element->llvmType);
+                for (const auto& e : one) {
+                    // Portable overflow discipline (no 128-bit type: MSVC has
+                    // none): every addition and multiplication is checked before
+                    // it happens, and a map that does not fit refuses rather
+                    // than wraps -- a wrapped offset is a miscompile.
+                    if (e.offset > UINT64_MAX - base)
+                        return "field '" + fieldPath + "' has a pointer map that does "
+                               "not fit in 64 bits";
+                    const uint64_t at = base + e.offset;
+                    if (e.count == 1) {
+                        // One slot per element, `extent` elements apart: one entry.
+                        out.push_back(MetaEntry{at, stride, type.extent});
+                    } else if (e.stride != 0 && e.count <= UINT64_MAX / e.stride &&
+                               e.stride * e.count == stride &&
+                               e.count <= UINT64_MAX / type.extent) {
+                        // A nested array's span is its array's size, which is the
+                        // outer stride too (elements are contiguous), so the
+                        // counts multiply into one entry.
+                        out.push_back(MetaEntry{at, e.stride, e.count * type.extent});
+                    } else {
+                        // Only reachable if the layouts disagree about an
+                        // element's size: refuse rather than expand (expanding a
+                        // disagreement is how a bitmap of zeroes gets big) or
+                        // compose a span that is not one.
+                        return "field '" + fieldPath + "' has array elements whose "
+                               "pointer span is not their stride";
+                    }
+                }
+                return "";
+            }
+        }
+        return "";
+    }
+
+    bool emitTypeMetadata(Program& program) {
+        std::vector<const SpecialDeclaration*> providers;
+        auto scan = [&](const Program* unit) {
+            if (!unit) return;
+            for (auto& stmt : unit->statements) {
+                const auto* special = dynamic_cast<const SpecialDeclaration*>(stmt.get());
+                if (special && providesTypeMetadata(*special)) providers.push_back(special);
+            }
+        };
+        scan(&program);
+        for (const Program* unit : modules_) scan(unit);
+        if (providers.empty()) return true;
+        if (providers.size() > 1) {
+            unsupported(*providers[1],
+                        fmt::format("a second provider for slot 'type_metadata': '@{}' "
+                                    "already provides it, so '@{}' cannot. A slot has "
+                                    "exactly one provider",
+                                    providers[0]->name, providers[1]->name));
+            return false;
+        }
+
+        const llvm::DataLayout& dl = module_.getDataLayout();
+        auto* i64 = llvm::Type::getInt64Ty(ctx_);
+        auto* entryTy = llvm::StructType::get(ctx_, {i64, i64, i64, i64});
+        auto ci = [&](uint64_t v) { return llvm::ConstantInt::get(i64, v); };
+
+        for (auto& [key, info] : structs_) {
+            if (!info.complete) continue;
+            std::vector<MetaEntry> entries;
+            std::set<const StructInfo*> path{&info};
+            const llvm::StructLayout* layout = dl.getStructLayout(info.llvmType);
+            std::string refusal;
+            for (size_t i = 0; i < info.fields.size(); ++i) {
+                const uint64_t at = layout->getElementOffset(static_cast<unsigned>(i));
+                refusal = collectMetaSlots(info.fields[i].type, info.fields[i].name,
+                                           at, entries, path);
+                if (!refusal.empty()) break;
+            }
+            if (!refusal.empty()) {
+                unsupported(info.decl ? static_cast<const ASTNode&>(*info.decl)
+                                      : static_cast<const ASTNode&>(program),
+                            "type_metadata for struct '" + info.finName + "': " + refusal);
+                return false;
+            }            auto* arrayTy = llvm::ArrayType::get(entryTy, entries.size());
+            auto* metaTy = llvm::StructType::get(ctx_, {i64, i64, i64, arrayTy});
+            std::vector<llvm::Constant*> entryConsts;
+            std::string entryText;
+            for (size_t i = 0; i < entries.size(); ++i) {
+                const auto& e = entries[i];
+                entryConsts.push_back(llvm::ConstantStruct::get(
+                    entryTy, {ci(e.offset), ci(e.stride), ci(e.count), ci(0)}));
+                if (i) entryText += ",";
+                entryText += "(" + std::to_string(e.offset) + "," +
+                             std::to_string(e.stride) + "," + std::to_string(e.count) +
+                             ",0)";
+            }
+            auto* init = llvm::ConstantStruct::get(
+                metaTy, {ci(dl.getTypeAllocSize(info.llvmType)),
+                         ci(dl.getABITypeAlign(info.llvmType).value()),
+                         ci(entries.size()),
+                         llvm::ConstantArray::get(arrayTy, entryConsts)});
+            const std::string globalName = "fin.typemeta." + key;
+            new llvm::GlobalVariable(module_, metaTy, true,
+                                     llvm::GlobalValue::LinkOnceODRLinkage, init,
+                                     globalName);
+            debugLog("type_metadata " + info.finName + " -> " + globalName + ": size=" +
+                     std::to_string(dl.getTypeAllocSize(info.llvmType)) + " align=" +
+                     std::to_string(dl.getABITypeAlign(info.llvmType).value()) +
+                     " entries=" + std::to_string(entries.size()) + " [" + entryText + "]");
+        }
+        return true;
+    }
 
 private:
     // ---- refusal ----------------------------------------------------------
@@ -1411,6 +2136,13 @@ private:
         failed_ = true;
         everFailed_ = true;
         diag_.reportError(node.loc, fmt::format("codegen: {} is not lowered yet", what));
+    }
+
+    // The same refusal for a borrowed const node: the metadata walk holds its
+    // struct declarations const, and a refusal that needed a mutable node would
+    // force a cast at every call site instead of one here.
+    void unsupported(const ASTNode& node, const std::string& what) {
+        unsupported(const_cast<ASTNode&>(node), what);
     }
 
     void unsupportedType(ASTNode& node, const TypeNode* type, const std::string& role) {
@@ -1716,6 +2448,19 @@ private:
         // its own binding installed would refuse `S` as a type it does not know. See
         // instantiateTemplate, which installs these under the lambda's own.
         Substitution outer;
+        // The value captures, snapshotted with the rest: parallel names and
+        // frame types from the declaration site, the env struct type built
+        // from them, and the mangled slot holding the runtime env the
+        // declaration built. Empty when the lambda captures nothing, in which
+        // case the declaration emits no slot and a call threads null.
+        // Per template (and so per outer instantiation, which registers its
+        // own), because a capture's type may itself mention the outer
+        // parameters -- `v: S` is an `int` field in one instance and a
+        // `double` field in another. See buildCaptureEnv for the snapshot.
+        std::vector<std::string> capNames;
+        std::vector<CgType> capTypes;
+        llvm::StructType* envType = nullptr;
+        std::string envSlot;
     };
 
     // The generic lambdas one body may call, which is what crosses a body boundary for
@@ -1752,6 +2497,28 @@ private:
     // queued method -- sees none rather than the last filler's.
     std::unordered_map<std::string, LambdaTemplate> lambdaCarry_;
 
+    // One env field for the body now being emitted. Filled from the carry
+    // below: the capture's index in the env struct and its type, read by
+    // visit(Identifier&) and emitAddress to thread an outer binding through
+    // the env instead of the (gone) frame.
+    struct ActiveCapture {
+        unsigned index = 0;
+        CgType type;
+    };
+    // The captures the NEXT body emitted takes: parallel name/type vectors
+    // handed over like `nestedCarry_`, plus the env struct type both sides
+    // were built against. Taken and cleared by emitBodyOf.
+    std::vector<std::string> captureCarryNames_;
+    std::vector<CgType> captureCarryTypes_;
+    llvm::StructType* captureCarryEnv_ = nullptr;
+    // The captures of the body NOW being emitted (empty outside lambda
+    // bodies), with the slot holding the env pointer and the struct type its
+    // fields are read through. Per body like the scopes, so ScopedEmission
+    // saves and clears them for a nested emission.
+    std::unordered_map<std::string, ActiveCapture> capturesActive_;
+    llvm::Value* captureEnvSlot_ = nullptr;
+    llvm::StructType* captureEnvType_ = nullptr;
+
     bool isPoisoned(const std::string& name) const {
         for (auto& p : poisoned_) if (p == name) return true;
         return false;
@@ -1786,6 +2553,61 @@ private:
             failed_ = true;
         }
         return nullptr;
+    }
+
+    // The same lookup without the poison side effect, for the moved-from
+    // bookkeeping below: marking or reviving a binding is not reading its
+    // value, so a refused declaration must not stop the statement here (its
+    // own refusal already did that where it belongs).
+    Local* findLocalNoPoison(const std::string& name) {
+        for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+            auto found = it->find(name);
+            if (found != it->end()) return &found->second;
+        }
+        return nullptr;
+    }
+
+    // The moved-from flags across branches (wave-5 slice 1). A snapshot is
+    // every live binding's flag, by scope index and name -- the lowering
+    // shadow of events::MovedAnalysis::Snapshot, but flags only, because the
+    // scopes themselves are this walk's to push and pop. A branch arm starts
+    // from the entry state (restore) and the join skips what either arm
+    // moved (joinMovedFrom ORs): agreement holds, disagreement becomes Maybe,
+    // and Maybe skips -- leak beats corruption, per the slice-1 owner
+    // decision. Scopes an arm pushed are popped by the arm itself, so only
+    // indices that survive are ever written back.
+    using MovedFromSnapshot = std::vector<std::unordered_map<std::string, bool>>;
+    MovedFromSnapshot snapshotMovedFrom() const {
+        MovedFromSnapshot snap;
+        snap.reserve(scopes_.size());
+        for (const auto& scope : scopes_) {
+            std::unordered_map<std::string, bool> flags;
+            for (const auto& entry : scope) flags[entry.first] = entry.second.movedFrom;
+            snap.push_back(std::move(flags));
+        }
+        return snap;
+    }
+    void restoreMovedFrom(const MovedFromSnapshot& snap) {
+        const size_t n = std::min(snap.size(), scopes_.size());
+        for (size_t i = 0; i < n; ++i) {
+            for (const auto& entry : snap[i]) {
+                auto found = scopes_[i].find(entry.first);
+                if (found != scopes_[i].end()) found->second.movedFrom = entry.second;
+            }
+        }
+    }
+    void joinMovedFrom(const MovedFromSnapshot& a, const MovedFromSnapshot& b) {
+        const size_t n = std::min({a.size(), b.size(), scopes_.size()});
+        for (size_t i = 0; i < n; ++i) {
+            for (const auto& entry : a[i]) {
+                auto found = scopes_[i].find(entry.first);
+                if (found == scopes_[i].end()) continue;
+                bool onB = false;
+                if (auto other = b[i].find(entry.first); other != b[i].end())
+                    onB = other->second;
+                found->second.movedFrom = entry.second || onB;
+            }
+        }
     }
 
     // Every nested function a body written *here* could call, flattened into the one map
@@ -2026,7 +2848,17 @@ private:
                 if (td->is_symbol_resolution) continue;
                 if (td->name.empty() || td->name == "*") continue;
                 if (!td->generic_params.empty()) continue;
-                if (!td->union_members.empty()) continue;
+                if (!td->union_members.empty()) {
+                    // A union alias lowers as its first alternative -- the same
+                    // answer the analyzer gives value positions -- and its name
+                    // is recorded beside it so the mapped type keeps the
+                    // union-ness for the metadata walk to refuse (Q12).
+                    unionAliases_.insert(td->name);
+                    if (td->aliased_type && !typeAliases_.count(td->name)) {
+                        typeAliases_[td->name] = td->aliased_type.get();
+                    }
+                    continue;
+                }
                 if (!td->aliased_type) continue;
 
                 // Root program declarations win over module declarations
@@ -4087,11 +4919,21 @@ private:
     // sound and only the name would be a small lie -- and the name of an instance is
     // read by the trace and by nothing else.
     static std::string cgDisplay(const CgType& t) {
+        // A nullable value shares its payload's typeid so that boxing `A?`
+        // answers the same key the old same-shape lowering did: the payload is
+        // first in the pair, so an unbox to the payload reads it back. Owed
+        // ruling: whether `A?` and `A` should share an `any` key at all.
+        if (t.isNullableValue() && t.nullablePayload)
+            return cgDisplay(*t.nullablePayload);
         switch (t.kind) {
             case CgType::Kind::Void:
                 return "void";
             case CgType::Kind::Int:
                 if (t.isBool) return "bool";
+                // A fieldless enum rides the Int kind, but it is not that
+                // integer: without its own key it would share a typeid with
+                // one, and an unbox could not tell them apart (ADR 0034).
+                if (t.enumInfo) return t.enumInfo->finName;
                 switch (t.bits) {
                     case 8: return t.isSigned ? "char" : "byte";
                     case 16: return t.isSigned ? "short" : "ushort";
@@ -4110,6 +4952,9 @@ private:
                 return t.pointee ? "&" + cgDisplay(*t.pointee) : "string";
             case CgType::Kind::Struct:
                 if (t.enumInfo) return t.enumInfo->finName;
+                // An interface reference is a struct-kind value but not any
+                // struct: its own key, so it never shares a typeid with one.
+                if (t.isInterface) return "interface<" + t.interfaceName + ">";
                 // The instantiation's own mangled name for a generic one, so
                 // `Box<Colour>` stays `Box<Colour>`.
                 return t.structInfo ? t.structInfo->finName : "struct";
@@ -4128,6 +4973,17 @@ private:
                                    t.values && t.values->element
                                        ? cgDisplay(*t.values->element)
                                        : "?");
+            case CgType::Kind::Fn: {
+                // The full signature: every function value is one `ptr` in the
+                // IR, so without this all of them would share one typeid and an
+                // unbox could not tell signatures apart (ADR 0034).
+                std::string out = "fn(";
+                for (size_t i = 0; i < t.params.size(); ++i) {
+                    if (i) out += ", ";
+                    out += t.params[i] ? cgDisplay(*t.params[i]) : "?";
+                }
+                return out + ") -> " + (t.result ? cgDisplay(*t.result) : "?");
+            }
         }
         return "?";
     }
@@ -4460,12 +5316,16 @@ private:
                          const std::string& symbol,
                          const std::vector<std::unique_ptr<Parameter>>& params,
                          const TypeNode* returnType, bool isVarArg, bool isExtern,
-                         const CgType* receiver = nullptr) {
+                         const CgType* receiver = nullptr, bool withEnv = false) {
         if (functions_.count(name)) return;  // first declaration wins, as the analyzer's does
 
         FnInfo info;
         info.isVarArg = isVarArg;
         info.hasReceiver = (receiver != nullptr);
+        // A lambda's closure environment travels as a leading `ptr` parameter.
+        // Only lambdas set this: named functions are called directly (no env),
+        // and reach values through a wrapper (closureWrapForValue) instead.
+        info.hasEnvParam = withEnv;
 
         auto ret = types_.map(returnType);
         if (!ret) { unsupportedType(node, returnType, "a return"); return; }
@@ -4494,6 +5354,11 @@ private:
             info.paramTypes.push_back(*receiver);
             llvmParams.push_back(receiver->llvmType);
         }
+        // The closure env goes behind the receiver and in front of what the
+        // source wrote. Like the receiver it is invisible at the Fin call site:
+        // an indirect call threads element 1 of the pair (see emitIndirectCall),
+        // and the body binds it to its env slot rather than to a parameter.
+        if (withEnv) llvmParams.push_back(types_.pointerType().llvmType);
         for (auto& p : params) {
             // `...` in `@define printf(fmt: string, ...)` is a Parameter with the
             // vararg flag and no type of its own.
@@ -4533,8 +5398,33 @@ private:
                 return;
             }
             llvmRet = llvm::Type::getInt32Ty(ctx_);
-            if (!llvmParams.empty()) {
+            if (info.hasReceiver || info.isVarArg) {
                 unsupported(node, "a 'main' with parameters");
+                return;
+            }
+            if (llvmParams.empty()) {
+                // `main()` — the C `i32()` entry; extra argc/argv the runtime
+                // passes are ignored by the callee's own convention.
+            } else if (llvmParams.size() == 1 && params.size() == 1) {
+                // `main(args: [string])` is the designed argv surface: one
+                // dynamic array of strings, lowered as C `i32(i32, ptr)`.
+                // Anything else named here is a C-shape accident, refused by
+                // name rather than silently given the wrong registers.
+                const CgType& pt = info.paramTypes[0];
+                const bool isStringArray =
+                    pt.isDynamicArray && pt.element &&
+                    pt.element->kind == CgType::Kind::Ptr &&
+                    !pt.element->pointee && !pt.isNullable;
+                if (!isStringArray) {
+                    unsupported(*params[0], "a 'main' parameter '" + params[0]->name +
+                                            "' (only '[string]' is lowered)");
+                    return;
+                }
+                info.isMainWithArgs = true;
+                llvmParams = {llvm::Type::getInt32Ty(ctx_),
+                              llvm::PointerType::getUnqual(ctx_)};
+            } else {
+                unsupported(node, "a 'main' with parameters (only 'main()' and 'main(args: [string])' are lowered)");
                 return;
             }
         }
@@ -4594,6 +5484,13 @@ private:
         if (a.isFn()) return sameSignature(a, b);
         if (a.kind == CgType::Kind::Int)
             return a.bits == b.bits && a.isSigned == b.isSigned && a.isBool == b.isBool;
+        // Two tagged pairs are the same type only when their payloads are:
+        // {i32,i1} for `int?` and `uint?` share an LLVM type but not a Fin type.
+        if (a.isNullableValue() || b.isNullableValue()) {
+            if (!a.isNullableValue() || !b.isNullableValue()) return false;
+            if (!a.nullablePayload || !b.nullablePayload) return false;
+            return sameType(*a.nullablePayload, *b.nullablePayload);
+        }
         return a.llvmType == b.llvmType;
     }
 
@@ -4763,6 +5660,46 @@ private:
             if (to.isStruct() || to.isAny)
                 return llvm::Constant::getNullValue(to.llvmType);
         }
+        // Nullable values as tagged pairs {T,i1}, presence = tag ONLY (ADR 0040).
+        // `null` above already yields {0,0} via the struct branch. Here a bare
+        // payload wraps present (tag=1) and a pair to a pair converts payload
+        // while carrying the tag.
+        if (to.isNullableValue()) {
+            if (!to.nullablePayload) {
+                unsupported(node, fmt::format("a conversion from '{}' to '{}'",
+                                              describe(from.type), describe(to)));
+                return nullptr;
+            }
+            if (from.type.isNullableValue()) {
+                if (!from.type.nullablePayload) {
+                    unsupported(node, fmt::format("a conversion from '{}' to '{}'",
+                                                  describe(from.type), describe(to)));
+                    return nullptr;
+                }
+                if (sameType(from.type, to)) return from.value;
+                llvm::Value* fromTag =
+                    builder_.CreateExtractValue(from.value, {1}, "null.tag");
+                llvm::Value* fromPayload =
+                    builder_.CreateExtractValue(from.value, {0}, "null.payload");
+                CgVal payloadVal{fromPayload, *from.type.nullablePayload};
+                llvm::Value* convPayload =
+                    convert(node, payloadVal, *to.nullablePayload, explicitCast);
+                if (!convPayload) return nullptr;
+                llvm::Value* pair = llvm::UndefValue::get(to.llvmType);
+                pair = builder_.CreateInsertValue(pair, convPayload, {0});
+                pair = builder_.CreateInsertValue(pair, fromTag, {1});
+                return pair;
+            }
+            llvm::Value* convPayload =
+                convert(node, from, *to.nullablePayload, explicitCast);
+            if (!convPayload) return nullptr;
+            llvm::Value* pair = llvm::UndefValue::get(to.llvmType);
+            pair = builder_.CreateInsertValue(pair, convPayload, {0});
+            pair = builder_.CreateInsertValue(
+                pair, llvm::ConstantInt::get(llvm::Type::getInt1Ty(ctx_), 1),
+                {1});
+            return pair;
+        }
         // A pointer into a non-bool integer is its address bits, but only as
         // an explicit `cast`: what `cast<int>(key)` means for the default
         // hasher (lib/std/hashmap.fin:91), where equal pointers must hash
@@ -4817,8 +5754,17 @@ private:
             if (from.type.isAny && to.isAny) return from.value;
             if (to.isAny) {
                 llvm::Value* payload = nullptr;
-                if (from.type.isPointer() || from.type.isFn()) {
+                if (from.type.isPointer()) {
                     payload = builder_.CreatePointerCast(from.value, llvm::PointerType::getUnqual(ctx_), "any.ptr");
+                } else if (from.type.isFn()) {
+                    // A closure pair is two words and fits no payload pointer,
+                    // so it boxes by address like a struct: the payload points
+                    // at a copy, and the unbox loads it back whole -- env
+                    // included, which boxing the code word alone would drop.
+                    auto* tmp = builder_.CreateAlloca(from.type.llvmType, nullptr,
+                                                      "any.closure.tmp");
+                    builder_.CreateStore(from.value, tmp);
+                    payload = builder_.CreatePointerCast(tmp, llvm::PointerType::getUnqual(ctx_), "any.addr");
                 } else if (from.type.kind == CgType::Kind::Int) {
                     llvm::Value* ext = builder_.CreateZExtOrTrunc(from.value, llvm::Type::getInt64Ty(ctx_), "any.int");
                     payload = builder_.CreateIntToPtr(ext, llvm::PointerType::getUnqual(ctx_), "any.scalar");
@@ -4846,8 +5792,35 @@ private:
             }
             if (from.type.isAny) {
                 llvm::Value* payload = builder_.CreateExtractValue(from.value, {0u}, "any.payload");
-                if (to.isPointer() || to.isFn()) {
+                llvm::Value* storedTid = builder_.CreateExtractValue(from.value, {1u}, "any.typeid");
+                // An `any` holds exactly one static type, and the unbox names it
+                // exactly: a stored typeid that is not the target's is a Fin
+                // blame, not a reinterpretation (ADR 0034 amendment). Without
+                // the check a `double`-holding blob cast to `float` truncated
+                // its bits and answered wrong.
+                if (!currentFn_) {
+                    unsupported(node, "an 'any' unbox outside a function (ADR 0034)");
+                    return nullptr;
+                }
+                llvm::Value* match = builder_.CreateICmpEQ(
+                    storedTid, builder_.getInt64(typeIdOf(to)), "any.type.match");
+                auto* failBB = llvm::BasicBlock::Create(ctx_, "any.unbox.fail", currentFn_->fn);
+                auto* okBB = llvm::BasicBlock::Create(ctx_, "any.unbox.ok", currentFn_->fn);
+                builder_.CreateCondBr(match, okBB, failBB);
+                builder_.SetInsertPoint(failBB);
+                if (!emitRuntimeBlame(node, "an 'any' unbox to '" + describe(to) +
+                                                "' holding another type",
+                                      "an 'any' unbox"))
+                    return nullptr;
+                builder_.SetInsertPoint(okBB);
+                if (to.isPointer()) {
                     return builder_.CreatePointerCast(payload, to.llvmType, "any.cast.ptr");
+                }
+                if (to.isFn()) {
+                    // The box above stored a copy of the pair: load it back
+                    // whole, so the env survives the round trip.
+                    llvm::Value* typedPtr = builder_.CreatePointerCast(payload, llvm::PointerType::getUnqual(ctx_), "any.closure.ptr");
+                    return builder_.CreateLoad(to.llvmType, typedPtr, "any.closure.val");
                 }
                 if (to.kind == CgType::Kind::Int) {
                     llvm::Value* asInt = builder_.CreatePtrToInt(payload, llvm::Type::getInt64Ty(ctx_), "any.cast.int");
@@ -4868,19 +5841,19 @@ private:
             }
         }
         // Before the identity shortcut below, and that is the whole point of putting it
-        // here. Every function value is a `ptr`, so `from.type.llvmType ==
-        // to.llvmType` is true for *any* pair of them -- and for a `&int` against an
-        // `fn` too. Left to that line, `fn(int) -> int` would be accepted where
+        // here. Every function value is one `{code, env}` struct, so
+        // `from.type.llvmType == to.llvmType` is true for *any* pair of them.
+        // Left to that line, `fn(int) -> int` would be accepted where
         // `fn(int, int) -> int` was wanted, and the indirect call through it would read
         // an argument register the caller never set. Nothing later would notice,
         // because there is nothing later to notice with.
         if (from.type.isFn() || to.isFn()) {
-            // `null` into a function slot is a null function pointer, which is a value
+            // `null` into a function slot is a null closure pair, which is a value
             // a function type has (stdlib/collection.fin:18 writes one as a field
             // default). Recognised by the constant rather than by the type, because a
             // bare `null` is a Ptr with no pointee and so is a `string`.
             if (to.isFn() && llvm::isa<llvm::ConstantPointerNull>(from.value))
-                return from.value;
+                return llvm::Constant::getNullValue(to.llvmType);
             if (!from.type.isFn() || !to.isFn() || !sameSignature(from.type, to)) {
                 unsupported(node, fmt::format("a conversion from '{}' to '{}'",
                                               describe(from.type), describe(to)));
@@ -5004,6 +5977,12 @@ private:
             // live local does: answering with the global's address would lower a read
             // of the wrong variable.
             if (failed_) return std::nullopt;
+            // A capture of the lambda now being emitted, for the reason the
+            // read path checks it before the globals: a function-local binding
+            // shadows one. This is what an assignment to a capture stores
+            // through, and what `&x` on one takes the address of -- both the
+            // env field, matching the by-value snapshot the definition built.
+            if (auto field = captureField(id->name)) return field;
             // A global has an address for the same reasons a local does, and being one
             // is the whole of what makes `Counter = Counter + 1` and `Cells[1] = 42`
             // work at module scope: everything past this point is the same code.
@@ -5535,10 +6514,16 @@ private:
               fn_(e.currentFn_), structBase_(e.fnScopeBase_),
               scopes_(std::move(e.scopes_)),
               nested_(std::move(e.nested_)), lambdas_(std::move(e.lambdaTemplates_)),
-              loops_(std::move(e.loops_)), poisoned_(std::move(e.poisoned_)) {
+              loops_(std::move(e.loops_)), poisoned_(std::move(e.poisoned_)),
+              tied_(std::move(e.tiedPending_)), region_(e.regionDepth_),
+              active_(std::move(e.capturesActive_)), envSlot_(e.captureEnvSlot_),
+              envType_(e.captureEnvType_) {
             e_.scopes_.clear();
             e_.nested_.clear();
             e_.lambdaTemplates_.clear();
+            e_.capturesActive_.clear();
+            e_.captureEnvSlot_ = nullptr;
+            e_.captureEnvType_ = nullptr;
             // No loop, whatever the caller was in the middle of. A `break` written in
             // a body emitted from inside a loop used to branch to that loop's exit
             // block, which is a block in another function -- `Referring to a basic
@@ -5548,6 +6533,8 @@ private:
             // visit(BreakStatement&) already says exactly that.
             e_.loops_.clear();
             e_.poisoned_.clear();
+            e_.tiedPending_.clear();
+            e_.regionDepth_ = 0;
             e_.currentFn_ = nullptr;
         }
         ~ScopedEmission() {
@@ -5556,6 +6543,11 @@ private:
             e_.lambdaTemplates_ = std::move(lambdas_);
             e_.loops_ = std::move(loops_);
             e_.poisoned_ = std::move(poisoned_);
+            e_.tiedPending_ = std::move(tied_);
+            e_.capturesActive_ = std::move(active_);
+            e_.captureEnvSlot_ = envSlot_;
+            e_.captureEnvType_ = envType_;
+            e_.regionDepth_ = region_;
             e_.currentFn_ = fn_;
             e_.fnScopeBase_ = structBase_;
             if (block_) e_.builder_.SetInsertPoint(block_, point_);
@@ -5575,6 +6567,34 @@ private:
         std::vector<std::unordered_map<std::string, LambdaTemplate>> lambdas_;
         std::vector<LoopTargets> loops_;
         std::vector<std::string> poisoned_;
+        std::vector<TiedPending> tied_;
+        size_t region_ = 0;
+        std::unordered_map<std::string, ActiveCapture> active_;
+        llvm::Value* envSlot_ = nullptr;
+        llvm::StructType* envType_ = nullptr;
+    };
+
+    // How deep inside loop bodies and branch arms the emission point is
+    // (wave-5 slice 4). A `#[slaveof]` deferral moves a destruction to the
+    // master's scope exit, which is only sound when the declaration's block
+    // dominates that point -- true for straight-line nesting, false across a
+    // loop back-edge or a branch join. The counter records the region each
+    // local was declared in (see Local::region); a tie across regions is
+    // refused in resolveSlaveof rather than lowered into invalid IR.
+    // Per function body like the scopes, so nested emission resets it.
+    size_t regionDepth_ = 0;
+
+    // Counts one control-flow region: a loop body or a branch arm. RAII so
+    // an early return for a refused body cannot leave the depth wrong.
+    // Only statements need it: expressions declare nothing (a ternary or a
+    // short-circuit arm holds no `let`), so their blocks never separate a
+    // declaration from the scope exit it drains at.
+    struct RegionGuard {
+        explicit RegionGuard(Emitter& e) : e_(e) { ++e_.regionDepth_; }
+        ~RegionGuard() { --e_.regionDepth_; }
+        RegionGuard(const RegionGuard&) = delete;
+        RegionGuard& operator=(const RegionGuard&) = delete;
+        Emitter& e_;
     };
 
     // One function's body, into the llvm::Function that `name` was declared under.
@@ -5648,18 +6668,80 @@ private:
             index = 1;
         }
 
+        // The closure env, beside the receiver and in front of what the source
+        // wrote. It gets a slot like a parameter, so the body reads its
+        // captures through it, and the capture carry taken below says which
+        // field is which. A body nobody filled the carry for -- a
+        // non-capturing lambda -- binds the slot and reads nothing through it.
+        if (info.hasEnvParam) {
+            const unsigned envArg = info.hasReceiver ? 1u : 0u;
+            auto* ptrTy = types_.pointerType().llvmType;
+            auto* eslot = builder_.CreateAlloca(ptrTy, nullptr, "env");
+            builder_.CreateStore(info.fn->getArg(envArg), eslot);
+            captureEnvSlot_ = eslot;
+            captureEnvType_ = captureCarryEnv_;
+            capturesActive_.clear();
+            for (size_t i = 0; i < captureCarryNames_.size(); ++i) {
+                capturesActive_[captureCarryNames_[i]] =
+                    ActiveCapture{(unsigned)i, captureCarryTypes_[i]};
+            }
+        }
+        captureCarryNames_.clear();
+        captureCarryTypes_.clear();
+        captureCarryEnv_ = nullptr;
+
         // Each parameter gets a stack slot, because a parameter is assignable in
         // Fin and an argument register is not.
-        for (auto& p : params) {
-            if (p->is_vararg) continue;
-            // Written or injected, `self` is the slot above and not a second one.
-            if (info.hasReceiver && p->name == "self") continue;
-            if (index >= info.paramTypes.size()) break;
-            auto* slot = builder_.CreateAlloca(info.paramTypes[index].llvmType, nullptr,
-                                               p->name);
-            builder_.CreateStore(info.fn->getArg((unsigned)index), slot);
-            scopes_.back()[p->name] = Local{slot, info.paramTypes[index], nextLocalOrder_++};
-            ++index;
+        //
+        // `main(args: [string])` is the one exception to the index-parallel
+        // rule above: its LLVM signature is C's `(i32, ptr)` while its Fin
+        // type is one `[string]`. The bridge borrows argv rather than
+        // copying it — `{argv+1, argc-1}` with a null for the empty case —
+        // so there is no allocation to free and no loop to miscompile.
+        if (info.isMainWithArgs) {
+            const std::string argName =
+                params.empty() ? "args" : params[0]->name;
+            const CgType& arrType = info.paramTypes[0];
+            llvm::Value* argc = info.fn->getArg(0);
+            llvm::Value* argv = info.fn->getArg(1);
+            argc->setName("argc");
+            argv->setName("argv");
+            llvm::Value* one = builder_.getInt32(1);
+            llvm::Value* zero = builder_.getInt32(0);
+            llvm::Value* raw = builder_.CreateSub(argc, one, "argv.count.raw");
+            llvm::Value* isNeg = builder_.CreateICmpSLT(raw, zero, "argv.count.neg");
+            llvm::Value* count = builder_.CreateSelect(isNeg, zero, raw, "argv.count");
+            llvm::Type* ptrTy = types_.pointerType().llvmType;
+            llvm::Value* argvPlusOne = builder_.CreateInBoundsGEP(
+                ptrTy, argv, {one}, "argv.plus.one");
+            llvm::Value* isZero =
+                builder_.CreateICmpEQ(count, zero, "argv.count.zero");
+            llvm::Value* nullPtr = llvm::Constant::getNullValue(ptrTy);
+            llvm::Value* buffer =
+                builder_.CreateSelect(isZero, nullPtr, argvPlusOne, "argv.buf");
+            llvm::Value* pair = llvm::UndefValue::get(arrType.llvmType);
+            pair = builder_.CreateInsertValue(pair, buffer, {0}, "argv.pair.ptr");
+            pair = builder_.CreateInsertValue(pair, count, {1}, "argv.pair.len");
+            auto* slot = builder_.CreateAlloca(arrType.llvmType, nullptr, argName);
+            builder_.CreateStore(pair, slot);
+            scopes_.back()[argName] = Local{slot, arrType, nextLocalOrder_++};
+        } else {
+            // The env sits between the receiver and the written parameters, so
+            // the argument index runs ahead of the parameter index by one where
+            // a body has it.
+            size_t argIndex = index + (info.hasEnvParam ? 1u : 0u);
+            for (auto& p : params) {
+                if (p->is_vararg) continue;
+                // Written or injected, `self` is the slot above and not a second one.
+                if (info.hasReceiver && p->name == "self") continue;
+                if (index >= info.paramTypes.size()) break;
+                auto* slot = builder_.CreateAlloca(info.paramTypes[index].llvmType, nullptr,
+                                                   p->name);
+                builder_.CreateStore(info.fn->getArg((unsigned)argIndex), slot);
+                scopes_.back()[p->name] = Local{slot, info.paramTypes[index], nextLocalOrder_++};
+                ++index;
+                ++argIndex;
+            }
         }
 
         if (block) {
@@ -5679,6 +6761,29 @@ private:
                 builder_.CreateRet(builder_.getInt32(0));
             } else if (info.returnType.isVoid()) {
                 builder_.CreateRetVoid();
+            } else if (info.returnType.isNullable) {
+                // `fun?` is the analyzer's documented exemption from the
+                // missing-return check (tests/samples/nullifier.fin:23
+                // "Automatically returns null even without an else
+                // statement"): falling off the end returns null in the
+                // declared representation -- the same value an explicit
+                // `return null` lowers to through convert() (a zero scalar,
+                // a null pointer, a zeroed aggregate). Emitting
+                // `unreachable` here instead let control run into whatever
+                // bytes followed the function (measured SIGSEGV on a `fun?`
+                // whose final `if` had no `else`).
+                const CgType& rt = info.returnType;
+                llvm::Value* nullRet = nullptr;
+                if (rt.kind == CgType::Kind::Int)
+                    nullRet = llvm::ConstantInt::get(rt.llvmType, 0);
+                else if (rt.kind == CgType::Kind::Float)
+                    nullRet = llvm::ConstantFP::get(rt.llvmType, 0.0);
+                else if (rt.isPointer() || rt.isFn() || rt.isStruct() || rt.isAny)
+                    nullRet = llvm::Constant::getNullValue(rt.llvmType);
+                if (nullRet)
+                    builder_.CreateRet(nullRet);
+                else
+                    builder_.CreateUnreachable();
             } else {
                 // The analyzer's missing-return check is what makes this
                 // unreachable for a well-typed program; `fun?` is its documented
@@ -5840,8 +6945,11 @@ private:
         //    position resolves through the bindings, so this is the ordinary path with
         //    the parameters substituted -- including every refusal it has, which is how
         //    an instance whose signature cannot be lowered says so at the call.
+        //    A lambda instance takes the env first, like every lambda: the call
+        //    threads the declaration's runtime env (see emitTemplateCall).
         declareFunction(*tmpl.node, key, key, *tmpl.params, tmpl.returnType,
-                        /*isVarArg=*/false, /*isExtern=*/false);
+                        /*isVarArg=*/false, /*isExtern=*/false, nullptr,
+                        /*withEnv=*/tmpl.lambda != nullptr);
         auto found = functions_.find(key);
         if (found == functions_.end()) return false;  // declareFunction reported
 
@@ -5871,11 +6979,19 @@ private:
         //    of whatever call asked for it, so reading the live tables here would refuse
         //    the caller's locals as captures and let the body call nested functions the
         //    lambda was never written among.
+        //
+        //    The value captures travel the same road as those three: the declaration
+        //    snapshotted their names, types and env layout, and the body reads them
+        //    through the env parameter the call threads in -- per instance, because
+        //    a capture's type may itself mention the outer parameters.
         if (tmpl.lambda) {
             std::vector<std::string> enclosing = tmpl.lambda->enclosing;
             enclosing.swap(enclosingNames_);
             nestedCarry_ = tmpl.lambda->nested;
             if (tmpl.lambda->visible) lambdaCarry_ = tmpl.lambda->visible->table;
+            captureCarryNames_ = tmpl.lambda->capNames;
+            captureCarryTypes_ = tmpl.lambda->capTypes;
+            captureCarryEnv_ = tmpl.lambda->envType;
             emitBodyOf(*tmpl.node, *tmpl.params, tmpl.block, tmpl.value, key);
             enclosing.swap(enclosingNames_);
         } else {
@@ -6065,7 +7181,26 @@ private:
         }
 
         std::vector<llvm::Value*> args;
-        args.reserve(values.size());
+        args.reserve(values.size() + 1);
+        // A lambda instance takes the declaration's runtime env first: loaded
+        // out of the mangled slot the declaration built beside registering the
+        // template, or null for a lambda that captures nothing (which built no
+        // slot). Converted after the user arguments, for the same reason an
+        // indirect call converts first and threads second: the env is already
+        // the type the parameter wants.
+        if (tmpl.lambda && !tmpl.lambda->envSlot.empty()) {
+            Local* envLocal = findLocal(tmpl.lambda->envSlot);
+            if (!envLocal) {
+                unsupported(node, fmt::format("a call to '{}', whose environment "
+                                              "is not in scope", tmpl.display));
+                return;
+            }
+            args.push_back(builder_.CreateLoad(envLocal->type.llvmType,
+                                               envLocal->slot, "closure.env"));
+        } else if (tmpl.lambda) {
+            args.push_back(llvm::Constant::getNullValue(
+                types_.pointerType().llvmType));
+        }
         for (size_t i = 0; i < values.size(); ++i) {
             llvm::Value* converted = convert(node, values[i], info.paramTypes[i]);
             if (!converted) return;
@@ -6087,13 +7222,16 @@ private:
 
     // `let id <auto> = fun <T>(x: T) <T> { return x; };` -- a name bound to a template.
     //
-    // The declaration emits nothing at all: no alloca, no store, and no entry in
-    // `scopes_`. That is the monomorphisation ruling applied to a lambda rather than a
-    // choice made here -- `id<int>` and `id<double>` are two functions and a bare `id`
-    // names neither, so there is no value for a slot to hold, and a template nothing
-    // calls costs nothing exactly as `AGenericFunctionNobodyCallsLowersToNothing` says
-    // for a named one. `lambdas.fin`'s two are both uncalled and this is why they are
-    // free.
+    // The declaration emits no function and no value slot: that is the
+    // monomorphisation ruling applied to a lambda rather than a choice made
+    // here -- `id<int>` and `id<double>` are two functions and a bare `id`
+    // names neither, so there is no value for a slot to hold, and a template
+    // nothing calls costs nothing exactly as `AGenericFunctionNobodyCallsLowersToNothing`
+    // says for a named one. `lambdas.fin`'s two are both uncalled and this is
+    // why they are free. What a capturing declaration does emit is the runtime
+    // env beside the registration, under a mangled name: the snapshot belongs
+    // to this execution of the enclosing frame, while the instance's code is
+    // emitted later, from the middle of a call.
     //
     // Returns false having already reported.
     bool registerLambdaTemplate(VariableDeclaration& node, LambdaExpression& lambda) {
@@ -6169,9 +7307,116 @@ private:
         tmpl.visible = std::make_shared<LambdaEnv>();
         tmpl.visible->table = visibleLambdas();
         if (const Substitution* active = types_.bindings()) tmpl.outer = *active;
+        // The value captures, resolved against the live frame exactly as a
+        // plain lambda's are (see visit(LambdaExpression&)): the declaration
+        // executes here, in the enclosing frame, so the snapshot is built
+        // here too -- while the instance's code is emitted later, from the
+        // middle of a call. The runtime env waits in a mangled slot the call
+        // loads; the mangled spelling keeps the written name unbound, so the
+        // call still reaches the template table first. Nothing is emitted
+        // when there is nothing to capture, and an uncalled template is still
+        // only a registration.
+        if (!lambda.captures.empty()) {
+            std::vector<std::pair<std::string, CgType>> fields;
+            fields.reserve(lambda.captures.size());
+            for (const auto& cap : lambda.captures) {
+                std::optional<CaptureSource> src = captureSource(cap.name);
+                if (failed_ || !src) {
+                    if (!failed_)
+                        unsupported(node, fmt::format("a lambda capturing '{}'",
+                                                      cap.name));
+                    return false;
+                }
+                tmpl.capNames.push_back(cap.name);
+                tmpl.capTypes.push_back(src->type);
+                fields.emplace_back(cap.name, src->type);
+            }
+            tmpl.envType = envStructType(fmt::format("fin.env.{}", tmpl.id),
+                                         fieldTypesOf(fields));
+            llvm::Value* env = buildCaptureEnv(node, tmpl.envType, fields);
+            if (!env) return false;
+            tmpl.envSlot = node.name + ".fin.env";
+            auto* slot = builder_.CreateAlloca(types_.pointerType().llvmType, nullptr,
+                                               tmpl.envSlot);
+            builder_.CreateStore(env, slot);
+            scopes_.back()[tmpl.envSlot] =
+                Local{slot, types_.pointerType(), nextLocalOrder_++};
+        }
         lambdaTemplates_.back()[node.name] = std::move(tmpl);
         debugLog(fmt::format("registered the generic lambda {}", node.name));
         return true;
+    }
+
+    // ---- the `#[slaveof]` tie (wave-5 slice 4) ------------------------------
+    //
+    // Reads the tie off a local declaration: how this binding's storage
+    // lifetime ends. The analyzer validated the shape and the referent, so
+    // with semantics on this only recognises the two spellings; `--no-check`
+    // is unsafe throughout, and what cannot be lowered here is refused
+    // rather than dropped.
+    //
+    // Returns false having reported when the tie cannot be lowered. On
+    // success `tie` is the binding's end and `master` the scopes_ index whose
+    // cleaning destroys it (Deferred only): Pinned for `#[slaveof($Fin)]`
+    // and for a tie to a global, which outlives every frame; Deferred to the
+    // master's scope for a strictly outer local; None for no tie -- and for
+    // a same-scope tie, which dies with its own scope anyway and lowers
+    // exactly as before.
+    bool resolveSlaveof(VariableDeclaration& node, Local::SlaveofTie& tie, size_t& master) {
+        tie = Local::SlaveofTie::None;
+        master = 0;
+        const Attribute* tieAttr = nullptr;
+        for (auto& attr : node.attributes) {
+            if (attr->name != "slaveof") continue;
+            if (tieAttr) {
+                unsupported(node, fmt::format("two '#[slaveof]' attributes on the variable '{}'",
+                                              node.name));
+                return false;
+            }
+            tieAttr = attr.get();
+        }
+        if (!tieAttr) return true;
+        if (tieAttr->is_flag || tieAttr->value_str.empty()) {
+            unsupported(node, fmt::format("the attribute 'slaveof' on the variable '{}' "
+                                          "names no referent", node.name));
+            return false;
+        }
+        const std::string& referent = tieAttr->value_str;
+        if (referent == "$Fin") {
+            tie = Local::SlaveofTie::Pinned;
+            return true;
+        }
+        if (!referent.empty() && referent[0] == '$') {
+            unsupported(node, fmt::format("the unknown lifetime '{}' in '#[slaveof]' on "
+                                          "the variable '{}'", referent, node.name));
+            return false;
+        }
+        for (size_t i = scopes_.size(); i-- > 0;) {
+            auto found = scopes_[i].find(referent);
+            if (found == scopes_[i].end()) continue;
+            if (i == scopes_.size() - 1) return true;  // same scope: dies together
+            // A tie across a loop body or branch arm would drain where the
+            // declaration's block does not dominate: across a back-edge or a
+            // join the slot may never have been constructed. Refused naming
+            // the tie rather than lowered into invalid IR.
+            if (found->second.region != regionDepth_) {
+                unsupported(node, fmt::format("the '#[slaveof({})]' on the variable '{}', "
+                                              "declared inside a loop body or branch arm "
+                                              "the tie cannot cross", referent, node.name));
+                return false;
+            }
+            tie = Local::SlaveofTie::Deferred;
+            master = i;
+            return true;
+        }
+        // A global outlives every frame, so a tie to one pins like `$Fin`.
+        if (globals_.count(referent)) {
+            tie = Local::SlaveofTie::Pinned;
+            return true;
+        }
+        unsupported(node, fmt::format("the '#[slaveof({})]' on the variable '{}', which "
+                                      "has no home here", referent, node.name));
+        return false;
     }
 
     void visit(VariableDeclaration& node) override {
@@ -6188,39 +7433,38 @@ private:
                 return;
             }
         }
-        // `#[slaveof(...)]` on a local is a no-op today, and that is a ruling rather
-        // than an omission (2026-08-28).
+        // `#[slaveof(...)]` on a local is a real rule (wave-5 slice 4),
+        // revisiting the 2026-08-28 no-op ruling rather than extending it.
         //
-        // Both corpus forms ask for a lifetime *at least* as long as something else:
-        // `#[slaveof(z)]` (variables.fin:27) ties `m`'s storage to `z`'s, and
-        // `#[slaveof($Fin)]` (:35) asks for "until the program exits". Neither can be
-        // violated by this backend, because **nothing here frees anything implicitly.**
-        // Memory management is a library in Fin (ADR 0003), so a heap allocation is
-        // released only by an explicit `delete` -- measured: an object built from a
-        // scope that allocates references `malloc` and not `free`, and a `new int(5)`
-        // whose scope has closed is still readable through a pointer that outlived it.
+        // That ruling rested on "nothing here frees anything implicitly", and
+        // scope-exit destructors have since made it false for struct-typed
+        // locals: a destructor running at the inner block's end is exactly the
+        // early freeing the attribute exists to prevent. So the ruling is
+        // narrowed rather than kept. `#[slaveof(z)]` (variables.fin:27) ties
+        // `m`'s destruction to `z`'s scope exit, and `#[slaveof($Fin)]` (:35)
+        // pins it to program exit (never destroyed at scope exit).
         //
-        // So an allocation nobody deletes already lives until the program exits, which
-        // is what `$Fin` asks for, and it already outlives any named variable, which is
-        // what `slaveof(z)` asks for. Emitting nothing satisfies both requests rather
-        // than ignoring them, and that is the difference between this and the refusals
-        // below: an unread attribute is refused when it *could* change the generated
-        // code, and this one provably cannot.
-        //
-        // The day scope-based freeing exists -- a destructor running implicitly, or an
-        // owning pointer released at scope exit -- this becomes a real rule and has to
-        // grow one. Soundness_Codegen.ASlaveofAttributeKeepsItsAllocationAlive is what
-        // fails then, because it reads through a pointer whose scope has closed.
+        // Destructor-less storage keeps the old reading: a heap allocation is
+        // released only by an explicit `delete` (ADR 0003), so an allocation
+        // nobody deletes already outlives every scope, and a tie on it lowers
+        // to nothing -- Soundness_Codegen.ASlaveofOnPlainDataLowersIdentically
+        // is what holds that, by comparing the generated code with and
+        // without the attribute. The difference from the refusals below is
+        // unchanged: an unread attribute is refused when it *could* change
+        // the generated code, and this one provably cannot for that storage.
         //
         // Other attributes still refuse. An attribute this file does not read may be
         // one that changes where the variable lives, and ignoring that is how a working
         // program ends up in the wrong section.
+        Local::SlaveofTie tie = Local::SlaveofTie::None;
+        size_t tieMaster = 0;
         for (auto& attr : node.attributes) {
             if (attr->name == "slaveof") continue;
             unsupported(node, fmt::format("the attribute '{}' on the variable '{}'",
                                           attr->name, node.name));
             return;
         }
+        if (!resolveSlaveof(node, tie, tieMaster)) return;
         if (!currentFn_) {
             unsupported(node, fmt::format("the variable '{}' declared here", node.name));
             return;
@@ -6262,7 +7506,7 @@ private:
             // undefined stack contents is the one answer that cannot be tested.
             builder_.CreateStore(llvm::Constant::getNullValue(type.llvmType), slot);
         }
-        scopes_.back()[node.name] = Local{slot, type, nextLocalOrder_++};
+        scopes_.back()[node.name] = Local{slot, type, nextLocalOrder_++, false, tie, tieMaster, regionDepth_};
     }
 
     // ---- statements -------------------------------------------------------
@@ -6406,13 +7650,26 @@ private:
         auto* mergeBB = llvm::BasicBlock::Create(ctx_, "if.end", currentFn_->fn);
         builder_.CreateCondBr(test, thenBB, elseBB);
 
-        builder_.SetInsertPoint(thenBB);
-        if (node.then_block) node.then_block->accept(*this);
-        if (!terminated()) builder_.CreateBr(mergeBB);
+        // The two arms fork the moved-from state and join it after, mirroring
+        // the analyzer (Analyzer_Stmt visit(IfStatement&)): the condition
+        // always runs, so both arms start from here; a move on one side only
+        // is Maybe past the join, and Maybe skips.
+        MovedFromSnapshot preMove = snapshotMovedFrom();
+        {
+            // One region for both arms: a declaration in either drains at the
+            // join its block does not dominate, so no tie crosses it.
+            RegionGuard armGuard(*this);
+            builder_.SetInsertPoint(thenBB);
+            if (node.then_block) node.then_block->accept(*this);
+            if (!terminated()) builder_.CreateBr(mergeBB);
 
-        builder_.SetInsertPoint(elseBB);
-        if (node.else_stmt) node.else_stmt->accept(*this);
-        if (!terminated()) builder_.CreateBr(mergeBB);
+            MovedFromSnapshot thenMove = snapshotMovedFrom();
+            restoreMovedFrom(preMove);
+            builder_.SetInsertPoint(elseBB);
+            if (node.else_stmt) node.else_stmt->accept(*this);
+            if (!terminated()) builder_.CreateBr(mergeBB);
+            joinMovedFrom(thenMove, snapshotMovedFrom());
+        }
 
         builder_.SetInsertPoint(mergeBB);
         // Both arms returned, so nothing reaches here. The block still has to be
@@ -6440,11 +7697,22 @@ private:
 
         // No scope of its own: the depth is the enclosing size, so `break`
         // and `continue` clean the body scopes and nothing above them.
+        //
+        // The body may run zero or more times, so its end joins its start,
+        // mirroring the analyzer (Analyzer_Stmt visit(WhileLoop&)): a move
+        // in the body is Maybe past the loop, and Maybe skips.
+        MovedFromSnapshot preMove = snapshotMovedFrom();
         loops_.push_back({condBB, endBB, scopes_.size()});
-        builder_.SetInsertPoint(bodyBB);
-        if (node.body) node.body->accept(*this);
-        if (!terminated()) builder_.CreateBr(condBB);
+        {
+            // The body's back-edge rejoins above the declaration point, so no
+            // tie drains past it.
+            RegionGuard bodyGuard(*this);
+            builder_.SetInsertPoint(bodyBB);
+            if (node.body) node.body->accept(*this);
+            if (!terminated()) builder_.CreateBr(condBB);
+        }
         loops_.pop_back();
+        joinMovedFrom(preMove, snapshotMovedFrom());
 
         builder_.SetInsertPoint(endBB);
     }
@@ -6479,15 +7747,27 @@ private:
         // (the init lives across iterations), so the depth recorded here is
         // that scope: `break` and `continue` clean everything deeper, and the
         // end block cleans this one uniformly for all paths joining there.
+        //
+        // The header (init, condition) runs once; the body and step may run
+        // zero or more times, so their end joins the header state, mirroring
+        // the analyzer (Analyzer_Stmt visit(ForLoop&)): a move in either is
+        // Maybe past the loop, and Maybe skips.
+        MovedFromSnapshot preMove = snapshotMovedFrom();
         loops_.push_back({stepBB, endBB, scopes_.size() - 1});
-        builder_.SetInsertPoint(bodyBB);
-        if (node.body) node.body->accept(*this);
-        if (!terminated()) builder_.CreateBr(stepBB);
+        {
+            // The body's back-edge rejoins above the declaration point, so no
+            // tie drains past it.
+            RegionGuard bodyGuard(*this);
+            builder_.SetInsertPoint(bodyBB);
+            if (node.body) node.body->accept(*this);
+            if (!terminated()) builder_.CreateBr(stepBB);
+        }
         loops_.pop_back();
 
         builder_.SetInsertPoint(stepBB);
         if (node.increment) emit(*node.increment);
         if (!terminated()) builder_.CreateBr(condBB);
+        joinMovedFrom(preMove, snapshotMovedFrom());
 
         builder_.SetInsertPoint(endBB);
         cleanScopeAt(node, scopes_.size() - 1);
@@ -6579,8 +7859,10 @@ private:
 
     void visit(Identifier& node) override {
         // A nested function named as a value -- `let f <fn(int) -> int> = h;` with `h`
-        // declared in this body. It is an ordinary code pointer for the same reason a
-        // module-scope function is: it captures nothing, because a capture is refused.
+        // declared in this body. It is a closure pair for the same reason a
+        // module-scope function is: the wrapper beside a null env answers the
+        // closure ABI while the function itself keeps its declared signature
+        // for direct calls.
         //
         // First, for the reason the call path checks it first: `nestedFor` answers only
         // when the nested declaration is at least as inner as any local of the name, so
@@ -6600,7 +7882,19 @@ private:
                                                   "value", node.name));
                     return;
                 }
-                value_ = CgVal{nestedFn->second.fn, *type};
+                const std::string wrap = closureWrapForValue(node, *symbol, *type);
+                if (failed_ || wrap.empty()) return;
+                auto wrapped = functions_.find(wrap);
+                if (wrapped == functions_.end()) return;  // already reported
+                std::optional<CgType> wtype = fnValueType(wrapped->second);
+                if (!wtype) {
+                    unsupported(node, fmt::format("the nested function '{}' used as a "
+                                                  "value", node.name));
+                    return;
+                }
+                auto* nullEnv = llvm::Constant::getNullValue(
+                    llvm::PointerType::getUnqual(ctx_));
+                value_ = CgVal{buildFnPair(wrapped->second.fn, nullEnv), *wtype};
                 return;
             }
         }
@@ -6610,6 +7904,17 @@ private:
             return;
         }
         if (failed_) return;  // a name refused above; see findLocal
+        // A capture of the lambda now being emitted, before the globals rather
+        // than after them: a function-local binding shadows a global of the
+        // name (ALocalOutranksAGlobalOfTheSameName), and a capture is such a
+        // binding read through the env. Loads the field; the address path in
+        // emitAddress is what `&x` and `x = v` lower through.
+        if (auto field = captureField(node.name)) {
+            auto loaded = builder_.CreateLoad(field->type.llvmType, field->ptr,
+                                              node.name);
+            value_ = CgVal{loaded, field->type};
+            return;
+        }
         // Then the globals, which are the same kind of thing as a local with a
         // different home -- and after them for the same reason: a local of the name
         // shadows one (ALocalOutranksAGlobalOfTheSameName).
@@ -6636,10 +7941,11 @@ private:
             value_ = enumConstant(member->second.value);
             return;
         }
-        // A function named as a value. An llvm::Function *is* a pointer constant, so
-        // there is nothing to emit -- the decision this used to refuse for (a bare
-        // pointer, or a closure pair) is settled at TypeMapper::mapFunction, and a named
-        // function captures nothing by construction.
+        // A function named as a value. A closure pair -- the wrapper beside a
+        // null env -- so that calling through the value is the env-first call
+        // every other `fn` value makes, while a direct call keeps calling the
+        // function itself. A named function captures nothing by construction,
+        // which is why the env is null rather than snapshot.
         auto fn = functions_.find(node.name);
         if (fn != functions_.end()) {
             std::optional<CgType> type = fnValueType(fn->second);
@@ -6651,7 +7957,18 @@ private:
                 unsupported(node, fmt::format("the function '{}' used as a value", node.name));
                 return;
             }
-            value_ = CgVal{fn->second.fn, *type};
+            const std::string wrap = closureWrapForValue(node, node.name, *type);
+            if (failed_ || wrap.empty()) return;
+            auto wrapped = functions_.find(wrap);
+            if (wrapped == functions_.end()) return;  // already reported
+            std::optional<CgType> wtype = fnValueType(wrapped->second);
+            if (!wtype) {
+                unsupported(node, fmt::format("the function '{}' used as a value", node.name));
+                return;
+            }
+            auto* nullEnv = llvm::Constant::getNullValue(
+                llvm::PointerType::getUnqual(ctx_));
+            value_ = CgVal{buildFnPair(wrapped->second.fn, nullEnv), *wtype};
             return;
         }
         // A template used as a value, which is not the same refusal: what is missing is
@@ -6691,21 +8008,223 @@ private:
     // Built from FnInfo rather than from the declaration's TypeNodes, because this has
     // to be the signature the *emitted* function actually has: declareFunction is what
     // decides that, and it rewrites `main` and folds a receiver into parameter 0.
-    std::optional<CgType> fnValueType(const FnInfo& info) const {
+    std::optional<CgType> fnValueType(const FnInfo& info) {
         if (info.isVarArg || info.isMain || !info.fn) return std::nullopt;
         CgType t;
         t.kind = CgType::Kind::Fn;
-        // Through the mapper rather than `PointerType::getUnqual(ctx_)`: this method is
-        // const, Emitter owns its LLVMContext by value, and TypeMapper holds it by
-        // reference -- so the mapper is the one that can still hand out a type here.
-        t.llvmType = types_.pointerType().llvmType;
+        // The closure pair, `{code, env}`: the same uniqued literal struct
+        // mapFunction hands to every `fn` annotation, so a lambda's value and
+        // a variable's declared type are one LLVM type however each was built.
+        auto* ptrTy = llvm::PointerType::getUnqual(ctx_);
+        t.llvmType = llvm::StructType::get(ctx_, {ptrTy, ptrTy});
         t.result = std::make_shared<CgType>(info.returnType);
         for (const CgType& p : info.paramTypes) t.params.push_back(std::make_shared<CgType>(p));
-        // The function's own type, so a call through the value is the call the callee
-        // was compiled to answer -- not one rebuilt from the Fin types, which would
-        // disagree about `main` and about a receiver.
-        t.llvmSignature = info.fn->getFunctionType();
+        // Env-first, always: an indirect call threads the pair's second word
+        // back in, so the signature a value carries is the call the value
+        // answers -- not the declared function's, which takes no env. For a
+        // lambda the two coincide (declareFunction's `withEnv`); for a named
+        // function this is the wrapper's (closureWrapForValue), never the
+        // function's own.
+        std::vector<llvm::Type*> callParams{ptrTy};
+        for (const auto& p : t.params) callParams.push_back(p->llvmType);
+        t.llvmSignature =
+            llvm::FunctionType::get(t.result->llvmType, callParams, false);
         return t;
+    }
+
+    // The `{code, env}` pair as a value: constant-folded where both words are
+    // constants (a wrapped function beside a null env), so a global
+    // initialised to one still folds; built with instructions otherwise.
+    llvm::Value* buildFnPair(llvm::Value* code, llvm::Value* env) {
+        auto* pairTy = llvm::cast<llvm::StructType>(
+            llvm::StructType::get(ctx_, {llvm::PointerType::getUnqual(ctx_),
+                                         llvm::PointerType::getUnqual(ctx_)}));
+        if (llvm::isa<llvm::Constant>(code) && llvm::isa<llvm::Constant>(env)) {
+            return llvm::ConstantStruct::get(
+                pairTy, {llvm::cast<llvm::Constant>(code),
+                         llvm::cast<llvm::Constant>(env)});
+        }
+        llvm::Value* pair = llvm::UndefValue::get(pairTy);
+        pair = builder_.CreateInsertValue(pair, code, {0}, "closure.code");
+        pair = builder_.CreateInsertValue(pair, env, {1}, "closure.env");
+        return pair;
+    }
+
+    // A named or nested function as a closure value: a thin wrapper with the
+    // env-first signature that drops the env and tail-calls the real function.
+    // The wrapper is what sits in element 0 of the pair beside a null env, so
+    // every `fn` value answers one ABI however its code was declared -- direct
+    // calls keep calling the real function, values go through here. One per
+    // function, internal, cached; variadics and `main` never reach it (their
+    // values are refused where fnValueType answers nothing).
+    std::string closureWrapForValue(ASTNode& node, const std::string& key,
+                                    const CgType& pairType) {
+        auto cached = wrappers_.find(key);
+        if (cached != wrappers_.end()) return cached->second;
+        auto target = functions_.find(key);
+        if (target == functions_.end() || !target->second.fn ||
+            !pairType.llvmSignature) {
+            unsupported(node, fmt::format("the function '{}' used as a value",
+                                          key));
+            return "";
+        }
+        const std::string wsym = key + ".fin.wrap";
+        llvm::Function* real = target->second.fn;
+        llvm::Function* wrap = llvm::Function::Create(
+            pairType.llvmSignature, llvm::Function::InternalLinkage, wsym,
+            &module_);
+        auto* entry = llvm::BasicBlock::Create(ctx_, "entry", wrap);
+        auto savedIP = builder_.saveIP();
+        builder_.SetInsertPoint(entry);
+        std::vector<llvm::Value*> args;
+        for (unsigned i = 1; i < wrap->arg_size(); ++i) args.push_back(wrap->getArg(i));
+        llvm::Value* call = builder_.CreateCall(real, args);
+        if (pairType.llvmSignature->getReturnType()->isVoidTy())
+            builder_.CreateRetVoid();
+        else
+            builder_.CreateRet(call);
+        builder_.restoreIP(savedIP);
+        FnInfo winfo;
+        winfo.fn = wrap;
+        winfo.returnType = target->second.returnType;
+        winfo.paramTypes = target->second.paramTypes;
+        winfo.hasEnvParam = true;
+        functions_[wsym] = winfo;
+        wrappers_[key] = wsym;
+        debugLog(fmt::format("wrapped {} for a value", key));
+        return wsym;
+    }
+
+    // The env struct type for one lambda's captures, in capture order.
+    llvm::StructType* envStructType(const std::string& name,
+                                    const std::vector<CgType>& fields) {
+        std::vector<llvm::Type*> elements;
+        elements.reserve(fields.size());
+        for (const auto& f : fields) elements.push_back(f.llvmType);
+        return llvm::StructType::create(ctx_, elements, name);
+    }
+
+    // Splits the definition-site capture list for its two readers: the env
+    // struct type takes the types, the body carry takes both halves.
+    static std::vector<CgType> fieldTypesOf(
+        const std::vector<std::pair<std::string, CgType>>& fields) {
+        std::vector<CgType> out;
+        out.reserve(fields.size());
+        for (const auto& f : fields) out.push_back(f.second);
+        return out;
+    }
+    static std::vector<std::string> fieldNamesOf(
+        const std::vector<std::pair<std::string, CgType>>& fields) {
+        std::vector<std::string> out;
+        out.reserve(fields.size());
+        for (const auto& f : fields) out.push_back(f.first);
+        return out;
+    }
+
+    // Where a capture's value comes from at the lambda's definition site.
+    struct CaptureSource {
+        CgType type;
+        llvm::Value* slot = nullptr;  // the alloca, or the env field address
+    };
+    // Resolves a recorded capture against the live definition context: the
+    // body's own locals and parameters first (shadowing wins), then an outer
+    // lambda's env (the transitive case: the definition sits inside another
+    // lambda's body, whose frame does not hold the name either). Empty when
+    // neither has it -- the caller then takes the capture backstop rather
+    // than inventing storage.
+    std::optional<CaptureSource> captureSource(const std::string& name) {
+        if (Local* local = findLocal(name)) return CaptureSource{local->type, local->slot};
+        auto active = capturesActive_.find(name);
+        if (active != capturesActive_.end() && captureEnvSlot_ && captureEnvType_) {
+            llvm::Value* env = builder_.CreateLoad(types_.pointerType().llvmType,
+                                                   captureEnvSlot_, "outer.env");
+            llvm::Value* field = builder_.CreateStructGEP(
+                captureEnvType_, env, active->second.index, name + ".field");
+            return CaptureSource{active->second.type, field};
+        }
+        return std::nullopt;
+    }
+
+    // The env field a capture name reads through in the body now being
+    // emitted, or nothing when the name is not a capture of this body. Loads
+    // the env out of its slot first: rebinding `env` is not a thing the
+    // source can write, but reading the slot keeps every use to one rule.
+    std::optional<Addr> captureField(const std::string& name) {
+        auto found = capturesActive_.find(name);
+        if (found == capturesActive_.end() || !captureEnvSlot_ ||
+            !captureEnvType_)
+            return std::nullopt;
+        llvm::Value* env = builder_.CreateLoad(types_.pointerType().llvmType,
+                                               captureEnvSlot_, "closure.env");
+        llvm::Value* field = builder_.CreateStructGEP(
+            captureEnvType_, env, found->second.index, name + ".field");
+        return Addr{field, found->second.type};
+    }
+
+    // Builds the env snapshot a lambda definition executes: one heap struct,
+    // each capture's current value stored into its field, or null for a
+    // lambda that captures nothing (no allocation to leak, nothing to free).
+    // Returns null having reported on any failure, including a capture whose
+    // storage asks for more than a copy: a `#[slaveof]` tie (the copy would
+    // outlive the master) or a destructor the env would never run.
+    llvm::Value* buildCaptureEnv(ASTNode& node, llvm::StructType* envType,
+                                 const std::vector<std::pair<std::string, CgType>>& fields) {
+        auto* ptrTy = types_.pointerType().llvmType;
+        if (fields.empty()) return llvm::Constant::getNullValue(ptrTy);
+        for (const auto& field : fields) {
+            if (Local* local = findLocal(field.first)) {
+                if (local->tie != Local::SlaveofTie::None) {
+                    unsupported(node, fmt::format("a lambda capturing '{}', whose "
+                                                  "lifetime is tied and the env copy "
+                                                  "would outlive", field.first));
+                    return nullptr;
+                }
+            }
+            if (field.second.isStruct() && field.second.structInfo &&
+                field.second.structInfo->decl &&
+                field.second.structInfo->decl->destructor) {
+                // A destructor the env copy would never run is a skipped
+                // destructor, which is a miscompile with a quiet symptom --
+                // so it is refused naming the binding, not dropped.
+                unsupported(node, fmt::format("a lambda capturing '{}', whose "
+                                              "type's destructor the env copy "
+                                              "would never run", field.first));
+                return nullptr;
+            }
+        }
+        const auto& dl = module_.getDataLayout();
+        uint64_t bytes = dl.getTypeAllocSize(envType);
+        llvm::FunctionCallee mallocFn = runtimeFn(
+            node, "malloc",
+            llvm::FunctionType::get(llvm::PointerType::get(ctx_, 0),
+                                    {llvm::Type::getInt64Ty(ctx_)}, false),
+            "a closure environment allocation");
+        if (!mallocFn) return nullptr;
+        llvm::Value* raw = builder_.CreateCall(
+            mallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), bytes)},
+            "closure.raw");
+        llvm::Value* env = builder_.CreateBitCast(raw, envType->getPointerTo(),
+                                                  "closure.env");
+        for (size_t i = 0; i < fields.size(); ++i) {
+            std::optional<CaptureSource> src = captureSource(fields[i].first);
+            if (failed_ || !src) {
+                if (!failed_)
+                    unsupported(node, fmt::format("a lambda capturing '{}'",
+                                                  fields[i].first));
+                return nullptr;
+            }
+            // The snapshot: the value as it is where the lambda is written.
+            // A reference-typed binding copies as its pointer, so the field
+            // aliases the referent; anything else copies as a value.
+            llvm::Value* loaded = builder_.CreateLoad(src->type.llvmType, src->slot,
+                                                      fields[i].first + ".snap");
+            llvm::Value* stored = convert(node, CgVal{loaded, src->type}, fields[i].second);
+            if (!stored) return nullptr;
+            llvm::Value* field = builder_.CreateStructGEP(envType, env, (unsigned)i,
+                                                          fields[i].first + ".slot");
+            builder_.CreateStore(stored, field);
+        }
+        return builder_.CreateBitCast(env, ptrTy, "closure.env.ptr");
     }
 
     // Whether `name` is a local of the function this lambda was written inside, which
@@ -6780,12 +8299,28 @@ private:
         CgVal lhs = emit(*node.left);
         if (failed_) return;
 
-        // `any` has no operator semantics: blob equality (payloads? typeids?
-        // deep values?) is three programs, and arithmetic on an unboxed value
-        // is none. Refused before the struct-operator dispatch below, which
-        // would otherwise report it as an ordinary struct without one.
+        // `==`/`!=` on `any` compare typeid first, then payload (strings by
+        // bytes): the map-key rule, so `==` agrees with lookup (ADR 0034
+        // amendment). A non-`any` side boxes first, so `y == 41` reads the
+        // same as two blobs. Any other operator on `any` still refuses.
         if (lhs.type.isAny) {
-            unsupported(node, "an operator on 'any'");
+            if (node.op != ASTTokenKind::EQEQ && node.op != ASTTokenKind::NOTEQ) {
+                unsupported(node, "an operator on 'any'");
+                return;
+            }
+            CgVal rhs = emit(*node.right);
+            if (failed_) return;
+            if (!rhs.ok()) { unsupported(node, "this operand"); return; }
+            llvm::Value* rhsValue = rhs.value;
+            if (!rhs.type.isAny) {
+                rhsValue = convert(node, rhs, lhs.type);
+                if (!rhsValue) return;
+            }
+            llvm::Value* equal = emitKeyEquality(node, lhs.type, lhs.value, rhsValue);
+            if (!equal) return;
+            llvm::Value* result = node.op == ASTTokenKind::EQEQ
+                ? equal : builder_.CreateNot(equal, "any.ne");
+            value_ = CgVal{result, *types_.byName("bool")};
             return;
         }
 
@@ -6841,6 +8376,22 @@ private:
                     value_ = emitArithmetic(node, node.op, lhs, rhs);
                     return;
                 }
+                // Nullable values compare payload+tag in emitArithmetic, not via
+                // a declared `operator ==` (ADR 0036 stays for named structs).
+                if (lhs.type.isNullableValue() || rhs.type.isNullableValue()) {
+                    value_ = emitArithmetic(node, node.op, lhs, rhs);
+                    return;
+                }
+            }
+            // Ordering on a nullable scalar reads its payload (blaming if absent);
+            // named structs still go to their declared operator.
+            if ((node.op == ASTTokenKind::LT || node.op == ASTTokenKind::GT ||
+                 node.op == ASTTokenKind::LTEQ || node.op == ASTTokenKind::GTEQ) &&
+                lhs.type.isNullableValue()) {
+                CgVal rhs = emit(*node.right);
+                if (failed_) return;
+                value_ = emitArithmetic(node, node.op, lhs, rhs);
+                return;
             }
             emitStructOperator(node, lhs);
             return;
@@ -6850,7 +8401,18 @@ private:
         if (failed_) return;
         if (!lhs.ok() || !rhs.ok()) { unsupported(node, "this operand"); return; }
         if (rhs.type.isAny) {
-            unsupported(node, "an operator on 'any'");
+            // Mirror of the left-`any` rule above: `41 == y` boxes the left.
+            if (node.op != ASTTokenKind::EQEQ && node.op != ASTTokenKind::NOTEQ) {
+                unsupported(node, "an operator on 'any'");
+                return;
+            }
+            llvm::Value* lhsValue = convert(node, lhs, rhs.type);
+            if (!lhsValue) return;
+            llvm::Value* equal = emitKeyEquality(node, rhs.type, lhsValue, rhs.value);
+            if (!equal) return;
+            llvm::Value* result = node.op == ASTTokenKind::EQEQ
+                ? equal : builder_.CreateNot(equal, "any.ne");
+            value_ = CgVal{result, *types_.byName("bool")};
             return;
         }
         value_ = emitArithmetic(node, node.op, lhs, rhs);
@@ -6860,8 +8422,8 @@ private:
     //
     // Never falls back: a struct on the left of an operator is either a declared
     // operator or a refusal, because the built-in path has nothing to do with a struct
-    // (commonType compares bit widths and a struct has none) and inventing a field-wise
-    // meaning for `==` is a ruling nobody has made.
+    // (commonType compares bit widths and a struct has none) and a field-wise
+    // meaning for `==` is refused per ADR 0036 (equality is declared, not synthesized).
     void emitStructOperator(BinaryOp& node, const CgVal& lhs) {
         const StructInfo* owner = lhs.type.structInfo;
         const std::string spelling = spellOperator(node.op);
@@ -6894,12 +8456,6 @@ private:
             }
         }
         if (!declared) {
-            if ((node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ) && owner) {
-                CgVal rhs = emit(*node.right);
-                if (failed_ || !rhs.ok()) return;
-                value_ = emitStructEquality(node, *owner, lhs, rhs, node.op == ASTTokenKind::NOTEQ);
-                return;
-            }
             unsupported(node, fmt::format("an undeclared operator '{}' on struct '{}'",
                                           spelling, owner->finName));
             return;
@@ -7143,9 +8699,14 @@ private:
                     llvm::Value* ptrEq = builder_.CreateICmpEQ(pa, pb, "any.ptr.eq");
                     llvm::Value* exactEq = builder_.CreateAnd(typeEq, ptrEq, "any.eq");
                     auto stringType = types_.byName("string");
-                    if (stringType) {
+                    // Strings compare by bytes, but the byte comparison must
+                    // only RUN for strings: calling `strcmp` on two arbitrary
+                    // payloads reads whatever they point at, and an
+                    // int-holding blob's payload points nowhere.
+                    if (stringType && currentFn_) {
                         int64_t strTid = typeIdOf(*stringType);
                         llvm::Value* isStr = builder_.CreateICmpEQ(ta, builder_.getInt64(strTid), "any.is_str");
+                        llvm::Value* bothStr = builder_.CreateAnd(typeEq, isStr, "any.both_str");
                         llvm::FunctionCallee cmp = runtimeFn(
                             node, "strcmp",
                             llvm::FunctionType::get(builder_.getInt32Ty(),
@@ -7153,10 +8714,19 @@ private:
                                                      llvm::PointerType::getUnqual(ctx_)}, false),
                             "a string key comparison");
                         if (cmp) {
+                            auto* strBB = llvm::BasicBlock::Create(ctx_, "any.strcmp", currentFn_->fn);
+                            auto* endBB = llvm::BasicBlock::Create(ctx_, "any.eq.done", currentFn_->fn);
+                            auto* preBB = builder_.GetInsertBlock();
+                            builder_.CreateCondBr(bothStr, strBB, endBB);
+                            builder_.SetInsertPoint(strBB);
                             llvm::Value* diff = builder_.CreateCall(cmp, {pa, pb}, "any.strcmp");
                             llvm::Value* strEq = builder_.CreateICmpEQ(diff, builder_.getInt32(0), "any.streq");
-                            llvm::Value* strMatch = builder_.CreateAnd(typeEq, builder_.CreateAnd(isStr, strEq));
-                            exactEq = builder_.CreateOr(exactEq, strMatch, "any.eq.or.str");
+                            builder_.CreateBr(endBB);
+                            builder_.SetInsertPoint(endBB);
+                            auto* phi = builder_.CreatePHI(builder_.getInt1Ty(), 2, "any.eq.str");
+                            phi->addIncoming(builder_.getInt1(false), preBB);
+                            phi->addIncoming(strEq, strBB);
+                            exactEq = builder_.CreateOr(exactEq, phi, "any.eq.or.str");
                         }
                     }
                     return exactEq;
@@ -7281,17 +8851,248 @@ private:
             return CgVal{cmp, boolType};
         }
 
+        // Nullable values as tagged pairs: `== null` reads the tag ONLY,
+        // `==` between two nullables reads payload+tag (ADR 0040). A bare
+        // payload against a nullable wraps present first.
+        if (op == ASTTokenKind::EQEQ || op == ASTTokenKind::NOTEQ) {
+            const bool lNull = lhs.value && llvm::isa<llvm::ConstantPointerNull>(lhs.value);
+            const bool rNull = rhs.value && llvm::isa<llvm::ConstantPointerNull>(rhs.value);
+            const bool lNVal = lhs.type.isNullableValue();
+            const bool rNVal = rhs.type.isNullableValue();
+            auto tagIsAbsent = [&](const CgVal& v) -> llvm::Value* {
+                llvm::Value* tag = builder_.CreateExtractValue(v.value, {1}, "tag");
+                return builder_.CreateICmpEQ(
+                    tag, llvm::ConstantInt::get(llvm::Type::getInt1Ty(ctx_), 0),
+                    "isnull");
+            };
+            if ((lNVal && rNull) || (rNVal && lNull)) {
+                const CgVal& other = lNVal ? lhs : rhs;
+                CgType boolType = *types_.byName("bool");
+                llvm::Value* out = tagIsAbsent(other);
+                if (op == ASTTokenKind::NOTEQ)
+                    out = builder_.CreateNot(out, "ne");
+                return CgVal{out, boolType};
+            }
+            if (lNVal && rNVal) {
+                if (!sameType(lhs.type, rhs.type)) {
+                    unsupported(node, "a comparison of different nullable types");
+                    return CgVal{};
+                }
+                const CgType& payloadTy = *lhs.type.nullablePayload;
+                if (payloadTy.kind != CgType::Kind::Int &&
+                    payloadTy.kind != CgType::Kind::Float) {
+                    unsupported(node, "an operator on a nullable struct");
+                    return CgVal{};
+                }
+                CgType boolType = *types_.byName("bool");
+                llvm::Value* lTag = builder_.CreateExtractValue(lhs.value, {1}, "ltag");
+                llvm::Value* rTag = builder_.CreateExtractValue(rhs.value, {1}, "rtag");
+                llvm::Value* tagsEq = builder_.CreateICmpEQ(lTag, rTag, "tags.eq");
+                llvm::Value* lPay = builder_.CreateExtractValue(lhs.value, {0}, "lpay");
+                llvm::Value* rPay = builder_.CreateExtractValue(rhs.value, {0}, "rpay");
+                llvm::Value* paysEq = nullptr;
+                if (payloadTy.kind == CgType::Kind::Float) {
+                    paysEq = builder_.CreateFCmpOEQ(lPay, rPay, "pays.eq");
+                } else {
+                    paysEq = builder_.CreateICmpEQ(lPay, rPay, "pays.eq");
+                }
+                llvm::Value* both = builder_.CreateAnd(tagsEq, paysEq, "null.eq");
+                if (op == ASTTokenKind::NOTEQ)
+                    both = builder_.CreateNot(both, "null.ne");
+                return CgVal{both, boolType};
+            }
+            if (lNVal && !rNVal && !rNull && !lNull) {
+                llvm::Value* wrapped = convert(node, rhs, lhs.type);
+                if (!wrapped) return CgVal{};
+                return emitArithmetic(node, op, lhs, CgVal{wrapped, lhs.type});
+            }
+            if (rNVal && !lNVal && !lNull && !rNull) {
+                llvm::Value* wrapped = convert(node, lhs, rhs.type);
+                if (!wrapped) return CgVal{};
+                return emitArithmetic(node, op, CgVal{wrapped, rhs.type}, rhs);
+            }
+        }
+
+        // Ordering on a nullable scalar reads its payload, blaming if absent.
+        // nullifier.fin:20 `if (n > 0)` with `n?: int` is the corpus site: absent
+        // returns early via `== null`, present compares payloads.
+        if (op == ASTTokenKind::LT || op == ASTTokenKind::GT ||
+            op == ASTTokenKind::LTEQ || op == ASTTokenKind::GTEQ) {
+            const bool lNVal = lhs.type.isNullableValue();
+            const bool rNVal = rhs.type.isNullableValue();
+            if (lNVal || rNVal) {
+                if (!currentFn_) {
+                    unsupported(node, "an ordering on a nullable outside a function");
+                    return CgVal{};
+                }
+                CgType payloadTy;
+                llvm::Value* lPay = nullptr;
+                llvm::Value* rPay = nullptr;
+                auto blameAbsent = [&](const CgVal& v) -> bool {
+                    llvm::Value* tag =
+                        builder_.CreateExtractValue(v.value, {1}, "tag");
+                    llvm::Value* isAbsent = builder_.CreateICmpEQ(
+                        tag, llvm::ConstantInt::get(llvm::Type::getInt1Ty(ctx_), 0),
+                        "absent");
+                    auto* failBB =
+                        llvm::BasicBlock::Create(ctx_, "ord.fail", currentFn_->fn);
+                    auto* okBB =
+                        llvm::BasicBlock::Create(ctx_, "ord.ok", currentFn_->fn);
+                    builder_.CreateCondBr(isAbsent, failBB, okBB);
+                    builder_.SetInsertPoint(failBB);
+                    if (!emitRuntimeBlame(node, "ordering of an absent value",
+                                          "an ordering"))
+                        return false;
+                    builder_.SetInsertPoint(okBB);
+                    return true;
+                };
+                if (lNVal && rNVal) {
+                    if (!lhs.type.nullablePayload || !rhs.type.nullablePayload ||
+                        !sameType(*lhs.type.nullablePayload, *rhs.type.nullablePayload)) {
+                        unsupported(node, "an ordering on different nullable types");
+                        return CgVal{};
+                    }
+                    payloadTy = *lhs.type.nullablePayload;
+                    if (payloadTy.kind != CgType::Kind::Int &&
+                        payloadTy.kind != CgType::Kind::Float) {
+                        unsupported(node, "an ordering on a nullable struct");
+                        return CgVal{};
+                    }
+                    if (!blameAbsent(lhs)) return CgVal{};
+                    if (!blameAbsent(rhs)) return CgVal{};
+                    lPay = builder_.CreateExtractValue(lhs.value, {0}, "lpay");
+                    rPay = builder_.CreateExtractValue(rhs.value, {0}, "rpay");
+                } else if (lNVal) {
+                    if (!lhs.type.nullablePayload) {
+                        unsupported(node, "an ordering on a nullable with no payload");
+                        return CgVal{};
+                    }
+                    payloadTy = *lhs.type.nullablePayload;
+                    if (payloadTy.kind != CgType::Kind::Int &&
+                        payloadTy.kind != CgType::Kind::Float) {
+                        unsupported(node, "an ordering on a nullable struct");
+                        return CgVal{};
+                    }
+                    if (!blameAbsent(lhs)) return CgVal{};
+                    lPay = builder_.CreateExtractValue(lhs.value, {0}, "lpay");
+                    CgVal rhsVal = rhs;
+                    llvm::Value* conv = convert(node, rhsVal, payloadTy);
+                    if (!conv) return CgVal{};
+                    rPay = conv;
+                    // The bare side's Fin type for signedness is the payload's:
+                    // convert already widened, so commonType below would do the
+                    // same; compare directly to avoid re-wrapping.
+                    CgType boolType = *types_.byName("bool");
+                    const bool fp = payloadTy.kind == CgType::Kind::Float;
+                    llvm::Value* out = nullptr;
+                    if (fp) {
+                        switch (op) {
+                            case ASTTokenKind::LT: out = builder_.CreateFCmpOLT(lPay, rPay); break;
+                            case ASTTokenKind::GT: out = builder_.CreateFCmpOGT(lPay, rPay); break;
+                            case ASTTokenKind::LTEQ: out = builder_.CreateFCmpOLE(lPay, rPay); break;
+                            case ASTTokenKind::GTEQ: out = builder_.CreateFCmpOGE(lPay, rPay); break;
+                            default: break;
+                        }
+                    } else {
+                        const bool isSigned = payloadTy.isSigned && !payloadTy.isBool;
+                        switch (op) {
+                            case ASTTokenKind::LT: out = isSigned ? builder_.CreateICmpSLT(lPay, rPay) : builder_.CreateICmpULT(lPay, rPay); break;
+                            case ASTTokenKind::GT: out = isSigned ? builder_.CreateICmpSGT(lPay, rPay) : builder_.CreateICmpUGT(lPay, rPay); break;
+                            case ASTTokenKind::LTEQ: out = isSigned ? builder_.CreateICmpSLE(lPay, rPay) : builder_.CreateICmpULE(lPay, rPay); break;
+                            case ASTTokenKind::GTEQ: out = isSigned ? builder_.CreateICmpSGE(lPay, rPay) : builder_.CreateICmpUGE(lPay, rPay); break;
+                            default: break;
+                        }
+                    }
+                    if (!out) {
+                        unsupported(node, "this operator");
+                        return CgVal{};
+                    }
+                    return CgVal{out, boolType};
+                } else {
+                    if (!rhs.type.nullablePayload) {
+                        unsupported(node, "an ordering on a nullable with no payload");
+                        return CgVal{};
+                    }
+                    payloadTy = *rhs.type.nullablePayload;
+                    if (payloadTy.kind != CgType::Kind::Int &&
+                        payloadTy.kind != CgType::Kind::Float) {
+                        unsupported(node, "an ordering on a nullable struct");
+                        return CgVal{};
+                    }
+                    if (!blameAbsent(rhs)) return CgVal{};
+                    rPay = builder_.CreateExtractValue(rhs.value, {0}, "rpay");
+                    llvm::Value* conv = convert(node, lhs, payloadTy);
+                    if (!conv) return CgVal{};
+                    lPay = conv;
+                    CgType boolType = *types_.byName("bool");
+                    const bool fp = payloadTy.kind == CgType::Kind::Float;
+                    llvm::Value* out = nullptr;
+                    if (fp) {
+                        switch (op) {
+                            case ASTTokenKind::LT: out = builder_.CreateFCmpOLT(lPay, rPay); break;
+                            case ASTTokenKind::GT: out = builder_.CreateFCmpOGT(lPay, rPay); break;
+                            case ASTTokenKind::LTEQ: out = builder_.CreateFCmpOLE(lPay, rPay); break;
+                            case ASTTokenKind::GTEQ: out = builder_.CreateFCmpOGE(lPay, rPay); break;
+                            default: break;
+                        }
+                    } else {
+                        const bool isSigned = payloadTy.isSigned && !payloadTy.isBool;
+                        switch (op) {
+                            case ASTTokenKind::LT: out = isSigned ? builder_.CreateICmpSLT(lPay, rPay) : builder_.CreateICmpULT(lPay, rPay); break;
+                            case ASTTokenKind::GT: out = isSigned ? builder_.CreateICmpSGT(lPay, rPay) : builder_.CreateICmpUGT(lPay, rPay); break;
+                            case ASTTokenKind::LTEQ: out = isSigned ? builder_.CreateICmpSLE(lPay, rPay) : builder_.CreateICmpULE(lPay, rPay); break;
+                            case ASTTokenKind::GTEQ: out = isSigned ? builder_.CreateICmpSGE(lPay, rPay) : builder_.CreateICmpUGE(lPay, rPay); break;
+                            default: break;
+                        }
+                    }
+                    if (!out) {
+                        unsupported(node, "this operator");
+                        return CgVal{};
+                    }
+                    return CgVal{out, boolType};
+                }
+                // Both-nullable fallthrough: payloads already extracted above.
+                CgType boolType = *types_.byName("bool");
+                const bool fp = payloadTy.kind == CgType::Kind::Float;
+                llvm::Value* out = nullptr;
+                if (!lPay)
+                    lPay = builder_.CreateExtractValue(lhs.value, {0}, "lpay");
+                if (!rPay)
+                    rPay = builder_.CreateExtractValue(rhs.value, {0}, "rpay");
+                if (fp) {
+                    switch (op) {
+                        case ASTTokenKind::LT: out = builder_.CreateFCmpOLT(lPay, rPay); break;
+                        case ASTTokenKind::GT: out = builder_.CreateFCmpOGT(lPay, rPay); break;
+                        case ASTTokenKind::LTEQ: out = builder_.CreateFCmpOLE(lPay, rPay); break;
+                        case ASTTokenKind::GTEQ: out = builder_.CreateFCmpOGE(lPay, rPay); break;
+                        default: break;
+                    }
+                } else {
+                    const bool isSigned = payloadTy.isSigned && !payloadTy.isBool;
+                    switch (op) {
+                        case ASTTokenKind::LT: out = isSigned ? builder_.CreateICmpSLT(lPay, rPay) : builder_.CreateICmpULT(lPay, rPay); break;
+                        case ASTTokenKind::GT: out = isSigned ? builder_.CreateICmpSGT(lPay, rPay) : builder_.CreateICmpUGT(lPay, rPay); break;
+                        case ASTTokenKind::LTEQ: out = isSigned ? builder_.CreateICmpSLE(lPay, rPay) : builder_.CreateICmpULE(lPay, rPay); break;
+                        case ASTTokenKind::GTEQ: out = isSigned ? builder_.CreateICmpSGE(lPay, rPay) : builder_.CreateICmpUGE(lPay, rPay); break;
+                        default: break;
+                    }
+                }
+                if (!out) {
+                    unsupported(node, "this operator");
+                    return CgVal{};
+                }
+                return CgVal{out, boolType};
+            }
+        }
+
         // An aggregate operand is refused before anything else looks at it. Not for
         // tidiness: commonType compares bit widths, a struct has none, so it would
         // return one of the two and hand a struct to CreateAdd -- which is an
         // assertion inside LLVM, reported as a compiler crash rather than as the
-        // unlowered operator it is. Whether `a == b` on two structs compares
-        // field-wise is a ruling nobody has made.
+        // unlowered operator it is. `a == b` on two structs without a declared
+        // `operator ==` stays refused per ADR 0036 (equality is declared, not
+        // synthesized): codegen performs no field-wise synthesis.
         if (lhs.type.isStruct() || rhs.type.isStruct()) {
-            if (lhs.type.isStruct() && rhs.type.isStruct() && lhs.type.structInfo &&
-                (op == ASTTokenKind::EQEQ || op == ASTTokenKind::NOTEQ)) {
-                return emitStructEquality(node, *lhs.type.structInfo, lhs, rhs, op == ASTTokenKind::NOTEQ);
-            }
             const bool isNullCheck = (op == ASTTokenKind::EQEQ || op == ASTTokenKind::NOTEQ) &&
                 ((lhs.value && llvm::isa<llvm::ConstantPointerNull>(lhs.value)) ||
                  (rhs.value && llvm::isa<llvm::ConstantPointerNull>(rhs.value)));
@@ -7311,6 +9112,28 @@ private:
                 return CgVal{};
             }
             return emitArrayEquality(node, op, lhs, rhs);
+        }
+
+        // Two function values compare by identity of the pair: same code and
+        // same env. An `ICmp` on the structs themselves is invalid IR, and
+        // converting one to the other's signature first would bless mismatched
+        // arities; comparing the two words keeps the old bare-pointer meaning
+        // (one word then, two now) with no conversion in between.
+        if (lhs.type.isFn() && rhs.type.isFn()) {
+            if (op != ASTTokenKind::EQEQ && op != ASTTokenKind::NOTEQ) {
+                unsupported(node, "an ordering on a function value");
+                return CgVal{};
+            }
+            CgType boolType = *types_.byName("bool");
+            llvm::Value* codeEq = builder_.CreateICmpEQ(
+                builder_.CreateExtractValue(lhs.value, {0}, "lhs.code"),
+                builder_.CreateExtractValue(rhs.value, {0}, "rhs.code"), "code.eq");
+            llvm::Value* envEq = builder_.CreateICmpEQ(
+                builder_.CreateExtractValue(lhs.value, {1}, "lhs.env"),
+                builder_.CreateExtractValue(rhs.value, {1}, "rhs.env"), "env.eq");
+            llvm::Value* both = builder_.CreateAnd(codeEq, envEq, "closure.eq");
+            if (op == ASTTokenKind::NOTEQ) both = builder_.CreateNot(both, "closure.ne");
+            return CgVal{both, boolType};
         }
 
         // A pointer operand, for the same reason and with a narrower exit: equality
@@ -7346,8 +9169,13 @@ private:
                 const CgVal& nil = lNull ? lhs : rhs;
                 llvm::Value* word = nullptr;
                 if (other.value) {
-                    if (other.type.isPointer() || other.type.isFn())
+                    if (other.type.isPointer())
                         word = other.value;
+                    else if (other.type.isFn())
+                        // A closure pair against null compares its code word:
+                        // a null pair is what `let f <fn...> = null` stores.
+                        word = builder_.CreateExtractValue(other.value, {0},
+                                                           "code");
                     else if (other.type.isDynamicArray)
                         word = builder_.CreateExtractValue(other.value, {0},
                                                            "buf");
@@ -7899,6 +9727,18 @@ private:
         llvm::Value* stored = convert(node, rhs, target->type);
         if (!stored) return;
         builder_.CreateStore(stored, target->ptr);
+        // Slice 1: rebinding revives. A plain or compound store to a bare
+        // identifier makes it live again on this path, mirroring the
+        // analyzer (Analyzer_Expr: only these five rebind, and only a bare
+        // identifier -- a member or index write never marked the base moved).
+        if (node.op == ASTTokenKind::EQUAL || node.op == ASTTokenKind::PLUSEQUAL ||
+            node.op == ASTTokenKind::MINUSEQUAL || node.op == ASTTokenKind::MULTEQUAL ||
+            node.op == ASTTokenKind::DIVEQUAL) {
+            if (auto* id = dynamic_cast<const Identifier*>(node.left.get())) {
+                if (Local* local = findLocalNoPoison(id->name))
+                    local->movedFrom = false;
+            }
+        }
         // The assignment's value is the value stored, so `let a <int> = (b = 1);`
         // would work if the grammar admitted it.
         value_ = CgVal{stored, target->type};
@@ -7957,6 +9797,28 @@ private:
     // `&my_array`, `&p`, `&G`, `&self.field`) comes from the one place that already
     // knew how.
     void emitAddressOf(UnaryOp& node) {
+        // `&self` in a constructor is the object under construction, not the
+        // slot holding the receiver pointer. The analyzer binds a constructor's
+        // `self` as the struct value, so `&self` is typed `&Struct`; the generic
+        // `&ident` path below would answer with the callee-frame slot instead --
+        // a pointer that dies at `ret` and reads back garbage
+        // (Soundness_Codegen.ACtorTimeSelfAddressReadsBackThroughRestrict). The
+        // receiver's value already is the caller's object address, so load it.
+        // Scoped to constructors: in a method `self` is spelled `&Self` and a
+        // bare `&self` is not a shape the checker accepts.
+        if (auto* selfId = dynamic_cast<Identifier*>(node.operand.get())) {
+            if (selfId->name == "self" && currentFn_ && currentFn_->isConstructor) {
+                if (Local* self = findLocal("self")) {
+                    if (self->type.isPointer() && self->type.pointee &&
+                        self->type.pointee->isStruct()) {
+                        llvm::Value* obj = builder_.CreateLoad(
+                            self->type.llvmType, self->slot, "self.obj");
+                        value_ = CgVal{obj, types_.pointerTo(*self->type.pointee)};
+                        return;
+                    }
+                }
+            }
+        }
         auto addr = emitAddress(*node.operand);
         if (failed_) return;
         if (!addr) {
@@ -8090,13 +9952,12 @@ private:
             }
             case ASTTokenKind::QUESTION: {
                 // Postfix `?` (denullify): read a nullable as its underlying
-                // type, failing if it is absent. Only nullable function values
-                // arrive flaggable -- nothing else maps nullable -- so a
-                // flagged `fn` emits the null check the spelling promises and
-                // blames on the failing edge (the panic the analyzer books for
-                // the null case). Anything else is the analyzer's identity: a
-                // `?` on a non-nullable value is that value, and a nullable
-                // that is not a function is this file disagreeing with itself.
+                // type, failing if it is absent. Nullable values are tagged
+                // pairs {T,i1} with presence = tag ONLY (ADR 0040): the tag at
+                // index 1 decides, a present zero stays present. Nullable
+                // pointers/strings read ptr==null and nullable functions read
+                // code==null (closure-pair/code-null). A `?` on a non-nullable
+                // value is the analyzer's identity.
                 if (!node.is_postfix) break;
                 if (!v.ok()) { unsupported(node, "this operand"); return; }
                 if (v.type.isNullable) {
@@ -8104,8 +9965,48 @@ private:
                         unsupported(node, "denullify outside a function");
                         return;
                     }
+                    if (v.type.isNullableValue()) {
+                        if (!v.type.nullablePayload) {
+                            unsupported(node, "denullify of a nullable value with no payload");
+                            return;
+                        }
+                        llvm::Value* tag = builder_.CreateExtractValue(
+                            v.value, {1}, "present");
+                        llvm::Value* isAbsent = builder_.CreateICmpEQ(
+                            tag,
+                            llvm::ConstantInt::get(llvm::Type::getInt1Ty(ctx_), 0),
+                            "absent");
+                        auto* failBB = llvm::BasicBlock::Create(ctx_, "denull.fail",
+                                                                currentFn_->fn);
+                        auto* okBB = llvm::BasicBlock::Create(ctx_, "denull.ok",
+                                                              currentFn_->fn);
+                        builder_.CreateCondBr(isAbsent, failBB, okBB);
+                        builder_.SetInsertPoint(failBB);
+                        if (!emitRuntimeBlame(node, "denullify of an absent value",
+                                              "a denullify"))
+                            return;
+                        builder_.SetInsertPoint(okBB);
+                        llvm::Value* payload = builder_.CreateExtractValue(
+                            v.value, {0}, "payload");
+                        CgType t = *v.type.nullablePayload;
+                        t.isNullable = false;
+                        t.nullablePayload = nullptr;
+                        value_ = CgVal{payload, t};
+                        return;
+                    }
                     llvm::Value* isNull = nullptr;
-                    if (v.type.isFn() || v.type.isPointer()) {
+                    if (v.type.isFn()) {
+                        // A closure pair is absent when its code word is: the
+                        // env alone says nothing, since a non-capturing
+                        // closure is `{code, null}` and present.
+                        llvm::Value* code = builder_.CreateExtractValue(
+                            v.value, {0}, "code");
+                        isNull = builder_.CreateICmpEQ(
+                            code,
+                            llvm::ConstantPointerNull::get(
+                                llvm::PointerType::getUnqual(ctx_)),
+                            "absent");
+                    } else if (v.type.isPointer()) {
                         isNull = builder_.CreateICmpEQ(
                             v.value,
                             llvm::ConstantPointerNull::get(
@@ -8234,6 +10135,29 @@ private:
                 value_ = CgVal{};
                 return;
             }
+            // Wave-4 step 17 (W7): `@move(x)` lowers as the identity. There
+            // are no moves in the language to skip for (ADR 0030: every
+            // binding copies, so every value destroys independently), and
+            // the moved-from case arrives with the `move_or_copy` protocol
+            // (wave 5). The analysis owns the state; the backend copies.
+            if (node.name == "move") {
+                if (node.args.size() != 1) {
+                    unsupported(node, "'@move' takes exactly 1 argument");
+                    return;
+                }
+                CgVal moved = emit(*node.args[0]);
+                if (failed_) return;
+                value_ = moved;
+                // Slice 1: the operand is moved-from from here on. Only a
+                // named local tracks (anything else was already refused by
+                // the analyzer); unclaimed programs mark too, harmlessly,
+                // since cleanScopeAt reads the flag only under a claimant.
+                if (auto* id = dynamic_cast<const Identifier*>(node.args[0].get())) {
+                    if (Local* local = findLocalNoPoison(id->name))
+                        local->movedFrom = true;
+                }
+                return;
+            }
             if (node.name == "implements") {
                 if (node.args.size() != 2) {
                     unsupported(node, "'@implements' takes exactly 2 arguments");
@@ -8324,6 +10248,16 @@ private:
             unsupported(node, fmt::format("the compile-time call '@{}'", node.name));
             return;
         }
+        // A bare call the frontend bound to a method of the enclosing struct
+        // (`FunctionCall::resolved_method_owner`): lowered as that method, never
+        // by name to the free function. Ahead of every lookup below, because the
+        // frontend has already settled precedence -- a nearer binding would have
+        // left the record unset -- and any lookup here could only answer a
+        // different callee.
+        if (!node.resolved_method_owner.empty()) {
+            emitBareMethodCall(node);
+            return;
+        }
         // A nested function, before the locals rather than after them. `nestedFor` is
         // the thing that decides between the two: it walks the local and the nested
         // tables in lockstep and answers only when the nested declaration is at least as
@@ -8362,6 +10296,23 @@ private:
             return;
         }
         if (failed_) return;  // a name refused above; see findLocal
+        // A capture of the lambda now being emitted holding a function value:
+        // calling `f` where `f` is the outer closure the definition snapshot.
+        // Before the globals for the reason the identifier path is, and shaped
+        // exactly like the local path above it -- the env field holds the same
+        // pair a slot would.
+        if (auto field = captureField(node.name)) {
+            if (!field->type.isFn()) {
+                unsupported(node, fmt::format("a call through the variable '{}' of "
+                                              "non-function type", node.name));
+                return;
+            }
+            llvm::Value* callee = builder_.CreateLoad(field->type.llvmType,
+                                                      field->ptr, node.name);
+            emitIndirectCall(node, field->type, callee, node.name,
+                             argList(node.args));
+            return;
+        }
         // A global of function type, for the same reason and in the same order the
         // identifier path uses: a local of the name shadows one.
         auto globalFn = globals_.find(node.name);
@@ -8512,6 +10463,156 @@ private:
             }
         }
         emitNamedCall(node, node.name);
+    }
+
+    // A bare call the frontend bound to a method of the enclosing struct
+    // (`FunctionCall::resolved_method_owner`): lowered as that method, never by
+    // name to the free function it shadows. The receiver of an instance method
+    // is args[0] and the rest are its arguments; a static method owns every
+    // argument -- the `s.foo(v)` and `S::make(v)` spellings with the object
+    // written (or absent) in the same place. Each branch mirrors the dotted
+    // spelling's core; the qualifier is already spent, so there is no
+    // namespace, super, prototype or interface case to repeat. Reaching one is
+    // the two passes disagreeing, and refuses as such rather than lowering the
+    // free function by name.
+    void emitBareMethodCall(FunctionCall& node) {
+        // A method of a generic struct is drained once per instantiation, under
+        // the instantiation's name, while the frontend records the template's.
+        // The declaration says which template an instantiation came from.
+        const StructInfo* owner = nullptr;
+        if (!currentStructName_.empty()) {
+            auto cur = structs_.find(currentStructName_);
+            if (cur != structs_.end() && cur->second.decl &&
+                cur->second.decl->name == node.resolved_method_owner)
+                owner = &cur->second;
+        }
+        if (!owner) {
+            auto sit = structs_.find(node.resolved_method_owner);
+            if (sit != structs_.end()) owner = &sit->second;
+        }
+        if (!owner) {
+            if (auto eit = enums_.find(node.resolved_method_owner);
+                eit != enums_.end()) {
+                emitBareEnumMethodCall(node, eit->second);
+                return;
+            }
+            unsupported(node, fmt::format("a call to the method '{}' on struct '{}', "
+                                          "which declares no such struct",
+                                          node.name, node.resolved_method_owner));
+            return;
+        }
+        if (!node.resolved_method_static) {
+            if (node.args.empty()) {
+                unsupported(node, fmt::format("a bare call to the method '{}' on struct "
+                                              "'{}' with no receiver",
+                                              node.name, owner->finName));
+                return;
+            }
+            // The receiver is an address, exactly as a dot call's object is.
+            auto direct = emitAddress(*node.args[0]);
+            if (failed_) return;
+            auto receiver = baseOf(direct, CgType::Kind::Struct);
+            if (failed_) return;
+            if (!receiver || !receiver->type.structInfo ||
+                receiver->type.structInfo->finName != owner->finName) {
+                unsupported(node, fmt::format("a bare call to the method '{}' on struct "
+                                              "'{}' whose receiver is not one",
+                                              node.name, owner->finName));
+                return;
+            }
+            std::vector<Expression*> rest;
+            for (size_t i = 1; i < node.args.size(); ++i)
+                rest.push_back(node.args[i].get());
+            auto found = functions_.find(methodKey(owner->finName, node.name));
+            if (found != functions_.end()) {
+                const FnInfo& info = found->second;
+                if (!info.hasReceiver) {
+                    unsupported(node, fmt::format("a bare call to the static method '{}' "
+                                                  "of struct '{}' with a receiver",
+                                                  node.name, owner->finName));
+                    return;
+                }
+                std::vector<llvm::Value*> args{receiver->ptr};
+                if (!emitCallArgs(node, info, node.name, rest, args)) return;
+                emitCall(info, args);
+                return;
+            }
+            // A generic method with a body is not missing, it is
+            // uninstantiated -- the dotted spelling's rule, not a second one.
+            const FunctionDeclaration* tmpl = findMethod(*owner, node.name);
+            if (tmpl && !tmpl->generic_params.empty() && tmpl->body) {
+                if (tmpl->is_static) {
+                    unsupported(node, fmt::format("a bare call to the generic static "
+                                                  "method '{}' on struct '{}' with a "
+                                                  "receiver",
+                                                  node.name, owner->finName));
+                    return;
+                }
+                emitGenericMethodCall(node, rest, *owner, *receiver, *tmpl);
+                return;
+            }
+            // No provider walk: the frontend bound the owner's own method, and
+            // a base's same-named method is an override -- a different callee.
+            reportMissingMethod(node, *owner, node.name);
+            return;
+        }
+        // A static method takes no receiver -- the `::` spelling's core.
+        auto found = functions_.find(methodKey(owner->finName, node.name));
+        if (found == functions_.end()) {
+            reportMissingMethod(node, *owner, node.name);
+            return;
+        }
+        const FnInfo& info = found->second;
+        if (info.hasReceiver) {
+            unsupported(node, fmt::format("a bare call to the instance method '{}' of "
+                                          "struct '{}' with no receiver",
+                                          node.name, owner->finName));
+            return;
+        }
+        std::vector<llvm::Value*> args;
+        if (!emitCallArgs(node, info, node.name, argList(node.args), args)) return;
+        emitCall(info, args);
+    }
+
+    // A bare call the frontend bound to a method of the enclosing enum. The
+    // enum spelling's rule (visit(MethodCall&)'s enum branch): the receiver is
+    // argument 0 and the written arguments start at parameter 1.
+    void emitBareEnumMethodCall(FunctionCall& node, const EnumInfo& eInfo) {
+        if (node.resolved_method_static) {
+            unsupported(node, fmt::format("a bare call to the static method '{}' on enum "
+                                          "'{}'",
+                                          node.name, eInfo.finName));
+            return;
+        }
+        if (node.args.empty()) {
+            unsupported(node, fmt::format("a bare call to the method '{}' on enum '{}' "
+                                          "with no receiver",
+                                          node.name, eInfo.finName));
+            return;
+        }
+        auto found = functions_.find(methodKey(eInfo.finName, node.name));
+        if (found == functions_.end()) {
+            unsupported(node, fmt::format("a bare call to the method '{}' on enum '{}'",
+                                          node.name, eInfo.finName));
+            return;
+        }
+        const FnInfo& info = found->second;
+        auto direct = emitAddress(*node.args[0]);
+        if (failed_) return;
+        if (!direct) {
+            unsupported(node, fmt::format("a bare call to the method '{}' on enum '{}' "
+                                          "whose receiver has no address",
+                                          node.name, eInfo.finName));
+            return;
+        }
+        llvm::Value* self =
+            builder_.CreateLoad(direct->type.llvmType, direct->ptr, "enum.recv");
+        std::vector<llvm::Value*> args{self};
+        std::vector<Expression*> rest;
+        for (size_t i = 1; i < node.args.size(); ++i)
+            rest.push_back(node.args[i].get());
+        if (!emitCallArgs(node, info, node.name, rest, args)) return;
+        emitCall(info, args);
     }
 
     // A call to a name that is either a free function's or a struct's, once the name is
@@ -8703,10 +10804,12 @@ private:
         value_ = info.returnType.isVoid() ? CgVal{} : CgVal{call, info.returnType};
     }
 
-    // A call through a function value, given the pointer to call and the type that says
+    // A call through a function value, given the pair to call and the type that says
     // what is at the other end.
     //
-    // The arguments go through emitCallArgs and not through a second copy of the
+    // The pair comes apart first: the code beside the env the definition
+    // snapshotted, and the env travels back in as the call's first word. The
+    // arguments go through emitCallArgs and not through a second copy of the
     // conversion rules, which is the reason for the synthetic FnInfo below: an argument
     // widened one way at a direct call and another way here would be a silent ABI
     // difference between `add(1, 2)` and `f(1, 2)` for one `f = add`. The FnInfo has no
@@ -8722,14 +10825,20 @@ private:
             unsupported(node, fmt::format("a call through '{}' with no signature", name));
             return;
         }
+        llvm::Value* code = builder_.CreateExtractValue(callee, {0}, "closure.code");
+        llvm::Value* env = builder_.CreateExtractValue(callee, {1}, "closure.env");
         FnInfo synthetic;
         synthetic.returnType = *fnType.result;
         for (const auto& p : fnType.params) synthetic.paramTypes.push_back(*p);
 
+        // Converted first and threaded second: arriving non-empty would shift
+        // every written argument one parameter across in emitCallArgs, so the
+        // env goes in front only once the user arguments are converted.
         std::vector<llvm::Value*> args;
         if (!emitCallArgs(node, synthetic, name, argNodes, args)) return;
+        args.insert(args.begin(), env);
 
-        auto* call = builder_.CreateCall(fnType.llvmSignature, callee, args);
+        auto* call = builder_.CreateCall(fnType.llvmSignature, code, args);
         value_ = synthetic.returnType.isVoid() ? CgVal{}
                                                : CgVal{call, synthetic.returnType};
     }
@@ -9597,8 +11706,15 @@ private:
         }
         // Ordinary locals from here on, which is what makes the body's reads of them
         // the same code any other read of a local is.
-        scopes_.back()[node.var_name] = Local{elementSlot, element, nextLocalOrder_++};
-        if (indexType) scopes_.back()[node.index_name] = Local{indexSlot, *indexType, nextLocalOrder_++};
+        scopes_.back()[node.var_name] = Local{elementSlot, element, nextLocalOrder_++, false,
+                                              Local::SlaveofTie::None, 0, regionDepth_};
+        if (indexType) scopes_.back()[node.index_name] = Local{indexSlot, *indexType, nextLocalOrder_++, false,
+                                                               Local::SlaveofTie::None, 0, regionDepth_};
+
+        // The bindings' scope joins the body's end like a `for` header's:
+        // the body may run zero or more times, so a move in it is Maybe past
+        // the loop, mirroring the analyzer (Analyzer_Stmt visit(ForeachLoop&)).
+        MovedFromSnapshot preMove = snapshotMovedFrom();
 
         auto* condBB = llvm::BasicBlock::Create(ctx_, "foreach.cond", currentFn_->fn);
         auto* bodyBB = llvm::BasicBlock::Create(ctx_, "foreach.body", currentFn_->fn);
@@ -9637,10 +11753,16 @@ private:
         // that scope, so `break` and `continue` clean everything deeper and the
         // end block cleans the bindings uniformly for all paths joining there.
         loops_.push_back({stepBB, endBB, scopes_.size() - 1});
-        builder_.SetInsertPoint(bodyBB);
-        if (node.body) node.body->accept(*this);
-        if (!terminated()) builder_.CreateBr(stepBB);
+        {
+            // The body's back-edge rejoins above the declaration point, so no
+            // tie drains past it.
+            RegionGuard bodyGuard(*this);
+            builder_.SetInsertPoint(bodyBB);
+            if (node.body) node.body->accept(*this);
+            if (!terminated()) builder_.CreateBr(stepBB);
+        }
         loops_.pop_back();
+        joinMovedFrom(preMove, snapshotMovedFrom());
 
         builder_.SetInsertPoint(stepBB);
         llvm::Value* next = builder_.CreateAdd(
@@ -9741,6 +11863,18 @@ private:
     // latest declared first. No popping: the scope stays for the walk to pop;
     // every caller below runs only where the scope dies on this path. Locals
     // without storage (poisoned) or without struct type need nothing.
+    //
+    // Slice 4 (wave-5 slice 4) adds the two `#[slaveof]` endings. A Pinned
+    // local is never destroyed at scope exit. A Deferred local is not
+    // destroyed here either: struct-typed, it joins the pending list for its
+    // master's scope exit (the slot is a frame alloca and stays valid); its
+    // moved-from flag travels with it, so the slice-1 skip engages at the
+    // extended point and deferral never resurrects. Destructor-less tied
+    // storage needs no entry -- there is no cleanup to delay, which is the
+    // narrowed no-op half. After the own-scope loop, the entries tied to
+    // this scope destroy here, latest declared first, behind the same
+    // moved-from gate; own-scope behaviour reads nothing new, so unclaimed
+    // programs lower exactly as before.
     void cleanScopeAt(ASTNode& node, size_t index) {
         if (index >= scopes_.size()) return;
         std::vector<std::pair<size_t, std::string>> names;
@@ -9752,8 +11886,38 @@ private:
             if (found == scopes_[index].end()) continue;
             const Local& local = found->second;
             if (!local.slot) continue;
+            if (local.tie == Local::SlaveofTie::Pinned) continue;
+            if (local.tie == Local::SlaveofTie::Deferred) {
+                if (local.type.isStruct() && local.type.structInfo)
+                    tiedPending_.push_back(TiedPending{local.slot, local.type,
+                                                       local.masterScope,
+                                                       local.movedFrom,
+                                                       local.order});
+                continue;
+            }
+            // Slice 1 (wave-5 slice 1, ADR 0030's moved-from case): with a
+            // `move_or_copy` claimant, a binding moved-from on this path --
+            // moved outright, or Maybe after a conditional move or rebind --
+            // skips its destructor call. Leak beats corruption. Without a
+            // claimant this reads nothing new and every value destroys
+            // independently, exactly as before.
+            if (hasMoveOrCopyClaimant_ && local.movedFrom) continue;
             if (!local.type.isStruct() || !local.type.structInfo) continue;
             if (!emitDestructorCall(node, *local.type.structInfo, local.slot))
+                return;
+        }
+        std::vector<TiedPending> due;
+        for (auto& pending : tiedPending_)
+            if (pending.masterScope == index) due.push_back(pending);
+        tiedPending_.erase(
+            std::remove_if(tiedPending_.begin(), tiedPending_.end(),
+                           [&](const TiedPending& pending) { return pending.masterScope == index; }),
+            tiedPending_.end());
+        std::sort(due.begin(), due.end(),
+                  [](const TiedPending& a, const TiedPending& b) { return a.order > b.order; });
+        for (const TiedPending& entry : due) {
+            if (hasMoveOrCopyClaimant_ && entry.movedFrom) continue;
+            if (!emitDestructorCall(node, *entry.type.structInfo, entry.slot))
                 return;
         }
     }
@@ -9777,10 +11941,16 @@ private:
     // sharing for bases). A struct with neither cleans nothing and this
     // emits nothing, which is what makes a generated destructor need no
     // symbol: parents that declare none still clean their fields through
-    // here. Recursion terminates because only plain struct values recurse --
-    // pointer and array fields hold no owned value (unruled shapes, not empty
-    // ones) -- and a value cycle has no finite size. Inherited fields belong
-    // to a base subobject the base call below owns. False having reported.
+    // here. Wave-5 slice 2 fills the declared-body slot when it is empty:
+    // the `destructor` claimant's one shared generation, if it supplies one,
+    // runs where a declared body would -- so an explicit `~T()` keeps
+    // precedence (the claimant is not consulted for its type) and
+    // fields-then-bases composition still runs after either (the
+    // composition-preserving default). Recursion terminates because only
+    // plain struct values recurse -- pointer and array fields hold no owned
+    // value (unruled shapes, not empty ones) -- and a value cycle has no
+    // finite size. Inherited fields belong to a base subobject the base call
+    // below owns. False having reported.
     bool emitDestructorCall(ASTNode& node, const StructInfo& info,
                             llvm::Value* receiver) {
         auto declared = functions_.find(methodKey(info.finName, "destructor"));
@@ -9793,6 +11963,19 @@ private:
                                               "defined in another module",
                                               info.finName));
                 return false;
+            }
+            // No declared body: the claimant's generation, if the program
+            // claims the slot and the claim supplies one. Without either this
+            // emits nothing, exactly as before this slice.
+            if (hasDestructorClaimant_) {
+                const std::string key = destructorClaimantKey();
+                auto generation = functions_.find(key);
+                if (generation != functions_.end()) {
+                    std::vector<llvm::Value*> noArgs{};
+                    if (!emitCallArgs(node, generation->second, key, {}, noArgs))
+                        return false;
+                    emitCall(generation->second, noArgs);
+                }
             }
         } else {
             const std::string key = methodKey(info.finName, "destructor");
@@ -9850,6 +12033,23 @@ private:
             v.type.pointee->structInfo) {
             if (!emitDestructorCall(node, *v.type.pointee->structInfo, address))
                 return;
+        }
+        // Wave-5 slice 3 (ADR 0014): with a `deallocate` claimant whose
+        // generation exists, the claimant substitutes the deallocation call.
+        // Only the `free` is replaced -- the destructor above already ran --
+        // so deeptest3.fin:44's order holds by construction. Without a
+        // claimant, or with an empty-bodied claim (recorded, no generation),
+        // this lowers exactly as before.
+        if (hasDeallocateClaimant_) {
+            const std::string key = deallocateClaimantKey();
+            auto generation = functions_.find(key);
+            if (generation != functions_.end()) {
+                std::vector<llvm::Value*> noArgs{};
+                if (!emitCallArgs(node, generation->second, key, {}, noArgs))
+                    return;
+                emitCall(generation->second, noArgs);
+                return;
+            }
         }
         llvm::FunctionCallee release = runtimeFn(
             node, "free",
@@ -10416,9 +12616,11 @@ private:
         // `get` and `contains` do not write, so a copy answers exactly what the original
         // would. `remove` does write, and refuses inside emitPrototypeMethod rather than
         // editing a table nobody can name.
+        std::optional<CgVal> probed;
         if (!direct && isPrototypeMethodName(node.method_name)) {
             CgVal object = emit(*node.object);
             if (failed_) return;
+            probed = object;
             if (object.ok() && object.type.isPrototype() &&
                 emitPrototypeMethod(node, nullptr, &object)) {
                 return;
@@ -10427,8 +12629,13 @@ private:
         auto receiver = baseOf(direct, CgType::Kind::Struct);
         if (failed_) return;
         if (!receiver && !dynamic_cast<Identifier*>(node.object.get())) {
-            CgVal val = emit(*node.object);
-            if (failed_) return;
+            CgVal val;
+            if (probed) {
+                val = *probed;
+            } else {
+                val = emit(*node.object);
+                if (failed_) return;
+            }
             if (val.ok()) {
                 if (val.address) {
                     receiver = Addr{val.address, val.type};
@@ -10466,7 +12673,14 @@ private:
                                                   node.method_name, eInfo.finName));
                     return;
                 }
-                const FnInfo& info = found->second;
+        const FnInfo& info = found->second;
+        // The entry point takes argv from the process, not from a caller:
+        // its LLVM signature is C's `(i32, ptr)` while a Fin call would pass
+        // one `[string]` pair, so any call would link and pass garbage.
+        if (info.isMainWithArgs) {
+            unsupported(node, "a call to 'main' (the entry point takes argv from the process, it cannot be called)");
+            return;
+        }
                 llvm::Value* self = builder_.CreateLoad(receiver->type.llvmType,
                                                         receiver->ptr, "enum.recv");
                 std::vector<llvm::Value*> args{self};
@@ -10490,7 +12704,7 @@ private:
             // body still refuses below -- there would be nothing to emit.
             const FunctionDeclaration* tmpl = findMethod(owner, node.method_name);
             if (tmpl && !tmpl->generic_params.empty() && tmpl->body) {
-                emitGenericMethodCall(node, owner, *receiver, *tmpl);
+                emitGenericMethodCall(node, argList(node.args), owner, *receiver, *tmpl);
                 return;
             }
             // `d.get_a()` where `get_a` is the *base*'s. The base's fields splice into
@@ -10635,7 +12849,12 @@ private:
     }
 
     // `b.set_x(5)` where `set_x` is `fun set_x<U>(new_x: U)` -- struct_methods.fin:14.
-    void emitGenericMethodCall(MethodCall& node, const StructInfo& owner,
+    //
+    // The arguments arrive as a list rather than off a MethodCall so a bare
+    // call bound to the method (receiver first, then the arguments)
+    // instantiates through the same code as the dotted spelling.
+    void emitGenericMethodCall(ASTNode& node, const std::vector<Expression*>& argNodes,
+                               const StructInfo& owner,
                                const Addr& receiver, const FunctionDeclaration& tmpl) {
         if (tmpl.is_static) {
             // A generic static method has no receiver to fix the struct's half of the
@@ -10653,8 +12872,8 @@ private:
         // rather than being offered a type, which is the same bargain emitTemplateCall
         // strikes and for the same reason.
         std::vector<CgVal> values;
-        values.reserve(node.args.size());
-        for (auto& arg : node.args) {
+        values.reserve(argNodes.size());
+        for (Expression* arg : argNodes) {
             CgVal a = emit(*arg);
             if (failed_) return;
             if (!a.ok()) { unsupported(node, "this argument"); return; }
@@ -11801,9 +14020,12 @@ private:
     //
     // A capture is refused rather than lowered, and that is what keeps this shape from
     // being a guess: `enclosingNames_` holds the names that were in scope where the
-    // lambda was written, so a body reading one is refused *as a capture* instead of
-    // silently reading a frame that is about to be gone. The day the corpus writes one
-    // is the day the pair has to be designed, and nothing before then compiles wrong.
+    // A lambda is a closure pair: the code beside the env snapshot the
+    // definition builds from the analyzer's recorded captures
+    // (LambdaExpression::captures). Reads of a capture inside the body thread
+    // through the env (see captureField); the backstop below stays for names
+    // the analysis did not record, which is this file disagreeing with the
+    // front end rather than a case.
     //
     // `functions_.count(name)` cannot collide: the name is generated from a counter
     // that only ever goes up, and `fin.lambda.` is not a spelling a Fin program can
@@ -11835,28 +14057,50 @@ private:
             return;
         }
 
-        const std::string name = fmt::format("fin.lambda.{}", lambdas_++);
+        // The captures against the live frame, in the analyzer's order. A name
+        // the frame does not hold is the backstop, not a lookup past it: the
+        // analysis recorded only function-locals, so a global here is the two
+        // passes disagreeing, and it says so.
+        std::vector<std::pair<std::string, CgType>> fields;
+        fields.reserve(node.captures.size());
+        for (const auto& cap : node.captures) {
+            std::optional<CaptureSource> src = captureSource(cap.name);
+            if (failed_ || !src) {
+                if (!failed_)
+                    unsupported(node, fmt::format("a lambda capturing '{}'",
+                                                  cap.name));
+                return;
+            }
+            fields.emplace_back(cap.name, src->type);
+        }
+
+        const unsigned id = lambdas_++;
+        const std::string name = fmt::format("fin.lambda.{}", id);
         // Declared exactly the way a top-level function is, so a lambda's parameters get
         // the same refusals a function's do -- an aggregate on an extern, a `void`
         // parameter, a return type with no representation. `isExtern` is false and there
-        // is no receiver: a lambda is neither.
+        // is no receiver: a lambda is neither. The env travels first (`withEnv`),
+        // which is what the indirect call threads back in.
         declareFunction(node, name, name, node.params, node.return_type.get(),
-                        /*isVarArg=*/false, /*isExtern=*/false);
+                        /*isVarArg=*/false, /*isExtern=*/false, nullptr,
+                        /*withEnv=*/true);
         auto declared = functions_.find(name);
         if (declared == functions_.end()) return;  // declareFunction already reported
         // Internal, because nothing outside this object file can name it. Set here
         // rather than threaded through declareFunction as a flag, since this is the only
         // caller that wants it and the linkage is the only thing that differs.
         declared->second.fn->setLinkage(llvm::Function::InternalLinkage);
+        llvm::StructType* envType =
+            envStructType(fmt::format("fin.env.{}", id), fieldTypesOf(fields));
 
         // The names visible *here*, snapshotted before emitBodyOf's ScopedEmission moves
-        // the scopes out of reach. Saved and restored around the body.
+        // the scopes out of reach. Saved and restored around the body. Kept as the
+        // backstop for names the analysis did not record: a body reading one is
+        // refused *as a capture* instead of silently reading a frame that is
+        // about to be gone.
         //
         // Added to what is already there, so that a lambda inside a lambda counts the
-        // outer lambda's parameters *and* the names the outer lambda was written among:
-        // neither frame is reachable from a bare code pointer, so a read of either is the
-        // same capture and says so, instead of the innermost one being reported as an
-        // unknown name.
+        // outer lambda's parameters *and* the names the outer lambda was written among.
         std::vector<std::string> enclosing = enclosingNames_;
         for (const auto& scope : scopes_)
             for (const auto& entry : scope) enclosing.push_back(entry.first);
@@ -11871,6 +14115,11 @@ private:
         // beside `let id <auto> = fun <T>...` builds the same instance the enclosing body
         // would.
         lambdaCarry_ = visibleLambdas();
+        // The env this body reads through, taken and cleared by emitBodyOf like
+        // the two carries above.
+        captureCarryNames_ = fieldNamesOf(fields);
+        captureCarryTypes_ = fieldTypesOf(fields);
+        captureCarryEnv_ = envType;
         emitBodyOf(node, node.params, node.body.get(), node.expression_body.get(), name);
         enclosing.swap(enclosingNames_);
         if (failed_) return;
@@ -11880,7 +14129,9 @@ private:
             unsupported(node, "this lambda used as a value");
             return;
         }
-        value_ = CgVal{declared->second.fn, *type};
+        llvm::Value* env = buildCaptureEnv(node, envType, fields);
+        if (!env) return;  // already reported
+        value_ = CgVal{buildFnPair(declared->second.fn, env), *type};
     }
     void visit(TypeLiteralExpression& node) override {
         std::string metaName = node.is_interface ? "$interface" : "$struct";
@@ -11954,6 +14205,11 @@ private:
     TypeMapper types_;
 
     std::unordered_map<std::string, FnInfo> functions_;
+    // One wrapper per function ever named as a value (closureWrapForValue):
+    // the bare function keyed to its env-first wrapper symbol. The wrapper
+    // takes the closure ABI so that every `fn` value is one pair however its
+    // code was declared.
+    std::unordered_map<std::string, std::string> wrappers_;
     // Keyed by Fin name, and never erased from after declareEnums: enumMembers_
     // points into it.
     std::unordered_map<std::string, EnumInfo> enums_;
@@ -11982,6 +14238,28 @@ private:
     // The loader's module Programs (ADR 0032), borrowed for registration only.
     // Set by run() before any pass reads it.
     std::vector<const Program*> modules_;
+    // The root Program run() was handed, borrowed like the modules above.
+    // Only the claimant scan reads it.
+    const Program* rootProgram_ = nullptr;
+    // Whether the root or any loaded module claims `move_or_copy` (wave-5
+    // slice 1). False means every value destroys independently, exactly as
+    // before this slice; true arms the Local::movedFrom skip in cleanScopeAt.
+    bool hasMoveOrCopyClaimant_ = false;
+    // Whether the root or any loaded module claims `destructor` (wave-5
+    // slice 2), and the generation it supplies. Borrowed from the scanned
+    // trees like rootProgram_ above. False (or a null generation) means
+    // emitDestructorCall lowers exactly what it lowered before this slice.
+    bool hasDestructorClaimant_ = false;
+    const SpecialDeclaration* destructorClaimant_ = nullptr;
+    const Block* destructorGeneration_ = nullptr;
+    // Whether the root or any loaded module claims `deallocate` (wave-5
+    // slice 3), and the generation it supplies. Borrowed from the scanned
+    // trees like rootProgram_ above. False (or a null generation) means
+    // visit(DeleteStatement) lowers the default `free`, exactly as before
+    // this slice.
+    bool hasDeallocateClaimant_ = false;
+    const SpecialDeclaration* deallocateClaimant_ = nullptr;
+    const Block* deallocateGeneration_ = nullptr;
     // Concrete module structs currently being laid out, by name: a base cycle
     // through modules re-enters ensureConcreteStruct, and an entry that exists
     // but is not complete yet is a cycle, not a layout to splice.
@@ -12020,6 +14298,12 @@ private:
     std::unordered_map<std::string, llvm::GlobalVariable*> interfaceVtables_;
     std::unordered_map<std::string, const TypeNode*> typeAliases_;
     std::unordered_map<std::string, std::string> symbolAliases_;
+    // The union aliases among the names above (`type Number = int | uint`).
+    // They lower as their first alternative -- registered in `typeAliases_`
+    // like any other alias -- and this set is what tells the mapper to keep
+    // the union-ness on the mapped type, so the metadata walk refuses a
+    // union's map (Q12) instead of emitting its first member's.
+    std::unordered_set<std::string> unionAliases_;
 
     // Every generic struct declaration, by name, borrowed from the AST -- which
     // outlives the emitter (run() takes the Program by reference). Not in structs_,
@@ -12052,6 +14336,12 @@ private:
     std::vector<PendingBody> pendingBodies_;
 
     std::vector<std::unordered_map<std::string, Local>> scopes_;
+
+    // Deferred struct destructions (wave-5 slice 4): one entry per tied local
+    // whose own scope was cleaned while its master lived, drained when the
+    // master's scope is cleaned. Per function body like scopes_ itself, so
+    // nested emission saves and restores it the same way.
+    std::vector<TiedPending> tiedPending_;
 
     // Module-scope variables, and the declarations declareGlobals has already
     // handled -- so that the top-level walk skips them instead of refusing.
@@ -12139,6 +14429,15 @@ bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngin
     module.setSourceFileName(sourceName);
 
     if (!emitter.run(ast, modules)) return false;
+
+    // COFF needs a COMDAT group to coalesce shared definitions across objects;
+    // linkonce_odr alone does not give Windows linkers that information.
+    if (triple.isOSBinFormatCOFF()) {
+        for (auto& object : module.global_objects()) {
+            if (object.hasLinkOnceODRLinkage())
+                object.setComdat(module.getOrInsertComdat(object.getName()));
+        }
+    }
 
     // Verified before anything is written. An invalid module that reaches the
     // object writer is an assertion failure deep in LLVM, which reads as a

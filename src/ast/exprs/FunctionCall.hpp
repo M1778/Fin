@@ -34,6 +34,20 @@ public:
     // (tests/samples/stdlib/memory.fin:14, stdlib/enums.fin:18,
     // literal_interface.fin:6). `name` never keeps the `@`.
     bool is_special = false;
+    // The struct whose method a bare call resolved to: `foo(self, v - 1)`
+    // inside `S::foo` is `S::foo`, not the free `foo`. Empty on every other
+    // call. Set by SemanticAnalyzer::visit(FunctionCall&) when the name binds
+    // a method of an enclosing struct body scope (which shadows a free
+    // function of the same name), read by CodeGen_LLVM::visit(FunctionCall&)
+    // to lower the method instead of the free function.
+    //
+    // The receiver of an instance method is args[0] and the rest are its
+    // arguments; a static method takes no receiver and owns every argument.
+    // Beside the call rather than replacing it (the MethodCall::resolved_call
+    // rule): the arguments keep their single owner and every structural pass
+    // still sees them in place.
+    std::string resolved_method_owner;
+    bool resolved_method_static = false;
     FunctionCall(std::string n, std::vector<std::unique_ptr<Expression>> a);
     void accept(Visitor& v) override;
 };

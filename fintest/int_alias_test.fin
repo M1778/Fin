@@ -1,0 +1,36 @@
+import { assert_true } from testing::std;
+import { u8, i8, u16, i16, u32, i32, u64, i64, f32, f64, usize, isize } from types::std;
+
+// Pins integer-alias basics: every short spelling resolves, lowers, and
+// holds its value at run time (`size_t` needs no import).
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+// Over-limit/negative constants stay refused and are pinned in
+// test_soundness.cpp, not here (fintest only runs passing programs).
+fun main() <noret> {
+    let a <u8> = 200;
+    assert_true(a == cast<u8>(200), "int_alias: u8 holds 200");
+    let b <i8> = -100;
+    assert_true(b == cast<i8>(-100), "int_alias: i8 holds -100");
+    let c <u16> = 60000;
+    assert_true(c == cast<u16>(60000), "int_alias: u16 holds 60000");
+    let d <i16> = -30000;
+    assert_true(d == cast<i16>(-30000), "int_alias: i16 holds -30000");
+    let e <u32> = 3000000000;
+    assert_true(e == cast<u32>(3000000000), "int_alias: u32 holds large value");
+    let f <i32> = -2000000000;
+    assert_true(f == cast<i32>(-2000000000), "int_alias: i32 holds large negative");
+    let g <u64> = 42;
+    assert_true(g == cast<u64>(42), "int_alias: u64 holds 42");
+    let h <i64> = -42;
+    assert_true(h == cast<i64>(-42), "int_alias: i64 holds -42");
+    let i <f32> = cast<f32>(1.5);
+    assert_true(i == cast<f32>(1.5), "int_alias: f32 holds 1.5");
+    let j <f64> = cast<f64>(2.5);
+    assert_true(j == cast<f64>(2.5), "int_alias: f64 holds 2.5");
+    let k <usize> = 42;
+    assert_true(k == cast<usize>(42), "int_alias: usize holds 42");
+    let l <isize> = -42;
+    assert_true(l == cast<isize>(-42), "int_alias: isize holds -42");
+    let m <size_t> = 42;
+    assert_true(m == cast<size_t>(42), "int_alias: size_t holds 42");
+}

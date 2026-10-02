@@ -13,3 +13,4 @@
 #include "PrototypeType.hpp"
 #include "ErrorType.hpp"
 #include "DynamicType.hpp"
+#include "UnionType.hpp"

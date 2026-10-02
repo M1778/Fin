@@ -35,16 +35,29 @@ pub fun run_finc(args: [string], count: int) <int> {
     p.add_flag("--version", "-v", "Print version");
     p.add_flag("--help", "-h", "Show help");
     p.add_flag("-c", "-c", "Compile to object file without linking");
-    p.add_flag("--emit-c", "", "Emit ANSI C source code");
     p.add_flag("--dump-tokens", "", "Print token stream");
     p.add_flag("--dump-ast", "", "Print parsed AST");
+    p.add_flag("--no-check", "", "Skip semantic analysis (unsafe)");
     p.add_option("-o", "-o", "", "Output path");
+    p.add_option("--color", "", "", "Color mode: auto, always, never (accepted; output is never colored)");
+    p.add_flag("--color=auto", "", "Color mode (accepted; output is never colored)");
+    p.add_flag("--color=always", "", "Color mode (accepted; output is never colored)");
+    p.add_flag("--color=never", "", "Color mode (accepted; output is never colored)");
 
     let ok <bool> = p.parse(args, count);
     if (!ok) {
         m_dprintf(2, "finc: error: %s\n", p.error_msg);
         free_arg_parser(p);
         return 2;
+    }
+
+    if (p.has_option("--color")) {
+        let cm <string> = p.get_option("--color");
+        if (cm != "auto" && cm != "always" && cm != "never") {
+            m_dprintf(2, "finc: error: unknown color mode '%s' (expected auto, always, or never)\n", cm);
+            free_arg_parser(p);
+            return 2;
+        }
     }
 
     if (p.get_flag("--version")) {
@@ -64,12 +77,19 @@ pub fun run_finc(args: [string], count: int) <int> {
         return 2;
     }
 
+    if (p.get_positional_count() > 1) {
+        m_dprintf(2, "finc: error: unexpected second input file '%s' (already compiling '%s')\n", p.get_positional(1), p.get_positional(0));
+        free_arg_parser(p);
+        return 2;
+    }
+
     let input_file <string> = p.get_positional(0);
     let out_file <string> = p.get_option("-o");
     let is_compile_only <bool> = p.get_flag("-c");
     let emit_c <bool> = p.get_flag("--emit-c");
     let dump_tokens <bool> = p.get_flag("--dump-tokens");
     let dump_ast <bool> = p.get_flag("--dump-ast");
+    let no_check <bool> = p.get_flag("--no-check");
 
     let res <int> = compile_source_file(
         input_file,
@@ -77,52 +97,16 @@ pub fun run_finc(args: [string], count: int) <int> {
         is_compile_only,
         dump_tokens,
         dump_ast,
-        emit_c
+        emit_c,
+        no_check
     );
 
     free_arg_parser(p);
     return res;
 }
 
-// Process entry point: reads argv from /proc/self/cmdline and invokes run_finc.
-pub fun main() <int> {
-    let raw_buf <[char]> = new [char, 4096]{};
-    let fp <&void> = m_fopen("/proc/self/cmdline", "rb");
-    let total_bytes <int> = 0;
-    if (fp != null) {
-        let n_read <ulong> = m_fread(&raw_buf[0], cast<ulong>(1), cast<ulong>(4095), fp);
-        total_bytes = cast<int>(n_read);
-        m_fclose(fp);
-    }
-
-    let args_list <[string]> = new [string, 64]{};
-    let arg_count <int> = 0;
-    let cur_start <int> = 0;
-
-    for (let i <int> = 0; i < total_bytes; i++) {
-        if (raw_buf[i] == cast<char>(0)) {
-            let arg_len <int> = i - cur_start;
-            if (arg_len > 0) {
-                let str <string> = m_calloc(cast<ulong>(arg_len + 1), cast<ulong>(1));
-                m_memcpy(str, &raw_buf[cur_start], cast<ulong>(arg_len));
-                if (cur_start > 0 && arg_count < 64) {
-                    args_list[arg_count] = str;
-                    arg_count++;
-                } else if (cur_start == 0) {
-                    m_free(str);
-                }
-            }
-            cur_start = i + 1;
-        }
-    }
-    delete raw_buf;
-
-    let exit_code <int> = run_finc(args_list, arg_count);
-
-    for (let j <int> = 0; j < arg_count; j++) {
-        m_free(args_list[j]);
-    }
-    delete args_list;
-
-    return exit_code;
+// Process entry point: argv arrives as `args` (program name excluded,
+// like `run_finc` already expects) and forwards with its length.
+pub fun main(args: [string]) <int> {
+    return run_finc(args, args.length);
 }

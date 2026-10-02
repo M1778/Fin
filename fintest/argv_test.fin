@@ -1,0 +1,10 @@
+import { assert_eq_int } from testing::std;
+
+// Pins the designed argv surface `main(args: [string])`: under the fintest
+// runner (no argv) the program name is excluded, so args is empty.
+// Content reads with real argv verified manually on both compilers
+// (`alpha beta` -> length 2, args[0]/args[1] read back).
+// Green on both compilers (finc + finc_stage2).
+fun main(args: [string]) <noret> {
+    assert_eq_int(args.length, 0, "argv: empty argv gives length 0");
+}

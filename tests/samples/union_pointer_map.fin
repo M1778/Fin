@@ -1,0 +1,20 @@
+//@ normative
+//@ error 11:16 "field 'v' has union type 'Number'"
+// Q12's union half: `type Number = int | uint | float` is a union, and a
+// struct field of union type has no single layout -- which alternative a value
+// holds is known only at run time. The field is refused here, at declaration
+// time, which is the pointer map's refusal rather than a zero map of the
+// first member. The provider below states the intent: asking this type's map
+// must diagnose, never guess.
+type Number = int | uint | float;
+
+struct S { pub v <Number>, }
+
+#[use(compiler)]
+#[use(compiler.components.layout)]
+#[provides(type_metadata)]
+@special(pub) meta(s: $struct) <quote> {
+  return compiler.layout.pointer_map_quote(s);
+}
+
+fun main() <int> { return 0; }

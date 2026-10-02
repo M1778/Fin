@@ -73,6 +73,23 @@ std::optional<ScalarInfo> scalarByName(const std::string& name) {
     if (name == "uint" || name == "uint32") return ScalarInfo{ScalarKind::Int, 32, false};
     if (name == "long" || name == "int64") return ScalarInfo{ScalarKind::Int, 64, true};
     if (name == "ulong" || name == "uint64") return ScalarInfo{ScalarKind::Int, 64, false};
+    // The short aliases the stage checker knows (finc/checker.fin:152-172): `u8`/
+    // `i8` complete the 8-bit row beside `int8`/`uint8`, and so on up to `u64`/
+    // `i64`. Same widths and signs as the long forms they abbreviate.
+    if (name == "i8") return ScalarInfo{ScalarKind::Int, 8, true};
+    if (name == "u8") return ScalarInfo{ScalarKind::Int, 8, false};
+    if (name == "i16") return ScalarInfo{ScalarKind::Int, 16, true};
+    if (name == "u16") return ScalarInfo{ScalarKind::Int, 16, false};
+    if (name == "i32") return ScalarInfo{ScalarKind::Int, 32, true};
+    if (name == "u32") return ScalarInfo{ScalarKind::Int, 32, false};
+    if (name == "i64") return ScalarInfo{ScalarKind::Int, 64, true};
+    if (name == "u64") return ScalarInfo{ScalarKind::Int, 64, false};
+    // The pointer-width names (lib/std/types.fin:79-80, stdlib/memory.fin:8) and
+    // the float aliases (stage map_type lowers them to float/double).
+    if (name == "isize") return ScalarInfo{ScalarKind::Int, 64, true};
+    if (name == "usize" || name == "size_t") return ScalarInfo{ScalarKind::Int, 64, false};
+    if (name == "f32") return ScalarInfo{ScalarKind::Float, 32, true};
+    if (name == "f64") return ScalarInfo{ScalarKind::Float, 64, true};
     if (name == "float") return ScalarInfo{ScalarKind::Float, 32, true};
     if (name == "double") return ScalarInfo{ScalarKind::Float, 64, true};
     // A Fin `string` is a pointer to NUL-terminated bytes, which is what makes the
@@ -197,6 +214,63 @@ void LayoutEngine::reset() {
     keepAlive_.clear();
 }
 
+std::string LayoutEngine::pointerCount(const TypePtr& type, uint64_t& count) {
+    LayoutResult result = layoutOf(type);
+    if (!result.ok()) return result.refusal;
+    count = result.layout.pointers.size();
+    return "";
+}
+
+namespace {
+
+// The index half of the typed queries, shared by offset and pointee so the
+// two cannot disagree about what names a slot. "" selects `slot`, else the
+// refusal -- a negative index, or one past a map that short, names the index
+// and the size rather than wrapping or answering zero.
+std::string checkSlotIndex(const Type& type, int64_t index, const TypeLayout& layout,
+                           PointerSlot& slot) {
+    if (index < 0) {
+        return "'" + type.toString() + "' has no pointer at index " +
+               std::to_string(index) + ": the index is negative";
+    }
+    if (static_cast<uint64_t>(index) >= layout.pointers.size()) {
+        return "'" + type.toString() + "' has only " +
+               std::to_string(layout.pointers.size()) + " pointer slot" +
+               (layout.pointers.size() == 1 ? "" : "s") + ", so index " +
+               std::to_string(index) + " names nothing";
+    }
+    slot = layout.pointers[static_cast<size_t>(index)];
+    return "";
+}
+
+}  // namespace
+
+std::string LayoutEngine::pointerOffsetAt(const TypePtr& type, int64_t index,
+                                          uint64_t& offset) {
+    if (!type) return "no type";
+    LayoutResult result = layoutOf(type);
+    if (!result.ok()) return result.refusal;
+    PointerSlot slot{0, nullptr};
+    if (std::string refusal = checkSlotIndex(*type, index, result.layout, slot);
+        !refusal.empty())
+        return refusal;
+    offset = slot.offset;
+    return "";
+}
+
+std::string LayoutEngine::pointeeTypeAt(const TypePtr& type, int64_t index,
+                                        TypePtr& pointee) {
+    if (!type) return "no type";
+    LayoutResult result = layoutOf(type);
+    if (!result.ok()) return result.refusal;
+    PointerSlot slot{0, nullptr};
+    if (std::string refusal = checkSlotIndex(*type, index, result.layout, slot);
+        !refusal.empty())
+        return refusal;
+    pointee = slot.pointee;
+    return "";
+}
+
 LayoutResult LayoutEngine::layoutOf(const TypePtr& type) {
     if (!type) return {{}, "no type"};
 
@@ -301,11 +375,34 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
 
     if (auto* nullable = t.as<NullableType>()) {
         if (!nullable->inner) return {{}, refuse(t, "it wraps nothing")};
+        // `fn?` is a closure pair `{code, env}` with absent as code==null, not a
+        // refusal. A bare `fn` still has no layout (undecided bare-vs-closure);
+        // the nullable spelling selects the pair, which is what the backend
+        // already emits for it.
+        if (nullable->inner->as<FunctionType>() != nullptr) {
+            const ScalarInfo ptrInfo{ScalarKind::Pointer, 0, false};
+            const uint64_t ptrSize = sizeOfScalar(ptrInfo, target_);
+            const uint64_t ptrAlign = alignOfScalar(ptrInfo, target_);
+            TypeLayout out;
+            out.size = ptrSize * 2;
+            out.align = ptrAlign;
+            // No traced slots: the code word is static and the env's layout is
+            // per-lambda and unruled, so any slot listed here would be a guess.
+            return {out, ""};
+        }
         // `null` is the null pointer, so a nullable pointer needs no discriminant
-        // and is the same eight bytes.
+        // and is the same eight bytes. `string?` is pointer-shaped too (owner
+        // decision): a string is already a pointer to NUL-terminated bytes.
         auto inner = layoutOf(nullable->inner);
         if (!inner.ok()) return inner;
-        const bool pointerShaped = nullable->inner->as<PointerType>() != nullptr;
+        bool pointerShaped = nullable->inner->as<PointerType>() != nullptr;
+        if (!pointerShaped) {
+            if (auto* primInner = nullable->inner->as<PrimitiveType>()) {
+                if (auto info = scalarOf(*primInner);
+                    info && info->kind == ScalarKind::Pointer)
+                    pointerShaped = true;
+            }
+        }
         if (!pointerShaped) {
             // ADR 0040: A nullable value type (`int?`, `float?`, `struct?`) lowers
             // as a tagged aggregate `{ T, bool }`: a payload of type T paired with
@@ -406,6 +503,17 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
     if (t.as<GenericType>()) {
         return {{}, refuse(t, "a generic parameter has no layout until monomorphisation "
                               "substitutes it")};
+    }
+
+    if (auto* un = t.as<UnionType>()) {
+        // Q12's union half: a union has no single layout, so its pointer map
+        // is a diagnostic, never the first member's (which for `int | uint`
+        // would be a confident zero). Which alternative a value holds is known
+        // only at run time, and no static offset list can say it.
+        return {{}, refuse(t, "a union ('" + un->alias +
+                              "') has no single layout: which alternative a value holds "
+                              "is known only at run time, so its pointer map is a "
+                              "diagnostic rather than a map")};
     }
 
     if (auto* self = t.as<SelfType>()) {
@@ -604,6 +712,27 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
     for (const auto& field : st->fields) {
         if (!field.type) {
             return {{}, refuse(t, "field '" + field.name + "' has no type")};
+        }
+        // Q12's interface half: a field of interface type is the backend's
+        // `{data, vtable}` pair (ADR 0019) -- two words -- contributing exactly
+        // one traced slot, the data word. The vtable word is absent from the map
+        // rather than marked: a collector must not follow it, and absence is the
+        // two-state staging of ADR 0019's third state. Asked through
+        // `scalarByName`'s table rather than restated, so the field agrees with
+        // the backend's `{i8*, i8*}` by construction rather than by two numbers
+        // that happen to match.
+        if (auto iface = std::dynamic_pointer_cast<StructType>(field.type);
+            iface && iface->is_interface) {
+            const ScalarInfo ptrInfo{ScalarKind::Pointer, 0, false};
+            const uint64_t ptrSize = sizeOfScalar(ptrInfo, target_);
+            const uint64_t ptrAlign = alignOfScalar(ptrInfo, target_);
+            offset = alignUp(offset, ptrAlign);
+            out.fields.push_back(
+                {field.name, field.type, offset, 2 * ptrSize, ptrAlign, false});
+            out.pointers.push_back({offset, field.type});
+            offset += 2 * ptrSize;
+            out.align = std::max(out.align, ptrAlign);
+            continue;
         }
         auto fieldLayout = layoutOf(field.type);
         if (!fieldLayout.ok()) {

@@ -52,3 +52,37 @@ side effects is a bug that the compiler will not catch and should not be expecte
 
 Eight of the nine jobs in the motivating collector (ADR 0003, `CortexGC.fin`) now need no amendment to
 any existing decision. The ninth is the safepoint, which is ADR 0007's `loop_back_edge`.
+
+## Slot contracts, as built (wave 5)
+
+The four slots above now lower. Each keeps the contract below; anything else is refused naming the gap,
+never silently dropped.
+
+Exclusivity is program-wide and front-loaded: a second claimant for one slot is a diagnostic naming the
+slot and both claimants with both lines (`collectProtocol`, mirroring the provider registry). A lone
+`lifetime` claimant is still refused — recorded, replacement not lowered yet — so no program compiles on
+a promise.
+
+Precedence at a destruction site is explicit body, then claimant generation, then composition:
+`emitDestructorCall` runs a declared `~T()` first (`deeptest2.fin:46` keeps its overwrite), else the
+`destructor` claimant's one shared generation when the claim supplies one, and ADR 0016's fields-then-bases
+composition still runs after either. The claim shape carries no full-vs-partial channel, so there is no
+opt-out yet; per-subject specialization waits on the comptime interpreter, and the generation names no
+`self`.
+
+Maybe skips, and only under a claim: with `move_or_copy` claimed (empty body — a replacement body is
+refused, not run), a binding moved-from on the reaching path skips its destructor at scope exit. Branch
+arms fork and join by OR — agreement holds, disagreement becomes Maybe, and Maybe skips: leak beats
+corruption. Without a claimant every value destroys independently, exactly as ADR 0030 says.
+
+`deallocate` replaces only the `free`: `delete` still runs the destructor first through `emitDestructorCall`
+(`deeptest3.fin:44`'s order holds by construction), then calls the claimant's generation instead of `free`.
+`new` is untouched, and an empty-bodied claim records the slot while the default `free` stays.
+
+`lifetime` is the `#[slaveof]` rule narrowed, not a claimant lowering: `#[slaveof(z)]` to a strictly outer
+local defers a struct-typed binding's destruction to the master's scope exit (the slot is a frame alloca,
+so the pointer stays valid; the moved-from flag travels with it, so deferral never resurrects).
+`#[slaveof($Fin)]` and a tie to a global pin — never destroyed at scope exit. A same-scope tie, and
+destructor-less tied storage, lower to nothing: the old no-op reading kept where it still proves out. A tie
+across a loop body or branch arm is refused — across a back-edge or a join the slot may never have been
+constructed.

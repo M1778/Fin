@@ -32,3 +32,16 @@ a boolean presence flag (`has_value`).
   `emitRuntimeBlame` ("denullify of an absent value") on absence.
 - Comparison `val == null` tests the discriminant flag for value types and `ptr == null`
   for pointers.
+
+## Adopted amendment (2026-09-27, NL-A)
+
+- Owner rule: nullable values lower as tagged pairs `{T,i1}`, presence = tag ONLY.
+- `string?` is 8B pointer-shaped (Layout amended; codegens unchanged).
+- `fn?` is a closure pair `{code,env}` (16B, align 8) with absent as code==null,
+  not a refusal and not the 8B pointer the title above names.
+- `M{int?,char,long?}` is 32B (int? at 0/8B, char at 8, long? at 16/16B) and the
+  backend emits the same offsets via `TypeMapper::map` pairs.
+- Flipped expectations (overrule old zero-sentinel p1/p5/p6 probes): a present
+  zero is PRESENT (tag=1). `a.b=0` then `a.b==null` is 0 and `a.b?` prints 0.
+- `==` between two nullables reads payload+tag (scalar payloads); `== null`
+  reads the tag only. `fun?` fall-off returns `{0,0}`; omitted `n?` fills null.

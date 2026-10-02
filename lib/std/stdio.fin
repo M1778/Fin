@@ -92,9 +92,10 @@
 //     parameter (`expected '&char', got 'string'`). `File::write_text` therefore declares
 //     `fwrite`'s buffer as a `string`, which is the same pointer wearing the type the call
 //     site has.
-//   * `cast<any>` reaches the front end and is refused in codegen (`a cast of type 'any'
-//     is not lowered yet`), so the `string`-to-bytes route that type-checks does not run.
-//     That is why nothing here converts a `string` to a `[char]`.
+//   * `cast<any>` boxes (ADR 0034 amendment), but the unbox names the held type
+//     exactly: `cast<&char>(cast<any>(s))` type-checks and blames at run time
+//     (`string` is not `&char`), so the `string`-to-bytes route still does not
+//     run. That is why nothing here converts a `string` to a `[char]`.
 //   * `File`'s methods are `static` and take a path, rather than a `File` being an open
 //     handle with a `&void` field. A `&void` field in a struct was not tried far enough to
 //     claim it works, and the static form is what the draft writes.

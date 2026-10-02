@@ -1,0 +1,17 @@
+import { assert_true } from testing::std;
+
+// PT1 no-regression guard: field-only mixing across two instantiations of one
+// generic struct is accidentally correct (one erased body per FIELD access,
+// resolved through the field type) and must keep lowering on both backends.
+// Contrast box_get/box_setu (method bodies share one erased body): those
+// refuse. If this file ever fails, a tripwire overreached.
+struct Box<T> {
+    val <T>,
+}
+
+fun main() <noret> {
+    let a <Box<int>> = Box::<int>{ val: 42 };
+    let b <Box<float>> = Box::<float>{ val: 1.5 };
+    assert_true(a.val == 42, "box_mix: int field reads back");
+    assert_true(b.val == 1.5, "box_mix: float field reads back");
+}

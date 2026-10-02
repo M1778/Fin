@@ -1,0 +1,18 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_d01: by-value struct params copy — the callee's field store is
+// visible in its return but invisible to the caller.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+struct P { a <int>, b <int> }
+
+fun bump(p: P) <int> {
+    p.a = 50;
+    return p.a + p.b;
+}
+
+fun main() <noret> {
+    let p <P> = P { a: 1, b: 2 };
+    assert_eq_int(bump(p), 52, "byval: callee sees its own store");
+    assert_eq_int(p.a, 1, "byval: caller copy is untouched");
+    assert_eq_int(p.b, 2, "byval: other field is untouched");
+}

@@ -42,14 +42,24 @@ bool PrimitiveType::equals(const Type& other) const {
 }
 bool PrimitiveType::isAssignableTo(const Type& other) const {
     if (Type::isAssignableTo(other)) return true;
-    // The one float rule the corpus needs. Read off the *name* rather than the
-    // spelling, because a spelling now carries a width and `float{128}` is still
-    // `float` -- scalarOf drops a width on anything that is not an integer, so a
-    // toString() comparison here would have been the only place in the compiler
-    // where it was not.
-    if (name == "int") {
-        if (auto* o = other.as<PrimitiveType>()) {
-            if (o->name == "float") return true;
+    // The one float rule the corpus needs, asked of the scalar table rather than
+    // the spelling, so that every name for one scalar converts like its canonical
+    // twin: `i32` like `int`, `f32` like `float`. A spelling now carries a width
+    // and `float{128}` is still `float` -- scalarOf drops a width on anything that
+    // is not an integer, so the target half is a width comparison against the
+    // table's `float` rather than a name comparison it would be the only place to
+    // fail. Other widths and signs (`long`, `short`, `uint`, ...) are different
+    // scalars and stay refused, as does `int` -> `double`; an integer *literal*
+    // still reaches `double` through constantFitsType, not through this rule.
+    if (auto* o = other.as<PrimitiveType>()) {
+        const auto from = scalarOf(*this);
+        const auto to = scalarOf(*o);
+        const auto intRef = scalarByName("int");
+        const auto floatRef = scalarByName("float");
+        if (from && to && intRef && floatRef && from->kind == ScalarKind::Int &&
+            to->kind == ScalarKind::Float && from->bits == intRef->bits &&
+            from->isSigned == intRef->isSigned && to->bits == floatRef->bits) {
+            return true;
         }
     }
 
@@ -122,6 +132,16 @@ bool PrimitiveType::isAssignableTo(const Type& other) const {
             if (to->bits > from->bits) return true;
             if (to->bits == from->bits && to->isSigned == from->isSigned) return true;
         }
+        // A `$struct` denotes a struct type, and a struct type is a type: it is
+        // accepted where a `$type` is expected. The layout operations take
+        // `$type` while a provider holds its subject as `$struct`
+        // (`compiler.layout.pointer_map_quote(s)`), and without this the only
+        // well-formed provider body in the language would not type-check. The
+        // four meta-types stay distinct from each other -- `$interface` where
+        // `$struct` is expected is still refused, which is what keeps argument
+        // order checkable (docs/compiler-api.md §2.4) -- and `$enum_member`
+        // widens to nothing: no consumer asks it to.
+        if (o->name == "$type" && name == "$struct") return true;
     }
     return false;
 }

@@ -1,0 +1,34 @@
+import { assert_true } from testing::std;
+import { crc32, fnv1a_32, fnv1a_64, djb2, sdbm } from hash::std;
+
+// Pins battery e02-e03: the hash::std vectors (crc32, fnv1a, djb2, sdbm).
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+// The three fnv1a_64 vectors above long-max are pinned via hi/lo 32-bit
+// halves (a >2^63 literal does not lower, so no bare huge literal appears).
+fun main() <noret> {
+    assert_true(crc32("") == cast<uint>(0), "hash: crc32 empty");
+    assert_true(crc32("hello") == cast<uint>(907060870), "hash: crc32 hello");
+    assert_true(crc32("abc") == cast<uint>(891568578), "hash: crc32 abc");
+    assert_true(crc32("123456789") == cast<uint>(3421780262), "hash: crc32 digits");
+    assert_true(crc32("a") == cast<uint>(3904355907), "hash: crc32 a");
+    assert_true(crc32("The quick brown fox jumps over the lazy dog") == cast<uint>(1095738169), "hash: crc32 fox");
+    assert_true(fnv1a_32("") == cast<uint>(2166136261), "hash: fnv1a_32 empty");
+    assert_true(fnv1a_32("hello") == cast<uint>(1335831723), "hash: fnv1a_32 hello");
+    assert_true(fnv1a_32("abc") == cast<uint>(440920331), "hash: fnv1a_32 abc");
+    assert_true(fnv1a_32("a") == cast<uint>(3826002220), "hash: fnv1a_32 a");
+    let h1 <ulong> = fnv1a_64("hello");
+    assert_true(h1 / cast<ulong>(4294967296) == cast<ulong>(2754664518), "hash: fnv1a_64 hello hi");
+    assert_true(h1 % cast<ulong>(4294967296) == cast<ulong>(2158673163), "hash: fnv1a_64 hello lo");
+    let h2 <ulong> = fnv1a_64("");
+    assert_true(h2 / cast<ulong>(4294967296) == cast<ulong>(3421674724), "hash: fnv1a_64 empty hi");
+    assert_true(h2 % cast<ulong>(4294967296) == cast<ulong>(2216829733), "hash: fnv1a_64 empty lo");
+    let h3 <ulong> = fnv1a_64("a");
+    assert_true(h3 / cast<ulong>(4294967296) == cast<ulong>(2942557260), "hash: fnv1a_64 a hi");
+    assert_true(h3 % cast<ulong>(4294967296) == cast<ulong>(2248273036), "hash: fnv1a_64 a lo");
+    assert_true(djb2("hello") == cast<ulong>(210714636441), "hash: djb2 hello");
+    assert_true(djb2("") == cast<ulong>(5381), "hash: djb2 empty");
+    assert_true(djb2("a") == cast<ulong>(177670), "hash: djb2 a");
+    assert_true(sdbm("hello") == cast<ulong>(7416051667693574450), "hash: sdbm hello");
+    assert_true(sdbm("") == cast<ulong>(0), "hash: sdbm empty");
+    assert_true(sdbm("a") == cast<ulong>(97), "hash: sdbm a");
+}

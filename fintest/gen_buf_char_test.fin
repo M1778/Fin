@@ -1,0 +1,14 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_a03: generic Buf<char> element reads come back as written.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+struct Buf<T> {
+    items <[T, 3]>
+}
+
+fun main() <noret> {
+    let b <Buf<char>> = Buf::<char>{ items: ['a', 'b', 'c'] };
+    assert_eq_int(cast<int>(b.items[0]), 97, "buf_char: read [0] is 'a'");
+    assert_eq_int(cast<int>(b.items[1]), 98, "buf_char: read [1] is 'b'");
+    assert_eq_int(cast<int>(b.items[2]), 99, "buf_char: read [2] is 'c'");
+}

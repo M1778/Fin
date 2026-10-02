@@ -1,0 +1,7 @@
+import { assert_eq_int, assert_eq_string } from testing::std;
+import { concat } from strings::std;
+
+fun main() <noret> {
+    assert_eq_int(2 * 3, 6, "assert_eq: int arithmetic holds");
+    assert_eq_string(concat("a", "b"), "ab", "assert_eq: string concat holds");
+}

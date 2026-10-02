@@ -1,0 +1,19 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_a01: generic Buf<int> element read/write plus .length.
+// Green on both compilers (finc + finc_stage2).
+struct Buf<T> {
+    items <[T, 3]>
+}
+
+fun main() <noret> {
+    let b <Buf<int>> = Buf::<int>{ items: [10, 20, 30] };
+    assert_eq_int(b.items[0], 10, "buf_int: read [0]");
+    assert_eq_int(b.items[1], 20, "buf_int: read [1]");
+    assert_eq_int(b.items[2], 30, "buf_int: read [2]");
+    assert_eq_int(b.items.length, 3, "buf_int: length is 3");
+    b.items[1] = 99;
+    assert_eq_int(b.items[1], 99, "buf_int: write [1] reads back");
+    assert_eq_int(b.items[0], 10, "buf_int: write preserves [0]");
+    assert_eq_int(b.items[2], 30, "buf_int: write preserves [2]");
+}

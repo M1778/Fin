@@ -7,10 +7,11 @@
 
 import {
     Token, lookup_keyword,
-    tok_eof, tok_ident, tok_int_lit, tok_string_lit, tok_char_lit,
+    tok_eof, tok_ident, tok_int_lit, tok_float_lit, tok_error,
+    tok_string_lit, tok_char_lit,
     tok_plus, tok_minus, tok_star, tok_slash, tok_percent,
     tok_equal, tok_eqeq, tok_noteq, tok_lt, tok_gt, tok_lteq, tok_gteq,
-    tok_and, tok_or, tok_not,
+    tok_and, tok_or, tok_not, tok_shl, tok_shr,
     tok_lparen, tok_rparen, tok_lbrace, tok_rbrace,
     tok_lbracket, tok_rbracket, tok_semicolon, tok_colon,
     tok_comma, tok_dot
@@ -61,6 +62,8 @@ pub struct Scanner {
       start_pos <int> = 0,
       start_line <int> = 1,
       start_col <int> = 1,
+      comment_open_line <int> = 1,
+      comment_open_col <int> = 1,
 
     pub:
       fun init(self: &Self, src: string) <noret> {
@@ -117,7 +120,9 @@ pub struct Scanner {
           return true;
       }
 
-      fun skip_whitespace_and_comments(self: &Self) <noret> {
+      // Returns true when a block comment ran into EOF still open, so the
+      // caller can refuse it instead of silently swallowing the file tail.
+      fun skip_whitespace_and_comments(self: &Self) <bool> {
           while (!self.is_at_end()) {
               let c <char> = self.peek();
               if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
@@ -127,6 +132,8 @@ pub struct Scanner {
                       self.advance();
                   }
               } else if (c == '/' && self.peek_next() == '*') {
+                  self.comment_open_line = self.line;
+                  self.comment_open_col = self.col;
                   self.advance();
                   self.advance();
                   let depth <int> = 1;
@@ -143,14 +150,27 @@ pub struct Scanner {
                           self.advance();
                       }
                   }
+                  if (depth > 0) {
+                      return true;
+                  }
               } else {
                   break;
               }
           }
+          return false;
       }
 
       fun scan_token(self: &Self) <Token> {
-          self.skip_whitespace_and_comments();
+          if (self.skip_whitespace_and_comments()) {
+              return Token {
+                  kind: tok_error(),
+                  text: "unterminated block comment",
+                  line: self.comment_open_line,
+                  col: self.comment_open_col,
+                  offset: self.cursor,
+                  len: 0
+              };
+          }
           self.start_pos = self.cursor;
           self.start_line = self.line;
           self.start_col = self.col;
@@ -167,6 +187,20 @@ pub struct Scanner {
           }
 
           let c <char> = self.peek();
+
+          // A NUL byte inside the scanned span is never valid source. Refuse
+          // it as one error token and keep scanning the tail after it.
+          if (c == cast<char>(0) && !self.is_at_end()) {
+              self.advance();
+              return Token {
+                  kind: tok_error(),
+                  text: "unrecognised byte in source: '\\x00'",
+                  line: self.start_line,
+                  col: self.start_col,
+                  offset: self.start_pos,
+                  len: 1
+              };
+          }
 
           // Identifiers and keywords
           if (is_alpha(c)) {
@@ -188,6 +222,7 @@ pub struct Scanner {
 
           // Numeric literals
           if (is_digit(c)) {
+              let is_float <bool> = false;
               if (c == '0' && (self.peek_next() == 'x' || self.peek_next() == 'X')) {
                   self.advance(); // '0'
                   self.advance(); // 'x'
@@ -199,6 +234,7 @@ pub struct Scanner {
                       self.advance();
                   }
                   if (self.peek() == '.' && is_digit(self.peek_next())) {
+                      is_float = true;
                       self.advance(); // '.'
                       while (is_digit(self.peek())) {
                           self.advance();
@@ -207,8 +243,12 @@ pub struct Scanner {
               }
               let len <int> = self.cursor - self.start_pos;
               let txt <string> = slice_str(self._chars, self.start_pos, len);
+              let num_kind <int> = tok_int_lit();
+              if (is_float) {
+                  num_kind = tok_float_lit();
+              }
               return Token {
-                  kind: tok_int_lit(),
+                  kind: num_kind,
                   text: txt,
                   line: self.start_line,
                   col: self.start_col,
@@ -227,9 +267,17 @@ pub struct Scanner {
                   }
                   self.advance();
               }
-              if (!self.is_at_end()) {
-                  self.advance();
+              if (self.is_at_end()) {
+                  return Token {
+                      kind: tok_error(),
+                      text: "unterminated string literal",
+                      line: self.start_line,
+                      col: self.start_col,
+                      offset: self.start_pos,
+                      len: self.cursor - self.start_pos
+                  };
               }
+              self.advance();
               let len <int> = self.cursor - self.start_pos;
               let txt <string> = slice_str(self._chars, self.start_pos, len);
               return Token {
@@ -252,9 +300,17 @@ pub struct Scanner {
                   }
                   self.advance();
               }
-              if (!self.is_at_end()) {
-                  self.advance();
+              if (self.is_at_end()) {
+                  return Token {
+                      kind: tok_error(),
+                      text: "unterminated character literal",
+                      line: self.start_line,
+                      col: self.start_col,
+                      offset: self.start_pos,
+                      len: self.cursor - self.start_pos
+                  };
               }
+              self.advance();
               let len <int> = self.cursor - self.start_pos;
               let txt <string> = slice_str(self._chars, self.start_pos, len);
               return Token {
@@ -283,8 +339,17 @@ pub struct Scanner {
           if (c == '<' && self.match_char('=')) {
               return Token { kind: tok_lteq(), text: "<=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
           }
+          // Shifts sit after `<=`: `a <= b` must not scan as `a <` `= b`,
+          // and `<<=` stays `<<` + `=` (the expression grammar has no
+          // shift-assign; the parser refuses it by name).
+          if (c == '<' && self.match_char('<')) {
+              return Token { kind: tok_shl(), text: "<<", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+          }
           if (c == '>' && self.match_char('=')) {
               return Token { kind: tok_gteq(), text: ">=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+          }
+          if (c == '>' && self.match_char('>')) {
+              return Token { kind: tok_shr(), text: ">>", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
           }
           if (c == '&' && self.match_char('&')) {
               return Token { kind: tok_and(), text: "&&", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
@@ -350,6 +415,7 @@ pub struct Scanner {
           if (c == '#') { return Token { kind: 122, text: "#", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
           if (c == '$') { return Token { kind: 123, text: "$", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
           if (c == '|') { return Token { kind: 124, text: "|", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+          if (c == '`') { return Token { kind: tok_ident(), text: "`", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
 
           let len <int> = self.cursor - self.start_pos;
           let txt <string> = slice_str(self._chars, self.start_pos, len);

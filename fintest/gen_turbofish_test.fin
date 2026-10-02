@@ -1,0 +1,16 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_e03: explicit turbofish vs inferred generic args on a free fn.
+// Green on both compilers (finc + finc_stage2).
+struct Box<T> {
+    val <T>
+}
+
+fun ident<T>(a: T) <T> { return a; }
+
+fun main() <noret> {
+    assert_eq_int(ident::<int>(5), 5, "turbofish: explicit arg");
+    assert_eq_int(ident(6), 6, "turbofish: inferred arg");
+    let b <Box<int>> = Box::<int>{ val: 7 };
+    assert_eq_int(b.val, 7, "turbofish: box field reads back");
+}

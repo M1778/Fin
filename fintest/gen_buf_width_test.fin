@@ -1,0 +1,17 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_a04: char and int instantiations of one generic Buf read back
+// side by side (mixed element widths in one program).
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+struct Buf<T> {
+    items <[T, 3]>
+}
+
+fun main() <noret> {
+    let a <Buf<char>> = Buf::<char>{ items: ['a', 'b', 'c'] };
+    let b <Buf<int>> = Buf::<int>{ items: [100, 200, 300] };
+    assert_eq_int(cast<int>(a.items[0]), 97, "buf_width: char [0] is 'a'");
+    assert_eq_int(cast<int>(a.items[1]), 98, "buf_width: char [1] is 'b'");
+    assert_eq_int(b.items[0], 100, "buf_width: int [0] reads back");
+    assert_eq_int(b.items[1], 200, "buf_width: int [1] reads back");
+}

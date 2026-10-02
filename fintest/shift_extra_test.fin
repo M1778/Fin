@@ -1,0 +1,23 @@
+import { assert_eq_int } from testing::std;
+
+// Pins shift additions past batteries a/b/c/f: char-by-char shifts, shifts
+// of an array element, shifts of a free-fn parameter, and a variable int
+// shift count.
+// All green on both compilers (finc + finc_stage2); prints converted to asserts.
+struct Buf<T> {
+    items <[T, 3]>
+}
+
+fun shl1(x: int) <int> { return x << 1; }
+
+fun main() <noret> {
+    let c <char> = cast<char>(4);
+    assert_eq_int(c << cast<char>(1), 8, "shift_extra: char << char");
+    let b <Buf<int>> = Buf::<int>{ items: [1, 2, 4] };
+    assert_eq_int(b.items[2] << 1, 8, "shift_extra: array element shifts");
+    assert_eq_int(b.items[0] >> 1, 0, "shift_extra: array element shifts right");
+    assert_eq_int(shl1(21), 42, "shift_extra: free-fn param shifts");
+    let n <int> = 3;
+    assert_eq_int(1 << n, 8, "shift_extra: variable int count");
+    assert_eq_int(16 >> n, 2, "shift_extra: variable int count right");
+}

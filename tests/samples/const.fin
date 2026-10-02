@@ -95,11 +95,12 @@ fun main() <noret> {
   test_5(ta2.own()); // ownership moved to the heir; `ta2` keeps reading the value
 
   // `test_5` set 1010 through the heir and then released the heir's reference,
-  // which drops the shared count from 3 to 2 (this handle, and the borrow from
-  // `test_4` that nothing released). The value outlives the release, so it
+  // which drops the shared count from 4 to 3 (this handle, the `restrict`
+  // snapshot from construction, and the borrow from `test_4` that nothing
+  // released). The value outlives the release, so it
   // still reads what was written -- release drops a reference, it does not
   // dispose the value (ADR 0039).
-  blame ta2.refs() == 2; // heir gone, lender and borrow outstanding
+  blame ta2.refs() == 3; // heir gone, lender, snapshot, and borrow outstanding
   blame ta2.owned == false; // ownership went with the heir
   blame *ta2.value == 1010; // the shared cell, intact
 

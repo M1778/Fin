@@ -1,0 +1,17 @@
+import { assert_eq_int, assert_true } from testing::std;
+
+// Pins alias widths: `int{8}`, `int{16}`, `int{32}` resolve, hold values, and
+// widen to `long`. Wrap-around arithmetic is deliberately not pinned here —
+// finc_stage2 miscompiles `int{8}` addition (expects -56, aborts), so that
+// half stays in test_codegen.cpp until the stage2 lowering agrees.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+fun main() <noret> {
+    let a <int{8}> = 100;
+    assert_eq_int(a, 100, "alias_width: int{8} holds 100");
+    let b <int{16}> = 20000;
+    assert_eq_int(b, 20000, "alias_width: int{16} holds 20000");
+    let c <int{32}> = 2000000000;
+    assert_eq_int(c, 2000000000, "alias_width: int{32} holds large value");
+    let w <long> = a;
+    assert_true(w == cast<long>(100), "alias_width: int{8} widens to long");
+}

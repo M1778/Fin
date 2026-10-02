@@ -1,0 +1,27 @@
+import { assert_eq_int, assert_true } from testing::std;
+
+// Pins gen_b03: multi-parameter generics (Pair<A,B> accessors plus wrap<T>).
+// Green on both compilers (finc + finc_stage2).
+struct Box<T> {
+    val <T>
+}
+
+struct Pair<A, B> {
+    first <A>,
+    second <B>
+}
+
+fun get_first<A, B>(p: Pair<A, B>) <A> { return p.first; }
+fun get_second<A, B>(p: Pair<A, B>) <B> { return p.second; }
+fun wrap<T>(v: T) <Box<T>> { return Box::<T>{ val: v }; }
+
+fun main() <noret> {
+    let p <Pair<int, char>> = Pair::<int, char>{ first: 300, second: 'z' };
+    let f <int> = get_first(p);
+    let s <char> = get_second(p);
+    assert_eq_int(f, 300, "multi_param: first reads back");
+    assert_true(s == 'z', "multi_param: second reads back");
+    let w <Box<int>> = wrap(55);
+    let wv <int> = w.val;
+    assert_eq_int(wv, 55, "multi_param: wrap builds the box");
+}

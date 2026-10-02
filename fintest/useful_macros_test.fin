@@ -1,0 +1,23 @@
+import { assert_eq_int, assert_eq_string, assert_true } from testing::std;
+import { HashMap, map } from hashmap::std;
+import { Collection, coll } from collection::std;
+
+// Pins tests/samples/useful_macros.fin run-clean on both backends: map! and
+// coll! populate, and format! renders. The sample itself only claims `ok`
+// (diagnostics); these asserts lock the runtime values on both compilers
+// (finc + finc_stage2); prints converted to asserts.
+fun main() <noret> {
+    let a <HashMap<string, int>> = map!{
+        "alex" => 10,
+        "robot" => 20,
+    };
+    assert_eq_int(a["alex"], 10, "macros: map! stores alex");
+    assert_eq_int(a["robot"], 20, "macros: map! stores robot");
+    assert_eq_int(a.len(), 2, "macros: map! holds two entries");
+    let b <Collection<int>> = coll![1, 2, 3, 4, 5];
+    assert_eq_int(b[2], 3, "macros: coll! third element is 3");
+    assert_eq_int(b.len(), 5, "macros: coll! holds five elements");
+    assert_true(b.contains(4), "macros: coll! contains 4");
+    let r <string> = format!("{}", b[2]);
+    assert_eq_string(r, "3", "macros: format! renders the element");
+}

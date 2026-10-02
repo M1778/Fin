@@ -1,0 +1,19 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_d03: by-value copy semantics hold for a generic struct too — the
+// callee's store is visible in its return but invisible to the caller.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+struct Box<T> {
+    val <T>
+}
+
+fun bump_box(b: Box<int>) <int> {
+    b.val = 50;
+    return b.val;
+}
+
+fun main() <noret> {
+    let b <Box<int>> = Box::<int>{ val: 1 };
+    assert_eq_int(bump_box(b), 50, "generic_byval: callee sees its own store");
+    assert_eq_int(b.val, 1, "generic_byval: caller copy is untouched");
+}

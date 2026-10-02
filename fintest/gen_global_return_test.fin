@@ -1,0 +1,16 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_c02: a global's address returned from a fn reads and writes
+// through on every call (no stale copy).
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+let G <int> = 7;
+
+fun get() <&int> { return &G; }
+
+fun main() <noret> {
+    assert_eq_int(*get(), 7, "global_return: deref of returned addr is 7");
+    let p <&int> = get();
+    *p = 11;
+    assert_eq_int(G, 11, "global_return: store visible on the global");
+    assert_eq_int(*get(), 11, "global_return: fresh call sees the store");
+}

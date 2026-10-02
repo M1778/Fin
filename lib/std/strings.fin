@@ -50,9 +50,10 @@
 //     not lowered yet`), while `*p` lowers fine. So a `&char` cannot be walked, and
 //     `to_chars` exists to turn one into a `[char]`, which can.
 //   * A `string` does not cast to a `&char` or to a `[char]`, and does not pass to a
-//     `&char` parameter. `cast<&char>(cast<any>(s))` type-checks and `cast<any>` is refused
-//     in codegen. The route that works is C's `memcpy` with the `string` in the parameter
-//     slot that is declared `string`.
+//     `&char` parameter. `cast<&char>(cast<any>(s))` type-checks and blames at run
+//     time (ADR 0034 amendment: the unbox names the held type exactly, and
+//     `string` is not `&char`). The route that works is C's `memcpy` with the
+//     `string` in the parameter slot that is declared `string`.
 //   * Two `@define`s carrying the same `#[llvm_name]` do not both link: the second is
 //     emitted as a call to `memcpy.1`, and the link fails with `undefined reference to
 //     'memcpy.1'`. Both directions of the copy are needed here, so one is declared against

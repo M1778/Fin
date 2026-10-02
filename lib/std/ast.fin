@@ -12,8 +12,10 @@ pub const AST_FUN_DECL <int> = 2;
 pub const AST_STRUCT_DECL <int> = 3;
 pub const AST_VAR_DECL <int> = 4;
 pub const AST_PARAM <int> = 5;
+pub const AST_IMPORT_DECL <int> = 6;
 pub const AST_ENUM_DECL <int> = 7;
 pub const AST_INTERFACE_DECL <int> = 8;
+pub const AST_MACRO_DECL <int> = 9;
 
 pub const AST_BLOCK <int> = 10;
 pub const AST_IF_STMT <int> = 11;
@@ -36,6 +38,9 @@ pub const AST_LITERAL_STRING <int> = 27;
 pub const AST_LITERAL_BOOL <int> = 28;
 pub const AST_LAMBDA_EXPR <int> = 29;
 pub const AST_PROTOTYPE_LITERAL <int> = 30;
+pub const AST_MACRO_INVOCATION <int> = 31;
+pub const AST_QUOTE_EXPR <int> = 32;
+pub const AST_TYPE_ALIAS <int> = 33;
 
 // Node Kind Accessor Functions
 #[export] pub fun ast_program() <int> { return 1; }
@@ -43,8 +48,10 @@ pub const AST_PROTOTYPE_LITERAL <int> = 30;
 #[export] pub fun ast_struct_decl() <int> { return 3; }
 #[export] pub fun ast_var_decl() <int> { return 4; }
 #[export] pub fun ast_param() <int> { return 5; }
+#[export] pub fun ast_import_decl() <int> { return 6; }
 #[export] pub fun ast_enum_decl() <int> { return 7; }
 #[export] pub fun ast_interface_decl() <int> { return 8; }
+#[export] pub fun ast_macro_decl() <int> { return 9; }
 
 #[export] pub fun ast_block() <int> { return 10; }
 #[export] pub fun ast_if_stmt() <int> { return 11; }
@@ -67,6 +74,9 @@ pub const AST_PROTOTYPE_LITERAL <int> = 30;
 #[export] pub fun ast_literal_bool() <int> { return 28; }
 #[export] pub fun ast_lambda_expr() <int> { return 29; }
 #[export] pub fun ast_prototype_literal() <int> { return 30; }
+#[export] pub fun ast_macro_invocation() <int> { return 31; }
+#[export] pub fun ast_quote_expr() <int> { return 32; }
+#[export] pub fun ast_type_alias() <int> { return 33; }
 
 // Returns human-readable name for an AST node kind.
 #[export]
@@ -76,8 +86,10 @@ pub fun node_kind_name(kind: int) <string> {
     if (kind == 3) { return "StructDeclaration"; }
     if (kind == 4) { return "VariableDeclaration"; }
     if (kind == 5) { return "Parameter"; }
+    if (kind == 6) { return "ImportDeclaration"; }
     if (kind == 7) { return "EnumDeclaration"; }
     if (kind == 8) { return "InterfaceDeclaration"; }
+    if (kind == 9) { return "MacroDeclaration"; }
 
     if (kind == 10) { return "BlockStatement"; }
     if (kind == 11) { return "IfStatement"; }
@@ -98,6 +110,9 @@ pub fun node_kind_name(kind: int) <string> {
     if (kind == 28) { return "BooleanLiteral"; }
     if (kind == 29) { return "LambdaExpression"; }
     if (kind == 30) { return "PrototypeLiteral"; }
+    if (kind == 31) { return "MacroInvocation"; }
+    if (kind == 32) { return "QuoteExpression"; }
+    if (kind == 33) { return "TypeAlias"; }
 
     return "UnknownNode";
 }
@@ -110,6 +125,19 @@ pub struct AstNode {
       type_annotation <string> = "",
       int_val <int> = 0,
       str_val <string> = "",
+      // Wave-4 compiler API: `;`-joined `#[...]` attribute text. Separate
+      // from str_val so generics, heritage, and symbols keep their field.
+      attr_text <string> = "",
+      // Member visibility: set by the parser from `pub:`/`priv:` labels
+      // and inline `pub`/`priv` markers on struct/interface members.
+      // Default public (matches C++); the checker enforces `priv`.
+      is_pub <bool> = true,
+      // Per-instantiation resolved spelling (ENGA slice 1): the checker's
+      // resolved target+args for a generic call/literal site
+      // (`Collection<int>` for `Collection<A>` where `A=int`), beside
+      // type_annotation rather than written into it (C++ record-don't-replace).
+      // Empty where nothing was resolved; codegen prefers it with fallback.
+      resolved_spelling <string> = "",
       line <int> = 1,
       col <int> = 1,
       left <&AstNode> = null,
@@ -285,6 +313,106 @@ pub fun make_interface_decl(name: string, members: &AstNode, line: int, col: int
     n.line = line;
     n.col = col;
     return n;
+}
+
+// Factory function: creates an import declaration node.
+#[export]
+pub fun make_import_decl(module_spec: string, line: int, col: int) <&AstNode> {
+    let n <&AstNode> = new AstNode{};
+    n.kind = 6;
+    n.name = module_spec;
+    n.line = line;
+    n.col = col;
+    return n;
+}
+
+// AST tree traversal and node analysis visitor.
+#[export]
+pub struct AstWalker {
+    pub:
+      node_count <int> = 0,
+      depth <int> = 0,
+      max_depth <int> = 0,
+
+    pub:
+      fun walk(self: &Self, node: &AstNode) <noret> {
+          if (node == null) { return; }
+          self.node_count = self.node_count + 1;
+          self.depth = self.depth + 1;
+          if (self.depth > self.max_depth) {
+              self.max_depth = self.depth;
+          }
+          if (node.left != null) { self.walk(node.left); }
+          if (node.right != null) { self.walk(node.right); }
+          if (node.extra != null) { self.walk(node.extra); }
+          self.depth = self.depth - 1;
+      }
+
+      fun count_nodes(self: &Self, node: &AstNode) <int> {
+          self.node_count = 0;
+          self.depth = 0;
+          self.max_depth = 0;
+          self.walk(node);
+          return self.node_count;
+      }
+
+      fun count_kind(self: &Self, node: &AstNode, kind: int) <int> {
+          if (node == null) { return 0; }
+          let c <int> = 0;
+          if (node.kind == kind) { c = 1; }
+          if (node.left != null) { c = c + self.count_kind(node.left, kind); }
+          if (node.right != null) { c = c + self.count_kind(node.right, kind); }
+          if (node.extra != null) { c = c + self.count_kind(node.extra, kind); }
+          return c;
+      }
+}
+
+#[export]
+pub fun new_ast_walker() <AstWalker> {
+    return AstWalker { node_count: 0, depth: 0, max_depth: 0 };
+}
+
+// Counts total nodes in an AST subtree.
+#[export]
+pub fun ast_count_nodes(node: &AstNode) <int> {
+    if (node == null) { return 0; }
+    let count <int> = 1;
+    if (node.left != null) { count = count + ast_count_nodes(node.left); }
+    if (node.right != null) { count = count + ast_count_nodes(node.right); }
+    if (node.extra != null) { count = count + ast_count_nodes(node.extra); }
+    return count;
+}
+
+// Counts nodes of a specific kind in an AST subtree.
+#[export]
+pub fun ast_count_kind(node: &AstNode, kind: int) <int> {
+    if (node == null) { return 0; }
+    let count <int> = 0;
+    if (node.kind == kind) { count = 1; }
+    if (node.left != null) { count = count + ast_count_kind(node.left, kind); }
+    if (node.right != null) { count = count + ast_count_kind(node.right, kind); }
+    if (node.extra != null) { count = count + ast_count_kind(node.extra, kind); }
+    return count;
+}
+
+// Finds first child node of a given kind in an AST subtree.
+#[export]
+pub fun ast_find_child(node: &AstNode, kind: int) <&AstNode> {
+    if (node == null) { return null; }
+    if (node.kind == kind) { return node; }
+    if (node.left != null) {
+        let f <&AstNode> = ast_find_child(node.left, kind);
+        if (f != null) { return f; }
+    }
+    if (node.right != null) {
+        let f <&AstNode> = ast_find_child(node.right, kind);
+        if (f != null) { return f; }
+    }
+    if (node.extra != null) {
+        let f <&AstNode> = ast_find_child(node.extra, kind);
+        if (f != null) { return f; }
+    }
+    return null;
 }
 
 // Recursively frees an AST subtree.

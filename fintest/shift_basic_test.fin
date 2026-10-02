@@ -1,0 +1,30 @@
+import { assert_eq_int, assert_true } from testing::std;
+
+// Pins battery a01-a09 plus f01: int shift basics, left-associativity,
+// precedence vs + * == % >, parens, and shift of a generic struct field.
+// All green on both compilers (finc + finc_stage2); prints converted to asserts.
+struct Box<T> {
+    val <T>
+}
+
+fun main() <noret> {
+    assert_eq_int(1 << 3, 8, "shift: 1 << 3");
+    assert_eq_int(16 >> 2, 4, "shift: 16 >> 2");
+    assert_eq_int(5 << 0, 5, "shift: shift by zero left");
+    assert_eq_int(5 >> 0, 5, "shift: shift by zero right");
+    assert_eq_int(8 >> 2 >> 1, 1, "shift: >> is left-associative");
+    assert_eq_int(1 << 2 << 3, 32, "shift: << is left-associative");
+    assert_eq_int(1 << 2 + 1, 8, "shift: + binds tighter than <<");
+    assert_eq_int(1 + 2 << 3, 24, "shift: + binds tighter than << (rhs)");
+    assert_eq_int(1 << 2 * 3, 64, "shift: * binds tighter than <<");
+    assert_eq_int((1 << 2) * 3, 12, "shift: parens override * precedence");
+    assert_true(4 >> 1 == 2, "shift: >> binds tighter than ==");
+    assert_true(1 << 3 > 7, "shift: << binds tighter than >");
+    assert_eq_int((1 << 4) % 7, 2, "shift: paren shift then mod");
+    assert_eq_int(1 << 4 % 7, 16, "shift: % binds tighter than <<");
+    assert_eq_int((1 << 2) >> 1, 2, "shift: paren shl then shr");
+    assert_eq_int(32 >> (1 + 1), 8, "shift: paren count on rhs");
+    let b <Box<int>> = Box::<int>{ val: 100 };
+    assert_eq_int(b.val >> 2, 25, "shift: generic struct field shifts");
+    assert_eq_int(1 << 2, 4, "shift: small shl sanity");
+}

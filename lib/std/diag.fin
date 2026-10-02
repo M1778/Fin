@@ -24,6 +24,29 @@ pub const DIAG_REFUSAL <int> = 3;
 #[llvm_name="memcpy"]
 @define diag_memcpy(dst: string, src: &char, count: ulong) <string>;
 
+#[llvm_name="fopen"]
+@define diag_fopen(filename: string, mode: string) <&void>;
+
+#[llvm_name="fclose"]
+@define diag_fclose(stream: &void) <int>;
+
+#[llvm_name="fseek"]
+@define diag_fseek(stream: &void, offset: long, whence: int) <int>;
+
+#[llvm_name="ftell"]
+@define diag_ftell(stream: &void) <long>;
+
+#[llvm_name="fread"]
+@define diag_fread(ptr: string, size: ulong, count: ulong, stream: &void) <ulong>;
+
+#[llvm_name="strlen"]
+@define diag_strlen(s: string) <ulong>;
+
+// The other copy direction from `diag_memcpy`: a `string` into a `[char]`.
+// Carries its own C name because two externs sharing one do not both link.
+#[llvm_name="memmove"]
+@define diag_bytes_out(dst: &char, src: string, count: ulong) <&char>;
+
 #[export] pub fun diag_note() <int> { return 0; }
 #[export] pub fun diag_warning() <int> { return 1; }
 #[export] pub fun diag_error() <int> { return 2; }
@@ -80,6 +103,10 @@ pub struct DiagnosticBag {
           return self.error_count > 0 || self.refusal_count > 0;
       }
 
+      fun has_warnings(self: &Self) <bool> {
+          return self.warn_count > 0;
+      }
+
       fun total(self: &Self) <int> {
           return self.error_count + self.warn_count + self.note_count + self.refusal_count;
       }
@@ -101,6 +128,26 @@ pub fun format_simple(file: string, line: int, col: int, level: int, msg: string
     return buf;
 }
 
+#[export]
+pub fun format_error(file: string, line: int, col: int, msg: string) <string> {
+    return format_simple(file, line, col, diag_error(), msg);
+}
+
+#[export]
+pub fun format_warning(file: string, line: int, col: int, msg: string) <string> {
+    return format_simple(file, line, col, diag_warning(), msg);
+}
+
+#[export]
+pub fun format_note(file: string, line: int, col: int, msg: string) <string> {
+    return format_simple(file, line, col, diag_note(), msg);
+}
+
+#[export]
+pub fun format_refusal(file: string, line: int, col: int, msg: string) <string> {
+    return format_simple(file, line, col, diag_refusal(), msg);
+}
+
 // Formats a compiler diagnostic with source snippet and caret underline:
 //
 // ```
@@ -110,10 +157,135 @@ pub fun format_simple(file: string, line: int, col: int, level: int, msg: string
 // 10 |     let x = 1;
 //    |     ^^^
 // ```
+//
+// An empty `source_line` means the caller reports a bare point, not a range:
+// the line is re-read from `file` and the span is the token at `col`, so the
+// snippet still shows the source and the underline still covers the token.
+// A caller that already holds the text passes it and owns both values.
+priv fun diag_is_ident(b: char) <bool> {
+    if (b >= 'a' && b <= 'z') { return true; }
+    if (b >= 'A' && b <= 'Z') { return true; }
+    if (b >= '0' && b <= '9') { return true; }
+    if (b == '_') { return true; }
+    return false;
+}
+
+// The whole file at `path`, or null when it cannot be read.
+priv fun? diag_read_file(path: string) <string> {
+    if (path == null) { return null; }
+    let fp <&void> = diag_fopen(path, "rb");
+    if (fp == null) { return null; }
+    let seek_end <int> = diag_fseek(fp, cast<long>(0), 2);
+    if (seek_end != 0) {
+        diag_fclose(fp);
+        return null;
+    }
+    let sz <long> = diag_ftell(fp);
+    if (sz < cast<long>(0)) {
+        diag_fclose(fp);
+        return null;
+    }
+    diag_fseek(fp, cast<long>(0), 0);
+    let u_sz <ulong> = cast<ulong>(sz);
+    let buf <string> = diag_calloc(u_sz + cast<ulong>(1), cast<ulong>(1));
+    if (buf == null) {
+        diag_fclose(fp);
+        return null;
+    }
+    if (u_sz > cast<ulong>(0)) {
+        let n_read <ulong> = diag_fread(buf, cast<ulong>(1), u_sz, fp);
+    }
+    diag_fclose(fp);
+    return buf;
+}
+
+// The `line`-th line (1-based) of the file at `path`, without its newline,
+// or null when the file cannot be read or has no such line.
+priv fun? diag_snippet_line(path: string, line: int) <string> {
+    if (line < 1) { return null; }
+    let text? <string> = diag_read_file(path);
+    if (text == null) { return null; }
+    let total <int> = cast<int>(diag_strlen(text?));
+    let bytes <[char]> = new [char, total + 1]{};
+    let copied <&char> = diag_bytes_out(&bytes[0], text?, cast<ulong>(total));
+    bytes[total] = cast<char>(0);
+    diag_free(text?);
+
+    let cur <int> = 1;
+    let start <int> = 0;
+    let found <int> = -1;
+    let found_len <int> = 0;
+    let i <int> = 0;
+    while (i <= total) {
+        if (i == total || bytes[i] == cast<char>(10)) {
+            if (cur == line) {
+                found = start;
+                found_len = i - start;
+                if (found_len > 0 && bytes[start + found_len - 1] == cast<char>(13)) {
+                    found_len = found_len - 1;
+                }
+                break;
+            }
+            cur = cur + 1;
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (found < 0) {
+        delete bytes;
+        return null;
+    }
+    let out <string> = diag_calloc(cast<ulong>(found_len + 1), cast<ulong>(1));
+    if (out == null) {
+        delete bytes;
+        return null;
+    }
+    if (found_len > 0) {
+        let moved <string> = diag_memcpy(out, &bytes[found], cast<ulong>(found_len));
+    }
+    delete bytes;
+    return out;
+}
+
+// The identifier length at 1-based `col` of `line_text`, or 1 when `col`
+// sits on no identifier character.
+priv fun diag_token_span(line_text: string, col: int) <int> {
+    let total <int> = cast<int>(diag_strlen(line_text));
+    let idx <int> = col - 1;
+    if (idx < 0 || idx >= total) { return 1; }
+    let bytes <[char]> = new [char, total + 1]{};
+    let copied <&char> = diag_bytes_out(&bytes[0], line_text, cast<ulong>(total));
+    bytes[total] = cast<char>(0);
+    if (!diag_is_ident(bytes[idx])) {
+        delete bytes;
+        return 1;
+    }
+    let end <int> = idx;
+    while (end < total && diag_is_ident(bytes[end])) {
+        end = end + 1;
+    }
+    delete bytes;
+    let span <int> = end - idx;
+    if (span < 1) { span = 1; }
+    return span;
+}
+
 #[export]
 pub fun format_snippet(file: string, line: int, col: int, level: int, msg: string, source_line: string, span_len: int) <string> {
     let buf <string> = diag_calloc(cast<ulong>(1024), cast<ulong>(1));
     let lvl <string> = level_name(level);
+
+    let body <string> = source_line;
+    let span <int> = span_len;
+    let owns_body <bool> = false;
+    if (body == null || diag_strlen(body) == cast<ulong>(0)) {
+        let disk? <string> = diag_snippet_line(file, line);
+        if (disk != null) {
+            body = disk?;
+            owns_body = true;
+            span = diag_token_span(body, col);
+        }
+    }
 
     let caret_buf <[char]> = new [char, 128]{};
     for (let i <int> = 0; i < 127; i++) {
@@ -122,7 +294,7 @@ pub fun format_snippet(file: string, line: int, col: int, level: int, msg: strin
     let col_idx <int> = col - 1;
     if (col_idx < 0) { col_idx = 0; }
     if (col_idx > 120) { col_idx = 120; }
-    let slen <int> = span_len;
+    let slen <int> = span;
     if (slen < 1) { slen = 1; }
     for (let j <int> = 0; j < slen && (col_idx + j) < 126; j++) {
         caret_buf[col_idx + j] = '^';
@@ -137,8 +309,11 @@ pub fun format_snippet(file: string, line: int, col: int, level: int, msg: strin
 
     let written <int> = diag_snprintf(buf, cast<ulong>(1024),
         "%s:%d:%d: %s: %s\n  --> %s:%d:%d\n   |\n%4d | %s\n   | %s\n",
-        file, line, col, lvl, msg, file, line, col, line, source_line, caret_str);
+        file, line, col, lvl, msg, file, line, col, line, body, caret_str);
     diag_free(caret_str);
+    if (owns_body) {
+        diag_free(body);
+    }
     return buf;
 }
 

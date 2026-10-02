@@ -14,11 +14,12 @@ pub const PREC_OR <int> = 2;
 pub const PREC_AND <int> = 3;
 pub const PREC_EQUALITY <int> = 4;
 pub const PREC_COMPARISON <int> = 5;
-pub const PREC_TERM <int> = 6;
-pub const PREC_FACTOR <int> = 7;
-pub const PREC_UNARY <int> = 8;
-pub const PREC_CALL <int> = 9;
-pub const PREC_PRIMARY <int> = 10;
+pub const PREC_SHIFT <int> = 6;
+pub const PREC_TERM <int> = 7;
+pub const PREC_FACTOR <int> = 8;
+pub const PREC_UNARY <int> = 9;
+pub const PREC_CALL <int> = 10;
+pub const PREC_PRIMARY <int> = 11;
 
 #[export] pub fun prec_none() <int> { return 0; }
 #[export] pub fun prec_assignment() <int> { return 1; }
@@ -26,11 +27,12 @@ pub const PREC_PRIMARY <int> = 10;
 #[export] pub fun prec_and() <int> { return 3; }
 #[export] pub fun prec_equality() <int> { return 4; }
 #[export] pub fun prec_comparison() <int> { return 5; }
-#[export] pub fun prec_term() <int> { return 6; }
-#[export] pub fun prec_factor() <int> { return 7; }
-#[export] pub fun prec_unary() <int> { return 8; }
-#[export] pub fun prec_call() <int> { return 9; }
-#[export] pub fun prec_primary() <int> { return 10; }
+#[export] pub fun prec_shift() <int> { return 6; }
+#[export] pub fun prec_term() <int> { return 7; }
+#[export] pub fun prec_factor() <int> { return 8; }
+#[export] pub fun prec_unary() <int> { return 9; }
+#[export] pub fun prec_call() <int> { return 10; }
+#[export] pub fun prec_primary() <int> { return 11; }
 
 // Returns the binary operator precedence for a token kind.
 #[export]
@@ -55,17 +57,21 @@ pub fun binary_precedence(token_kind: int) <int> {
     if (token_kind >= 88 && token_kind <= 91) {
         return 5;
     }
+    // Shift: << (106), >> (107) — left-associative, looser than `+`
+    if (token_kind == 106 || token_kind == 107) {
+        return 6;
+    }
     // Term: + (80), - (81)
     if (token_kind == 80 || token_kind == 81) {
-        return 6;
+        return 7;
     }
     // Factor: * (82), / (83), % (84)
     if (token_kind >= 82 && token_kind <= 84) {
-        return 7;
+        return 8;
     }
     // Calls, member access, subscripts: ( (110), [ (114), . (119)
     if (token_kind == 110 || token_kind == 114 || token_kind == 119) {
-        return 9;
+        return 10;
     }
     return 0;
 }
@@ -75,7 +81,7 @@ pub fun binary_precedence(token_kind: int) <int> {
 pub fun unary_precedence(token_kind: int) <int> {
     // Unary: - (81), ! (94), ++ (96), -- (97)
     if (token_kind == 81 || token_kind == 94 || token_kind == 96 || token_kind == 97) {
-        return 8;
+        return 9;
     }
     return 0;
 }

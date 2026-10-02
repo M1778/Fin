@@ -1,0 +1,18 @@
+import { assert_eq_int } from testing::std;
+
+// Pins fn-typed let inits: a named function and a lambda both bind to an
+// explicitly annotated `fn` variable and call through it.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+// NOTE: indirect calls are bound to a let first — `assert_eq_int(f(x), ...)`
+// with an fn-typed callee nested as an argument is refused by finc_stage2,
+// so that shape is deliberately not pinned here.
+fun add(x: int, y: int) <int> { return x + y; }
+
+fun main() <noret> {
+    let my_op <fn(int, int) -> int> = add;
+    let r1 <int> = my_op(5, 5);
+    assert_eq_int(r1, 10, "fn_let: named function value calls through variable");
+    let f3 <fn(int) -> int> = (x: int) <int> => x - 3;
+    let r2 <int> = f3(10);
+    assert_eq_int(r2, 7, "fn_let: lambda value calls through variable");
+}

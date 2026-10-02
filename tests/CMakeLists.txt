@@ -8,10 +8,18 @@ add_executable(fin_tests
     test_semantics.cpp
     test_soundness.cpp
     test_codegen.cpp
+    test_events.cpp
+    test_events_w5.cpp
+    test_events_w6.cpp
+    test_events_w7.cpp
+    test_events_w10.cpp
+    test_comptime_interp.cpp
+    test_scopes_w9.cpp
     test_layout.cpp
     test_stdlib.cpp
     test_module_loader.cpp
     test_macro_expander.cpp
+    test_stage_agreement.cpp
     Corpus.cpp
     Pipeline.cpp
 )
@@ -32,6 +40,10 @@ target_compile_definitions(fin_tests PRIVATE
     FIN_TESTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     FIN_SAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/samples"
     FINC_BINARY="$<TARGET_FILE:finc>"
+    # The self-hosted stage compiler is bootstrapped outside CMake (build/finc
+    # compiles finc/main.fin into it), so there is no target to ask: the path
+    # is the build tree's, and the suite skips with a reason when it is absent.
+    FINC_STAGE2_BINARY="${CMAKE_BINARY_DIR}/finc_stage2"
 )
 
 # test_codegen.cpp compiles and *runs* what finc produced, which only exists in a

@@ -3783,16 +3783,131 @@ TEST(Soundness_Attributes, AnAttributeOnAClassReachesTheAST) {
     EXPECT_EQ(cls->attributes[0]->name, "export");
 }
 
-TEST(KnownDefect_Attributes, AnUnknownAttributeIsAccepted) {
-    // Nothing validates an attribute name, so a misspelled one is silently inert
-    // — the failure mode CONTEXT.md's "known component name" rule exists to
-    // prevent for components, applied one level up. Whether an unknown *attribute*
-    // is an error is a language decision and not yet ratified; this test exists so
-    // that decision is taken deliberately rather than discovered.
+TEST(Soundness_Attributes, AnUnknownAttributeIsRejected) {
+    // Was KnownDefect_Attributes.AnUnknownAttributeIsAccepted. Inverted by owner
+    // decision (wave-4 slice 1b): an unknown attribute is a diagnostic naming it
+    // -- the failure mode CONTEXT.md's "known component name" rule exists to
+    // prevent for components, applied one level up.
     auto r = compile("#[definitely_not_an_attribute]\nfun f() <void> {}\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "CHANGED: attribute names are validated now. If that was a ratified "
-           "language decision, move this to Soundness_Attributes and invert it.";
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("definitely_not_an_attribute"), std::string::npos)
+        << "the diagnostic must name the attribute:\n" << err;
+}
+
+// ---------------------------------------------------------------------------
+// Wave-4 slice 1b: attributes are checkable. RED tests: the semantic visitor
+// never reaches attributes (no visit(Attribute&) override, no decl walk), so
+// every unknown attribute below is silently inert today.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Attributes, TheAnalyzerReachesAnAttributeOnAFunction) {
+    auto r = compile("#[bogus_attribute]\nfun f() <void> {}\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("bogus_attribute"), std::string::npos)
+        << "the diagnostic must name the attribute:\n" << err;
+}
+
+TEST(Soundness_Attributes, TheAnalyzerReachesAnAttributeOnAStruct) {
+    auto r = compile("#[bogus_attribute]\nstruct S { pub v <int>, }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("bogus_attribute"), std::string::npos)
+        << "the diagnostic must name the attribute:\n" << err;
+}
+
+TEST(Soundness_Attributes, TheAnalyzerReachesAnAttributeOnAStructField) {
+    auto r = compile("struct S { #[bogus_attribute] v <int>, }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("bogus_attribute"), std::string::npos)
+        << "the diagnostic must name the attribute:\n" << err;
+}
+
+TEST(Soundness_Attributes, AParameterCarriesNoAttribute) {
+    // The grammar gives `param` no attribute production (parser.y), so `#[x] on
+    // a parameter is a syntax error rather than an attribute the analyzer could
+    // silently miss. This locks that fact: a param-attribute position can never
+    // exist without a grammar change, which is W1's, not this slice's.
+    auto r = compile("fun f(#[bogus_attribute] a: int) <int> { return a; }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+}
+
+// Validation (RED): known shapes checked, unknown named, deferred refused loudly.
+TEST(Soundness_Attributes, AGrantOnAStructNamesAnUnknownComponent) {
+    // `#[use(...)]` path checks mirror applyUseAttributes, at a position it never
+    // reaches: a grant on a struct binds nothing, but a misspelled one is still
+    // refused rather than silently kept.
+    auto r = compile("#[use(compiler.components.tpyes)]\nstruct S { pub v <int>, }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("tpyes"), std::string::npos) << err;
+}
+
+TEST(Soundness_Attributes, AMalformedGrantOnAStructIsRefused) {
+    auto r = compile("#[use(compiler.tpyes)]\nstruct S { pub v <int>, }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("not a component reference"), std::string::npos) << err;
+}
+
+TEST(Soundness_Attributes, AnExportWithAnArgumentIsRefused) {
+    // `#[export]` is a flag in every corpus site; an argument names nothing.
+    auto r = compile("#[export(something)]\nfun f() <void> {}\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("export"), std::string::npos) << err;
+}
+
+TEST(Soundness_Attributes, AnOnWithAnUnknownEventIsRefused) {
+    auto r = compile("#[on(nosuchevent)]\n@special h() <void> {}\nfun main() <void> {}\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("nosuchevent"), std::string::npos) << err;
+}
+
+TEST(Soundness_Attributes, AnOnWithAWrongPayloadIsRefused) {
+    // Was AnOnWithAKnownEventIsAcceptedWithoutArming, inverted rather than
+    // relaxed: the handler's signature IS the event's payload
+    // (docs/compiler-api.md §3.1), so a `#[on(variable_scope_exit)]` on a
+    // `@special` without the payload is refused before anything runs, naming
+    // the handler, the event, and both shapes.
+    auto r = compile("#[on(variable_scope_exit)]\n@special h() <void> {}\nfun main() <void> {}\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("h"), std::string::npos) << err;
+    EXPECT_NE(err.find("variable_scope_exit"), std::string::npos) << err;
+    EXPECT_NE(err.find("(name: string, t: $type, exit_kind: int, moved: int) <quote>"),
+              std::string::npos) << err;
+}
+
+TEST(Soundness_Attributes, ProvidesOnASpecialIsCollectedNotDeferred) {
+    // Was ProvidesIsRecognizedButDeferred, inverted rather than relaxed: the
+    // provider mechanism is wave-4's per-type answer (docs/compiler-api.md
+    // §3.9, ADR 0014), so a well-formed `#[provides(type_metadata)]` on a
+    // `@special` with the contract's signature and body is accepted. The
+    // refusal halves live on in Soundness_Provider, one per contract clause.
+    auto r = compile(
+        "#[use(compiler)]\n"
+        "#[use(compiler.components.layout)]\n"
+        "#[provides(type_metadata)]\n"
+        "@special h(s: $struct) <quote> { return compiler.layout.pointer_map_quote(s); }\n"
+        "fun main() <void> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Attributes, ProtocolClaimantIsRecognizedAndLowers) {
+    // Was ProtocolClaimantIsRecognizedButNotLowered, rewritten rather than
+    // relaxed for wave-5 slice 1: a well-formed `move_or_copy` claimant now
+    // lowers (it gates moved-from cleanup skipping in codegen), so the
+    // not-lowered refusal is gone for this slot and only this slot. The
+    // property this test holds never changed: a protocol attribute is never
+    // silently accepted. The refusal halves live on in Soundness_Protocol,
+    // one per contract clause, plus AMoveOrCopyClaimantWithABodyIsRefused
+    // below for the slice-1 body rule.
+    auto r = compile("#[protocol(move_or_copy)]\n@special h(s: $struct) <quote> {}\nfun main() <void> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -5309,6 +5424,57 @@ TEST(Soundness_IntegerWidening, WideningDoesNotReachBoolOrFloatOrString) {
     const FincRun toFloat =
         compile("fun main() <noret> { let a <int> = 1; let b <float> = a; }\n");
     EXPECT_EQ(toFloat.exitCode, 0) << "int -> float is unchanged:\n" << toFloat.err;
+}
+
+TEST(Soundness_IntToFloat, SameScalarSpellingsConvertLikeTheirCanonicalTwin) {
+    // LG2: `int` -> `float` (variable) passed while `i32` -> `float` failed,
+    // though both are 32-bit signed. The rule is about the scalar (width and
+    // signedness from the one table), not the spelling, so every name for one
+    // scalar converts like its canonical twin: `i32` like `int`, `f32` like
+    // `float`. Other widths/signs (`long`, `short`, `uint`, ...) are different
+    // scalars and stay refused, as does `int` -> `double`; integer literals
+    // still reach `double` through constantFitsType, not through this rule.
+    for (const char* from : {"int", "i32"}) {
+        for (const char* to : {"float", "f32"}) {
+            const std::string code = std::string("fun main() <noret> { let a <") +
+                                     from + "> = 1; let b <" + to + "> = a; }\n";
+            const FincRun r = compile(code);
+            EXPECT_EQ(r.exitCode, 0)
+                << from << " -> " << to << " must convert like int -> float:\n"
+                << code << r.err;
+        }
+    }
+    for (const char* from : {"int", "i32"}) {
+        for (const char* to : {"double", "f64"}) {
+            const std::string code = std::string("fun main() <noret> { let a <") +
+                                     from + "> = 1; let b <" + to + "> = a; }\n";
+            const FincRun r = compile(code);
+            EXPECT_NE(r.exitCode, 0)
+                << from << " -> " << to << " stays refused (variables do not "
+                   "widen to double):\n"
+                << code;
+        }
+    }
+    for (const char* from : {"long", "short", "char", "uint", "ulong", "ushort",
+                             "u8", "i8", "u16", "i16", "u32", "u64", "i64",
+                             "usize", "isize", "size_t"}) {
+        const std::string code = std::string("fun main() <noret> { let a <") +
+                                 from + "> = 1; let b <float> = a; }\n";
+        const FincRun r = compile(code);
+        EXPECT_NE(r.exitCode, 0)
+            << from << " -> float stays refused (a different scalar from int):\n"
+            << code;
+    }
+    const FincRun litDouble =
+        compile("fun main() <noret> { let x <double> = 1; }\n");
+    EXPECT_EQ(litDouble.exitCode, 0)
+        << "integer-literal -> double is via constant-fits and unchanged:\n"
+        << litDouble.err;
+    const FincRun floatLitDouble =
+        compile("fun main() <noret> { let x <double> = 1.5; }\n");
+    EXPECT_NE(floatLitDouble.exitCode, 0)
+        << "float-literal -> double stays refused:\n"
+        << "fun main() <noret> { let x <double> = 1.5; }\n";
 }
 
 TEST(Soundness_IntegerWidening, WideningDoesNotAdmitANegativeConstantToAnUnsignedTarget) {
@@ -9321,6 +9487,77 @@ TEST(Soundness_StaticCallInference, AnAnnotationSeedsAParameterNoArgumentMention
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
+TEST(Soundness_StaticCallInference, ANestedElidedStaticCallInfersFromTheOuterAnnotation) {
+    // `G::zero()` nested as the argument of another elided static call: the inner
+    // call names no type of its own, so what its Self is comes from the outer call's
+    // instantiation, which the annotation seeds. Without that the inner call keeps
+    // the template and is reported against the instantiated parameter.
+    const FincRun r = compile(
+        "struct G<T> {\n"
+        "    v <T>,\n"
+        "    static fun zero() <&Self> { return null; }\n"
+        "    static fun clone(v: &Self) <&Self> { return null; }\n"
+        "}\n"
+        "fun main() <noret> { let a <&G<int>> = G::clone(G::zero()); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, AnExplicitTargetInstantiationIsStillChecked) {
+    // The control for the elided rule: what the target writes outright is checked
+    // outright, so a turbofish that disagrees with the annotation still refuses.
+    const FincRun r = compile(
+        "struct G<T> {\n"
+        "    v <T>,\n"
+        "    static fun zero() <&Self> { return null; }\n"
+        "}\n"
+        "fun main() <noret> { let a <&G<string>> = G::<int>::zero(); }\n");
+    EXPECT_NE(r.exitCode, 0) << "an explicit '<int>' is not a '<string>'";
+}
+
+TEST(Soundness_StaticCallInference, AChainedElidedCallInfersFromTheOuterAnnotation) {
+    // `Box::zero().get()` with the hint on the whole chain: the outer `get`
+    // returns `T`, so `int` says `T` is `int` and the receiver `Box::zero()`
+    // is offered `Box<int>` inward instead of keeping the template and
+    // reporting `expected 'int', got 'T'`.
+    const FincRun r = compile(
+        "struct Box<T> {\n"
+        "    v <T>,\n"
+        "    static fun zero() <&Self> { return null; }\n"
+        "    fun get(self: &Self) <T> { return self.v; }\n"
+        "}\n"
+        "fun main() <noret> { let x <int> = Box::zero().get(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, AChainedExplicitInstantiationIsStillChecked) {
+    // The control for the chained rule: what the receiver writes outright is
+    // checked outright, so an explicit `<int>` against a `<string>` hint still
+    // refuses instead of being re-inferred through the chain.
+    const FincRun r = compile(
+        "struct Box<T> {\n"
+        "    v <T>,\n"
+        "    static fun zero() <&Self> { return null; }\n"
+        "    fun get(self: &Self) <T> { return self.v; }\n"
+        "}\n"
+        "fun main() <noret> { let x <string> = Box::<int>::zero().get(); }\n");
+    EXPECT_NE(r.exitCode, 0) << "an explicit '<int>' receiver is not a '<string>'";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_StaticCallInference, ANonGenericChainIsUnaffected) {
+    // No generic parameter anywhere: the receiver carries its own type, so the
+    // chained offer has nothing to bind and the call checks as it always did.
+    const FincRun r = compile(
+        "struct P {\n"
+        "    v <int>,\n"
+        "    static fun make(x: int) <P> { return P{v: x}; }\n"
+        "    fun get(self: &Self) <int> { return self.v; }\n"
+        "}\n"
+        "fun main() <noret> { let x <int> = P::make(7).get(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
 TEST(Soundness_StaticCallInference, APrototypeArgumentInfersBothParameters) {
     // tests/samples/prototype_test.fin:27 as written -- lib/std/hashmap.fin:95 declares
     // `from_prototype(prtp: {T, U}) <Self>`, and the literal's key and value types are
@@ -9813,25 +10050,118 @@ TEST(Soundness_WrittenGenericArguments, ACallWithNoneOfThemStillInfers) {
     EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_WrittenGenericArguments, AFreeFunctionsTurbofishBindsNothing) {
-    // `print_any::<User>(u)` (tests/samples/interfaces.fin:25) is the corpus site. A
-    // FunctionType carries parameter *types* and no parameter names, so there is nothing
-    // to pair the written argument with -- a struct has its `generic_args` in
-    // declaration order and a function has no equivalent. The declaration's
-    // `generic_params` would have to reach the type for this to be bindable.
-    //
-    // Quiet rather than wrong: the written argument is ignored, and the parameter is
-    // whatever the arguments say it is.
+TEST(Soundness_WrittenGenericArguments, AFreeFunctionsTurbofishIsEnforcedAgainstItsArgument) {
+    // `id::<string>(1)` states T is string and hands an int: the argument is
+    // checked against what was written, not against what inference would find.
     const FincRun r = compile(
+        "fun id<T>(x: T) <T> { return x; }\n"
+        "fun main() <int> { id::<string>(1); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << "an explicit '<string>' against an int argument must refuse\n"
+                             << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("got 'T'"), std::string::npos)
+        << "no diagnostic may name the template\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_WrittenGenericArguments, AFreeFunctionsTurbofishIsEnforcedAgainstTheAnnotation) {
+    // The return position too: the call is a string and the annotation says int.
+    const FincRun r = compile(
+        "fun id<T>(x: T) <T> { return x; }\n"
+        "fun main() <int> { let x<int> = id::<string>(1); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << "the call is a string; the annotation is what disagrees with it\n"
+        << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("got 'T'"), std::string::npos)
+        << "no diagnostic may name the template\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_WrittenGenericArguments, AFreeFunctionsTurbofishOnANonGenericTypeIsReported) {
+    const FincRun r = compile(
+        "fun f(a: int) <int> { return a; }\n"
+        "fun main() <noret> { f::<int>(1); }\n");
+    EXPECT_NE(r.exitCode, 0) << "a turbofish on a non-generic function must refuse\n"
+                             << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Generic count mismatch"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericMethodCalls, AMethodInfersItsReturnFromItsArgument) {
+    // The method twin of Soundness_GenericReturn.AMismatchNamesTheInstantiation-
+    // AndNotTheTemplate: T is int from the argument, so the annotation is what
+    // does not fit -- and the diagnostic names what was inferred, never bare T.
+    const FincRun r = compile(
+        "struct S { pub v <int>, fun m<T>(self: &Self, a: T) <T> { return a; } }\n"
+        "fun main() <int> { let s <S> = S{v: 1}; let x<string> = s.m(1); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("got 'T'"), std::string::npos)
+        << "no diagnostic may name the template\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericMethodCalls, ATwoParameterMethodInfersBoth) {
+    // `s.m(1, "s")` for `m<T, U>(a: T, b: U) <T>`: T is int, U is string, the
+    // call is an int. Valid inference stays valid.
+    const FincRun r = compile(
+        "struct S { pub v <int>, fun m<T, U>(self: &Self, a: T, b: U) <T> { return a; } }\n"
+        "fun main() <int> { let s <S> = S{v: 1}; let x<int> = s.m(1, \"s\"); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericMethodCalls, AMethodMismatchNamesConcreteTypes) {
+    const FincRun r = compile(
+        "struct S { pub v <int>, fun m<T, U>(self: &Self, a: T, b: U) <T> { return a; } }\n"
+        "fun main() <int> { let s <S> = S{v: 1}; let x<string> = s.m(1, \"s\"); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("got 'T'"), std::string::npos)
+        << "no diagnostic may name the template\n" << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericMethodCalls, AMatchingMethodTurbofishIsAccepted) {
+    const FincRun r = compile(
+        "struct S { pub v <int>, fun m<T>(self: &Self, a: T) <T> { return a; } }\n"
+        "fun main() <int> { let s <S> = S{v: 1}; let x<int> = s.m::<int>(1); return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericMethodCalls, AMismatchingMethodTurbofishIsRefused) {
+    const FincRun r = compile(
+        "struct S { pub v <int>, fun m<T>(self: &Self, a: T) <T> { return a; } }\n"
+        "fun main() <int> { let s <S> = S{v: 1}; let x<int> = s.m::<string>(1); return 0; }\n");
+    EXPECT_NE(r.exitCode, 0) << "an explicit '<string>' against an int argument must refuse\n"
+                             << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("got 'T'"), std::string::npos)
+        << "no diagnostic may name the template\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_WrittenGenericArguments, AStructReturningFreeFunctionsTurbofishBinds) {
+    // Inverted from KnownDefect_WrittenGenericArguments.AFreeFunctionsTurbofish-
+    // BindsNothing: `wrap::<string>(1)` for `wrap<T>(p: T) <Box<T>>` was typed
+    // from the argument, so `b.v` was an int. The turbofish states the type and
+    // outranks the argument -- the mismatch is at the argument, and a matching
+    // argument leaves `b.v` a string.
+    const FincRun bad = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun wrap<T>(p: T) <Box<T>> { return Box(p); }\n"
+        "fun main() <noret> { let b <auto> = wrap::<string>(1); }\n");
+    EXPECT_NE(bad.exitCode, 0) << stripAnsi(bad.err);
+    EXPECT_NE(stripAnsi(bad.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(bad.err);
+
+    const FincRun good = compile(
         "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
         "fun wrap<T>(p: T) <Box<T>> { return Box(p); }\n"
         "fun main() <noret> {\n"
-        "    let b <auto> = wrap::<string>(1);\n"
+        "    let b <auto> = wrap::<string>(\"s\");\n"
         "    let s <string> = b.v;\n"
         "}\n");
-    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
-        << "T came from the argument; had the turbofish bound it, b.v would be a string\n"
-        << stripAnsi(r.err);
+    EXPECT_EQ(good.exitCode, 0) << stripAnsi(good.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -9972,6 +10302,113 @@ TEST(Soundness_GenericReturn, AStructReturnStillWorksTheWayItDid) {
     EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
         << stripAnsi(r.err);
     EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// A generic parameter is bound from the arguments even when the return type
+// does not mention it.
+//
+// `fun take<T>(b: Box<T>) <T>` infers T from its argument, but
+// `fun take<T>(b: Box<T>) <int>` refused the same call with
+// `expected 'Box<T>', got 'Box<int>'`: the free-call gate only ran inference
+// when the *return* type mentioned a parameter, so the parameters were
+// checked as the unsubstituted template. The method-call gate already
+// checked the parameters too; the free, bare-method and static gates did
+// not. What binds T is the argument, whatever the return type says.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_GenericArgInference, AConcreteIntReturnStillInfersFromItsArguments) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun take<T>(b: Box<T>) <int> { return 1; }\n"
+        "fun main() <noret> { let b <Box<int>> = Box(1); take(b); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericArgInference, AConcreteVoidReturnStillInfersFromItsArguments) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun take<T>(b: Box<T>) <void> { }\n"
+        "fun main() <noret> { let b <Box<int>> = Box(1); take(b); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericArgInference, AConcreteNoretReturnStillInfersFromItsArguments) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun take<T>(b: Box<T>) <noret> { }\n"
+        "fun main() <noret> { let b <Box<int>> = Box(1); take(b); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericArgInference, AConflictingArgumentNamesTheInstantiation) {
+    // First binding wins: T is int from the first argument, so the second is
+    // checked against Box<int> and the message names what was inferred.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun pair<T>(a: Box<T>, b: Box<T>) <int> { return 1; }\n"
+        "fun main() <noret> {\n"
+        "    let x <Box<int>> = Box(1);\n"
+        "    let y <Box<string>> = Box(\"s\");\n"
+        "    pair(x, y);\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << "two Boxes of different element types do not fit one parameter";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'Box<int>', got 'Box<string>'"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("got 'T'"), std::string::npos)
+        << "no diagnostic may name the template\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericArgInference, ConflictingBareArgumentsAreRefused) {
+    // The same rule through a bare parameter: T is int from the first
+    // argument, so the second is a string where an int was inferred.
+    const FincRun r = compile(
+        "fun pair<T>(a: T, b: T) <int> { return 1; }\n"
+        "fun main() <noret> { pair(1, \"x\"); }\n");
+    EXPECT_NE(r.exitCode, 0) << "a string does not fit an int parameter";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericArgInference, AnArgumentOfTheWrongShapeStillRefuses) {
+    // Nothing binds T here -- an int is not a Box of anything -- so the
+    // parameter stands and the diagnostic honestly names it.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun take<T>(b: Box<T>) <int> { return 1; }\n"
+        "fun main() <noret> { take(1); }\n");
+    EXPECT_NE(r.exitCode, 0) << "an int is not a Box";
+    EXPECT_EQ(stripAnsi(r.err).find("<error>"), std::string::npos) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericArgInference, ATurbofishOnAConcreteReturnIsStillChecked) {
+    // What the call writes outright outranks inference: an explicit
+    // `<string>` against a `Box<int>` argument refuses naming both.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "fun take<T>(b: Box<T>) <int> { return 1; }\n"
+        "fun main() <noret> { let b <Box<int>> = Box(1); take::<string>(b); }\n");
+    EXPECT_NE(r.exitCode, 0) << "an explicit '<string>' is not a '<int>'";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'Box<string>', got 'Box<int>'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericArgInference, AStaticMethodOnAConcreteStructInfersFromItsArguments) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "struct S { pub v <int>, static fun take<T>(b: Box<T>) <int> { return 1; } }\n"
+        "fun main() <noret> { let b <Box<int>> = Box(1); S::take(b); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericArgInference, AStaticTurbofishOnAConcreteReturnIsStillChecked) {
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, Box(v: T) { self.v = v; } }\n"
+        "struct S { pub v <int>, static fun take<T>(b: Box<T>) <int> { return 1; } }\n"
+        "fun main() <noret> { let b <Box<int>> = Box(1); S::take::<string>(b); }\n");
+    EXPECT_NE(r.exitCode, 0) << "an explicit '<string>' is not a '<int>'";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'Box<string>', got 'Box<int>'"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -11924,6 +12361,678 @@ TEST(Soundness_CompilerApi, APlainFunctionCanGrantItToo) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
+// ---------------------------------------------------------------------------
+// The `layout` component (docs/compiler-api.md §2.5, steps 8+16): sizes,
+// alignments, offsets and the typed pointer map. Resolved through the same
+// grant gate as every other component; evaluated nowhere in the analyzer --
+// phase legality is the layout engine's (ADR 0015), driven by the events that
+// open each moment.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_CompilerApi, TheLayoutComponentResolvesWhenGranted) {
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.layout)]\n"
+        "#[use(compiler.components.types)]\n",
+        "const s <uint> = compiler.layout.size_of(t);\n"
+        "  const a <uint> = compiler.layout.align_of(t);\n"
+        "  const n <int> = compiler.layout.pointer_count(t);\n"
+        "  const o <uint> = compiler.layout.pointer_offset_at(t, 0);\n"
+        "  const p <$type> = compiler.layout.pointee_type_at(t, 0);\n"
+        "  const q <quote> = compiler.layout.pointer_map_quote(t);\n"
+        "  const f <bool> = compiler.layout.is_layout_final(t);\n"
+        "  const c <$struct> = compiler.types.gettype::<int>();\n"
+        "  const u <uint> = compiler.layout.offset_of(c, \"x\")?;\n"
+        "  compiler.layout.request_header_words(c, 1);\n"
+        "  compiler.layout.request_min_align(c, 8);\n"
+        "  return n;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, AnUngrantedLayoutComponentReports) {
+    const FincRun r = compile(apiSpecial(
+        kUseCompiler, "return compiler.layout.size_of(t);"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("layout"), std::string::npos) << e;
+    EXPECT_NE(e.find("not granted"), std::string::npos) << e;
+}
+
+TEST(Soundness_CompilerApi, ALayoutOperationChecksItsArguments) {
+    // Arity, then types: an index is an `int`, not a string.
+    const FincRun arity = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.layout)]\n",
+        "return compiler.layout.pointer_offset_at(t);"));
+    EXPECT_NE(arity.exitCode, 0) << stripAnsi(arity.err);
+    const FincRun types = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.layout)]\n",
+        "return compiler.layout.pointer_offset_at(t, \"x\");"));
+    EXPECT_NE(types.exitCode, 0) << stripAnsi(types.err);
+}
+
+TEST(Soundness_CompilerApi, AStructValueWidensToATypeArgument) {
+    // A `$struct` denotes a struct type, and a struct type is a type: the
+    // layout operations take `$type` while a provider holds its subject -- and
+    // `gettype` returns its handle -- as `$struct`. Without this the only
+    // well-formed provider body in the language would not type-check. The four
+    // meta-types stay distinct from each other (Soundness_TypeLiterals still
+    // refuses `$interface` where `$struct` is expected).
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.layout)]\n"
+        "#[use(compiler.components.types)]\n",
+        "const c <$struct> = compiler.types.gettype::<int>();\n"
+        "  const s <uint> = compiler.layout.size_of(c);\n"
+        "  return 0;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// ---------------------------------------------------------------------------
+// The hybrid layout members: `t.size` reads through the `layout` component
+// and needs its grant, exactly as `compiler.layout.size_of(t)` does. Only the
+// argument-free scalar reads have a member spelling; everything taking an
+// argument is component-call only.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_CompilerApi, ALayoutMemberReadNeedsTheGrant) {
+    const FincRun r = compile(apiSpecial(
+        kUseCompiler, "const u <uint> = t.size;\n  return 0;"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("layout"), std::string::npos) << e;
+    EXPECT_NE(e.find("not granted"), std::string::npos) << e;
+}
+
+TEST(Soundness_CompilerApi, ALayoutMemberReadWithTheGrant) {
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.layout)]\n",
+        "const s <uint> = t.size;\n"
+        "  const a <uint> = t.align;\n"
+        "  const n <int> = t.pointer_count;\n"
+        "  return n;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, ALayoutMemberReadReachesAStructValueToo) {
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.layout)]\n"
+        "#[use(compiler.components.types)]\n",
+        "const c <$struct> = compiler.types.gettype::<int>();\n"
+        "  const s <uint> = c.size;\n"
+        "  return 0;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, AnUnknownMemberOfATypeIsStillNotAStruct) {
+    // The hybrid rule adds three members and no more: anything else on a
+    // `$type` falls through to the old diagnostic rather than being captured.
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.layout)]\n",
+        "const u <uint> = t.nosuch;\n  return 0;"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("not a struct"), std::string::npos) << e;
+}
+
+// ---------------------------------------------------------------------------
+// The `diag` component (docs/compiler-api.md §2.5, step 19): a handler's own
+// diagnostics. Effect operations taking a message, resolved through the same
+// grant gate as every other component. What a call *does* is the firing
+// slice's (W5Diag in tests/test_events_w5.cpp); this section pins the table
+// only. `error_at` stays absent: it needs a `source_loc` value Tier 4 never
+// built, and an invented spelling would be a ruling.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_CompilerApi, TheDiagComponentResolvesWhenGranted) {
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.diag)]\n",
+        "compiler.diag.error(\"nope\");\n"
+        "  compiler.diag.warning(\"careful\");\n"
+        "  compiler.diag.note(\"fyi\");\n"
+        "  return 0;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, AnUngrantedDiagComponentReports) {
+    const FincRun r = compile(apiSpecial(
+        kUseCompiler, "compiler.diag.error(\"nope\");\n  return 0;"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("diag"), std::string::npos) << e;
+    EXPECT_NE(e.find("not granted"), std::string::npos) << e;
+}
+
+TEST(Soundness_CompilerApi, ADiagOperationChecksItsArguments) {
+    const FincRun arity = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.diag)]\n",
+        "compiler.diag.error();\n  return 0;"));
+    EXPECT_NE(arity.exitCode, 0) << stripAnsi(arity.err);
+    const FincRun types = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.diag)]\n",
+        "compiler.diag.error(1);\n  return 0;"));
+    EXPECT_NE(types.exitCode, 0) << stripAnsi(types.err);
+}
+
+TEST(Soundness_CompilerApi, AnUnknownDiagMemberReports) {
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.diag)]\n",
+        "compiler.diag.nope(\"x\");\n  return 0;"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("has no member 'nope'"), std::string::npos) << e;
+}
+
+// ---------------------------------------------------------------------------
+// The provider contract (§3.9, ADR 0014): one slot, one subject, one answer.
+// A well-formed provider is collected; every clause below is a diagnostic.
+// ---------------------------------------------------------------------------
+
+static std::string providerProgram(const std::string& attrs, const std::string& decl) {
+    return attrs + decl + "\nfun main() <noret> { }\n";
+}
+
+static const char* kProviderGrants =
+    "#[use(compiler)]\n#[use(compiler.components.layout)]\n";
+static const char* kGoodProvider =
+    "#[provides(type_metadata)]\n"
+    "@special(pub) meta(s: $struct) <quote> {\n"
+    "  return compiler.layout.pointer_map_quote(s);\n"
+    "}\n";
+
+TEST(Soundness_Provider, AWellFormedProviderIsCollected) {
+    const FincRun r = compile(providerProgram(kProviderGrants, kGoodProvider));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Provider, AnUnknownSlotIsRefused) {
+    const FincRun r = compile(providerProgram(
+        kProviderGrants,
+        "#[provides(nosuchslot)]\n"
+        "@special(pub) meta(s: $struct) <quote> {\n"
+        "  return compiler.layout.pointer_map_quote(s);\n"
+        "}\n"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("Unknown provider slot 'nosuchslot'"), std::string::npos) << e;
+}
+
+TEST(Soundness_Provider, AProviderTakesExactlyOneSubject) {
+    const FincRun r = compile(providerProgram(
+        kProviderGrants,
+        "#[provides(type_metadata)]\n"
+        "@special(pub) meta() <quote> {\n"
+        "  return compiler.layout.pointer_map_quote(s);\n"
+        "}\n"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("exactly one subject"), std::string::npos) << e;
+}
+
+TEST(Soundness_Provider, AProviderTakesItsSubjectAsAStruct) {
+    const FincRun r = compile(providerProgram(
+        kProviderGrants,
+        "#[provides(type_metadata)]\n"
+        "@special(pub) meta(n: int) <quote> {\n"
+        "  return compiler.layout.pointer_map_quote(n);\n"
+        "}\n"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("$struct"), std::string::npos) << e;
+}
+
+TEST(Soundness_Provider, AProviderReturnsAQuote) {
+    const FincRun r = compile(providerProgram(
+        kProviderGrants,
+        "#[provides(type_metadata)]\n"
+        "@special(pub) meta(s: $struct) <int> {\n"
+        "  return compiler.layout.pointer_map_quote(s);\n"
+        "}\n"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("quote"), std::string::npos) << e;
+}
+
+TEST(Soundness_Provider, ASecondClaimantNamesTheFirst) {
+    // Exclusive per slot (ADR 0014): the diagnostic names the slot and both
+    // providers, so the two declarations can be found.
+    const FincRun r = compile(providerProgram(
+        kProviderGrants,
+        "#[provides(type_metadata)]\n"
+        "@special(pub) first(s: $struct) <quote> {\n"
+        "  return compiler.layout.pointer_map_quote(s);\n"
+        "}\n"
+        "#[provides(type_metadata)]\n"
+        "@special(pub) second(s: $struct) <quote> {\n"
+        "  return compiler.layout.pointer_map_quote(s);\n"
+        "}\n"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("type_metadata"), std::string::npos) << e;
+    EXPECT_NE(e.find("first"), std::string::npos) << e;
+    EXPECT_NE(e.find("second"), std::string::npos) << e;
+}
+
+TEST(Soundness_Provider, ProvidesOnAnOrdinaryFunctionIsRefused) {
+    const FincRun r = compile(providerProgram(
+        kProviderGrants,
+        "#[provides(type_metadata)]\n"
+        "pub fun meta(s: $struct) <quote> {\n"
+        "  return compiler.layout.pointer_map_quote(s);\n"
+        "}\n"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("Only a `@special`"), std::string::npos) << e;
+}
+
+TEST(Soundness_Provider, ABodyThatIsNotTheProjectionIsRefused) {
+    // The interpretability line is held: a provider is a straight-line answer,
+    // and anything else is refused naming the line rather than run.
+    const FincRun r = compile(providerProgram(
+        kProviderGrants,
+        "#[provides(type_metadata)]\n"
+        "@special(pub) meta(s: $struct) <quote> {\n"
+        "  return compiler.layout.pointer_map_quote(s);\n"
+        "  return compiler.layout.pointer_map_quote(s);\n"
+        "}\n"));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("straight-line answer"), std::string::npos) << e;
+}
+
+TEST(Soundness_Provider, AProviderBodyStillNeedsItsGrants) {
+    // The contract does not exempt the body from the grant layer: without the
+    // `layout` grant the projection call fails exactly as it would anywhere.
+    const FincRun r = compile(providerProgram(
+        "#[use(compiler)]\n", kGoodProvider));
+    const std::string e = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("layout"), std::string::npos) << e;
+    EXPECT_NE(e.find("not granted"), std::string::npos) << e;
+}
+
+// ---------------------------------------------------------------------------
+// Wave-5 slice 0: the protocol CLAIM registry (C++ side, ADR 0014).
+//
+// A protocol replaces one compiler operation; exactly one library may claim a
+// slot, declared `#[protocol(<slot>)]` on a `@special`. Slice 0 builds the
+// registry and its exclusivity; replacement is still refused (the
+// not-lowered refusal owned by slice 3). Four slots only: move_or_copy,
+// deallocate, lifetime, destructor. Mirrors Soundness_Provider clause for
+// clause: slot, bearer, signature, then exclusivity.
+static std::string protocolProgram(const std::string& attrs, const std::string& decl) {
+    return attrs + decl + "\nfun main() <noret> { }\n";
+}
+
+TEST(Soundness_Protocol, AnUnknownSlotIsRefused) {
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(nosuchslot)]\n"
+        "@special h(s: $struct) <quote> { }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("unknown protocol slot 'nosuchslot'"), std::string::npos) << e;
+    EXPECT_NE(e.find("expected move_or_copy, deallocate, lifetime, or destructor"),
+              std::string::npos) << e;
+}
+
+TEST(Soundness_Protocol, AProtocolNeedsASlot) {
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol]\n"
+        "@special h(s: $struct) <quote> { }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("needs a slot"), std::string::npos) << e;
+}
+
+TEST(Soundness_Protocol, ProtocolOnAnOrdinaryFunctionIsRefused) {
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(move_or_copy)]\n"
+        "fun h() <void> { }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("Only a `@special`"), std::string::npos) << e;
+}
+
+TEST(Soundness_Protocol, AProtocolTakesExactlyOneSubject) {
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(move_or_copy)]\n"
+        "@special h() <quote> { }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("exactly one subject"), std::string::npos) << e;
+}
+
+TEST(Soundness_Protocol, AProtocolReturnsAQuote) {
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(move_or_copy)]\n"
+        "@special h(s: $struct) <int> { }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("returns"), std::string::npos) << e;
+    EXPECT_NE(e.find("quote"), std::string::npos) << e;
+}
+
+TEST(Soundness_Protocol, AProtocolClaimsExactlyOneSlot) {
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(move_or_copy)]\n"
+        "#[protocol(destructor)]\n"
+        "@special h(s: $struct) <quote> { }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("claims exactly one slot"), std::string::npos) << e;
+}
+
+TEST(Soundness_Protocol, ASecondClaimantNamesBothSites) {
+    // Exclusive per slot (ADR 0014): the diagnostic names the slot and both
+    // claimants, with both claim sites, so the two declarations can be found.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(move_or_copy)]\n"
+        "@special first(s: $struct) <quote> { }\n"
+        "#[protocol(move_or_copy)]\n"
+        "@special second(s: $struct) <quote> { }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("protocol slot 'move_or_copy' is already claimed"), std::string::npos)
+        << e;
+    EXPECT_NE(e.find("first"), std::string::npos) << e;
+    EXPECT_NE(e.find("second"), std::string::npos) << e;
+    // Both claim sites named: two distinct "(line N)" anchors in one message.
+    const std::string::size_type p1 = e.find("(line ");
+    EXPECT_NE(p1, std::string::npos) << e;
+    EXPECT_NE(e.find("(line ", p1 + 1), std::string::npos) << e;
+}
+
+TEST(Soundness_Protocol, ZeroClaimantsCompilesClean) {
+    // No claim, no registry output: the default lowering is untouched.
+    const FincRun r = compile("struct V { x <int>, }\nfun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADestructorClaimantLowers) {
+    // Was ASingleClaimantIsRecognizedButNotLowered, rewritten rather than
+    // relaxed for wave-5 slice 2: a well-formed `destructor` claimant now
+    // lowers (it supplies the generation codegen runs for structs with no
+    // `~T()`), so the not-lowered refusal is gone for this slot. Only
+    // `deallocate` and `lifetime` still report it.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(destructor)]\n"
+        "@special mydtor(s: $struct) <quote> { }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, BothLoweringClaimantsLowerTogether) {
+    // Was AMoveOrCopyClaimantLowersWhileOthersStillRefuse, rewritten for
+    // wave-5 slice 2: `move_or_copy` (slice 1) and `destructor` (slice 2)
+    // are the two slots whose claim lowers, so a program claiming both
+    // compiles clean. The exemption is still per-slot, not blanket:
+    // `lifetime` claimants still report the not-lowered refusal (pinned
+    // below); `deallocate` lowers from slice 3 on.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(move_or_copy)]\n"
+        "@special mymove(s: $struct) <quote> { }\n"
+        "#[protocol(destructor)]\n"
+        "@special mydtor(s: $struct) <quote> { }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADeallocateClaimantLowers) {
+    // Was ADeallocateClaimantIsStillNotLowered, rewritten rather than
+    // relaxed for wave-5 slice 3: a well-formed `deallocate` claimant now
+    // lowers (it substitutes the deallocation call codegen emits for
+    // `delete`), so the not-lowered refusal is gone for this slot. Only
+    // `lifetime` still reports it.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(deallocate)]\n"
+        "@special myfree(s: $struct) <quote> { }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, AMoveOrCopyClaimantWithABodyIsRefused) {
+    // Wave-5 slice 1: the claim gates skipping, but the replacement body is
+    // not executed -- so a non-empty body is refused naming the claimant
+    // rather than silently dropped (the backend never drops runtime code).
+    // Declare the claim with an empty body.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(move_or_copy)]\n"
+        "@special mymove(s: $struct) <quote> { {} }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("move_or_copy"), std::string::npos) << e;
+    EXPECT_NE(e.find("mymove"), std::string::npos) << e;
+    EXPECT_NE(e.find("empty body"), std::string::npos) << e;
+}
+
+// Wave-5 slice 2: the `destructor` slot lowers (the claimant supplies the
+// generation for structs that declare no `~T()`; an explicit `~T()` keeps
+// precedence in codegen). The contract is the evaluable subset only: an
+// empty body, or one `return quote { ... };` whose quote is uniform across
+// subjects (parameters do not bind -- the interpreter gap). Anything else is
+// refused naming the gap rather than silently dropped.
+TEST(Soundness_Protocol, ADestructorClaimantWithAReturnQuoteLowers) {
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(destructor)]\n"
+        "@special mydtor(s: $struct) <quote> { return quote { printf(\"claimant\\n\"); }; }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADestructorClaimantWithAnEmptyBodyLowers) {
+    // No custom cleanup: the claim is recorded and composition still runs.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(destructor)]\n"
+        "@special mydtor(s: $struct) <quote> { }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADestructorClaimantWithLetBeforeQuoteLowers) {
+    // Threaded (the comptime value model, ADR 0006): a let before the return
+    // threads instead of refusing -- the same straight line providers and W5
+    // handlers hold (literals + lets + calls, parameters bound).
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(destructor)]\n"
+        "@special mydtor(s: $struct) <quote> { let x <int> = 1; return quote { printf(\"c\\n\"); }; }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADestructorClaimantThreadingTheSubjectLowers) {
+    // The unlock: the subject parameter binds, so aliasing it threads.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(destructor)]\n"
+        "@special mydtor(s: $struct) <quote> { let t <$struct> = s; return quote { printf(\"c\\n\"); }; }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADestructorClaimantWithHelperCallLowers) {
+    const FincRun r = compile(protocolProgram(
+        "fun id(v: int) <int> {\n  return v;\n}\n",
+        "#[protocol(destructor)]\n"
+        "@special mydtor(s: $struct) <quote> { let y <int> = id(7); return quote { printf(\"c\\n\"); }; }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADestructorClaimantWithHelperQuoteReturnLowers) {
+    const FincRun r = compile(protocolProgram(
+        "@special mkq() <quote> { return quote { printf(\"c\\n\"); }; }\n",
+        "#[protocol(destructor)]\n"
+        "@special mydtor(s: $struct) <quote> { let q <quote> = mkq(); return q; }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADestructorClaimantWithNonQuoteStillRefused) {
+    // Anything wider than the line is still the existing named gap, never
+    // silent: a non-quote answer keeps the generation-shape refusal.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(destructor)]\n"
+        "@special mydtor(s: $struct) <quote> { return 42; }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("destructor"), std::string::npos) << e;
+    EXPECT_NE(e.find("mydtor"), std::string::npos) << e;
+    EXPECT_NE(e.find("return quote"), std::string::npos) << e;
+}
+
+TEST(Soundness_Protocol, ADestructorClaimantNamingSelfIsRefused) {
+    // The generation lowers once, as a shared function with no receiver, for
+    // every claimed type alike: a subject-relative name has nothing to bind to.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(destructor)]\n"
+        "@special mydtor(s: $struct) <quote> { return quote { printf(\"%d\\n\", self.v); }; }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("destructor"), std::string::npos) << e;
+    EXPECT_NE(e.find("no receiver"), std::string::npos) << e;
+}
+
+// Wave-5 slice 3: the `deallocate` slot lowers (the claimant substitutes the
+// deallocation call `delete` emits; the destructor still runs first in
+// codegen, so this slot never touches it). The contract is the evaluable
+// subset only, slice 2's shape carried over: an empty body, or one
+// `return quote { ... };` whose quote is uniform across subjects
+// (parameters do not bind -- the interpreter gap). Anything else is refused
+// naming the gap rather than silently dropped.
+TEST(Soundness_Protocol, ADeallocateClaimantWithAReturnQuoteLowers) {
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(deallocate)]\n"
+        "@special myfree(s: $struct) <quote> { return quote { printf(\"claimant-free\\n\"); }; }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADeallocateClaimantWithAnEmptyBodyLowers) {
+    // No custom deallocation: the claim is recorded and the default `free`
+    // stays.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(deallocate)]\n"
+        "@special myfree(s: $struct) <quote> { }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADeallocateClaimantWithLetBeforeQuoteLowers) {
+    // Threaded (the comptime value model, ADR 0006): a let before the return
+    // threads instead of refusing -- slice 2's shape carried over with the
+    // same straight line.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(deallocate)]\n"
+        "@special myfree(s: $struct) <quote> { let x <int> = 1; return quote { printf(\"c\\n\"); }; }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADeallocateClaimantThreadingTheSubjectLowers) {
+    // The unlock: the subject parameter binds, so aliasing it threads.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(deallocate)]\n"
+        "@special myfree(s: $struct) <quote> { let t <$struct> = s; return quote { printf(\"c\\n\"); }; }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADeallocateClaimantWithHelperCallLowers) {
+    const FincRun r = compile(protocolProgram(
+        "fun id(v: int) <int> {\n  return v;\n}\n",
+        "#[protocol(deallocate)]\n"
+        "@special myfree(s: $struct) <quote> { let y <int> = id(7); return quote { printf(\"c\\n\"); }; }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADeallocateClaimantWithHelperQuoteReturnLowers) {
+    const FincRun r = compile(protocolProgram(
+        "@special mkq() <quote> { return quote { printf(\"c\\n\"); }; }\n",
+        "#[protocol(deallocate)]\n"
+        "@special myfree(s: $struct) <quote> { let q <quote> = mkq(); return q; }\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Protocol, ADeallocateClaimantWithNonQuoteStillRefused) {
+    // Anything wider than the line is still the existing named gap, never
+    // silent: a non-quote answer keeps the generation-shape refusal.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(deallocate)]\n"
+        "@special myfree(s: $struct) <quote> { return 42; }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("deallocate"), std::string::npos) << e;
+    EXPECT_NE(e.find("myfree"), std::string::npos) << e;
+    EXPECT_NE(e.find("return quote"), std::string::npos) << e;
+}
+
+TEST(Soundness_Protocol, ADeallocateClaimantNamingSelfIsRefused) {
+    // The generation lowers once, as a shared function with no receiver, for
+    // every claimed subject alike: a subject-relative name has nothing to
+    // bind to.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(deallocate)]\n"
+        "@special myfree(s: $struct) <quote> { return quote { printf(\"%d\\n\", self.v); }; }\n"));
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("deallocate"), std::string::npos) << e;
+    EXPECT_NE(e.find("no receiver"), std::string::npos) << e;
+}
+
+// ---------------------------------------------------------------------------
+// Wave-5 slice 4: `#[slaveof(...)]` is a real rule (C++ side).
+//
+// `slaveof(z)` extends the tied storage lifetime to the referent's scope
+// exit; `slaveof($Fin)` pins it to program exit. The 2026-08-28 no-op
+// ruling rested on "nothing here frees anything implicitly", which scope-exit
+// destructors have since made false for struct-typed locals -- so a tie now
+// validates its referent here and delays destruction in codegen, while
+// destructor-less storage still lowers to nothing (Soundness_Codegen holds
+// both halves).
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Lifetime, ASlaveofToADeadReferentIsRefused) {
+    // The tie would dangle from birth: `z` left scope before `m` is
+    // declared, so there is no referent lifetime to share. Accepted today
+    // (the attribute is unchecked), refused naming the attribute.
+    const FincRun r = compile(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "fun main() <noret> {\n"
+        "    {\n"
+        "        let z <int> = 1;\n"
+        "    }\n"
+        "    {\n"
+        "        #[slaveof(z)]\n"
+        "        let m <int> = 2;\n"
+        "        printf(\"%d\\n\", m);\n"
+        "    }\n"
+        "}\n");
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("slaveof"), std::string::npos) << e;
+    EXPECT_NE(e.find("z"), std::string::npos) << e;
+}
+
+TEST(Soundness_Lifetime, ASlaveofNeedsAReferent) {
+    // Flag-form names nothing, so there is no lifetime to share. Accepted
+    // today, refused naming the attribute.
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "    let z <int> = 1;\n"
+        "    #[slaveof]\n"
+        "    let m <int> = 2;\n"
+        "}\n");
+    const std::string e = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(r.exitCode, 0) << e;
+    EXPECT_NE(e.find("slaveof"), std::string::npos) << e;
+}
+
 TEST(Soundness_CompilerApi, TheApiIsNotInScopeAtTopLevel) {
     // `compiler` is granted into a body. There is no declaration to read the
     // attribute off at file scope, so the name is not there.
@@ -12179,6 +13288,27 @@ TEST(Soundness_SpecialCalls, ThePlainSpellingResolvesToo) {
     const FincRun r = compile(
         "@special(pub) sp(v: int) <int> { return v; }\n"
         "fun main() <noret> { const x <int> = sp(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_SpecialCalls, AtCallUsableInEveryExpressionPosition) {
+    // Wave-4 slice 1a: `@f(...)` is an expression, so it is usable wherever a
+    // call is -- including the zero-argument shape of the motivating
+    // `@CortexCollectorInit()`. One program sweeps every position so a future
+    // grammar change that drops one of them goes red here, not in a sample.
+    const FincRun r = compile(
+        "@special(pub) sp(v: int) <int> { return v; }\n"
+        "@special(pub) boot() <int> { return 1; }\n"
+        "fun callee(x: int) <int> { return x; }\n"
+        "fun produce() <int> { return @sp(1); }\n"
+        "fun main() <noret> {\n"
+        "  const a <int> = @sp(1);\n"
+        "  const b <int> = @boot();\n"
+        "  const n <int> = @sp(@sp(1));\n"
+        "  const w <int> = callee(@sp(2));\n"
+        "  @sp(3);\n"
+        "  blame @sp(0) == 0;\n"
+        "}\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
@@ -13862,4 +14992,498 @@ TEST(Soundness_Macros, TheBangIsWhatSeparatesTheTwoDefineForms) {
     EXPECT_NE(macro.exitCode, 0)
         << "`pf!` declares a macro, and a macro is not callable without the `!`\n"
         << stripAnsi(macro.err);
+}
+
+// ---------------------------------------------------------------------------
+// An operator call checks its operand.
+//
+// Analyzer_Expr.cpp types `s + x` by the operator's return type and never
+// compares `x` against the operator's parameter, so `s + "hi"` on
+// `operator +(other: <int>) <int>` compiles. The subscript path
+// (Soundness_IndexOperator.TheSubscriptIsCheckedAgainstTheOperatorsParameter)
+// is the model: the operand is checked against param_types[0] with the same
+// `Type mismatch` wording every other call gets.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Operators, AnOperatorCallChecksItsOperandAgainstItsParameter) {
+    const FincRun bad = compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    operator +(other: <int>) <int> { return 0; }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let s <S> = S{v: 1};\n"
+        "    let r <int> = s + \"hi\";\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(bad.exitCode, 1) << "an int operator does not take a string:\n" << bad.err;
+    const std::string err = messagesOnly(stripAnsi(bad.err));
+    EXPECT_NE(err.find("Type mismatch"), std::string::npos) << err;
+    EXPECT_NE(err.find("expected 'int', got 'string'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+
+    // The control: the operand the operator declares still compiles.
+    const FincRun ok = compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    operator +(other: <int>) <int> { return 0; }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let s <S> = S{v: 1};\n"
+        "    let r <int> = s + 1;\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(errorCount(stripAnsi(ok.err)), 0u) << stripAnsi(ok.err);
+}
+
+// ---------------------------------------------------------------------------
+// Method visibility.
+//
+// Field reads refuse `priv` from outside
+// (Soundness_FieldVisibility.APrivFieldIsNotReadableFromOutside) but a method
+// call never consults visibility, so `s.m()` on a `priv fun m` compiles.
+// Mirrors the field rule: refused outside, allowed inside the declaring type,
+// and the diagnostic names the member the same way.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_MethodVisibility, APrivMethodIsNotCallableFromOutside) {
+    const FincRun r = compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    priv fun m() <int> { return 1; }\n"
+        "}\n"
+        "fun main() <int> { let s <S> = S{v: 1}; return s.m(); }\n");
+    EXPECT_EQ(r.exitCode, 1) << "`priv` must still mean private for methods:\n" << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("Cannot access private method 'm'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(Soundness_MethodVisibility, APrivMethodIsCallableFromInsideItsOwnStruct) {
+    // What `priv` is for: the declaring type's own methods may call it, exactly
+    // as they may read its private fields
+    // (Soundness_FieldVisibility.APrivFieldIsReadableFromInsideItsOwnStruct).
+    const FincRun r = compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    priv fun m() <int> { return 1; }\n"
+        "    pub fun get() <int> { return self.m(); }\n"
+        "}\n"
+        "fun main() <int> { let s <S> = S{v: 1}; return s.get(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a struct can call its own private method:\n" << r.err;
+}
+
+TEST(Soundness_MethodVisibility, APrivStaticMethodIsNotCallableFromOutside) {
+    // The `::` spell of the instance rule above: `S::m()` on a
+    // `priv static fun m` must refuse with the same diagnostic.
+    const FincRun r = compile(
+        "struct S {\n"
+        "    v <int>,\n"
+        "    priv static fun m() <int> { return 1; }\n"
+        "}\n"
+        "fun main() <int> { return S::m(); }\n");
+    EXPECT_EQ(r.exitCode, 1) << "`priv` must still mean private for static methods:\n" << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("Cannot access private method 'm' of struct 'S'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+TEST(Soundness_MethodVisibility, AnExplicitPrivOverwriteOnANewMemberIsPrivate) {
+    // The single-member overwrite carries its own visibility: `@implements(priv)`
+    // on a brand-new member must register it private, so calling it from outside
+    // refuses with the same diagnostic as a `priv` declaration.
+    const FincRun r = compile(
+        "struct Box<T> { pub v <T>, }\n"
+        "@implements(priv) Box<T>::twice = (self: &Self) <int> => { return 2; }\n"
+        "fun f(b: Box<int>) <int> { return b.twice(); }\n");
+    EXPECT_EQ(r.exitCode, 1) << "an explicit `priv` overwrite must stay private:\n" << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("Cannot access private method 'twice' of struct 'Box'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(err), 1u) << err;
+}
+
+// ---------------------------------------------------------------------------
+// Wave-4 Round 3, Q11: a `@special` may read the host but is warned when it
+// branches on what it read (docs/compiler-api.md §4).
+//
+// `compiler.system.get_total_memory` / `get_available_memory` /
+// `get_memorycard_model` read the machine doing the compiling, not the target.
+// A compile-time branch on one emits a different program on a different build
+// machine, breaking the reproducibility ADR 0010 exists to guarantee. Reading
+// is legal (stdlib/memory.fin's `mem_info` only formats and returns); branching
+// is a warning naming the host operation. Full taint through `@special` calls
+// needs the comptime interpreter's value model (ADR 0017) and is still open;
+// what is caught here is a direct read in a branch condition and a `let` that
+// names one.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_HostBranch, BranchingDirectlyOnAHostReadWarns) {
+    const FincRun r = compile(
+        "#[use(compiler)]\n"
+        "#[use(compiler.components.system)]\n"
+        "@special br() <int> {\n"
+        "  if (compiler.system.get_total_memory(1) == 1) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a warning never fails the build:\n" << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("warning"), std::string::npos) << "a warning is reported:\n" << err;
+    EXPECT_NE(err.find("get_total_memory"), std::string::npos)
+        << "the warning names the host operation it came from:\n" << err;
+}
+
+TEST(Soundness_HostBranch, BranchingThroughALetBoundHostReadWarns) {
+    const FincRun r = compile(
+        "#[use(compiler)]\n"
+        "#[use(compiler.components.system)]\n"
+        "@special br() <int> {\n"
+        "  let m <uint> = compiler.system.get_available_memory(1);\n"
+        "  if (m == 1) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a warning never fails the build:\n" << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("warning"), std::string::npos) << "a warning is reported:\n" << err;
+    EXPECT_NE(err.find("get_available_memory"), std::string::npos)
+        << "the warning names the host operation behind the binding:\n" << err;
+}
+
+TEST(Soundness_HostBranch, ReadingWithoutBranchingIsSilent) {
+    // The `mem_info` shape (stdlib/memory.fin:27): three host reads formatted
+    // into a value and returned. Reproducibility is threatened by decisions,
+    // not by data, so no branch means no warning.
+    const FincRun r = compile(
+        "#[use(compiler)]\n"
+        "#[use(compiler.components.system)]\n"
+        "@special info() <uint> {\n"
+        "  let m <uint> = compiler.system.get_total_memory(1);\n"
+        "  return m;\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("warning"), std::string::npos)
+        << "reading the host without branching warns about nothing:\n" << r.err;
+}
+
+TEST(Soundness_HostBranch, BranchingOnATargetFactIsSilent) {
+    // `pointer_size` answers about the target the compiler is emitting for,
+    // not the machine doing the emitting. Branching on it reproduces, so the
+    // taint rule (ADR 0017) does not reach it.
+    const FincRun r = compile(
+        "#[use(compiler)]\n"
+        "#[use(compiler.components.system)]\n"
+        "@special br() <int> {\n"
+        "  if (compiler.system.pointer_size() == 8) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("warning"), std::string::npos)
+        << "a target fact is not a host read:\n" << r.err;
+}
+
+TEST(Soundness_HostBranch, BranchingOnAnOrdinaryValueIsSilent) {
+    const FincRun r = compile(
+        "@special br(v: int) <int> {\n"
+        "  if (v == 1) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("warning"), std::string::npos)
+        << "an ordinary branch warns about nothing:\n" << r.err;
+}
+
+// ---------------------------------------------------------------------------
+// Wave-4 Round 3, Q13: a `@special` may not be an interface method
+// (docs/compiler-api.md §4). Dispatch is chosen at run time and cannot select
+// a function that only exists at compile time (D forbids `@__ctfe` on virtual
+// methods for the same reason). The grammar has no interface position for one,
+// so this pins the named refusal rather than the bare syntax error.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_SpecialInterface, ASpecialMayNotBeAnInterfaceMethod) {
+    const FincRun r = compile(
+        "interface I {\n"
+        "  pub fun m() <int>;\n"
+        "  @special sp() <int> { return 0; }\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 1) << "an interface `@special` is refused:\n" << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("may not be an interface method"), std::string::npos)
+        << "the refusal names the rule, not just the token:\n" << err;
+}
+
+// ---------------------------------------------------------------------------
+// Wave-4 Round 3, Q12 (union half): a union alias keeps its alternatives in
+// the type system instead of collapsing to its first member.
+//
+// `type Number = int | uint | float` (tests/samples/arrays.fin:9) is used as a
+// generic bound (`fun sort<T: Number>`), and bounds keep working exactly as
+// before. What changes is that the union-ness survives resolution, so that the
+// layout pass can refuse a union's pointer map with a diagnostic instead of
+// answering its first member's (a zero map for `int` pretending to cover
+// `uint` and `float`).
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Union, AUnionAliasResolvesAndKeepsItsAlternatives) {
+    // Values still store: assignability delegates to the first alternative,
+    // which is exactly what the alias meant before it was a union type.
+    const FincRun r = compile(
+        "type Number = int | uint | float;\n"
+        "fun main() <int> {\n"
+        "  let x <Number> = 5;\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Union, AUnionBoundStillConstrainsNothingNew) {
+    // The corpus's only use of unions is bounds (`arrays.fin:11`,
+    // `stdlib/types.fin:109`). A bound that used to resolve to `int` now
+    // resolves to a union, and generic calls through it must keep compiling.
+    const FincRun r = compile(
+        "type Number = int | uint | float;\n"
+        "fun sort<T: Number>(v: T) <int> { return 0; }\n"
+        "fun main() <int> { return sort(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Union, AMemberAccessOnAUnionValueIsADiagnosticNotACrash) {
+    // A union value has no members of its own. Whatever the answer becomes, it
+    // must be one diagnostic -- not a crash and not silence.
+    const FincRun r = compile(
+        "type Number = int | uint | float;\n"
+        "fun main() <int> {\n"
+        "  let x <Number> = 5;\n"
+        "  let y <int> = x.nosuch;\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << "a diagnostic, not a crash and not a pass:\n" << r.err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+}
+
+TEST(Soundness_HostBranch, ABranchInsideAQuoteIsRuntimeCodeAndIsSilent) {
+    // A quote body is data: `return quote { if (compiler.system....) {...} }`
+    // injects a runtime branch into the program, which decides nothing about
+    // what gets compiled. The warning is about compile-time branches only.
+    const FincRun r = compile(
+        "#[use(compiler)]\n"
+        "#[use(compiler.components.system)]\n"
+        "@special br() <quote> {\n"
+        "  return quote {\n"
+        "    if (compiler.system.get_total_memory(1) == 1) {\n"
+        "    }\n"
+        "  };\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("branching on"), std::string::npos)
+        << "a branch in injected code is not a compile-time branch:\n" << r.err;
+}
+
+// ---------------------------------------------------------------------------
+// Integer type-alias completeness: the analyzer registers the short
+// spellings whose widths U81 added to the Layout/codegen table only.
+// Before that, `let x<u8> = 1` reported `Undefined type 'u8'`; refusals below
+// assert the checking verdict *and* its reason, so an unregistered name fails
+// them (its diagnostic names the type, not the mismatch).
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_IntegerAliases, NarrowingConstantsAreRefusedAtTheAliasWidth) {
+    // An over-limit constant is refused for the alias exactly as for the
+    // canonical twin spelling at the same width: one `Type mismatch`, never
+    // an `Undefined type`.
+    struct Case { const char* alias; const char* bad; const char* twin; };
+    const Case cases[] = {
+        {"u8", "300", "uint{8}"}, {"i8", "200", "int{8}"},
+        {"u16", "70000", "ushort"}, {"i16", "40000", "short"},
+        {"u32", "4294967296", "uint"}, {"i32", "2147483648", "int"},
+    };
+    for (const auto& c : cases) {
+        for (const char* t : {c.alias, c.twin}) {
+            const std::string code =
+                std::string("fun main() <noret> { let x <") + t + "> = " + c.bad + "; }\n";
+            const FincRun r = compile(code);
+            const std::string err = messagesOnly(stripAnsi(r.err));
+            EXPECT_NE(r.exitCode, 0) << "<" << t << "> = " << c.bad << " must be refused:\n" << code;
+            EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u)
+                << "one diagnostic, not a cascade:\n" << code << stripAnsi(r.err);
+            EXPECT_NE(err.find("Type mismatch"), std::string::npos)
+                << "the width refuses, whatever spells it:\n" << code << err;
+            EXPECT_EQ(err.find("Undefined type"), std::string::npos)
+                << "the name must resolve:\n" << code << err;
+        }
+    }
+}
+
+TEST(Soundness_IntegerAliases, RangeEdgesAreRefusedAt64Bits) {
+    // Nothing is wider than 64 bits, so these probe the edges: a negative
+    // constant is not an unsigned value; past-the-minimum is not a signed
+    // one. Each beside the canonical twin at the same width.
+    struct Case { const char* alias; const char* bad; const char* twin; };
+    const Case cases[] = {
+        {"u64", "-1", "ulong"}, {"usize", "-1", "ulong"}, {"size_t", "-1", "ulong"},
+        {"i64", "-9223372036854775809", "long"}, {"isize", "-9223372036854775809", "long"},
+    };
+    for (const auto& c : cases) {
+        for (const char* t : {c.alias, c.twin}) {
+            const std::string code =
+                std::string("fun main() <noret> { let x <") + t + "> = " + c.bad + "; }\n";
+            const FincRun r = compile(code);
+            const std::string err = messagesOnly(stripAnsi(r.err));
+            EXPECT_NE(r.exitCode, 0) << "<" << t << "> = " << c.bad << " must be refused:\n" << code;
+            EXPECT_EQ(err.find("Undefined type"), std::string::npos)
+                << "the name must resolve:\n" << code << err;
+            EXPECT_NE(err.find("Type mismatch"), std::string::npos)
+                << "the edge refuses, whatever spells it:\n" << code << err;
+        }
+    }
+}
+
+TEST(Soundness_IntegerAliases, NegativeConstantsAreNotUnsignedAliases) {
+    // The negative-constant guard names unsigned spellings explicitly; the new
+    // unsigned aliases must be on it, probed beside the twins that are.
+    for (const char* pair : {"u8|uint{8}", "u16|ushort", "u32|uint"}) {
+        const std::string s = pair;
+        const auto bar = s.find('|');
+        const std::string alias = s.substr(0, bar), twin = s.substr(bar + 1);
+        for (const std::string& t : {alias, twin}) {
+            const std::string code =
+                "fun main() <noret> { let x <" + t + "> = -1; }\n";
+            const FincRun r = compile(code);
+            const std::string err = messagesOnly(stripAnsi(r.err));
+            EXPECT_NE(r.exitCode, 0) << "<" << t << "> = -1 must be refused:\n" << code;
+            EXPECT_EQ(err.find("Undefined type"), std::string::npos)
+                << "the name must resolve:\n" << code << err;
+            EXPECT_NE(err.find("Type mismatch"), std::string::npos)
+                << "a negative constant is not an unsigned value:\n" << code << err;
+        }
+    }
+}
+
+TEST(Soundness_IntegerAliases, FloatAliasesDoNotWidenToIntegers) {
+    // `double` -> `long` is refused (Soundness_IntegerWidening); the float
+    // aliases hold the same line at their widths.
+    struct Case { const char* fromInit; const char* from; const char* to; };
+    const Case cases[] = {
+        {"let a <f32> = cast<f32>(1.0)", "f32", "i32"},
+        {"let a <f64> = cast<f64>(1.0)", "f64", "i64"},
+    };
+    for (const auto& c : cases) {
+        const std::string code =
+            std::string("fun main() <noret> { ") + c.fromInit + "; let b <" + c.to + "> = a; }\n";
+        const FincRun r = compile(code);
+        const std::string err = messagesOnly(stripAnsi(r.err));
+        EXPECT_NE(r.exitCode, 0) << c.from << " must not widen to " << c.to << ":\n" << code;
+        EXPECT_EQ(err.find("Undefined type"), std::string::npos)
+            << "the names must resolve:\n" << code << err;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bare calls to methods: UNIFY AS METHOD (owner decision I2).
+//
+// A bare call that binds a struct's own method is one declaration with one
+// diagnostic identity: the Method form with the receiver excluded. It used to
+// report the Function form with the receiver exposed as a first parameter
+// (`Function 'foo' expects 2`), so the same mistake had two wordings depending
+// on which spelling reached it.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_BareMethodCalls, ABareCallToAMethodReportsTheMethodForm) {
+    // `foo(1)` inside `S::foo(self, v)`: the method takes 1 argument besides
+    // its receiver, and `1` is no receiver. Two diagnostics under one
+    // identity: the arity (receiver excluded) and the receiver's own type.
+    const FincRun r = compile(
+        "struct S {\n"
+        "    pub x <int>,\n"
+        "    pub fun foo(self: &Self, v: int) <int> { let f <int> = foo(1); return v + f; }\n"
+        "}\n"
+        "fun main() <int> { let s <S> = S{x: 0}; return s.foo(0); }\n");
+    EXPECT_NE(r.exitCode, 0) << "a bare call with no receiver must be refused";
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("Method 'foo' expects 1 arguments, got 0"), std::string::npos) << err;
+    EXPECT_NE(err.find("expected '&Self'"), std::string::npos) << err;
+    EXPECT_EQ(err.find("Function 'foo'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 2u) << "one arity, one receiver\n" << err;
+}
+
+TEST(Soundness_BareMethodCalls, ABareCallFromASiblingMethodReportsTheMethodForm) {
+    // The same identity from a sibling method: `other` calling `foo(1)` binds
+    // `S::foo` (declared above it) and reports it as the method it is.
+    const FincRun r = compile(
+        "fun foo(a: int, b: int) <int> { return 200 + a + b; }\n"
+        "struct S {\n"
+        "    pub x <int>,\n"
+        "    pub fun foo(self: &Self, v: int) <int> { return 100 + v; }\n"
+        "    pub fun other(self: &Self, v: int) <int> { let f <int> = foo(1); return v + f; }\n"
+        "}\n"
+        "fun main() <int> { let s <S> = S{x: 0}; return s.other(0); }\n");
+    EXPECT_NE(r.exitCode, 0) << "a bare call with no receiver must be refused";
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("Method 'foo' expects 1 arguments, got 0"), std::string::npos) << err;
+    EXPECT_EQ(err.find("Function 'foo'"), std::string::npos) << err;
+}
+
+TEST(Soundness_BareMethodCalls, ABareCallWithTheWrongReceiverKeepsItsSingleDiagnostic) {
+    // `foo(1, 2)` inside `S::foo`: the arity is right once the receiver is
+    // excluded, so the one diagnostic is the receiver's type -- not an arity
+    // error about a signature nobody wrote.
+    const FincRun r = compile(
+        "struct S {\n"
+        "    pub x <int>,\n"
+        "    pub fun foo(self: &Self, v: int) <int> { let f <int> = foo(1, 2); return v + f; }\n"
+        "}\n"
+        "fun main() <int> { let s <S> = S{x: 0}; return s.foo(0); }\n");
+    EXPECT_NE(r.exitCode, 0) << "an int is no receiver";
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("expected '&Self'"), std::string::npos) << err;
+    EXPECT_EQ(err.find("Function 'foo'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << "one call, one diagnostic\n" << err;
+}
+
+TEST(Soundness_BareMethodCalls, ABareCallToAStaticMethodReportsTheStaticForm) {
+    // `make(1, 2)` inside `S::probe` binds the static `S::make(v: int)`: the
+    // wording matches the `::` spelling's (`Static method`), never `Function`.
+    const FincRun r = compile(
+        "fun make(a: int, b: int) <int> { return 200 + a + b; }\n"
+        "struct S {\n"
+        "    pub x <int>,\n"
+        "    pub static fun make(v: int) <int> { return 100 + v; }\n"
+        "    pub fun probe(self: &Self, v: int) <int> { let f <int> = make(1, 2); return v + f; }\n"
+        "}\n"
+        "fun main() <int> { let s <S> = S{x: 0}; return s.probe(0); }\n");
+    EXPECT_NE(r.exitCode, 0) << "two arguments to a one-parameter static must be refused";
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("Static method 'make' expects 1 arguments, got 2"), std::string::npos)
+        << err;
+    EXPECT_EQ(err.find("Function 'make'"), std::string::npos) << err;
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << "one call, one diagnostic\n" << err;
+}
+
+TEST(Soundness_BareMethodCalls, AFreeCallInsideADifferentlyNamedMethodIsUnaffected) {
+    // No name collision, no method binding: `foo(1, 2)` inside `other` is the
+    // free function and compiles clean.
+    const FincRun r = compile(
+        "fun foo(a: int, b: int) <int> { return 200 + a + b; }\n"
+        "struct S {\n"
+        "    pub x <int>,\n"
+        "    pub fun other(self: &Self, v: int) <int> { let f <int> = foo(1, 2); return v + f; }\n"
+        "}\n"
+        "fun main() <int> { let s <S> = S{x: 0}; return s.other(1); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }

@@ -1,0 +1,16 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_a02: foreach iteration over a generic Buf<int> sums elements.
+// Green on both compilers (finc + finc_stage2).
+struct Buf<T> {
+    items <[T, 3]>
+}
+
+fun main() <noret> {
+    let b <Buf<int>> = Buf::<int>{ items: [1, 2, 3] };
+    let total <int> = 0;
+    foreach (v <int> in b.items) {
+        total += v;
+    }
+    assert_eq_int(total, 6, "buf_iter: foreach sums [1,2,3]");
+}

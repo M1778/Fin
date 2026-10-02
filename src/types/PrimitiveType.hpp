@@ -19,9 +19,9 @@ public:
     // `uint{8}`. All three are the same missing number, and this is where it goes.
     //
     // Not encoded into `name`, and that is the load-bearing half of the decision.
-    // Seven sites compare a type's spelling against a bare name -- `toString() ==
+    // Six sites compare a type's spelling against a bare name -- `toString() ==
     // "auto"` in Type.cpp twice, `"void"` in PointerType.cpp twice,
-    // Analyzer_Decl.cpp:41, PrimitiveType.cpp's `int` -> `float` rule -- and two
+    // Analyzer_Decl.cpp:41 -- and two
     // more use a spelling as a substitution key (StructType.cpp:213,
     // Analyzer_Expr.cpp:1258). A name of `int{64}` would silently fail every one
     // of them, so `name` stays what the base name was and `toString()` is what

@@ -1,0 +1,5 @@
+import { assert_true } from testing::std;
+
+fun main() <noret> {
+    assert_true(1 + 1 == 2, "smoke: arithmetic holds");
+}

@@ -1,0 +1,21 @@
+import { assert_eq_int } from testing::std;
+
+// Pins elided statics: a generic static call with no turbofish takes its type
+// argument from the annotation, from a chained receiver, and from an argument.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+struct Box<T> {
+pub:
+    v <T> = 0,
+    static fun zero() <&Self> { return new Self{}; }
+    static fun of(x: T) <&Self> { return new Self{v: x}; }
+    fun get(self: &Self) <T> { return self.v; }
+}
+
+fun main() <noret> {
+    let z <&Box<int>> = Box::zero();
+    assert_eq_int(z.v, 0, "elided_static: annotation seeds zero");
+    let x <int> = Box::zero().get();
+    assert_eq_int(x, 0, "elided_static: chained call resolves receiver");
+    let a <&Box<int>> = Box::of(7);
+    assert_eq_int(a.v, 7, "elided_static: call infers from argument");
+}

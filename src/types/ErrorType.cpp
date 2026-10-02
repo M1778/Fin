@@ -28,6 +28,12 @@ bool isErrorType(const TypePtr& t) {
         if (isErrorType(f->return_type)) return true;
         for (const auto& p : f->param_types) if (isErrorType(p)) return true;
     }
+    // A union with an alternative that did not resolve: the undefined member
+    // was already reported where it was written, so the alias suppresses like
+    // any other declaration carrying the sentinel.
+    if (auto* u = t->as<UnionType>()) {
+        for (const auto& a : u->alternatives) if (isErrorType(a)) return true;
+    }
     return false;
 }
 

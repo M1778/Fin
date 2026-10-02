@@ -1,0 +1,15 @@
+import { assert_true } from testing::std;
+
+// Pins cast-count peelings: a shift count reads through `cast<T>(...)` layers
+// — including a doubled cast — as the literal it spells, and lowers.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+// Out-of-range counts through casts stay refused and are pinned in
+// test_soundness.cpp, not here (fintest only runs passing programs).
+fun main() <noret> {
+    let a <uint> = cast<uint>(1) << cast<uint>(3);
+    assert_true(a == cast<uint>(8), "cast_peel: shift with cast counts");
+    let b <uint> = cast<uint>(1) << cast<uint>(cast<uint>(3));
+    assert_true(b == cast<uint>(8), "cast_peel: shift with double-cast count peels");
+    let c <ulong> = cast<ulong>(1) << cast<ulong>(2);
+    assert_true(c == cast<ulong>(4), "cast_peel: ulong shift with cast counts");
+}

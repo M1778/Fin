@@ -1,0 +1,16 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_b05: a free generic fn reading an array element out of Buf<T>.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+struct Buf<T> {
+    items <[T, 3]>
+}
+
+fun second<T>(b: Buf<T>) <T> { return b.items[1]; }
+
+fun main() <noret> {
+    let b <Buf<int>> = Buf::<int>{ items: [10, 20, 30] };
+    assert_eq_int(second(b), 20, "free_arr: second() reads items[1]");
+    let bc <Buf<char>> = Buf::<char>{ items: ['a', 'b', 'c'] };
+    assert_eq_int(cast<int>(second(bc)), 98, "free_arr: second() works at char");
+}

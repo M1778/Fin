@@ -1,0 +1,15 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_b02: a free generic identity fn passes a struct through intact.
+// Green on both compilers (finc + finc_stage2).
+struct Box<T> {
+    val <T>
+}
+
+fun ident<T>(a: T) <T> { return a; }
+
+fun main() <noret> {
+    let b <Box<int>> = Box::<int>{ val: 7 };
+    let c <Box<int>> = ident(b);
+    assert_eq_int(c.val, 7, "ident_struct: Box<int> passes through ident");
+}

@@ -1,0 +1,27 @@
+import { assert_eq_int, assert_true } from testing::std;
+
+// Pins narrowed call args: widening applies at the call (short -> int,
+// int -> long), an integer constant converts to a float parameter, and an
+// explicitly narrowed value converts at the call too.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+fun take_long(x: long) <long> { return x; }
+fun take_int(x: int) <int> { return x; }
+fun take_short(x: short) <short> { return x; }
+fun take_float(x: float) <float> { return x; }
+
+fun main() <noret> {
+    let s <short> = 42;
+    let r1 <int> = take_int(s);
+    assert_eq_int(r1, 42, "narrow_call: short widens to int param");
+    let a <int> = 42;
+    let r2 <long> = take_long(a);
+    assert_true(r2 == cast<long>(42), "narrow_call: int widens to long param");
+    let r3 <float> = take_float(42);
+    assert_true(r3 == 42.0, "narrow_call: int constant converts to float param");
+    let wide <long> = 42;
+    let r4 <int> = take_int(cast<int>(wide));
+    assert_eq_int(r4, 42, "narrow_call: explicitly narrowed long converts at call");
+    let n <int> = 7;
+    let r5 <short> = take_short(cast<short>(n));
+    assert_true(r5 == cast<short>(7), "narrow_call: narrowed int converts at call");
+}

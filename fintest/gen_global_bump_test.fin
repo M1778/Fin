@@ -1,0 +1,14 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_c03: a scalar global bumped across calls accumulates.
+// Green on both compilers (finc + finc_stage2); prints converted to asserts.
+let Counter <int> = 0;
+
+fun bump() <noret> { Counter = Counter + 1; }
+
+fun main() <noret> {
+    bump();
+    bump();
+    bump();
+    assert_eq_int(Counter, 3, "global_bump: three bumps accumulate to 3");
+}

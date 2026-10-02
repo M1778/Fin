@@ -38,11 +38,15 @@ module call
 
 Imported generic structs can instantiate in the root program. Ordinary imported
 Fin function bodies are not emitted into that program. Resolving the function's
-signature does not make the call executable. This example checks but cannot build:
+signature does not make the call executable. This example builds and runs:
 
-```fin build-error
+```fin
 import { println_str } from stdio::std;
 fun main() <noret> { println_str("hello"); }
+```
+
+```output
+hello
 ```
 
 For a small executable, keep ordinary application functions in the root source

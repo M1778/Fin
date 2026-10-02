@@ -1,4 +1,5 @@
 #include "../SemanticAnalyzer.hpp"
+#include "../EventPayloads.hpp"
 #include "../../ast/StructuralWalk.hpp"
 #include "../../ast/types/Attribute.hpp"
 #include "../../types/TypeImpl.hpp"
@@ -24,11 +25,13 @@ namespace {
 using ExtentRead = ConstantRead;
 constexpr auto readExtent = readConstant;
 
-// The three unsigned types Analyzer_Core registers. `char` is not among them:
-// whether it is signed is undecided, so it accepts a negative constant rather
-// than having this function invent the answer.
+// The unsigned integer spellings the analyzer registers. `char` is not among
+// them: whether it is signed is undecided, so it accepts a negative constant
+// rather than having this function invent the answer.
 bool isUnsignedIntegerName(const std::string& n) {
-    return n == "uint" || n == "ulong" || n == "ushort";
+    return n == "uint" || n == "ulong" || n == "ushort" ||
+           n == "u8" || n == "u16" || n == "u32" || n == "u64" ||
+           n == "usize" || n == "size_t";
 }
 
 bool isSignedIntegerName(const std::string& n) {
@@ -142,6 +145,27 @@ SemanticAnalyzer::SemanticAnalyzer(DiagnosticEngine& d, bool debug)
     currentScope->defineType("uint", std::make_shared<PrimitiveType>("uint"));
     currentScope->defineType("ulong", std::make_shared<PrimitiveType>("ulong"));
     currentScope->defineType("ushort", std::make_shared<PrimitiveType>("ushort"));
+
+    // The short integer and float spellings. Widths and signs read off the one
+    // scalar table (types/Layout.hpp), which already carries them so that
+    // `u8` resolves to a width rather than to a second table somewhere else;
+    // registering the names is what makes them writable in annotations. What
+    // checking they get -- widening, narrowing, the negative-constant guard --
+    // is asked of that table (scalarOf), not of the spelling, so no rule below
+    // restates a width.
+    currentScope->defineType("u8", std::make_shared<PrimitiveType>("u8"));
+    currentScope->defineType("i8", std::make_shared<PrimitiveType>("i8"));
+    currentScope->defineType("u16", std::make_shared<PrimitiveType>("u16"));
+    currentScope->defineType("i16", std::make_shared<PrimitiveType>("i16"));
+    currentScope->defineType("u32", std::make_shared<PrimitiveType>("u32"));
+    currentScope->defineType("i32", std::make_shared<PrimitiveType>("i32"));
+    currentScope->defineType("u64", std::make_shared<PrimitiveType>("u64"));
+    currentScope->defineType("i64", std::make_shared<PrimitiveType>("i64"));
+    currentScope->defineType("f32", std::make_shared<PrimitiveType>("f32"));
+    currentScope->defineType("f64", std::make_shared<PrimitiveType>("f64"));
+    currentScope->defineType("usize", std::make_shared<PrimitiveType>("usize"));
+    currentScope->defineType("isize", std::make_shared<PrimitiveType>("isize"));
+    currentScope->defineType("size_t", std::make_shared<PrimitiveType>("size_t"));
     
     // The two dynamic types. Builtins because the corpus uses them in files with no
     // imports at all -- `nullifier.fin:34` and `literal_struct.fin:4` write `any`,
@@ -186,6 +210,22 @@ SemanticAnalyzer::SemanticAnalyzer(DiagnosticEngine& d, bool debug)
     currentScope->defineType("$struct", std::make_shared<PrimitiveType>("$struct"));
     currentScope->defineType("$interface", std::make_shared<PrimitiveType>("$interface"));
     currentScope->defineType("$enum_member", std::make_shared<PrimitiveType>("$enum_member"));
+
+    // `quote`, opaque. The layout projections (`compiler.layout.pointer_map_quote`)
+    // and the provider slots return one, so the signature is nameable before
+    // wave-4 steps 11-13 build quote values: resolving `<quote>` in a signature
+    // is not evaluating it, and no quote value reaches any later pass yet. A
+    // PrimitiveType for the `$` family's reason -- name equality is the behaviour
+    // needed, and nothing treats "is a PrimitiveType" as "is a number".
+    currentScope->defineType("quote", std::make_shared<PrimitiveType>("quote"));
+
+    // `function`, opaque, for the `$` family's and `quote`'s reason: the
+    // function_entry/function_exit payloads name it
+    // (docs/compiler-api.md §3.2), so a handler must be able to spell it in
+    // a signature. Resolving `<function>` is not carrying a value of it;
+    // what a handler receives at a fire point is wave-4 step 17's firing,
+    // which is not decided by registering the name.
+    currentScope->defineType("function", std::make_shared<PrimitiveType>("function"));
 }
 
 SemanticAnalyzer::~SemanticAnalyzer() {}
@@ -582,15 +622,98 @@ void SemanticAnalyzer::error(ASTNode& node, const std::string& msg) {
     // is the one outcome worse than a duplicate. See SemanticAnalyzer::QuietPass for
     // why silence is sound at the two sites that use it.
     if (quietDepth) return;
-    diag.reportError(node.loc, msg);
+    if (activeAttr_.active)
+        diag.reportError(node.loc, attributedMessage(msg), engineAttribution());
+    else
+        diag.reportError(node.loc, msg);
     hasError = true;
 }
 
 void SemanticAnalyzer::error(ASTNode& node, const std::string& msg,
                              const std::string& help) {
     if (quietDepth) return;
-    diag.reportError(node.loc, msg, help);
+    if (activeAttr_.active)
+        diag.reportError(node.loc, attributedMessage(msg), help, engineAttribution());
+    else
+        diag.reportError(node.loc, msg, help);
     hasError = true;
+}
+
+std::string SemanticAnalyzer::attributedMessage(const std::string& msg) const {
+    if (!activeAttr_.active) return msg;
+    return msg + " [injected by handler '" + activeAttr_.handler + "' for event '" +
+           activeAttr_.event + "' at '" + activeAttr_.detail + "' (line " +
+           std::to_string(activeAttr_.line) + ")]";
+}
+
+DiagnosticAttribution SemanticAnalyzer::engineAttribution() const {
+    DiagnosticAttribution attr;
+    if (activeAttr_.active) {
+        attr.handler = activeAttr_.handler;
+        attr.event = activeAttr_.event;
+    }
+    return attr;
+}
+
+void SemanticAnalyzer::warning(ASTNode& node, const std::string& msg) {
+    if (quietDepth) return;
+    diag.reportWarning(node.loc, attributedMessage(msg));
+}
+
+void SemanticAnalyzer::note(ASTNode& node, const std::string& msg) {
+    if (quietDepth) return;
+    diag.reportNote(node.loc, attributedMessage(msg));
+}
+
+// Wave-4 step 19: the check half of splice-then-check. Each chunk's
+// statements are walked in a child of the anchor's recorded scope with that
+// chunk's attribution active, so a diagnostic in generated code names the
+// handler that wrote it and the event point that fired it. The child scope
+// keeps what the check defines from leaking into a scope the walk already
+// left; the saved stack, current scope, return-type context and type hint
+// are restored afterwards, so the check is invisible to whatever follows.
+void SemanticAnalyzer::checkInjectedChunks(const std::vector<events::InjectedChunk>& chunks) {
+    if (chunks.empty()) return;
+    const auto savedStack = scopeStack;
+    const auto savedScope = currentScope;
+    const auto savedRet = context.currentFuncReturnType;
+    const ASTNode* savedHintFor = typeHintFor;
+    const auto savedHint = typeHint;
+    context.currentFuncReturnType = nullptr;
+    typeHintFor = nullptr;
+    typeHint = nullptr;
+    injectedWalk_ = true;
+    for (const auto& chunk : chunks) {
+        const auto it = w5_scopes_.find(chunk.anchor);
+        if (it != w5_scopes_.end() && !it->second.empty()) {
+            scopeStack = it->second;
+            currentScope = scopeStack.back();
+        } else {
+            // The anchor is recorded from this same tree, so a missing scope
+            // is the compiler surprising itself: check against globals rather
+            // than skipping the check.
+            scopeStack.clear();
+            scopeStack.push_back(globalScope);
+            currentScope = globalScope;
+        }
+        enterScope();
+        activeAttr_.handler = chunk.handler;
+        activeAttr_.event = chunk.event;
+        activeAttr_.detail = chunk.detail;
+        activeAttr_.line = chunk.line;
+        activeAttr_.active = true;
+        for (auto* stmt : chunk.inserted) {
+            if (stmt) stmt->accept(*this);
+        }
+        activeAttr_.active = false;
+        exitScope();
+    }
+    injectedWalk_ = false;
+    scopeStack = savedStack;
+    currentScope = savedScope;
+    context.currentFuncReturnType = savedRet;
+    typeHintFor = savedHintFor;
+    typeHint = savedHint;
 }
 
 bool SemanticAnalyzer::checkType(ASTNode& node, std::shared_ptr<Type> actual, std::shared_ptr<Type> expected) {
@@ -845,8 +968,10 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
             }
 
             for (auto& method : s->methods) {
-                if (auto sig = buildMethodSignature(*method))
-                    structType->defineMethod(method->name, sig);
+                if (auto sig = buildMethodSignature(*method)) {
+                    structType->defineMethod(method->name, sig, method->is_public);
+                    recordMethodGenerics(s->name, method->name, method->generic_params);
+                }
             }
             for (auto& op : s->operators) {
                 if (auto sig = buildOperatorSignature(*op, structType))
@@ -897,8 +1022,10 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
             }
 
             for (auto& method : cls->methods) {
-                if (auto sig = buildMethodSignature(*method))
-                    structType->defineMethod(method->name, sig);
+                if (auto sig = buildMethodSignature(*method)) {
+                    structType->defineMethod(method->name, sig, method->is_public);
+                    recordMethodGenerics(cls->name, method->name, method->generic_params);
+                }
             }
             for (auto& op : cls->operators) {
                 if (auto sig = buildOperatorSignature(*op, structType))
@@ -935,8 +1062,10 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
                 }
             }
             for (auto& method : iface->methods) {
-                if (auto sig = buildMethodSignature(*method))
-                    ifaceType->defineMethod(method->name, sig);
+                if (auto sig = buildMethodSignature(*method)) {
+                    ifaceType->defineMethod(method->name, sig, method->is_public);
+                    recordMethodGenerics(iface->name, method->name, method->generic_params);
+                }
             }
             for (auto& op : iface->operators) {
                 if (auto sig = buildOperatorSignature(*op, ifaceType))
@@ -1004,8 +1133,10 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
                 }
             }
             for (auto& method : ib->methods) {
-                if (auto sig = buildMethodSignature(*method, structType))
-                    structType->defineMethod(method->name, sig);
+                if (auto sig = buildMethodSignature(*method, structType)) {
+                    structType->defineMethod(method->name, sig, method->is_public);
+                    recordMethodGenerics(structType->name, method->name, method->generic_params);
+                }
             }
             for (auto& op : ib->operators) {
                 if (auto sig = buildOperatorSignature(*op, structType))
@@ -1093,6 +1224,7 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
         currentScope->define({name, std::make_shared<FunctionType>(paramTypes, retType,
                                                                    false, paramDefaults),
                               false, true});
+        if (generics) recordFunctionGenerics(name, *generics);
         debugLog(fg(fmt::color::gray), "      [Hoist] Registered '{}' at file scope\n", name);
     }
 }
@@ -1107,10 +1239,75 @@ void SemanticAnalyzer::setExternalGlobalScope(const std::shared_ptr<Scope>& scop
 void SemanticAnalyzer::visit(Program& node) {
     refuseMisplacedGlobals(node);
     auto prevHoisted = std::move(hoistedTypes_);
+    // Wave-4 step 15, Collect then Arm (docs/compiler-api.md §3.4). Collection
+    // runs before anything is analysed, so the subscription table exists before
+    // any body that could fire it; arming consumes every top-level enable next,
+    // so the armed set is complete before bodies are walked either.
+    auto report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
+    events::collectProgramHandlers(node, module_path_, event_registry_, report);
+    events::armProgramHandlers(node, event_registry_, report);    // Wave-4 step 17: W6's payload match, before anything is analysed (§3.8).
+    // W6 events only; W5's check owns W5's events.
+    events::checkW6HandlerPayloads(node, event_registry_, report);
+    // Wave-4 step 17 (W5 floor): the same pre-pass for W5's two events. The
+    // refused set travels to the firing pass so one mismatch is diagnosed
+    // once, never as a check-then-fire cascade.
+    w5_refused_ = events::checkW5HandlerPayloads(node, event_registry_, report);
+    // Wave-4 step 17 (W7): the same pre-pass for variable_scope_exit. W7's
+    // event only; W5's and W6's checks own theirs, so one handler is
+    // diagnosed once no matter how many events it subscribes.
+    w7_refused_ = events::checkW7HandlerPayloads(node, event_registry_, report);
+    // Wave-4 step 20 (W10): the same pre-pass for loop_back_edge. W10's
+    // event only; older checks own theirs, so one handler is diagnosed
+    // once no matter how many events it subscribes.
+    w10_refused_ = events::checkW10HandlerPayloads(node, event_registry_, report);
     hoistTopLevelSignatures(node);
+    // The program being walked, for the inline struct_layout_finalised fire.
+    w5_program_ = &node;
     for (auto& stmt : node.statements) {
         stmt->accept(*this);
     }
+    w5_program_ = nullptr;
+    // Deferred variable_declared firing: splicing mid-walk would mutate the
+    // vector being walked, so the accumulated points fire here, after every
+    // body is analysed. struct_layout_finalised already fired inline.
+    // Step 19: warnings and notes have their own reporters so a handler's
+    // `compiler.diag.warning`/`note` never fails the build; chunks carry the
+    // spliced batches into the attributed check below.
+    auto warnReport = [this](ASTNode& at, const std::string& msg) { warning(at, msg); };
+    auto noteReport = [this](ASTNode& at, const std::string& msg) { note(at, msg); };
+    std::vector<events::InjectedChunk> w5chunks;
+    for (auto& fired : events::fireW5Events(node, event_registry_, w5_points_, w5_refused_,
+                                            report, warnReport, noteReport, &w5chunks))
+        w5_fired_.push_back(std::move(fired));
+    checkInjectedChunks(w5chunks);
+    // Wave-4 step 17 (W7): variable_scope_exit fires deferred, in the same
+    // shape as variable_declared: the walk accumulated one point per
+    // variable per exit path, and splicing here never mutates the vector
+    // being walked. After W5's firing: anchors are heap pointers, so earlier
+    // inserts shift nothing they hold. Injected code does not fire events
+    // (§3.3): the check walk above ran with injectedWalk_ set, during which
+    // every hook below stayed silent.
+    for (auto& fired : events::fireW7Events(node, event_registry_, moved_.points(),
+                                            w7_refused_, report))
+        w7_fired_.push_back(std::move(fired));
+    // Wave-4 step 20 (W10): loop_back_edge fires deferred, after W7. The walk
+    // accumulated one latch point per loop statement; prepending to body
+    // blocks never mutates the vector being walked (the walk is over), and
+    // each point anchors its own block, so firing order shifts no other
+    // point's site. No codegen support is needed: the spliced quote is
+    // ordinary Fin lowered by the existing loop lowering. The event fires per
+    // static edge, not per iteration, so an infinite-loop program terminates
+    // analysis here exactly as a bounded one does.
+    for (auto& fired : events::fireW10Events(node, event_registry_, w10_points_,
+                                            w10_refused_, report))
+        w10_fired_.push_back(std::move(fired));
+    // Wave-5 slice 0: the protocol claim registry's deferred refusal. A lone
+    // well-formed claimant per slot is recognized and recorded, but
+    // replacement is not lowered yet -- so it fails here, naming the claim
+    // site, rather than compiling as if the library took over. After all
+    // firing so every claimant in the module is collected; slots with zero
+    // claimants report nothing and the default lowering stands.
+    reportSingleProtocolClaims();
     dropConsumedImports(node);
     hoistedTypes_ = std::move(prevHoisted);
 }
@@ -1188,5 +1385,40 @@ void SemanticAnalyzer::dropConsumedImports(Program& node) {
 
 void SemanticAnalyzer::visit(TypeNode& node) { resolveTypeFromAST(&node); }
 void SemanticAnalyzer::visit(FunctionTypeNode& node) { resolveTypeFromAST(&node); }
+
+void SemanticAnalyzer::recordFunctionGenerics(
+    const std::string& name, const std::vector<std::unique_ptr<GenericParam>>& params) {
+    auto& slot = functionGenericOrder_[name];
+    slot.clear();
+    for (auto& p : params) slot.push_back(p->name);
+}
+
+void SemanticAnalyzer::recordMethodGenerics(
+    const std::string& structName, const std::string& methodName,
+    const std::vector<std::unique_ptr<GenericParam>>& params) {
+    auto& slot = methodGenericOrder_[structName + "::" + methodName];
+    slot.clear();
+    for (auto& p : params) slot.push_back(p->name);
+}
+
+const std::vector<std::string>* SemanticAnalyzer::lookupFunctionGenerics(
+    const std::string& name) const {
+    auto it = functionGenericOrder_.find(name);
+    return it != functionGenericOrder_.end() ? &it->second : nullptr;
+}
+
+const std::vector<std::string>* SemanticAnalyzer::lookupMethodGenerics(
+    const std::shared_ptr<StructType>& structType, const std::string& methodName) const {
+    for (auto cur = structType; cur;) {
+        auto it = methodGenericOrder_.find(cur->name + "::" + methodName);
+        if (it != methodGenericOrder_.end()) return &it->second;
+        std::shared_ptr<StructType> next;
+        for (auto& p : cur->parents) {
+            if (auto ps = std::dynamic_pointer_cast<StructType>(p)) { next = ps; break; }
+        }
+        cur = next;
+    }
+    return nullptr;
+}
 
 }

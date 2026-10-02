@@ -1,0 +1,15 @@
+import { assert_eq_int } from testing::std;
+
+// Pins gen_e01: nested generic struct (Result<Result<int>>) field access.
+// Green on both compilers (finc + finc_stage2).
+struct Result<T> {
+    value <T>,
+    is_error <bool>
+}
+
+fun main() <noret> {
+    let inner <Result<int>> = Result::<int>{ value: 42, is_error: false };
+    let outer <Result<Result<int>>> = Result::<Result<int>>{ value: inner, is_error: false };
+    assert_eq_int(outer.value.value, 42, "nested_result: inner value reads back");
+    assert_eq_int(cast<int>(outer.value.is_error), 0, "nested_result: inner flag reads back");
+}

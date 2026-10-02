@@ -545,7 +545,13 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // member was resolved and discarded, so reading a declared member through an
     // interface type reported "has no member"
     // (Soundness_Interfaces.AnInterfaceMemberIsReadableThroughTheInterfaceType).
-    EXPECT_EQ(t.samples, 51)
+    // 51 -> 53 on 2026-09-26: Wave-4 Round 3 closes Q12 with two pins.
+    // `union_pointer_map.fin` is the union half -- a struct field of union type is
+    // refused with the map's diagnostic rather than a zero map of the first member.
+    // `interface_pointer_map.fin` is the interface half -- a struct field of
+    // interface type contributes exactly one traced slot, so a provider over it
+    // compiles.
+    EXPECT_EQ(t.samples, 53)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";

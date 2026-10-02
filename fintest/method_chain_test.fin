@@ -1,0 +1,24 @@
+import { assert_eq_int } from testing::std;
+
+// Pins p07: chained method calls returning &Self (a.add(2).add(3)) plus a
+// call on a temporary (a.add(10).get()).
+// Green on both compilers (finc + finc_stage2); bare prints converted to asserts.
+struct Acc {
+    val <int>,
+
+    fun add(self: &Self, x: int) <&Self> {
+        return new Self{ val: self.val + x };
+    }
+
+    fun get(self: &Self) <int> {
+        return self.val;
+    }
+}
+
+fun main() <noret> {
+    let a <Acc> = Acc{ val: 1 };
+    let b <&Acc> = a.add(2);
+    let c <&Acc> = b.add(3);
+    assert_eq_int(c.get(), 6, "chain: 1+2+3 accumulates");
+    assert_eq_int(a.add(10).get(), 11, "chain: temporary adds without aliasing");
+}

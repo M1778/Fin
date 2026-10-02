@@ -1,0 +1,20 @@
+//@ normative
+//@ ok
+// Q12's interface half: a struct field of interface type contributes exactly
+// one pointer to the type's map -- the data word of the backend's
+// `{data, vtable}` pair (ADR 0019) -- whose pointee is the interface. The
+// provider below emits the map; it compiles because the map is answerable,
+// with one entry at the field's offset and the vtable word absent rather than
+// marked (a collector must not follow it).
+interface I { pub fun m() <int>; }
+
+struct S { pub h <I>, pub x <int>, }
+
+#[use(compiler)]
+#[use(compiler.components.layout)]
+#[provides(type_metadata)]
+@special(pub) meta(s: $struct) <quote> {
+  return compiler.layout.pointer_map_quote(s);
+}
+
+fun main() <int> { return 0; }
