@@ -4817,6 +4817,21 @@ pub struct Checker {
                   // `Box<int>`), beside the as-written annotation the
                   // backend's per-instantiation gate reads.
                   expr.resolved_spelling = self.chk_resolve_generic_spelling(expr.type_annotation);
+                  // A `$struct`-typed value in instantiation position
+                  // (`st{}` where `st: $struct`): the concrete struct is
+                  // known only at compile time, so this accepts without
+                  // field checks and types the instance as `any` (C++
+                  // visit(StructInstantiation&)). Unknown names keep the
+                  // old quiet path, never a new diagnostic.
+                  if (expr.type_annotation != null && chk_strlen(expr.type_annotation) > cast<ulong>(0)) {
+                      let si_ann <string> = chk_trim(expr.type_annotation);
+                      if (!self.chk_is_known_type_name(si_ann) && self.current_scope.has(si_ann)) {
+                          let si_sym <Symbol> = self.current_scope.lookup(si_ann);
+                          if (chk_str_eq(si_sym.type_name, "$struct")) {
+                              return "any";
+                          }
+                      }
+                  }
                   return self.resolve_type(expr.type_annotation);
               }
               if (chk_str_eq(expr.name, "@Alloc") || chk_str_eq(expr.name, "Alloc")) {
@@ -5548,6 +5563,9 @@ pub struct Checker {
                   let bind_names <[string]> = new [string, 64]{};
                   let bind_vals <[string]> = new [string, 64]{};
                   let bind_n <int> = 0;
+                  // `$struct` value-handle pairs for return seeding below.
+                  let seed_count <int> = 0;
+                  let seed_name <string> = "";
                   let is_free_shape <bool> = !hit_method && !call_recv_skip && !is_mod_call &&
                       !is_coll_method && chk_strchr(expr.name, 58) == null &&
                       chk_str_eq(self.struct_prefix_of(expr.name), "");
@@ -5664,12 +5682,70 @@ pub struct Checker {
                                       }
                                   }
                               }
+                              // A `$struct` parameter receiving a struct
+                              // literal counts a value-handle pair (C++
+                              // checkGenericCall's `$struct` seeding): the
+                              // literal marker names its stashed
+                              // declaration. Counted, not bound yet: one
+                              // unambiguous handle seeds an unbound bare
+                              // return below, several stay unbound.
+                              if (chk_str_eq(chk_trim(psegs[si]), "$struct") &&
+                                  actual_arg.kind == ast_prototype_literal() &&
+                                  actual_arg.type_annotation != null &&
+                                  chk_str_eq(actual_arg.type_annotation, "$struct") &&
+                                  actual_arg.str_val != null &&
+                                  chk_strlen(actual_arg.str_val) > cast<ulong>(0)) {
+                                  if (self.global_scope.has(actual_arg.str_val)) {
+                                      let seedsym <Symbol> = self.global_scope.lookup(actual_arg.str_val);
+                                      if (seedsym.kind == sym_struct()) {
+                                          seed_count = seed_count + 1;
+                                          seed_name = actual_arg.str_val;
+                                      }
+                                  }
+                              }
                           }
                       }
                       ai = ai + 1;
                       arg = arg.right;
                   }
                   delete psegs;
+                  // One unambiguous `$struct` handle seeds an unbound bare
+                  // return (C++ checkGenericCall's structLiteralTypes_
+                  // seeding): `make_default(struct { ... })` types the call
+                  // as the literal's struct, which is the only thing saying
+                  // which members the result has. Fills only a return
+                  // parameter nothing bound yet (a turbofish seed or an
+                  // argument binding wins by first-binding-wins) and only
+                  // under a dynamic bound (`<T: int>` stays unbound: a
+                  // struct is not one of those, and the call-site bound
+                  // check owns that refusal). Several handles stay unbound
+                  // rather than guessed.
+                  if (seed_count == 1 && bind_n > 0 && seed_name != null &&
+                      chk_strlen(seed_name) > cast<ulong>(0) &&
+                      self.current_scope.has(expr.name)) {
+                      let seed_sym <Symbol> = self.current_scope.lookup(expr.name);
+                      let seed_rt <string> = chk_trim(self.resolve_type(seed_sym.type_name));
+                      if (self.chk_is_bare_word(seed_rt)) {
+                          let sk <int> = 0;
+                          while (sk < bind_n) {
+                              if (chk_str_eq(bind_names[sk], seed_rt) &&
+                                  (bind_vals[sk] == null || chk_strlen(bind_vals[sk]) == cast<ulong>(0))) {
+                                  let seed_bound <string> = self.generic_bound_of(expr.name, seed_rt);
+                                  if (chk_strlen(seed_bound) == cast<ulong>(0)) {
+                                      bind_vals[sk] = seed_name;
+                                  } else {
+                                      let seed_base <string> = self.bound_base_word(seed_bound);
+                                      if (chk_str_eq(seed_base, "any") || chk_str_eq(seed_base, "object") ||
+                                          chk_str_eq(seed_base, "Struct")) {
+                                          bind_vals[sk] = seed_name;
+                                      }
+                                  }
+                                  break;
+                              }
+                              sk = sk + 1;
+                          }
+                      }
+                  }
                   // The `let` narrowing check observes whether this call
                   // substituted its return: receiver type arguments count,
                   // and any bound parameter (turbofish seed or argument
@@ -6673,7 +6749,13 @@ pub struct Checker {
                           starts_word = true;
                       }
                       delete fch;
-                      if (starts_word && !self.is_bound_name_known(w, pnames, pcount)) {
+                      // `implements` introduces an inline bound (`T: any
+                      // implements Struct`); it is not a type name. C++
+                      // carries it on the type node's implements list at
+                      // the one choke point every spelling flows through
+                      // (resolveTypeUnwrapped) and never resolves it as a
+                      // type, so neither does this word scan.
+                      if (starts_word && !chk_str_eq(w, "implements") && !self.is_bound_name_known(w, pnames, pcount)) {
                           let b <Buffer> = new_buffer(64);
                           b.write_string("Undefined type '");
                           b.write_string(w);
@@ -6738,7 +6820,8 @@ pub struct Checker {
               chk_str_eq(w, "ulong") || chk_str_eq(w, "short") || chk_str_eq(w, "ushort") ||
               chk_str_eq(w, "float") || chk_str_eq(w, "double") || chk_str_eq(w, "bool") ||
               chk_str_eq(w, "char") || chk_str_eq(w, "string") || chk_str_eq(w, "void") ||
-              chk_str_eq(w, "auto") || chk_str_eq(w, "any") || chk_str_eq(w, "noret") ||
+              chk_str_eq(w, "auto") || chk_str_eq(w, "any") || chk_str_eq(w, "object") ||
+              chk_str_eq(w, "Struct") || chk_str_eq(w, "noret") ||
               chk_str_eq(w, "Self") || chk_str_eq(w, "Castable") || chk_str_eq(w, "u8") || chk_str_eq(w, "i8") ||
               chk_str_eq(w, "u16") || chk_str_eq(w, "i16") || chk_str_eq(w, "u32") ||
               chk_str_eq(w, "i32") || chk_str_eq(w, "u64") || chk_str_eq(w, "i64") ||
@@ -6971,6 +7054,70 @@ pub struct Checker {
               gi = gi + 1;
           }
           return 0;
+      }
+
+      // The declared bound of one generic parameter (`any implements
+      // Struct` for T in `fun f<T: any implements Struct>`), "" when the
+      // parameter is unbound or the declaration is unknown. Reads the
+      // same generic-scope registry lookup_generic_pnames does.
+      fun generic_bound_of(self: &Self, fn_name: string, pname: string) <string> {
+          if (fn_name == null || pname == null || self.gen_scope_names == null) { return ""; }
+          let gi <int> = 0;
+          while (gi < self.gen_count) {
+              if (chk_str_eq(self.gen_scope_names[gi], fn_name)) {
+                  let segs <[string]> = new [string, 64]{};
+                  let scount <int> = self.split_generic_segs(self.gen_scope_params[gi], segs);
+                  let si <int> = 0;
+                  while (si < scount) {
+                      let seg <string> = segs[si];
+                      let cpos <int> = self.bound_colon_pos(seg);
+                      if (cpos >= 0) {
+                          let nm <string> = chk_trim(substr(seg, 0, cpos));
+                          if (chk_str_eq(nm, pname)) {
+                              let slen <int> = cast<int>(chk_strlen(seg));
+                              let bound <string> = chk_trim(substr(seg, cpos + 1, slen - cpos - 1));
+                              delete segs;
+                              return bound;
+                          }
+                      }
+                      si = si + 1;
+                  }
+                  delete segs;
+                  return "";
+              }
+              gi = gi + 1;
+          }
+          return "";
+      }
+
+      // First word of a bound (`any` in `any implements Struct`), "" when
+      // the bound starts outside a word. `$` rides with the word like the
+      // bound scan does.
+      fun bound_base_word(self: &Self, bound: string) <string> {
+          if (bound == null) { return ""; }
+          let b <string> = chk_trim(bound);
+          let blen <int> = cast<int>(chk_strlen(b));
+          if (blen <= 0) { return ""; }
+          let fch <string> = substr(b, 0, 1);
+          let fcs <[char]> = to_chars(fch);
+          let f <char> = fcs[0];
+          delete fcs;
+          if (!((f >= 'a' && f <= 'z') || (f >= 'A' && f <= 'Z') || f == '_' || f == '$')) {
+              return "";
+          }
+          let bi <int> = 1;
+          while (bi < blen) {
+              let cs <[char]> = to_chars(substr(b, bi, 1));
+              let c <char> = cs[0];
+              delete cs;
+              if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '$') {
+                  bi = bi + 1;
+              } else {
+                  break;
+              }
+          }
+          return substr(b, 0, bi);
       }
 
       // True for a bare type word (`T`, `int`): none of the composite

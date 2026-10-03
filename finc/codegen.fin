@@ -9812,6 +9812,15 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         return call_res;
     }
     if (n.kind == ast_prototype_literal()) {
+        // A `struct { ... }` literal marker (the parser tags it `$struct`
+        // and stashes its declaration top-level for the checker): the value
+        // is a compile-time type handle, not a runtime prototype, so the
+        // prototype allocation below must not silently build one for it.
+        if (n.type_annotation != null && cg_str_eq(n.type_annotation, "$struct")) {
+            cg_dprintf(2, "codegen: a 'struct { ... }' literal value is not lowered yet\n");
+            refuse_and_poison(ctx);
+            return null;
+        }
         let count <int> = 0;
         let cur <&AstNode> = n.left;
         while (cur != null) {

@@ -974,6 +974,27 @@ TEST(Soundness_Layout, APointerArrayFieldsSlotsAreFlattenedIntoTheOuterMap) {
     EXPECT_EQ(l.pointers[1].offset, 16u);
 }
 
+TEST(Soundness_Layout, APrototypeFieldHasTwoBufferSlots) {
+    // A prototype is `{ [K], [V] }`: the keys' dynamic array beside the
+    // values' (the backend's representation, derived from
+    // stdlib/prototypes.fin's `.0` and `.1`). Two `{ptr, len}` pairs, four
+    // words: each pair's buffer word traces exactly as a dynamic array's
+    // does, and the elements' own pointers are dynamic-length with no static
+    // offsets and are not traced.
+    auto s = typeFromSource("struct S { pub m <{string, int}>, }\n", "S");
+    ASSERT_TRUE(s != nullptr);
+    LayoutEngine e;
+    const TypeLayout l = must(e.layoutOf(s));
+    EXPECT_EQ(l.size, 32u);
+    EXPECT_EQ(l.align, 8u);
+    ASSERT_EQ(l.fields.size(), 1u);
+    EXPECT_EQ(l.fields[0].offset, 0u);
+    EXPECT_EQ(l.fields[0].size, 32u);
+    ASSERT_EQ(l.pointers.size(), 2u);
+    EXPECT_EQ(l.pointers[0].offset, 0u);
+    EXPECT_EQ(l.pointers[1].offset, 16u);
+}
+
 TEST(Soundness_Layout, AFixedArrayOfAStructWithNoLayoutIsRefusedThroughTheField) {
     auto s = typeFromSource("interface I { pub fun f() <int>; }\n"
                             "struct S { pub xs <[I, 2]>, }\n", "S");

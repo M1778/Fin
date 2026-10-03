@@ -1915,9 +1915,6 @@ public:
             return "field '" + fieldPath + "' holds a union ('" + type.unionAlias +
                    "'), which has no single pointer map: which alternative a value "
                    "holds is known only at run time";
-        if (type.isPrototype())
-            return "field '" + fieldPath + "' holds a prototype, which has no "
-                   "static field list to lay out";
         if (type.isEnum()) {
             // Per-variant precise pointer maps: each variant's payload lays out
             // separately (discriminant + payload layout per variant), so a
@@ -1986,9 +1983,26 @@ public:
             case CgType::Kind::Float:
             case CgType::Kind::Void:
                 return "";
-            case CgType::Kind::Prototype:
-                return "field '" + fieldPath + "' holds a prototype, which has no "
-                       "static field list to lay out";
+            case CgType::Kind::Prototype: {
+                // A `prototype<K, V>` is `{ [K], [V] }` -- the keys' dynamic
+                // array beside the values' (see CgType::keys): two `{ptr, len}`
+                // pairs, four words. Each pair's buffer word traces exactly as
+                // a dynamic-array field does (ADR 0025); the elements' own
+                // pointers are dynamic-length with no static offsets and are
+                // not traced.
+                if (!type.keys || !type.values || !type.keys->llvmType ||
+                    !type.values->llvmType)
+                    return "field '" + fieldPath +
+                           "' holds a prototype this file did not lower";
+                const uint64_t keysSize =
+                    module_.getDataLayout().getTypeAllocSize(type.keys->llvmType);
+                if (keysSize > UINT64_MAX - base)
+                    return "field '" + fieldPath +
+                           "' has a pointer map that does not fit in 64 bits";
+                out.push_back(MetaEntry{base, 0, 1});
+                out.push_back(MetaEntry{base + keysSize, 0, 1});
+                return "";
+            }
             case CgType::Kind::Struct: {
                 const StructInfo* info = type.structInfo;
                 if (!info || !info->llvmType)

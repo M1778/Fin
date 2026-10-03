@@ -13907,15 +13907,19 @@ BACKEND_TEST(Soundness_TypeMetadata, NoProviderEmitsNothing) {
 }
 
 BACKEND_TEST(Soundness_TypeMetadata, AnUnmappableFieldIsRefusedByName) {
-    // The backend invariant: a field the map cannot describe -- a prototype
-    // has no static field list to lay out -- refuses naming the struct and
-    // the field, never emits a guess. (`any` served here until P-A1 mapped
-    // it as an opaque blob per ADR 0034; a prototype is the still-unmapped
-    // sibling that keeps this refusal honest.)
+    // The backend invariant: a field the map cannot describe -- a gate inside
+    // a gate, an enum variant reaching a nested variant-gated pointer that
+    // would need two discriminants traced at once -- refuses naming the struct
+    // and the field, never emits a guess. (`any` served here until P-A1 mapped
+    // it as an opaque blob per ADR 0034, and a prototype until its two buffer
+    // words mapped per ADR 0025; the nested gate is the still-unmapped sibling
+    // that keeps this refusal honest.)
     // First that the struct lowers cleanly without the provider, so the
     // refusal below is the metadata's and nothing else's.
     const std::string body =
-        "struct Box { pub v <{string, int}>, }\n"
+        "enum Inner { A(&int), B = 2, }\n"
+        "enum Outer { X(Inner), Y = 2, }\n"
+        "struct GateBox { pub gate <Outer>, }\n"
         "fun main() <noret> { }\n";
     const fs::path obj = uniqueTempPath("fin_meta_ok", ".o");
     const Compiled plain = compileOnly(body, obj);
@@ -13927,8 +13931,8 @@ BACKEND_TEST(Soundness_TypeMetadata, AnUnmappableFieldIsRefusedByName) {
     const Compiled refused = compileOnly(std::string(kTypeMetadataProvider) + body, bad);
     EXPECT_NE(refused.exitCode, 0) << refused.why();
     EXPECT_NE(refused.err.find("type_metadata"), std::string::npos) << refused.why();
-    EXPECT_NE(refused.err.find("Box"), std::string::npos) << refused.why();
-    EXPECT_NE(refused.err.find("v"), std::string::npos) << refused.why();
+    EXPECT_NE(refused.err.find("GateBox"), std::string::npos) << refused.why();
+    EXPECT_NE(refused.err.find("gate"), std::string::npos) << refused.why();
     fs::remove(bad, ec);
 }
 
@@ -14079,6 +14083,31 @@ BACKEND_TEST(Soundness_TypeMetadata, EnumWithPointerMapsPerVariant) {
     ASSERT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "41\nB\nDIFF\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_TypeMetadata, APrototypeFieldHasAMap) {
+    // A `m <{string, int}>` field is `{ [string], [int] }`: the keys' dynamic
+    // array beside the values' -- two `{ptr, len}` pairs, four words. Each
+    // pair's buffer word traces exactly as a dynamic-array field does (ADR
+    // 0025); the elements' own pointers are dynamic-length with no static
+    // offsets and are not traced.
+    const std::string trace = codegenTrace(std::string(kTypeMetadataProvider) +
+        "struct S { pub m <{string, int}>, }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(trace.find("fin.typemeta.S"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("entries=2"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("(0,0,1,0)"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("(16,0,1,0)"), std::string::npos) << trace;
+    const Built b = build(std::string(kPrintf) + std::string(kTypeMetadataProvider) +
+        "struct Bag { pub data <{int, float}> }\n"
+        "fun main() <noret> {\n"
+        "    let b <Bag> = Bag { data: { 9: 1.5, 8: 2.5 } };\n"
+        "    let c <Bag> = b;\n"
+        "    printf(\"%d %d %.1f\\n\", c.data.0[0], c.data.0.length, c.data.1[1]);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9 2 2.5\n") << b.why();
 }
 
 // ---------------------------------------------------------------------------

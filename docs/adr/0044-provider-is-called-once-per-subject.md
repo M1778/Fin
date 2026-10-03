@@ -41,12 +41,13 @@ everywhere: the must-not-follow states have no producer yet, and the field
 exists so they fit without an ABI break when one does.
 
 A field the map cannot describe refuses, naming the struct and the field: an
-interface reference (whose vtable word must not be followed) and a prototype
-(no static field list). Since this decision, three refusals became maps: an
-`any` blob maps opaque with zero entries (ADR 0034), a dynamic
-array traces word 0 (ADR 0025), and an enum variant holding a pointer maps
-per-variant under its discriminant tag. A guessed map corrupts a heap
-and produces no diagnostic anywhere; a refusal costs one line.
+interface reference (whose vtable word must not be followed). Since this
+decision, four refusals became maps: an `any` blob maps opaque with zero
+entries (ADR 0034), a dynamic array traces word 0 (ADR 0025), an enum variant
+holding a pointer maps per-variant under its discriminant tag, and a
+prototype traces its two buffer words (fixed `{[K],[V]}` representation).
+A guessed map corrupts a heap and produces no diagnostic anywhere; a refusal
+costs one line.
 
 `quote` is a type before it is a value: the grammar admits it in type
 position (beside `any`, for the same reason) and the analyzer registers it

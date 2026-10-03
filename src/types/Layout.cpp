@@ -553,9 +553,27 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
                               "pair is undecided, and no lambda is lowered yet")};
     }
 
-    if (t.as<PrototypeType>()) {
-        return {{}, refuse(t, "a prototype's keys are decided at run time, so it has no "
-                              "static field list to lay out")};
+    if (auto* proto = t.as<PrototypeType>()) {
+        // A prototype is `{ [K], [V] }`: the keys' dynamic array beside the
+        // values' (the backend's representation, derived from
+        // stdlib/prototypes.fin's `.0` and `.1`). Two `{ptr, len}` pairs, laid
+        // out exactly as the dynamic-array case above lays one: each pair's
+        // buffer word traces, and the elements' own pointers are
+        // dynamic-length with no static offsets and are not traced.
+        const ScalarInfo ptrInfo{ScalarKind::Pointer, 0, false};
+        const ScalarInfo lenInfo{ScalarKind::Int, 32, true};
+        const uint64_t ptrSize = sizeOfScalar(ptrInfo, target_);
+        const uint64_t ptrAlign = alignOfScalar(ptrInfo, target_);
+        const uint64_t lenSize = sizeOfScalar(lenInfo, target_);
+        const uint64_t lenAlign = alignOfScalar(lenInfo, target_);
+        const uint64_t pairAlign = std::max(ptrAlign, lenAlign);
+        const uint64_t pairSize = alignUp(alignUp(ptrSize, lenAlign) + lenSize, pairAlign);
+        TypeLayout out;
+        out.align = pairAlign;
+        out.size = alignUp(pairSize * 2, pairAlign);
+        if (proto->keyType) out.pointers.push_back({0, proto->keyType});
+        if (proto->valueType) out.pointers.push_back({pairSize, proto->valueType});
+        return {out, ""};
     }
 
     if (t.as<ErrorType>()) {

@@ -220,6 +220,14 @@ pub struct Parser {
       // marker-style (inner declarations parse as top-level), so the closer
       // has no owning block parser; the top-level loop matches it here.
       ns_depth <int> = 0,
+      // Stashed anonymous struct literals, spliced after the written
+      // top-level declarations by parse_program (see the `struct { ... }`
+      // literal site): the checker then registers them in its Pass 1
+      // like named structs.
+      pending_struct_head <&AstNode> = null,
+      pending_struct_tail <&AstNode> = null,
+      // Per-file literal sequence for synthesized struct names.
+      anon_seq <int> = 0,
 
     pub:
       fun report_error(self: &Self, msg: string, line: int, col: int) <noret> {
@@ -241,6 +249,20 @@ pub struct Parser {
 
       fun current(self: &Self) <Token> {
           return self.stream.peek();
+      }
+
+      // Stash one anonymous struct literal declaration for the
+      // end-of-program splice (parse_program appends these after the
+      // written top-level declarations).
+      fun stash_anon_struct(self: &Self, decl: &AstNode) <noret> {
+          if (decl == null) { return; }
+          if (self.pending_struct_head == null) {
+              self.pending_struct_head = decl;
+              self.pending_struct_tail = decl;
+          } else {
+              self.pending_struct_tail.right = decl;
+              self.pending_struct_tail = decl;
+          }
       }
 
       fun match_token(self: &Self, kind: int) <bool> {
@@ -1441,8 +1463,51 @@ pub struct Parser {
               return call_node;
           }
 
-          // Anonymous struct or interface literal in expression
-          if (cur.kind == kw_interface() || cur.kind == kw_struct()) {
+          // Anonymous struct literal in expression position (`struct {
+          // ... }`, literal_struct.fin:24). The body parses through the
+          // same struct-body parser named declarations use, so
+          // constructor-shaped members file the same way there; the
+          // declaration is stashed for the top-level splice below, so the
+          // checker registers and checks it exactly like a named struct
+          // (C++ analyses the literal body through the same visit a named
+          // declaration takes). This site keeps a marker typing `$struct`
+          // (C++ TypeLiteralExpression's meta-type); its str_val names the
+          // stashed declaration for `$struct` call seeding. The name is
+          // synthesized from the site plus a per-file sequence
+          // (deterministic; unique across an import closure unless two
+          // files place literals at identical sites in identical order).
+          if (cur.kind == kw_struct()) {
+              self.stream.advance();
+              if (!self.stream.check(tok_lbrace())) {
+                  self.report_error("expected '{' for struct literal", cur.line, cur.col);
+                  return make_ident("NULL", cur.line, cur.col);
+              }
+              self.anon_seq = self.anon_seq + 1;
+              let anon_b <Buffer> = new_buffer(32);
+              anon_b.write_string("AnonStruct_");
+              anon_b.write_int(cur.line);
+              anon_b.write_char('_');
+              anon_b.write_int(cur.col);
+              anon_b.write_char('_');
+              anon_b.write_int(self.anon_seq);
+              let anon_name <string> = anon_b.to_string();
+              free_buffer(anon_b);
+              let anon_decl <&AstNode> = self.parse_struct_rest(anon_name, "", "", cur.line, cur.col);
+              if (anon_decl != null) {
+                  self.stash_anon_struct(anon_decl);
+              }
+              let lit <&AstNode> = new AstNode{};
+              lit.kind = ast_prototype_literal();
+              lit.type_annotation = "$struct";
+              lit.str_val = anon_name;
+              lit.line = cur.line;
+              lit.col = cur.col;
+              return lit;
+          }
+
+          // Anonymous interface literal in expression position: skipped
+          // like before (its body is never analysed here).
+          if (cur.kind == kw_interface()) {
               self.stream.advance();
               if (self.stream.check(tok_lbrace())) {
                   self.stream.advance();
@@ -2232,6 +2297,21 @@ pub struct Parser {
               return self.parse_block();
           }
 
+          // Block-level `@define` declaration (`@define name(...) <ret>;`,
+          // e.g. inside a `@defined` guard in a method body): the same
+          // declaration the top level routes to parse_define, parsed here
+          // so the body owns it like C++ owns a block DefineDeclaration.
+          // No `@define(...)` call form exists in the corpus, so like the
+          // top level this routes unconditionally once `@define` is seen.
+          if (cur.kind == 121 || cur.kind == tok_at()) {
+              let at_next <Token> = self.stream.peek_at(1);
+              if (at_next.kind == kw_define() || (at_next.kind == tok_ident() && p_str_eq(at_next.text, "define"))) {
+                  self.stream.advance();
+                  self.stream.advance();
+                  return self.parse_define(stmt_attr_val);
+              }
+          }
+
           // Expression statement (e.g. call or assignment)
           let expr <&AstNode> = self.parse_expression(0);
           if (self.match_token(tok_equal())) {
@@ -2249,57 +2329,15 @@ pub struct Parser {
           return stmt;
       }
 
-      fun parse_struct(self: &Self) <&AstNode> {
-          let is_pub <bool> = false;
-          if (self.match_token(kw_pub())) {
-              is_pub = true;
-          } else if (self.match_token(kw_priv())) {
-              is_pub = false;
-          }
-          let st_tok <Token> = self.stream.peek();
-          if (st_tok.kind == kw_struct() || st_tok.kind == 53 || (st_tok.kind == tok_ident() && p_str_eq(st_tok.text, "class"))) {
-              self.stream.advance();
-          } else {
-              self.report_error("expected 'struct'", st_tok.line, st_tok.col);
-              return null;
-          }
-
-          let id_tok <Token> = self.stream.peek();
-          if (!self.expect(tok_ident(), "expected struct name")) {
-              return null;
-          }
-          let struct_name <string> = id_tok.text;
+      // Shared struct-body parser: named declarations (`struct S { ... }`)
+      // and anonymous literals (`struct { ... }`) file constructor-shaped
+      // members the same way, so the checker's constructor gate holds for
+      // both. Expects `{` next; saves and restores the enclosing
+      // struct context so a literal inside a method nests.
+      fun parse_struct_rest(self: &Self, struct_name: string, struct_generics: string, struct_parents: string, st_line: int, st_col: int) <&AstNode> {
+          let outer_struct <string> = "";
+          if (self.current_struct != null) { outer_struct = self.current_struct; }
           self.current_struct = struct_name;
-
-          let struct_generics <string> = "";
-          if (self.stream.check(tok_lt())) {
-              struct_generics = self.parse_type();
-          }
-
-          let struct_parents <string> = "";
-          if (self.match_token(tok_colon())) {
-              if (self.stream.check(tok_lt())) {
-                  struct_parents = self.parse_type();
-              } else if (self.stream.check(tok_ident())) {
-                  let p_id <Token> = self.stream.advance();
-                  struct_parents = p_id.text;
-              }
-          }
-
-          if (self.match_token(tok_semicolon())) {
-              let st_node <&AstNode> = new AstNode{};
-              st_node.kind = ast_struct_decl();
-              st_node.name = struct_name;
-              st_node.type_annotation = struct_generics;
-              st_node.str_val = struct_parents;
-              // A forward declaration declares no constructor: the checker
-              // records no arity for it (the real declaration owns it).
-              st_node.int_val = 1;
-              st_node.line = st_tok.line;
-              st_node.col = st_tok.col;
-              self.current_struct = "";
-              return st_node;
-          }
 
           self.expect(tok_lbrace(), "expected '{' after struct name");
 
@@ -2536,8 +2574,65 @@ pub struct Parser {
           st_node.str_val = struct_parents;
           st_node.left = fields_head;
           st_node.extra = methods_head;
-          st_node.line = st_tok.line;
-          st_node.col = st_tok.col;
+          st_node.line = st_line;
+          st_node.col = st_col;
+          self.current_struct = outer_struct;
+          return st_node;
+      }
+
+      fun parse_struct(self: &Self) <&AstNode> {
+          let is_pub <bool> = false;
+          if (self.match_token(kw_pub())) {
+              is_pub = true;
+          } else if (self.match_token(kw_priv())) {
+              is_pub = false;
+          }
+          let st_tok <Token> = self.stream.peek();
+          if (st_tok.kind == kw_struct() || st_tok.kind == 53 || (st_tok.kind == tok_ident() && p_str_eq(st_tok.text, "class"))) {
+              self.stream.advance();
+          } else {
+              self.report_error("expected 'struct'", st_tok.line, st_tok.col);
+              return null;
+          }
+
+          let id_tok <Token> = self.stream.peek();
+          if (!self.expect(tok_ident(), "expected struct name")) {
+              return null;
+          }
+          let struct_name <string> = id_tok.text;
+          self.current_struct = struct_name;
+
+          let struct_generics <string> = "";
+          if (self.stream.check(tok_lt())) {
+              struct_generics = self.parse_type();
+          }
+
+          let struct_parents <string> = "";
+          if (self.match_token(tok_colon())) {
+              if (self.stream.check(tok_lt())) {
+                  struct_parents = self.parse_type();
+              } else if (self.stream.check(tok_ident())) {
+                  let p_id <Token> = self.stream.advance();
+                  struct_parents = p_id.text;
+              }
+          }
+
+          if (self.match_token(tok_semicolon())) {
+              let st_fwd <&AstNode> = new AstNode{};
+              st_fwd.kind = ast_struct_decl();
+              st_fwd.name = struct_name;
+              st_fwd.type_annotation = struct_generics;
+              st_fwd.str_val = struct_parents;
+              // A forward declaration declares no constructor: the checker
+              // records no arity for it (the real declaration owns it).
+              st_fwd.int_val = 1;
+              st_fwd.line = st_tok.line;
+              st_fwd.col = st_tok.col;
+              self.current_struct = "";
+              return st_fwd;
+          }
+
+          let st_node <&AstNode> = self.parse_struct_rest(struct_name, struct_generics, struct_parents, st_tok.line, st_tok.col);
           self.current_struct = "";
           return st_node;
       }
@@ -2757,47 +2852,55 @@ pub struct Parser {
            let id_tok <Token> = self.stream.peek();
            let is_nullable_fn <int> = 0;
            let fn_generics <string> = "";
-           if (self.stream.check(tok_lt())) {
-               self.stream.advance();
-               let gen_buf <Buffer> = new_buffer(64);
-               let depth <int> = 1;
-                while (!self.stream.is_at_end() && depth > 0) {
-                    let tk <Token> = self.stream.peek();
-                    if (tk.kind == tok_lt()) { depth++; }
-                    else if (tk.kind == tok_gt()) {
-                        depth--;
-                        if (depth == 0) {
-                            self.stream.advance();
-                            break;
-                        }
-                    } else if (tk.kind == tok_shr()) {
-                        // Fused `>>` closes two levels; the final one
-                        // breaks without entering the buffer.
-                        depth = depth - 2;
-                        if (depth <= 0) {
-                            self.stream.advance();
-                            break;
-                        }
+            if (self.stream.check(tok_lt())) {
+                self.stream.advance();
+                let gen_buf <Buffer> = new_buffer(64);
+                let depth <int> = 1;
+                // Token separators survive: the checker splits this text
+                // into segments and words (`T: any implements Struct` reads
+                // as three words, not one), and C++ keeps the same
+                // structure on TypeNodes. Concatenating without them fused
+                // every bound into one unknown word (`anyimplementsStruct`).
+                let gen_first <bool> = true;
+                 while (!self.stream.is_at_end() && depth > 0) {
+                     let tk <Token> = self.stream.peek();
+                     if (tk.kind == tok_lt()) { depth++; }
+                     else if (tk.kind == tok_gt()) {
+                         depth--;
+                         if (depth == 0) {
+                             self.stream.advance();
+                             break;
+                         }
+                     } else if (tk.kind == tok_shr()) {
+                         // Fused `>>` closes two levels; the final one
+                         // breaks without entering the buffer.
+                         depth = depth - 2;
+                         if (depth <= 0) {
+                             self.stream.advance();
+                             break;
+                         }
+                     }
+                    if (tk.text != null) {
+                        if (!gen_first) { gen_buf.write_char(' '); }
+                        gen_buf.write_string(tk.text);
+                        gen_first = false;
                     }
-                   if (tk.text != null) {
-                       gen_buf.write_string(tk.text);
-                   }
-                   self.stream.advance();
-               }
-               fn_generics = gen_buf.to_string();
-               free_buffer(gen_buf);
-           }
-
-           self.expect(tok_lparen(), "expected '(' for parameters");
-           let param_head <&AstNode> = null;
-           let param_tail <&AstNode> = null;
-
-            while (!self.stream.check(tok_rparen()) && !self.stream.is_at_end()) {
-                let p_pos <int> = self.stream.position();
-                if (self.match_token(kw_const())) {
+                    self.stream.advance();
                 }
-                if (self.match_token(tok_ampersand()) || self.match_token(95)) {
-                }
+                fn_generics = gen_buf.to_string();
+                free_buffer(gen_buf);
+            }
+
+            self.expect(tok_lparen(), "expected '(' for parameters");
+            let param_head <&AstNode> = null;
+            let param_tail <&AstNode> = null;
+
+             while (!self.stream.check(tok_rparen()) && !self.stream.is_at_end()) {
+                 let p_pos <int> = self.stream.position();
+                 if (self.match_token(kw_const())) {
+                 }
+                 if (self.match_token(tok_ampersand()) || self.match_token(95)) {
+                 }
                 let is_variadic <bool> = false;
                 if (self.match_token(tok_ellipsis())) {
                     is_variadic = true;
@@ -2905,36 +3008,42 @@ pub struct Parser {
            }
 
            let fn_generics <string> = "";
-           if (self.stream.check(tok_lt())) {
-               self.stream.advance();
-               let gen_buf <Buffer> = new_buffer(64);
-               let depth <int> = 1;
-                while (!self.stream.is_at_end() && depth > 0) {
-                    let tk <Token> = self.stream.peek();
-                    if (tk.kind == tok_lt()) { depth++; }
-                    else if (tk.kind == tok_gt()) {
-                        depth--;
-                        if (depth == 0) {
-                            self.stream.advance();
-                            break;
-                        }
-                    } else if (tk.kind == tok_shr()) {
-                        // Fused `>>` closes two levels; the final one
-                        // breaks without entering the buffer.
-                        depth = depth - 2;
-                        if (depth <= 0) {
-                            self.stream.advance();
-                            break;
-                        }
+            if (self.stream.check(tok_lt())) {
+                self.stream.advance();
+                let gen_buf <Buffer> = new_buffer(64);
+                let depth <int> = 1;
+                // Separators survive here too (see parse_function_tail):
+                // one unknown word per bound is a mistyped bound, while
+                // one fused word for all of them is a parser artifact.
+                let gen_first <bool> = true;
+                 while (!self.stream.is_at_end() && depth > 0) {
+                     let tk <Token> = self.stream.peek();
+                     if (tk.kind == tok_lt()) { depth++; }
+                     else if (tk.kind == tok_gt()) {
+                         depth--;
+                         if (depth == 0) {
+                             self.stream.advance();
+                             break;
+                         }
+                     } else if (tk.kind == tok_shr()) {
+                         // Fused `>>` closes two levels; the final one
+                         // breaks without entering the buffer.
+                         depth = depth - 2;
+                         if (depth <= 0) {
+                             self.stream.advance();
+                             break;
+                         }
+                     }
+                    if (tk.text != null) {
+                        if (!gen_first) { gen_buf.write_char(' '); }
+                        gen_buf.write_string(tk.text);
+                        gen_first = false;
                     }
-                   if (tk.text != null) {
-                       gen_buf.write_string(tk.text);
-                   }
-                   self.stream.advance();
-               }
-               fn_generics = gen_buf.to_string();
-               free_buffer(gen_buf);
-           }
+                    self.stream.advance();
+                }
+                fn_generics = gen_buf.to_string();
+                free_buffer(gen_buf);
+            }
 
            self.expect(tok_lparen(), "expected '(' for parameters");
            // Parameters (optional)
@@ -4512,6 +4621,25 @@ pub struct Parser {
                self.report_error("expected '}' to close namespace block", eof_tok.line, eof_tok.col);
            }
 
+           // Stashed anonymous struct literals go after the written
+           // declarations, so the checker's Pass 1 registers them like
+           // named structs before any Pass 2 body check runs.
+           let ps <&AstNode> = self.pending_struct_head;
+           while (ps != null) {
+               let ps_next <&AstNode> = ps.right;
+               ps.right = null;
+               if (head == null) {
+                   head = ps;
+                   tail = ps;
+               } else {
+                   tail.right = ps;
+                   tail = ps;
+               }
+               ps = ps_next;
+           }
+           self.pending_struct_head = null;
+           self.pending_struct_tail = null;
+
            root.left = head;
            return root;
       }
@@ -4528,7 +4656,10 @@ pub fun new_parser(tokens: [Token], count: int, filename: string, source: string
         source_file: filename,
         source_text: source,
         had_error: false,
-        current_struct: ""
+        current_struct: "",
+        pending_struct_head: null,
+        pending_struct_tail: null,
+        anon_seq: 0
     };
 }
 
