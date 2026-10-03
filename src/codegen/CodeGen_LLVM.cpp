@@ -10738,6 +10738,72 @@ private:
                     return;
                 }
 
+                // A bare generic parameter (`@implements(T, Printable)` inside
+                // `fun f<T>...`): the active instantiation binds T to what the
+                // call site gave, so the query folds per instantiation through
+                // the same predicate -- never a runtime chain (a parameter has
+                // no tid word) and never a guess from the declared constraint
+                // (bounds are not enforced at call sites). Either side may be
+                // the parameter; anything else keeps the paths below exactly
+                // as they were.
+                if (sId || iId) {
+                    const Substitution* active = types_.bindings();
+                    const auto boundFor = [&](const std::string& name) -> const TypeBinding* {
+                        if (!active) return nullptr;
+                        for (const auto& b : *active) {
+                            if (b.first == name) return &b.second;
+                        }
+                        return nullptr;
+                    };
+                    const TypeBinding* sBound =
+                        (sId && !structs_.count(sId->name)) ? boundFor(sId->name) : nullptr;
+                    const TypeBinding* iBound =
+                        (iId && !interfaces_.count(iId->name)) ? boundFor(iId->name) : nullptr;
+                    if (sBound || iBound) {
+                        const StructInfo* sInfo = nullptr;
+                        const InterfaceInfo* iInfo = nullptr;
+                        if (sBound) {
+                            if (sBound->type.isStruct() && !sBound->type.isInterface &&
+                                sBound->type.structInfo) {
+                                sInfo = sBound->type.structInfo;
+                            } else {
+                                unsupported(node, fmt::format("'@implements' on the generic "
+                                                              "parameter '{}' bound to '{}', which is "
+                                                              "not a struct type",
+                                                              sId->name, sBound->display));
+                                return;
+                            }
+                        } else if (sId) {
+                            sInfo = structs_.count(sId->name) ? &structs_.at(sId->name) : nullptr;
+                        }
+                        if (iBound) {
+                            if (iBound->type.isInterface && iBound->type.interfaceInfo) {
+                                iInfo = iBound->type.interfaceInfo;
+                            } else {
+                                unsupported(node, fmt::format("'@implements' on the generic "
+                                                              "parameter '{}' bound to '{}', which is "
+                                                              "not an interface type",
+                                                              iId->name, iBound->display));
+                                return;
+                            }
+                        } else if (iId) {
+                            iInfo = interfaces_.count(iId->name) ? &interfaces_.at(iId->name) : nullptr;
+                        }
+                        if (sInfo && iInfo) {
+                            auto boolTy = types_.byName("bool");
+                            value_ = CgVal{builder_.getInt1(checkConformity(*sInfo, *iInfo)),
+                                           boolTy ? *boolTy : types_.intType(1, false)};
+                            return;
+                        }
+                        // The other side is a runtime word, not a name: a
+                        // parameter has no tid to compare, so the chain below
+                        // cannot ask it.
+                        unsupported(node, fmt::format("'@implements' mixing a generic parameter "
+                                                      "with a runtime type word"));
+                        return;
+                    }
+                }
+
                 // Dynamic meta-type arguments: evaluate expressions, extract type IDs,
                 // and dynamically check interface conformity against the module's registered implementations.
                 CgVal sVal = emit(*node.args[0]);
@@ -12720,12 +12786,15 @@ private:
         // untaken (enums.fin's else), so the program runs; taken, it aborts
         // like any failed blame. A bare `m1778;` still refuses
         // (AnUnloweredConstructIsRefused): that is an expression with no
-        // failure semantics of its own. A message beside the marker has no
-        // lowering here and stays refused rather than dropped.
+        // failure semantics of its own. A message beside the marker aborts
+        // with that text, in the same `Fin blames` shape as the bare marker.
         if (auto* lit = dynamic_cast<Literal*>(node.condition.get())) {
             if (lit->kind == ASTTokenKind::M1778) {
                 if (node.message) {
-                    unsupported(node, "a 'blame m1778' with a message");
+                    llvm::Value* text = emitBlameMessage(node);
+                    if (!text) return;
+                    if (!emitRuntimeBlameText(node, text, "a 'blame m1778'"))
+                        return;
                     return;
                 }
                 if (!emitRuntimeBlame(node, "'m1778' reached", "a 'blame m1778'"))
@@ -12801,21 +12870,20 @@ private:
         return builder_.CreateLoad(ptrTy, errStream, "stderr");
     }
 
-    // A runtime Fin blame with a fixed reason: print `<file>:<line>: Fin blames
-    // <reason>` on stderr, then abort. This is the shared shape ADR 0028 asks for when
+    // A runtime Fin blame naming a caller-supplied string: print `<file>:<line>: Fin blames
+    // <message>` on stderr, then abort. This is the shared shape ADR 0028 asks for when
     // an operation fails at run time for a reason the program itself did not write --
     // a missing prototype key is the first of them -- and it is deliberately the same
     // stream, the same location and the same abort a failed `blame` uses, so a reader
     // learns one diagnostic form and not two.
     //
-    // The reason is a compile-time constant of this file's own, and it still goes
-    // through `%s` rather than being the format string: a reason is text, and text that
-    // reaches printf as a format is a vararg read waiting to happen the first time one
-    // of them contains a `%`.
+    // The text is a value this file did not write, so it goes through `%s` rather
+    // than being the format string: text that reaches printf as a format is a vararg
+    // read waiting to happen the first time one of them contains a `%`.
     //
     // Terminates the block with `unreachable`, because `abort` does not return and a
     // block without a terminator is invalid IR. Returns false having already reported.
-    bool emitRuntimeBlame(ASTNode& node, const std::string& reason, const char* what) {
+    bool emitRuntimeBlameText(ASTNode& node, llvm::Value* text, const char* what) {
         llvm::Type* ptrTy = llvm::PointerType::getUnqual(ctx_);
         llvm::Type* i32Ty = llvm::Type::getInt32Ty(ctx_);
         llvm::Value* stream = emitStderr(node, what);
@@ -12831,11 +12899,34 @@ private:
         llvm::Value* format = builder_.CreateGlobalString("%s:%d: Fin blames %s\n");
         llvm::Value* file = builder_.CreateGlobalString(sourceName_);
         llvm::Value* line = llvm::ConstantInt::get(i32Ty, node.loc.begin.line);
-        llvm::Value* text = builder_.CreateGlobalString(reason);
         builder_.CreateCall(report, {stream, format, file, line, text});
         builder_.CreateCall(stop, {});
         builder_.CreateUnreachable();
         return true;
+    }
+
+    // A runtime Fin blame with a fixed reason: the reason is a compile-time constant
+    // of this file's own, baked to a string and printed through `%s` above.
+    bool emitRuntimeBlame(ASTNode& node, const std::string& reason, const char* what) {
+        llvm::Value* text = builder_.CreateGlobalString(reason);
+        return emitRuntimeBlameText(node, text, what);
+    }
+
+    // The message operand of a `blame`: an expression the analyzer checked against
+    // `string` (so it may be a call, not a literal), emitted to the pointer `%s`
+    // takes. Null having already reported when the passes disagree -- handing an
+    // integer to `%s` would read it as an address.
+    llvm::Value* emitBlameMessage(BlameStatement& node) {
+        CgVal m = emit(*node.message);
+        if (failed_) return nullptr;
+        if (!m.ok() || !m.type.isPointer()) {
+            // The analyzer checks the message against `string`, so a non-pointer
+            // here is the two passes disagreeing -- and handing an integer to
+            // `%s` would read it as an address.
+            unsupported(node, "this blame message");
+            return nullptr;
+        }
+        return m.value;
     }
 
     // The failing path: print, then abort. Returns false having already reported.
@@ -12856,16 +12947,8 @@ private:
 
         llvm::Value* message = nullptr;
         if (node.message) {
-            CgVal m = emit(*node.message);
-            if (failed_) return false;
-            if (!m.ok() || !m.type.isPointer()) {
-                // The analyzer checks the message against `string`, so a non-pointer
-                // here is the two passes disagreeing -- and handing an integer to
-                // `%s` would read it as an address.
-                unsupported(node, "this blame message");
-                return false;
-            }
-            message = m.value;
+            message = emitBlameMessage(node);
+            if (!message) return false;
         }
 
         // The error stream (emitStderr): loaded and passed straight on.

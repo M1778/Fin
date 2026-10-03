@@ -6591,7 +6591,7 @@ pub struct Checker {
               // (`codegen: 'm1778' is not lowered yet`, exit 1, even in dead
               // code). A check-time refusal here would be a diagnostic the
               // reference never reports, so the checker walks what is raised
-              // and codegen owns the refusal.
+              // and codegen owns the refusal. A message beside the marker lowers with it, so there is nothing to check there either.
               if (stmt.left != null) {
                   self.check_expression(stmt.left);
               }

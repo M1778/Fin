@@ -4599,6 +4599,95 @@ BACKEND_TEST(Soundness_Codegen, PickInterfaceTidFlowsIntoCompatible) {
     EXPECT_EQ(b.out, "first-true\nsecond-false\n") << b.why();
 }
 
+// Wave-4 `@implements` over a generic type parameter: the query is emitted
+// once per instantiation with the parameter bound, so it folds through the
+// same normative predicate as a concrete pair -- never a runtime chain (a
+// bare parameter has no tid word) and never a guess.
+BACKEND_TEST(Soundness_Codegen, ImplementsQueryOverGenericParamFoldsPerInstantiation) {
+    const Built b = build(std::string(kPrintf) +
+        "interface Printable {\n"
+        "    pub fun to_string() <string>;\n"
+        "}\n"
+        "struct User {\n"
+        "    name <string>,\n"
+        "    pub fun to_string() <string> { return \"User\"; }\n"
+        "}\n"
+        "struct Empty { x <int> }\n"
+        "fun check<T>(item: T) <bool> {\n"
+        "    return @implements(T, Printable);\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let u <User> = User { name: \"Fin\" };\n"
+        "    let e <Empty> = Empty { x: 1 };\n"
+        "    let r1 <bool> = check::<User>(u);\n"
+        "    if (r1 == true) {\n"
+        "        printf(\"user-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"user-false\\n\");\n"
+        "    }\n"
+        "    let r2 <bool> = check::<Empty>(e);\n"
+        "    if (r2 == true) {\n"
+        "        printf(\"empty-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"empty-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "user-true\nempty-false\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ImplementsQueryOverBoundGenericParamFoldsPerInstantiation) {
+    // A bound parameter folds the same way: the answer comes from what the
+    // instantiation bound, never from the declared constraint (bounds are not
+    // enforced at call sites, so the constraint alone would be a guess).
+    const Built b = build(std::string(kPrintf) +
+        "interface Printable {\n"
+        "    pub fun to_string() <string>;\n"
+        "}\n"
+        "struct User {\n"
+        "    name <string>,\n"
+        "    pub fun to_string() <string> { return \"User\"; }\n"
+        "}\n"
+        "fun check_bound<T: Printable>(item: T) <bool> {\n"
+        "    return @implements(T, Printable);\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let u <User> = User { name: \"Fin\" };\n"
+        "    let r <bool> = check_bound::<User>(u);\n"
+        "    if (r == true) {\n"
+        "        printf(\"bound-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"bound-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "bound-true\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ImplementsQueryOverGenericParamBoundToNonStructIsRefused) {
+    // The parameter bound to something with no conformance to check: a named
+    // refusal owning the query, never a silent false.
+    const Built b = build(std::string(kPrintf) +
+        "interface Printable {\n"
+        "    pub fun to_string() <string>;\n"
+        "}\n"
+        "fun check<T>(item: T) <bool> {\n"
+        "    return @implements(T, Printable);\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let r <bool> = check::<int>(1);\n"
+        "    if (r == true) {\n"
+        "        printf(\"int-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"int-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("'@implements'"), std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AMethodInABlockOfANameTheStructDeclaresIsRefused) {
     // Two definitions of one `S.f` symbol, and `declareFunction` keeps the first --
     // so the block's body would silently not be the one that runs. The same refusal a
@@ -4720,6 +4809,56 @@ BACKEND_TEST(Soundness_Codegen, ABlameM1778InUnreachedElseLowersAndRuns) {
     EXPECT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "True\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABlameM1778WithAMessageAbortsWithIt) {
+    // `blame m1778, "why"` -- the with-message form of the marker. Reaching it
+    // aborts like the bare marker, carrying the message text the author wrote
+    // (rendered through `%s` like any blame message).
+    const Built b = build(
+        "fun main() <void> {\n"
+        "    blame m1778, \"went here\";\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_NE(b.runExit, 0) << b.why();
+    const std::string pinned = b.srcPath + ":2: Fin blames went here\n";
+    EXPECT_TRUE(b.out == pinned || b.out == pinned + "Aborted\n" ||
+                b.out == pinned + "Aborted (core dumped)\n")
+        << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABlameM1778WithAMessageGoesToStderr) {
+    // The message beside the marker is a diagnostic, not output: stdout stays
+    // empty and the exact line lands on stderr.
+    const fs::path src = uniqueTempPath("fin_blame_m1778_stderr", ".fin");
+    const fs::path exe = uniqueTempPath("fin_blame_m1778_stderr_exe");
+    {
+        std::ofstream f(src, std::ios::binary);
+        const std::string code =
+            "fun main() <void> {\n"
+            "    blame m1778, \"to stderr\";\n"
+            "}\n";
+        f.write(code.data(), (std::streamsize)code.size());
+    }
+    const FincRun c = runFinc({src.string(), "-o", exe.string()});
+    ASSERT_EQ(c.exitCode, 0) << stripAnsi(c.err);
+    ASSERT_TRUE(fs::exists(exe));
+
+    const fs::path outOnly = uniqueTempPath("fin_blame_m1778_out");
+    const fs::path errOnly = uniqueTempPath("fin_blame_m1778_err");
+    fin::runProcess({exe.string()}, outOnly.string(), errOnly.string());
+    const std::string onOut = readProcessOutput(outOnly.string());
+    const std::string onErr = readProcessOutput(errOnly.string());
+
+    EXPECT_EQ(onOut, "") << "a reached marker reached stdout:\n" << onOut;
+    EXPECT_EQ(onErr, src.string() + ":2: Fin blames to stderr\n") << onErr;
+
+    std::error_code ec;
+    fs::remove(src, ec);
+    fs::remove(exe, ec);
+    fs::remove(outOnly, ec);
+    fs::remove(errOnly, ec);
 }
 
 BACKEND_TEST(Soundness_Codegen, ADisagreeingPayloadSlotUnwrapsThroughAny) {

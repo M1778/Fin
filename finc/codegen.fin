@@ -3590,25 +3590,37 @@ fun cg_emit_blame_text(ctx: &FnContext, line: int, msg_val: &LLVMValue) <noret> 
     }
 }
 
-// A runtime blame with a fixed reason: `file:line: Fin blames <reason>` on
-// stderr, then the caller aborts. Same empty-filename rule as blame.
-fun cg_emit_absent_blame(ctx: &FnContext, line: int, reason: string) <noret> {
+// A runtime blame naming a caller-supplied string: `file:line: Fin blames
+// <msg>` on stderr, then the caller aborts. The text is a value lowering
+// did not write, so it goes through `%s` rather than being the format
+// string: text that reaches printf as a format is a vararg read waiting to
+// happen the first time one of them contains a `%`.
+fun cg_emit_absent_blame_val(ctx: &FnContext, line: int, msg_val: &LLVMValue) <noret> {
     if (ctx.src_file == null || cg_strlen(ctx.src_file) == cast<ulong>(0)) { return; }
     let d_fn <&LLVMValue> = get_or_declare_dprintf(ctx);
     let d_ty <&LLVMType> = llvm_global_get_value_type(d_fn);
     let file_s <&LLVMValue> = llvm_build_global_string_ptr(ctx.builder, ctx.src_file, "absent_file");
     let line_v <&LLVMValue> = llvm_const_int(ctx.i32_ty, line, 0);
     let fd_v <&LLVMValue> = llvm_const_int(ctx.i32_ty, 2, 0);
-    let why <&LLVMValue> = llvm_build_global_string_ptr(ctx.builder, reason, "absent_reason");
     let fmt <&LLVMValue> = llvm_build_global_string_ptr(ctx.builder, "%s:%d: Fin blames %s\n", "absent_fmt");
     let args <&LLVMValueArgs> = new LLVMValueArgs{};
     args.v0 = fd_v;
     args.v1 = fmt;
     args.v2 = file_s;
     args.v3 = line_v;
-    args.v4 = why;
+    args.v4 = msg_val;
     llvm_build_call2(ctx.builder, d_ty, d_fn, args, 5, "");
     delete args;
+}
+
+// A runtime blame with a fixed reason: `file:line: Fin blames <reason>` on
+// stderr, then the caller aborts. Same empty-filename rule as blame. The
+// reason is a compile-time constant baked to a string and printed through
+// `%s` above.
+fun cg_emit_absent_blame(ctx: &FnContext, line: int, reason: string) <noret> {
+    if (ctx.src_file == null || cg_strlen(ctx.src_file) == cast<ulong>(0)) { return; }
+    let why <&LLVMValue> = llvm_build_global_string_ptr(ctx.builder, reason, "absent_reason");
+    cg_emit_absent_blame_val(ctx, line, why);
 }
 
 // A failed denullify prints `file:line: Fin blames denullify of an absent
@@ -11026,11 +11038,23 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         // operand. Mirror the C++ backend: reaching it is a runtime failure,
         // lowered as an unconditional abort on this arm rather than a
         // whole-program refusal. A bare `m1778;` still refuses at its
-        // expression site; a message beside the marker stays refused.
+        // expression site; a message beside the marker aborts carrying that
+        // text, rendered through `%s` like any blame message.
         if (stmt.left != null && stmt.left.kind == ast_ident() && cg_str_eq(stmt.left.name, "m1778")) {
             if (!cg_blame_msg_is_default(stmt)) {
-                cg_dprintf(2, "finc codegen refusal: a 'blame m1778' with a message is not lowered\n");
-                refuse_and_poison(ctx);
+                let mval <&LLVMValue> = lower_expr(ctx, stmt.right);
+                if (ctx.poisoned) { return; }
+                if (mval == null || llvm_type_of(mval) != ctx.ptr_ty) {
+                    // The checker holds the message against `string`, so a
+                    // non-pointer here is the two passes disagreeing -- and
+                    // handing an integer to `%s` would read it as an address.
+                    cg_dprintf(2, "codegen: this blame message is not lowered yet\n");
+                    refuse_and_poison(ctx);
+                    return;
+                }
+                cg_emit_absent_blame_val(ctx, stmt.line, mval);
+                llvm_build_call2(ctx.builder, a_fn_ty, abort_fn, null, 0, "");
+                llvm_build_unreachable(ctx.builder);
                 return;
             }
             cg_emit_absent_blame(ctx, stmt.line, "'m1778' reached");
