@@ -551,7 +551,10 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // `interface_pointer_map.fin` is the interface half -- a struct field of
     // interface type contributes exactly one traced slot, so a provider over it
     // compiles.
-    EXPECT_EQ(t.samples, 53)
+    // 53 -> 52: owner-ordered deletion of tests/samples/stdlib/somelib.fin --
+    // the name was the importing.fin sample's invention, never a module, and
+    // the empty lib existed only to satisfy it. Ratified decision, not accident.
+    EXPECT_EQ(t.samples, 52)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";

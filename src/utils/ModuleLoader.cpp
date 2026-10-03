@@ -128,7 +128,7 @@ std::string ModuleLoader::resolvePath(const std::string& rawImport, bool isPacka
     }
 
     // 3. Check in Search Paths (Treating quoted string as a library lookup)
-    // This allows import "somelib" to find "stdlib/somelib.fin"
+    // This allows import "networking" to find "stdlib/networking.fin"
     for (const auto& base : searchPaths) {
         res = check(fs::path(base) / rawImport);
         if (!res.empty()) return res;

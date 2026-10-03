@@ -1327,7 +1327,7 @@ TEST(Soundness_ModuleDiagnostics, AnImportCycleIsReportedOnceAndTerminates) {
 // Two readings, and the corpus does not settle which is right, so this is booked rather
 // than fixed. A quoted import is overloaded: `import "tests/samples/macros.fin";`
 // (importing.fin:7) is a path relative to the project and has to resolve against the
-// source, while `import "somelib";` (extern_as.fin:9) is emphatically a *library* lookup
+// source, while `import "networking";` (importing.fin:9) is emphatically a *library* lookup
 // with no path at all -- "HOW DOES THE COMPILER KNOW WHERE TO IMPORT THIS LIBRARY". One
 // spelling, two meanings, and only the second one should honour a pin. A plausible rule
 // is that a name with no separator and no `.fin` is a library lookup and skips the
@@ -1396,7 +1396,7 @@ TEST(KnownDefect_LibraryPaths, AFileBesideTheSourceShadowsAPinnedLibrary) {
 // while a quoted *path* keeps it" is a language decision, not a loader detail:
 // the corpus documents both meanings for the one syntax. importing.fin calls
 // `import "tests/samples/macros.fin"` "a normal file import" and says of
-// `import "somelib"` that it has no path so the compiler must find it through
+// `import "networking"` that it has no path so the compiler must find it through
 // FIN_LIBS/--fin-libs. A rule keyed on whether the string looks like a path
 // reads straight off those two lines and closes the hole exactly. It is left for
 // the owner, because it changes how every import in every project resolves.
@@ -1591,8 +1591,8 @@ TEST(Soundness_Imports, ANamedImportBindsTheSymbolItNames) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-// `import * from somelib;` -- tests/samples/importing.fin:11, whose comment reads
-// "this will import ALL symbols from the somelib library".
+// `import * from networking;` -- tests/samples/importing.fin:11, whose comment reads
+// "this will import ALL symbols from the networking library".
 //
 // It did not import any. `visit(ImportModule&)` looked `*` up in the module's
 // scope as though it were an identifier and reported `Module 'm' does not export

@@ -26,8 +26,9 @@ conversions or unsupported calls. The examples below mark those boundaries.
 | [stdptr](../../lib/std/stdptr.fin) | `rptr<T>`, `wptr<T>`, `OwnershipError` | Incomplete execution/safety paths; no borrow checker |
 | [networking](../../lib/std/networking.fin) | Placeholder module | No networking implementation |
 
-`strings` and `math` exist in the shipped library. `somelib` does not; it appears
-only in the sample drafts. A module cannot be named `string` through a pathless
+`strings` and `math` exist in the shipped library. `somelib` never did; it appeared
+only in the sample drafts, whose last lines importing it now import the shipped
+`networking` module instead. A module cannot be named `string` through a pathless
 import because `string` is a keyword.
 
 ## Printing and formatting

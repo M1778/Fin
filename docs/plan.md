@@ -3260,3 +3260,182 @@ have changed nothing. Both halves live in `visitParameterDefaults` now; see "A d
 **Diagnostics.** Is there a legal third diagnostic shape beyond error and warning — a note, or a remark
 attached to a parent? Two sites want one, and the JSON contract in ADR 0009 fixes the shape, so the answer
 has to precede `finn` consuming it.
+
+## Wave-4 plan: `@implements` query lowering (plan-only; no code yet)
+
+Scope: the compile-time query `@implements(t, i)` in expression position
+(`tests/samples/literal_interface.fin:6`), NOT the declaration forms
+(`ImplementsBlock`: `X implements <I> {...}`, `@implements X {...}`,
+`@implements X::m = ...` at `src/parser/parser.y:1712-1795`). The declaration
+track (enums sibling: `enums.fin:25`; removal sibling: `somelib`) is untouched
+by this plan; this section appends to `docs/plan.md` only and changes no
+`src/`, `finc/*`, `lib/`, `tests/` or other `docs/` file.
+
+### 1. Current representation (where `@implements` lives today)
+
+C++ frontend:
+- Parse: `@implements(args)` is a `FunctionCall("implements", is_special=true)`
+  in both expression grammars (`src/parser/parser.y:2417-2422` and `:2692-2697`);
+  `FunctionCall.hpp:35` notes `name` never keeps the `@`. This is a different
+  node family from the `ImplementsBlock` declaration headers (`parser.y:1712-1795`).
+- Anonymous interface literals: `return interface { ... }`
+  (`parser.y:2927-2955`, generated `<anonymous interface at ...>` name at `:2955`)
+  become `TypeLiteralExpression` (`src/ast/exprs/MiscExpr.hpp:25-31`).
+- Analyze: `Analyzer_Expr.cpp:1694-1740` checks arity (`'@implements' expects 2
+  arguments`) and argument kinds (`$struct`/`$type` vs `$interface`/`$type` at
+  `:1720-1734`) and types the result `bool` — but never evaluates the predicate
+  and never folds to a constant. `TypeLiteralExpression` is typed `$struct` /
+  `$interface` (`Analyzer_Expr.cpp:2708`), yet the interface-literal branch
+  records nothing (`:2692-2704` skips `is_interface`, only struct literals enter
+  `structLiteralTypes_`). Comptime branch elimination covers `@defined` only
+  (`Analyzer_Stmt.cpp:132-167` via `mentionsDefined` + `ComptimeInterp`); there
+  is no `mentionsImplements` path.
+- Normative predicate (unused by the query): `StructType::implements`
+  (`src/types/StructType.cpp:358+`) with `Self`-aware field comparison
+  (`fieldTypeSatisfies`, `:319-346`) over fields, methods, operators,
+  constructors and destructor.
+- Backend (partial, gated): `CodeGen_LLVM.cpp:10481-10539` lowers
+  `is_special "implements"` in two sub-shapes: static `Identifier`/`Identifier`
+  pairs registered in `structs_`/`interfaces_` fold via `checkConformity`
+  (`:10488-10493`, predicate at `:10382-10391`); anything else falls to a
+  dynamic tid-pair OR-chain over `typeIds_` (`:10497-10538`, `match.both` at
+  `:10532-10533`). `checkConformity` is presence-only (field presence +
+  `methodKey` presence) and is NOT `StructType::implements` (no `Self`
+  handling, no operators/ctors/dtor, no signature check).
+- Interface runtime shape (already landed, not this plan): references are fat
+  `{data, vtable}` (`CodeGen_LLVM.cpp:202-203`; `Type.cpp:58`; ADR 0019; field
+  offsets + methods in ADR 0027); conversion emits the pair (`:5917-5928`);
+  calls dispatch through the table (`emitInterfaceMethodCall`, `:5601-5640`);
+  tables are per-`(struct, interface)` `LinkOnceODR` globals
+  (`interfaceVtable`, `:5642-5694`, key at `:5643`). Declarations emit no code
+  (`visit(InterfaceDeclaration&)`, `:11715-11754`); unconsumed
+  `ImplementsBlock`s refuse (`visit(ImplementsBlock&)`, `:11779-11790`).
+- Meta-value shape (already landed): `$type`/`$struct`/`$interface` are
+  one-word `{i64}` tid types (`mapMetaType`, `:705-718`); `TypeLiteralExpression`
+  lowers to the tid word (`:14464-14494`, registry `typeIds_` at `:14709`).
+  `declareInterfaces` registers only module-scope named interfaces (`:2766-2795`);
+  a `TypeLiteralExpression` interface literal registers no `InterfaceInfo`.
+
+Fin mirror (`finc/`, second compiler):
+- Parse: `@implements(...)` special call plus `@implements` visibility/block
+  forms (`finc/parser.fin:1429`, `:4047-4054`, `:4263-4265`, `:4489-4531`).
+- Check: `finc/checker.fin:4905-4941` mirrors the C++ arity/kind checks and
+  returns `bool` — also without folding.
+- Lower: `finc/codegen.fin:8535-8550` is an explicit refusal naming the
+  construct (`the compile-time call '@implements' is not lowered yet`).
+
+Why `literal_interface.fin` "checks clean, builds on neither": both checkers
+accept the query shape (C++ `:1694-1740`, Fin mirror `:4905-4941`), but the
+sample's actual shapes miss every landed lowering: `:6` passes `$struct` /
+`$interface` *parameters* (not `Identifier`/`Identifier` names), so the C++
+static fold cannot fire; the dynamic fallback needs registered tids plus a
+conformity gate, while the `:20`/`:25` `return interface { ... }` literals
+never register an `InterfaceInfo`; the Fin mirror refuses by name.
+
+### 2. What lowering must produce (derived from the three interface samples)
+
+- `interfaces.fin`: `struct User: <Printable>` + `fun print_any<T: Printable>`
+  called as `print_any::<User>(u)` (`:9-29`) is the monomorphised path — direct
+  call, no vtable, no query value at runtime. Nothing in this plan changes it.
+- `generics_interfaces.fin`: `<T: Castable>` erasure vs bare-`<T>`
+  monomorphisation (`:8-14`) is the calling-convention branch (wave-3 order:
+  monomorphisation before erasure; `any` is `{i8*, i64}`, erased generic raw
+  `i8*` per plan wave-3). `@implements` never selects a calling convention; it
+  only answers the predicate the bound already states.
+- `literal_interface.fin`: two distinct needs. (a) `compatible()` (`:5-11`)
+  needs the *query* — `@implements(struct_, iface)` over `$struct`/`$interface`
+  meta-words must become an `i1` (ADR 0042 consequences: fold to `bool`
+  constant; `if (... == true)` branch elimination). The inputs are tid words,
+  NOT fat `{data, vtable}` references — no method table, no witness record, no
+  dispatch. (b) `pick_interface()` (`:18-27`) returns `<$interface>` meta-values
+  produced by `interface {...}` literals, selected by a runtime enum compare
+  (`option == IFaceOptions::First`, `:19`). Lowering (b) is a tid-value dataflow
+  problem (which literal's tid flows out), independent of lowering (a).
+- Dispatch shape is therefore already decided and out of scope: interface
+  *references* dispatch via per-pair vtables (fields-first, ADR 0027;
+  `interfaceVtable`); the *query* produces only `i1`. No new method-table or
+  witness-record type is required by the query. A guarded conversion
+  (`if (@implements(...)) { convert to interface }`) reuses the existing
+  `convert` + `interfaceVtable` path; the query only decides the branch.
+
+### 3. C++-first staging (analyzer acceptance → LLVM lowering → Fin mirror)
+
+| Stage | Owner surface | Red shape (failing test first) | Size |
+| --- | --- | --- | --- |
+| A. Analyzer fold | `src/semantics/` | `@implements(User, Printable)` folds to comptime `true` constant; negative pair folds `false`; non-foldable `$struct`/`$interface` params stay typed `bool` with the query recorded, and `if (@implements(...) == true)` eliminates the untaken arm (extends the `@defined`-only elimination at `Analyzer_Stmt.cpp:132-167`) | S |
+| B. LLVM static fold | `src/codegen/` | `FunctionCall is_special "implements"` with two concrete named types lowers to `ConstantInt i1` via the normative predicate (reconcile `checkConformity` `:10382-10391` with `StructType::implements` `StructType.cpp:358+` first); dynamic shapes still refuse with the construct named | S |
+| C. LLVM meta/dynamic values | `src/codegen/` | `literal_interface.fin:6` shape: `$struct`/`$interface` params + `TypeLiteralExpression` tids (`:14464-14494`, `typeIds_` `:14709`) + anonymous `interface {...}` literals (`parser.y:2927-2955`) lower through the tid-pair chain (`:10497-10538`) gated by the Stage-B predicate; comptime-foldable args must never reach this runtime chain | M |
+| D. Fin mirror parity | `finc/*` only, after A–C land | `finc/checker.fin:4905-4941` gains the Stage-A fold; `finc/codegen.fin:8538-8550` refusal narrows to exactly the shapes C++ still refuses (same diagnostic wording family, no independent design) | S |
+| E. `pick_interface` return (deferred unless A–C force it) | `src/semantics/` + `src/codegen/` | `return interface {...}` under `<$interface>` with a runtime enum guard carries the selected literal's tid out; if branch elimination over the discriminant suffices, this stage dissolves into A (no runtime tid dataflow) | L (only if needed) |
+
+Order is load-bearing: A before B (no runtime chain for foldable queries), B
+before C (predicate fixed before the dynamic gate uses it), C++ (A–C) before
+Fin mirror (D). Total without E: 2S + 1M.
+
+### 4. Refusal boundaries (what stays refused and why)
+
+- Non-foldable query with no tid identity (e.g. interface literal never
+  registered as `InterfaceInfo` because `declareInterfaces` `:2766-2795` sees
+  only module-scope names): refuse naming `@implements` + the missing
+  registration, never a guessed `false` (backend invariant: explicit refusal,
+  never silently dropped runtime code).
+- `@implements` over `any`/nullable/union/enum-as-struct: refuse. `any` stays
+  opaque value semantics (ADR 0034 amendment; `useful_macros.fin` builds;
+  `collectMetaSlots` `:1900-1902` emits zero entries, never a refusal);
+  nullable struct-field layout is open (`nullifier.fin` `b? <int>`); enum value
+  representation waits (ADR 0037 `Ok(T)`); unions have no single pointer map
+  (`:1911-1917`). A wrong `true`/`false` here corrupts dispatch or collection.
+- Declaration forms (`ImplementsBlock`, single-member `@implements X::m = ...`
+  as in `enums.fin:25`, `stdlib/collection.fin:97`): not this plan; unconsumed
+  blocks keep refusing (`:11779-11790`). Do not smuggle block lowering into the
+  query stages.
+- Struct `==` stays declared-only, never synthesized (ADR 0036;
+  `deeptest4.fin` refused): the query compares requirements, never method
+  bodies; no equality synthesis rides along.
+- A `@special`/`@implements` argument that is not compile-time-known stays a
+  diagnostic naming that argument (wave-4 interpretability line), unless the
+  owner answers Q3 below otherwise: the dynamic chain (Stage C) exists only for
+  meta-values with real tid identity, not for arbitrary runtime values.
+- Full compiler-API component routing (`compiler.types.implements` at
+  `docs/compiler-api.md:507`, ADR 0042 §2.4) and grant enforcement
+  (`#[use(...)]`): not settled here (see Q1); stages use the direct predicate
+  until the owner rules.
+
+### 5. Interaction with already-landed maps (no change in this plan)
+
+- Interface-reference pointer map (`collectMetaSlots`, `:1887-1910`): an
+  interface-typed field contributes exactly the data word (`:1907-1909`); the
+  vtable word is absent — the two-state staging of ADR 0019's third state. The
+  query takes one-word tid meta-values (`mapMetaType` `:705-718`), never fat
+  references, so it adds no `MetaEntry`, moves no offset, and does not touch
+  the vtable-absence rule.
+- Per-variant enum maps (`:1918-1975`): payload words traced gated on
+  `encodeVariantTag` discriminants (`:1883-1885`); nested gates refused
+  (`:1948-1955`); overflow refused (`:1958-1966`). `@implements` is type-level
+  and never reads a discriminant; `pick_interface`'s `option ==
+  IFaceOptions::First` enum compare is ordinary value equality, orthogonal to
+  the map. No stage decodes a variant tag to answer the query.
+- Provider model (ADR 0014; `pointer_map_quote`; once-per-subject ADR 0044;
+  `collectMetaSlots` provider notes at `:1530-1551`, `:2091-2107`): unchanged.
+  The query is not a provider question and emits no map.
+
+### Open questions for the owner (do not settle unilaterally)
+
+1. Must the Stage-A fold route through `compiler.types.implements`
+   (`docs/compiler-api.md:507`, ADR 0042) with grant visibility, or call
+   `StructType::implements` (`StructType.cpp:358+`) directly?
+2. For `pick_interface` (`literal_interface.fin:18-27`): are anonymous
+   `interface {...}` literals (generated names, `parser.y:2955`) assigned real
+   tids and `InterfaceInfo` registrations, or does enum-guard branch
+   elimination suffice so `<$interface>` return stays comptime-only?
+3. Does a non-foldable `@implements` over `$struct`/`$interface` params lower
+   via the Stage-C tid-pair runtime chain, or refuse as "not
+   compile-time-known" under the `@special` rule (plan §interpretability line)?
+4. Which predicate is normative in codegen: `checkConformity`
+   (`CodeGen_LLVM.cpp:10382-10391`, presence-only) or
+   `StructType::implements` (Self-aware, operators/ctors/dtor)? Does the
+   vtable emitter's null-slot-on-missing-method (`:5683-5687`) stay?
+5. Confirm the representation split: `$interface` query operands are one-word
+   tid values (`fin.interface`) while interface *references* are two-word
+   `{data, vtable}` — no conflation in any stage?
+

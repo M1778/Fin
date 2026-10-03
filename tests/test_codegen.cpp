@@ -168,8 +168,8 @@ BACKEND_TEST(Soundness_Codegen, AProgramWithNoMainSaysSoRatherThanFailingToLink)
     // Before this the object was emitted and handed to `cc`, which reported
     // "undefined reference to `main`" from inside Scrt1.o -- a C diagnostic about a
     // C file, for a Fin program, followed by finc's own help blaming the C toolchain
-    // and suggesting FIN_CC. Five corpus samples reach it (macros.fin, macros2.fin,
-    // macro_definitions.fin, stdlib/somelib.fin, stdlib/networking.fin), and every
+    // and suggesting FIN_CC. Four corpus samples reach it (macros.fin, macros2.fin,
+    // macro_definitions.fin, stdlib/networking.fin), and every
     // one of them is a file with no main rather than a broken toolchain.
     const Built b = build(std::string(kPrintf) +
         "fun helper() <void> {\n"

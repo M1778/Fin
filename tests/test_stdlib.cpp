@@ -259,11 +259,11 @@ TEST(Soundness_BundledStdlib, EverySymbolTheCorpusImportsIsExported) {
 // Soundness_Imports.ImportStarBindsEveryValueTheModuleDeclares and its two siblings in
 // test_cli.cpp, which build their own module rather than borrowing one from the bundle.
 //
-// What the deletion does cost is two diagnostics in `tests/samples/importing.fin`, which
-// writes `import "somelib";` and `import * from somelib;` and now reports `module not
-// found` for both. Its expectation is `unimplemented`, so the corpus stays green; the
-// sample is the specification (ADR 0008) and it asks for a module the library no longer
-// ships, which is an owner question and not this file's to answer.
+// What the deletion cost is gone: `tests/samples/importing.fin` now writes
+// `import "networking";` and `import * from networking;`, which resolve against
+// the shipped library, so neither reports `module not found` anymore. Its
+// expectation stays `unimplemented` over an unbuilt construct further down (a
+// struct literal codegen refuses), not over these two lines.
 TEST(Soundness_BundledStdlib, TheWholeModuleImportFormsResolve) {
     for (const char* code : {
              "import networking;\nfun main() <int> { return 0; }\n",
