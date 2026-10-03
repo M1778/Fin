@@ -541,6 +541,10 @@ pub struct Checker {
       bare_seen_static <[int]>,
       bare_seen_count <int> = 0,
       current_method_short <string> = "",
+      // Current function for bound-aware member lookup (C++ declareGenericParams
+      // scope): the enclosing `fun` whose generic bounds own a `T` receiver.
+      // Saved/restored per function like current_ret_type; "" outside bodies.
+      current_fn <string> = "",
 
     pub:
       fun report_error(self: &Self, msg: string, line: int, col: int) <noret> {
@@ -5289,6 +5293,133 @@ pub struct Checker {
                       }
                       subst_recv = receiver_t;
                       subst_base = base_st;
+                      // Bound-aware generic receivers for method calls (C++
+                      // getStructType over constraints/bounds, same tables as
+                      // field reads): `T: S` resolves `S_m`; missing names
+                      // the bound (`Method 'm' not found in type 'S'`);
+                      // non-struct bounds and unbound diagnose (`Type 'T'
+                      // does not have methods`). Skips the plain `T_m`
+                      // lookup below via gen_done.
+                      let gen_method_done <bool> = false;
+                      if (self.chk_is_bare_word(base_st) && (self.is_gen_in_scope(base_st) || self.chk_word_is_gen_param(base_st))) {
+                          let gmb <string> = "";
+                          if (self.is_gen_in_scope(base_st)) {
+                              gmb = self.bound_in_scope(base_st);
+                          } else {
+                              gmb = self.bound_global(base_st);
+                          }
+                          let gbs <string> = self.resolve_bound_struct(gmb, 0);
+                          if (!chk_str_eq(gbs, "")) {
+                              let gq <Buffer> = new_buffer(64);
+                              gq.write_string(gbs);
+                              gq.write_char('_');
+                              gq.write_string(expr.name);
+                              let gqn <string> = gq.to_string();
+                              free_buffer(gq);
+                              if (self.global_scope.has(gqn)) {
+                                  expr.name = gqn;
+                                  hit_method = true;
+                                  subst_base = gbs;
+                                  subst_recv = gmb;
+                                  gen_method_done = true;
+                              } else {
+                                  let ginh <string> = self.find_inherited_method(gbs, expr.name, 0);
+                                  if (!chk_str_eq(ginh, "")) {
+                                      expr.name = ginh;
+                                      hit_method = true;
+                                      subst_base = gbs;
+                                      subst_recv = gmb;
+                                      gen_method_done = true;
+                                  } else {
+                                      let rl <int> = expr.line;
+                                      let rc <int> = expr.col;
+                                      if (rec_node != null) {
+                                          rl = rec_node.line;
+                                          rc = rec_node.col;
+                                      }
+                                      let mb <Buffer> = new_buffer(64);
+                                      mb.write_string("Method '");
+                                      mb.write_string(expr.name);
+                                      mb.write_string("' not found in type '");
+                                      mb.write_string(gbs);
+                                      mb.write_string("'");
+                                      self.report_error(mb.to_string(), rl, rc);
+                                      free_buffer(mb);
+                                      if (reentry) { self.quiet_recheck = self.quiet_recheck - 1; }
+                                      return "error";
+                                  }
+                              }
+                          } else {
+                              let rl2 <int> = expr.line;
+                              let rc2 <int> = expr.col;
+                              if (rec_node != null) {
+                                  rl2 = rec_node.line;
+                                  rc2 = rec_node.col;
+                              }
+                              let mb2 <Buffer> = new_buffer(64);
+                              mb2.write_string("Type '");
+                              mb2.write_string(base_st);
+                              mb2.write_string("' does not have methods");
+                              self.report_error(mb2.to_string(), rl2, rc2);
+                              free_buffer(mb2);
+                              if (reentry) { self.quiet_recheck = self.quiet_recheck - 1; }
+                              return "error";
+                          }
+                      }
+                      // Direct alias-implements receivers for calls (`v: Likes`
+                      // with `type Likes = Struct implements <_I>`): resolve
+                      // through the interface like fields do.
+                      if (!gen_method_done && self.chk_find_substr(receiver_t, "implements") >= 0) {
+                          let dmi <string> = self.chk_extract_implements_target(receiver_t);
+                          if (!chk_str_eq(dmi, "")) {
+                              let dmr <string> = self.resolve_type(chk_trim(dmi));
+                              if (self.global_scope.has(dmr)) {
+                                  let dmsym <Symbol> = self.global_scope.lookup(dmr);
+                                  if (dmsym.kind == sym_struct() || dmsym.kind == sym_interface()) {
+                                      let dmq <Buffer> = new_buffer(64);
+                                      dmq.write_string(dmr);
+                                      dmq.write_char('_');
+                                      dmq.write_string(expr.name);
+                                      let dmqn <string> = dmq.to_string();
+                                      free_buffer(dmq);
+                                      if (self.global_scope.has(dmqn)) {
+                                          expr.name = dmqn;
+                                          hit_method = true;
+                                          subst_base = dmr;
+                                          subst_recv = receiver_t;
+                                          gen_method_done = true;
+                                      } else {
+                                          let dminh <string> = self.find_inherited_method(dmr, expr.name, 0);
+                                          if (!chk_str_eq(dminh, "")) {
+                                              expr.name = dminh;
+                                              hit_method = true;
+                                              subst_base = dmr;
+                                              subst_recv = receiver_t;
+                                              gen_method_done = true;
+                                          } else {
+                                              let rl <int> = expr.line;
+                                              let rc <int> = expr.col;
+                                              if (rec_node != null) {
+                                                  rl = rec_node.line;
+                                                  rc = rec_node.col;
+                                              }
+                                              let mb <Buffer> = new_buffer(64);
+                                              mb.write_string("Method '");
+                                              mb.write_string(expr.name);
+                                              mb.write_string("' not found in type '");
+                                              mb.write_string(dmr);
+                                              mb.write_string("'");
+                                              self.report_error(mb.to_string(), rl, rc);
+                                              free_buffer(mb);
+                                              if (reentry) { self.quiet_recheck = self.quiet_recheck - 1; }
+                                              return "error";
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      if (!gen_method_done) {
                       if (chk_str_eq(base_st, "Collection") || chk_str_eq(base_st, "HashMap") ||
                           chk_str_eq(base_st, "prototype") || chk_str_eq(base_st, "string") ||
                           chk_str_eq(expr.name, "rm") || chk_str_eq(expr.name, "push") ||
@@ -5335,6 +5466,7 @@ pub struct Checker {
                                   expr.name = if_name;
                               }
                           }
+                      }
                       }
                   }
               }
@@ -5787,6 +5919,33 @@ pub struct Checker {
                           return subst;
                       }
                       if (!self.chk_is_known_type_name(fn_rt)) {
+                          // Preserve an unbound generic return (`T` with
+                          // nothing bound, e.g. two `$struct` handles staying
+                          // unbound): member lookup diagnoses through the
+                          // bound (`Type 'T' is not a struct`) like C++,
+                          // while narrowing still skips generics. Truly
+                          // unknown spellings keep today's `auto`.
+                          let rtt <string> = chk_trim(fn_rt);
+                          if (self.chk_is_bare_word(rtt)) {
+                              let ki <int> = 0;
+                              let keep <bool> = false;
+                              while (ki < bind_n) {
+                                  if (chk_str_eq(bind_names[ki], rtt)) { keep = true; break; }
+                                  ki = ki + 1;
+                              }
+                              let kj <int> = 0;
+                              while (!keep && kj < s_n) {
+                                  if (chk_str_eq(s_names[kj], rtt)) { keep = true; break; }
+                                  kj = kj + 1;
+                              }
+                              if (keep) {
+                                  delete s_names;
+                                  delete s_vals;
+                                  delete bind_names;
+                                  delete bind_vals;
+                                  return rtt;
+                              }
+                          }
                           delete s_names;
                           delete s_vals;
                           delete bind_names;
@@ -5964,6 +6123,143 @@ pub struct Checker {
                       ga = ga + 1;
                   }
                   base_st = self.resolve_type(base_st);
+                  // Bound-aware generic receivers (C++ getStructType over
+                  // GenericType constraints + DynamicType bounds): `T` reads
+                  // through its bound. `T: S` resolves `S_x`; missing names
+                  // the bound (`Struct 'S' ...`); non-struct bounds (`int`,
+                  // `any`, `Struct`, `$struct`) and unbound diagnose like
+                  // C++ (`Type 'T' is not a struct`). In-scope first (the
+                  // caller's own `T`); inferred returns (`let v = make(..)`
+                  // as `T` from the callee) fall back to the first global
+                  // declaration, first-wins like other registries.
+                  if (self.chk_is_bare_word(base_st) && (self.is_gen_in_scope(base_st) || self.chk_word_is_gen_param(base_st))) {
+                      let gb <string> = "";
+                      if (self.is_gen_in_scope(base_st)) {
+                          gb = self.bound_in_scope(base_st);
+                      } else {
+                          gb = self.bound_global(base_st);
+                      }
+                      let bs <string> = self.resolve_bound_struct(gb, 0);
+                      if (!chk_str_eq(bs, "")) {
+                          let bq <Buffer> = new_buffer(64);
+                          bq.write_string(bs);
+                          bq.write_char('_');
+                          bq.write_string(expr.name);
+                          let bqn <string> = bq.to_string();
+                          free_buffer(bq);
+                          if (self.global_scope.has(bqn)) {
+                              let bf <Symbol> = self.global_scope.lookup(bqn);
+                              self.check_priv_member(bqn, expr.line, expr.col, 0, bs);
+                              return self.subst_field_return(gb, bs, bf.type_name);
+                          }
+                          let bq2 <Buffer> = new_buffer(64);
+                          bq2.write_string(bs);
+                          bq2.write_string("::");
+                          bq2.write_string(expr.name);
+                          let bqn2 <string> = bq2.to_string();
+                          free_buffer(bq2);
+                          if (self.global_scope.has(bqn2)) {
+                              let bf2 <Symbol> = self.global_scope.lookup(bqn2);
+                              self.check_priv_member(bqn2, expr.line, expr.col, 0, bs);
+                              return self.subst_field_return(gb, bs, bf2.type_name);
+                          }
+                          let binh <string> = self.find_inherited_member_type(bs, expr.name, bs, 0, expr.line, expr.col);
+                          if (!chk_str_eq(binh, "")) {
+                              return self.resolve_type(binh);
+                          }
+                          if (!self.member_name_is_positional(expr.name)) {
+                              let ml <int> = expr.line;
+                              let mc <int> = expr.col;
+                              if (expr.left != null) {
+                                  ml = expr.left.line;
+                                  mc = expr.left.col;
+                              }
+                              let mb <Buffer> = new_buffer(64);
+                              mb.write_string("Struct '");
+                              mb.write_string(bs);
+                              mb.write_string("' has no member '");
+                              mb.write_string(expr.name);
+                              mb.write_string("'");
+                              self.report_error(mb.to_string(), ml, mc);
+                              free_buffer(mb);
+                              return "error";
+                          }
+                          return "auto";
+                      } else {
+                          let ml3 <int> = expr.line;
+                          let mc3 <int> = expr.col;
+                          if (expr.left != null) {
+                              ml3 = expr.left.line;
+                              mc3 = expr.left.col;
+                          }
+                          let mb3 <Buffer> = new_buffer(64);
+                          mb3.write_string("Type '");
+                          mb3.write_string(base_st);
+                          mb3.write_string("' is not a struct");
+                          self.report_error(mb3.to_string(), ml3, mc3);
+                          free_buffer(mb3);
+                          return "error";
+                      }
+                  }
+                  // Direct alias-implements receivers (`v: Likes` where
+                  // `type Likes = Struct implements <_I>` stores fused
+                  // `Structimplements<_I>`): read through the interface like
+                  // C++ DynamicType bounds. Missing names the interface.
+                  if (self.chk_find_substr(recv_full, "implements") >= 0) {
+                      let di <string> = self.chk_extract_implements_target(recv_full);
+                      if (!chk_str_eq(di, "")) {
+                          let dr <string> = self.resolve_type(chk_trim(di));
+                          if (self.global_scope.has(dr)) {
+                              let dsym <Symbol> = self.global_scope.lookup(dr);
+                              if (dsym.kind == sym_struct() || dsym.kind == sym_interface()) {
+                                  let dq <Buffer> = new_buffer(64);
+                                  dq.write_string(dr);
+                                  dq.write_char('_');
+                                  dq.write_string(expr.name);
+                                  let dqn <string> = dq.to_string();
+                                  free_buffer(dq);
+                                  if (self.global_scope.has(dqn)) {
+                                      let df <Symbol> = self.global_scope.lookup(dqn);
+                                      self.check_priv_member(dqn, expr.line, expr.col, 0, dr);
+                                      return self.subst_field_return(recv_full, dr, df.type_name);
+                                  }
+                                  let dq2 <Buffer> = new_buffer(64);
+                                  dq2.write_string(dr);
+                                  dq2.write_string("::");
+                                  dq2.write_string(expr.name);
+                                  let dqn2 <string> = dq2.to_string();
+                                  free_buffer(dq2);
+                                  if (self.global_scope.has(dqn2)) {
+                                      let df2 <Symbol> = self.global_scope.lookup(dqn2);
+                                      self.check_priv_member(dqn2, expr.line, expr.col, 0, dr);
+                                      return self.subst_field_return(recv_full, dr, df2.type_name);
+                                  }
+                                  let dinh <string> = self.find_inherited_member_type(dr, expr.name, dr, 0, expr.line, expr.col);
+                                  if (!chk_str_eq(dinh, "")) {
+                                      return self.resolve_type(dinh);
+                                  }
+                                  if (!self.member_name_is_positional(expr.name)) {
+                                      let ml <int> = expr.line;
+                                      let mc <int> = expr.col;
+                                      if (expr.left != null) {
+                                          ml = expr.left.line;
+                                          mc = expr.left.col;
+                                      }
+                                      let mb <Buffer> = new_buffer(64);
+                                      mb.write_string("Struct '");
+                                      mb.write_string(dr);
+                                      mb.write_string("' has no member '");
+                                      mb.write_string(expr.name);
+                                      mb.write_string("'");
+                                      self.report_error(mb.to_string(), ml, mc);
+                                      free_buffer(mb);
+                                      return "error";
+                                  }
+                                  return "auto";
+                              }
+                          }
+                      }
+                  }
                   let q_buf <Buffer> = new_buffer(64);
                   q_buf.write_string(base_st);
                   q_buf.write_char('_');
@@ -5992,13 +6288,15 @@ pub struct Checker {
                   if (!chk_str_eq(inh_ty, "")) {
                       return self.resolve_type(inh_ty);
                   }
-                  // The field list is authoritative only for structs
-                  // (interface/enum members are not recorded here, and a
-                  // numeric member is positional payload access, enums.fin:38),
-                  // so only a struct base can refuse an unknown member.
+                  // The field list is authoritative for structs and
+                  // interfaces (interface fields register like struct
+                  // fields now; enums still do not, and a numeric member is
+                  // positional payload access, enums.fin:38), so either can
+                  // refuse an unknown member like C++ (`Struct 'I' ...`
+                  // even for interfaces).
                   if (self.global_scope.has(base_st)) {
                       let bsym <Symbol> = self.global_scope.lookup(base_st);
-                      if (bsym.kind == sym_struct() && !self.member_name_is_positional(expr.name)) {
+                      if ((bsym.kind == sym_struct() || bsym.kind == sym_interface()) && !self.member_name_is_positional(expr.name)) {
                           // Reported at the object, like C++.
                           let ml <int> = expr.line;
                           let mc <int> = expr.col;
@@ -6371,6 +6669,8 @@ pub struct Checker {
           // break/continue after it belong to the enclosing function.
           let saved_ret <string> = self.current_ret_type;
           let saved_loop <int> = self.loop_depth;
+          let saved_fn <string> = self.current_fn;
+          self.current_fn = fn_node.name;
           let ret_ann <string> = self.resolve_type(fn_node.type_annotation);
           // `fun?` declares a nullable return: `<long>` here means `<long?>`,
           // so returns check against `T?` (C++ NullableType return). The
@@ -6511,6 +6811,7 @@ pub struct Checker {
           self.exit_scope();
           self.current_ret_type = saved_ret;
           self.loop_depth = saved_loop;
+          self.current_fn = saved_fn;
           let rgi <int> = 0;
           while (rgi < 8) {
               self.grants[rgi] = saved_grants[rgi];
@@ -6723,8 +7024,11 @@ pub struct Checker {
       // interface/type alias. Reports the first unknown word and returns false.
       fun check_bound_words(self: &Self, bound: string, pnames: [string], pcount: int, line: int, col: int) <bool> {
           if (bound == null) { return true; }
-          let blen <int> = cast<int>(chk_strlen(bound));
-          let bchars <[char]> = to_chars(bound);
+          // `$ struct` (generic-token join) reads as `$struct`: normalize
+          // before the word scan so `$struct` bounds validate.
+          let nbound <string> = self.chk_normalize_dollar(bound);
+          let blen <int> = cast<int>(chk_strlen(nbound));
+          let bchars <[char]> = to_chars(nbound);
           let word_start <int> = -1;
           let bi <int> = 0;
           while (bi <= blen) {
@@ -6741,7 +7045,7 @@ pub struct Checker {
                   if (word_start < 0) { word_start = bi; }
               } else {
                   if (word_start >= 0) {
-                      let w <string> = substr(bound, word_start, bi - word_start);
+                      let w <string> = substr(nbound, word_start, bi - word_start);
                       let first <string> = substr(w, 0, 1);
                       let fch <[char]> = to_chars(first);
                       let starts_word <bool> = false;
@@ -7095,7 +7399,8 @@ pub struct Checker {
       // bound scan does.
       fun bound_base_word(self: &Self, bound: string) <string> {
           if (bound == null) { return ""; }
-          let b <string> = chk_trim(bound);
+          let nb <string> = self.chk_normalize_dollar(bound);
+          let b <string> = chk_trim(nb);
           let blen <int> = cast<int>(chk_strlen(b));
           if (blen <= 0) { return ""; }
           let fch <string> = substr(b, 0, 1);
@@ -7118,6 +7423,233 @@ pub struct Checker {
               }
           }
           return substr(b, 0, bi);
+      }
+
+      // Joins a `$` split by the generic-token join (`T: $struct` lexes as
+      // `$` + `struct`, stored as `$ struct`): `$` + spaces are one spelling.
+      // Parser-fin owns the join; this owns the read, so `$struct` bounds
+      // validate and resolve without a parser change.
+      fun chk_normalize_dollar(self: &Self, s: string) <string> {
+          if (s == null) { return ""; }
+          let len <int> = cast<int>(chk_strlen(s));
+          if (len <= 0) { return s; }
+          let b <Buffer> = new_buffer(len + 1);
+          let i <int> = 0;
+          while (i < len) {
+              let ch <string> = substr(s, i, 1);
+              if (chk_str_eq(ch, "$")) {
+                  b.write_char('$');
+                  i = i + 1;
+                  while (i < len && chk_str_eq(substr(s, i, 1), " ")) {
+                      i = i + 1;
+                  }
+                  continue;
+              } else {
+                  b.write_string(ch);
+                  i = i + 1;
+              }
+          }
+          let out <string> = b.to_string();
+          free_buffer(b);
+          return out;
+      }
+
+      // Position of needle in hay, -1 when absent.
+      fun chk_find_substr(self: &Self, hay: string, needle: string) <int> {
+          if (hay == null || needle == null) { return -1; }
+          let hlen <int> = cast<int>(chk_strlen(hay));
+          let nlen <int> = cast<int>(chk_strlen(needle));
+          if (nlen <= 0 || nlen > hlen) { return -1; }
+          let i <int> = 0;
+          while (i + nlen <= hlen) {
+              if (chk_str_eq(substr(hay, i, nlen), needle)) { return i; }
+              i = i + 1;
+          }
+          return -1;
+      }
+
+      // Implements target of a bound/alias spelling (`_I` in both
+      // `Struct implements <_I>` and the fused `Structimplements<_I>` the
+      // alias writer stores; `Struct` in `any implements Struct`). First
+      // target only (`<A,B>` answers `A`, like C++ taking the first bound
+      // for its struct). "" when no implements or no readable target.
+      fun chk_extract_implements_target(self: &Self, s: string) <string> {
+          if (s == null) { return ""; }
+          let pos <int> = self.chk_find_substr(s, "implements");
+          if (pos < 0) { return ""; }
+          let slen <int> = cast<int>(chk_strlen(s));
+          let rest <string> = chk_trim(substr(s, pos + 10, slen - pos - 10));
+          if (chk_strlen(rest) == cast<ulong>(0)) { return ""; }
+          if (chk_str_eq(substr(rest, 0, 1), "<")) {
+              let rlen <int> = cast<int>(chk_strlen(rest));
+              let gi <int> = 1;
+              while (gi < rlen) {
+                  if (chk_str_eq(substr(rest, gi, 1), ">")) { break; }
+                  gi = gi + 1;
+              }
+              if (gi <= 1) { return ""; }
+              let inner <string> = chk_trim(substr(rest, 1, gi - 1));
+              let comma <int> = self.chk_find_substr(inner, ",");
+              if (comma >= 0) {
+                  inner = chk_trim(substr(inner, 0, comma));
+              }
+              return inner;
+          }
+          return self.bound_base_word(rest);
+      }
+
+      // True when fn_name's recorded generics declare pname.
+      fun fn_declares_param(self: &Self, fn_name: string, pname: string) <bool> {
+          if (fn_name == null || pname == null) { return false; }
+          if (self.gen_scope_names == null) { return false; }
+          let gi <int> = 0;
+          while (gi < self.gen_count) {
+              if (chk_str_eq(self.gen_scope_names[gi], fn_name)) {
+                  let segs <[string]> = new [string, 64]{};
+                  let scount <int> = self.split_generic_segs(self.gen_scope_params[gi], segs);
+                  let pnames <[string]> = new [string, 64]{};
+                  let pcount <int> = self.collect_bound_pnames(segs, scount, pnames, 0);
+                  let pi <int> = 0;
+                  let found <bool> = false;
+                  while (pi < pcount) {
+                      if (chk_str_eq(pnames[pi], pname)) { found = true; break; }
+                      pi = pi + 1;
+                  }
+                  delete segs;
+                  delete pnames;
+                  return found;
+              }
+              gi = gi + 1;
+          }
+          return false;
+      }
+
+      // True when pname is a generic parameter in scope for the current
+      // body: the current function's own, its flattened target's, or the
+      // current struct's. Program-global names from other functions do not
+      // count (C++ innermost scope).
+      fun is_gen_in_scope(self: &Self, pname: string) <bool> {
+          if (pname == null) { return false; }
+          let t <string> = chk_trim(pname);
+          if (!self.chk_is_bare_word(t)) { return false; }
+          if (self.current_fn != null && chk_strlen(self.current_fn) > cast<ulong>(0)) {
+              if (self.fn_declares_param(self.current_fn, t)) { return true; }
+              let pre <string> = self.struct_prefix_of(self.current_fn);
+              if (!chk_str_eq(pre, "") && self.fn_declares_param(pre, t)) { return true; }
+          }
+          if (chk_strlen(self.current_struct) > cast<ulong>(0)) {
+              if (self.fn_declares_param(self.current_struct, t)) { return true; }
+          }
+          return false;
+      }
+
+      // Declared bound of pname in scope ("" when unbound). Only call when
+      // is_gen_in_scope holds; normalized for `$` splits.
+      fun bound_in_scope(self: &Self, pname: string) <string> {
+          if (pname == null) { return ""; }
+          let t <string> = chk_trim(pname);
+          if (self.current_fn != null && chk_strlen(self.current_fn) > cast<ulong>(0)) {
+              if (self.fn_declares_param(self.current_fn, t)) {
+                  return self.chk_normalize_dollar(self.generic_bound_of(self.current_fn, t));
+              }
+              let pre2 <string> = self.struct_prefix_of(self.current_fn);
+              if (!chk_str_eq(pre2, "") && self.fn_declares_param(pre2, t)) {
+                  return self.chk_normalize_dollar(self.generic_bound_of(pre2, t));
+              }
+          }
+          if (chk_strlen(self.current_struct) > cast<ulong>(0) && self.fn_declares_param(self.current_struct, t)) {
+              return self.chk_normalize_dollar(self.generic_bound_of(self.current_struct, t));
+          }
+          return "";
+      }
+
+      // First bound declaring pname anywhere (first-wins, like other
+      // registries): provenance for inferred returns (`let v = make2(..)`
+      // types `v` as `T` from `make2`, whose bound lives there, not in the
+      // caller). Single-file probes declare once; duplicates take the first.
+      fun bound_global(self: &Self, pname: string) <string> {
+          if (pname == null || self.gen_scope_names == null) { return ""; }
+          let t <string> = chk_trim(pname);
+          let gi <int> = 0;
+          while (gi < self.gen_count) {
+              if (self.fn_declares_param(self.gen_scope_names[gi], t)) {
+                  return self.chk_normalize_dollar(self.generic_bound_of(self.gen_scope_names[gi], t));
+              }
+              gi = gi + 1;
+          }
+          return "";
+      }
+
+      // Struct/interface a bound resolves to for member lookup (C++
+      // getStructType over GenericType constraints + DynamicType bounds):
+      // `S` -> `S`, `Likes` (alias `Struct implements <_I>`) -> `_I`,
+      // `any implements <_I>` -> `_I`. "" for non-struct bounds (`int`,
+      // `any`, `Struct`, `$struct`) and unbound. Depth-capped transitive
+      // (`T: U`, `U: S`).
+      fun resolve_bound_struct(self: &Self, bound: string, depth: int) <string> {
+          if (depth > 4) { return ""; }
+          if (bound == null) { return ""; }
+          let b <string> = chk_trim(self.chk_normalize_dollar(bound));
+          if (chk_strlen(b) == cast<ulong>(0)) { return ""; }
+          if (self.chk_find_substr(b, "implements") >= 0) {
+              let tgt <string> = chk_trim(self.chk_extract_implements_target(b));
+              if (chk_strlen(tgt) == cast<ulong>(0)) { return ""; }
+              let rt <string> = self.resolve_type(tgt);
+              if (!chk_str_eq(rt, tgt) && self.chk_find_substr(rt, "implements") >= 0) {
+                  let inner <string> = self.chk_extract_implements_target(rt);
+                  if (chk_strlen(inner) > cast<ulong>(0)) {
+                      return self.resolve_bound_struct(inner, depth + 1);
+                  }
+                  return "";
+              }
+              if (self.chk_is_bare_word(tgt) && self.is_gen_in_scope(tgt)) {
+                  let ib <string> = self.bound_in_scope(tgt);
+                  if (chk_strlen(ib) > cast<ulong>(0)) {
+                      return self.resolve_bound_struct(ib, depth + 1);
+                  }
+                  return "";
+              }
+              let tb <string> = self.chk_generic_base(self.chk_strip_ptr(tgt));
+              tb = self.resolve_type(tb);
+              if (!chk_str_eq(tb, tgt) && self.chk_find_substr(tb, "implements") >= 0) {
+                  let inner2 <string> = self.chk_extract_implements_target(tb);
+                  if (chk_strlen(inner2) > cast<ulong>(0)) {
+                      return self.resolve_bound_struct(inner2, depth + 1);
+                  }
+                  return "";
+              }
+              if (self.global_scope.has(tb)) {
+                  let sym <Symbol> = self.global_scope.lookup(tb);
+                  if (sym.kind == sym_struct() || sym.kind == sym_interface()) {
+                      return tb;
+                  }
+              }
+              return "";
+          }
+          let r <string> = self.resolve_type(b);
+          if (!chk_str_eq(r, b) && self.chk_find_substr(r, "implements") >= 0) {
+              let it <string> = self.chk_extract_implements_target(r);
+              if (chk_strlen(it) > cast<ulong>(0)) {
+                  return self.resolve_bound_struct(it, depth + 1);
+              }
+              return "";
+          }
+          if (self.chk_is_bare_word(b) && self.is_gen_in_scope(b)) {
+              let ob <string> = self.bound_in_scope(b);
+              if (chk_strlen(ob) > cast<ulong>(0)) {
+                  return self.resolve_bound_struct(ob, depth + 1);
+              }
+              return "";
+          }
+          let base <string> = self.chk_generic_base(self.chk_strip_ptr(b));
+          base = self.resolve_type(base);
+          if (self.global_scope.has(base)) {
+              let s <Symbol> = self.global_scope.lookup(base);
+              if (s.kind == sym_struct() || s.kind == sym_interface()) {
+                  return base;
+              }
+          }
+          return "";
       }
 
       // True for a bare type word (`T`, `int`): none of the composite
@@ -7566,6 +8098,37 @@ pub struct Checker {
                       self.global_scope.insert_symbol(if_sym);
                   }
                   self.record_generic_scope(decl.name, decl.type_annotation);
+                  // Interface fields (`interface I { pub x <int>; }`) register
+                  // like struct fields (`I_x`, `I::x`) so bound receivers
+                  // (`T: I`, `T: Likes` via `Struct implements <I>`) resolve
+                  // members through the bound (C++ getStructType over the
+                  // interface's fields). Methods already register below.
+                  let fld <&AstNode> = decl.left;
+                  while (fld != null) {
+                      let fb <Buffer> = new_buffer(64);
+                      fb.write_string(decl.name);
+                      fb.write_char('_');
+                      fb.write_string(fld.name);
+                      let fq <string> = fb.to_string();
+                      free_buffer(fb);
+                      let fsym <Symbol> = make_var_sym(fq, fld.type_annotation, true);
+                      fsym.is_pub = fld.is_pub;
+                      if (!self.global_scope.has(fq)) {
+                          self.global_scope.insert_symbol(fsym);
+                      }
+                      let fb2 <Buffer> = new_buffer(64);
+                      fb2.write_string(decl.name);
+                      fb2.write_string("::");
+                      fb2.write_string(fld.name);
+                      let fq2 <string> = fb2.to_string();
+                      free_buffer(fb2);
+                      let fsym2 <Symbol> = make_var_sym(fq2, fld.type_annotation, true);
+                      fsym2.is_pub = fld.is_pub;
+                      if (!self.global_scope.has(fq2)) {
+                          self.global_scope.insert_symbol(fsym2);
+                      }
+                      fld = fld.right;
+                  }
                   let m <&AstNode> = decl.extra;
                   while (m != null) {
                       let m_sym <Symbol> = make_fn_sym(m.name, m.type_annotation, true);

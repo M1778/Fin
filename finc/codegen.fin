@@ -184,6 +184,12 @@ pub struct StructFieldInfo {
       name <string> = "",
       index <int> = 0,
       type_annotation <string> = "",
+      // The field's declared default (`health <uint> = 100` keeps the
+      // `100`): struct literals that omit the field evaluate it after the
+      // written values (C++ buildStructValue's defaults loop). Null when
+      // the declaration gives none. Kept like StructInfo.method_head,
+      // where the AST is still at hand.
+      default_init <&AstNode> = null,
 }
 
 pub struct StructInfo {
@@ -1166,6 +1172,7 @@ fun cg_ensure_struct_instance(ctx: &FnContext, spelling: string) <&StructInfo> {
             let nf <&StructFieldInfo> = new StructFieldInfo{};
             nf.name = f.name;
             nf.index = f.index;
+            nf.default_init = f.default_init;
             if (f.type_annotation != null) {
                 nf.type_annotation = cg_subst_params(f.type_annotation, params, args, pcount, acount);
             } else {
@@ -4791,6 +4798,23 @@ fun cg_clone_subst(node: &AstNode, params: [string], args: [string], n: int) <&A
     return c;
 }
 
+// Retarget `$struct`-handle instantiations in a freshly cloned per-key
+// instance body (C++ structHandleTarget): `st{}` where `st` is the handle
+// parameter builds the seeded struct, not the handle. Only the handle's
+// own bare name retargets; anything else keeps today's lowering. Runs on
+// the clone, never the template.
+fun cg_rewrite_handle_inits(node: &AstNode, handle_name: string, struct_name: string) <noret> {
+    if (node == null) { return; }
+    if (node.kind == ast_call_expr() && node.name != null && cg_str_eq(node.name, "__fin_struct_init")) {
+        if (node.type_annotation != null && cg_str_eq(cg_trim_spaces(node.type_annotation), handle_name)) {
+            node.type_annotation = struct_name;
+        }
+    }
+    cg_rewrite_handle_inits(node.left, handle_name, struct_name);
+    cg_rewrite_handle_inits(node.right, handle_name, struct_name);
+    cg_rewrite_handle_inits(node.extra, handle_name, struct_name);
+}
+
 // The substituted spelling of a member receiver (`self.keys` with
 // `self: &HashMap<int,int>` reads `&Collection<int>`): the field's
 // declared annotation with the receiver struct's own arguments filled
@@ -5331,6 +5355,39 @@ fun cg_decl_is_free_bare_generic(decl: &AstNode, structs: [&StructInfo], struct_
     return true;
 }
 
+// A `$struct`-seeded free generic (`make_default<T>(st: $struct) <T>`):
+// the return-only bare parameter is seeded at the call by the single
+// `$struct` handle's own declaration (C++ trySeedFromStructHandle), so
+// the function instantiates per seeding like any template. Only the
+// single-parameter single-handle shape qualifies (several handles stay
+// unbound like C++); anything wider stays eager as before.
+fun cg_decl_is_struct_seeded_generic(decl: &AstNode) <bool> {
+    if (decl == null || decl.kind != ast_fun_decl()) { return false; }
+    if (decl.int_val == 2) { return false; }
+    if (decl.left == null) { return false; }
+    if (!is_generic_method(decl)) { return false; }
+    if (decl.extra != null && decl.extra.name != null && cg_str_eq(decl.extra.name, "self")) { return false; }
+    let pn <[string]> = new [string, 64]{};
+    let pc <int> = cg_method_param_names(decl.str_val, pn, 64);
+    if (pc != 1) { delete pn; return false; }
+    let pcount <int> = 0;
+    let handle_count <int> = 0;
+    let pw <&AstNode> = decl.extra;
+    while (pw != null) {
+        pcount = pcount + 1;
+        if (pw.type_annotation != null && cg_str_eq(cg_trim_spaces(pw.type_annotation), "$struct")) {
+            handle_count = handle_count + 1;
+        }
+        pw = pw.right;
+    }
+    if (pcount != 1 || handle_count != 1) { delete pn; return false; }
+    let ret <string> = "";
+    if (decl.type_annotation != null) { ret = cg_trim_spaces(decl.type_annotation); }
+    let ok <bool> = cg_str_eq(ret, pn[0]);
+    delete pn;
+    return ok;
+}
+
 // Bind a pattern annotation against an actual spelling, mirroring C++
 // unifyBinding (bare `T` binds, `Box<T>` reads the instantiation's own
 // substitution, concrete spellings bind nothing). Returns the new binding
@@ -5626,6 +5683,17 @@ fun cg_free_spelling_of(ctx: &FnContext, node: &AstNode, depth: int) <string> {
             return s2;
         }
     }
+    // A `struct { ... }` literal marker (the parser tags it `$struct` and
+    // stashes its declaration top-level): the seeding the checker reads off
+    // the same node, so the declaration's own name is the spelling
+    // monomorphization keys on. Anything else prototypal stays exotic.
+    if (node.kind == ast_prototype_literal()) {
+        if (node.type_annotation != null && cg_str_eq(node.type_annotation, "$struct") &&
+            node.str_val != null && cg_strlen(node.str_val) > cast<ulong>(0)) {
+            return node.str_val;
+        }
+        return "";
+    }
     return "";
 }
 
@@ -5822,6 +5890,20 @@ fun cg_free_cache_sym(ctx: &FnContext, n: &AstNode) <&FnSymbol> {
     clone.name = key;
     clone.right = null;
     clone.str_val = "";
+    // `$struct`-handle instantiation targets (C++ structHandleTarget): each
+    // handle parameter denotes its argument's own declaration, so a `st{}`
+    // in the body builds that struct. Retargeted on the clone, beside the
+    // stamping below, which gives the handle parameter the same spelling.
+    let tp <&AstNode> = tmpl.extra;
+    let tpi <int> = 0;
+    while (tp != null && tpi < acount) {
+        if (tp.type_annotation != null && cg_str_eq(cg_trim_spaces(tp.type_annotation), "$struct") &&
+            tp.name != null && cg_strlen(tp.name) > cast<ulong>(0)) {
+            cg_rewrite_handle_inits(clone, tp.name, actuals[tpi]);
+        }
+        tp = tp.right;
+        tpi = tpi + 1;
+    }
     // Stamp the clone's parameters with the actual spellings (the template
     // patterns are erased to `void*`, so substitution alone leaves them
     // erased and member reads cannot resolve). Arity already checked, so a
@@ -8314,7 +8396,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 // A value written for a nullable pair field wraps with its
                 // presence; a pair written for a plain field refuses rather
                 // than storing a two-word value into a one-word slot.
-                // Omitted fields stay what calloc left: the zero pair, absent.
+                // Omitted fields stay what calloc left (the zero pair,
+                // absent) unless a declared default fills them below.
                 let f_want <&LLVMType> = get_struct_field_type_by_name(ctx, st_name, f_cur.name);
                 if (f_val != null && f_want != null) {
                     if (cg_is_tagged_pair(ctx, f_want) && !cg_is_tagged_pair(ctx, llvm_type_of(f_val))) {
@@ -8335,6 +8418,55 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 delete ind;
                 llvm_build_store(ctx.builder, f_val, f_gep);
                 f_cur = f_cur.right;
+            }
+            // Omitted-field defaults (C++ buildStructValue's defaults
+            // loop): every field the literal did not write but declares a
+            // default evaluates it here, after the written values, in
+            // declared order. A written field's own value stands, never
+            // re-run; fields without defaults stay what calloc left.
+            let d_si <&StructInfo> = find_struct(ctx, st_name);
+            if (d_si != null) {
+                let d_fi <int> = 0;
+                while (d_fi < d_si.field_count) {
+                    let d_fld <&StructFieldInfo> = d_si.fields[d_fi];
+                    d_fi = d_fi + 1;
+                    if (d_fld == null || d_fld.default_init == null) { continue; }
+                    let d_w <&AstNode> = n.left;
+                    let d_written <bool> = false;
+                    while (d_w != null) {
+                        if (d_w.name != null && cg_str_eq(d_w.name, d_fld.name)) { d_written = true; break; }
+                        d_w = d_w.right;
+                    }
+                    if (d_written) { continue; }
+                    let d_saved <bool> = ctx.arr_hint_auto;
+                    cg_apply_array_field_hint(ctx, st_name, d_fld.name, d_fld.default_init);
+                    let d_val <&LLVMValue> = lower_expr(ctx, d_fld.default_init);
+                    ctx.arr_hint_auto = d_saved;
+                    d_val = fn_value_to_ptr(ctx, d_fld.default_init, d_val);
+                    let d_iface <&InterfaceInfo> = field_interface(ctx, st_name, d_fld.name);
+                    if (d_iface != null && d_iface.fat_ptr_ty != null && llvm_type_of(d_val) != ctx.ptr_ty) {
+                        d_val = box_interface_value(ctx, d_val, d_iface.fat_ptr_ty);
+                    }
+                    let d_want <&LLVMType> = get_struct_field_type_by_name(ctx, st_name, d_fld.name);
+                    if (d_val != null && d_want != null) {
+                        if (cg_is_tagged_pair(ctx, d_want) && !cg_is_tagged_pair(ctx, llvm_type_of(d_val))) {
+                            d_val = cg_wrap_nullable(ctx, d_val, d_want, cg_is_absent_spelling(d_fld.default_init));
+                        } else if (cg_is_tagged_pair(ctx, d_want) && cg_is_tagged_pair(ctx, llvm_type_of(d_val))) {
+                            d_val = cg_convert_pair(ctx, d_val, d_want);
+                        } else if (!cg_is_tagged_pair(ctx, d_want) && cg_is_tagged_pair(ctx, llvm_type_of(d_val))) {
+                            cg_dprintf(2, "finc codegen refusal: struct literal field '%s' holds a nullable value without denullify ('?')\n", d_fld.name);
+                            refuse_and_poison(ctx);
+                            llvm_build_unreachable(ctx.builder);
+                            return null;
+                        }
+                    }
+                    let d_idx <int> = find_field_index_by_name(ctx, st_name, d_fld.name);
+                    let d_ind <&LLVMIndices> = new LLVMIndices{};
+                    d_ind.i0 = llvm_const_int(ctx.i64_ty, d_idx, 0);
+                    let d_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, st_ptr, d_ind, 1, "f_gep");
+                    delete d_ind;
+                    llvm_build_store(ctx.builder, d_val, d_gep);
+                }
             }
             return st_ptr;
         }
@@ -8358,11 +8490,52 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             }
             return lower_expr(ctx, mv_arg);
         }
-        // `@implements` / `@defined` are answered at compile time by the
-        // C++ frontend; the self-host holds no comptime values yet, so the
-        // honest lowering is a refusal naming the construct.
-        if (cg_str_eq(n.name, "implements") || cg_str_eq(n.name, "@implements") ||
-            cg_str_eq(n.name, "defined") || cg_str_eq(n.name, "@defined")) {
+        // `@defined("name")` folds to whether the name is declared: the
+        // C++ backend answers from its function, struct, enum and global
+        // tables, so `printf` (a runtime intrinsic, never a user
+        // declaration) folds false and the literal_struct.fin guard takes
+        // the define branch while the gated call resolves through the
+        // ambient printf declaration below. Anything but one string
+        // literal keeps the refusal, never a guess.
+        if (cg_str_eq(n.name, "defined") || cg_str_eq(n.name, "@defined")) {
+            let def_argc <int> = 0;
+            let def_w <&AstNode> = n.left;
+            while (def_w != null) {
+                def_argc = def_argc + 1;
+                def_w = def_w.right;
+            }
+            if (def_argc == 1 && n.left != null) {
+                let def_a <&AstNode> = n.left.left;
+                if (def_a == null) { def_a = n.left; }
+                if (def_a.kind == ast_literal_string() && def_a.str_val != null) {
+                    let def_target <string> = unescape_string_literal(def_a.str_val);
+                    let def_hit <bool> = false;
+                    if (fn_ctx_find_fn(ctx, def_target) != null) { def_hit = true; }
+                    if (!def_hit && find_struct(ctx, def_target) != null) { def_hit = true; }
+                    if (!def_hit && find_enum(ctx, def_target) != null) { def_hit = true; }
+                    if (!def_hit && llvm_get_named_global(ctx.module, def_target) != null) { def_hit = true; }
+                    if (def_hit) {
+                        return llvm_const_int(ctx.i1_ty, 1, 0);
+                    }
+                    return llvm_const_int(ctx.i1_ty, 0, 0);
+                }
+            }
+            let at_name <string> = n.name;
+            let at_buf <Buffer> = new_buffer(32);
+            if (!cg_str_eq(substr(at_name, 0, 1), "@")) {
+                at_buf.write_char('@');
+                at_buf.write_string(at_name);
+                at_name = at_buf.to_string();
+            }
+            cg_dprintf(2, "codegen: the compile-time call '%s' is not lowered yet\n", at_name);
+            free_buffer(at_buf);
+            refuse_and_poison(ctx);
+            return null;
+        }
+        // `@implements` is answered at compile time by the C++ frontend;
+        // the self-host holds no comptime values yet, so the honest
+        // lowering is a refusal naming the construct.
+        if (cg_str_eq(n.name, "implements") || cg_str_eq(n.name, "@implements")) {
             let at_name <string> = n.name;
             let at_buf <Buffer> = new_buffer(32);
             if (!cg_str_eq(substr(at_name, 0, 1), "@")) {
@@ -9813,13 +9986,23 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
     }
     if (n.kind == ast_prototype_literal()) {
         // A `struct { ... }` literal marker (the parser tags it `$struct`
-        // and stashes its declaration top-level for the checker): the value
-        // is a compile-time type handle, not a runtime prototype, so the
-        // prototype allocation below must not silently build one for it.
+        // and stashes its declaration top-level for the checker): it lowers
+        // as a default construction of that declaration (C++
+        // ensureAnonymousStruct lays the same declaration out on demand).
+        // Reaches the `__fin_struct_init` path below by retagging, which
+        // stores the (empty) written list and runs the declared defaults.
+        // Unresolvable stays a refusal, never a guessed struct.
         if (n.type_annotation != null && cg_str_eq(n.type_annotation, "$struct")) {
-            cg_dprintf(2, "codegen: a 'struct { ... }' literal value is not lowered yet\n");
-            refuse_and_poison(ctx);
-            return null;
+            let anon <string> = n.str_val;
+            if (anon == null || cg_strlen(anon) == cast<ulong>(0) || find_struct(ctx, anon) == null) {
+                cg_dprintf(2, "codegen: a 'struct { ... }' literal value is not lowered yet\n");
+                refuse_and_poison(ctx);
+                return null;
+            }
+            n.kind = ast_call_expr();
+            n.name = "__fin_struct_init";
+            n.type_annotation = anon;
+            return lower_expr(ctx, n);
         }
         let count <int> = 0;
         let cur <&AstNode> = n.left;
@@ -11747,7 +11930,7 @@ pub fun lower_decl(
         // FG1/MM2: free generics over structs or bare parameters lower on
         // demand (see pass 1.5): skipping them here keeps uncalled generics
         // out of the object.
-        if (decl.int_val != 2 && (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count))) { return false; }
+        if (decl.int_val != 2 && (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count) || cg_decl_is_struct_seeded_generic(decl))) { return false; }
         return lower_fun_decl(module, builder, decl, fn_syms, fn_sym_count, structs, struct_count, enums, enum_count, interfaces, interface_count, move_claim, src_file);
     } else if (decl.kind == ast_struct_decl()) {
         let refused <bool> = false;
@@ -12329,6 +12512,22 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int, 
     let module <&LLVMModule> = llvm_module_create("fin_module");
     let builder <&LLVMBuilder> = llvm_create_builder();
 
+    // Canonical ambient `printf` declares before any user declaration
+    // (declare_function keeps the first spelling in the module): a hoisted
+    // in-body `@define printf() <noret>` (literal_struct.fin's `@defined`
+    // guard) must not hijack the vararg symbol the gated call resolves
+    // through. Mirrors the C++ driver's ambient printf prototype, which is
+    // also why `@defined("printf")` folds there. Same shape as
+    // get_or_declare_printf below, which then reuses this declaration.
+    let pre_pf <&LLVMValue> = llvm_get_named_function(module, "printf");
+    if (pre_pf == null) {
+        let pre_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
+        pre_params.t0 = llvm_pointer_type(llvm_i8_type(), 0);
+        let pre_ty <&LLVMType> = llvm_function_type(llvm_i32_type(), pre_params, 1, 1);
+        delete pre_params;
+        pre_pf = llvm_add_function(module, "printf", pre_ty);
+    }
+
     let fn_syms <[&FnSymbol]> = new [&FnSymbol, 8192]{};
     let fn_sym_count <int> = 0;
 
@@ -12372,6 +12571,7 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int, 
                     f_item.name = f_cur.name;
                     f_item.index = f_idx;
                     f_item.type_annotation = f_cur.type_annotation;
+                    f_item.default_init = f_cur.left;
                     s_info.fields[f_idx] = f_item;
                     s_info.field_count = s_info.field_count + 1;
                     f_idx = f_idx + 1;
@@ -12596,9 +12796,10 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int, 
         if (decl.kind == ast_fun_decl() && decl.int_val != 2) {
             // FG1/MM2: a free generic over a generic struct or over bare
             // parameters is a template, registered for on-demand per-call
-            // instantiation like a generic method (MC1). Anything else
+            // instantiation like a generic method (MC1). A `$struct`-seeded
+            // return-only generic registers the same way. Anything else
             // declares eager as before.
-            if (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count)) {
+            if (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count) || cg_decl_is_struct_seeded_generic(decl)) {
                 let dup <bool> = false;
                 let di <int> = 0;
                 while (di < fn_sym_count) {

@@ -63,8 +63,9 @@ struct AllowEntry {
 
 // complex/interfaces refuse in the stage with a monomorphization diagnostic.
 // deeptest1/implements_block/lambdas did too (stage emitted `add ptr`) until
-// the stage side was fixed; their lines were deleted. Each remaining entry
-// must go away with a one-line deletion.
+// the stage side was fixed; their lines were deleted, and literal_struct's
+// went the same way (the stage lowers the $struct-seeded return now).
+// Each remaining entry must go away with a one-line deletion.
 const AllowEntry kAllowlist[] = {
 };
 

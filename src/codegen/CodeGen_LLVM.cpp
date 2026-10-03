@@ -6649,6 +6649,37 @@ private:
         Emitter& e_;
     };
 
+    // The `$struct` handle rule's per-body context (see structHandleTarget):
+    // which parameter names are `$struct` handles, and which bare generic
+    // the return type seeds. Set for exactly one emission and restored
+    // after, so a nested body starts clean rather than inheriting its
+    // caller's handles.
+    struct BodyHandleContext {
+        BodyHandleContext(Emitter& e, ASTNode& node,
+                          const std::vector<std::unique_ptr<Parameter>>& params)
+            : e_(e), savedParams_(std::move(e.structHandleParams_)),
+              savedReturn_(std::move(e.handleReturnParam_)) {
+            e_.structHandleParams_.clear();
+            e_.handleReturnParam_.clear();
+            for (auto& p : params) {
+                if (p && p->type && isMetaHandle(p->type.get()))
+                    e_.structHandleParams_.push_back(p->name);
+            }
+            e_.handleReturnParam_ = bareReturnParamOf(node);
+        }
+        ~BodyHandleContext() {
+            e_.structHandleParams_ = std::move(savedParams_);
+            e_.handleReturnParam_ = std::move(savedReturn_);
+        }
+        BodyHandleContext(const BodyHandleContext&) = delete;
+        BodyHandleContext& operator=(const BodyHandleContext&) = delete;
+
+    private:
+        Emitter& e_;
+        std::vector<std::string> savedParams_;
+        std::string savedReturn_;
+    };
+
     // One function's body, into the llvm::Function that `name` was declared under.
     //
     // Shared by the ordinary path and by an instantiation, which is the point: an
@@ -6692,6 +6723,12 @@ private:
         currentFn_ = &found->second;
         pushScope();
         fnScopeBase_ = scopes_.size() - 1;
+
+        // The `$struct` handle rule's context for this body (see
+        // structHandleTarget). After the scope push, so the parameter scope
+        // it reasons about is the one just made; restored on exit by
+        // destruction, so a nested emission starts clean.
+        BodyHandleContext handleContext(*this, node, params);
 
         // The nested functions this body may call, if it is one of the two kinds that
         // may call any: the outermost scope of the body holds them, so the body's own
@@ -7117,6 +7154,226 @@ private:
         }
     }
 
+    // A written type with nothing on it: a bare name a binding can answer.
+    // The same shape unifyBinding binds through, stated once so the `$struct`
+    // seeding below and the `st{}` rule read one predicate rather than
+    // restating its decorations. Stricter than unifyBinding in exactly the
+    // exotic corners (annotations): refusing to seed there is refusing to
+    // guess, which is what the ordered loop does next anyway.
+    static bool isBareName(const TypeNode* node) {
+        if (!node || node->name.empty()) return false;
+        if (!node->generics.empty() || !node->annotations.empty() ||
+            node->pointer_depth != 0 || node->is_array || node->is_nullable ||
+            node->is_prototype || !node->implements_list.empty() ||
+            node->array_size || dynamic_cast<const FunctionTypeNode*>(node) ||
+            dynamic_cast<const PointerTypeNode*>(node) ||
+            dynamic_cast<const ArrayTypeNode*>(node)) {
+            return false;
+        }
+        return true;
+    }
+
+    // A `$struct` parameter type, undecorated: the handle a struct literal
+    // seeds through.
+    static bool isMetaHandle(const TypeNode* node) {
+        return isBareName(node) && node->name == "$struct";
+    }
+
+    // Whether a lowered value is a `$struct` handle (mapMetaType's one-word
+    // `fin.struct`) rather than a struct with fields. A user struct cannot
+    // spell the name (`.` is not an identifier character), so the name is
+    // the whole check.
+    static bool isStructHandleValue(const CgType& type) {
+        if (type.kind != CgType::Kind::Struct || type.structInfo != nullptr ||
+            type.enumInfo != nullptr || type.isInterface || !type.llvmType) {
+            return false;
+        }
+        if (auto* word = llvm::dyn_cast<llvm::StructType>(type.llvmType))
+            return word->getName() == "fin.struct";
+        return false;
+    }
+
+    // The bare generic the body's return type names, when it names one of
+    // the declaration's own type parameters (`<T>` naming `T`). Empty
+    // otherwise: a concrete return, a decorated one (`&T`, `Box<T>`), or a
+    // name no parameter declares. Constructors declare no type parameters,
+    // so theirs is never bare in this sense.
+    static std::string bareReturnParamOf(ASTNode& node) {
+        const TypeNode* ret = nullptr;
+        const std::vector<std::unique_ptr<GenericParam>>* generics = nullptr;
+        if (auto* fn = dynamic_cast<FunctionDeclaration*>(&node)) {
+            ret = fn->return_type.get();
+            generics = &fn->generic_params;
+        } else if (auto* op = dynamic_cast<OperatorDeclaration*>(&node)) {
+            ret = op->return_type.get();
+            generics = &op->generic_params;
+        } else if (auto* lam = dynamic_cast<LambdaExpression*>(&node)) {
+            ret = lam->return_type.get();
+            generics = &lam->generic_params;
+        } else {
+            return {};
+        }
+        if (!isBareName(ret)) return {};
+        for (auto& g : *generics) {
+            if (g && g->name == ret->name) return ret->name;
+        }
+        return {};
+    }
+
+    // One anonymous `struct { ... }` literal's declaration, laid out on
+    // demand.
+    //
+    // declareStructs walks only module-scope declarations, so a literal's own
+    // never reaches it -- and eagerly declaring every literal would refuse
+    // programs that only ever hold the handle (a `$struct`-typed `let`
+    // builds today through the meta word alone). The seeding below is the
+    // demand: the call names which literal's struct `T` became, and this
+    // gives it the layout, methods and queued bodies a named struct got at
+    // the start. Returns false having already reported.
+    bool ensureAnonymousStruct(StructDeclaration& decl) {
+        auto found = structs_.find(decl.name);
+        if (found != structs_.end()) return found->second.complete && !failed_;
+        if (!decl.generic_params.empty()) {
+            unsupported(decl, fmt::format("a generic anonymous struct '{}'", decl.name));
+            return false;
+        }
+        if (!lowerableStruct(decl)) return false;
+        StructInfo info;
+        info.finName = decl.name;
+        info.llvmType = llvm::StructType::create(ctx_, llvmNameOf(decl, decl.name));
+        info.decl = &decl;
+        info.extras = extrasFor(decl.name);
+        registerImplementsBlocks(decl.name);
+        structs_[decl.name] = info;
+        registered_.insert(&decl);
+        declareStructBody(&decl);
+        if (failed_) return false;
+        StructInfo& live = structs_[decl.name];
+        bindMethodTypes(live);
+        ScopedBindings bound(types_, &live.methodBindings);
+        if (!declareStructMethods(live)) return false;
+        return !failed_;
+    }
+
+    // The `$struct`-handle half of generic inference: `make_default(struct
+    // {...})` for `fun make_default<T: any implements Struct>(st: $struct)
+    // <T>` (tests/samples/literal_struct.fin).
+    //
+    // unifyBinding binds nothing through a `$struct` parameter (a handle is
+    // not the struct), so a return-only `T` stays unbound and the ordered
+    // loop below refuses it. The analyzer seeds that same `T` from the
+    // literal's own anonymous struct (checkGenericCall), and this is the
+    // backend reading the same fact off the same call: one `$struct`
+    // parameter holding one struct literal seeds the bare generic the return
+    // type names. Anything else -- several handles, a non-literal argument,
+    // a non-bare return, a non-dynamic bound -- returns false for the caller
+    // to refuse as it did before, because the answer would be a guess rather
+    // than the struct the program wrote.
+    //
+    // Returns true when the shape matched: seeded (binding appended), or the
+    // seeding itself reported (an unlowerable anonymous struct), in which
+    // case the caller returns rather than refusing past it.
+    bool trySeedFromStructHandle(FunctionCall& node, const TemplateCallee& tmpl,
+                                 const std::string& paramName, Substitution& ordered) {
+        if (!tmpl.returnType || !isBareName(tmpl.returnType) ||
+            tmpl.returnType->name != paramName) {
+            return false;
+        }
+        const GenericParam* gp = nullptr;
+        if (tmpl.generics) {
+            for (auto& g : *tmpl.generics) {
+                if (g && g->name == paramName) { gp = g.get(); break; }
+            }
+        }
+        if (!gp) return false;
+        // The analyzer seeds only a dynamically-bounded return (`any`, with
+        // or without an `implements` list): a struct is not an `int`, and
+        // the call-site bound check owns that refusal.
+        if (gp->constraint && gp->constraint->name != "any" &&
+            gp->constraint->name != "object") {
+            return false;
+        }
+        if (!tmpl.params) return false;
+        StructDeclaration* literalDecl = nullptr;
+        size_t handlePairs = 0;
+        for (size_t i = 0; i < node.args.size() && i < tmpl.params->size(); ++i) {
+            const auto& param = (*tmpl.params)[i];
+            if (!param || !param->type || !isMetaHandle(param->type.get())) continue;
+            auto* lit = dynamic_cast<TypeLiteralExpression*>(node.args[i].get());
+            if (!lit || lit->is_interface || !lit->decl) continue;
+            auto* decl = dynamic_cast<StructDeclaration*>(lit->decl.get());
+            if (!decl) continue;
+            ++handlePairs;
+            literalDecl = decl;
+        }
+        if (handlePairs != 1 || !literalDecl) return false;
+        if (!ensureAnonymousStruct(*literalDecl)) {
+            if (!failed_) {
+                unsupported(node, fmt::format("a literal of struct '{}'",
+                                              literalDecl->name));
+            }
+            return true;
+        }
+        auto it = structs_.find(literalDecl->name);
+        if (it == structs_.end() || !it->second.complete) {
+            unsupported(node, fmt::format("a literal of struct '{}'", literalDecl->name));
+            return true;
+        }
+        CgType handle;
+        handle.kind = CgType::Kind::Struct;
+        handle.llvmType = it->second.llvmType;
+        handle.structInfo = &it->second;
+        ordered.push_back({paramName, TypeBinding{handle, cgDisplay(handle)}});
+        return true;
+    }
+
+    // The struct a `$struct` handle denotes, for `st{}` where `st` is a
+    // parameter of the body being emitted
+    // (tests/samples/literal_struct.fin:8).
+    //
+    // A handle is a runtime word; which struct it denotes is known only where
+    // the call seeded it. Inside the seeded instance that answer is the bare
+    // generic the return type named (see emitBodyOf's handle context): the
+    // same single-handle shape the call seeding required, read back through
+    // the substitution the instance is emitted under. Anything else -- no
+    // handle parameter of the name, a shadowed name, an unbound or
+    // non-struct binding -- is nullopt for the written-name path, which
+    // refuses a handle's name as an unknown struct. Never a guess.
+    std::optional<std::string> structHandleTarget(StructInstantiation& node) {
+        if (handleReturnParam_.empty() || structHandleParams_.empty()) return std::nullopt;
+        bool isHandleParam = false;
+        for (const auto& h : structHandleParams_) {
+            if (h == node.struct_name) { isHandleParam = true; break; }
+        }
+        if (!isHandleParam) return std::nullopt;
+        // An existing type of the name wins: the handle rule only answers for
+        // a name nothing else claims, so a struct (or template, or enum)
+        // called `st` keeps lowering as itself.
+        if (structs_.count(node.struct_name) || templates_.count(node.struct_name) ||
+            enums_.count(node.struct_name)) {
+            return std::nullopt;
+        }
+        if (scopes_.empty()) return std::nullopt;
+        // Shadowed below the parameter scope: the name no longer denotes the
+        // handle the call provided.
+        for (size_t i = scopes_.size(); i-- > 0;) {
+            auto found = scopes_[i].find(node.struct_name);
+            if (found == scopes_[i].end()) continue;
+            if (i != fnScopeBase_ || !isStructHandleValue(found->second.type))
+                return std::nullopt;
+            break;
+        }
+        const Substitution* bindings = types_.bindings();
+        if (!bindings) return std::nullopt;
+        for (const auto& b : *bindings) {
+            if (b.first != handleReturnParam_) continue;
+            if (b.second.type.isStruct() && b.second.type.structInfo != nullptr)
+                return b.second.type.structInfo->finName;
+            return std::nullopt;
+        }
+        return std::nullopt;
+    }
+
     // A call to a generic function: resolve the bindings, instantiate, call.
     //
     // The bindings are resolved *here* rather than read off the analyzer, and that is
@@ -7212,6 +7469,17 @@ private:
                 break;
             }
             if (found) continue;
+            // A `$struct` handle seeds a Struct-bounded return
+            // (trySeedFromStructHandle): the one unbound parameter with an
+            // answer the arguments do imply. Anything it cannot seed keeps
+            // the refusal below.
+            if (trySeedFromStructHandle(node, tmpl, p->name, ordered)) {
+                // Seeded -- or the seeding itself reported (an unlowerable
+                // anonymous struct), in which case there is nothing to
+                // refuse past it.
+                if (failed_) return;
+                continue;
+            }
             // Nothing to infer it from -- `fun nothing<T>() <int>` mentions T in no
             // parameter. Refused naming the parameter, because the alternative is
             // picking a type, and a function instantiated at a type the program never
@@ -13319,6 +13587,14 @@ private:
     }
 
     void visit(StructInstantiation& node) override {
+        // A `$struct` handle in instantiation position (`st{}` where `st` is
+        // a parameter): the struct the handle denotes, resolved through the
+        // seeded return (see structHandleTarget). Ahead of the written-name
+        // path, which would refuse a handle's name as an unknown struct.
+        if (auto target = structHandleTarget(node)) {
+            value_ = buildStructValue(node, *target, node.fields);
+            return;
+        }
         // What inference found, where the literal wrote no turbofish -- the
         // literal half of the constructor call's resolved_args, under the
         // same rule: a written turbofish needs no record, and the recorded
@@ -14415,6 +14691,15 @@ private:
     // rather than a pointer: draining can instantiate a template, which
     // inserts into structs_ while bodies are being read.
     std::string currentStructName_;
+    // The `$struct` handle rule's per-body context, for `st{}` (see
+    // structHandleTarget): which parameter names are `$struct` handles, and
+    // which bare generic the body's return type seeds. Set in emitBodyOf for
+    // exactly one emission and restored after, so a nested body starts clean
+    // rather than inheriting its caller's handles. Empty everywhere else --
+    // in particular a body with no handle parameter lowers `st{}` exactly as
+    // before.
+    std::vector<std::string> structHandleParams_;
+    std::string handleReturnParam_;
     // Per-compilation type ids for the `resolve_type*` intrinsics, keyed by
     // the type's display spelling (cgDisplay): the same static type settles
     // on the same number twice, and numbering starts at 1 so 0 stays "no

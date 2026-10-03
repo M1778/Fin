@@ -14998,6 +14998,76 @@ BACKEND_TEST(Soundness_GenericInference, APhantomParameterIsCheckedButNotLowered
         std::string::npos) << b.why();
 }
 
+BACKEND_TEST(Soundness_GenericInference, AStructHandleSeedsTheReturnAndLowers) {
+    // `make_default(struct { ... })` (tests/samples/literal_struct.fin): the
+    // `$struct` handle seeds the bare `<T>` return with the literal's own
+    // anonymous struct, so the backend monomorphizes instead of refusing for
+    // an unmentioned type argument. The run proves the value, not just the
+    // build: the default-built field reads back what the literal declared.
+    const std::string code =
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "fun make_default<T>(st: $struct) <T> {\n"
+        "    let instance <auto> = st{};\n"
+        "    return cast<T>(instance);\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <auto> = make_default(struct {\n"
+        "        pub x <int> = 42,\n"
+        "    });\n"
+        "    printf(\"%d\\n\", p.x);\n"
+        "    blame p.x == 42;\n"
+        "}\n";
+    EXPECT_EQ(checkOnly(code).exitCode, 0);
+    const Built b = build(code);
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    EXPECT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_GenericInference, ATwoHandleCallStillRefuses) {
+    // Seeding needs one unambiguous handle: two `$struct` literals name two
+    // structs, so neither seeds the return and the call keeps the old refusal
+    // rather than guessing one. The return is `<int>` (not a bare generic),
+    // so even one handle would not seed here.
+    const std::string code =
+        "fun f<T>(a: $struct, b: $struct) <int> { return 1; }\n"
+        "fun main() <noret> {\n"
+        "    let q <int> = f(struct {\n"
+        "        pub x <int> = 1,\n"
+        "    }, struct {\n"
+        "        pub y <int> = 2,\n"
+        "    });\n"
+        "}\n";
+    EXPECT_EQ(checkOnly(code).exitCode, 0);
+    const Built b = build(code);
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find(
+        "codegen: a call to 'f' whose type argument 'T' no argument mentions is not lowered yet"),
+        std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_GenericInference, AHandleConstructionWithoutAGenericReturnStillRefuses) {
+    // `st{}` with no generic return to resolve it to: the handle's struct is
+    // known only at the call, and a non-generic body is shared across calls,
+    // so there is no one struct to build. Refused naming the handle.
+    const std::string code =
+        "fun make_it(st: $struct) <int> {\n"
+        "    let instance <auto> = st{};\n"
+        "    return 1;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let q <int> = make_it(struct {\n"
+        "        pub x <int> = 42,\n"
+        "    });\n"
+        "}\n";
+    EXPECT_EQ(checkOnly(code).exitCode, 0);
+    const Built b = build(code);
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("codegen: a literal of struct 'st' is not lowered yet"),
+              std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_GenericInference, APartialTurbofishIsCheckedButNotLowered) {
     // One of two arguments given explicitly: checking accepts and the backend
     // refuses the arity rather than mixing explicit with inferred.

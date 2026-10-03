@@ -1,8 +1,11 @@
 //@ normative
 //@ ok
 // NOTE: `//@ ok` is the check contract (exits 0, no diagnostics). Lowering
-// still refuses: `make_default`'s unmentioned type argument has no codegen
-// rule yet, so `-c`/`-o` report it by name (backend invariant).
+// builds too: the `$struct` handle seeds `make_default`'s return-only `T`
+// with the literal's own anonymous struct, so `-c`/`-o` monomorphize the
+// call instead of refusing it by name. `sub_health` takes `&T` because a
+// struct binding copies (ADR 0030): a by-value `plr` would mutate a copy
+// and the `blame` below would fail.
 
 fun make_default<T: any implements Struct>(st: $struct) <T> {
     let instance <auto> = st{}; // Make default of struct type
@@ -17,7 +20,7 @@ interface _PlayerStructLike {
 
 type PlayerStructLike = Struct implements <_PlayerStructLike>;
 
-fun sub_health<T: PlayerStructLike>(plr: T) <noret> { // another way of defining this function is like this: `fun sub_health(plr: PlayerStructLike) <noret>{}` which is easier
+fun sub_health<T: PlayerStructLike>(plr: &T) <noret> { // another way of defining this function is like this: `fun sub_health(plr: PlayerStructLike) <noret>{}` which is easier
     plr.health -= 10;
   }
 
@@ -32,7 +35,7 @@ fun main() <noret> {
             if (!@defined("printf")){
               @define printf() <noret>;
             }
-            printf("health: %d, damage: %d\n");
+            printf("health: %d, damage: %d\n", self.health, self.damage);
           }
       });
 
@@ -40,7 +43,7 @@ fun main() <noret> {
 
     unique_player.damage = 10; // this works
 
-    sub_health(unique_player);
+    sub_health(&unique_player);
 
    blame unique_player.health == 90 && unique_player.damage == 10; // <- assertion here
 
