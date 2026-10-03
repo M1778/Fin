@@ -66,7 +66,6 @@ struct AllowEntry {
 // the stage side was fixed; their lines were deleted. Each remaining entry
 // must go away with a one-line deletion.
 const AllowEntry kAllowlist[] = {
-    {"simple_pointers", "stderr-wording", "n/a (glibc)", "same SIGABRT fate, same empty stdout; glibc wording differs (`invalid pointer` vs `double free`) incl. exit-134 equality"},
 };
 
 const AllowEntry* lookupAllow(const std::string& stem, const std::string& kind) {
@@ -248,18 +247,11 @@ struct RunAgreement {
 };
 
 std::string normalizedStderr(const std::string& stem, const std::string& err) {
-    // simple_pointers only: both sides abort with the same fate and the same
-    // (empty) stdout; the one glibc line is environmental wording, so either
-    // known spelling normalizes to the same placeholder. Scoped to the listed
-    // sample -- every other sample compares stderr byte-exact.
-    if (lookupAllow(stem, "stderr-wording") == nullptr) return err;
-    std::string s = err;
-    for (const char* w : {"free(): invalid pointer", "double free or corruption (out)"}) {
-        const std::string word(w);
-        for (size_t at = s.find(word); at != std::string::npos; at = s.find(word))
-            s.replace(at, word.size(), "<glibc-abort>");
-    }
-    return s;
+    // No wording entries remain: bare-T monomorphization converged the one
+    // glibc spelling (simple_pointers aborts `free(): invalid pointer` on
+    // both sides), so stderr compares byte-exact for every sample.
+    (void)stem;
+    return err;
 }
 
 RunAgreement checkRunAgreement(const std::string& stem, const Proc& cpp, const Proc& stage) {
@@ -361,23 +353,19 @@ TEST(StageAgreementLogic, PostFixConstShapeAgrees) {
     EXPECT_TRUE(a.agrees()) << "fate " << procFate(cpp) << " vs " << procFate(stage);
 }
 
-TEST(StageAgreementLogic, SimplePointersWordingIsScopedToItsSample) {
-    // Same SIGABRT fate, same empty stdout, glibc wording differs. Tolerated
-    // for simple_pointers only -- the identical pair under any other stem must
-    // still fail the stderr assertion, or the allowlist would be a blanket.
+TEST(StageAgreementLogic, SimplePointersStderrAgreesByteExact) {
+    // Bare-T monomorphization converged the glibc spelling: both sides abort
+    // with `free(): invalid pointer`, so no normalization remains and the
+    // identical pair agrees under every stem.
     Proc cpp, stage;
     cpp.signaled = true;
     cpp.termSig = 6;
     cpp.err = "free(): invalid pointer\n";
     stage.signaled = true;
     stage.termSig = 6;
-    stage.err = "double free or corruption (out)\n";
+    stage.err = "free(): invalid pointer\n";
     EXPECT_TRUE(checkRunAgreement("simple_pointers", cpp, stage).agrees());
-    const RunAgreement other = checkRunAgreement("loops", cpp, stage);
-    EXPECT_TRUE(other.fateMatch);
-    EXPECT_TRUE(other.stdoutMatch);
-    EXPECT_FALSE(other.stderrMatch);
-    EXPECT_FALSE(other.agrees());
+    EXPECT_TRUE(checkRunAgreement("loops", cpp, stage).agrees());
 }
 
 TEST(StageAgreementLogic, BuildVerdictsRouteEveryShape) {

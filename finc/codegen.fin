@@ -5213,6 +5213,42 @@ fun cg_decl_is_free_over_struct(decl: &AstNode, structs: [&StructInfo], struct_c
     return found;
 }
 
+// True when the subtree mentions one of the named value parameters
+// (`key` in `cast<int>(key)`). Concrete-cast detection below reads this,
+// not types: inside an erased body every annotation is already width-less.
+fun cg_subtree_mentions_param(node: &AstNode, names: [string], count: int) <bool> {
+    if (node == null) { return false; }
+    if (node.kind == ast_ident()) {
+        if (node.name != null && cg_name_in_list(names, count, node.name)) { return true; }
+    }
+    if (cg_subtree_mentions_param(node.left, names, count)) { return true; }
+    if (cg_subtree_mentions_param(node.right, names, count)) { return true; }
+    if (cg_subtree_mentions_param(node.extra, names, count)) { return true; }
+    return false;
+}
+
+// True when the body folds a parameter's machine word through a concrete
+// cast (`cast<int>(key)` in `hash_of<T>`): the erasure idiom, designed for
+// the pointer-width representation. Such functions stay eager: their inner
+// call sites (`hash_of::<T>(key)` inside `HashMap<T, U>`) name no concrete
+// instantiation, so there is no key to monomorphize on, while the erased
+// body lowers exactly as written. A cast TO a generic (`cast<T>(...)`)
+// still needs its width and never counts here.
+fun cg_body_has_erasure_cast(node: &AstNode, pnames: [string], pcount: int, gen: [string], gcount: int) <bool> {
+    if (node == null) { return false; }
+    if (node.kind == ast_unary_expr() && node.name != null && cg_str_eq(node.name, "cast")) {
+        let target <string> = "";
+        if (node.type_annotation != null) { target = node.type_annotation; }
+        if (cg_strlen(target) > cast<ulong>(0) && !cg_free_mentions_param(target, gen, gcount)) {
+            if (cg_subtree_mentions_param(node.left, pnames, pcount)) { return true; }
+        }
+    }
+    if (cg_body_has_erasure_cast(node.left, pnames, pcount, gen, gcount)) { return true; }
+    if (cg_body_has_erasure_cast(node.right, pnames, pcount, gen, gcount)) { return true; }
+    if (cg_body_has_erasure_cast(node.extra, pnames, pcount, gen, gcount)) { return true; }
+    return false;
+}
+
 // True when an annotation mentions any parameter as a whole word.
 fun cg_free_mentions_param(ann: string, params: [string], pcount: int) <bool> {
     if (ann == null || pcount <= 0) { return false; }
@@ -5239,6 +5275,60 @@ fun cg_free_mentions_param(ann: string, params: [string], pcount: int) <bool> {
         pi = pi + 1;
     }
     return false;
+}
+
+// MM2: a free generic over bare parameters (`swap<T>(a: &T, b: &T)`,
+// `sz<T>(x: T)`). Every generic parameter must show in at least one
+// parameter annotation as a whole word inside a simple spelling (bare `T`,
+// pointer-decorated `T*`, or an application like `Box<T>`); array (`[...]`),
+// meta (`$...`), and erased (`void*`) spellings never count, so `sort`'s
+// `void*` and `make_default`'s `$struct` stay eager on today's path.
+// `structs`/`struct_count` are unused (kept so Pass 1.5 and Pass 2 share one
+// predicate, like the over-struct shape above).
+fun cg_decl_is_free_bare_generic(decl: &AstNode, structs: [&StructInfo], struct_count: int) <bool> {
+    if (decl == null || decl.kind != ast_fun_decl()) { return false; }
+    if (decl.int_val == 2) { return false; }
+    if (decl.left == null) { return false; }
+    if (!is_generic_method(decl)) { return false; }
+    if (decl.extra != null && decl.extra.name != null && cg_str_eq(decl.extra.name, "self")) { return false; }
+    let pn <[string]> = new [string, 64]{};
+    let pc <int> = cg_method_param_names(decl.str_val, pn, 64);
+    if (pc <= 0) { delete pn; return false; }
+    let gi <int> = 0;
+    while (gi < pc) {
+        let seen <bool> = false;
+        let pw <&AstNode> = decl.extra;
+        while (pw != null) {
+            let ann <string> = "";
+            if (pw.type_annotation != null) { ann = pw.type_annotation; }
+            if (cg_strlen(ann) > cast<ulong>(0) && !cg_str_eq(cg_trim_spaces(ann), "void*") &&
+                !cg_str_contains(ann, "[") && !cg_str_contains(ann, "]") && !cg_str_contains(ann, "$")) {
+                let one <[string]> = new [string, 1]{};
+                one[0] = pn[gi];
+                if (cg_free_mentions_param(ann, one, 1)) { seen = true; delete one; break; }
+                delete one;
+            }
+            pw = pw.right;
+        }
+        if (!seen) { delete pn; return false; }
+        gi = gi + 1;
+    }
+    // The erasure idiom (`cast<int>(key)`) stays eager: its body is designed
+    // for the machine word and its inner generic call sites name no key.
+    let vn <[string]> = new [string, 64]{};
+    let vc <int> = 0;
+    let vw <&AstNode> = decl.extra;
+    while (vw != null && vc < 64) {
+        if (vw.name != null && cg_strlen(vw.name) > cast<ulong>(0)) {
+            vn[vc] = vw.name;
+            vc = vc + 1;
+        }
+        vw = vw.right;
+    }
+    if (vc > 0 && cg_body_has_erasure_cast(decl.left, vn, vc, pn, pc)) { delete pn; delete vn; return false; }
+    delete vn;
+    delete pn;
+    return true;
 }
 
 // Bind a pattern annotation against an actual spelling, mirroring C++
@@ -5505,6 +5595,37 @@ fun cg_free_spelling_of(ctx: &FnContext, node: &AstNode, depth: int) <string> {
         delete oa;
         return cg_trim_spaces(out);
     }
+    // MM2: address-of/deref around an ident (`&a` with `a: int` spells
+    // `int*`, matching the parser's `&T`-folds-to-`T*` parameter shape so
+    // bare-T unify binds through the decoration, mirroring C++ unifyBinding
+    // through a pointer). Anything else stays exotic ("").
+    if (node.kind == ast_unary_expr() && node.left != null) {
+        if (node.name != null && cg_str_eq(node.name, "&")) {
+            let inner <string> = cg_free_spelling_of(ctx, node.left, depth - 1);
+            if (cg_strlen(inner) == cast<ulong>(0)) { return ""; }
+            let ib <Buffer> = new_buffer(64);
+            ib.write_string(cg_trim_spaces(inner));
+            ib.write_char('*');
+            let spelled <string> = ib.to_string();
+            free_buffer(ib);
+            return spelled;
+        }
+        if (node.name != null && cg_str_eq(node.name, "*")) {
+            let inner2 <string> = cg_free_spelling_of(ctx, node.left, depth - 1);
+            if (cg_strlen(inner2) == cast<ulong>(0)) { return ""; }
+            // One decoration level off (`*p` with `p: int*` spells `int`);
+            // anything deeper stays on the stripped spelling, never guessed.
+            let s2 <string> = cg_trim_spaces(inner2);
+            let l2 <int> = cast<int>(cg_strlen(s2));
+            if (l2 > 1 && cg_str_eq(substr(s2, l2 - 1, 1), "*")) {
+                return cg_trim_spaces(substr(s2, 0, l2 - 1));
+            }
+            if (l2 > 1 && cg_str_eq(substr(s2, 0, 1), "&")) {
+                return cg_trim_spaces(substr(s2, 1, l2 - 1));
+            }
+            return s2;
+        }
+    }
     return "";
 }
 
@@ -5561,6 +5682,34 @@ fun cg_free_cache_sym(ctx: &FnContext, n: &AstNode) <&FnSymbol> {
         steps = steps + 1;
     }
     if (!paired) { delete pn; delete bn; delete bv; delete actuals; return null; }
+    // MM2: bare-T unify through the declared patterns (`T` vs `int`,
+    // `T*` vs `int*` via strip_markers, mirroring C++ unifyBinding through
+    // a pointer). bind_positional above only fires for struct
+    // instantiations (`Box<int>`); bare and pointer-decorated patterns need
+    // this. Erased `void*` patterns unify to nothing, so over-struct calls
+    // keep their existing binding. Exotic (pattern/actual count mismatch,
+    // unmodellable actual) stays on the old path via the checks below.
+    let pats <[string]> = new [string, 64]{};
+    let pat_count <int> = 0;
+    let pw2 <&AstNode> = tmpl.extra;
+    while (pw2 != null && pat_count < 64) {
+        if (pw2.type_annotation != null) { pats[pat_count] = pw2.type_annotation; }
+        else { pats[pat_count] = ""; }
+        pat_count = pat_count + 1;
+        pw2 = pw2.right;
+    }
+    if (pat_count == acount && pat_count > 0) {
+        let ui <int> = 0;
+        let uok <bool> = true;
+        while (ui < acount) {
+            let nb <int> = cg_free_unify(pats[ui], actuals[ui], pn, bn, bv, pc, bc);
+            if (nb < 0) { uok = false; break; }
+            bc = nb;
+            ui = ui + 1;
+        }
+        if (!uok) { delete pn; delete bn; delete bv; delete actuals; delete pats; return null; }
+    }
+    delete pats;
     // Bare-parameter fallback for interface-bounded free generics
     // (`print_any<T: Printable>(item: T)` called as `print_any::<User>(u)`):
     // the positional binder only binds through generic instantiations
@@ -5603,11 +5752,14 @@ fun cg_free_cache_sym(ctx: &FnContext, n: &AstNode) <&FnSymbol> {
     let ret_ann <string> = "";
     if (tmpl.type_annotation != null) { ret_ann = tmpl.type_annotation; }
     if (!cg_free_mentions_param(ret_ann, pn, pc)) {
-        // A single-generic single-arg procedure (`print_any<T: Printable>`
-        // returning void) still instantiates per concrete receiver: the body
-        // dispatches to the receiver's method. Allow that narrow shape;
-        // anything else keeps the old refusal.
-        if (!(pc == 1 && acount == 1 && bc == 1)) {
+        // MM2: procedures (`noret`/`void` returns like `swap`) instantiate
+        // per key at any arity: the return names no layout, so there is
+        // nothing to disagree on. A single-generic single-arg function with
+        // a concrete return (`print_any<T: Printable>`, `rebox<T>(v: T)<int>`)
+        // still instantiates per concrete receiver. Anything else keeps the
+        // old refusal.
+        let ret_void <bool> = cg_str_eq(cg_trim_spaces(ret_ann), "noret") || cg_str_eq(cg_trim_spaces(ret_ann), "void");
+        if (!ret_void && !(pc == 1 && acount == 1 && bc == 1)) {
             cg_dprintf(2, "finc codegen refusal: free generic function '%s' with a concrete return is not lowered yet (needs monomorphization)\n", n.name);
             refuse_and_poison(ctx);
             delete pn;
@@ -11583,9 +11735,10 @@ pub fun lower_decl(
     // (the C++ backend's visit(SpecialDeclaration&) does the same).
     if (decl.kind == ast_fun_decl() && decl.int_val == 2) { return false; }
     if (decl.kind == ast_fun_decl()) {
-        // FG1: free generics over structs lower on demand (see pass 1.5):
-        // skipping them here keeps uncalled generics out of the object.
-        if (decl.int_val != 2 && cg_decl_is_free_over_struct(decl, structs, struct_count)) { return false; }
+        // FG1/MM2: free generics over structs or bare parameters lower on
+        // demand (see pass 1.5): skipping them here keeps uncalled generics
+        // out of the object.
+        if (decl.int_val != 2 && (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count))) { return false; }
         return lower_fun_decl(module, builder, decl, fn_syms, fn_sym_count, structs, struct_count, enums, enum_count, interfaces, interface_count, move_claim, src_file);
     } else if (decl.kind == ast_struct_decl()) {
         let refused <bool> = false;
@@ -12432,10 +12585,11 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int, 
     decl = root.left;
     while (decl != null) {
         if (decl.kind == ast_fun_decl() && decl.int_val != 2) {
-            // FG1: a free generic over a generic struct is a template,
-            // registered for on-demand per-call instantiation like a generic
-            // method (MC1). Anything else declares eager as before.
-            if (cg_decl_is_free_over_struct(decl, structs, struct_count)) {
+            // FG1/MM2: a free generic over a generic struct or over bare
+            // parameters is a template, registered for on-demand per-call
+            // instantiation like a generic method (MC1). Anything else
+            // declares eager as before.
+            if (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count)) {
                 let dup <bool> = false;
                 let di <int> = 0;
                 while (di < fn_sym_count) {
