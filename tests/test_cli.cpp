@@ -2869,7 +2869,12 @@ TEST(Soundness_DiagnosticAttribution, NoDiagnosticPointsAtAnExpectationComment) 
     // sits at the count rather than above it -- `EXPECT_GE`, because `EXPECT_GT`
     // at 30 would fail on the value the corpus emits today. Any further decay
     // still fails here, which is the tripwire this guard is.
-    EXPECT_GE(census.considered, 30u)
+    // 30 -> 22, deliberately: the in-flight wave-4 slices had already taken the
+    // census to 26, and the literal_struct slice (member lookup through a
+    // `$struct`-handle-seeded return, plus refiling the no-`fun` method the
+    // grammar files as a constructor) cleared that sample's last four
+    // diagnostics -- all without touching the detector.
+    EXPECT_GE(census.considered, 22u)
         << "the corpus emitted almost no located diagnostics about its own files, so the "
            "assertion below would pass without measuring anything. Fix the detector (or "
            "lower this floor on purpose) before trusting an empty census.";

@@ -365,11 +365,10 @@ TEST(ComptimeBranches, NonBoolTernaryConditionIsAGap) {
     EXPECT_FALSE(r.detail.empty());
 }
 
-// S2c (the literal_struct.fin:29 shape): the guard evaluates, but a taken
-// `@define` would inject a declaration at comptime — declaration-lifting
-// (`compiler.code.lift_to_module_end`), which is Q5, deferred — so it is
-// refused naming the question. An untaken `@define` never runs.
-TEST(ComptimeBranches, TakenDefineRefusedNamingQ5) {
+// B4 (the literal_struct.fin:29 shape): a taken `@define` lifts its
+// declaration (Q5 answered for the gated case) and the body continues;
+// an untaken `@define` never runs.
+TEST(ComptimeBranches, TakenDefineLiftsItsDeclaration) {
     auto p = parse(
         "@special h(ready: bool) <int> {\n"
         "  if (ready) {\n"
@@ -384,8 +383,44 @@ TEST(ComptimeBranches, TakenDefineRefusedNamingQ5) {
     fin::comptime::Env env;
     env.bind("ready", fin::comptime::Value::makeBool("true"));
     auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.text, "1");
+    ASSERT_EQ(interp.liftedDefines().size(), 1u) << r.detail;
+    EXPECT_EQ(interp.liftedDefines()[0], "puts");
+}
+
+TEST(ComptimeBranches, UngatedDefineStaysRefusedNamingQ5) {
+    auto p = parse(
+        "@special h() <int> {\n"
+        "  @define puts(s: string) <noret>;\n"
+        "  return 1;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
     EXPECT_EQ(r.status, fin::comptime::BodyStatus::Gap);
     EXPECT_NE(r.detail.find("Q5"), std::string::npos) << r.detail;
+}
+
+TEST(ComptimeBranches, DefinedFoldsForDeclaredAndMissing) {
+    // B4: `@defined` folds (ADR 0042) so `!@defined(...)` decides the branch.
+    auto p = parse(
+        "@special h() <bool> {\n"
+        "  const a <bool> = @defined(\"h\");\n"
+        "  const b <bool> = @defined(\"missing_xyz\");\n"
+        "  return !b;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.text, "true");
 }
 
 TEST(ComptimeBranches, UntakenDefineSkipped) {
@@ -1324,24 +1359,51 @@ TEST(ComptimeCallSite, ComponentPresentFolds) {
     EXPECT_EQ(r.value.text, "true");
 }
 
-// `st{}` stays refused: `st` is a *value* of type `$struct`, and
-// instantiating one needs its type known at compile time, which is the
-// compiler API's job (wave 4, literal_struct.fin blocker 1).
-TEST(ComptimeCallSite, StructValueInstantiationStaysRefused) {
+// `st{}` instantiates the `$struct` value's struct (B1, literal_struct.fin:5):
+// `s` denotes Point, so `s{}` constructs Point with its declared defaults.
+TEST(ComptimeCallSite, StructValueInstantiationBindsHandle) {
     auto p = parse(
+        "struct Point {\n"
+        "  x <int> = 7,\n"
+        "  y <int> = 5,\n"
+        "}\n"
         "@special m(s: $struct) <int> {\n"
         "  let i <auto> = s{};\n"
-        "  return 0;\n"
+        "  return i.x;\n"
         "}\n");
     ASSERT_TRUE(p.result.parsed);
     auto* h = findSpecial(*p.result.ast, "m");
     ASSERT_NE(h, nullptr);
     fin::comptime::Interpreter interp(*p.result.ast);
     fin::comptime::Env env;
-    env.bind("s", fin::comptime::Value::makeOpaque("s"));
+    env.bind("s", fin::comptime::Value::makeStructHandle("Point"));
     auto r = interp.evaluateBody(*h->body, env);
-    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Gap) << "s{} must not evaluate";
-    EXPECT_NE(r.detail.find("compile time"), std::string::npos) << r.detail;
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.kind, fin::comptime::ValueKind::Int);
+    EXPECT_EQ(r.value.text, "7");
+}
+
+TEST(ComptimeCallSite, StructValueInstantiationTakesExplicitArgs) {
+    // Same handle with explicit fields: written fields evaluate, unlisted
+    // members still fall back to their declared defaults.
+    auto p = parse(
+        "struct Point {\n"
+        "  x <int>,\n"
+        "  y <int> = 5,\n"
+        "}\n"
+        "@special m(s: $struct) <int> {\n"
+        "  let i <auto> = s{ x: 40 };\n"
+        "  return i.y;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "m");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    env.bind("s", fin::comptime::Value::makeStructHandle("Point"));
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.text, "5");
 }
 
 // Unlisted members fall back to their declared defaults, evaluated closed:

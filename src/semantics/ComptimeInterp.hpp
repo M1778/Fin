@@ -1,6 +1,8 @@
 #pragma once
 
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -44,8 +46,9 @@ namespace comptime {
 // dot-call on a Struct runs the declared method with `self` bound. Casts fold
 // only when they claim nothing new (same-kind scalars, or any cast of an
 // opaque), and `compiler.components.<c>.present()/version()/name()` answer
-// from the static component table. Instantiating a `$struct` *value* (`st{}`)
-// stays refused: its type is known only at compile time (wave 4).
+// from the static component table. A `$struct` *value* (`st{}`) binds the
+// value's struct: a handle for `Point` constructs `Point` with explicit
+// fields evaluated and unlisted defaults filled closed.
 enum class ValueKind { Int, String, Bool, Quote, Opaque, Struct, Array };
 
 struct Value {
@@ -67,6 +70,14 @@ struct Value {
     std::vector<std::pair<std::string, Value>> fields;
     // Array only, in element order.
     std::vector<Value> elements;
+    // Host taint (ADR 0017, Q11): true when the value derives from a host
+    // read (`compiler.system.get_total_memory` / `get_available_memory` /
+    // `get_memorycard_model`). Any op on a tainted value stays tainted, so a
+    // host value threaded through helper calls still warns at the branch.
+    // Pure-comptime values stay clean. host_op names the read for the
+    // diagnostic; empty when clean.
+    bool host_tainted = false;
+    std::string host_op;
 
     static Value makeInt(std::string spelling) {
         return Value{ValueKind::Int, std::move(spelling), nullptr};
@@ -82,6 +93,12 @@ struct Value {
     }
     static Value makeOpaque(std::string identity) {
         return Value{ValueKind::Opaque, std::move(identity), nullptr};
+    }
+    // A `$struct` handle for the named struct: an opaque whose identity carries
+    // which struct the value denotes, so `st{}` can bind it. The prefix keeps a
+    // handle apart from a plain bound name, which still needs its type known.
+    static Value makeStructHandle(const std::string& structName) {
+        return Value{ValueKind::Opaque, "$struct:" + structName, nullptr};
     }
     static Value makeStruct(std::string name,
                             std::vector<std::pair<std::string, Value>> fields) {
@@ -132,6 +149,18 @@ struct ExprResult {
 class Interpreter {
 public:
     explicit Interpreter(const Program& program) : program_(program) {}
+
+    // B4: how `@defined("name")` and `compiler.symbols.defined("name")`
+    // answer. Empty (no hook) scans the program's own top-level declarations;
+    // the analyzer installs a hook answering from its scopes (which include
+    // the eager ambient), so the guard folds the same name the later call
+    // resolves. Nullopt means "not known here" and stays a gap, never false.
+    using DefinedHook = std::function<std::optional<bool>(const std::string&)>;
+    void setDefinedHook(DefinedHook hook) { definedHook_ = std::move(hook); }
+
+    // B4: the gated `@define`s a taken arm lifted, in order. Ungated (no
+    // taken guard above) stays a Q5 gap and records nothing.
+    const std::vector<std::string>& liftedDefines() const { return lifted_; }
 
     // The first loop form in the body ("while", "for", "foreach"), or ""
     // when the body has none. `if`/`else` evaluates (S2) and is never a
@@ -196,8 +225,9 @@ private:
     const Block* findBody(const std::string& name,
                           std::vector<std::string>* paramsOut) const;
     // The struct declaration of that name, in declaration order. Null when
-    // no `struct` of that name is declared — which is also how a `$struct`
-    // *value* in `st{}` position is told apart from a type.
+    // no `struct` of that name is declared. A `$struct` *value* in `st{}`
+    // position never reaches here by name: evaluateStruct binds the handle's
+    // struct first, so this stays a type-name lookup.
     const StructDeclaration* findStruct(const std::string& name) const;
 
     const Program& program_;
@@ -206,6 +236,18 @@ private:
     // reports the cycle it closes ("a -> b -> a"), not just its own name.
     std::vector<std::string> callStack_;
     int depth_ = 0;
+    // B4: `@defined` scope answers (analyzer hook) and gated lift state.
+    DefinedHook definedHook_;
+    std::vector<std::string> lifted_;
+    // How many taken guards enclose the body being evaluated: >0 lifts a
+    // taken `@define`, 0 refuses it naming Q5.
+    int gatedDepth_ = 0;
+    // Whether the program declares the name at top level (the hook's
+    // fallback when no analyzer scope is installed).
+    bool programDefines(const std::string& name) const;
+    // Answer `@defined("name")`: the hook first, then the program scan.
+    // Nullopt when neither knows (a gap, never false).
+    std::optional<bool> answerDefined(const std::string& name) const;
 };
 
 } // namespace comptime

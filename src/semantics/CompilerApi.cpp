@@ -169,6 +169,18 @@ std::vector<Component> build() {
         cs.push_back(std::move(c));
     }
 
+    // --- compiler.symbols: the program's declarations (§2.6, Tier 3) ---
+    //
+    // B4 (ADR 0021 consequence, ADR 0042): `defined` backs `@defined`
+    // (literal_struct.fin:29). Only `defined` is registered: the doc lists
+    // further members by name with signatures left open, and those stay
+    // absent rather than guessed.
+    {
+        Component c{"symbols", 1, {}};
+        c.members.push_back(op("defined", "bool", {"string"}));
+        cs.push_back(std::move(c));
+    }
+
     return cs;
 }
 

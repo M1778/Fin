@@ -513,6 +513,36 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
     debugLog(fg(fmt::color::orange), "[INFO] Analyzing struct '{}'\n", node.name);
     validateAttributes(node.attributes);
 
+    // A constructor-shaped declaration not named for its struct is a method
+    // written without `fun` (literal_struct.fin:28
+    // `pub print_player(self: &Self) <noret> {...}`). The grammar files
+    // `name(params) <ret> {}` as a ConstructorDeclaration whatever the name
+    // is; the name tells them apart, because a constructor constructs its
+    // struct. Refiled as a method before anything registers, so signatures,
+    // bodies, `implements` and bare-call binding all see one thing -- and the
+    // backend keeps seeing the AST the parser wrote, which is unchanged.
+    // Only without a member-initialiser list (that belongs to a constructor,
+    // and keeping the old path there is the honest refusal rather than a
+    // dropped list), and never the `constructor(...)` spelling: that name is
+    // the other way to declare a constructor (it builds `Point(7)` in the
+    // codegen tests), so it stays one whatever the struct is called. Public,
+    // which is the struct default (`label_public` is true) and the sample's
+    // own `pub`, both of which the constructor production drops on the floor.
+    for (auto it = node.constructors.begin(); it != node.constructors.end();) {
+        if ((*it)->name != node.name && (*it)->name != "constructor" &&
+            (*it)->member_inits.empty()) {
+            auto fun = std::make_unique<FunctionDeclaration>(
+                (*it)->name, std::move((*it)->params),
+                std::move((*it)->return_type), std::move((*it)->body));
+            fun->is_public = true;
+            fun->setLoc((*it)->loc);
+            it = node.constructors.erase(it);
+            node.methods.push_back(std::move(fun));
+        } else {
+            ++it;
+        }
+    }
+
     std::shared_ptr<StructType> structType;
     auto it = hoistedTypes_.find(&node);
     if (it != hoistedTypes_.end()) {

@@ -1,7 +1,55 @@
 #include "../SemanticAnalyzer.hpp"
+#include "../ComptimeInterp.hpp"
 #include "../EventPayloads.hpp"
-#include "../../types/TypeImpl.hpp" 
+#include "../../ast/decls/Program.hpp"
+#include "../../ast/exprs/BinaryOp.hpp"
+#include "../../ast/exprs/FunctionCall.hpp"
+#include "../../ast/exprs/Identifier.hpp"
+#include "../../ast/exprs/MiscExpr.hpp"
+#include "../../ast/exprs/StructureExpr.hpp"
+#include "../../ast/exprs/UnaryOp.hpp"
+#include "../../ast/stmts/ControlFlow.hpp"
+#include "../../types/TypeImpl.hpp"
 namespace fin {
+
+namespace {
+// B4: whether the guard mentions `@defined` (or `compiler.symbols.defined`),
+// the only shape this slice folds. Anything else keeps the both-arms walk.
+bool mentionsDefined(const Expression* e) {
+    if (!e) return false;
+    if (const auto* call = dynamic_cast<const FunctionCall*>(e)) {
+        if (call->is_special && call->name == "defined") return true;
+        for (const auto& a : call->args) {
+            if (a && mentionsDefined(a.get())) return true;
+        }
+        return false;
+    }
+    if (const auto* m = dynamic_cast<const MethodCall*>(e)) {
+        if (m->method_name == "defined") return true;
+        if (m->object && mentionsDefined(m->object.get())) return true;
+        for (const auto& a : m->args) {
+            if (a && mentionsDefined(a.get())) return true;
+        }
+        return false;
+    }
+    if (const auto* u = dynamic_cast<const UnaryOp*>(e)) {
+        return u->operand && mentionsDefined(u->operand.get());
+    }
+    if (const auto* b = dynamic_cast<const BinaryOp*>(e)) {
+        return (b->left && mentionsDefined(b->left.get())) ||
+               (b->right && mentionsDefined(b->right.get()));
+    }
+    if (const auto* t = dynamic_cast<const TernaryOp*>(e)) {
+        return (t->condition && mentionsDefined(t->condition.get())) ||
+               (t->true_expr && mentionsDefined(t->true_expr.get())) ||
+               (t->false_expr && mentionsDefined(t->false_expr.get()));
+    }
+    if (const auto* mem = dynamic_cast<const MemberAccess*>(e)) {
+        return mem->object && mentionsDefined(mem->object.get());
+    }
+    return false;
+}
+}  // namespace
 
 void SemanticAnalyzer::visit(Block& node) {
     enterScope();
@@ -76,6 +124,47 @@ void SemanticAnalyzer::visit(ExpressionStatement& node) {
 
 void SemanticAnalyzer::visit(IfStatement& node) {
     node.condition->accept(*this);
+    // B4 (ADR 0042): a `@defined`-mentioned guard that folds decides the
+    // arm through ComptimeInterp (never around it). The untaken arm is
+    // eliminated — its `@define`s never elaborate — and a taken `@define`
+    // lifts by the ordinary visit below. Anything that does not fold keeps
+    // the both-arms walk.
+    if (w5_program_ && node.condition && mentionsDefined(node.condition.get())) {
+        comptime::Interpreter interp(*w5_program_);
+        interp.setDefinedHook([this](const std::string& name) -> std::optional<bool> {
+            if (currentScope->resolve(name)) return true;
+            if (currentScope->resolveType(name)) return true;
+            if (currentScope->resolveMacro(name)) return true;
+            return false;
+        });
+        comptime::Env env;
+        comptime::ExprResult folded = interp.evaluateExpression(*node.condition, env);
+        if (folded.status == comptime::ExprStatus::Ok &&
+            folded.value.kind == comptime::ValueKind::Bool) {
+            const bool take = (folded.value.text == "true");
+            if (take) {
+                if (injectedWalk_) {
+                    node.then_block->accept(*this);
+                    return;
+                }
+                auto snap = moved_.snapshot();
+                node.then_block->accept(*this);
+                auto thenEnd = moved_.snapshot();
+                moved_.installJoin(thenEnd, snap);
+                return;
+            }
+            if (!node.else_stmt) return;
+            if (injectedWalk_) {
+                node.else_stmt->accept(*this);
+                return;
+            }
+            auto snap = moved_.snapshot();
+            moved_.restore(snap);
+            node.else_stmt->accept(*this);
+            moved_.installJoin(snap, moved_.snapshot());
+            return;
+        }
+    }
     // Wave-4 step 17 (W7): the two branches fork the moved state and join it
     // after. A move on one side only is MovedMaybe past the join; agreement
     // holds. The walk order is unchanged: only the state forks.

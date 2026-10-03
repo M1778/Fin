@@ -1030,12 +1030,12 @@ void SemanticAnalyzer::reportSingleProtocolClaims() {
 //
 // What this catches is syntactic and deliberately narrow: a host read sitting
 // in a branch condition, or a `let` in the same body initialised from one and
-// then branched on. What it does not catch is taint through an `@special`
-// call -- `@special limit() { return compiler.system.get_...; }` branched on
-// by its caller -- which needs the interpreter's value model carrying taint
-// alongside every value (ADR 0017's stated consequence) and is still open.
-// Target facts (`pointer_size`, `target_triple`) are not host reads and never
-// warn, however they are branched on.
+// then branched on. Taint through an `@special` call -- `@special limit() {
+// return compiler.system.get_...; }` branched on by its caller -- is caught
+// below by the interpreter's value model carrying taint alongside every value
+// (ADR 0017's stated consequence). Target facts (`pointer_size`,
+// `target_triple`) are not host reads and never warn, however they are
+// branched on.
 
 namespace {
 
@@ -1178,6 +1178,69 @@ private:
     std::unordered_map<std::string, std::string> tainted_;
 };
 
+// Call-through taint (ADR 0017): a branch condition evaluated by the comptime
+// interpreter that folds host-tainted -- through helper calls, lets, and ops
+// -- warns naming the originating read. Syntactic cases are skipped here
+// (the walk above already warned them). Gaps never warn: only proven taint
+// does, so pure-comptime branches stay silent. Single-pass and ordered like
+// the syntactic walk: a `let` binds as it is visited, quotes and lambdas are
+// runtime code and never entered.
+class HostTaintWalk : public StructuralWalk {
+public:
+    using WarnReporter = std::function<void(ASTNode&, const std::string&)>;
+
+    HostTaintWalk(comptime::Interpreter& interp, WarnReporter warn)
+        : interp_(interp), warn_(std::move(warn)) {}
+
+    bool enter(ASTNode& node) override {
+        if (dynamic_cast<QuoteExpression*>(&node)) return false;
+        if (dynamic_cast<LambdaExpression*>(&node)) return false;
+        if (auto* decl = dynamic_cast<VariableDeclaration*>(&node)) {
+            std::string op;
+            if (decl->initializer && subtreeReadsHost(decl->initializer.get(), &op))
+                synTainted_[decl->name] = op;
+            if (decl->initializer) {
+                comptime::ExprResult bound =
+                    interp_.evaluateExpression(*decl->initializer, env_);
+                if (bound.status == comptime::ExprStatus::Ok)
+                    env_.bind(decl->name, std::move(bound.value));
+            }
+            return true;
+        }
+        Expression* condition = nullptr;
+        if (auto* s = dynamic_cast<IfStatement*>(&node)) condition = s->condition.get();
+        else if (auto* s = dynamic_cast<WhileLoop*>(&node)) condition = s->condition.get();
+        else if (auto* s = dynamic_cast<ForLoop*>(&node)) condition = s->condition.get();
+        else if (auto* s = dynamic_cast<ForeachLoop*>(&node)) condition = s->iterable.get();
+        else if (auto* e = dynamic_cast<TernaryOp*>(&node)) condition = e->condition.get();
+        if (!condition) return true;
+        // Syntactic: the walk above owns these.
+        std::string direct;
+        if (subtreeReadsHost(condition, &direct)) return true;
+        for (const auto& [name, source] : synTainted_) {
+            if (subtreeMentions(condition, name)) return true;
+        }
+        comptime::ExprResult folded = interp_.evaluateExpression(*condition, env_);
+        if (folded.status != comptime::ExprStatus::Ok) return true;
+        if (!folded.value.host_tainted) return true;
+        warn(*condition, folded.value.host_op);
+        return true;
+    }
+
+private:
+    void warn(ASTNode& at, const std::string& op) {
+        warn_(at, "branching on '" + op +
+                      "' makes the compiled program depend on the machine "
+                      "that builds it (docs/compiler-api.md Q11: reading the "
+                      "host is legal, branching on it is warned; ADR 0017)");
+    }
+
+    comptime::Interpreter& interp_;
+    comptime::Env env_;
+    WarnReporter warn_;
+    std::unordered_map<std::string, std::string> synTainted_;
+};
+
 }  // namespace
 
 void SemanticAnalyzer::warnOnHostBranch(SpecialDeclaration& node, bool hasSystemGrant) {
@@ -1187,6 +1250,12 @@ void SemanticAnalyzer::warnOnHostBranch(SpecialDeclaration& node, bool hasSystem
     auto report = [this](ASTNode& at, const std::string& msg) { warning(at, msg); };
     HostBranchWalk walk(report);
     walk.walk(node.body.get());
+    // The interpreter needs the program for helper lookup; outside the walk
+    // there is none, and the syntactic walk above is the whole check.
+    if (!w5_program_) return;
+    comptime::Interpreter interp(*w5_program_);
+    HostTaintWalk tainted(interp, report);
+    tainted.walk(node.body.get());
 }
 
 // --- hybrid layout members ---------------------------------------------------

@@ -1,5 +1,6 @@
 #include "../SemanticAnalyzer.hpp"
 #include "../EventPayloads.hpp"
+#include "../../ast/exprs/MiscExpr.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../../utils/IntegerConstant.hpp"
 #include "../../types/Layout.hpp"
@@ -1578,6 +1579,36 @@ std::shared_ptr<Type> SemanticAnalyzer::checkGenericCall(ASTNode& node, const ch
         unifyGeneric(sig.param_types[i], argTypes[i], mapping);
     }
 
+    // A `$struct` handle seeds a Struct-bounded return (literal_struct.fin:24).
+    // `make_default(struct { ... })` pairs a `$struct` parameter with the
+    // literal's handle, and the bare `<T>` return is that handle's struct --
+    // which is the only thing that says which members `unique_player` has.
+    // Fills only a return parameter nothing bound yet (a hint, turbofish or
+    // argument wins by first-binding-wins) and only from one unambiguous
+    // handle: several handles or several open returns stay unbound rather than
+    // guessed. A non-dynamic bound (`<T: int>`) stays unbound too: a struct is
+    // not one of those, and the call-site bound check owns that refusal.
+    if (sig.return_type && sig.return_type->as<GenericType>() &&
+        !mapping.count(sig.return_type->as<GenericType>()->name)) {
+        auto* retGen = sig.return_type->as<GenericType>();
+        std::shared_ptr<StructType> handleStruct;
+        size_t handlePairs = 0;
+        for (size_t i = 0; i < args.size() && i < sig.param_types.size(); ++i) {
+            auto* dollar = sig.param_types[i] ? sig.param_types[i]->as<PrimitiveType>() : nullptr;
+            if (!dollar || dollar->name != "$struct") continue;
+            auto* lit = dynamic_cast<TypeLiteralExpression*>(args[i].get());
+            if (!lit) continue;
+            auto it = structLiteralTypes_.find(lit);
+            if (it == structLiteralTypes_.end() || !it->second) continue;
+            ++handlePairs;
+            handleStruct = it->second;
+        }
+        if (handlePairs == 1 && handleStruct &&
+            (!retGen->constraint || retGen->constraint->as<DynamicType>())) {
+            mapping[retGen->name] = handleStruct;
+        }
+    }
+
     std::shared_ptr<Type> instantiatedOwner = nullptr;
     if (owner && mentionsGenericParam(owner)) {
         instantiatedOwner = owner->instantiate(orderedGenericArgs(owner, mapping));
@@ -2654,6 +2685,24 @@ void SemanticAnalyzer::visit(TypeLiteralExpression& node) {
     // before, because analysing the body overwrites lastExprType.
     enterScope();
     node.decl->accept(*this);
+    // The value behind the meta-type: the literal's own scope holds exactly the
+    // type its body declared (its methods' scopes came and went inside the
+    // visit above, and a literal takes no generic parameters), so the one
+    // struct-shaped entry in it is the anonymous struct this value denotes.
+    // Anything else -- no entry, several, or an interface -- records nothing,
+    // and the seeding in checkGenericCall stays out of it.
+    {
+        std::shared_ptr<StructType> literalStruct;
+        size_t structEntries = 0;
+        for (const auto& [name, type] : currentScope->types) {
+            if (auto st = std::dynamic_pointer_cast<StructType>(type)) {
+                if (st->is_interface) continue;
+                ++structEntries;
+                literalStruct = st;
+            }
+        }
+        if (structEntries == 1 && literalStruct) structLiteralTypes_[&node] = literalStruct;
+    }
     exitScope();
 
     lastExprType = currentScope->resolveType(node.is_interface ? "$interface" : "$struct");
@@ -3034,6 +3083,25 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
 void SemanticAnalyzer::visit(StructInstantiation& node) {
     auto baseType = currentScope->resolveType(node.struct_name);
     if (!baseType) {
+        // A `$struct`-typed value in instantiation position (`st{}` where
+        // `st: $struct`, literal_struct.fin:5): the concrete struct is known
+        // only at compile time, so the analyzer accepts without field checks
+        // and types the instance as `any`. Unknown names still diagnose.
+        if (Symbol* sym = currentScope->resolve(node.struct_name)) {
+            if (sym->type) {
+                if (auto* prim = sym->type->as<PrimitiveType>()) {
+                    if (prim->name == "$struct") {
+                        for (auto& f : node.fields) {
+                            if (f.second) f.second->accept(*this);
+                        }
+                        lastExprType = currentScope->resolveType("any");
+                        if (!lastExprType)
+                            lastExprType = std::make_shared<DynamicType>("any");
+                        return;
+                    }
+                }
+            }
+        }
         error(node, "Undefined struct '" + node.struct_name + "'");
         lastExprType = nullptr;
         return;

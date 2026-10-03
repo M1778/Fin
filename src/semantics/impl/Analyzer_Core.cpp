@@ -182,6 +182,17 @@ SemanticAnalyzer::SemanticAnalyzer(DiagnosticEngine& d, bool debug)
     currentScope->defineType("any", std::make_shared<DynamicType>("any"));
     currentScope->defineType("object", std::make_shared<DynamicType>("object"));
 
+    // `Struct`, its own interface-like bound kind with struct-shape rules -- not an
+    // alias for `any` and not an "any struct" set. The corpus writes it bare as a
+    // bound (`any implements Struct`, literal_struct.fin:4) and as a bound target
+    // (`type PlayerStructLike = Struct implements <_PlayerStructLike>;`, :15), so it
+    // is a builtin for the same bare-corpus-use reason as `any`/`object` above. A
+    // DynamicType for that reason: the alias path (Analyzer_Decl.cpp) and the inline
+    // path above both attach `implements` bounds to any dynamic target already, and
+    // member lookup already consults those bounds, which is what keeps the attached
+    // interface's struct members visible through the alias.
+    currentScope->defineType("Struct", std::make_shared<DynamicType>("Struct"));
+
     // Mock Castable
     currentScope->defineType("Castable", std::make_shared<StructType>("Castable"));
 
@@ -460,6 +471,22 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
         } else {
              type = std::make_shared<StructType>(node->name, args);
         }
+    }
+
+    // The inline `implements` bound: `T: any implements <_I>` and
+    // `T: any implements _I` (parser.y generic_param) carry the constraint set
+    // on the TypeNode itself, exactly as the union alternative does. It was
+    // parsed but never resolved or stored, so the bound resolved to a bare
+    // `any` and member lookup saw nothing to consult. Resolved here -- the one
+    // place every spelling flows through -- so a typo reports, like the alias
+    // path (`Analyzer_Decl.cpp`: `type B = any implements <_I>`), and a
+    // resolvable bound is stored the same way it is there.
+    if (type && !node->implements_list.empty()) {
+        std::vector<std::shared_ptr<Type>> bounds;
+        bounds.reserve(node->implements_list.size());
+        for (auto& bnd : node->implements_list) bounds.push_back(resolveTypeOrError(bnd.get()));
+        if (auto* dyn = type->as<DynamicType>())
+            type = std::make_shared<DynamicType>(dyn->name, std::move(bounds));
     }
     
     // 6. The written width: `int{64}`.

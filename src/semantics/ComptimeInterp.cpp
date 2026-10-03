@@ -222,6 +222,35 @@ bool isCompilerRooted(const Expression& expr) {
     }
 }
 
+// Host taint (ADR 0017, Q11): any op on a tainted value stays tainted, naming
+// the first host read it derived from. First op wins: one branch names one
+// operation, and the value still warns exactly once.
+void inheritTaint(Value& dst, const Value& src) {
+    if (src.host_tainted && !dst.host_tainted) {
+        dst.host_tainted = true;
+        dst.host_op = src.host_op;
+    }
+}
+
+bool isHostReadOpName(const std::string& method) {
+    return method == "get_total_memory" || method == "get_available_memory" ||
+           method == "get_memorycard_model";
+}
+
+// Whether `call` is `compiler.system.get_*(...)`: the object chain is exactly
+// `compiler` then `system`, the method one of the host reads above. Mirrors
+// the analyzer's syntactic check, answered here as a tainted value instead of
+// a gap so call-through taint folds.
+bool asHostSystemRead(const MethodCall& call, std::string* opOut) {
+    if (!isHostReadOpName(call.method_name)) return false;
+    const auto* sys = dynamic_cast<const MemberAccess*>(call.object.get());
+    if (!sys || !sys->object || sys->member != "system") return false;
+    const auto* root = dynamic_cast<const Identifier*>(sys->object.get());
+    if (!root || root->name != "compiler") return false;
+    if (opOut) *opOut = "compiler.system." + call.method_name;
+    return true;
+}
+
 } // namespace
 
 std::string Interpreter::flowBreach(const Block& body) {
@@ -313,19 +342,73 @@ const StructDeclaration* Interpreter::findStruct(const std::string& name) const 
     return nullptr;
 }
 
+// B4: whether the program itself declares the name at top level (the
+// analyzer hook's fallback). A lifted `@define` counts: a later guard in the
+// same body sees the earlier taken declaration.
+bool Interpreter::programDefines(const std::string& name) const {
+    for (const auto& lifted : lifted_) {
+        if (lifted == name) return true;
+    }
+    for (const auto& stmt : program_.statements) {
+        if (const auto* fun = dynamic_cast<const FunctionDeclaration*>(stmt.get())) {
+            if (fun->name == name) return true;
+        } else if (const auto* def = dynamic_cast<const DefineDeclaration*>(stmt.get())) {
+            if (def->name == name) return true;
+        } else if (const auto* special = dynamic_cast<const SpecialDeclaration*>(stmt.get())) {
+            if (special->name == name) return true;
+        } else if (const auto* decl = dynamic_cast<const StructDeclaration*>(stmt.get())) {
+            if (decl->name == name) return true;
+        } else if (const auto* iface = dynamic_cast<const InterfaceDeclaration*>(stmt.get())) {
+            if (iface->name == name) return true;
+        } else if (const auto* en = dynamic_cast<const EnumDeclaration*>(stmt.get())) {
+            if (en->name == name) return true;
+        } else if (const auto* td = dynamic_cast<const TypeDefinition*>(stmt.get())) {
+            if (td->name == name) return true;
+        } else if (const auto* vd = dynamic_cast<const VariableDeclaration*>(stmt.get())) {
+            if (vd->name == name) return true;
+        }
+    }
+    return false;
+}
+
+std::optional<bool> Interpreter::answerDefined(const std::string& name) const {
+    if (definedHook_) {
+        if (auto hooked = definedHook_(name)) return hooked;
+    }
+    return programDefines(name);
+}
+
 ExprResult Interpreter::evaluateStruct(const StructInstantiation& node, const Env& env) {
     // The name first, then the fields: a mistake about which struct this is
-    // outranks a mistake inside a field. A bound-but-undeclared name is a
-    // `$struct` *value* (`st` in `st{}`), whose type is known only at compile
-    // time — the wave-4 compiler API's job, named here and never guessed.
+    // outranks a mistake inside a field. A `$struct` *value* (`st` in `st{}`)
+    // binds its handle's struct and constructs that, with explicit fields
+    // evaluated and unlisted defaults filled closed. A bound-but-unhandled
+    // name keeps the wave-4 gap; an unbound unknown name stays unknown.
     const StructDeclaration* decl = findStruct(node.struct_name);
+    std::string actualName = node.struct_name;
     if (!decl) {
-        if (env.lookup(node.struct_name))
+        const Value* bound = env.lookup(node.struct_name);
+        if (bound && bound->kind == ValueKind::Opaque) {
+            const std::string prefix = "$struct:";
+            if (bound->text.rfind(prefix, 0) == 0) {
+                actualName = bound->text.substr(prefix.size());
+                decl = findStruct(actualName);
+                if (!decl)
+                    return ExprResult{ExprStatus::Gap, {}, "unknown struct '" + actualName + "'"};
+            } else {
+                return ExprResult{ExprStatus::Gap, {},
+                                  "instantiating '$struct' value '" + node.struct_name +
+                                      "' needs its type known at compile time "
+                                      "(the compiler API's wave-4 value handle)"};
+            }
+        } else if (bound) {
             return ExprResult{ExprStatus::Gap, {},
                               "instantiating '$struct' value '" + node.struct_name +
                                   "' needs its type known at compile time "
                                   "(the compiler API's wave-4 value handle)"};
-        return ExprResult{ExprStatus::Gap, {}, "unknown struct '" + node.struct_name + "'"};
+        } else {
+            return ExprResult{ExprStatus::Gap, {}, "unknown struct '" + node.struct_name + "'"};
+        }
     }
     std::vector<std::pair<std::string, Value>> fields;
     fields.reserve(node.fields.size());
@@ -333,7 +416,7 @@ ExprResult Interpreter::evaluateStruct(const StructInstantiation& node, const En
         if (!fieldExpr)
             return ExprResult{ExprStatus::Gap, {},
                               "missing value for field '" + fieldName + "' in '" +
-                                  node.struct_name + "{...}'"};
+                                  actualName + "{...}'"};
         ExprResult field = evaluateExpression(*fieldExpr, env);
         if (field.status != ExprStatus::Ok) return field;
         // Last wins on a duplicate: the analyzer owns the diagnostic, so
@@ -367,8 +450,9 @@ ExprResult Interpreter::evaluateStruct(const StructInstantiation& node, const En
         if (filled.status != ExprStatus::Ok) return filled;
         fields.emplace_back(member->name, std::move(filled.value));
     }
-    return ExprResult{ExprStatus::Ok,
-                      Value::makeStruct(node.struct_name, std::move(fields)), {}};
+    Value built = Value::makeStruct(actualName, std::move(fields));
+    for (const auto& [name, value] : built.fields) inheritTaint(built, value);
+    return ExprResult{ExprStatus::Ok, std::move(built), {}};
 }
 
 ExprResult Interpreter::evaluateMember(const MemberAccess& node, const Env& env) {
@@ -416,7 +500,9 @@ ExprResult Interpreter::evaluateArray(const ArrayLiteral& node, const Env& env) 
         if (evaluated.status != ExprStatus::Ok) return evaluated;
         elements.push_back(std::move(evaluated.value));
     }
-    return ExprResult{ExprStatus::Ok, Value::makeArray(std::move(elements)), {}};
+    Value built = Value::makeArray(std::move(elements));
+    for (const auto& element : built.elements) inheritTaint(built, element);
+    return ExprResult{ExprStatus::Ok, std::move(built), {}};
 }
 
 ExprResult Interpreter::evaluateIndex(const ArrayAccess& node, const Env& env) {
@@ -445,7 +531,10 @@ ExprResult Interpreter::evaluateIndex(const ArrayAccess& node, const Env& env) {
         return ExprResult{ExprStatus::Gap, {},
                           "index " + spellInt(at) + " is out of range for an array of " +
                               std::to_string(array.value.elements.size())};
-    return ExprResult{ExprStatus::Ok, array.value.elements[static_cast<std::size_t>(at)], {}};
+    Value picked = array.value.elements[static_cast<std::size_t>(at)];
+    // The selection depends on the host when the index does.
+    inheritTaint(picked, index.value);
+    return ExprResult{ExprStatus::Ok, std::move(picked), {}};
 }
 
 ExprResult Interpreter::evaluateCast(const CastExpression& node, const Env& env) {
@@ -502,6 +591,54 @@ ExprResult Interpreter::evaluateMethod(const MethodCall& node, const Env& env) {
         return ExprResult{ExprStatus::Gap, {},
                           "component call 'compiler.components." + component + "." +
                               node.method_name + "' is not evaluated at comptime"};
+    }
+    // A host read folds to a placeholder of its kind, tainted with the
+    // operation: the value is a stand-in (the branch, not the bytes, is what
+    // the warning owns), and the taint is what threads through helpers. Args
+    // are not evaluated: `compiler.enums.InBytes` is itself a gap, and the
+    // taint comes from the read, not its arguments.
+    {
+        std::string hostOp;
+        if (node.object && asHostSystemRead(node, &hostOp)) {
+            Value folded = (node.method_name == "get_memorycard_model")
+                               ? Value::makeString("")
+                               : Value::makeInt("0");
+            folded.host_tainted = true;
+            folded.host_op = hostOp;
+            return ExprResult{ExprStatus::Ok, std::move(folded), {}};
+        }
+    }
+    // B4: `compiler.symbols.defined("name")` folds like `@defined` (ADR 0042).
+    if (node.method_name == "defined" && node.object) {
+        const auto* mem = dynamic_cast<const MemberAccess*>(node.object.get());
+        const Identifier* root = nullptr;
+        if (mem && mem->member == "symbols" && mem->object)
+            root = dynamic_cast<const Identifier*>(mem->object.get());
+        if (root && root->name == "compiler") {
+            if (node.args.size() != 1)
+                return ExprResult{ExprStatus::Gap, {},
+                                  "'defined' expects 1 argument, got " +
+                                      std::to_string(node.args.size())};
+            std::string target;
+            if (!node.args[0])
+                return ExprResult{ExprStatus::Gap, {}, "missing argument in call 'defined'"};
+            if (const auto* lit = dynamic_cast<const Literal*>(node.args[0].get())) {
+                if (lit->kind != ASTTokenKind::STRING_LITERAL)
+                    return ExprResult{ExprStatus::Gap, {},
+                                      "Argument to 'defined' must be a string"};
+                target = decodeStringLiteral(lit->value);
+            } else {
+                ExprResult arg = evaluateExpression(*node.args[0], env);
+                if (arg.status != ExprStatus::Ok) return arg;
+                if (arg.value.kind != ValueKind::String)
+                    return ExprResult{ExprStatus::Gap, {},
+                                      "Argument to 'defined' must be a string"};
+                target = arg.value.text;
+            }
+            std::optional<bool> ans = answerDefined(target);
+            if (!ans) return ExprResult{ExprStatus::Gap, {}, "unknown name '" + target + "'"};
+            return ExprResult{ExprStatus::Ok, Value::makeBool(*ans ? "true" : "false"), {}};
+        }
     }
     if (node.object && isCompilerRooted(*node.object))
         return ExprResult{ExprStatus::Gap, {},
@@ -681,8 +818,36 @@ ExprResult Interpreter::evaluateExpression(const Expression& expr, const Env& en
     }
     if (const auto* quote = dynamic_cast<const QuoteExpression*>(&expr))
         return ExprResult{ExprStatus::Ok, Value::makeQuote(quote), {}};
-    if (const auto* call = dynamic_cast<const FunctionCall*>(&expr))
+    if (const auto* call = dynamic_cast<const FunctionCall*>(&expr)) {
+        // B4 (ADR 0042): `@defined("name")` folds to whether the name is
+        // declared (hook = analyzer scopes with the eager ambient, else the
+        // program's own top level + lifted). Missing means false, never a
+        // gap; only a bad shape stays a gap.
+        if (call->is_special && call->name == "defined") {
+            if (call->args.size() != 1)
+                return ExprResult{ExprStatus::Gap, {},
+                                  "'@defined' expects 1 argument, got " +
+                                      std::to_string(call->args.size())};
+            std::string target;
+            if (const auto* lit = dynamic_cast<const Literal*>(call->args[0].get())) {
+                if (lit->kind != ASTTokenKind::STRING_LITERAL)
+                    return ExprResult{ExprStatus::Gap, {},
+                                      "Argument to '@defined' must be a string"};
+                target = decodeStringLiteral(lit->value);
+            } else {
+                ExprResult arg = evaluateExpression(*call->args[0], env);
+                if (arg.status != ExprStatus::Ok) return arg;
+                if (arg.value.kind != ValueKind::String)
+                    return ExprResult{ExprStatus::Gap, {},
+                                      "Argument to '@defined' must be a string"};
+                target = arg.value.text;
+            }
+            std::optional<bool> ans = answerDefined(target);
+            if (!ans) return ExprResult{ExprStatus::Gap, {}, "unknown name '" + target + "'"};
+            return ExprResult{ExprStatus::Ok, Value::makeBool(*ans ? "true" : "false"), {}};
+        }
         return evaluateCall(call->name, call->args, env);
+    }
     if (const auto* inv = dynamic_cast<const MacroInvocation*>(&expr))
         return evaluateCall(inv->name, inv->args, env);
     // G4: the call-site forms. Static and qualified method shapes outside
@@ -714,7 +879,11 @@ ExprResult Interpreter::evaluateExpression(const Expression& expr, const Env& en
         bool take = false;
         if (!asBool(cond.value, &take))
             return ExprResult{ExprStatus::Gap, {}, "a ternary needs a bool condition"};
-        return evaluateExpression(take ? *tern->true_expr : *tern->false_expr, env);
+        ExprResult arm = evaluateExpression(take ? *tern->true_expr : *tern->false_expr, env);
+        if (arm.status != ExprStatus::Ok) return arm;
+        // The choice is host-dependent when the condition is.
+        inheritTaint(arm.value, cond.value);
+        return arm;
     }
     // Method, static-method, macro and every other expression shape need
     // the full interpreter. Named by node kind, never silently dropped.
@@ -733,7 +902,9 @@ ExprResult Interpreter::evaluateUnary(const UnaryOp& node, const Env& env) {
         bool b = false;
         if (!asBool(inner.value, &b))
             return ExprResult{ExprStatus::Gap, {}, "'!' needs a bool"};
-        return ExprResult{ExprStatus::Ok, Value::makeBool(spellBool(!b)), {}};
+        Value folded = Value::makeBool(spellBool(!b));
+        inheritTaint(folded, inner.value);
+        return ExprResult{ExprStatus::Ok, std::move(folded), {}};
     }
     std::int64_t n = 0;
     if (!asInt(inner.value, &n))
@@ -741,7 +912,9 @@ ExprResult Interpreter::evaluateUnary(const UnaryOp& node, const Env& env) {
     // Wrapping negation, exactly the backend's `sub 0, n`: INT64_MIN stays
     // INT64_MIN rather than trapping, so there is nothing to refuse.
     const std::uint64_t negated = 0 - static_cast<std::uint64_t>(n);
-    return ExprResult{ExprStatus::Ok, Value::makeInt(spellInt(static_cast<std::int64_t>(negated))), {}};
+    Value folded = Value::makeInt(spellInt(static_cast<std::int64_t>(negated)));
+    inheritTaint(folded, inner.value);
+    return ExprResult{ExprStatus::Ok, std::move(folded), {}};
 }
 
 ExprResult Interpreter::evaluateBinary(const BinaryOp& node, const Env& env) {
@@ -758,16 +931,25 @@ ExprResult Interpreter::evaluateBinary(const BinaryOp& node, const Env& env) {
         bool leftBool = false;
         if (!asBool(left.value, &leftBool))
             return ExprResult{ExprStatus::Gap, {}, "'&&' and '||' need bools"};
-        if (node.op == ASTTokenKind::AND && !leftBool)
-            return ExprResult{ExprStatus::Ok, Value::makeBool("false"), {}};
-        if (node.op == ASTTokenKind::OR && leftBool)
-            return ExprResult{ExprStatus::Ok, Value::makeBool("true"), {}};
+        if (node.op == ASTTokenKind::AND && !leftBool) {
+            Value folded = Value::makeBool("false");
+            inheritTaint(folded, left.value);
+            return ExprResult{ExprStatus::Ok, std::move(folded), {}};
+        }
+        if (node.op == ASTTokenKind::OR && leftBool) {
+            Value folded = Value::makeBool("true");
+            inheritTaint(folded, left.value);
+            return ExprResult{ExprStatus::Ok, std::move(folded), {}};
+        }
         ExprResult right = evaluateExpression(*node.right, env);
         if (right.status != ExprStatus::Ok) return right;
         bool rightBool = false;
         if (!asBool(right.value, &rightBool))
             return ExprResult{ExprStatus::Gap, {}, "'&&' and '||' need bools"};
-        return ExprResult{ExprStatus::Ok, Value::makeBool(spellBool(rightBool)), {}};
+        Value folded = Value::makeBool(spellBool(rightBool));
+        inheritTaint(folded, left.value);
+        inheritTaint(folded, right.value);
+        return ExprResult{ExprStatus::Ok, std::move(folded), {}};
     }
     if (node.op == ASTTokenKind::EQEQ || node.op == ASTTokenKind::NOTEQ) {
         ExprResult left = evaluateExpression(*node.left, env);
@@ -792,7 +974,10 @@ ExprResult Interpreter::evaluateBinary(const BinaryOp& node, const Env& env) {
             return ExprResult{ExprStatus::Gap, {}, "'==' needs two ints, two bools or two strings"};
         }
         const bool result = (node.op == ASTTokenKind::EQEQ) ? equal : !equal;
-        return ExprResult{ExprStatus::Ok, Value::makeBool(spellBool(result)), {}};
+        Value folded = Value::makeBool(spellBool(result));
+        inheritTaint(folded, left.value);
+        inheritTaint(folded, right.value);
+        return ExprResult{ExprStatus::Ok, std::move(folded), {}};
     }
     if (node.op == ASTTokenKind::LT || node.op == ASTTokenKind::GT ||
         node.op == ASTTokenKind::LTEQ || node.op == ASTTokenKind::GTEQ) {
@@ -816,7 +1001,10 @@ ExprResult Interpreter::evaluateBinary(const BinaryOp& node, const Env& env) {
             case ASTTokenKind::LTEQ: result = (a <= b); break;
             default: result = (a >= b); break;
         }
-        return ExprResult{ExprStatus::Ok, Value::makeBool(spellBool(result)), {}};
+        Value folded = Value::makeBool(spellBool(result));
+        inheritTaint(folded, left.value);
+        inheritTaint(folded, right.value);
+        return ExprResult{ExprStatus::Ok, std::move(folded), {}};
     }
     if (node.op == ASTTokenKind::PLUS || node.op == ASTTokenKind::MINUS ||
         node.op == ASTTokenKind::MULT || node.op == ASTTokenKind::DIV ||
@@ -849,7 +1037,10 @@ ExprResult Interpreter::evaluateBinary(const BinaryOp& node, const Env& env) {
             case ASTTokenKind::DIV: raw = static_cast<std::uint64_t>(a / b); break;
             default: raw = static_cast<std::uint64_t>(a % b); break;
         }
-        return ExprResult{ExprStatus::Ok, Value::makeInt(spellInt(static_cast<std::int64_t>(raw))), {}};
+        Value folded = Value::makeInt(spellInt(static_cast<std::int64_t>(raw)));
+        inheritTaint(folded, left.value);
+        inheritTaint(folded, right.value);
+        return ExprResult{ExprStatus::Ok, std::move(folded), {}};
     }
     return ExprResult{ExprStatus::Gap, {}, std::string(nodeKindName(node.kind()))};
 }
@@ -968,13 +1159,13 @@ BodyResult Interpreter::evaluateBody(const Block& body, Env& env) {
             return branch;
         }
         if (const auto* def = dynamic_cast<const DefineDeclaration*>(stmt.get())) {
-            // S2: a taken `@define` would inject a declaration at comptime,
-            // which needs declaration-lifting
-            // (`compiler.code.lift_to_module_end`) — Q5, deferred — so it is
-            // refused naming the question, never run and never silently
-            // dropped. The analyzer still publishes guarded `@define`s
-            // (Soundness_SpecialCalls.GuardedDefinePublishesToSubsequentCode);
-            // this is only what *executing* one would mean.
+            // B4: a gated (taken-arm) `@define` lifts its declaration and the
+            // body continues; an ungated one keeps the Q5 refusal, never run
+            // and never silently dropped.
+            if (gatedDepth_ > 0) {
+                lifted_.push_back(def->name);
+                continue;
+            }
             return BodyResult{BodyStatus::Gap, {},
                               "@define '" + def->name +
                                   "' injects a declaration: no declaration-lifting at comptime "
@@ -991,31 +1182,41 @@ BodyResult Interpreter::evaluateIf(const IfStatement& node, Env& env) {
     // never runs — analyze-but-don't-emit (both arms typecheck in the
     // analyzer walk, only the taken one evaluates here).
     //
-    // Host-taint hole, recorded not built: a condition threaded through a
-    // helper call carries no taint in this model, so a host read behind a
-    // call folds like any other bool. warnOnHostBranch
-    // (Analyzer_CompilerApi.cpp) stays syntactic for the same reason and
-    // records the same hole; taint in the value model is a later wave, and
-    // silently treating a helper-called bool as host-clean would be the bug
-    // this note refuses to write.
+    // Host taint (ADR 0017, Q11) rides the condition into the taken arm's
+    // answer: which arm runs is host-dependent, so the answer is too, and a
+    // helper returning it threads the taint to its caller.
     if (!node.condition || !node.then_block)
         return BodyResult{BodyStatus::Gap, {}, "an 'if' needs a condition and a body"};
     ExprResult cond = evaluateExpression(*node.condition, env);
     if (cond.status != ExprStatus::Ok) {
         return BodyResult{cond.status == ExprStatus::LineBreach ? BodyStatus::LineBreach
-                                                                : BodyStatus::Gap,
+                                                                 : BodyStatus::Gap,
                           {}, std::move(cond.detail)};
     }
     bool take = false;
     if (!asBool(cond.value, &take))
         return BodyResult{BodyStatus::Gap, {}, "'if' needs a bool condition"};
-    if (take) return evaluateBody(*node.then_block, env);
-    if (!node.else_stmt) return BodyResult{BodyStatus::Empty, {}, {}};
-    if (const auto* elseBlock = dynamic_cast<const Block*>(node.else_stmt.get()))
-        return evaluateBody(*elseBlock, env);
-    if (const auto* elseIf = dynamic_cast<const IfStatement*>(node.else_stmt.get()))
-        return evaluateIf(*elseIf, env);
-    return BodyResult{BodyStatus::Gap, {}, "an 'else' holds a block or an 'if'"};
+    // B4: the taken arm is gated, so a `@define` inside it lifts (gatedDepth_
+    // counts the enclosing taken guards; an `else if` dispatches without
+    // gating here and gates its own taken arm inside the recursion).
+    struct Gate {
+        Interpreter* self;
+        explicit Gate(Interpreter* s) : self(s) { ++self->gatedDepth_; }
+        ~Gate() { --self->gatedDepth_; }
+    };
+    BodyResult arm{BodyStatus::Empty, {}, {}};
+    if (take) {
+        Gate g(this);
+        arm = evaluateBody(*node.then_block, env);
+    } else if (!node.else_stmt) return BodyResult{BodyStatus::Empty, {}, {}};
+    else if (const auto* elseBlock = dynamic_cast<const Block*>(node.else_stmt.get())) {
+        Gate g(this);
+        arm = evaluateBody(*elseBlock, env);
+    } else if (const auto* elseIf = dynamic_cast<const IfStatement*>(node.else_stmt.get()))
+        arm = evaluateIf(*elseIf, env);
+    else return BodyResult{BodyStatus::Gap, {}, "an 'else' holds a block or an 'if'"};
+    if (arm.status == BodyStatus::Returned) inheritTaint(arm.value, cond.value);
+    return arm;
 }
 
 } // namespace fin::comptime

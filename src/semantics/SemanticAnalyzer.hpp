@@ -435,9 +435,9 @@ private:
     // Wave-4 Round 3, Q11: warns when a `@special` body branches on a value
     // read from the host (`compiler.system.get_*_memory`, `get_memorycard_model`).
     // Reading is legal; branching makes the program depend on the build machine.
-    // Only direct reads and same-body `let`s are visible; taint through
-    // `@special` calls needs the interpreter's value model (ADR 0017) and stays
-    // open. `hasSystemGrant` gates the walk so an ungranted read (already an
+    // Direct reads and same-body `let`s warn syntactically; taint through
+    // `@special` calls warns via the interpreter's value model (ADR 0017).
+    // `hasSystemGrant` gates the walk so an ungranted read (already an
     // error) is not also a warning on the same line.
     void warnOnHostBranch(SpecialDeclaration& node, bool hasSystemGrant);
 
@@ -639,6 +639,17 @@ private:
     // resolved_args and everyGenericParamResolvesHere. Either way the failure
     // is the old refusal, never a wrong instantiation.
     void recordResolvedArgs(FunctionCall& node, const std::shared_ptr<Type>& inferred);
+
+    // The struct a `struct { ... }` literal declares, keyed by the literal node.
+    // A literal's *type* is the `$struct` meta-type (Soundness_TypeLiterals.
+    // AStructLiteralIsTypedDollarStructAndNotSomethingElse pins the spelling),
+    // but its *value* denotes the anonymous struct -- which is what a `$struct`
+    // parameter receives and what a Struct-bounded generic return is seeded
+    // from (checkGenericCall). Recorded in visit(TypeLiteralExpression&) before
+    // the literal's scope is discarded; read only through that seeding, so an
+    // interface literal (recorded never) and an ambiguous call (read never)
+    // keep today's behaviour exactly.
+    std::unordered_map<const ASTNode*, std::shared_ptr<StructType>> structLiteralTypes_;
 
     // Records on a struct literal the type arguments inference found, for the
     // backend to instantiate where the literal wrote none (`Box{ val: 7 }`

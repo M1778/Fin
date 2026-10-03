@@ -1426,11 +1426,11 @@ TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnADynamicTypeIsNotEnforced) {
 }
 
 TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnANonDynamicAliasIsDropped) {
-    // The bound is attached only when the alias target is `any` or `object`, because
-    // that is the only shape the corpus writes it on -- except literal_struct.fin:15,
-    // `type PlayerStructLike = Struct implements <_PlayerStructLike>;`, where the
-    // target is `Struct` and the whole construct is part of the unimplemented struct
-    // literal feature.
+    // The bound is attached only when the alias target is dynamic (`any`, `object`,
+    // or `Struct`), because that is the only shape the corpus writes it on --
+    // including literal_struct.fin:15, `type PlayerStructLike = Struct implements
+    // <_PlayerStructLike>;`, which keeps its bound (Soundness_DynamicTypes.
+    // AStructTargetKeepsItsImplementsBound).
     //
     // On any other target the bound is resolved and then discarded. Resolving it is
     // deliberate and is what the second half of this test pins: an unenforced bound
@@ -1459,6 +1459,38 @@ TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnANonDynamicAliasIsDropped) {
         "fun main() <int> { let x <F> = 5; return 0; }\n");
     EXPECT_NE(stripAnsi(typo.err).find("Undefined type 'NoSuchIface'"), std::string::npos)
         << "a bound is resolved even where it is not kept\n" << stripAnsi(typo.err);
+}
+
+TEST(Soundness_DynamicTypes, AStructTargetKeepsItsImplementsBound) {
+    // Owner ruling: `Struct` is its own interface-like bound kind, not an alias
+    // for `any`. `type PlayerStructLike = Struct implements <_PlayerStructLike>;`
+    // (literal_struct.fin:15) keeps the bound and keeps struct members visible
+    // through it; `any implements Struct` (literal_struct.fin:4) resolves too.
+    const FincRun alias = compile(
+        "interface _PlayerStructLike { pub health <uint>; pub damage <uint>; }\n"
+        "type PlayerStructLike = Struct implements <_PlayerStructLike>;\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(errorCount(stripAnsi(alias.err)), 0u) << stripAnsi(alias.err);
+
+    const FincRun use = compile(
+        "interface _PlayerStructLike { pub health <uint>; pub damage <uint>; }\n"
+        "type PlayerStructLike = Struct implements <_PlayerStructLike>;\n"
+        "fun sub_health<T: PlayerStructLike>(plr: T) <noret> { plr.health -= 10; }\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(errorCount(stripAnsi(use.err)), 0u) << stripAnsi(use.err);
+
+    const FincRun inlineBound = compile(
+        "fun f<T: any implements Struct>(x: T) <noret> {}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(errorCount(stripAnsi(inlineBound.err)), 0u) << stripAnsi(inlineBound.err);
+
+    // The bound is kept, not dropped: it renders in the diagnostic.
+    const FincRun rendered = compile(
+        "interface _I { pub fun m() <int>; }\n"
+        "type PlayerStructLike = Struct implements <_I>;\n"
+        "fun main() <int> { let a <PlayerStructLike> = 5; let b <int> = a; return 0; }\n");
+    EXPECT_NE(stripAnsi(rendered.err).find("got 'Struct implements <_I>'"), std::string::npos)
+        << "the bound the program wrote is part of the type's name\n" << stripAnsi(rendered.err);
 }
 
 TEST(Soundness_DynamicTypes, AnyWithGenericArgumentsIsStillDynamic) {
@@ -4785,6 +4817,53 @@ TEST(Soundness_GenericBounds, AnUnboundedParameterStillHasNoMethods) {
         << stripAnsi(r.err);
 }
 
+TEST(Soundness_GenericBounds, AnInlineImplementsBoundIsVisibleToMemberLookup) {
+    // Mirror of ABoundIsVisibleToMethodResolution for the inline spelling:
+    // `T: any implements <_I>` must resolve and store like the alias path
+    // (`type B = any implements <_I>` + `T: B`, which already passes).
+    // Covers both field and method lookup through the same bound.
+    auto r = compile(
+        "interface _I { pub health <uint>; pub fun heal(amount: uint) <noret>; }\n"
+        "fun direct<T: any implements <_I>>(plr: T) <noret> {\n"
+        "    plr.health -= 10;\n"
+        "    plr.heal(5);\n"
+        "    let h <uint> = plr.health;\n"
+        "}\n"
+        "fun main() <void> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("is not a struct"), std::string::npos)
+        << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("does not have methods"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericBounds, AnInlineImplementsBoundWithoutBracketsIsVisibleToMemberLookup) {
+    // The parser accepts both `any implements <_I>` and `any implements _I`
+    // (parser.y generic_param); both must behave identically downstream.
+    auto r = compile(
+        "interface _I { pub health <uint>; }\n"
+        "fun nobracket<T: any implements _I>(plr: T) <noret> {\n"
+        "    plr.health -= 10;\n"
+        "}\n"
+        "fun main() <void> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(stripAnsi(r.err).find("is not a struct"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_GenericBounds, ABogusInlineImplementsBoundIsRejected) {
+    // The inline list is resolved, so a typo in it reports like any other
+    // unresolved bound (compare ABogusBoundOnAFunctionIsRejected).
+    auto r = compile(
+        "fun badiface<T: any implements NoSuch>(plr: T) <noret> {\n"
+        "    plr.health -= 10;\n"
+        "}\n"
+        "fun main() <void> {}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'NoSuch'"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
 TEST(KnownDefect_GenericBounds, AnArgumentViolatingAFunctionBoundIsAccepted) {
     // `int` does not implement `I`, and `f` says it requires it. The bound is
     // resolved and stored now (see the Soundness tests above), so what is missing
@@ -6732,6 +6811,56 @@ TEST(Soundness_TypeLiterals, AMethodWithNoFunKeywordWorksInALiteralToo) {
                      "      });\n"
                      "  }\n");
     EXPECT_EQ(r.exitCode, 0) << r.err;
+}
+
+TEST(Soundness_TypeLiterals, AStructValueInstantiatesWithDefaults) {
+    // literal_struct.fin:5: `st{}` where `st: $struct` instantiates the value's
+    // struct with defaults. The name resolves against the value scope, not the
+    // type scope; an unknown name still reports `Undefined struct`.
+    auto r = compile("fun make_default<T: any>(st: $struct) <T> {\n"
+                     "    let instance <auto> = st{};\n"
+                     "    return cast<T>(instance);\n"
+                     "}\n"
+                     "fun main() <noret> {}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeLiterals, AStructHandleSeedsTheBareAnyBoundReturn) {
+    // literal_struct.fin:24+36/38/42: `make_default(struct { ... })` passes the
+    // literal's `$struct` handle, and the bare `any implements Struct` return
+    // takes the handle's struct, so member lookup resolves through the value.
+    // Field reads, field stores and method calls share the one seeding: the
+    // return's type carries the members, not the bound.
+    auto r = compile("fun make_default<T: any implements Struct>(st: $struct) <T> {\n"
+                     "    let instance <auto> = st{};\n"
+                     "    return cast<T>(instance);\n"
+                     "}\n"
+                     "fun main() <noret> {\n"
+                     "    let u <auto> = make_default(struct {\n"
+                     "        pub health <uint> = 100,\n"
+                     "        pub ping(self: &Self) <noret> { }\n"
+                     "      });\n"
+                     "    u.ping();\n"
+                     "    u.health = 90;\n"
+                     "    let h <uint> = u.health;\n"
+                     "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_TypeLiterals, AMissingMemberThroughASeededReturnStillDiagnoses) {
+    // The seeding above names a struct, so a name it does not declare is still
+    // a diagnostic rather than a silent `any`.
+    auto r = compile("fun make_default<T: any implements Struct>(st: $struct) <T> {\n"
+                     "    let instance <auto> = st{};\n"
+                     "    return cast<T>(instance);\n"
+                     "}\n"
+                     "fun main() <noret> {\n"
+                     "    let u <auto> = make_default(struct { pub health <uint> = 100, });\n"
+                     "    u.nosuch = 1;\n"
+                     "}\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("has no member 'nosuch'"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
 TEST(Soundness_TypeLiterals, ALiteralsMembersDoNotLeakIntoTheEnclosingScope) {
@@ -13439,6 +13568,29 @@ TEST(Soundness_SpecialCalls, GuardedDefinePublishesToSubsequentCode) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
+TEST(Soundness_SpecialCalls, GuardedDefineUntakenStaysDormant) {
+    // B4 guard-false (literal_struct.fin:30 shape): ambient `printf` makes
+    // `@defined("printf")` true, `!true` false, so the untaken `@define`
+    // declares nothing and the 1-arg call resolves ambient (variadic C).
+    const FincRun r = compile(
+        "fun main() <noret> {\n"
+        "  if (!@defined(\"printf\")) {\n"
+        "    @define printf() <noret>;\n"
+        "  }\n"
+        "  printf(\"health: %d\\n\");\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_CompilerApi, SymbolsDefinedIsARegisteredOperation) {
+    // B4 (ADR 0021 consequence): `defined` is a registered operation backing
+    // `@defined` (docs/compiler-api.md §2.6, ADR 0042).
+    const FincRun r = compile(apiSpecial(
+        std::string(kUseCompiler) + "#[use(compiler.components.symbols)]\n",
+        "const b <bool> = compiler.symbols.defined(\"probe\");\n  return 0;"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
 // ---------------------------------------------------------------------------
 // A top-level function or `@special` is visible to the whole file, including
 // above its own declaration.
@@ -15215,6 +15367,31 @@ TEST(Soundness_HostBranch, BranchingOnAnOrdinaryValueIsSilent) {
     EXPECT_EQ(r.exitCode, 0) << r.err;
     EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("warning"), std::string::npos)
         << "an ordinary branch warns about nothing:\n" << r.err;
+}
+
+TEST(Soundness_HostBranch, HostCalledBoolWarnsOnBranch) {
+    // A host read behind a helper call folds tainted, so branching on the
+    // helper's bool warns (Q11 is warning-level, never a refusal).
+    const FincRun r = compile(
+        "#[use(compiler)]\n"
+        "#[use(compiler.components.system)]\n"
+        "@special helper() <bool> {\n"
+        "  return compiler.system.get_total_memory(1) == 1;\n"
+        "}\n"
+        "#[use(compiler)]\n"
+        "#[use(compiler.components.system)]\n"
+        "@special br() <int> {\n"
+        "  if (helper()) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n"
+        "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "a warning never fails the build:\n" << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("warning"), std::string::npos) << "a warning is reported:\n" << err;
+    EXPECT_NE(err.find("get_total_memory"), std::string::npos)
+        << "the warning names the host operation behind the call:\n" << err;
 }
 
 // ---------------------------------------------------------------------------
