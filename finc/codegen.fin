@@ -1258,6 +1258,22 @@ fun cg_ensure_enum_instance(ctx: &FnContext, spelling: string) <&EnumInfo> {
     let pcount <int> = cg_split_top(tmpl.gen_params, params, 64);
     let acount <int> = cg_split_top(inner, args, 64);
     if (pcount <= 0 || acount != pcount) { delete params; delete args; return tmpl; }
+    // Bounded params (`T: Any<...>`, `E: Offer<string, Error>`): the
+    // constraint reads as the word before `:`, so substitution matches the
+    // bare name (`T`, `E`). Without this no bounded generic ever differs
+    // from its template and no instantiation is made.
+    let pi <int> = 0;
+    while (pi < pcount) {
+        let ps <string> = cg_trim_spaces(params[pi]);
+        let plen <int> = cast<int>(cg_strlen(ps));
+        let ci <int> = 0;
+        while (ci < plen) {
+            if (cg_str_eq(substr(ps, ci, 1), ":")) { ps = cg_trim_spaces(substr(ps, 0, ci)); break; }
+            ci = ci + 1;
+        }
+        params[pi] = ps;
+        pi = pi + 1;
+    }
     let ai <int> = 0;
     while (ai < acount) {
         let seg <string> = cg_trim_spaces(args[ai]);
@@ -4293,6 +4309,94 @@ fun cg_eq_operand_ann(ctx: &FnContext, node: &AstNode) <string> {
         return "";
     }
     return "";
+}
+
+// ADR 0037 member-denoting call (`Ok(T)` in `r == Ok(T)`): a one-argument
+// call naming an enum member whose single ident argument spells the
+// member's declared payload type -- disambiguation, not a value. Answers
+// the member tag, or -1 when the shape is anything else (a value argument,
+// more arguments, a value in scope under that name, a member without
+// payload). Callers compare the tag; construction keeps the em_call path.
+fun cg_enum_member_probe_tag(ctx: &FnContext, node: &AstNode) <int> {
+    if (ctx == null || node == null) { return -1; }
+    if (node.kind != ast_call_expr()) { return -1; }
+    if (node.left == null) { return -1; }
+    let arg <&AstNode> = node.left.left;
+    if (arg == null) { arg = node.left; }
+    else if (node.left.right != null) { return -1; }
+    if (arg.kind != ast_ident()) { return -1; }
+    if (arg.name == null) { return -1; }
+    // A value in scope under that name is a payload, not a type.
+    if (fn_ctx_find_var(ctx, arg.name) != null) { return -1; }
+    if (llvm_get_named_global(ctx.module, arg.name) != null) { return -1; }
+    if (fn_ctx_find_fn(ctx, arg.name) != null) { return -1; }
+    if (llvm_get_named_function(ctx.module, arg.name) != null) { return -1; }
+    let em <&EnumMemberInfo> = find_enum_member_global(ctx, node.name);
+    if (em == null || !em.has_payload) { return -1; }
+    if (em.payload_type == null) { return -1; }
+    if (!cg_str_eq(cg_trim_spaces(em.payload_type), arg.name)) { return -1; }
+    return em.tag;
+}
+
+// Whether an annotation spells an enum: the name itself or a generic
+// application of an enum base (`Res`, `Res<int>`, `Res<T>`). Reference and
+// array marks strip first; anything else answers false.
+fun cg_ann_names_enum(ctx: &FnContext, ann: string) <bool> {
+    if (ctx == null || ann == null) { return false; }
+    let t <string> = cg_trim_spaces(cg_strip_markers(cg_trim_spaces(ann)));
+    if (cg_strlen(t) == cast<ulong>(0)) { return false; }
+    if (find_enum(ctx, t) != null) { return true; }
+    let len <int> = cast<int>(cg_strlen(t));
+    let i <int> = 0;
+    while (i < len) {
+        if (cg_str_eq(substr(t, i, 1), "<")) {
+            let base <string> = cg_trim_spaces(substr(t, 0, i));
+            if (cg_strlen(base) > cast<ulong>(0) && find_enum(ctx, base) != null) { return true; }
+            return false;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// Read the discriminant off an enum-member comparison operand: a probe is
+// already a tag; an enum struct extracts index 0; a fieldless tag is the
+// value itself; an erased (generic-body) address loads the first word,
+// which is the tag in every enum layout. Anything else refuses naming the
+// comparison rather than comparing across kinds.
+fun cg_enum_cmp_tag(ctx: &FnContext, node: &AstNode, v: &LLVMValue, is_probe: bool) <&LLVMValue> {
+    if (v == null) { return null; }
+    if (is_probe) { return v; }
+    let vt <&LLVMType> = llvm_type_of(v);
+    let en <&EnumInfo> = find_enum_by_llvm_type(ctx, vt);
+    if (en != null) {
+        return llvm_build_extract_value(ctx.builder, v, 0, "etag");
+    }
+    if (vt == ctx.i32_ty) { return v; }
+    if (vt == ctx.ptr_ty && cg_ann_names_enum(ctx, cg_eq_operand_ann(ctx, node))) {
+        let i32p <&LLVMValue> = llvm_build_bitcast(ctx.builder, v, llvm_pointer_type(ctx.i32_ty, 0), "etag_p");
+        return llvm_build_load2(ctx.builder, ctx.i32_ty, i32p, "etag");
+    }
+    cg_dprintf(2, "finc codegen refusal: an enum-member comparison with a value of unlowerable type is not lowered (discriminant comparison needs an enum value beside the member)\n");
+    refuse_and_poison(ctx);
+    llvm_build_unreachable(ctx.builder);
+    return null;
+}
+
+// Strict discriminant read for the value/value arm: structs extract,
+// fieldless tags pass through, anything else (erased addresses included)
+// refuses. Only the member probe above may read through an address.
+fun cg_enum_cmp_tag_strict(ctx: &FnContext, v: &LLVMValue) <&LLVMValue> {
+    if (v == null) { return null; }
+    let vt <&LLVMType> = llvm_type_of(v);
+    if (find_enum_by_llvm_type(ctx, vt) != null) {
+        return llvm_build_extract_value(ctx.builder, v, 0, "etag");
+    }
+    if (vt == ctx.i32_ty) { return v; }
+    cg_dprintf(2, "finc codegen refusal: an enum comparison with a value of unlowerable type is not lowered (discriminant comparison needs enum values)\n");
+    refuse_and_poison(ctx);
+    llvm_build_unreachable(ctx.builder);
+    return null;
 }
 
 // ADR 0036: whether a `==`/`!=` operand spelling is a struct value with no
@@ -7710,6 +7814,38 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             }
             return rhs;
         }
+        // ADR 0037 member-denoting operand (`r == Ok(T)`): the argument
+        // spells the payload type as written in the member's declaration --
+        // disambiguation, not a value -- so the operand is the member's
+        // discriminant, never a construction. Compare discriminants like the
+        // C++ backend; the em_call construction path below never sees it.
+        if (cg_str_eq(n.name, "==") || cg_str_eq(n.name, "!=")) {
+            let probe_l <int> = cg_enum_member_probe_tag(ctx, n.left);
+            let probe_r <int> = cg_enum_member_probe_tag(ctx, n.right);
+            if (probe_l >= 0 || probe_r >= 0) {
+                let want_ne <bool> = cg_str_eq(n.name, "!=");
+                let lv <&LLVMValue> = null;
+                let rv <&LLVMValue> = null;
+                if (probe_l >= 0) {
+                    lv = llvm_const_int(ctx.i32_ty, probe_l, 0);
+                } else {
+                    lv = lower_expr(ctx, n.left);
+                }
+                if (probe_r >= 0) {
+                    rv = llvm_const_int(ctx.i32_ty, probe_r, 0);
+                } else {
+                    rv = lower_expr(ctx, n.right);
+                }
+                if (lv == null || rv == null) { return null; }
+                lv = cg_enum_cmp_tag(ctx, n.left, lv, probe_l >= 0);
+                rv = cg_enum_cmp_tag(ctx, n.right, rv, probe_r >= 0);
+                if (lv == null || rv == null) { return null; }
+                if (want_ne) {
+                    return llvm_build_icmp(ctx.builder, llvm_int_ne(), lv, rv, "ne");
+                }
+                return llvm_build_icmp(ctx.builder, llvm_int_eq(), lv, rv, "eq");
+            }
+        }
         let lhs <&LLVMValue> = lower_expr(ctx, n.left);
         let rhs <&LLVMValue> = lower_expr(ctx, n.right);
         if (lhs == null || rhs == null) { return null; }
@@ -8189,15 +8325,25 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             }
             let l_en <&EnumInfo> = find_enum_by_llvm_type(ctx, l_ty);
             let r_en <&EnumInfo> = find_enum_by_llvm_type(ctx, r_ty);
+            // Two erased addresses never compare as discriminants here: a
+            // member-denoting pair is decided above, so address equality
+            // would read the boxes, not the tags.
+            if (l_ty == ctx.ptr_ty && r_ty == ctx.ptr_ty &&
+                cg_ann_names_enum(ctx, cg_eq_operand_ann(ctx, n.left)) &&
+                cg_ann_names_enum(ctx, cg_eq_operand_ann(ctx, n.right))) {
+                cg_dprintf(2, "finc codegen refusal: operator '%s' on two erased enum values is not lowered (discriminant comparison needs a member beside the value)\n", n.name);
+                refuse_and_poison(ctx);
+                llvm_build_unreachable(ctx.builder);
+                return null;
+            }
             if (l_en != null || r_en != null) {
-                let l_tag <&LLVMValue> = lhs;
-                if (l_en != null) {
-                    l_tag = llvm_build_extract_value(ctx.builder, lhs, 0, "ltag");
-                }
-                let r_tag <&LLVMValue> = rhs;
-                if (r_en != null) {
-                    r_tag = llvm_build_extract_value(ctx.builder, rhs, 0, "rtag");
-                }
+                // Structs extract their discriminant, fieldless tags pass
+                // through; anything else (notably an erased address, which
+                // only the member probe above may read) refuses by name
+                // rather than emitting a cross-type icmp.
+                let l_tag <&LLVMValue> = cg_enum_cmp_tag_strict(ctx, lhs);
+                let r_tag <&LLVMValue> = cg_enum_cmp_tag_strict(ctx, rhs);
+                if (l_tag == null || r_tag == null) { return null; }
                 if (is_eq) {
                     return llvm_build_icmp(ctx.builder, llvm_int_eq(), l_tag, r_tag, "eq");
                 } else {
@@ -8911,15 +9057,59 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     free_buffer(eb);
                 }
                 if (cg_strlen(efull) == cast<ulong>(0)) {
-                    cg_dprintf(2, "finc codegen refusal: a '::' call on a target of type '%s' is not lowered yet (needs an explicit instantiation)\n", en_owner.name);
-                    refuse_and_poison(ctx);
-                    return llvm_const_int(ctx.i32_ty, 0, 0);
-                }
-                let einst <&EnumInfo> = cg_ensure_enum_instance(ctx, efull);
-                if (einst != null && einst.has_payload) {
-                    en_owner = einst;
-                } else if (einst != null) {
-                    en_owner = einst;
+                    // Bare generic constructor (`Ok(10)` for
+                    // `let r <Result<int, string>>`): the annotation already
+                    // instantiated the layout via map_type, so mirror the
+                    // C++ flat-table inference where a single existing
+                    // instantiation carries the member. Unique wins; zero or
+                    // ambiguous stays a named refusal, never a guessed layout.
+                    let ebase2 <string> = en_owner.name;
+                    let eblen <int> = cast<int>(cg_strlen(ebase2));
+                    let ecut <int> = 0;
+                    while (ecut < eblen) {
+                        if (cg_str_eq(substr(ebase2, ecut, 1), "<")) { ebase2 = cg_trim_spaces(substr(ebase2, 0, ecut)); break; }
+                        ecut = ecut + 1;
+                    }
+                    let uniq <&EnumInfo> = null;
+                    let ucount <int> = 0;
+                    ctx.enum_count = recount_enums(ctx.enums, ctx.enum_count);
+                    let ei <int> = 0;
+                    while (ei < ctx.enum_count) {
+                        let cand <&EnumInfo> = ctx.enums[ei];
+                        if (cand != null && cand.name != null && cg_strlen(cand.name) > cg_strlen(ebase2)) {
+                            if (cg_str_eq(substr(cand.name, 0, cast<int>(cg_strlen(ebase2))), ebase2) && cg_str_eq(substr(cand.name, cast<int>(cg_strlen(ebase2)), 1), "<")) {
+                                let mj <int> = 0;
+                                while (mj < cand.member_count) {
+                                    let mm <&EnumMemberInfo> = cand.members[mj];
+                                    if (mm != null && cg_str_eq(mm.name, n.name)) {
+                                        ucount = ucount + 1;
+                                        uniq = cand;
+                                        break;
+                                    }
+                                    mj = mj + 1;
+                                }
+                            }
+                        }
+                        ei = ei + 1;
+                    }
+                    if (ucount == 1 && uniq != null) {
+                        en_owner = uniq;
+                    } else {
+                        if (ucount > 1) {
+                            cg_dprintf(2, "finc codegen refusal: a bare '%s' on generic '%s' is ambiguous (%d instantiations carry it)\n", n.name, ebase2, ucount);
+                        } else {
+                            cg_dprintf(2, "finc codegen refusal: a '::' call on a target of type '%s' is not lowered yet (needs an explicit instantiation)\n", en_owner.name);
+                        }
+                        refuse_and_poison(ctx);
+                        return llvm_const_int(ctx.i32_ty, 0, 0);
+                    }
+                } else {
+                    let einst <&EnumInfo> = cg_ensure_enum_instance(ctx, efull);
+                    if (einst != null && einst.has_payload) {
+                        en_owner = einst;
+                    } else if (einst != null) {
+                        en_owner = einst;
+                    }
                 }
             }
             if (en_owner != null && en_owner.has_payload) {
@@ -9738,6 +9928,16 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                             }
                         }
                         av = struct_to_interface(ctx, av, actual_rec_st, tgt_iface);
+                    } else if (exp_ty == ctx.ptr_ty && find_enum_by_llvm_type(ctx, a_ty) != null) {
+                        // A concrete enum struct for an erased
+                        // (generic-spelling) parameter: generics carry
+                        // aggregates by address (struct locals are already
+                        // boxes), so box the value struct and pass its
+                        // address. Scalars keep the representative-bits path
+                        // in coerce_val below.
+                        let box <&LLVMValue> = llvm_build_alloca(ctx.builder, a_ty, "enum.box");
+                        llvm_build_store(ctx.builder, av, box);
+                        av = box;
                     } else {
                         av = coerce_val(ctx, av, exp_ty);
                     }
@@ -10810,15 +11010,6 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) != null) {
             return;
         }
-        // `blame m1778` is refused at lowering, like the C++ backend refuses
-        // it (`codegen: 'm1778' is not lowered yet`, exit 1, even in dead
-        // code): the checker accepts the marker, so lowering it to an abort
-        // would give the marker a runtime meaning the reference denies it.
-        if (stmt.left != null && stmt.left.kind == ast_ident() && cg_str_eq(stmt.left.name, "m1778")) {
-            cg_dprintf(2, "codegen: 'm1778' is not lowered yet\n");
-            refuse_and_poison(ctx);
-            return;
-        }
         let is_unconditional <bool> = false;
         if (stmt.left == null) {
             is_unconditional = true;
@@ -10830,6 +11021,69 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
             abort_fn = llvm_add_function(ctx.module, "abort", a_ty);
         }
         let a_fn_ty <&LLVMType> = llvm_global_get_value_type(abort_fn);
+
+        // `blame m1778;` (enums.fin:41): the unimplemented marker as a blame
+        // operand. Mirror the C++ backend: reaching it is a runtime failure,
+        // lowered as an unconditional abort on this arm rather than a
+        // whole-program refusal. A bare `m1778;` still refuses at its
+        // expression site; a message beside the marker stays refused.
+        if (stmt.left != null && stmt.left.kind == ast_ident() && cg_str_eq(stmt.left.name, "m1778")) {
+            if (!cg_blame_msg_is_default(stmt)) {
+                cg_dprintf(2, "finc codegen refusal: a 'blame m1778' with a message is not lowered\n");
+                refuse_and_poison(ctx);
+                return;
+            }
+            cg_emit_absent_blame(ctx, stmt.line, "'m1778' reached");
+            llvm_build_call2(ctx.builder, a_fn_ty, abort_fn, null, 0, "");
+            llvm_build_unreachable(ctx.builder);
+            return;
+        }
+
+        // `blame enum_.0` where the payload slot disagrees across members
+        // (Result Ok(T) vs Err(E)): C++ erases the slot to `any` and lowers
+        // the raise as an unconditional abort. Agreed slots (Color .0) keep
+        // the assert path below.
+        if (stmt.left != null && stmt.left.kind == ast_member_access() && cg_str_eq(stmt.left.name, "0")) {
+            let bann <string> = cg_eq_operand_ann(ctx, stmt.left.left);
+            if (cg_ann_names_enum(ctx, bann)) {
+                let bt <string> = cg_trim_spaces(cg_strip_markers(cg_trim_spaces(bann)));
+                let bl <int> = cast<int>(cg_strlen(bt));
+                let bbase <string> = bt;
+                let bii <int> = 0;
+                while (bii < bl) {
+                    if (cg_str_eq(substr(bt, bii, 1), "<")) { bbase = cg_trim_spaces(substr(bt, 0, bii)); break; }
+                    bii = bii + 1;
+                }
+                let einfo <&EnumInfo> = find_enum(ctx, bbase);
+                let exact <&EnumInfo> = find_enum(ctx, bt);
+                if (exact != null) { einfo = exact; }
+                if (einfo != null && einfo.has_payload && einfo.member_count > 1) {
+                    let first_seg <string> = "";
+                    let have_first <bool> = false;
+                    let disagree <bool> = false;
+                    let mi2 <int> = 0;
+                    while (mi2 < einfo.member_count) {
+                        let mm2 <&EnumMemberInfo> = einfo.members[mi2];
+                        if (mm2 != null && mm2.has_payload && mm2.payload_type != null) {
+                            let pparts <[string]> = new [string, 64]{};
+                            let pcn <int> = cg_split_top(mm2.payload_type, pparts, 64);
+                            let seg <string> = "";
+                            if (pcn > 0) { seg = cg_trim_spaces(pparts[0]); } else { seg = cg_trim_spaces(mm2.payload_type); }
+                            delete pparts;
+                            if (!have_first) { first_seg = seg; have_first = true; }
+                            else if (!cg_str_eq(first_seg, seg)) { disagree = true; break; }
+                        }
+                        mi2 = mi2 + 1;
+                    }
+                    if (disagree) {
+                        cg_emit_absent_blame(ctx, stmt.line, "blame of an erased payload");
+                        llvm_build_call2(ctx.builder, a_fn_ty, abort_fn, null, 0, "");
+                        llvm_build_unreachable(ctx.builder);
+                        return;
+                    }
+                }
+            }
+        }
 
         if (is_unconditional) {
             let umsg <&LLVMValue> = null;

@@ -386,6 +386,13 @@ struct StructExtras {
     // Every block that contributed, so the statement walk can tell one this file
     // consumed from one whose target it never lowered.
     std::vector<const ImplementsBlock*> blocks;
+    // The single-member overwrite form (`@implements R<T>::m = fun(...) {...}`).
+    // Filed for every target here; only enum targets are consumed (see
+    // collectImplementsBlocks and registerImplementsBlocks). A struct target
+    // stays refused by visit(ImplementsBlock&), which keeps
+    // ASingleMemberOverwriteIsRefused green: a struct field overwrite is a
+    // value for storage, not a method, and has no method lowering.
+    std::vector<const ImplementsBlock*> overwriteBlocks;
 };
 
 struct StructInfo {
@@ -2869,7 +2876,18 @@ private:
                 auto* b = dynamic_cast<ImplementsBlock*>(stmt.get());
                 if (!b) continue;
                 if (b->target_type.empty()) continue;
-                if (!b->overwrite_member.empty()) continue;  // refused whole, see above
+                if (!b->overwrite_member.empty()) {
+                    // The single-member form. Filed, not skipped: an enum
+                    // declares no fields, so the form can only add a method
+                    // (Soundness_MemberOverwrite), and declareEnumMethods
+                    // lowers it per instantiation. A struct target is filed
+                    // but never registered or declared, so visit() still
+                    // refuses it whole -- the struct field-vs-method split has
+                    // no method lowering.
+                    StructExtras& extras = implementsExtras_[b->target_type];
+                    extras.overwriteBlocks.push_back(b);
+                    continue;
+                }
                 StructExtras& extras = implementsExtras_[b->target_type];
                 extras.blocks.push_back(b);
                 for (auto& m : b->methods) if (m) extras.methods.push_back(m.get());
@@ -2890,8 +2908,18 @@ private:
     // Marks every block that contributed to a struct this file lowered, so the
     // statement walk can tell one that was consumed from one whose target it never saw.
     void registerImplementsBlocks(const std::string& name) {
-        if (const StructExtras* extras = extrasFor(name))
+        if (const StructExtras* extras = extrasFor(name)) {
             for (const ImplementsBlock* b : extras->blocks) registeredBlocks_.insert(b);
+            // Enum overwrites only: a struct overwrite is never consumed, so
+            // visit() still refuses it (ASingleMemberOverwriteIsRefused). The
+            // enum check is the template table because only generic enums
+            // declare methods per instantiation; a non-generic enum overwrite
+            // stays refused until it has a lowering to consume it.
+            if (enumTemplates_.count(name)) {
+                for (const ImplementsBlock* b : extras->overwriteBlocks)
+                    registeredBlocks_.insert(b);
+            }
+        }
     }
 
     void declareTypeAliases(Program& program) {
@@ -4941,6 +4969,31 @@ private:
                 PendingBody{m, &m->params, m->body.get(), key, &info.methodBindings,
                             tmpl.name});
         }
+        // The single-member overwrite on an enum: a lambda, not a declaration.
+        // Same lowering as a block method above (first parameter is the enum
+        // value, bindings active, weak linkage, deferred body) because that is
+        // what the analyzer registered it as (Soundness_MemberOverwrite). A
+        // generic lambda is skipped like a generic block method: no signature
+        // until instantiated.
+        for (const ImplementsBlock* b : extras->overwriteBlocks) {
+            if (!b || b->overwrite_member.empty() || !b->overwrite_value) continue;
+            auto* lam =
+                dynamic_cast<LambdaExpression*>(b->overwrite_value.get());
+            if (!lam || !lam->body) continue;
+            if (!lam->generic_params.empty()) continue;
+            const std::string key = methodKey(info.finName, b->overwrite_member);
+            if (functions_.count(key)) continue;
+            declareFunction(*b->overwrite_value, key, key, lam->params,
+                            lam->return_type.get(), /*isVarArg=*/false,
+                            /*isExtern=*/false);
+            auto declared = functions_.find(key);
+            if (declared == functions_.end()) return false;
+            declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+            pendingBodies_.push_back(
+                PendingBody{b->overwrite_value.get(), &lam->params,
+                            lam->body.get(), key, &info.methodBindings,
+                            tmpl.name});
+        }
         return true;
     }
 
@@ -6131,14 +6184,27 @@ private:
                 if (failed_) return std::nullopt;
                 if (enumBase && enumBase->type.isPayloadedEnum()) {
                     const EnumInfo& eInfo = *enumBase->type.enumInfo;
-                    const EnumMemberInfo* match = nullptr;
+                    std::vector<const EnumMemberInfo*> cands;
                     for (const auto& kv : eInfo.memberInfoByName) {
-                        if (position < kv.second.payloadTypes.size()) {
-                            match = &kv.second;
-                            break;
-                        }
+                        if (position < kv.second.payloadTypes.size())
+                            cands.push_back(&kv.second);
                     }
-                    if (match) {
+                    if (!cands.empty()) {
+                        // Agree means one address and one type; disagree has no
+                        // single home (visit(MemberAccess&) boxes per member by
+                        // tag), so no address rather than the first member's.
+                        bool agree = true;
+                        const std::string firstSpelling =
+                            cgDisplay(cands.front()->payloadTypes[position]);
+                        for (size_t i = 1; i < cands.size(); ++i) {
+                            if (cgDisplay(cands[i]->payloadTypes[position]) !=
+                                firstSpelling) {
+                                agree = false;
+                                break;
+                            }
+                        }
+                        if (!agree) return std::nullopt;
+                        const EnumMemberInfo* match = cands.front();
                         uint64_t targetOffset = match->payloadOffsets[position];
                         const CgType& targetType = match->payloadTypes[position];
                         uint64_t offset = eInfo.payloadStart + targetOffset;
@@ -11952,10 +12018,12 @@ private:
     // One that was *not* consumed is refused, and the reason it was not is always the
     // same: its target is not a struct this file lowered. An enum target
     // (stdlib/typing.fin:27), an interface, a name declared nowhere, a struct refused
-    // for one of lowerableStruct's shapes -- and the single-member overwrite form, whose
-    // right-hand side is a value rather than a declaration (collectImplementsBlocks says
-    // why it is not collected). Refusing here rather than at collection time is what
-    // puts the diagnostic on the block's own line.
+    // for one of lowerableStruct's shapes -- and the single-member overwrite form
+    // on a non-enum target, whose struct field-vs-method split has no method
+    // lowering (collectImplementsBlocks files it but only enum templates
+    // register it). An enum overwrite is consumed per instantiation
+    // (declareEnumMethods) and returns above. Refusing here rather than at
+    // collection time is what puts the diagnostic on the block's own line.
     void visit(ImplementsBlock& node) override {
         if (registeredBlocks_.count(&node)) return;
         if (!node.overwrite_member.empty()) {
@@ -12645,10 +12713,44 @@ private:
             unsupported(node, "'blame' with no condition");
             return;
         }
+        // `blame m1778;` -- the unimplemented marker as a blame operand
+        // (enums.fin:41, stdlib/types.fin:18). Reaching it is a run-time
+        // failure (CONTEXT.md), so it lowers as an unconditional abort on
+        // this arm rather than refusing the whole program. The arm is usually
+        // untaken (enums.fin's else), so the program runs; taken, it aborts
+        // like any failed blame. A bare `m1778;` still refuses
+        // (AnUnloweredConstructIsRefused): that is an expression with no
+        // failure semantics of its own. A message beside the marker has no
+        // lowering here and stays refused rather than dropped.
+        if (auto* lit = dynamic_cast<Literal*>(node.condition.get())) {
+            if (lit->kind == ASTTokenKind::M1778) {
+                if (node.message) {
+                    unsupported(node, "a 'blame m1778' with a message");
+                    return;
+                }
+                if (!emitRuntimeBlame(node, "'m1778' reached", "a 'blame m1778'"))
+                    return;
+                return;
+            }
+        }
 
         CgVal cond = emit(*node.condition);
         if (failed_) return;
         if (!cond.ok()) { unsupported(node, "this blamed expression"); return; }
+        if (cond.type.isAny) {
+            // `blame <any>` -- the erased payload slot (enums.fin:29, where
+            // Ok(T) and Err(E) disagree at .0 so the slot is `any`). The raise
+            // form, lowered as an unconditional abort like any failed blame.
+            // The payload's bytes are not printed: a string-holding `any`
+            // could be unboxed and printed, but that is a rendering ruling on
+            // top of the abort, and the abort is what makes the program stop.
+            // ponytail: generic abort, print the unboxed string when a
+            // string-holding raise needs its message.
+            if (!emitRuntimeBlame(node, "blame of an erased payload",
+                                  "a 'blame' of an erased payload"))
+                return;
+            return;
+        }
         if (cond.type.isStruct() || cond.type.isArray()) {
             // The raise form. Named as a raise and not as "this condition", because the
             // two are one keyword and a reader told "condition" would go looking for a
@@ -13699,32 +13801,105 @@ private:
         if (enumInfo && enumInfo->hasPayload) {
             size_t position = 0;
             if (positionalMember(node.member, position)) {
-                const EnumMemberInfo* match = nullptr;
+                std::vector<const EnumMemberInfo*> cands;
                 for (const auto& kv : enumInfo->memberInfoByName) {
-                    if (position < kv.second.payloadTypes.size()) {
-                        match = &kv.second;
-                        break;
-                    }
+                    if (position < kv.second.payloadTypes.size())
+                        cands.push_back(&kv.second);
                 }
-                if (match) {
-                    uint64_t targetOffset = match->payloadOffsets[position];
-                    const CgType& targetType = match->payloadTypes[position];
-                    uint64_t offset = enumInfo->payloadStart + targetOffset;
-
-                    llvm::Value* addr = nullptr;
-                    if (isEnumPtr) {
-                        addr = object.value;
-                    } else if (object.address) {
-                        addr = object.address;
-                    } else {
-                        addr = builder_.CreateAlloca(enumInfo->llvmType, nullptr, "enum.tmp");
-                        builder_.CreateStore(object.value, addr);
+                if (!cands.empty()) {
+                    // Agree means one representation: `Color`'s `.0` is
+                    // `uint{8}` for RGB and RGBA alike, so the slot keeps its
+                    // type (Analyzer_Expr visit(MemberAccess&)). Compared by
+                    // display name, which tells `int` from `uint` apart where
+                    // the LLVM type does not.
+                    bool agree = true;
+                    const std::string firstSpelling = cgDisplay(
+                        cands.front()->payloadTypes[position]);
+                    for (size_t i = 1; i < cands.size(); ++i) {
+                        if (cgDisplay(cands[i]->payloadTypes[position]) !=
+                            firstSpelling) {
+                            agree = false;
+                            break;
+                        }
                     }
+                    if (agree) {
+                        const EnumMemberInfo* match = cands.front();
+                        uint64_t targetOffset = match->payloadOffsets[position];
+                        const CgType& targetType = match->payloadTypes[position];
+                        uint64_t offset = enumInfo->payloadStart + targetOffset;
 
-                    llvm::Value* fieldPtr = builder_.CreateConstInBoundsGEP1_32(
-                        builder_.getInt8Ty(), addr, static_cast<unsigned>(offset), "payload.slot");
-                    llvm::Value* loaded = builder_.CreateLoad(targetType.llvmType, fieldPtr, "slot.val");
-                    value_ = CgVal{loaded, targetType, fieldPtr};
+                        llvm::Value* addr = nullptr;
+                        if (isEnumPtr) {
+                            addr = object.value;
+                        } else if (object.address) {
+                            addr = object.address;
+                        } else {
+                            addr = builder_.CreateAlloca(enumInfo->llvmType, nullptr, "enum.tmp");
+                            builder_.CreateStore(object.value, addr);
+                        }
+
+                        llvm::Value* fieldPtr = builder_.CreateConstInBoundsGEP1_32(
+                            builder_.getInt8Ty(), addr, static_cast<unsigned>(offset), "payload.slot");
+                        llvm::Value* loaded = builder_.CreateLoad(targetType.llvmType, fieldPtr, "slot.val");
+                        value_ = CgVal{loaded, targetType, fieldPtr};
+                        return;
+                    }
+                    // Disagree means erasure: the members hold different types
+                    // at this slot, so the read is `any`
+                    // (Analyzer_Expr visit(MemberAccess&) resolves it to
+                    // `any`). Boxed per member and selected by the tag at run
+                    // time, so `Ok` reads its `T` and `Err` its `E`:
+                    // loading one static type for both would read the other's
+                    // bytes. ponytail: tag-dispatched box, keep for any
+                    // disagreeing slot; a guard-narrowed read would avoid the
+                    // select when the branch proves the member.
+                    TypeNode anyNode("any");
+                    auto anyOpt = types_.map(&anyNode);
+                    if (!anyOpt) {
+                        unsupportedType(node, nullptr, "an erased enum payload");
+                        return;
+                    }
+                    const CgType anyType = *anyOpt;
+                    llvm::Value* enumAddr = nullptr;
+                    if (isEnumPtr) {
+                        enumAddr = object.value;
+                    } else if (object.address) {
+                        enumAddr = object.address;
+                    } else {
+                        enumAddr = builder_.CreateAlloca(enumInfo->llvmType, nullptr, "enum.tmp");
+                        builder_.CreateStore(object.value, enumAddr);
+                    }
+                    llvm::Value* tagPtr = builder_.CreateStructGEP(
+                        enumInfo->llvmType, enumAddr, 0, "enum.tag.ptr");
+                    llvm::Value* tag = builder_.CreateLoad(
+                        builder_.getInt32Ty(), tagPtr, "enum.tag");
+                    llvm::Value* acc = nullptr;
+                    for (const EnumMemberInfo* cand : cands) {
+                        uint64_t candOffset = enumInfo->payloadStart +
+                                              cand->payloadOffsets[position];
+                        const CgType& candType = cand->payloadTypes[position];
+                        llvm::Value* candField = builder_.CreateConstInBoundsGEP1_32(
+                            builder_.getInt8Ty(), enumAddr,
+                            static_cast<unsigned>(candOffset), "payload.slot");
+                        llvm::Value* candLoaded = builder_.CreateLoad(
+                            candType.llvmType, candField, "slot.val");
+                        llvm::Value* candBoxed = convert(
+                            node, CgVal{candLoaded, candType, candField},
+                            anyType);
+                        if (!candBoxed) return;
+                        if (!acc) {
+                            acc = candBoxed;
+                        } else {
+                            llvm::Value* isThis = builder_.CreateICmpEQ(
+                                tag,
+                                builder_.getInt32(
+                                    static_cast<uint32_t>(cand->tag)),
+                                "enum.tag.is");
+                            acc = builder_.CreateSelect(isThis, candBoxed, acc,
+                                                        "enum.slot.any");
+                        }
+                    }
+                    value_ = CgVal{acc, anyType};
                     return;
                 }
             }

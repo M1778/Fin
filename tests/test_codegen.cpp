@@ -4681,6 +4681,109 @@ BACKEND_TEST(Soundness_Codegen, ASingleMemberOverwriteIsRefused) {
               std::string::npos) << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, AnEnumSingleMemberOverwriteLowersAndRuns) {
+    // enums.fin:25 -- `@implements Res<T>::unwrap = fun(...)` on an enum.
+    // An enum declares no fields, so the single-member form can only add a
+    // method (Soundness_MemberOverwrite); the block form for the same method
+    // already lowers (AnEnumMethodRunsTheTagIdiom), so this must lower the
+    // same way rather than refuse the whole block.
+    const Built b = build(std::string(kPrintf) +
+        "enum Res<T> { Ok(T), Err(T) }\n"
+        "extern Res::Ok as Ok;\n"
+        "@implements Res<T>::unwrap = fun(enum_: Res<T>) <T> {\n"
+        "    return enum_.0;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let r <Res<int>> = Ok(10);\n"
+        "    printf(\"%d\\n\", r.unwrap());\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABlameM1778InUnreachedElseLowersAndRuns) {
+    // enums.fin:41 -- `blame m1778;` in the else arm of a taken branch.
+    // Reaching `m1778` is a run-time failure (CONTEXT.md); the arm is not
+    // taken here, so the build must lower the marker as an abort on that arm
+    // rather than refuse the whole program. A bare `m1778;` still refuses
+    // (AnUnloweredConstructIsRefused).
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    if (x == 1) {\n"
+        "        printf(\"True\\n\");\n"
+        "    } else {\n"
+        "        blame m1778;\n"
+        "    }\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "True\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADisagreeingPayloadSlotUnwrapsThroughAny) {
+    // enums.fin:26-29 -- `enum_.0` where Ok(T) and Err(E) disagree is `any`
+    // (Analyzer_Expr visit(MemberAccess&)); returning it as T unboxes with a
+    // run-time check. The else arm blames (next test), but this call takes
+    // the Ok arm, so it prints and exits 0. Red today as a pointer->int
+    // conversion at 1:1.
+    const Built b = build(std::string(kPrintf) +
+        "enum Res<T, E> { Ok(T), Err(E) }\n"
+        "extern Res::Ok as Ok;\n"
+        "extern Res::Err as Err;\n"
+        "interface ResApi<T, E> {\n"
+        "    fun unwrap(enum_: Res<T, E>) <T>;\n"
+        "}\n"
+        "Res<T, E> implements <ResApi> {\n"
+        "    pub fun unwrap(enum_: Res<T, E>) <T> {\n"
+        "        if (enum_ == Ok(T)) {\n"
+        "            return enum_.0;\n"
+        "        } else {\n"
+        "            blame enum_.0;\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let r <Res<int, string>> = Ok(10);\n"
+        "    printf(\"%d\\n\", r.unwrap());\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABlameOfErasedPayloadAborts) {
+    // The else arm of the same unwrap: Err holds a string, `enum_.0` is
+    // erased to `any`, and `blame` of it is the raise form. Lowered as an
+    // abort (like any failed blame), so the program dies with a Fin blame
+    // rather than refusing to build. Red today as a pointer condition.
+    const Built b = build(std::string(kPrintf) +
+        "enum Res<T, E> { Ok(T), Err(E) }\n"
+        "extern Res::Ok as Ok;\n"
+        "extern Res::Err as Err;\n"
+        "interface ResApi<T, E> {\n"
+        "    fun unwrap(enum_: Res<T, E>) <T>;\n"
+        "}\n"
+        "Res<T, E> implements <ResApi> {\n"
+        "    pub fun unwrap(enum_: Res<T, E>) <T> {\n"
+        "        if (enum_ == Ok(T)) {\n"
+        "            return enum_.0;\n"
+        "        } else {\n"
+        "            blame enum_.0;\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let r <Res<int, string>> = Err(\"boom\");\n"
+        "    printf(\"%d\\n\", r.unwrap());\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_NE(b.runExit, 0) << b.why();
+    EXPECT_NE(b.out.find("Fin blames"), std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnUndeclaredOperatorOnAStructIsRefused) {
     // Was AnOperatorOnAStructComparesMemberwise, which asserted memberwise `p == q`
     // synthesis. Overturned by owner decision under ADR 0036 (equality is declared,
