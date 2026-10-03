@@ -70,15 +70,15 @@ bool signatureMatches(const SpecialDeclaration& decl, const EventPayload& payloa
     return spellsPayloadType(decl.return_type.get(), payload.returns);
 }
 
-// The interpretability line as a walker: the first control-flow form found,
-// by its source spelling. Shared so W5's check calls this rather than
-// restating which four forms are control flow.
+// The interpretability line as a walker: the first loop form found, by its
+// source spelling. `if`/`else` evaluates (I-G3: the taken arm over a
+// comptime-known bool) and is never a breach — only loops are. Shared so
+// W5's check calls this rather than restating which forms are control flow.
 class LineWalker : public StructuralWalk {
 public:
     std::string found;
     bool enter(ASTNode& node) override {
         switch (node.kind()) {
-            case NodeKind::IfStatement: found = "if"; return false;
             case NodeKind::WhileLoop: found = "while"; return false;
             case NodeKind::ForLoop: found = "for"; return false;
             case NodeKind::ForeachLoop: found = "foreach"; return false;
@@ -115,10 +115,11 @@ void checkW6HandlerPayloads(Program& program, const EventRegistry& registry,
             walker.walk(decl->body.get());
             if (!walker.found.empty())
                 report(*decl, "Handler '" + record.handler + "' for event '" +
-                                  record.event + "' uses control flow ('" +
-                                  walker.found +
-                                  "'): handlers hold no control flow "
-                                  "(the interpretability line)");
+                                   record.event + "' uses control flow ('" +
+                                   walker.found +
+                                   "'): handlers hold lets, calls, rebinds and known-bool "
+                                   "branches, and no other control flow "
+                                   "(the interpretability line)");
         }
     }
 }

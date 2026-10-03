@@ -12869,6 +12869,19 @@ TEST(Soundness_Protocol, ADestructorClaimantWithHelperQuoteReturnLowers) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
+TEST(Soundness_Protocol, ADestructorClaimantWithKnownBoolBranchLowers) {
+    // Slice I-G3: an `if` over a comptime-known bool scans its taken arm to
+    // the generation quote, the same admission providers hold.
+    const FincRun r = compile(protocolProgram(
+        "",
+        "#[protocol(destructor)]\n"
+        "@special mydtor(s: $struct) <quote> {\n"
+        "  if (1 == 1) { return quote { printf(\"c\\n\"); }; }\n"
+        "  else { return quote { printf(\"d\\n\"); }; }\n"
+        "}\n"));
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
 TEST(Soundness_Protocol, ADestructorClaimantWithNonQuoteStillRefused) {
     // Anything wider than the line is still the existing named gap, never
     // silent: a non-quote answer keeps the generation-shape refusal.

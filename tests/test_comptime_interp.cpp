@@ -600,9 +600,42 @@ TEST(ComptimeOperators, NotOnIntIsAGap) {
     EXPECT_FALSE(r.detail.empty()) << "a gap names what is missing, never silence";
 }
 
-// String `==` folds only if a probe needs it; none does, so it stays a gap.
-TEST(ComptimeOperators, StringEqualityStaysAGap) {
-    auto p = parse("@special h() <bool> {\n  let x <bool> = \"a\" == \"a\";\n  return x;\n}\n");
+// I-G2: const string `==`/`!=` folds (byte equality, like the backend),
+// so handler dispatch on `name: string` — bound by value in EventFiring —
+// can take its `if` arm. This amends the earlier pin that held string `==`
+// a gap ("no probe needs it"): dispatch is the probe that needs it.
+TEST(ComptimeOperators, StringEqualityFolds) {
+    auto p = parse(
+        "@special h() <bool> {\n"
+        "  let a <bool> = \"a\" == \"a\";\n"
+        "  let b <bool> = \"a\" == \"b\";\n"
+        "  return b;\n}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.text, "false");
+}
+
+TEST(ComptimeOperators, StringInequalityFolds) {
+    auto p = parse("@special h() <bool> {\n  let x <bool> = \"a\" != \"b\";\n  return x;\n}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.text, "true");
+}
+
+// The fold is const strings only: an unknowable side keeps the named
+// refusal, never a guessed arm.
+TEST(ComptimeOperators, NonConstStringEqualityStaysAGap) {
+    auto p = parse("@special h() <bool> {\n  let x <bool> = unknown_name == \"hi\";\n  return x;\n}\n");
     ASSERT_TRUE(p.result.parsed);
     auto* h = findSpecial(*p.result.ast, "h");
     ASSERT_NE(h, nullptr);
@@ -821,6 +854,58 @@ TEST(ComptimeProvider, NonProjectionStillRefused) {
         << r.err;
 }
 
+// Slice I-G1, provider half: a rebinding threads the subject to the
+// projection instead of refusing.
+TEST(ComptimeProvider, ReassignmentThreadsToProjection) {
+    auto r = provCompile(
+        "#[use(compiler)]\n#[use(compiler.components.layout)]\n"
+        "#[provides(type_metadata)]\n"
+        "@special(pub) meta(s: $struct) <quote> {\n"
+        "  let t <$struct> = s;\n"
+        "  t = s;\n"
+        "  return compiler.layout.pointer_map_quote(t);\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// Slice I-G3, provider half (/tmp/sc/pt_iftrue.fin): an `if` over a
+// comptime-known bool scans its taken arm to the projection.
+TEST(ComptimeProvider, BranchOverKnownBoolThreadsToProjection) {
+    auto r = provCompile(
+        "#[use(compiler)]\n#[use(compiler.components.layout)]\n"
+        "#[provides(type_metadata)]\n"
+        "@special(pub) meta(s: $struct) <quote> {\n"
+        "  let t <$struct> = s;\n"
+        "  if (1 == 1) {\n"
+        "    return compiler.layout.pointer_map_quote(t);\n"
+        "  } else {\n"
+        "    return compiler.layout.pointer_map_quote(s);\n"
+        "  }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// The admission is known bools only: a non-bool condition keeps the
+// existing straight-line refusal, never a guessed arm.
+TEST(ComptimeProvider, BranchOverNonBoolStillRefused) {
+    auto r = provCompile(
+        "#[use(compiler)]\n#[use(compiler.components.layout)]\n"
+        "#[provides(type_metadata)]\n"
+        "@special(pub) meta(s: $struct) <quote> {\n"
+        "  if (1) {\n"
+        "    return compiler.layout.pointer_map_quote(s);\n"
+        "  } else {\n"
+        "    return compiler.layout.pointer_map_quote(s);\n"
+        "  }\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    EXPECT_NE(provMessages(stripAnsi(r.err)).find("straight-line answer"), std::string::npos)
+        << r.err;
+}
+
 // Slice 3: handler bodies adopt the threading — lets and calls before the
 // return evaluate instead of refusing, with the splice unchanged.
 TEST(ComptimeHandler, LetBeforeReturnQuoteSplices) {
@@ -868,6 +953,28 @@ TEST(ComptimeHandler, NonQuoteReturnStillRefused) {
         "}\n");
     EXPECT_NE(r.exitCode, 0) << r.err;
     EXPECT_NE(provMessages(stripAnsi(r.err)).find("only a quote literal"), std::string::npos)
+        << r.err;
+}
+
+// Slice I-G3's boundary: the check admits the `if`, but a condition that is
+// no comptime-known bool keeps a named refusal at fire time — never a
+// guessed arm.
+TEST(ComptimeHandler, UnknownBranchConditionStillRefused) {
+    auto r = provCompile(
+        "#[on(variable_declared)]\n"
+        "@special h_decl(name: string, t: $type, is_mutable: bool) <quote> {\n"
+        "    if (name) {\n"
+        "        return quote { };\n"
+        "    } else {\n"
+        "        return quote { };\n"
+        "    }\n"
+        "}\n"
+        "compiler.events.enable(h_decl);\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    EXPECT_NE(provMessages(stripAnsi(r.err)).find("cannot take its 'if' arm"), std::string::npos)
         << r.err;
 }
 
@@ -964,6 +1071,61 @@ COMPTIME_BACKEND_TEST(ComptimeOperatorsProbe, FoldedValuesMatchRuntimeValues) {
     EXPECT_EQ(b.out, expected) << "comptime fold vs runtime value";
 }
 
+// Slice I-G1 (assignment in comptime validators): a plain `x = ...`
+// rebinds the name, so `return x` sees the new value. RED.
+TEST(ComptimeValue, ReassignmentRebinds) {
+    auto p = parse("@special h() <int> {\n  let x <int> = 1;\n  x = 2;\n  return x;\n}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.kind, fin::comptime::ValueKind::Int);
+    EXPECT_EQ(r.value.text, "2");
+}
+
+// Slice I-G1, handler half (/tmp/sc/ci_assign.fin): reassignment before the
+// quote return threads instead of refusing with `uses 'BinaryOp'`. RED.
+TEST(ComptimeHandler, ReassignmentBeforeReturnQuoteSplices) {
+    auto r = provCompile(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "#[on(variable_declared)]\n"
+        "@special h_decl(name: string, t: $type, is_mutable: bool) <quote> {\n"
+        "    let m <string> = name;\n"
+        "    m = name;\n"
+        "    return quote { printf(\"w5\\n\"); };\n"
+        "}\n"
+        "compiler.events.enable(h_decl);\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+// Slice I-G3 (/tmp/sc/ev_if.fin): `if` over a comptime-known bool takes its
+// arm in a handler — `let x` is mutable, so the `is_mutable` arm fires. RED.
+COMPTIME_BACKEND_TEST(ComptimeHandlerProbe, HandlerBranchTakesKnownArm) {
+    Built b = buildRun(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "#[on(variable_declared)]\n"
+        "@special h_decl(name: string, t: $type, is_mutable: bool) <quote> {\n"
+        "    if (is_mutable) {\n"
+        "        return quote { printf(\"mut\\n\"); };\n"
+        "    } else {\n"
+        "        return quote { printf(\"let\\n\"); };\n"
+        "    }\n"
+        "}\n"
+        "compiler.events.enable(h_decl);\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.compileErr;
+    ASSERT_TRUE(b.ran) << "compile exit " << b.compileExit << "\n" << b.compileErr;
+    EXPECT_EQ(b.out, "mut\n") << "the taken (is_mutable) arm fired";
+}
+
 // A threaded handler's quote runs at the declaration: end-to-end proof the
 // splice survived threading rather than merely not refusing.
 COMPTIME_BACKEND_TEST(ComptimeHandlerProbe, ThreadedMarkerRunsAtTheDeclaration) {
@@ -984,4 +1146,496 @@ COMPTIME_BACKEND_TEST(ComptimeHandlerProbe, ThreadedMarkerRunsAtTheDeclaration) 
     ASSERT_TRUE(b.ran) << "compile exit " << b.compileExit << "\n" << b.compileErr;
     EXPECT_NE(b.out.find("w5-threaded"), std::string::npos)
         << "the threaded handler's quote ran at the declaration:\n" << b.out;
+}
+
+// Slice I-G4: a user `@`-call (plain `fun` helper) in const position folds
+// to a constant and `-o` emits it. Reuses the interpreter's acyclic +
+// depth guards; gaps stay refused.
+COMPTIME_BACKEND_TEST(ComptimeAtCall, AtCallFoldsToConstant) {
+    Built b = buildRun(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "fun h(n: int) <int> {\n"
+        "  return n + 40;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  const x <int> = @h(2);\n"
+        "  printf(\"%d\\n\", x);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.compileErr;
+    ASSERT_TRUE(b.ran) << "compile exit " << b.compileExit << "\n" << b.compileErr;
+    EXPECT_EQ(b.out, "42\n") << "folded @h(2) runs as 42";
+}
+
+// Slice I-G2, handler half: `if (name == "x")` dispatches — `name` binds by
+// value, the folded equality takes the matching arm, and its quote runs at
+// the declaration. No validator change: the fold is already a Bool, which
+// evaluateIf and knownBranch admit.
+COMPTIME_BACKEND_TEST(ComptimeHandlerProbe, HandlerDispatchesOnNameEquality) {
+    Built b = buildRun(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "#[on(variable_declared)]\n"
+        "@special h_decl(name: string, t: $type, is_mutable: bool) <quote> {\n"
+        "    if (name == \"x\") {\n"
+        "        return quote { printf(\"found\\n\"); };\n"
+        "    } else {\n"
+        "        return quote { printf(\"other\\n\"); };\n"
+        "    }\n"
+        "}\n"
+        "compiler.events.enable(h_decl);\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.compileErr;
+    ASSERT_TRUE(b.ran) << "compile exit " << b.compileExit << "\n" << b.compileErr;
+    EXPECT_EQ(b.out, "found\n") << "the name-matching arm fired";
+}
+
+// --- G4: call-site coverage -------------------------------------------------
+//
+// A user `@`-call folds only when its arguments evaluate. Today every one of
+// these forms is a named gap, so `@h(...)` with such an argument never folds
+// and codegen refuses it. Each probe below is RED until its form lands; the
+// `st{}` probe pins the refusal instead (wave-4 owns it).
+TEST(ComptimeCallSite, StructConstructionThreads) {
+    auto p = parse(
+        "struct Point {\n"
+        "  x <int>,\n"
+        "  y <int> = 0,\n"
+        "}\n"
+        "@special h() <int> {\n"
+        "  let p <auto> = Point{ x: 40, y: 2 };\n"
+        "  return 42;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.text, "42");
+}
+
+TEST(ComptimeCallSite, ArrayConstructionThreads) {
+    auto p = parse(
+        "@special h() <int> {\n"
+        "  let a <auto> = [40, 2];\n"
+        "  return 42;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.text, "42");
+}
+
+TEST(ComptimeCallSite, MemberAccessFolds) {
+    auto p = parse(
+        "struct Point {\n"
+        "  x <int>,\n"
+        "  y <int> = 0,\n"
+        "}\n"
+        "@special h() <int> {\n"
+        "  let p <auto> = Point{ x: 40, y: 2 };\n"
+        "  return p.x;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.kind, fin::comptime::ValueKind::Int);
+    EXPECT_EQ(r.value.text, "40");
+}
+
+TEST(ComptimeCallSite, ArrayIndexFolds) {
+    auto p = parse(
+        "@special h() <int> {\n"
+        "  let a <auto> = [10, 20];\n"
+        "  return a[1];\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.kind, fin::comptime::ValueKind::Int);
+    EXPECT_EQ(r.value.text, "20");
+}
+
+TEST(ComptimeCallSite, CastFoldsIdentity) {
+    auto p = parse("@special h() <int> {\n  return cast<int>(40);\n}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.kind, fin::comptime::ValueKind::Int);
+    EXPECT_EQ(r.value.text, "40");
+}
+
+TEST(ComptimeCallSite, MethodCallFolds) {
+    auto p = parse(
+        "struct Point {\n"
+        "  x <int>,\n"
+        "  y <int> = 0,\n"
+        "  fun get(self: &Self) <int> {\n"
+        "    return self.x;\n"
+        "  }\n"
+        "}\n"
+        "@special h() <int> {\n"
+        "  let p <auto> = Point{ x: 41, y: 0 };\n"
+        "  return p.get();\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.kind, fin::comptime::ValueKind::Int);
+    EXPECT_EQ(r.value.text, "41");
+}
+
+TEST(ComptimeCallSite, ComponentPresentFolds) {
+    auto p = parse(
+        "@special h() <bool> {\n"
+        "  let a <bool> = compiler.components.layout.present();\n"
+        "  return a;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.kind, fin::comptime::ValueKind::Bool);
+    EXPECT_EQ(r.value.text, "true");
+}
+
+// `st{}` stays refused: `st` is a *value* of type `$struct`, and
+// instantiating one needs its type known at compile time, which is the
+// compiler API's job (wave 4, literal_struct.fin blocker 1).
+TEST(ComptimeCallSite, StructValueInstantiationStaysRefused) {
+    auto p = parse(
+        "@special m(s: $struct) <int> {\n"
+        "  let i <auto> = s{};\n"
+        "  return 0;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "m");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    env.bind("s", fin::comptime::Value::makeOpaque("s"));
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Gap) << "s{} must not evaluate";
+    EXPECT_NE(r.detail.find("compile time"), std::string::npos) << r.detail;
+}
+
+// Unlisted members fall back to their declared defaults, evaluated closed:
+// `y` is never written at the construction site.
+TEST(ComptimeCallSite, StructDefaultsFill) {
+    auto p = parse(
+        "struct Point {\n"
+        "  x <int>,\n"
+        "  y <int> = 5,\n"
+        "}\n"
+        "@special h() <int> {\n"
+        "  let p <auto> = Point{ x: 40 };\n"
+        "  return p.y;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.text, "5");
+}
+
+// The one synthetic read: `a.length` is the element count as an int.
+TEST(ComptimeCallSite, ArrayLengthFolds) {
+    auto p = parse(
+        "@special h() <int> {\n"
+        "  let a <auto> = [7, 8, 9];\n"
+        "  return a.length;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.text, "3");
+}
+
+// A cast claims a type, never a value: the unknown threads under the same
+// identity, so `cast<T>(s)` in a provider body reaches the projection check
+// as `s`.
+TEST(ComptimeCallSite, CastOpaqueThreads) {
+    auto p = parse(
+        "@special m(s: $struct) <int> {\n"
+        "  let t <auto> = cast<int>(s);\n"
+        "  return t;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "m");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    env.bind("s", fin::comptime::Value::makeOpaque("s"));
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.kind, fin::comptime::ValueKind::Opaque);
+}
+
+// `present()` answers from the static table, including for a component this
+// compiler does not have (§2.1a): `gc` is absent.
+TEST(ComptimeCallSite, ComponentAbsentIsFalse) {
+    auto p = parse(
+        "@special h() <bool> {\n"
+        "  let a <bool> = compiler.components.gc.present();\n"
+        "  return a;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.text, "false");
+}
+
+TEST(ComptimeCallSite, ComponentVersionFolds) {
+    auto p = parse(
+        "@special h() <int> {\n"
+        "  let v <int> = compiler.components.layout.version();\n"
+        "  return v;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Returned) << r.detail;
+    EXPECT_EQ(r.value.text, "1");
+}
+
+// The refusal pins: an out-of-range index, a missing field, a missing
+// method, a narrowing cast, and a component *use* never evaluate.
+TEST(ComptimeCallSite, IndexOutOfRangeStaysRefused) {
+    auto p = parse(
+        "@special h() <int> {\n"
+        "  let a <auto> = [10, 20];\n"
+        "  return a[5];\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Gap) << "an out-of-range index must not fold";
+    EXPECT_NE(r.detail.find("out of range"), std::string::npos) << r.detail;
+}
+
+TEST(ComptimeCallSite, UnknownFieldStaysRefused) {
+    auto p = parse(
+        "struct Point {\n"
+        "  x <int>,\n"
+        "}\n"
+        "@special h() <int> {\n"
+        "  let p <auto> = Point{ x: 1 };\n"
+        "  return p.z;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Gap) << "a missing field must not fold";
+    EXPECT_NE(r.detail.find("has no field"), std::string::npos) << r.detail;
+}
+
+TEST(ComptimeCallSite, MissingMethodStaysRefused) {
+    auto p = parse(
+        "struct Point {\n"
+        "  x <int>,\n"
+        "}\n"
+        "@special h() <int> {\n"
+        "  let p <auto> = Point{ x: 1 };\n"
+        "  return p.nope();\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Gap) << "a missing method must not run";
+    EXPECT_NE(r.detail.find("has no method"), std::string::npos) << r.detail;
+}
+
+// A narrowing cast would truncate at runtime (`u8` of 300 is 44), so only
+// the identity spellings fold.
+TEST(ComptimeCallSite, NarrowingCastStaysRefused) {
+    auto p = parse("@special h() <int> {\n  return cast<u8>(300);\n}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Gap) << "a narrowing cast must not fold";
+    EXPECT_NE(r.detail.find("not evaluated"), std::string::npos) << r.detail;
+}
+
+// A component *use* needs layout facts this model does not hold; only the
+// asking-about ops (`present`, `version`, `name`) answer.
+TEST(ComptimeCallSite, ComponentUseStaysRefused) {
+    auto p = parse(
+        "@special h(s: $struct) <int> {\n"
+        "  let w <uint> = compiler.layout.size_of(s);\n"
+        "  return 0;\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    env.bind("s", fin::comptime::Value::makeOpaque("s"));
+    auto r = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(r.status, fin::comptime::BodyStatus::Gap) << "a component use must not run";
+    EXPECT_NE(r.detail.find("not evaluated"), std::string::npos) << r.detail;
+}
+
+// --- G4 end-to-end: each form folds out of a real `@`-call argument --------
+COMPTIME_BACKEND_TEST(ComptimeAtCallSite, StructMemberFoldsToConstant) {
+    Built b = buildRun(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "struct Point {\n"
+        "  x <int>,\n"
+        "  y <int> = 0,\n"
+        "}\n"
+        "fun getx(p: Point) <int> {\n"
+        "  return p.x;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  const v <int> = @getx(Point{ x: 41, y: 1 });\n"
+        "  printf(\"%d\\n\", v);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.compileErr;
+    ASSERT_TRUE(b.ran) << "compile exit " << b.compileExit << "\n" << b.compileErr;
+    EXPECT_EQ(b.out, "41\n") << "construction + member access folded out of the call site";
+}
+
+COMPTIME_BACKEND_TEST(ComptimeAtCallSite, ArrayIndexFoldsToConstant) {
+    Built b = buildRun(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "fun id(n: int) <int> {\n"
+        "  return n;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  const v <int> = @id([10, 21][1]);\n"
+        "  printf(\"%d\\n\", v);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.compileErr;
+    ASSERT_TRUE(b.ran) << "compile exit " << b.compileExit << "\n" << b.compileErr;
+    EXPECT_EQ(b.out, "21\n") << "array construction + index folded out of the call site";
+}
+
+COMPTIME_BACKEND_TEST(ComptimeAtCallSite, CastFoldsToConstant) {
+    Built b = buildRun(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "fun id(n: int) <int> {\n"
+        "  return n;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  const v <int> = @id(cast<int>(40));\n"
+        "  printf(\"%d\\n\", v);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.compileErr;
+    ASSERT_TRUE(b.ran) << "compile exit " << b.compileExit << "\n" << b.compileErr;
+    EXPECT_EQ(b.out, "40\n") << "identity cast folded out of the call site";
+}
+
+COMPTIME_BACKEND_TEST(ComptimeAtCallSite, MethodCallFoldsToConstant) {
+    Built b = buildRun(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "struct Point {\n"
+        "  x <int>,\n"
+        "  y <int> = 0,\n"
+        "  fun add(self: &Self, n: int) <int> {\n"
+        "    return self.x + n;\n"
+        "  }\n"
+        "}\n"
+        "fun apply(n: int) <int> {\n"
+        "  return n;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  const v <int> = @apply(Point{ x: 40, y: 0 }.add(2));\n"
+        "  printf(\"%d\\n\", v);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.compileErr;
+    ASSERT_TRUE(b.ran) << "compile exit " << b.compileExit << "\n" << b.compileErr;
+    EXPECT_EQ(b.out, "42\n") << "method call folded out of the call site";
+}
+
+COMPTIME_BACKEND_TEST(ComptimeAtCallSite, ComponentPresentFoldsToConstant) {
+    // A `#[use]` grant on a plain function is not lowered yet (codegen
+    // refuses the attribute there), so `compiler` cannot be named in `main`
+    // at all. The reachable call site for a component call is a `@special`
+    // body, where the grant is compiled: the branch condition evaluates
+    // `present()` at compile time and the taken arm's quote runs.
+    Built b = buildRun(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "#[use(compiler)]\n"
+        "#[on(variable_declared)]\n"
+        "@special h_decl(name: string, t: $type, is_mutable: bool) <quote> {\n"
+        "    if (compiler.components.layout.present()) {\n"
+        "        return quote { printf(\"present\\n\"); };\n"
+        "    } else {\n"
+        "        return quote { printf(\"absent\\n\"); };\n"
+        "    }\n"
+        "}\n"
+        "compiler.events.enable(h_decl);\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.compileErr;
+    ASSERT_TRUE(b.ran) << "compile exit " << b.compileExit << "\n" << b.compileErr;
+    EXPECT_EQ(b.out, "present\n") << "component presence evaluated at compile time";
+}
+
+// `st{}` at a call site still fails: the analyzer has no struct `s`, and the
+// interpreter would need the wave-4 value handle. Either refusal keeps the
+// exit non-zero — there is no silent miscompile.
+TEST(ComptimeAtCallSite, StructValueInstantiationFailsToCompile) {
+    auto r = provCompile(
+        "fun id(n: int) <int> {\n"
+        "  return n;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "  const v <int> = @id(s{});\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << "s{} must not compile";
+    EXPECT_NE(provMessages(stripAnsi(r.err)).find("Undefined struct 's'"), std::string::npos)
+        << r.err;
 }

@@ -13907,14 +13907,15 @@ BACKEND_TEST(Soundness_TypeMetadata, NoProviderEmitsNothing) {
 }
 
 BACKEND_TEST(Soundness_TypeMetadata, AnUnmappableFieldIsRefusedByName) {
-    // The backend invariant: a field the map cannot describe -- an `any` blob
-    // is a heap pointer exactly when it boxes one, which no static entry can
-    // say -- refuses naming the struct and the field, never emits a guess.
+    // The backend invariant: a field the map cannot describe -- a prototype
+    // has no static field list to lay out -- refuses naming the struct and
+    // the field, never emits a guess. (`any` served here until P-A1 mapped
+    // it as an opaque blob per ADR 0034; a prototype is the still-unmapped
+    // sibling that keeps this refusal honest.)
     // First that the struct lowers cleanly without the provider, so the
     // refusal below is the metadata's and nothing else's.
     const std::string body =
-        "struct Box { pub v <any>, }\n"
-        "fun use(b: &Box, x: any) <noret> { b.v = x; }\n"
+        "struct Box { pub v <{string, int}>, }\n"
         "fun main() <noret> { }\n";
     const fs::path obj = uniqueTempPath("fin_meta_ok", ".o");
     const Compiled plain = compileOnly(body, obj);
@@ -13981,6 +13982,103 @@ BACKEND_TEST(Soundness_TypeMetadata, AUnionFieldIsRefusedByName) {
     EXPECT_NE(refused.err.find("v"), std::string::npos) << refused.why();
     std::error_code ec;
     fs::remove(bad, ec);
+}
+
+BACKEND_TEST(Soundness_TypeMetadata, NullableFieldHasAMap) {
+    // P-A1: `b? <int>` unwraps to its payload's map (ADR 0040 pairs have
+    // computable maps). `int` holds no pointers, so the map is empty but the
+    // build succeeds; the run proves the tag still reads.
+    const std::string trace = codegenTrace(std::string(kTypeMetadataProvider) +
+        "struct A { pub b? <int>, }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(trace.find("fin.typemeta.A"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("entries=0"), std::string::npos) << trace;
+    const Built b = build(std::string(kPrintf) + std::string(kTypeMetadataProvider) +
+        "struct A { pub b? <int>, }\n"
+        "fun main() <noret> {\n"
+        "    let a <A> = A{};\n"
+        "    printf(\"is_null=%d\\n\", a.b == null);\n"
+        "    a.b = 42;\n"
+        "    printf(\"val=%d is_null=%d\\n\", a.b?, a.b == null);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "is_null=1\nval=42 is_null=0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_TypeMetadata, AnyFieldHasAMap) {
+    // P-A1: `v <any>` maps as an opaque blob per ADR 0034 (value semantics;
+    // the payload word is not a traced slot). The map is empty; the run
+    // proves boxing through the field still reads back.
+    const std::string trace = codegenTrace(std::string(kTypeMetadataProvider) +
+        "struct S { pub v <any>, }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(trace.find("fin.typemeta.S"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("entries=0"), std::string::npos) << trace;
+    const Built b = build(std::string(kPrintf) + std::string(kTypeMetadataProvider) +
+        "struct S { pub v <any>, }\n"
+        "fun main() <noret> {\n"
+        "    let s <S> = S{};\n"
+        "    s.v = 41;\n"
+        "    printf(\"%d\\n\", cast<int>(s.v));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "41\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_TypeMetadata, DynArrayFieldHasAMap) {
+    // P-A1: `a <[int]>` is ADR 0025's `{ptr, len}` pair; the map traces word
+    // 0 (the buffer) as one entry. The run proves the buffer still reads.
+    const std::string trace = codegenTrace(std::string(kTypeMetadataProvider) +
+        "struct S { pub a <[int]>, }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(trace.find("fin.typemeta.S"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("(0,0,1,0)"), std::string::npos) << trace;
+    const Built b = build(std::string(kPrintf) + std::string(kTypeMetadataProvider) +
+        "struct C { pub xs <[int]>, }\n"
+        "fun main() <noret> {\n"
+        "    let c <C> = C{xs: new [int, 3]{}};\n"
+        "    c.xs[1] = 6;\n"
+        "    printf(\"%d %d\\n\", c.xs.length, c.xs[1]);\n"
+        "    delete c.xs;\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "3 6\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_TypeMetadata, EnumWithPointerMapsPerVariant) {
+    // Per-variant precise pointer maps: `A(&int)` traces its pointer word
+    // gated on A's discriminant; payload-free `B` traces nothing. The run
+    // proves values of both variants still read back -- a wrong map exits 0
+    // too, so exit 0 alone is not the assertion.
+    const std::string trace = codegenTrace(std::string(kTypeMetadataProvider) +
+        "enum E { A(&int), B = 2, }\n"
+        "struct S { pub e <E>, }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_NE(trace.find("fin.typemeta.S"), std::string::npos) << trace;
+    EXPECT_NE(trace.find("entries=1"), std::string::npos) << trace;
+    // A's discriminant is 0, gated as tag 1 (0 stays unconditional-only so a
+    // collector can tell "always" from "when A"): the payload is
+    // pointer-aligned, so the word at 8 traces if and only if the value is A.
+    EXPECT_NE(trace.find("(8,0,1,1)"), std::string::npos) << trace;
+    const Built b = build(std::string(kPrintf) + std::string(kTypeMetadataProvider) +
+        "enum E { A(&int), B = 2, }\n"
+        "struct S { pub e <E>, }\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 41;\n"
+        "    let s <S> = S{e: E::A(&x)};\n"
+        "    let v <E> = s.e;\n"
+        "    let got <&int> = v.0;\n"
+        "    printf(\"%d\\n\", *got);\n"
+        "    let t <S> = S{e: E::B};\n"
+        "    if (t.e == E::B) { printf(\"B\\n\"); }\n"
+        "    if (s.e != t.e) { printf(\"DIFF\\n\"); }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "41\nB\nDIFF\n") << b.why();
 }
 
 // ---------------------------------------------------------------------------

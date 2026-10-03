@@ -1,5 +1,9 @@
 #include "../SemanticAnalyzer.hpp"
+#include "../ComptimeInterp.hpp"
 #include "../EventPayloads.hpp"
+#include "../../ast/decls/FunctionDecl.hpp"
+#include "../../ast/exprs/FunctionCall.hpp"
+#include "../../ast/exprs/Literal.hpp"
 #include "../../utils/ModuleLoader.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../BuiltinMacros.hpp"
@@ -49,6 +53,38 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
                 // declaration and is legal (deeptest4.fin:6), while `x = null;`
                 // is an assignment and is not.
                 checkInitializer(*node.initializer, lastExprType, type);
+            }
+        }
+        // Slice I-G4: fold `@h(args)` in const position to a literal. Only a
+        // plain-`fun` helper (never a builtin, never `@special`, so the existing
+        // `@special` refusal stays), only Int/Bool, via ComptimeInterp — whose
+        // acyclic + depth guards are the whole no-hang argument. A gap or breach
+        // leaves the call in place for codegen's refusal; never guessed.
+        if (!node.is_mutable && w5_program_ && lastExprType && !isErrorType(lastExprType)) {
+            if (auto* call = dynamic_cast<FunctionCall*>(node.initializer.get())) {
+                if (call->is_special) {
+                    bool isPlainFun = false;
+                    for (auto& stmt : w5_program_->statements) {
+                        const auto* fun = dynamic_cast<const FunctionDeclaration*>(stmt.get());
+                        if (fun && fun->name == call->name) { isPlainFun = true; break; }
+                    }
+                    if (isPlainFun) {
+                        comptime::Interpreter interp(*w5_program_);
+                        comptime::Env env;
+                        comptime::ExprResult folded = interp.evaluateExpression(*node.initializer, env);
+                        if (folded.status == comptime::ExprStatus::Ok) {
+                            std::unique_ptr<Literal> lit;
+                            if (folded.value.kind == comptime::ValueKind::Int)
+                                lit = std::make_unique<Literal>(folded.value.text, ASTTokenKind::INTEGER);
+                            else if (folded.value.kind == comptime::ValueKind::Bool)
+                                lit = std::make_unique<Literal>(folded.value.text, ASTTokenKind::BOOL);
+                            if (lit) {
+                                lit->setLoc(call->loc);
+                                node.initializer = std::move(lit);
+                            }
+                        }
+                    }
+                }
             }
         }
     }

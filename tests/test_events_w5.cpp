@@ -259,14 +259,14 @@ TEST(W5Mismatch, MismatchIsDiagnosedOnce) {
 }
 
 // --- Slice 1: the interpretability line is held at fire time ----------------
-// Five statement forms, no control flow; quote-returning calls + splice only.
-// A handler that exceeds it is refused by name.
+// Lets, calls, rebinds and known-bool branches thread; loops stay refused.
+// A handler that exceeds the line is refused by name.
 
 TEST(W5Line, ControlFlowIsRefusedByName) {
     auto r = w5compile(
         "#[on(variable_declared)]\n"
         "@special h_decl(name: string, t: $type, is_mutable: bool) <quote> {\n"
-        "    if (1 == 1) {}\n"
+        "    while (1 == 1) {}\n"
         "}\n"
         "fun main() <noret> {}\n");
     EXPECT_NE(r.exitCode, 0) << r.err;

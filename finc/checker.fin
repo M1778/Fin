@@ -331,44 +331,6 @@ priv fun chk_big_const_verdict(node: &AstNode, target: string) <int> {
     return 0;
 }
 
-// True when the spelling mentions a generic parameter as its own word
-// (`T`, `&T`, `T*`, `Box<T>`): the callee unifies those (C++
-// checkGenericCall), it never refuses them, so the narrowing check
-// skips them. Only whole words match (`int` is not `T`).
-priv fun chk_mentions_type_param(s: string) <bool> {
-    if (s == null) { return false; }
-    let len <int> = cast<int>(chk_strlen(s));
-    let chars <[char]> = to_chars(s);
-    let i <int> = 0;
-    while (i < len) {
-        let c <char> = chars[i];
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
-            let start <int> = i;
-            while (i < len) {
-                let c2 <char> = chars[i];
-                if ((c2 >= 'a' && c2 <= 'z') || (c2 >= 'A' && c2 <= 'Z') ||
-                    (c2 >= '0' && c2 <= '9') || c2 == '_') {
-                    i = i + 1;
-                } else {
-                    break;
-                }
-            }
-            if (i - start == 1) {
-                let w <string> = substr(s, start, 1);
-                if (chk_str_eq(w, "T") || chk_str_eq(w, "E") || chk_str_eq(w, "U") ||
-                    chk_str_eq(w, "K") || chk_str_eq(w, "V") || chk_str_eq(w, "X")) {
-                    delete chars;
-                    return true;
-                }
-            }
-        } else {
-            i = i + 1;
-        }
-    }
-    delete chars;
-    return false;
-}
-
 // Shift-count refusal (owner decision: refuse constants): a constant count
 // must satisfy 0 <= count < bits of the shifted value's spelling
 // (8->7, 16->15, 32->31, 64->63). Literal plus unary-minus, through
@@ -1862,9 +1824,9 @@ pub struct Checker {
           if (!self.chk_is_known_type_name(at) || !self.chk_is_known_type_name(want)) { return; }
           if (self.chk_spelling_has_unknown_word(at) || self.chk_spelling_has_unknown_word(want)) { return; }
           if (!chk_str_eq(at, "auto") && !chk_str_eq(at, "void") && !chk_str_eq(at, "error") &&
-              !chk_str_eq(at, "module") && !chk_mentions_type_param(at) &&
+              !chk_str_eq(at, "module") && !self.chk_mentions_gen_param(at) &&
               !chk_str_eq(want, "") && !chk_str_eq(want, "void") && !chk_str_eq(want, "void*") &&
-              !chk_str_eq(want, "error") && !chk_mentions_type_param(want)) {
+              !chk_str_eq(want, "error") && !self.chk_mentions_gen_param(want)) {
               // Parser artifact (parser.fin parse_param_type): a written
               // `[T]` parameter arrives here as `T*`, the same spelling an
               // explicit `*T` writes. C++ keeps the array and accepts `[T]`
@@ -1930,15 +1892,31 @@ pub struct Checker {
       // generic parameter target is bound at instantiation, not here.
       // Declared names consult the pass-1 generic registry, so
       // `fun addgen<Generic>` treats `Generic` like `T` (triage #6b).
+      // SG1 mirror (codegen.fin cg_is_generic_ann): a vocabulary letter
+      // naming a declared struct/enum/interface is that concrete type,
+      // NOT a type parameter — unless the letter is also declared as a
+      // generic parameter in scope (shadowing, like C++). Undeclared
+      // letters keep the vocabulary fallback so genuine generics bind.
       fun chk_is_type_param(self: &Self, s: string) <bool> {
           if (s == null) { return false; }
           if (chk_str_eq(s, "T") || chk_str_eq(s, "E") || chk_str_eq(s, "U") ||
               chk_str_eq(s, "K") || chk_str_eq(s, "V") || chk_str_eq(s, "X")) {
+              if (self.chk_single_letter_is_declared_type(s)) { return false; }
               return true;
           }
           if (self.gen_scope_names == null) { return false; }
           let t <string> = chk_trim(s);
           if (!self.chk_is_bare_word(t)) { return false; }
+          return self.chk_word_is_gen_param(t);
+      }
+
+      // True when the trimmed bare word is a bound parameter name in any
+      // recorded generic scope (the loop above, extracted so the
+      // single-letter rule below shares it). Program-global like the
+      // registry it reads (see record_generic_scope).
+      fun chk_word_is_gen_param(self: &Self, t: string) <bool> {
+          if (self.gen_scope_names == null) { return false; }
+          if (t == null) { return false; }
           let gi <int> = 0;
           while (gi < self.gen_count) {
               let segs <[string]> = new [string, 64]{};
@@ -1958,6 +1936,68 @@ pub struct Checker {
               delete pnames;
               gi = gi + 1;
           }
+          return false;
+      }
+
+      // True when the single-letter word names a declared
+      // struct/enum/interface (a concrete type, never a parameter) and
+      // is not shadowed by a declared generic parameter. Non-vocabulary
+      // words answer false; aliases stay parameters here because C++
+      // resolves them to their target like any other spelling.
+      fun chk_single_letter_is_declared_type(self: &Self, w: string) <bool> {
+          if (w == null) { return false; }
+          if (!chk_str_eq(w, "T") && !chk_str_eq(w, "E") && !chk_str_eq(w, "U") &&
+              !chk_str_eq(w, "K") && !chk_str_eq(w, "V") && !chk_str_eq(w, "X")) {
+              return false;
+          }
+          if (self.chk_word_is_gen_param(w)) { return false; }
+          if (self.global_scope.has(w)) {
+              let sym <Symbol> = self.global_scope.lookup(w);
+              if (sym.kind == sym_struct() || sym.kind == sym_enum() ||
+                  sym.kind == sym_interface()) {
+                  return true;
+              }
+          }
+          return false;
+      }
+
+      // Spelling-level SG1 mirror: a single-letter word answered above
+      // is a concrete type, not a parameter mention, so the narrowing
+      // checks keep full checking there instead of skipping. Only whole
+      // words match (`int` is not `T`).
+      fun chk_mentions_gen_param(self: &Self, s: string) <bool> {
+          if (s == null) { return false; }
+          let len <int> = cast<int>(chk_strlen(s));
+          let chars <[char]> = to_chars(s);
+          let i <int> = 0;
+          while (i < len) {
+              let c <char> = chars[i];
+              if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+                  let start <int> = i;
+                  while (i < len) {
+                      let c2 <char> = chars[i];
+                      if ((c2 >= 'a' && c2 <= 'z') || (c2 >= 'A' && c2 <= 'Z') ||
+                          (c2 >= '0' && c2 <= '9') || c2 == '_') {
+                          i = i + 1;
+                      } else {
+                          break;
+                      }
+                  }
+                  if (i - start == 1) {
+                      let w <string> = substr(s, start, 1);
+                      if (chk_str_eq(w, "T") || chk_str_eq(w, "E") || chk_str_eq(w, "U") ||
+                          chk_str_eq(w, "K") || chk_str_eq(w, "V") || chk_str_eq(w, "X")) {
+                          if (!self.chk_single_letter_is_declared_type(w)) {
+                              delete chars;
+                              return true;
+                          }
+                      }
+                  }
+              } else {
+                  i = i + 1;
+              }
+          }
+          delete chars;
           return false;
       }
 
@@ -4422,7 +4462,12 @@ pub struct Checker {
                   let fst_c <string> = expr.name;
                   if (chk_str_eq(fst_c, "T") || chk_str_eq(fst_c, "E") || chk_str_eq(fst_c, "U") ||
                       chk_str_eq(fst_c, "K") || chk_str_eq(fst_c, "V") || chk_str_eq(fst_c, "X")) {
-                      return expr.name;
+                      // SG1 mirror: a vocabulary letter naming a declared
+                      // struct/enum/interface falls through to the normal
+                      // lookup below instead of answering as a parameter.
+                      if (!self.chk_single_letter_is_declared_type(fst_c)) {
+                          return expr.name;
+                      }
                   }
               }
               if (chk_str_eq(expr.name, "m1778") || chk_str_eq(expr.name, "_") || chk_str_eq(expr.name, "_?")) {
@@ -5061,8 +5106,8 @@ pub struct Checker {
                                       let fw_mat <string> = self.check_expression(fw_maa);
                                       if (fw_mi == 0) {
                                           if (!chk_str_eq(fw_mat, "auto") && !chk_str_eq(fw_mat, "error") &&
-                                              !chk_str_eq(fw_mat, "void") && !chk_mentions_type_param(fw_mat) &&
-                                              !chk_mentions_type_param(fw_recv_exp)) {
+                                              !chk_str_eq(fw_mat, "void") && !self.chk_mentions_gen_param(fw_mat) &&
+                                              !self.chk_mentions_gen_param(fw_recv_exp)) {
                                               let fw_exp_base <string> = self.probe_strip_base(fw_recv_exp);
                                               let fw_act_base <string> = self.probe_strip_base(fw_mat);
                                               if (!chk_str_eq(fw_exp_base, "") && !chk_str_eq(fw_act_base, "") &&
@@ -5561,6 +5606,15 @@ pub struct Checker {
                           delete tsegs;
                       }
                   }
+                  // Free-function inference (C++ checkGenericCall): without a
+                  // turbofish the declared parameters still unify from the
+                  // arguments in the walk below (first wins), so the result
+                  // substitution sees them. Turbofish seeds above; methods
+                  // own the next arm. Non-generics record nothing, so this
+                  // leaves them exactly as today.
+                  if (is_free_shape && !has_turbo) {
+                      bind_n = self.lookup_generic_pnames(expr.name, bind_names);
+                  }
                   if (hit_method || call_recv_skip) {
                       bind_n = self.lookup_generic_pnames(expr.name, bind_names);
                       if (subst_base != null && chk_strlen(subst_base) > cast<ulong>(0)) {
@@ -6030,7 +6084,7 @@ pub struct Checker {
                       self.last_call_subst != 1 &&
                       !(chk_int_bits(stmt.type_annotation) > 0 && chk_is_int_const(stmt.left)) &&
                       self.chk_is_known_type_name(inferred) && self.chk_is_known_type_name(stmt.type_annotation) &&
-                      !chk_mentions_type_param(inferred) && !chk_mentions_type_param(stmt.type_annotation) &&
+                      !self.chk_mentions_gen_param(inferred) && !self.chk_mentions_gen_param(stmt.type_annotation) &&
                       chk_strchr(inferred, 44) == null &&
                       chk_strchr(inferred, 123) == null && chk_strchr(inferred, 125) == null &&
                       chk_strchr(stmt.type_annotation, 123) == null && chk_strchr(stmt.type_annotation, 125) == null &&
@@ -6940,7 +6994,7 @@ pub struct Checker {
       // word equal to pnames[i] becomes pvals[i] (null or empty values leave
       // the word standing, so partially-bound spellings keep checking what
       // is bound and skip what is not). Reuses the word scan of
-      // chk_mentions_type_param; complex spellings substitute each word
+      // chk_mentions_gen_param; complex spellings substitute each word
       // where it stands (`Box<U>` with U=int answers `Box<int>`).
       fun subst_generic_words(self: &Self, spelling: string, pnames: [string], pvals: [string], n: int) <string> {
           if (spelling == null || n <= 0) { return spelling; }

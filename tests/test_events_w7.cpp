@@ -689,9 +689,8 @@ TEST(W7Fire, AUnionTypedVariableFiresScopeExit) {
 }
 
 // --- Straight-line threading (the comptime value model, ADR 0006) -----------
-// Lets, bare calls and parameters thread through the handler body, the same
-// line W5's handlers hold (ComptimeHandler): literals + lets + calls with
-// parameters bound, no control flow, anything wider the existing named gap.
+// Lets, bare calls, rebinds and known-bool branches thread with parameters
+// bound; loops stay refused, anything wider the existing named gap.
 
 TEST(W7Threaded, LetBeforeReturnQuoteEvaluates) {
     auto a = analyzeW7(

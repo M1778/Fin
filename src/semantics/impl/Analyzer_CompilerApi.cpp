@@ -3,6 +3,7 @@
 #include "../../ast/StructuralWalk.hpp"
 #include "../../ast/decls/Program.hpp"
 #include "../../ast/decls/TypeDef.hpp"
+#include "../../ast/exprs/BinaryOp.hpp"
 #include "../../ast/exprs/FunctionCall.hpp"
 #include "../../ast/exprs/Identifier.hpp"
 #include "../../ast/exprs/Lambda.hpp"
@@ -466,59 +467,148 @@ bool isTypeMetadataAnswer(const Block& body, const std::string& subjectName) {
     return arg && arg->name == subjectName;
 }
 
-// Whether `body` answers the slot by threading the subject to the
-// projection: straight-line lets and bare calls (literals + lets + calls,
-// parameters bound) ending in
-// `return compiler.layout.pointer_map_quote(<subject>)`, where the argument
-// evaluates to the subject parameter rather than merely spelling it. The
-// single-return projection above is the base case; `let t = s; return
-// ...(t);` and helper-threaded equivalents are the unlocked shapes. The
-// projection call itself is never executed here -- codegen computes the map
-// from the finalised layout -- so this validates the threading and the
-// shape, and anything else answers false for the existing refusal below.
-bool isThreadedTypeMetadataAnswer(const Block& body, const std::string& subjectName,
-                                  const Program& program) {
-    if (body.statements.empty()) return false;
-    comptime::Interpreter interp(program);
-    comptime::Env env;
-    env.bind(subjectName, comptime::Value::makeOpaque(subjectName));
-    for (std::size_t i = 0; i < body.statements.size(); ++i) {
-        const bool last = (i + 1 == body.statements.size());
-        const Statement* stmt = body.statements[i].get();
-        if (const auto* decl = dynamic_cast<const VariableDeclaration*>(stmt)) {
-            if (last) return false;
-            std::string detail;
-            if (interp.evaluateDeclaration(*decl, env, &detail) != comptime::ExprStatus::Ok)
-                return false;
-            continue;
-        }
-        if (const auto* ret = dynamic_cast<const ReturnStatement*>(stmt)) {
-            if (!last || !ret->value) return false;
-            const auto* call = dynamic_cast<const MethodCall*>(ret->value.get());
-            if (!call || call->method_name != "pointer_map_quote") return false;
-            if (!call->generic_args.empty() || call->args.size() != 1) return false;
-            const auto* inner = dynamic_cast<const MemberAccess*>(call->object.get());
-            if (!inner || inner->member != "layout") return false;
-            const auto* root = dynamic_cast<const Identifier*>(inner->object.get());
-            if (!root || root->name != "compiler") return false;
-            comptime::ExprResult arg = interp.evaluateExpression(*call->args[0], env);
-            return arg.status == comptime::ExprStatus::Ok &&
-                   arg.value.kind == comptime::ValueKind::Opaque &&
-                   arg.value.text == subjectName;
-        }
-        if (const auto* exprStmt = dynamic_cast<const ExpressionStatement*>(stmt)) {
-            if (last || !exprStmt->expr) return false;
-            if (interp.evaluateExpression(*exprStmt->expr, env).status !=
-                comptime::ExprStatus::Ok)
-                return false;
-            continue;
-        }
-        return false;
+}  // namespace
+
+// --- I-G1/I-G3: the threaded scans share one arm rule ------------------------
+//
+// An `if` condition to a known bool in `env`: helper calls in the condition
+// run under the interpreter's depth and acyclicity guards. False when unknown
+// or non-bool — the caller keeps its named refusal.
+bool knownBranch(const Expression& condition, comptime::Interpreter& interp,
+                 comptime::Env& env, bool* take) {
+    if (!take) return false;
+    comptime::ExprResult cond = interp.evaluateExpression(condition, env);
+    if (cond.status != comptime::ExprStatus::Ok) return false;
+    if (cond.value.kind != comptime::ValueKind::Bool) return false;
+    if (cond.value.text == "true") {
+        *take = true;
+        return true;
+    }
+    if (cond.value.text == "false") {
+        *take = false;
+        return true;
     }
     return false;
 }
 
-}  // namespace
+// One `if`/`else-if` chain to its taken arm (I-G3): each condition evaluates
+// through knownBranch above. `*refused` is set when a condition is unknown
+// or non-bool, a block is missing, or an `else` holds neither a block nor an
+// `if` — evaluateIf's traversal, restated for a structural scan, because the
+// projection/quote answer is shape-checked here, never executed. A null arm
+// with `*refused` clear falls through: the statements after the `if` run.
+const Block* takenBranchArm(const IfStatement& node, comptime::Interpreter& interp,
+                            comptime::Env& env, bool* refused) {
+    const IfStatement* cur = &node;
+    while (true) {
+        if (!cur->condition || !cur->then_block) {
+            *refused = true;
+            return nullptr;
+        }
+        bool take = false;
+        if (!knownBranch(*cur->condition, interp, env, &take)) {
+            *refused = true;
+            return nullptr;
+        }
+        if (take) return cur->then_block.get();
+        if (!cur->else_stmt) return nullptr;
+        if (const auto* elseBlock = dynamic_cast<const Block*>(cur->else_stmt.get()))
+            return elseBlock;
+        if (const auto* elseIf = dynamic_cast<const IfStatement*>(cur->else_stmt.get())) {
+            cur = elseIf;
+            continue;
+        }
+        *refused = true;
+        return nullptr;
+    }
+}
+
+// The scan outcome for one statement list: FallsThrough reached the end
+// without answering, Answered found the slot's answer, Refused met a shape
+// outside the line.
+enum class ThreadedScan { FallsThrough, Answered, Refused };
+
+bool isProjectionReturn(const ReturnStatement& ret, const std::string& subjectName,
+                        comptime::Interpreter& interp, comptime::Env& env) {
+    if (!ret.value) return false;
+    const auto* call = dynamic_cast<const MethodCall*>(ret.value.get());
+    if (!call || call->method_name != "pointer_map_quote") return false;
+    if (!call->generic_args.empty() || call->args.size() != 1) return false;
+    const auto* inner = dynamic_cast<const MemberAccess*>(call->object.get());
+    if (!inner || inner->member != "layout") return false;
+    const auto* root = dynamic_cast<const Identifier*>(inner->object.get());
+    if (!root || root->name != "compiler") return false;
+    comptime::ExprResult arg = interp.evaluateExpression(*call->args[0], env);
+    return arg.status == comptime::ExprStatus::Ok &&
+           arg.value.kind == comptime::ValueKind::Opaque && arg.value.text == subjectName;
+}
+
+ThreadedScan scanThreadedAnswer(const Block& body, const std::string& subjectName,
+                                comptime::Interpreter& interp, comptime::Env& env) {
+    for (std::size_t i = 0; i < body.statements.size(); ++i) {
+        const bool last = (i + 1 == body.statements.size());
+        const Statement* stmt = body.statements[i].get();
+        if (const auto* decl = dynamic_cast<const VariableDeclaration*>(stmt)) {
+            if (last) return ThreadedScan::Refused;
+            std::string detail;
+            if (interp.evaluateDeclaration(*decl, env, &detail) != comptime::ExprStatus::Ok)
+                return ThreadedScan::Refused;
+            continue;
+        }
+        if (const auto* ret = dynamic_cast<const ReturnStatement*>(stmt)) {
+            if (!last) return ThreadedScan::Refused;
+            return isProjectionReturn(*ret, subjectName, interp, env) ? ThreadedScan::Answered
+                                                                      : ThreadedScan::Refused;
+        }
+        if (const auto* ifStmt = dynamic_cast<const IfStatement*>(stmt)) {
+            bool refused = false;
+            const Block* arm = takenBranchArm(*ifStmt, interp, env, &refused);
+            if (refused) return ThreadedScan::Refused;
+            if (!arm) continue;
+            const ThreadedScan sub = scanThreadedAnswer(*arm, subjectName, interp, env);
+            if (sub != ThreadedScan::FallsThrough) return sub;
+            continue;
+        }
+        if (const auto* exprStmt = dynamic_cast<const ExpressionStatement*>(stmt)) {
+            if (last || !exprStmt->expr) return ThreadedScan::Refused;
+            const auto* assign = dynamic_cast<const BinaryOp*>(exprStmt->expr.get());
+            if (assign && assign->op == ASTTokenKind::EQUAL &&
+                dynamic_cast<const Identifier*>(assign->left.get())) {
+                std::string detail;
+                if (interp.evaluateAssign(*assign, env, &detail) != comptime::ExprStatus::Ok)
+                    return ThreadedScan::Refused;
+                continue;
+            }
+            if (interp.evaluateExpression(*exprStmt->expr, env).status !=
+                comptime::ExprStatus::Ok)
+                return ThreadedScan::Refused;
+            continue;
+        }
+        return ThreadedScan::Refused;
+    }
+    return ThreadedScan::FallsThrough;
+}
+
+// Whether `body` answers the slot by threading the subject to the
+// projection: straight-line lets, rebinds and bare calls (literals + lets +
+// calls, parameters bound) plus `if` over a comptime-known bool (I-G3: the
+// taken arm must thread to the projection), ending in
+// `return compiler.layout.pointer_map_quote(<subject>)`, where the argument
+// evaluates to the subject parameter rather than merely spelling it. The
+// single-return projection (isTypeMetadataAnswer) is the base case; `let t =
+// s; return ...(t);` and helper-threaded equivalents are the unlocked
+// shapes. The projection call itself is never executed here -- codegen
+// computes the map from the finalised layout -- so this validates the
+// threading and the shape, and anything else answers false for the existing
+// refusal below. Loops stay refused per ADR 0006, and every threaded step
+// still runs under the interpreter's depth and acyclicity guards.
+bool isThreadedTypeMetadataAnswer(const Block& body, const std::string& subjectName,
+                                  const Program& program) {
+    if (body.statements.empty()) return false;    comptime::Interpreter interp(program);
+    comptime::Env env;
+    env.bind(subjectName, comptime::Value::makeOpaque(subjectName));
+    return scanThreadedAnswer(body, subjectName, interp, env) == ThreadedScan::Answered;
+}
 
 void SemanticAnalyzer::collectProvider(SpecialDeclaration& node) {
     std::vector<Attribute*> provides;
@@ -585,9 +675,10 @@ void SemanticAnalyzer::collectProvider(SpecialDeclaration& node) {
     // The body is what makes the provider pure by construction. Anything but
     // the projection return is refused with the line it breaks, never run.
     // The single-return projection is the base case; a straight-line body
-    // threading the subject to it (lets, helper calls, parameters bound)
-    // answers alike. `w5_program_` is the program being walked, which is
-    // what helper lookup reads; null outside the walk keeps the base case.
+    // threading the subject to it (lets, rebinds, helper calls, known-bool
+    // branches, parameters bound) answers alike. `w5_program_` is the program
+    // being walked, which is what helper lookup reads; null outside the walk
+    // keeps the base case.
     const bool projection =
         node.body && (isTypeMetadataAnswer(*node.body, node.params[0]->name) ||
                       (w5_program_ && isThreadedTypeMetadataAnswer(*node.body,
@@ -625,13 +716,79 @@ void SemanticAnalyzer::collectProvider(SpecialDeclaration& node) {
 // `~T()`. The evaluable subset is handler-eval's shape with threading: an
 // empty body (no custom cleanup; composition still runs), one
 // `return quote { ... };` whose quote codegen lowers once as a shared
-// function, or a straight-line body (literals + lets + calls, the subject
-// parameter bound) threading to such a quote. Anything else is refused at
-// collection naming the gap rather than silently dropped in codegen. Null
+// function, or a straight-line body (literals + lets + rebinds + calls with
+// known-bool branches, the subject parameter bound) threading to such a
+// quote. Anything else is refused at collection naming the gap rather than
+// silently dropped in codegen. Null
 // when the body is absent or empty (no generation); the inner quote block
 // when the body threads to a quote return; null with `*valid` cleared when
 // the shape is outside the subset. A null `program` (outside the program
 // walk) holds only the base case: one literal quote return.
+// The destructor/deallocate scan outcome for one statement list, mirroring
+// ThreadedScan above: the answer here is the generation quote block.
+enum class DtorScan { FallsThrough, Answered, Refused };
+
+DtorScan scanDestructorGeneration(const Block& body, comptime::Interpreter& interp,
+                                  comptime::Env& env, Block** generation) {
+    for (std::size_t i = 0; i < body.statements.size(); ++i) {
+        const bool last = (i + 1 == body.statements.size());
+        const Statement* stmt = body.statements[i].get();
+        if (const auto* decl = dynamic_cast<const VariableDeclaration*>(stmt)) {
+            if (last) return DtorScan::Refused;
+            std::string detail;
+            if (interp.evaluateDeclaration(*decl, env, &detail) !=
+                comptime::ExprStatus::Ok)
+                return DtorScan::Refused;
+            continue;
+        }
+        if (const auto* ret = dynamic_cast<const ReturnStatement*>(stmt)) {
+            if (!last || !ret->value) return DtorScan::Refused;
+            if (const auto* quote = dynamic_cast<const QuoteExpression*>(ret->value.get())) {
+                if (quote->block) {
+                    *generation = quote->block.get();
+                    return DtorScan::Answered;
+                }
+                return DtorScan::Refused;
+            }
+            comptime::ExprResult threaded = interp.evaluateExpression(*ret->value, env);
+            if (threaded.status == comptime::ExprStatus::Ok &&
+                threaded.value.kind == comptime::ValueKind::Quote &&
+                threaded.value.quote && threaded.value.quote->block) {
+                *generation = threaded.value.quote->block.get();
+                return DtorScan::Answered;
+            }
+            return DtorScan::Refused;
+        }
+        if (const auto* ifStmt = dynamic_cast<const IfStatement*>(stmt)) {
+            bool refused = false;
+            const Block* arm = takenBranchArm(*ifStmt, interp, env, &refused);
+            if (refused) return DtorScan::Refused;
+            if (!arm) continue;
+            const DtorScan sub = scanDestructorGeneration(*arm, interp, env, generation);
+            if (sub != DtorScan::FallsThrough) return sub;
+            continue;
+        }
+        if (const auto* exprStmt = dynamic_cast<const ExpressionStatement*>(stmt)) {
+            if (last || !exprStmt->expr) return DtorScan::Refused;
+            const auto* assign = dynamic_cast<const BinaryOp*>(exprStmt->expr.get());
+            if (assign && assign->op == ASTTokenKind::EQUAL &&
+                dynamic_cast<const Identifier*>(assign->left.get())) {
+                std::string detail;
+                if (interp.evaluateAssign(*assign, env, &detail) !=
+                    comptime::ExprStatus::Ok)
+                    return DtorScan::Refused;
+                continue;
+            }
+            if (interp.evaluateExpression(*exprStmt->expr, env).status !=
+                comptime::ExprStatus::Ok)
+                return DtorScan::Refused;
+            continue;
+        }
+        return DtorScan::Refused;
+    }
+    return DtorScan::FallsThrough;
+}
+
 static Block* destructorGenerationBody(SpecialDeclaration& node, bool* valid,
                                        const Program* program) {
     *valid = true;
@@ -649,48 +806,25 @@ static Block* destructorGenerationBody(SpecialDeclaration& node, bool* valid,
         }
         if (!program) { *valid = false; return nullptr; }
     } else if (!program) { *valid = false; return nullptr; }
-    // Straight-line threading to the generation quote: lets bind, bare calls
-    // run for their threading, and the subject parameter is bound (the
-    // unlock), so `let t <$struct> = s;` and helper-threaded equivalents
-    // reach the same quote. The final statement must return the quote; the
-    // generation itself stays uniform (it names no `self`, checked below).
+    // Straight-line threading to the generation quote: lets bind, rebinds
+    // rebind (I-G1), bare calls run for their threading, `if` over a
+    // comptime-known bool scans its taken arm (I-G3, takenBranchArm above),
+    // and the subject parameter is bound (the unlock), so `let t <$struct> =
+    // s;` and helper-threaded equivalents reach the same quote. The final
+    // statement must return the quote; the generation itself stays uniform
+    // (it names no `self`, checked below). Loops stay refused per ADR 0006.
     comptime::Interpreter interp(*program);
     comptime::Env env;
     if (!node.params.empty())
         env.bind(node.params[0]->name,
                  comptime::Value::makeOpaque(node.params[0]->name));
-    for (std::size_t i = 0; i < node.body->statements.size(); ++i) {
-        const bool last = (i + 1 == node.body->statements.size());
-        const Statement* stmt = node.body->statements[i].get();
-        if (const auto* decl = dynamic_cast<const VariableDeclaration*>(stmt)) {
-            if (last) { *valid = false; return nullptr; }
-            std::string detail;
-            if (interp.evaluateDeclaration(*decl, env, &detail) !=
-                comptime::ExprStatus::Ok) { *valid = false; return nullptr; }
-            continue;
-        }
-        if (const auto* ret = dynamic_cast<const ReturnStatement*>(stmt)) {
-            if (!last || !ret->value) { *valid = false; return nullptr; }
-            if (const auto* quote = dynamic_cast<const QuoteExpression*>(ret->value.get())) {
-                if (quote->block) return quote->block.get();
-                *valid = false; return nullptr;
-            }
-            comptime::ExprResult threaded = interp.evaluateExpression(*ret->value, env);
-            if (threaded.status == comptime::ExprStatus::Ok &&
-                threaded.value.kind == comptime::ValueKind::Quote &&
-                threaded.value.quote && threaded.value.quote->block)
-                return threaded.value.quote->block.get();
-            *valid = false; return nullptr;
-        }
-        if (const auto* exprStmt = dynamic_cast<const ExpressionStatement*>(stmt)) {
-            if (last || !exprStmt->expr) { *valid = false; return nullptr; }
-            if (interp.evaluateExpression(*exprStmt->expr, env).status !=
-                comptime::ExprStatus::Ok) { *valid = false; return nullptr; }
-            continue;
-        }
-        *valid = false; return nullptr;
+    Block* generation = nullptr;
+    if (scanDestructorGeneration(*node.body, interp, env, &generation) !=
+        DtorScan::Answered) {
+        *valid = false;
+        return nullptr;
     }
-    *valid = false; return nullptr;
+    return generation;
 }
 
 // A subject-relative name inside destructor generation: the generation

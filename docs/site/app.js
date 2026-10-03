@@ -763,7 +763,7 @@
     const heroCopyBtn = document.getElementById('hero-copy-install-btn');
     if (heroCopyBtn) {
       heroCopyBtn.addEventListener('click', async () => {
-        const cmd = 'curl -fsSL https://fin-lang.org/install.sh | sh';
+        const cmd = 'curl -fsSL https://raw.githubusercontent.com/M1778/Fin/master/install.sh | sh';
         try {
           await navigator.clipboard.writeText(cmd);
           heroCopyBtn.innerHTML = `

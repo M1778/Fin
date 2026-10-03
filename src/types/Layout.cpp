@@ -521,7 +521,24 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
         return {{}, refuse(t, "`Self` is not bound to the type it stands for")};
     }
 
-    if (t.as<DynamicType>()) {
+    if (auto* dyn = t.as<DynamicType>()) {
+        // `any` is the backend's `{i8*, i64}` blob (payload, typeid) per ADR
+        // 0034: opaque storage, so zero traced slots. Sized here so a struct
+        // holding one agrees with codegen by construction; `object` stays
+        // unmapped, a distinct dynamic type with even less settled meaning.
+        if (dyn->name == "any") {
+            const ScalarInfo ptrInfo{ScalarKind::Pointer, 0, false};
+            const ScalarInfo idInfo{ScalarKind::Int, 64, false};
+            const uint64_t ptrSize = sizeOfScalar(ptrInfo, target_);
+            const uint64_t ptrAlign = alignOfScalar(ptrInfo, target_);
+            const uint64_t idSize = sizeOfScalar(idInfo, target_);
+            const uint64_t idAlign = alignOfScalar(idInfo, target_);
+            TypeLayout out;
+            out.align = std::max<uint64_t>(ptrAlign, idAlign);
+            const uint64_t idOffset = alignUp(ptrSize, idAlign);
+            out.size = alignUp(idOffset + idSize, out.align);
+            return {out, ""};
+        }
         // docs/plan.md fixes `any` as `{i8*, i64}` -- payload plus typeid -- and
         // says in the same paragraph to emit that layout from a declaration in
         // lib/std rather than hardcoding it. Hardcoding 16 here would be the
@@ -579,6 +596,13 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
         bool hasPayload = false;
         uint64_t maxPayloadSize = 0;
         uint64_t maxPayloadAlign = 1;
+        // Every variant's pointer words, relative to its own payload start.
+        // Per-variant and word-precise, never the whole buffer: a variant with
+        // an `&int` payload contributes exactly that word, and a payload-free
+        // variant contributes nothing. Which variant gates a word is the
+        // emitted metadata's tag (src/codegen); this flat list carries the
+        // offsets the gates select among.
+        std::vector<PointerSlot> variantPointers;
 
         for (const auto& kv : st->enumerators) {
             if (auto fn = kv.second->as<FunctionType>()) {
@@ -586,12 +610,15 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
                     hasPayload = true;
                     uint64_t memberOffset = 0;
                     uint64_t memberMaxAlign = 1;
-                     
+
                     for (const auto& pt : fn->param_types) {
                         auto pl = layoutOf(pt);
                         if (!pl.ok()) return {{}, pl.refusal};
-                        if (!pl.layout.pointers.empty()) return {{}, refuse(t, "one of its variants holds a pointer, and how a collector reads a discriminant to safely trace a tagged union is undecided")};
                         memberOffset = alignUp(memberOffset, pl.layout.align);
+                        for (const auto& slot : pl.layout.pointers) {
+                            variantPointers.push_back(
+                                {memberOffset + slot.offset, slot.pointee});
+                        }
                         memberOffset += pl.layout.size;
                         memberMaxAlign = std::max(memberMaxAlign, pl.layout.align);
                     }
@@ -615,6 +642,15 @@ LayoutResult LayoutEngine::compute(const TypePtr& type) {
         TypeLayout out;
         out.size = totalSize;
         out.align = totalAlign;
+        for (const auto& slot : variantPointers) {
+            out.pointers.push_back({payloadStart + slot.offset, slot.pointee});
+        }
+        // Variant iteration is unordered, so the walk above is not: sorted
+        // here, keeping the ascending-offsets contract true for every map.
+        std::sort(out.pointers.begin(), out.pointers.end(),
+                  [](const PointerSlot& a, const PointerSlot& b) {
+                      return a.offset < b.offset;
+                  });
         return {out, ""};
     }
 

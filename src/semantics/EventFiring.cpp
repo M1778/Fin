@@ -109,15 +109,15 @@ bool isLineCall(const Expression& expr) {
            dynamic_cast<const MacroInvocation*>(&expr);
 }
 
-// The interpretability line as a walker: the first control-flow form found,
-// by its source spelling. Same four forms W6 holds, so the two diagnostics
-// read alike.
+// The interpretability line as a walker: the first loop form found, by its
+// source spelling. `if`/`else` evaluates (I-G3: the taken arm over a
+// comptime-known bool) and is never a breach — only loops are. Same loop
+// forms W6 holds, so the two diagnostics read alike.
 class FlowWalker : public StructuralWalk {
 public:
     std::string found;
     bool enter(ASTNode& node) override {
         switch (node.kind()) {
-            case NodeKind::IfStatement: found = "if"; return false;
             case NodeKind::WhileLoop: found = "while"; return false;
             case NodeKind::ForLoop: found = "for"; return false;
             case NodeKind::ForeachLoop: found = "foreach"; return false;
@@ -127,8 +127,10 @@ public:
 };
 
 // The form breach in one top-level body statement, or "" when the statement
-// is one of the five forms (plus `blame`/`return`, which §3.8 and every
-// handler need). A call's quote return is NOT checked here: that is
+// is one of the seven forms (plus `blame`/`return`, which §3.8 and every
+// handler need): lets, bare calls, index stores, plain `name = value`
+// rebinds (I-G1), and `if` over a comptime-known bool (I-G3, the taken arm
+// decides at fire time). A call's quote return is NOT checked here: that is
 // evaluation's gap, and refusing it here would convict an unarmed handler
 // for what only firing could know.
 std::string formBreach(const Statement& stmt) {
@@ -139,11 +141,13 @@ std::string formBreach(const Statement& stmt) {
     }
     if (dynamic_cast<const ReturnStatement*>(&stmt)) return "";
     if (dynamic_cast<const BlameStatement*>(&stmt)) return "";
+    if (dynamic_cast<const IfStatement*>(&stmt)) return "";
     if (const auto* exprStmt = dynamic_cast<const ExpressionStatement*>(&stmt)) {
         const Expression* expr = exprStmt->expr.get();
         if (const auto* assign = dynamic_cast<const BinaryOp*>(expr)) {
             if (assign->op == ASTTokenKind::EQUAL &&
-                dynamic_cast<const ArrayAccess*>(assign->left.get()))
+                (dynamic_cast<const ArrayAccess*>(assign->left.get()) ||
+                 dynamic_cast<const Identifier*>(assign->left.get())))
                 return "";
             return "uses '" + std::string(nodeKindName(expr->kind())) + "'";
         }
@@ -195,7 +199,8 @@ std::set<std::string> checkW5HandlerPayloads(Program& program, const EventRegist
         if (!breach.empty()) {
             report(*decl, "Handler '" + record.handler + "' for event '" +
                               record.event + "' " + breach +
-                              ": handlers hold five statement forms and no control flow "
+                              ": handlers hold lets, calls, rebinds and known-bool branches, "
+                              "and no other control flow "
                               "(the interpretability line)");
             refused.insert(record.handler);
         }
@@ -420,18 +425,80 @@ EvalOutcome evaluateHandler(SpecialDeclaration& decl, Program& program, const W5
             out.diagnosed = true;
             return out;
         }
-        // A `let` whose initialiser evaluates binds and continues; a bare
-        // call that evaluates runs for its threading and continues. Either
-        // is straight-line threading (literals + lets + calls). Anything
-        // else falls to the existing gap below, word for word.
+        // I-G3: an `if` over a comptime-known bool takes its arm here — the
+        // same arm the interpreter takes (evaluateIf carries its depth and
+        // acyclicity guards, so a helper-called condition folds alike). A
+        // quote answered from the arm splices like a top-level one (and a
+        // prior `error` suppresses it alike); falling off the arm continues
+        // with the next statement. Anything else keeps the named gap below.
+        if (const auto* ifStmt = dynamic_cast<const IfStatement*>(stmt.get())) {
+            comptime::BodyResult branch = interp.evaluateIf(*ifStmt, env);
+            if (branch.status == comptime::BodyStatus::Empty) continue;
+            if (branch.status == comptime::BodyStatus::Returned &&
+                branch.value.kind == comptime::ValueKind::Quote &&
+                branch.value.quote) {
+                if (errorSeen) {
+                    out.diagnosed = true;
+                    return out;
+                }
+                if (branch.value.quote->block) {
+                    CloneVisitor cloner;
+                    for (auto& qstmt : branch.value.quote->block->statements)
+                        out.quote.push_back(cloner.clone<Statement>(qstmt.get()));
+                }
+                return out;
+            }
+            if (branch.status == comptime::BodyStatus::Blame) {
+                std::string msg = "Handler '" + record.handler + "' for event '" +
+                                  record.event + "' at '" + pointDetail(point) + "' blamed";
+                const std::string prefix = "blame:";
+                if (branch.detail.compare(0, prefix.size(), prefix) == 0)
+                    msg += branch.detail.substr(prefix.size());
+                report(*stmt, msg);
+                out.diagnosed = true;
+                return out;
+            }
+            if (branch.status == comptime::BodyStatus::Returned) {
+                report(*stmt, "Handler '" + record.handler + "' for event '" +
+                                  record.event +
+                                  "' returns a non-quote answer from its 'if' arm: "
+                                  "only a quote literal evaluates today "
+                                  "(the comptime interpreter gap: no @special execution yet, "
+                                  "so handler parameters do not bind and calls do not run)");
+            } else {
+                report(*stmt, "Handler '" + record.handler + "' for event '" +
+                                  record.event + "' cannot take its 'if' arm: '" +
+                                  branch.detail +
+                                  "' (the comptime interpreter gap: the condition must be a "
+                                  "comptime-known bool and the taken arm must evaluate)");
+            }
+            out.diagnosed = true;
+            return out;
+        }
+        // A `let` whose initialiser evaluates binds and continues; a plain
+        // `name = value;` rebinds through evaluateAssign (I-G1, the
+        // interpreter's case) and continues; a bare call that evaluates runs
+        // for its threading and continues. Anything else falls to the
+        // existing gap below, word for word.
         if (const auto* let = dynamic_cast<const VariableDeclaration*>(stmt.get())) {
             std::string detail;
             if (interp.evaluateDeclaration(*let, env, &detail) == comptime::ExprStatus::Ok)
                 continue;
         } else if (const auto* bare = dynamic_cast<const ExpressionStatement*>(stmt.get())) {
-            if (bare->expr &&
-                interp.evaluateExpression(*bare->expr, env).status == comptime::ExprStatus::Ok)
-                continue;
+            bool ok = false;
+            if (bare->expr) {
+                const auto* assign = dynamic_cast<const BinaryOp*>(bare->expr.get());
+                if (assign && assign->op == ASTTokenKind::EQUAL &&
+                    dynamic_cast<const Identifier*>(assign->left.get())) {
+                    std::string detail;
+                    ok = interp.evaluateAssign(*assign, env, &detail) ==
+                         comptime::ExprStatus::Ok;
+                } else {
+                    ok = interp.evaluateExpression(*bare->expr, env).status ==
+                         comptime::ExprStatus::Ok;
+                }
+            }
+            if (ok) continue;
         }
         // A `let`/`const`, an index store, or a bare call before the return:
         // within the line, but needs an environment the gap does not have.

@@ -562,24 +562,48 @@ TEST(Soundness_Layout, AnOptionLikeEnumHasExpectedSize) {
     EXPECT_EQ(l.layout.align, 4u);
 }
 
-TEST(Soundness_Layout, AnEnumVariantHoldingAPointerIsRefused) {
-    // An enum variant with a pointer payload has no layout: tracing collector support
-    // for reading discriminants dynamically across variants is not yet ruled.
+TEST(Soundness_Layout, AnEnumVariantHoldingAPointerHasAPreciseMap) {
+    // Per-variant precise pointer maps: `Some(&int)` traces exactly its
+    // payload word -- tag is 4 bytes, the payload is pointer-aligned, so the
+    // word sits at 8 -- and payload-free `None` traces nothing.
     auto t = typeFromSource("enum OptPtr { None, Some(&int) }\n", "OptPtr");
     ASSERT_TRUE(t != nullptr);
     LayoutEngine e;
     auto l = e.layoutOf(t);
-    EXPECT_FALSE(l.ok());
-    EXPECT_NE(l.refusal.find("holds a pointer"), std::string::npos) << l.refusal;
+    ASSERT_TRUE(l.ok()) << l.refusal;
+    EXPECT_EQ(l.layout.size, 16u);
+    EXPECT_EQ(l.layout.align, 8u);
+    ASSERT_EQ(l.layout.pointers.size(), 1u);
+    EXPECT_EQ(l.layout.pointers[0].offset, 8u);
+}
+
+TEST(Soundness_Layout, AnEnumMapsEachVariantPayloadSeparately) {
+    // Each variant's payload lays out separately: `A(&int, int)` traces word
+    // 0 of the payload and `B(int, &int)` word 1 -- never the whole buffer.
+    // Tag 4 bytes padded to 8, 16-byte payloads: words at 8 and 16 of 24.
+    auto t = typeFromSource("enum Two { A(&int, int), B(int, &int) }\n", "Two");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto l = e.layoutOf(t);
+    ASSERT_TRUE(l.ok()) << l.refusal;
+    EXPECT_EQ(l.layout.size, 24u);
+    EXPECT_EQ(l.layout.align, 8u);
+    ASSERT_EQ(l.layout.pointers.size(), 2u);
+    EXPECT_EQ(l.layout.pointers[0].offset, 8u);
+    EXPECT_EQ(l.layout.pointers[1].offset, 16u);
 }
 
 TEST(Soundness_Layout, ADynamicTypeHasNoLayout) {
-    // `any` is `{i8*, i64}` per docs/plan.md -- and that layout is to be emitted
-    // from a declaration in lib/std rather than hardcoded, which is ADR 0003's
-    // "library not compiler feature" applied to itself. Hardcoding 16 here would
-    // be the hardcoding the plan refuses, one file earlier.
+    // `any` is the backend's `{i8*, i64}` opaque blob per ADR 0034 (value
+    // semantics): storage with zero traced slots, so a struct holding one
+    // agrees with codegen. `object` stays unmapped, a distinct dynamic type
+    // with even less settled meaning.
     LayoutEngine e;
-    EXPECT_FALSE(e.layoutOf(std::make_shared<DynamicType>("any")).ok());
+    const LayoutResult any = e.layoutOf(std::make_shared<DynamicType>("any"));
+    ASSERT_TRUE(any.ok()) << any.refusal;
+    EXPECT_EQ(any.layout.size, e.target().pointerSize + 8u);
+    EXPECT_EQ(any.layout.align, e.target().pointerSize);
+    EXPECT_TRUE(any.layout.pointers.empty());
     EXPECT_FALSE(e.layoutOf(std::make_shared<DynamicType>("object")).ok());
 }
 

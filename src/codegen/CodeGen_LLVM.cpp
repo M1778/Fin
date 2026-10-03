@@ -1542,9 +1542,10 @@ public:
     // Stride-encoded so its cost is counted in fields, not bytes (§3.9's
     // normative constraint): a `[&T, N]` field is one entry whatever N is, and
     // a pointer-free type is a constant-size record with no entries. The tag is
-    // ADR 0019's slot state and is 0 (traced) everywhere today -- the
-    // must-not-follow states have no producer yet, and the field exists so
-    // they fit without an ABI break when one does.
+    // 0 (trace always) for unconditional slots and the gating variant's
+    // discriminant otherwise (biased by encodeVariantTag, so 0 stays
+    // unconditional-only): ADR 0019's must-not-follow states still have no
+    // producer, and a gate inside a gate refuses rather than guessing.
     //
     // Nothing is emitted without the declaration: every program that names no
     // provider lowers exactly what it lowered before this slice.
@@ -1866,57 +1867,22 @@ public:
                                              /*structName=*/""});
     }
 
-    // Whether a lowered value can hold a heap pointer anywhere inside it. The
-    // question an enum field asks: a variant whose payload may hold a pointer
-    // needs discriminant-dependent tracing, which is undecided, so the field
-    // refuses rather than emitting a map that is right for one member.
-    // Conservative towards refusal: a struct this file cannot see inside
-    // answers true, so an unverifiable payload refuses instead of vanishing.
-    static bool containsDataPointer(const CgType& type) {
-        if (type.isAny || type.isInterface || type.isPrototype()) return true;
-        // A union lowered as its first alternative: whether the value holds a
-        // pointer depends on the alternative, which is known only at run time.
-        if (type.isUnion) return true;
-        if (type.isEnum()) {
-            if (!type.enumInfo) return true;
-            for (const auto& kv : type.enumInfo->memberInfoByName) {
-                for (const auto& payload : kv.second.payloadTypes) {
-                    if (containsDataPointer(payload)) return true;
-                }
-            }
-            return false;
-        }
-        switch (type.kind) {
-            case CgType::Kind::Ptr:
-                // A string (no recorded pointee) points at static bytes, and a
-                // function pointer at code: neither is a heap edge.
-                return type.pointee != nullptr && !type.pointee->isFn();
-            case CgType::Kind::Struct: {
-                if (!type.structInfo) return true;
-                for (const auto& f : type.structInfo->fields) {
-                    if (containsDataPointer(f.type)) return true;
-                }
-                return false;
-            }
-            case CgType::Kind::Array:
-                if (type.isDynamicArray) return true;  // the buffer pointer
-                return type.element ? containsDataPointer(*type.element) : true;
-            case CgType::Kind::Fn:
-            case CgType::Kind::Int:
-            case CgType::Kind::Float:
-            case CgType::Kind::Void:
-                return false;
-            case CgType::Kind::Prototype:
-                return true;
-        }
-        return true;
-    }
-
     struct MetaEntry {
         uint64_t offset = 0;
         uint64_t stride = 0;
         uint64_t count = 1;
+        // 0 traces unconditionally; otherwise the gating variant's
+        // discriminant, biased by encodeVariantTag so that no discriminant --
+        // including 0 -- collides with "always".
+        int64_t tag = 0;
     };
+
+    // The gate on a variant-traced entry. Non-negative discriminants shift up
+    // by one, negative ones pass through, so 0 stays unconditional-only and
+    // every int64 discriminant still decodes (tag > 0 means tag - 1).
+    static int64_t encodeVariantTag(int64_t discriminant) {
+        return discriminant >= 0 ? discriminant + 1 : discriminant;
+    }
 
     // This file's pointer map for `type` laid at `base`: ascending offsets,
     // nesting already resolved, arrays stride-encoded. "" on success; else the
@@ -1924,10 +1890,16 @@ public:
     // rather than a guess it emits.
     std::string collectMetaSlots(const CgType& type, const std::string& fieldPath,
                                  uint64_t base, std::vector<MetaEntry>& out,
-                                 std::set<const StructInfo*>& path) {
-        if (type.isAny)
-            return "field '" + fieldPath + "' holds an `any`, whose heap edges "
-                   "depend on what it boxes and no static entry can say";
+                                 std::set<const StructInfo*>& path,
+                                 std::set<const EnumInfo*>& epath) {
+        // A nullable value is its payload at offset zero plus a tag word (ADR
+        // 0040): the tag is not a heap edge, so the map is the payload's.
+        if (type.isNullableValue())
+            return collectMetaSlots(*type.nullablePayload, fieldPath, base, out, path,
+                                    epath);
+        // An `any` blob is opaque per ADR 0034 (value semantics): storage, not
+        // a traced slot. Zero entries, never a refusal.
+        if (type.isAny) return "";
         // Q12's interface half: an interface-typed field contributes exactly one
         // traced slot, the data word at the field's offset. The vtable word a
         // collector must not follow (ADR 0019) is absent rather than marked --
@@ -1947,15 +1919,61 @@ public:
             return "field '" + fieldPath + "' holds a prototype, which has no "
                    "static field list to lay out";
         if (type.isEnum()) {
-            for (const auto& kv : type.enumInfo->memberInfoByName) {
-                for (const auto& payload : kv.second.payloadTypes) {
-                    if (containsDataPointer(payload))
-                        return "field '" + fieldPath + "' holds an enum whose '" +
-                               kv.first +
-                               "' variant may hold a pointer, and tracing a tagged union "
-                               "needs a discriminant rule nobody has written";
+            // Per-variant precise pointer maps: each variant's payload lays out
+            // separately (discriminant + payload layout per variant), so a
+            // variant with an `&int` payload traces exactly that word gated on
+            // its discriminant, and a payload-free variant traces nothing.
+            // Never the whole payload buffer, and never another variant's.
+            const EnumInfo* einfo = type.enumInfo;
+            if (!einfo)
+                return "field '" + fieldPath + "' is an enum this file did not lower";
+            if (!einfo->hasPayload) return "";
+            if (!epath.insert(einfo).second)
+                return "field '" + fieldPath + "' reaches an enum cycle by value";
+            for (const auto& kv : einfo->memberInfoByName) {
+                const EnumMemberInfo& mem = kv.second;
+                if (!mem.hasPayload) continue;
+                for (size_t i = 0; i < mem.payloadTypes.size(); ++i) {
+                    // Walked at zero, as the array case below: the entries are
+                    // payload-relative and `base` joins once when composing.
+                    std::vector<MetaEntry> one;
+                    const std::string sub = fieldPath + "::" + mem.name;
+                    if (std::string r = collectMetaSlots(mem.payloadTypes[i], sub, 0,
+                                                         one, path, epath);
+                        !r.empty()) {
+                        epath.erase(einfo);
+                        return r;
+                    }
+                    for (const auto& e : one) {
+                        // A gate inside a gate is two discriminants at once --
+                        // unruled, so refused rather than half-traced. A wrong
+                        // map is worse than this refusal.
+                        if (e.tag != 0) {
+                            epath.erase(einfo);
+                            return "field '" + fieldPath + "' holds an enum whose '" +
+                                   mem.name +
+                                   "' variant reaches a nested variant-gated pointer, "
+                                   "and tracing two discriminants at once is not "
+                                   "lowered yet";
+                        }
+                        // Portable overflow discipline, as the array case below:
+                        // refused rather than wrapped.
+                        uint64_t at = base;
+                        for (uint64_t part :
+                             {einfo->payloadStart, mem.payloadOffsets[i], e.offset}) {
+                            if (part > UINT64_MAX - at) {
+                                epath.erase(einfo);
+                                return "field '" + fieldPath +
+                                       "' has a pointer map that does not fit in 64 bits";
+                            }
+                            at += part;
+                        }
+                        out.push_back(
+                            MetaEntry{at, e.stride, e.count, encodeVariantTag(mem.tag)});
+                    }
                 }
             }
+            epath.erase(einfo);
             return "";
         }
         switch (type.kind) {
@@ -1985,7 +2003,7 @@ public:
                         fieldPath.empty() ? f.name : fieldPath + "." + f.name;
                     const uint64_t at =
                         base + layout->getElementOffset(static_cast<unsigned>(i));
-                    if (std::string r = collectMetaSlots(f.type, sub, at, out, path);
+                    if (std::string r = collectMetaSlots(f.type, sub, at, out, path, epath);
                         !r.empty()) {
                         path.erase(info);
                         return r;
@@ -1995,9 +2013,14 @@ public:
                 return "";
             }
             case CgType::Kind::Array: {
-                if (type.isDynamicArray)
-                    return "field '" + fieldPath + "' holds a dynamic array, which has "
-                           "no static pointer map";
+                // A dynamic `[T]` is ADR 0025's `{ptr, len}` pair: the buffer
+                // pointer is word zero, the length is not traced. One entry,
+                // whatever the element holds -- the elements' own pointers are
+                // dynamic-length and have no static offsets.
+                if (type.isDynamicArray) {
+                    out.push_back(MetaEntry{base, 0, 1});
+                    return "";
+                }
                 if (!type.element || !type.element->llvmType)
                     return "field '" + fieldPath + "' is an array this file did not lower";
                 if (type.extent == 0) return "";
@@ -2006,7 +2029,7 @@ public:
                 // Walking at `base` would count it twice.
                 std::vector<MetaEntry> one;
                 if (std::string r = collectMetaSlots(*type.element, fieldPath + "[]",
-                                                     0, one, path);
+                                                     0, one, path, epath);
                     !r.empty())
                     return r;
                 if (one.empty()) return "";  // pointer-free element: nothing,
@@ -2024,14 +2047,17 @@ public:
                     const uint64_t at = base + e.offset;
                     if (e.count == 1) {
                         // One slot per element, `extent` elements apart: one entry.
-                        out.push_back(MetaEntry{at, stride, type.extent});
+                        // The gate rides along: each element reads its own
+                        // discriminant, so one gated entry covers the whole run.
+                        out.push_back(MetaEntry{at, stride, type.extent, e.tag});
                     } else if (e.stride != 0 && e.count <= UINT64_MAX / e.stride &&
                                e.stride * e.count == stride &&
                                e.count <= UINT64_MAX / type.extent) {
                         // A nested array's span is its array's size, which is the
                         // outer stride too (elements are contiguous), so the
                         // counts multiply into one entry.
-                        out.push_back(MetaEntry{at, e.stride, e.count * type.extent});
+                        out.push_back(
+                            MetaEntry{at, e.stride, e.count * type.extent, e.tag});
                     } else {
                         // Only reachable if the layouts disagree about an
                         // element's size: refuse rather than expand (expanding a
@@ -2077,12 +2103,13 @@ public:
             if (!info.complete) continue;
             std::vector<MetaEntry> entries;
             std::set<const StructInfo*> path{&info};
+            std::set<const EnumInfo*> epath;
             const llvm::StructLayout* layout = dl.getStructLayout(info.llvmType);
             std::string refusal;
             for (size_t i = 0; i < info.fields.size(); ++i) {
                 const uint64_t at = layout->getElementOffset(static_cast<unsigned>(i));
                 refusal = collectMetaSlots(info.fields[i].type, info.fields[i].name,
-                                           at, entries, path);
+                                           at, entries, path, epath);
                 if (!refusal.empty()) break;
             }
             if (!refusal.empty()) {
@@ -2090,18 +2117,29 @@ public:
                                       : static_cast<const ASTNode&>(program),
                             "type_metadata for struct '" + info.finName + "': " + refusal);
                 return false;
-            }            auto* arrayTy = llvm::ArrayType::get(entryTy, entries.size());
+            }
+            // Variant iteration is unordered, so the walk above is not: sorted
+            // here, keeping the ascending-offsets contract true for every map.
+            std::sort(entries.begin(), entries.end(), [](const MetaEntry& a,
+                                                         const MetaEntry& b) {
+                if (a.offset != b.offset) return a.offset < b.offset;
+                if (a.stride != b.stride) return a.stride < b.stride;
+                if (a.count != b.count) return a.count < b.count;
+                return a.tag < b.tag;
+            });
+            auto* arrayTy = llvm::ArrayType::get(entryTy, entries.size());
             auto* metaTy = llvm::StructType::get(ctx_, {i64, i64, i64, arrayTy});
             std::vector<llvm::Constant*> entryConsts;
             std::string entryText;
             for (size_t i = 0; i < entries.size(); ++i) {
                 const auto& e = entries[i];
                 entryConsts.push_back(llvm::ConstantStruct::get(
-                    entryTy, {ci(e.offset), ci(e.stride), ci(e.count), ci(0)}));
+                    entryTy, {ci(e.offset), ci(e.stride), ci(e.count),
+                              ci(static_cast<uint64_t>(e.tag))}));
                 if (i) entryText += ",";
                 entryText += "(" + std::to_string(e.offset) + "," +
                              std::to_string(e.stride) + "," + std::to_string(e.count) +
-                             ",0)";
+                             "," + std::to_string(e.tag) + ")";
             }
             auto* init = llvm::ConstantStruct::get(
                 metaTy, {ci(dl.getTypeAllocSize(info.llvmType)),

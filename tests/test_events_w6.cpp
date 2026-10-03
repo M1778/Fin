@@ -263,21 +263,20 @@ TEST(W6Mismatch, DeleteSitePayloadIsChecked) {
 
 // --- Slice 3b: the interpretability line is held ---------------------------
 //
-// No control flow in handlers (owner decision). An over-wide handler is
+// Loops stay refused in handlers (owner decision). An over-wide handler is
 // refused by name: the diagnostic names the handler and the statement form,
 // so the library knows what to remove rather than what rule to look up.
+// `if` over a comptime-known bool is admitted instead (I-G3): the taken arm
+// holds no loop, so there is nothing to refuse.
 
-TEST(W6Line, IfInAHandlerIsRefusedByName) {
+TEST(W6Line, IfOverKnownBoolIsAdmitted) {
     auto r = w6compile(
         "#[on(assignment)]\n"
         "@special h_asg(target: quote, value: quote, t: $type) <quote> {\n"
         "    if (1 == 1) {}\n"
         "}\n"
         "fun main() <noret> {}\n");
-    EXPECT_NE(r.exitCode, 0) << r.err;
-    const std::string err = w6messages(stripAnsi(r.err));
-    EXPECT_NE(err.find("h_asg"), std::string::npos) << err;
-    EXPECT_NE(err.find("control flow"), std::string::npos) << err;
+    EXPECT_EQ(r.exitCode, 0) << r.err;
 }
 
 TEST(W6Line, LoopInAHandlerIsRefusedByName) {
