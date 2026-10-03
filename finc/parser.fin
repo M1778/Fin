@@ -226,6 +226,11 @@ pub struct Parser {
       // like named structs.
       pending_struct_head <&AstNode> = null,
       pending_struct_tail <&AstNode> = null,
+      // Stashed anonymous interface literals, same splice (see the
+      // `interface { ... }` literal site): the checker registers them
+      // like named interfaces, and codegen gives them tids.
+      pending_iface_head <&AstNode> = null,
+      pending_iface_tail <&AstNode> = null,
       // Per-file literal sequence for synthesized struct names.
       anon_seq <int> = 0,
 
@@ -262,6 +267,18 @@ pub struct Parser {
           } else {
               self.pending_struct_tail.right = decl;
               self.pending_struct_tail = decl;
+          }
+      }
+
+      // Stash one anonymous interface literal declaration, same splice.
+      fun stash_anon_iface(self: &Self, decl: &AstNode) <noret> {
+          if (decl == null) { return; }
+          if (self.pending_iface_head == null) {
+              self.pending_iface_head = decl;
+              self.pending_iface_tail = decl;
+          } else {
+              self.pending_iface_tail.right = decl;
+              self.pending_iface_tail = decl;
           }
       }
 
@@ -1249,20 +1266,36 @@ pub struct Parser {
               return sp_node;
           }
 
-          // Interface literal: interface { ... }
+          // Interface literal: interface { ... } (literal_interface.fin).
+          // Parsed through the interface body parser like struct
+          // literals use parse_struct_rest, stashed top-level so the
+          // checker registers and codegen gives it a tid (C++
+          // declareAnonymousLiterals). The marker types `$interface`;
+          // its str_val names the stashed declaration.
           if (cur.kind == kw_interface()) {
               self.stream.advance();
-              self.expect(tok_lbrace(), "expected '{' in interface literal");
-              let d <int> = 1;
-              while (!self.stream.is_at_end() && d > 0) {
-                  let tk <Token> = self.stream.peek();
-                  if (tk.kind == tok_lbrace()) { d++; }
-                  else if (tk.kind == tok_rbrace()) { d--; }
-                  self.stream.advance();
+              if (!self.stream.check(tok_lbrace())) {
+                  self.report_error("expected '{' in interface literal", cur.line, cur.col);
+                  return make_ident("NULL", cur.line, cur.col);
+              }
+              self.anon_seq = self.anon_seq + 1;
+              let anon_b <Buffer> = new_buffer(32);
+              anon_b.write_string("AnonInterface_");
+              anon_b.write_int(cur.line);
+              anon_b.write_char('_');
+              anon_b.write_int(cur.col);
+              anon_b.write_char('_');
+              anon_b.write_int(self.anon_seq);
+              let anon_name <string> = anon_b.to_string();
+              free_buffer(anon_b);
+              let anon_decl <&AstNode> = self.parse_interface_rest(anon_name, cur.line, cur.col);
+              if (anon_decl != null) {
+                  self.stash_anon_iface(anon_decl);
               }
               let lit <&AstNode> = new AstNode{};
               lit.kind = ast_prototype_literal();
               lit.type_annotation = "$interface";
+              lit.str_val = anon_name;
               lit.line = cur.line;
               lit.col = cur.col;
               return lit;
@@ -3615,7 +3648,160 @@ pub struct Parser {
            return en_node;
        }
 
-       fun parse_interface(self: &Self) <&AstNode> {
+        fun parse_interface_rest(self: &Self, iface_name: string, if_line: int, if_col: int) <&AstNode> {
+            self.expect(tok_lbrace(), "expected '{' after interface name");
+            let fields_head <&AstNode> = null;
+            let fields_tail <&AstNode> = null;
+            let methods_head <&AstNode> = null;
+            let methods_tail <&AstNode> = null;
+            while (!self.stream.check(tok_rbrace()) && !self.stream.is_at_end()) {
+                let cur <Token> = self.stream.peek();
+                if (cur.kind == 122 || cur.kind == tok_hash()) {
+                    self.stream.advance();
+                    if (self.match_token(tok_lbracket())) {
+                        let b_depth <int> = 1;
+                        while (!self.stream.is_at_end() && b_depth > 0) {
+                            let tk <Token> = self.stream.peek();
+                            if (tk.kind == tok_lbracket()) { b_depth++; }
+                            else if (tk.kind == tok_rbracket()) { b_depth--; }
+                            self.stream.advance();
+                        }
+                    }
+                    continue;
+                }
+                if (cur.kind == kw_pub() || cur.kind == kw_priv()) {
+                    let next <Token> = self.stream.peek_at(1);
+                    if (next.kind == tok_colon()) {
+                        self.stream.advance();
+                        self.stream.advance();
+                        continue;
+                    }
+                    self.stream.advance();
+                    cur = self.stream.peek();
+                }
+                if (cur.kind == 17 || (cur.kind == tok_ident() && p_str_eq(cur.text, "readonly"))) {
+                    self.stream.advance();
+                    cur = self.stream.peek();
+                }
+                if (cur.kind == kw_fun()) {
+                    let m_node <&AstNode> = self.parse_function(iface_name);
+                    if (m_node != null) {
+                        if (methods_head == null) {
+                            methods_head = m_node;
+                            methods_tail = m_node;
+                        } else {
+                            methods_tail.right = m_node;
+                            methods_tail = m_node;
+                        }
+                    }
+                    continue;
+                }
+                if (cur.kind == kw_operator()) {
+                    let op_node <&AstNode> = self.parse_operator(iface_name);
+                    if (op_node != null) {
+                        if (methods_head == null) {
+                            methods_head = op_node;
+                            methods_tail = op_node;
+                        } else {
+                            methods_tail.right = op_node;
+                            methods_tail = op_node;
+                        }
+                    }
+                    continue;
+                }
+                if (cur.kind == 51 || (cur.kind == tok_ident() && p_str_eq(cur.text, "Self"))) {
+                    if (self.stream.peek_at(1).kind == tok_lparen()) {
+                        self.stream.advance();
+                        self.stream.advance();
+                        while (!self.stream.check(tok_rparen()) && !self.stream.is_at_end()) {
+                            self.stream.advance();
+                        }
+                        self.expect(tok_rparen(), "expected ')' after Self parameters");
+                        self.match_token(tok_semicolon());
+                        continue;
+                    }
+                }
+                if (cur.text != null && p_str_eq(cur.text, "~")) {
+                    self.stream.advance();
+                    if (self.stream.check(51) || self.stream.check(tok_ident())) {
+                        self.stream.advance();
+                    }
+                    self.expect(tok_lparen(), "expected '(' in destructor");
+                    self.expect(tok_rparen(), "expected ')' in destructor");
+                    self.match_token(tok_semicolon());
+                    let d_b <Buffer> = new_buffer(64);
+                    d_b.write_string(iface_name);
+                    d_b.write_string("_destructor");
+                    let d_nm <string> = d_b.to_string();
+                    free_buffer(d_b);
+                    let d_node <&AstNode> = new AstNode{};
+                    d_node.kind = ast_fun_decl();
+                    d_node.name = d_nm;
+                    d_node.type_annotation = "void";
+                    d_node.line = cur.line;
+                    d_node.col = cur.col;
+                    if (methods_head == null) {
+                        methods_head = d_node;
+                        methods_tail = d_node;
+                    } else {
+                        methods_tail.right = d_node;
+                        methods_tail = d_node;
+                    }
+                    continue;
+                }
+                if (cur.kind == tok_ident()) {
+                    let f_tok <Token> = self.stream.advance();
+                    let f_name <string> = f_tok.text;
+                    let f_nullable <bool> = false;
+                    if (self.match_token(tok_question())) {
+                        f_nullable = true;
+                    }
+                    let f_type <string> = "auto";
+                    if (self.stream.check(tok_lt())) {
+                        f_type = self.parse_type();
+                    }
+                    if (f_nullable) {
+                        f_type = p_nullable_ann(f_type);
+                    }
+                    let def_val <&AstNode> = null;
+                    if (self.match_token(tok_equal())) {
+                        def_val = self.parse_expression(0);
+                    }
+                    if (self.stream.check(tok_comma()) || self.stream.check(tok_semicolon())) {
+                        self.stream.advance();
+                    }
+                    let f_node <&AstNode> = new AstNode{};
+                    f_node.kind = ast_var_decl();
+                    f_node.name = f_name;
+                    f_node.type_annotation = f_type;
+                    f_node.left = def_val;
+                    f_node.line = f_tok.line;
+                    f_node.col = f_tok.col;
+                    if (fields_head == null) {
+                        fields_head = f_node;
+                        fields_tail = f_node;
+                    } else {
+                        fields_tail.right = f_node;
+                        fields_tail = f_node;
+                    }
+                    continue;
+                }
+                self.report_error("unexpected token in interface body", cur.line, cur.col);
+                self.stream.advance();
+            }
+            self.expect(tok_rbrace(), "expected '}' after interface body");
+            let if_node <&AstNode> = new AstNode{};
+            if_node.kind = ast_interface_decl();
+            if_node.name = iface_name;
+            if_node.type_annotation = "";
+            if_node.left = fields_head;
+            if_node.extra = methods_head;
+            if_node.line = if_line;
+            if_node.col = if_col;
+            return if_node;
+        }
+
+        fun parse_interface(self: &Self) <&AstNode> {
            let is_pub <bool> = false;
            if (self.match_token(kw_pub())) {
                is_pub = true;
@@ -3719,17 +3905,37 @@ pub struct Parser {
                    }
                }
 
-               // Abstract destructor in interface: ~Self();
-               if (cur.text != null && p_str_eq(cur.text, "~")) {
-                   self.stream.advance(); // consume ~
-                   if (self.stream.check(51) || self.stream.check(tok_ident())) {
-                       self.stream.advance();
-                   }
-                   self.expect(tok_lparen(), "expected '(' in destructor");
-                   self.expect(tok_rparen(), "expected ')' in destructor");
-                   self.match_token(tok_semicolon());
-                   continue;
-               }
+                // Abstract destructor in interface: ~Self(); recorded as a
+                // destructor method (like structs) so conformance checks it
+                // instead of guessing true.
+                if (cur.text != null && p_str_eq(cur.text, "~")) {
+                    self.stream.advance(); // consume ~
+                    if (self.stream.check(51) || self.stream.check(tok_ident())) {
+                        self.stream.advance();
+                    }
+                    self.expect(tok_lparen(), "expected '(' in destructor");
+                    self.expect(tok_rparen(), "expected ')' in destructor");
+                    self.match_token(tok_semicolon());
+                    let d_b <Buffer> = new_buffer(64);
+                    d_b.write_string(iface_name);
+                    d_b.write_string("_destructor");
+                    let d_nm <string> = d_b.to_string();
+                    free_buffer(d_b);
+                    let d_node <&AstNode> = new AstNode{};
+                    d_node.kind = ast_fun_decl();
+                    d_node.name = d_nm;
+                    d_node.type_annotation = "void";
+                    d_node.line = cur.line;
+                    d_node.col = cur.col;
+                    if (methods_head == null) {
+                        methods_head = d_node;
+                        methods_tail = d_node;
+                    } else {
+                        methods_tail.right = d_node;
+                        methods_tail = d_node;
+                    }
+                    continue;
+                }
 
                 if (cur.kind == tok_ident()) {
                     let f_tok <Token> = self.stream.advance();
@@ -4621,24 +4827,40 @@ pub struct Parser {
                self.report_error("expected '}' to close namespace block", eof_tok.line, eof_tok.col);
            }
 
-           // Stashed anonymous struct literals go after the written
-           // declarations, so the checker's Pass 1 registers them like
-           // named structs before any Pass 2 body check runs.
-           let ps <&AstNode> = self.pending_struct_head;
-           while (ps != null) {
-               let ps_next <&AstNode> = ps.right;
-               ps.right = null;
-               if (head == null) {
-                   head = ps;
-                   tail = ps;
-               } else {
-                   tail.right = ps;
-                   tail = ps;
-               }
-               ps = ps_next;
-           }
-           self.pending_struct_head = null;
-           self.pending_struct_tail = null;
+            // Stashed anonymous struct literals go after the written
+            // declarations, so the checker's Pass 1 registers them like
+            // named structs before any Pass 2 body check runs.
+            let ps <&AstNode> = self.pending_struct_head;
+            while (ps != null) {
+                let ps_next <&AstNode> = ps.right;
+                ps.right = null;
+                if (head == null) {
+                    head = ps;
+                    tail = ps;
+                } else {
+                    tail.right = ps;
+                    tail = ps;
+                }
+                ps = ps_next;
+            }
+            self.pending_struct_head = null;
+            self.pending_struct_tail = null;
+            // Stashed anonymous interfaces, same splice.
+            let pi <&AstNode> = self.pending_iface_head;
+            while (pi != null) {
+                let pi_next <&AstNode> = pi.right;
+                pi.right = null;
+                if (head == null) {
+                    head = pi;
+                    tail = pi;
+                } else {
+                    tail.right = pi;
+                    tail = pi;
+                }
+                pi = pi_next;
+            }
+            self.pending_iface_head = null;
+            self.pending_iface_tail = null;
 
            root.left = head;
            return root;
@@ -4659,6 +4881,8 @@ pub fun new_parser(tokens: [Token], count: int, filename: string, source: string
         current_struct: "",
         pending_struct_head: null,
         pending_struct_tail: null,
+        pending_iface_head: null,
+        pending_iface_tail: null,
         anon_seq: 0
     };
 }

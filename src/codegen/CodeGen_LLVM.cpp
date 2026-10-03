@@ -3,6 +3,7 @@
 #include "../ast/ASTNode.hpp"   // the master AST include
 #include "../ast/CloneVisitor.hpp"
 #include "../ast/Visitor.hpp"
+#include "../ast/StructuralWalk.hpp"
 #include "../diagnostics/DiagnosticEngine.hpp"
 // The list of macros the compiler implements, read here for the same reason the
 // analyzer reads it: an invocation that survives expansion is either a builtin's
@@ -1465,6 +1466,11 @@ public:
         for (auto& et : enumTemplates_) registerImplementsBlocks(et.first);
         // Before the functions, because a function's signature may name a struct.
         declareStructs(program);
+        if (failed_) return false;
+        // Before the functions, because the Stage-C `@implements` chain is emitted
+        // where the query sits: a literal in a later body must already have its
+        // StructInfo/InterfaceInfo and tid, or the chain is frozen without it.
+        declareAnonymousLiterals(program);
         if (failed_) return false;
         declareTopLevel(program);
         if (failed_) return false;
@@ -7126,11 +7132,17 @@ private:
             // The argument is an instantiation and already knows what its own parameters
             // became, so the inner binding is read off it rather than re-derived -- and
             // that carries the display the struct was instantiated under, which is the
-            // one a diagnostic and the instance's key both want.
-            const StructInfo* info = actual.type.structInfo;
-            if (!info || info->substitution.size() != pattern->generics.size()) return;
+            // one a diagnostic and the instance's key both want. An enum instantiation
+            // carries the same answer in its method bindings: instantiateEnumGeneric
+            // keys one EnumInfo per argument list exactly as instantiateGeneric does
+            // for structs, so this is the call-boundary half of that same per-key rule.
+            const Substitution* sub = nullptr;
+            if (const StructInfo* info = actual.type.structInfo) sub = &info->substitution;
+            else if (const EnumInfo* einfo = actual.type.enumInfo)
+                sub = &einfo->methodBindings;
+            if (!sub || sub->size() != pattern->generics.size()) return;
             for (size_t i = 0; i < pattern->generics.size(); ++i) {
-                unifyBinding(pattern->generics[i].get(), info->substitution[i].second,
+                unifyBinding(pattern->generics[i].get(), (*sub)[i].second,
                              params, out);
             }
             return;
@@ -7253,6 +7265,81 @@ private:
         ScopedBindings bound(types_, &live.methodBindings);
         if (!declareStructMethods(live)) return false;
         return !failed_;
+    }
+
+    // One anonymous `interface { ... }` literal's registration, on demand
+    // (owner ruling 2: FULL tids + InterfaceInfo).
+    //
+    // declareInterfaces walks only module-scope declarations, so a literal's
+    // own never reaches it. The Stage-C tid-pair chain gates on InterfaceInfo
+    // (fields + methods + decl for operators/ctors/dtor via checkConformity),
+    // so a literal without an entry can never match and the query would answer
+    // a silent false. Registering here gives the literal the same entry a named
+    // interface got at the start. The tid itself is assigned in
+    // visit(TypeLiteralExpression&); this only ensures the info it keys.
+    bool ensureAnonymousInterface(InterfaceDeclaration& decl) {
+        auto found = interfaces_.find(decl.name);
+        if (found != interfaces_.end()) return !failed_;
+        if (!decl.generic_params.empty()) {
+            unsupported(decl, fmt::format("a generic anonymous interface '{}'", decl.name));
+            return false;
+        }
+        InterfaceInfo info;
+        info.finName = decl.name;
+        info.decl = &decl;
+        for (const auto& m : decl.members) {
+            if (!m || !m->type) continue;
+            auto mapped = types_.map(m->type.get(), true);
+            if (mapped) info.fields.push_back({m->name, *mapped, nullptr});
+        }
+        for (const auto& m : decl.methods)
+            if (m) info.methods.push_back(m.get());
+        interfaces_[decl.name] = std::move(info);
+        interfaceNames_.insert(decl.name);
+        return !failed_;
+    }
+
+    // Every anonymous `struct {...}` / `interface {...}` literal in the whole
+    // program (root + modules), registered before any body emits.
+    //
+    // The Stage-C tid-pair chain for `@implements` is emitted where the query
+    // sits (e.g. `compatible`), enumerating the (struct, interface) pairs known
+    // THEN. A literal in `main` lowered AFTER `compatible`'s body would otherwise
+    // be absent from that enumeration and the query would answer a silent false.
+    // Registering every literal's StructInfo/InterfaceInfo and assigning its tid
+    // up front makes the chain complete wherever the query sits. visit() below
+    // reuses both (find-existing fast paths), so this is the same fact read twice,
+    // never two facts.
+    void declareAnonymousLiterals(Program& program) {
+        std::vector<ASTNode*> stack;
+        stack.push_back(&program);
+        for (const Program* m : modules_)
+            if (m) stack.push_back(const_cast<Program*>(m));
+        std::vector<TypeLiteralExpression*> lits;
+        while (!stack.empty()) {
+            ASTNode* cur = stack.back();
+            stack.pop_back();
+            if (!cur) continue;
+            if (auto* lit = dynamic_cast<TypeLiteralExpression*>(cur)) lits.push_back(lit);
+            try {
+                forEachChild(*cur, [&](ASTNode& child) { stack.push_back(&child); });
+            } catch (...) {
+                // An unregistered node contributes no literals; the statement walk
+                // refuses it where it sits rather than from registration.
+                continue;
+            }
+        }
+        for (auto* lit : lits) {
+            if (!lit || !lit->decl) continue;
+            if (auto* s = dynamic_cast<StructDeclaration*>(lit->decl.get())) {
+                if (!ensureAnonymousStruct(*s)) return;
+                if (typeIds_.find(s->name) == typeIds_.end()) typeIds_[s->name] = nextTypeId_++;
+            } else if (auto* i = dynamic_cast<InterfaceDeclaration*>(lit->decl.get())) {
+                if (!ensureAnonymousInterface(*i)) return;
+                if (typeIds_.find(i->name) == typeIds_.end()) typeIds_[i->name] = nextTypeId_++;
+            }
+            if (failed_) return;
+        }
     }
 
     // The `$struct`-handle half of generic inference: `make_default(struct
@@ -10379,15 +10466,108 @@ private:
         unsupported(node, "this unary operator");
     }
 
+    // Wave-4 `@implements` lowering, stage B: the normative conformance
+    // predicate at the backend (`StructType::implements` in
+    // src/types/StructType.cpp is normative, owner ruling 4). Presence alone
+    // is not conformance: a field of the wrong type, a missing operator, a
+    // missing destructor, or an unmatched constructor answers false, never a
+    // guessed true. Methods stay presence-only -- the normative predicate
+    // compares method names, not signatures -- and `null` vtable slots stay
+    // as they are (ruling 4: null slots follow struct rules).
     bool checkConformity(const StructInfo& sInfo, const InterfaceInfo& iInfo) const {
+        // Fields: presence plus representation. The corpus's `Self` case
+        // (`readonly restrict <&Self>` satisfied by `&rptr`) holds by
+        // construction: both spellings lower to one opaque pointer word, so
+        // llvmType equality is the Self-aware comparison here.
         for (const auto& ifield : iInfo.fields) {
             size_t idx = 0;
             if (!sInfo.find(ifield.name, idx)) return false;
+            if (idx >= sInfo.fields.size()) return false;
+            if (sInfo.fields[idx].type.llvmType != ifield.type.llvmType) return false;
         }
         for (const auto* imeth : iInfo.methods) {
             if (!functions_.count(methodKey(sInfo.finName, imeth->name))) return false;
         }
+        // Operators, constructors and the destructor live on the interface's
+        // declaration (InterfaceInfo carries fields and methods only), read
+        // here rather than cached there so the two cannot disagree.
+        if (iInfo.decl) {
+            // Operators, with the `[]=`/`=` leniency the normative predicate
+            // owns (stdlib/operators.fin:126 requires `operator []=`, the
+            // corpus structs that satisfy it write `operator =`).
+            for (const auto& iop : iInfo.decl->operators) {
+                if (!iop) return false;
+                if (hasConformOperator(sInfo, iop->op)) continue;
+                if (iop->op == ASTTokenKind::INDEX_ASSIGN &&
+                    hasConformOperator(sInfo, ASTTokenKind::EQUAL))
+                    continue;
+                return false;
+            }
+            // A destructor the interface declares, the struct must declare.
+            if (iInfo.decl->destructor) {
+                if (!sInfo.decl || !sInfo.decl->destructor) return false;
+            }
+            // Constructors: parameters only, deliberately -- a constructor's
+            // return is the type being constructed, so the requirement's and
+            // the implementor's never match (constructorSatisfies in
+            // StructType.cpp, same rule).
+            for (const auto& ictor : iInfo.decl->constructors) {
+                if (!ictor) return false;
+                if (!hasConformConstructor(sInfo, *ictor)) return false;
+            }
+        }
         return true;
+    }
+
+    // Whether the struct declares the operator: its own body or an
+    // `implements` block's (StructExtras), the same two places
+    // declareStructMethods reads.
+    bool hasConformOperator(const StructInfo& sInfo, ASTTokenKind op) const {
+        if (sInfo.decl) {
+            for (const auto& o : sInfo.decl->operators) {
+                if (o && o->op == op) return true;
+            }
+        }
+        if (sInfo.extras) {
+            for (const auto* o : sInfo.extras->operators) {
+                if (o && o->op == op) return true;
+            }
+        }
+        return false;
+    }
+
+    // Whether one of the struct's constructors takes what the requirement
+    // takes: same arity, same lowered parameter words. An unmappable
+    // parameter (a bare generic, `Self` outside a binding) matches nothing,
+    // so an open template never conforms by guess.
+    bool hasConformConstructor(const StructInfo& sInfo,
+                              const ConstructorDeclaration& required) const {
+        const auto matches = [&](const ConstructorDeclaration* mine) -> bool {
+            if (!mine) return false;
+            if (mine->params.size() != required.params.size()) return false;
+            for (size_t i = 0; i < mine->params.size(); ++i) {
+                const auto& mParam = mine->params[i];
+                const auto& rParam = required.params[i];
+                if (!mParam || !rParam) return false;
+                if (mParam->is_vararg != rParam->is_vararg) return false;
+                auto m = mParam->type ? types_.map(mParam->type.get()) : std::nullopt;
+                auto r = rParam->type ? types_.map(rParam->type.get()) : std::nullopt;
+                if (!m || !r) return false;
+                if (m->llvmType != r->llvmType) return false;
+            }
+            return true;
+        };
+        if (sInfo.decl) {
+            for (const auto& c : sInfo.decl->constructors) {
+                if (matches(c.get())) return true;
+            }
+        }
+        if (sInfo.extras) {
+            for (const auto* c : sInfo.extras->constructors) {
+                if (matches(c)) return true;
+            }
+        }
+        return false;
     }
 
     void visit(FunctionCall& node) override {
@@ -14471,8 +14651,10 @@ private:
         std::string name;
         if (auto* s = dynamic_cast<StructDeclaration*>(node.decl.get())) {
             name = s->name;
+            if (!ensureAnonymousStruct(*s)) return;
         } else if (auto* i = dynamic_cast<InterfaceDeclaration*>(node.decl.get())) {
             name = i->name;
+            if (!ensureAnonymousInterface(*i)) return;
         }
         if (name.empty()) {
             unsupported(node, "a type literal for an unsupported declaration");

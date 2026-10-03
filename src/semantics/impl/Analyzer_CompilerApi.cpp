@@ -16,6 +16,7 @@
 #include "../../types/FunctionType.hpp"
 #include "../../types/NullableType.hpp"
 #include "../../types/PrimitiveType.hpp"
+#include "../../types/StructType.hpp"
 #include "../EventRegistry.hpp"
 #include <algorithm>
 #include <optional>
@@ -422,6 +423,34 @@ void SemanticAnalyzer::validateAttributes(
     }
 }
 
+// Wave-4 `@implements` lowering, stage A: the fold behind the compiler-API
+// op. One hook behind both spellings -- `@implements(S, I)` and
+// `compiler.types.implements(S, I)` -- the `symbols.defined` precedent (one
+// predicate behind `@defined` and `compiler.symbols.defined`, answered by
+// answerDefined in ComptimeInterp.cpp): the hook answers from the analyzer's
+// own scopes through `StructType::implements`, the normative predicate, so a
+// guard folds the same pair the query later lowers. Anything but a concrete
+// struct/interface pair answers nullopt and stays a gap, never a guessed
+// false: a `$struct`/`$interface` parameter is a runtime tid word (Stage C
+// owns it), `any`/nullable/union are not StructTypes at all, an enum is a
+// StructType but not a struct (is_enum), and an open generic template is not
+// an answer about any instantiation.
+void SemanticAnalyzer::installComptimeHooks(comptime::Interpreter& interp) {
+    interp.setImplementsHook([this](const std::string& sName,
+                                    const std::string& iName) -> std::optional<bool> {
+        auto sType = currentScope->resolveType(sName);
+        auto iType = currentScope->resolveType(iName);
+        auto sStruct = std::dynamic_pointer_cast<StructType>(sType);
+        auto iStruct = std::dynamic_pointer_cast<StructType>(iType);
+        if (!sStruct || sStruct->is_interface || sStruct->is_enum ||
+            !sStruct->generic_args.empty())
+            return std::nullopt;
+        if (!iStruct || !iStruct->is_interface || iStruct->is_enum ||
+            !iStruct->generic_args.empty())
+            return std::nullopt;
+        return sStruct->implements(iStruct.get());
+    });
+}
 // --- the provider mechanism (§3.9, ADR 0014) ---------------------------------
 //
 // A provider is a `@special` the compiler calls once per subject, whose

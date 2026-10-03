@@ -2699,6 +2699,27 @@ BACKEND_TEST(Soundness_Codegen, AGenericEnumInstantiatesPerArgumentList) {
     EXPECT_EQ(b.out, "7 21\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, AGenericFunctionInfersThroughAnEnumArgument) {
+    // The call-boundary mirror of the struct path: `unbox(b: Box<T>)` infers T
+    // from the argument's instantiation, and `get(r: Res<T>)` must infer it
+    // from the enum's -- the instantiation already knows what its parameters
+    // became (instantiateEnumGeneric), so the inner binding is read off it
+    // rather than re-derived. Used to refuse `a call to 'get' whose type
+    // argument 'T' no argument mentions`.
+    const Built b = build(std::string(kPrintf) +
+        "enum Res <T> { Ok <T>, Err <T> }\n"
+        "fun get<T>(r: Res<T>) <T> {\n"
+        "    return r.0;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let r <Res<int>> = Ok(10);\n"
+        "    printf(\"%d\\n\", get(r));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnEnumMethodRunsTheTagIdiom) {
     // lib/std/stdio.fin's `unwrap` shape, end to end: a generic enum, an
     // `implements`-block method taking the enum as its first *parameter*
@@ -4358,6 +4379,224 @@ BACKEND_TEST(Soundness_Codegen, AnOverwriterImplementsBlockAddsItsMethodsToo) {
     ASSERT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "6\n") << b.why();
+}
+
+// Wave-4 @implements query lowering, stage B: concrete named pairs lower to
+// ConstantInt i1 through the normative predicate (`StructType::implements`,
+// owner ruling 4) -- presence alone is not conformance. A field of the wrong
+// type, a missing operator, or a missing destructor answers false, never a
+// guessed true.
+BACKEND_TEST(Soundness_Codegen, ImplementsQueryRefusesAFieldOfTheWrongType) {
+    const Built b = build(std::string(kPrintf) +
+        "interface HasX {\n"
+        "    pub x <int>,\n"
+        "    pub fun m() <int>;\n"
+        "}\n"
+        "struct WrongType {\n"
+        "    x <string>,\n"
+        "    pub fun m() <int> { return 1; }\n"
+        "}\n"
+        "struct Right {\n"
+        "    x <int>,\n"
+        "    pub fun m() <int> { return 1; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let r1 <bool> = @implements(WrongType, HasX);\n"
+        "    if (r1 == true) {\n"
+        "        printf(\"wrong-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"wrong-false\\n\");\n"
+        "    }\n"
+        "    let r2 <bool> = @implements(Right, HasX);\n"
+        "    if (r2 == true) {\n"
+        "        printf(\"right-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"right-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "wrong-false\nright-true\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ImplementsQueryRefusesAMissingOperator) {
+    const Built b = build(std::string(kPrintf) +
+        "interface HasAdd {\n"
+        "    pub operator + (other: <int>) <int>;\n"
+        "}\n"
+        "struct NoAdd { x <int> }\n"
+        "struct HasIt {\n"
+        "    x <int>,\n"
+        "    pub operator + (other: <int>) <int> { return self.x + other; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let r1 <bool> = @implements(NoAdd, HasAdd);\n"
+        "    if (r1 == true) {\n"
+        "        printf(\"noadd-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"noadd-false\\n\");\n"
+        "    }\n"
+        "    let r2 <bool> = @implements(HasIt, HasAdd);\n"
+        "    if (r2 == true) {\n"
+        "        printf(\"hasit-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"hasit-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "noadd-false\nhasit-true\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ImplementsQueryRefusesAMissingDestructor) {
+    const Built b = build(std::string(kPrintf) +
+        "interface HasDtor {\n"
+        "    ~Self();\n"
+        "}\n"
+        "struct NoDtor { x <int> }\n"
+        "struct YesDtor {\n"
+        "    x <int>,\n"
+        "    ~YesDtor() { }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let r1 <bool> = @implements(NoDtor, HasDtor);\n"
+        "    if (r1 == true) {\n"
+        "        printf(\"nodtor-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"nodtor-false\\n\");\n"
+        "    }\n"
+        "    let r2 <bool> = @implements(YesDtor, HasDtor);\n"
+        "    if (r2 == true) {\n"
+        "        printf(\"yesdtor-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"yesdtor-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "nodtor-false\nyesdtor-true\n") << b.why();
+}
+
+// Wave-4 @implements query lowering, stage C: the `$struct`/`$interface`
+// param shape (literal_interface.fin:6) plus `interface {...}` literals flow
+// through the tid-pair chain -- anonymous interfaces carry full tids and
+// InterfaceInfo (owner ruling 2), never a silent false. Foldable named pairs
+// still take the Stage-B static fold above and never reach the chain.
+BACKEND_TEST(Soundness_Codegen, ImplementsQueryOverLiteralsAnswersTrue) {
+    // `compatible()` verbatim from literal_interface.fin:5-11, called with
+    // literals whose shapes agree.
+    const Built b = build(std::string(kPrintf) +
+        "fun compatible(iface: $interface, struct_: $struct) <bool> {\n"
+        "    if (@implements(struct_, iface) == true) {\n"
+        "        return true;\n"
+        "      } else {\n"
+        "          return false;\n"
+        "        }\n"
+        "  }\n"
+        "fun main() <noret> {\n"
+        "    let s <$struct> = struct {\n"
+        "        pub x <int>,\n"
+        "        pub fun m() <int> { return 1; }\n"
+        "      };\n"
+        "    let i <$interface> = interface {\n"
+        "        pub x <int>,\n"
+        "        pub fun m() <int>;\n"
+        "      };\n"
+        "    let r <bool> = compatible(i, s);\n"
+        "    if (r == true) {\n"
+        "        printf(\"compat-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"compat-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "compat-true\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ImplementsQueryOverLiteralsAnswersFalse) {
+    // The same chain saying no: the struct lacks the interface's method, so
+    // no tid pair matches and the answer is false -- the honest negative,
+    // not an over-matching chain.
+    const Built b = build(std::string(kPrintf) +
+        "fun compatible(iface: $interface, struct_: $struct) <bool> {\n"
+        "    if (@implements(struct_, iface) == true) {\n"
+        "        return true;\n"
+        "      } else {\n"
+        "          return false;\n"
+        "        }\n"
+        "  }\n"
+        "fun main() <noret> {\n"
+        "    let s <$struct> = struct {\n"
+        "        pub x <int>,\n"
+        "      };\n"
+        "    let i <$interface> = interface {\n"
+        "        pub x <int>,\n"
+        "        pub fun m() <int>;\n"
+        "      };\n"
+        "    let r <bool> = compatible(i, s);\n"
+        "    if (r == true) {\n"
+        "        printf(\"compat-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"compat-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "compat-false\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, PickInterfaceTidFlowsIntoCompatible) {
+    // literal_interface.fin:18-27 verbatim: `pick_interface` returns an
+    // anonymous interface literal selected by a runtime enum compare, and
+    // the returned tid flows into `compatible`. First matches, Second does
+    // not -- the tid dataflow made observable.
+    const Built b = build(std::string(kPrintf) +
+        "fun compatible(iface: $interface, struct_: $struct) <bool> {\n"
+        "    if (@implements(struct_, iface) == true) {\n"
+        "        return true;\n"
+        "      } else {\n"
+        "          return false;\n"
+        "        }\n"
+        "  }\n"
+        "enum IFaceOptions {\n"
+        "    First = 1,\n"
+        "    Second = 2,\n"
+        "  }\n"
+        "fun pick_interface(option: IFaceOptions) <$interface> {\n"
+        "    if (option == IFaceOptions::First) {\n"
+        "        return interface {\n"
+        "            pub picked_first <bool> = true;\n"
+        "            pub fun say_hello() <noret>;\n"
+        "          };\n"
+        "      } else {\n"
+        "          return interface { pub picked_second <bool> = true; };\n"
+        "        }\n"
+        "  }\n"
+        "fun main() <noret> {\n"
+        "    let has_first <$struct> = struct {\n"
+        "        pub picked_first <bool> = true,\n"
+        "        pub fun say_hello() <noret> {\n"
+        "          }\n"
+        "      };\n"
+        "    let i1 <$interface> = pick_interface(IFaceOptions::First);\n"
+        "    let r1 <bool> = compatible(i1, has_first);\n"
+        "    if (r1 == true) {\n"
+        "        printf(\"first-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"first-false\\n\");\n"
+        "    }\n"
+        "    let i2 <$interface> = pick_interface(IFaceOptions::Second);\n"
+        "    let r2 <bool> = compatible(i2, has_first);\n"
+        "    if (r2 == true) {\n"
+        "        printf(\"second-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"second-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "first-true\nsecond-false\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AMethodInABlockOfANameTheStructDeclaresIsRefused) {

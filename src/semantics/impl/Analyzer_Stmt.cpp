@@ -49,6 +49,47 @@ bool mentionsDefined(const Expression* e) {
     }
     return false;
 }
+
+// Wave-4 `@implements` lowering, stage A: whether the guard mentions the
+// query in either spelling -- `@implements(S, I)` or
+// `compiler.types.implements(S, I)`. A `MethodCall` named `implements` on
+// any other receiver counts too, exactly as `mentionsDefined` counts any
+// method named `defined`: a false positive only costs the optimization,
+// never correctness, because what does not fold keeps the both-arms walk.
+bool mentionsImplements(const Expression* e) {
+    if (!e) return false;
+    if (const auto* call = dynamic_cast<const FunctionCall*>(e)) {
+        if (call->is_special && call->name == "implements") return true;
+        for (const auto& a : call->args) {
+            if (a && mentionsImplements(a.get())) return true;
+        }
+        return false;
+    }
+    if (const auto* m = dynamic_cast<const MethodCall*>(e)) {
+        if (m->method_name == "implements") return true;
+        if (m->object && mentionsImplements(m->object.get())) return true;
+        for (const auto& a : m->args) {
+            if (a && mentionsImplements(a.get())) return true;
+        }
+        return false;
+    }
+    if (const auto* u = dynamic_cast<const UnaryOp*>(e)) {
+        return u->operand && mentionsImplements(u->operand.get());
+    }
+    if (const auto* b = dynamic_cast<const BinaryOp*>(e)) {
+        return (b->left && mentionsImplements(b->left.get())) ||
+               (b->right && mentionsImplements(b->right.get()));
+    }
+    if (const auto* t = dynamic_cast<const TernaryOp*>(e)) {
+        return (t->condition && mentionsImplements(t->condition.get())) ||
+                (t->true_expr && mentionsImplements(t->true_expr.get())) ||
+                (t->false_expr && mentionsImplements(t->false_expr.get()));
+    }
+    if (const auto* mem = dynamic_cast<const MemberAccess*>(e)) {
+        return mem->object && mentionsImplements(mem->object.get());
+    }
+    return false;
+}
 }  // namespace
 
 void SemanticAnalyzer::visit(Block& node) {
@@ -129,7 +170,16 @@ void SemanticAnalyzer::visit(IfStatement& node) {
     // eliminated — its `@define`s never elaborate — and a taken `@define`
     // lifts by the ordinary visit below. Anything that does not fold keeps
     // the both-arms walk.
-    if (w5_program_ && node.condition && mentionsDefined(node.condition.get())) {
+    //
+    // Wave-4 `@implements` lowering, stage A: an `@implements`-mentioned
+    // guard folds the same way, through the same interpreter, with the fold
+    // answering through the compiler-API op (`compiler.types.implements`,
+    // installed by installComptimeHooks -- the `symbols.defined` precedent).
+    // A `$struct`/`$interface` parameter never folds (the hook answers
+    // nullopt), so `compatible()` keeps its both-arms walk.
+    if (w5_program_ && node.condition &&
+        (mentionsDefined(node.condition.get()) ||
+         mentionsImplements(node.condition.get()))) {
         comptime::Interpreter interp(*w5_program_);
         interp.setDefinedHook([this](const std::string& name) -> std::optional<bool> {
             if (currentScope->resolve(name)) return true;
@@ -137,6 +187,7 @@ void SemanticAnalyzer::visit(IfStatement& node) {
             if (currentScope->resolveMacro(name)) return true;
             return false;
         });
+        installComptimeHooks(interp);
         comptime::Env env;
         comptime::ExprResult folded = interp.evaluateExpression(*node.condition, env);
         if (folded.status == comptime::ExprStatus::Ok &&

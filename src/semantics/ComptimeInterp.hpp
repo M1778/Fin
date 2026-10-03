@@ -157,6 +157,18 @@ public:
     // resolves. Nullopt means "not known here" and stays a gap, never false.
     using DefinedHook = std::function<std::optional<bool>(const std::string&)>;
     void setDefinedHook(DefinedHook hook) { definedHook_ = std::move(hook); }
+    // Wave-4 `@implements` lowering, stage A: how `@implements(S, I)` and
+    // `compiler.types.implements(S, I)` answer. One hook behind both
+    // spellings -- the `symbols.defined` precedent (one predicate behind
+    // `@defined` and `compiler.symbols.defined` above): the analyzer installs
+    // it answering from its scopes through `StructType::implements`, so the
+    // guard folds the same pair the query later lowers. Empty (no hook) or
+    // nullopt (a name that is not a concrete struct/interface pair here --
+    // a `$struct`/`$interface` parameter, an anonymous literal, `any`) stays
+    // a gap, never a guessed false.
+    using ImplementsHook =
+        std::function<std::optional<bool>(const std::string&, const std::string&)>;
+    void setImplementsHook(ImplementsHook hook) { implementsHook_ = std::move(hook); }
 
     // B4: the gated `@define`s a taken arm lifted, in order. Ungated (no
     // taken guard above) stays a Q5 gap and records nothing.
@@ -238,6 +250,8 @@ private:
     int depth_ = 0;
     // B4: `@defined` scope answers (analyzer hook) and gated lift state.
     DefinedHook definedHook_;
+    // Stage A: `@implements` scope answers (analyzer hook, same precedent).
+    ImplementsHook implementsHook_;
     std::vector<std::string> lifted_;
     // How many taken guards enclose the body being evaluated: >0 lifts a
     // taken `@define`, 0 refuses it naming Q5.

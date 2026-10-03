@@ -6,7 +6,12 @@
 #include "Corpus.hpp"
 #include "Pipeline.hpp"
 #include "ast/StructuralWalk.hpp"
+#include "ast/decls/Program.hpp"
+#include "ast/exprs/FunctionCall.hpp"
+#include "ast/exprs/Identifier.hpp"
 #include "ast/exprs/Lambda.hpp"
+#include "ast/exprs/StructureExpr.hpp"
+#include "ast/stmts/ControlFlow.hpp"
 #include "diagnostics/DiagnosticEngine.hpp"
 #include "semantics/SemanticAnalyzer.hpp"
 #include "types/Type.hpp"
@@ -364,4 +369,123 @@ TEST(SemanticAnalyzer, PreexistingTypeNamesStillResolve) {
         ASSERT_TRUE(a.parsed) << c.type;
         EXPECT_TRUE(a.clean()) << "<" << c.type << "> regressed; errors: " << a.errorCount;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wave-4 @implements query lowering, stage A: analyzer fold.
+//
+// `@implements(User, Printable)` folds through the compiler-API op
+// (`compiler.types.implements`, the `symbols.defined` precedent: one
+// predicate behind both spellings), so `if` over the query eliminates the
+// untaken arm. Non-foldable `$struct`/`$interface` params stay `bool`.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const char* const kImplementsShapes =
+    "interface Printable {\n"
+    "    pub fun to_string() <string>;\n"
+    "}\n"
+    "struct User: <Printable> {\n"
+    "    name <string>,\n"
+    "    age <int>,\n"
+    "    pub fun to_string() <string> {\n"
+    "        return \"User\";\n"
+    "    }\n"
+    "}\n"
+    "struct Empty {\n"
+    "    x <int>,\n"
+    "}\n";
+
+}  // namespace
+
+TEST(SemanticAnalyzer, ImplementsTrueFoldEliminatesElseArm) {
+    // A conforming pair folds true, so the else arm -- which names a type
+    // that does not exist -- is never walked.
+    auto a = analyze(std::string(kImplementsShapes) +
+        "fun main() <noret> {\n"
+        "    if (@implements(User, Printable)) {\n"
+        "    } else {\n"
+        "        let bad <NoSuchType> = 1;\n"
+        "    }\n"
+        "}\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean()) << "the else arm must be eliminated; errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, ImplementsFalseFoldEliminatesThenArm) {
+    // A non-conforming pair folds false, so the then arm is never walked.
+    // Spelled `== true` like literal_interface.fin:6, which must fold too.
+    auto a = analyze(std::string(kImplementsShapes) +
+        "fun main() <noret> {\n"
+        "    if (@implements(Empty, Printable) == true) {\n"
+        "        let bad <NoSuchType> = 1;\n"
+        "    } else {\n"
+        "    }\n"
+        "}\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean()) << "the then arm must be eliminated; errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, ImplementsOverMetaParamsStaysBool) {
+    // Non-foldable `$struct`/`$interface` params (literal_interface.fin:5-6)
+    // stay typed `bool` with the query recorded: both arms still walk, and
+    // the function checks clean.
+    auto a = analyze(
+        "fun compatible(iface: $interface, struct_: $struct) <bool> {\n"
+        "    if (@implements(struct_, iface) == true) {\n"
+        "        return true;\n"
+        "      } else {\n"
+        "          return false;\n"
+        "        }\n"
+        "  }\n"
+        "fun main() <noret> {\n"
+        "}\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean()) << "meta params must stay bool; errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, ImplementsThroughCompilerApiEliminatesArm) {
+    // The compiler-API spelling folds through the same op: one predicate
+    // behind `@implements(...)` and `compiler.types.implements(...)`.
+    //
+    // NOTE (grammar gap, not this stage): the C++ grammar cannot spell
+    // `.implements` after DOT -- a member there must be IDENTIFIER and
+    // `implements` lexes as KW_IMPLEMENTS -- so the test plants the
+    // MethodCall the parser will build once the grammar owner allows it.
+    // The interpreter half below covers the spelling on its own.
+    auto diag = std::make_unique<fin::DiagnosticEngine>("", "<test>");
+    diag->setColorMode(fin::ColorMode::Never);
+    auto parsed = fin::testing::parseSource(std::string(kImplementsShapes) +
+        "#[use(compiler)]\n"
+        "#[use(compiler.components.types)]\n"
+        "fun main() <noret> {\n"
+        "    if (true) {\n"
+        "    } else {\n"
+        "        let bad <NoSuchType> = 1;\n"
+        "    }\n"
+        "}\n", *diag);
+    ASSERT_TRUE(parsed.parsed);
+    class IfFinder : public fin::StructuralWalk {
+    public:
+        std::vector<fin::IfStatement*> ifs;
+        bool enter(fin::ASTNode& node) override {
+            if (auto* i = dynamic_cast<fin::IfStatement*>(&node)) ifs.push_back(i);
+            return true;
+        }
+    };
+    IfFinder finder;
+    finder.walk(*parsed.ast);
+    ASSERT_EQ(finder.ifs.size(), 1u);
+    auto obj = std::make_unique<fin::MemberAccess>(
+        std::make_unique<fin::Identifier>("compiler"), "types");
+    std::vector<std::unique_ptr<fin::Expression>> args;
+    args.push_back(std::make_unique<fin::Identifier>("User"));
+    args.push_back(std::make_unique<fin::Identifier>("Printable"));
+    finder.ifs[0]->condition = std::make_unique<fin::MethodCall>(
+        std::move(obj), "implements", std::move(args));
+    fin::SemanticAnalyzer analyzer(*diag, false);
+    analyzer.visit(*parsed.ast);
+    EXPECT_FALSE(analyzer.hasError || diag->hasErrors())
+        << "the API spelling must fold like @implements";
 }

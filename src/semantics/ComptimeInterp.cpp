@@ -201,6 +201,31 @@ bool asComponentsRef(const Expression& obj, std::string* compOut) {
     return true;
 }
 
+// Stage A: whether `expr` names a type for `@implements`/`compiler.types.
+// implements`. A bare `Identifier` is the only foldable shape: it is the
+// type's name, never a value, so the environment is not consulted (a
+// `$struct`/`$interface` parameter of the same spelling is a runtime word
+// and stays a gap for the Stage-C chain). Anything else -- a literal, a
+// call, member access -- is a gap naming the query.
+bool asImplementsTypeName(const Expression* expr, std::string* out) {
+    if (!expr) return false;
+    if (const auto* id = dynamic_cast<const Identifier*>(expr)) {
+        if (out) *out = id->name;
+        return true;
+    }
+    return false;
+}
+
+// Whether `call` is `compiler.types.implements(...)`: the object chain is
+// exactly `compiler` then `types`. Mirrors the `defined` check in
+// evaluateMethod below, answered the same way (hook first, gap otherwise).
+bool asTypesImplementsCall(const MethodCall& call) {
+    const auto* mem = dynamic_cast<const MemberAccess*>(call.object.get());
+    if (!mem || !mem->object || mem->member != "types") return false;
+    const auto* root = dynamic_cast<const Identifier*>(mem->object.get());
+    return root && root->name == "compiler";
+}
+
 // Whether the expression is rooted at the `compiler` name: a member chain,
 // a call on one, or the name itself. Component reads are answered (or named)
 // by the evaluator, never by the environment — `compiler` is never bound.
@@ -640,6 +665,33 @@ ExprResult Interpreter::evaluateMethod(const MethodCall& node, const Env& env) {
             return ExprResult{ExprStatus::Ok, Value::makeBool(*ans ? "true" : "false"), {}};
         }
     }
+    // Stage A: `compiler.types.implements(S, I)` folds through the same hook
+    // as `@implements(S, I)` above -- one predicate behind both spellings.
+    // Grant checking is the analyzer's (this model never carries grants);
+    // unknown names stay a gap exactly as there.
+    if (node.method_name == "implements" && node.object && asTypesImplementsCall(node)) {
+        if (node.args.size() != 2)
+            return ExprResult{ExprStatus::Gap, {},
+                              "'compiler.types.implements' expects 2 arguments, got " +
+                                  std::to_string(node.args.size())};
+        std::string sName;
+        std::string iName;
+        if (!asImplementsTypeName(node.args[0].get(), &sName) ||
+            !asImplementsTypeName(node.args[1].get(), &iName))
+            return ExprResult{ExprStatus::Gap, {},
+                              "'compiler.types.implements' needs type names at comptime "
+                              "(a $struct/$interface value lowers through the runtime chain)"};
+        if (!implementsHook_)
+            return ExprResult{ExprStatus::Gap, {},
+                              "unknown 'compiler.types.implements' pair '" + sName + ", " +
+                                  iName + "' (no implements hook)"};
+        std::optional<bool> ans = implementsHook_(sName, iName);
+        if (!ans)
+            return ExprResult{ExprStatus::Gap, {},
+                              "unknown 'compiler.types.implements' pair '" + sName + ", " +
+                                  iName + "'"};
+        return ExprResult{ExprStatus::Ok, Value::makeBool(*ans ? "true" : "false"), {}};
+    }
     if (node.object && isCompilerRooted(*node.object))
         return ExprResult{ExprStatus::Gap, {},
                           "component call 'compiler...' is not evaluated at comptime"};
@@ -844,6 +896,36 @@ ExprResult Interpreter::evaluateExpression(const Expression& expr, const Env& en
             }
             std::optional<bool> ans = answerDefined(target);
             if (!ans) return ExprResult{ExprStatus::Gap, {}, "unknown name '" + target + "'"};
+            return ExprResult{ExprStatus::Ok, Value::makeBool(*ans ? "true" : "false"), {}};
+        }
+        // Stage A (Wave-4 `@implements` lowering): `@implements(S, I)` folds
+        // through the compiler-API op -- the same hook `compiler.types.
+        // implements` answers below (the `symbols.defined` precedent: one
+        // predicate behind both spellings). Only bare type names fold; a
+        // `$struct`/`$interface` parameter is a runtime tid word and stays a
+        // gap for the Stage-C chain. No hook, or names the hook does not
+        // know, is a gap naming the query, never a guessed false.
+        if (call->is_special && call->name == "implements") {
+            if (call->args.size() != 2)
+                return ExprResult{ExprStatus::Gap, {},
+                                  "'@implements' expects 2 arguments, got " +
+                                      std::to_string(call->args.size())};
+            std::string sName;
+            std::string iName;
+            if (!asImplementsTypeName(call->args[0].get(), &sName) ||
+                !asImplementsTypeName(call->args[1].get(), &iName))
+                return ExprResult{ExprStatus::Gap, {},
+                                  "'@implements' needs type names at comptime "
+                                  "(a $struct/$interface value lowers through "
+                                  "the runtime chain)"};
+            if (!implementsHook_)
+                return ExprResult{ExprStatus::Gap, {},
+                                  "unknown '@implements' pair '" + sName + ", " + iName +
+                                      "' (no implements hook)"};
+            std::optional<bool> ans = implementsHook_(sName, iName);
+            if (!ans)
+                return ExprResult{ExprStatus::Gap, {},
+                                  "unknown '@implements' pair '" + sName + ", " + iName + "'"};
             return ExprResult{ExprStatus::Ok, Value::makeBool(*ans ? "true" : "false"), {}};
         }
         return evaluateCall(call->name, call->args, env);

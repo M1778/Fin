@@ -33,6 +33,10 @@ class NamespaceType; // lowerModuleCall names the qualifier it resolved through
 class SpecialDeclaration; // collectProvider reads the bearer's contract
 class MemberAccess; // tryLayoutMember reads the member-access site
 
+namespace comptime {
+class Interpreter; // installComptimeHooks installs the fold hooks on one
+}
+
 struct AnalysisContext {
     bool inLoop = false;
     std::shared_ptr<Type> currentFuncReturnType = nullptr;
@@ -464,6 +468,18 @@ private:
     std::shared_ptr<Type> compilerApiMemberType(const compilerapi::Member& m,
                                                 const std::shared_ptr<Type>& turbofish);
 
+    // Wave-4 `@implements` lowering, stage A: installs the comptime fold
+    // hooks on an interpreter. One hook behind both spellings --
+    // `@implements(S, I)` and `compiler.types.implements(S, I)` -- the
+    // `symbols.defined` precedent (one predicate behind `@defined` and
+    // `compiler.symbols.defined`): the hook answers from these scopes
+    // through `StructType::implements`, so a guard folds the same pair the
+    // query later lowers. Anything but a concrete struct/interface pair --
+    // a `$struct`/`$interface` parameter, an anonymous literal, `any`,
+    // nullable, union, enum-as-struct, an open generic -- answers nullopt
+    // and stays a gap, never a guessed false.
+    void installComptimeHooks(comptime::Interpreter& interp);
+
     // A `::`-separated path from an `extern X as Y;` or a `pub implements Y = X;`,
     // resolved as a symbol rather than as a type. Null when the path names no symbol,
     // which is the caller's cue to read it as a type instead. Analyzer_Decl.cpp carries
@@ -647,9 +663,17 @@ private:
     // parameter receives and what a Struct-bounded generic return is seeded
     // from (checkGenericCall). Recorded in visit(TypeLiteralExpression&) before
     // the literal's scope is discarded; read only through that seeding, so an
-    // interface literal (recorded never) and an ambiguous call (read never)
-    // keep today's behaviour exactly.
+    // interface literal (recorded in interfaceLiteralTypes_ below) and an
+    // ambiguous call (read never) keep today's behaviour exactly.
     std::unordered_map<const ASTNode*, std::shared_ptr<StructType>> structLiteralTypes_;
+    // The interface an `interface { ... }` literal declares, keyed by the
+    // literal node. The mirror of structLiteralTypes_ above, recorded by the
+    // same visit: an anonymous interface's *value* is a `$interface` tid word
+    // (ruling 5), and what it denotes is what the Stage-C runtime chain gates
+    // on -- which needs the full InterfaceInfo, so the literal's semantic
+    // type is kept here rather than re-derived. A struct literal never lands
+    // here and an interface literal never lands above.
+    std::unordered_map<const ASTNode*, std::shared_ptr<StructType>> interfaceLiteralTypes_;
 
     // Records on a struct literal the type arguments inference found, for the
     // backend to instantiate where the literal wrote none (`Box{ val: 7 }`

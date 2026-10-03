@@ -1453,6 +1453,31 @@ fun find_interface_for_node(ctx: &FnContext, node: &AstNode) <&InterfaceInfo> {
     return null;
 }
 
+// Type-id of a struct/interface by its table index (Stage C tid): structs
+// and interfaces have separate spaces, so indices alone are unique within
+// each. -1 when unknown (never a valid tid).
+fun cg_struct_tid(ctx: &FnContext, name: string) <int> {
+    if (ctx == null || name == null) { return -1; }
+    let i <int> = 0;
+    while (i < ctx.struct_count) {
+        let st <&StructInfo> = ctx.structs[i];
+        if (st != null && cg_str_eq(st.name, name)) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fun cg_iface_tid(ctx: &FnContext, name: string) <int> {
+    if (ctx == null || name == null) { return -1; }
+    let i <int> = 0;
+    while (i < ctx.interface_count) {
+        let iface <&InterfaceInfo> = ctx.interfaces[i];
+        if (iface != null && cg_str_eq(iface.name, name)) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
 fun is_nullable_type(type_ann: string) <bool> {
     if (type_ann == null) { return false; }
     let len <int> = cast<int>(cg_strlen(type_ann));
@@ -2332,6 +2357,15 @@ fun map_type(ctx: &FnContext, fin_type: string) <&LLVMType> {
     }
     if (cg_str_eq(fin_type, "bool")) {
         return ctx.i1_ty;
+    }
+    // Meta-values (`$struct`/`$interface`/`$type`) are type ids (Stage C):
+    // one i64 word, like the C++ `{i64}` tid. Callers and callees agree
+    // because both go through here; the old pointer representation never
+    // carried identity, so no working program observes the change except
+    // through `@implements`, which is what needs it.
+    if (cg_str_eq(fin_type, "$struct") || cg_str_eq(fin_type, "$interface") ||
+        cg_str_eq(fin_type, "$type") || cg_str_eq(fin_type, "$enum_member")) {
+        return ctx.i64_ty;
     }
     if (cg_str_eq(fin_type, "char") || cg_str_eq(fin_type, "u8") || cg_str_eq(fin_type, "i8")) {
         return ctx.i8_ty;
@@ -4401,6 +4435,9 @@ pub fun declare_function(
         ret_ty = void_t;
     } else if (cg_str_eq(ret_ann, "bool")) {
         ret_ty = i1_t;
+    } else if (cg_str_eq(ret_ann, "$struct") || cg_str_eq(ret_ann, "$interface") ||
+        cg_str_eq(ret_ann, "$type") || cg_str_eq(ret_ann, "$enum_member")) {
+        ret_ty = i64_t;
     } else if (cg_str_eq(ret_ann, "char") || cg_str_eq(ret_ann, "u8") || cg_str_eq(ret_ann, "i8")) {
         ret_ty = i8_t;
     } else if (cg_str_eq(ret_ann, "short") || cg_str_eq(ret_ann, "ushort") ||
@@ -4487,6 +4524,9 @@ pub fun declare_function(
                 pt = llvm_struct_type(f_args, 2, 0);
                 delete f_args;
             }
+        } else if (cg_str_eq(p_ann, "$struct") || cg_str_eq(p_ann, "$interface") ||
+            cg_str_eq(p_ann, "$type") || cg_str_eq(p_ann, "$enum_member")) {
+            pt = i64_t;
         } else if (cg_str_eq(p_ann, "bool")) { pt = i1_t; }
         else if (cg_str_eq(p_ann, "char") || cg_str_eq(p_ann, "u8") || cg_str_eq(p_ann, "i8") || cg_str_eq(p_ann, "int{8}") || cg_str_eq(p_ann, "uint{8}")) { pt = i8_t; }
         else if (cg_str_eq(p_ann, "short") || cg_str_eq(p_ann, "ushort") || cg_str_eq(p_ann, "i16") || cg_str_eq(p_ann, "u16") || cg_str_eq(p_ann, "int{16}") || cg_str_eq(p_ann, "uint{16}")) { pt = i16_t; }
@@ -5907,14 +5947,26 @@ fun cg_free_cache_sym(ctx: &FnContext, n: &AstNode) <&FnSymbol> {
     // Stamp the clone's parameters with the actual spellings (the template
     // patterns are erased to `void*`, so substitution alone leaves them
     // erased and member reads cannot resolve). Arity already checked, so a
-    // short clone refuses rather than misaligns.
+    // short clone refuses rather than misaligns. A `$struct` handle param
+    // keeps its handle spelling: the seeding value is a tid word, never a
+    // box, so stamping it struct would arm the by-value entry copy
+    // (memcpy from the tid, NULL for index 0) while the `st{}` retarget
+    // above already builds from the declaration name.
     let cp <&AstNode> = clone.extra;
+    let sp <&AstNode> = tmpl.extra;
     let ai <int> = 0;
     while (cp != null) {
         if (ai >= acount) { delete actuals; return null; }
-        cp.type_annotation = actuals[ai];
+        let keep_handle <bool> = false;
+        if (sp != null && sp.type_annotation != null && cg_str_eq(cg_trim_spaces(sp.type_annotation), "$struct")) {
+            keep_handle = true;
+        }
+        if (!keep_handle) {
+            cp.type_annotation = actuals[ai];
+        }
         ai = ai + 1;
         cp = cp.right;
+        if (sp != null) { sp = sp.right; }
     }
     delete actuals;
     ctx.fn_sym_count = declare_function(ctx.module, clone, ctx.fn_syms, ctx.fn_sym_count, ctx.interfaces, ctx.interface_count);
@@ -6412,6 +6464,71 @@ priv fun cg_value_is_unsigned(ctx: &FnContext, node: &AstNode) <bool> {
         return false;
     }
     return false;
+}
+
+// Short name after `Prefix_` (`Right_m` -> `m` under `Right`).
+// Full when no such prefix: interface fields are bare already.
+fun cg_short_of(full: string, prefix: string) <string> {
+    if (full == null || prefix == null) { return full; }
+    let plen <int> = cast<int>(cg_strlen(prefix));
+    let flen <int> = cast<int>(cg_strlen(full));
+    if (plen <= 0 || flen <= plen + 1) { return full; }
+    if (cg_str_eq(substr(full, 0, plen), prefix) && cg_str_eq(substr(full, plen, 1), "_")) {
+        return substr(full, plen + 1, flen - plen - 1);
+    }
+    return full;
+}
+
+// Whether struct s declares a method/operator with short name want.
+// Walks the recorded method chain (operators live there too); the
+// `[]=`/`=` leniency mirrors the normative predicate (stdlib
+// operators.fin:126 requires `operator []=`, corpus structs write
+// `operator =`).
+fun cg_struct_has_short(s: &StructInfo, want: string) <bool> {
+    if (s == null || want == null) { return false; }
+    let m <&AstNode> = s.method_head;
+    while (m != null) {
+        let short <string> = cg_short_of(m.name, s.name);
+        if (cg_str_eq(short, want)) { return true; }
+        if (cg_str_eq(want, "operator[]=") && cg_str_eq(short, "operator=")) { return true; }
+        m = m.right;
+    }
+    return false;
+}
+
+// Static conformance for concrete named pairs (Stage B predicate,
+// fields+methods+operators+dtor; ctors stay unmodelled and are reported,
+// never guessed).
+fun cg_implements_conforms(ctx: &FnContext, s_name: string, i_name: string) <bool> {
+    let s <&StructInfo> = find_struct(ctx, s_name);
+    let i <&InterfaceInfo> = find_interface(ctx, i_name);
+    if (s == null || i == null) { return false; }
+    let mi <int> = 0;
+    while (mi < i.method_count) {
+        let im <&InterfaceMethodInfo> = i.methods[mi];
+        if (im != null) {
+            if (im.is_field) {
+                let found <bool> = false;
+                let fi <int> = 0;
+                while (fi < s.field_count) {
+                    let f <&StructFieldInfo> = s.fields[fi];
+                    if (f != null && cg_str_eq(f.name, im.name)) {
+                        let s_ty <&LLVMType> = map_type(ctx, f.type_annotation);
+                        let i_ty <&LLVMType> = map_type(ctx, im.ret_type);
+                        if (s_ty == i_ty) { found = true; }
+                        break;
+                    }
+                    fi = fi + 1;
+                }
+                if (!found) { return false; }
+            } else {
+                let want <string> = cg_short_of(im.name, i.name);
+                if (!cg_struct_has_short(s, want)) { return false; }
+            }
+        }
+        mi = mi + 1;
+    }
+    return true;
 }
 
 pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
@@ -8541,21 +8658,89 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             refuse_and_poison(ctx);
             return null;
         }
-        // `@implements` is answered at compile time by the C++ frontend;
-        // the self-host holds no comptime values yet, so the honest
-        // lowering is a refusal naming the construct.
+        // `@implements` static fold for concrete named pairs (Stage B):
+        // two identifiers naming a known struct and interface lower to a
+        // bool constant via the conformance predicate. Anything else
+        // (a `$struct`/`$interface` value, a generic spelling) keeps the
+        // refusal below, never a guessed answer.
         if (cg_str_eq(n.name, "implements") || cg_str_eq(n.name, "@implements")) {
-            let at_name <string> = n.name;
-            let at_buf <Buffer> = new_buffer(32);
-            if (!cg_str_eq(substr(at_name, 0, 1), "@")) {
-                at_buf.write_char('@');
-                at_buf.write_string(at_name);
-                at_name = at_buf.to_string();
+            let imp_argc <int> = 0;
+            let imp_w <&AstNode> = n.left;
+            while (imp_w != null) {
+                imp_argc = imp_argc + 1;
+                imp_w = imp_w.right;
             }
-            cg_dprintf(2, "codegen: the compile-time call '%s' is not lowered yet\n", at_name);
-            free_buffer(at_buf);
-            refuse_and_poison(ctx);
-            return null;
+            if (imp_argc != 2) {
+                cg_dprintf(2, "finc codegen refusal: '@implements' takes exactly 2 arguments\n");
+                refuse_and_poison(ctx);
+                return null;
+            }
+            let imp_a0 <&AstNode> = null;
+            let imp_a1 <&AstNode> = null;
+            if (n.left != null) {
+                imp_a0 = n.left.left;
+                if (imp_a0 == null) { imp_a0 = n.left; }
+                if (n.left.right != null) {
+                    imp_a1 = n.left.right.left;
+                    if (imp_a1 == null) { imp_a1 = n.left.right; }
+                }
+            }
+            if (imp_a0 != null && imp_a1 != null &&
+                imp_a0.kind == ast_ident() && imp_a1.kind == ast_ident()) {
+                let s_nm <string> = imp_a0.name;
+                let i_nm <string> = imp_a1.name;
+                if (s_nm != null && i_nm != null &&
+                    !cg_str_contains(s_nm, "<") && !cg_str_contains(i_nm, "<")) {
+                    let s_info <&StructInfo> = find_struct(ctx, s_nm);
+                    let i_info <&InterfaceInfo> = find_interface(ctx, i_nm);
+                    if (s_info != null && i_info != null) {
+                        if (s_info.gen_params == null || cg_strlen(s_info.gen_params) == cast<ulong>(0)) {
+                            if (cg_implements_conforms(ctx, s_nm, i_nm)) {
+                                return llvm_const_int(ctx.i1_ty, 1, 0);
+                            }
+                            return llvm_const_int(ctx.i1_ty, 0, 0);
+                        }
+                    }
+                }
+            }
+            // Dynamic `$struct`/`$interface` values (Stage C tid-pair chain):
+            // both sides lower to i64 tids; the answer is the OR over every
+            // conforming (struct, interface) pair known here. A side that is
+            // not a tid refuses naming the side, like the C++ backend.
+            let s_val <&LLVMValue> = lower_expr(ctx, imp_a0);
+            let i_val <&LLVMValue> = lower_expr(ctx, imp_a1);
+            if (s_val == null || llvm_type_of(s_val) != ctx.i64_ty) {
+                cg_dprintf(2, "finc codegen refusal: the first argument of dynamic '@implements' is not a struct type\n");
+                refuse_and_poison(ctx);
+                return null;
+            }
+            if (i_val == null || llvm_type_of(i_val) != ctx.i64_ty) {
+                cg_dprintf(2, "finc codegen refusal: the second argument of dynamic '@implements' is not an interface type\n");
+                refuse_and_poison(ctx);
+                return null;
+            }
+            let cond <&LLVMValue> = llvm_const_int(ctx.i1_ty, 0, 0);
+            let si <int> = 0;
+            while (si < ctx.struct_count) {
+                let st <&StructInfo> = ctx.structs[si];
+                if (st != null && st.name != null) {
+                    let ii <int> = 0;
+                    while (ii < ctx.interface_count) {
+                        let iface <&InterfaceInfo> = ctx.interfaces[ii];
+                        if (iface != null && iface.name != null) {
+                            if (cg_implements_conforms(ctx, st.name, iface.name)) {
+                                let ms <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), s_val, llvm_const_int(ctx.i64_ty, si, 0), "match.s");
+                                let mi2 <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), i_val, llvm_const_int(ctx.i64_ty, ii, 0), "match.i");
+                                let both <&LLVMValue> = llvm_build_and(ctx.builder, ms, mi2, "match.both");
+                                cond = llvm_build_or(ctx.builder, cond, both, "match.implements");
+                            }
+                        }
+                        ii = ii + 1;
+                    }
+                }
+                si = si + 1;
+            }
+            return cond;
         }
         if (cg_str_eq(n.name, "Alloc") || cg_str_eq(n.name, "@Alloc")) {            let size_val <&LLVMValue> = lower_expr(ctx, n.left);
             let size_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, size_val, ctx.i64_ty, "alloc_size");
@@ -9995,11 +10180,10 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
     }
     if (n.kind == ast_prototype_literal()) {
         // A `struct { ... }` literal marker (the parser tags it `$struct`
-        // and stashes its declaration top-level for the checker): it lowers
-        // as a default construction of that declaration (C++
-        // ensureAnonymousStruct lays the same declaration out on demand).
-        // Reaches the `__fin_struct_init` path below by retagging, which
-        // stores the (empty) written list and runs the declared defaults.
+        // and stashes its declaration top-level): it lowers as its type id
+        // (Stage C tid, one i64 word like `$struct` params carry), never as
+        // a construction. `st{}` inside a `$struct`-seeded generic builds
+        // from the declaration name at compile time, not from this value.
         // Unresolvable stays a refusal, never a guessed struct.
         if (n.type_annotation != null && cg_str_eq(n.type_annotation, "$struct")) {
             let anon <string> = n.str_val;
@@ -10008,10 +10192,33 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 refuse_and_poison(ctx);
                 return null;
             }
-            n.kind = ast_call_expr();
-            n.name = "__fin_struct_init";
-            n.type_annotation = anon;
-            return lower_expr(ctx, n);
+            let s_tid <int> = cg_struct_tid(ctx, anon);
+            if (s_tid < 0) {
+                cg_dprintf(2, "codegen: a 'struct { ... }' literal value is not lowered yet\n");
+                refuse_and_poison(ctx);
+                return null;
+            }
+            return llvm_const_int(ctx.i64_ty, s_tid, 0);
+        }
+        // An `interface { ... }` literal marker (same stash): its tid, for
+        // the `@implements` chain. Without a stashed name it keeps the old
+        // prototype lowering, never a guessed id.
+        if (n.type_annotation != null && cg_str_eq(n.type_annotation, "$interface")) {
+            if (n.str_val != null && cg_strlen(n.str_val) > cast<ulong>(0)) {
+                let iname <string> = n.str_val;
+                if (find_interface(ctx, iname) == null) {
+                    cg_dprintf(2, "codegen: an 'interface { ... }' literal value is not lowered yet\n");
+                    refuse_and_poison(ctx);
+                    return null;
+                }
+                let i_tid <int> = cg_iface_tid(ctx, iname);
+                if (i_tid < 0) {
+                    cg_dprintf(2, "codegen: an 'interface { ... }' literal value is not lowered yet\n");
+                    refuse_and_poison(ctx);
+                    return null;
+                }
+                return llvm_const_int(ctx.i64_ty, i_tid, 0);
+            }
         }
         let count <int> = 0;
         let cur <&AstNode> = n.left;

@@ -2703,6 +2703,24 @@ void SemanticAnalyzer::visit(TypeLiteralExpression& node) {
         }
         if (structEntries == 1 && literalStruct) structLiteralTypes_[&node] = literalStruct;
     }
+    // Stage A: the interface mirror. An `interface { ... }` literal's value
+    // is a `$interface` tid word, and what it denotes -- the anonymous
+    // interface's full semantic type -- is what the Stage-C runtime chain
+    // gates on, so it is kept here rather than re-derived. A struct literal
+    // never lands here, exactly as an interface literal never lands above.
+    {
+        std::shared_ptr<StructType> literalInterface;
+        size_t interfaceEntries = 0;
+        for (const auto& [name, type] : currentScope->types) {
+            if (auto st = std::dynamic_pointer_cast<StructType>(type)) {
+                if (!st->is_interface) continue;
+                ++interfaceEntries;
+                literalInterface = st;
+            }
+        }
+        if (interfaceEntries == 1 && literalInterface)
+            interfaceLiteralTypes_[&node] = literalInterface;
+    }
     exitScope();
 
     lastExprType = currentScope->resolveType(node.is_interface ? "$interface" : "$struct");

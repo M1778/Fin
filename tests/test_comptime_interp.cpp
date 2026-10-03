@@ -10,6 +10,9 @@
 #include "ast/decls/FunctionDecl.hpp"
 #include "ast/decls/Program.hpp"
 #include "ast/decls/TypeDef.hpp"
+#include "ast/exprs/FunctionCall.hpp"
+#include "ast/exprs/Identifier.hpp"
+#include "ast/exprs/StructureExpr.hpp"
 #include "ast/stmts/Statement.hpp"
 #include "diagnostics/DiagnosticEngine.hpp"
 #include "semantics/ComptimeInterp.hpp"
@@ -1700,4 +1703,70 @@ TEST(ComptimeAtCallSite, StructValueInstantiationFailsToCompile) {
     EXPECT_NE(r.exitCode, 0) << "s{} must not compile";
     EXPECT_NE(provMessages(stripAnsi(r.err)).find("Undefined struct 's'"), std::string::npos)
         << r.err;
+}
+
+// Wave-4 @implements query lowering, stage A: the interpreter answers the
+// query through one hook behind both spellings (`@implements(...)` and
+// `compiler.types.implements(...)`), the `symbols.defined` precedent. No
+// hook (or unknown names) is a gap, never a guessed false.
+TEST(ComptimeImplements, WithoutHookIsAGap) {
+    auto p = parse(
+        "interface I {\n"
+        "  pub fun m() <int>;\n"
+        "}\n"
+        "struct S {\n"
+        "  pub fun m() <int> { return 1; }\n"
+        "}\n"
+        "@special h() <bool> {\n"
+        "  return @implements(S, I);\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    fin::comptime::Env env;
+    auto r = interp.evaluateBody(*h->body, env);
+    EXPECT_EQ(r.status, fin::comptime::BodyStatus::Gap) << r.detail;
+    EXPECT_NE(r.detail.find("'@implements'"), std::string::npos)
+        << "the gap must name the query, never 'unknown call': " << r.detail;
+}
+
+TEST(ComptimeImplements, HookAnswersBothSpellings) {
+    auto p = parse(
+        "interface I {\n"
+        "  pub fun m() <int>;\n"
+        "}\n"
+        "struct S {\n"
+        "  pub fun m() <int> { return 1; }\n"
+        "}\n"
+        "@special h() <bool> {\n"
+        "  return @implements(S, I);\n"
+        "}\n");
+    ASSERT_TRUE(p.result.parsed);
+    auto* h = findSpecial(*p.result.ast, "h");
+    ASSERT_NE(h, nullptr);
+    fin::comptime::Interpreter interp(*p.result.ast);
+    interp.setImplementsHook([](const std::string& s, const std::string& i)
+                                 -> std::optional<bool> {
+        if (s == "S" && i == "I") return true;
+        return std::nullopt;
+    });
+    fin::comptime::Env env;
+    auto rh = interp.evaluateBody(*h->body, env);
+    ASSERT_EQ(rh.status, fin::comptime::BodyStatus::Returned) << rh.detail;
+    EXPECT_EQ(rh.value.text, "true");
+    // The compiler-API spelling answers through the same hook. NOTE (grammar
+    // gap, not this stage): `.implements` cannot parse after DOT (member
+    // must be IDENTIFIER), so the call is built by hand -- the shape the
+    // parser will produce once the grammar owner allows it.
+    auto obj = std::make_unique<fin::MemberAccess>(
+        std::make_unique<fin::Identifier>("compiler"), "types");
+    std::vector<std::unique_ptr<fin::Expression>> args;
+    args.push_back(std::make_unique<fin::Identifier>("S"));
+    args.push_back(std::make_unique<fin::Identifier>("I"));
+    fin::MethodCall api(std::move(obj), "implements", std::move(args));
+    auto rg = interp.evaluateExpression(api, env);
+    ASSERT_EQ(rg.status, fin::comptime::ExprStatus::Ok) << rg.detail;
+    EXPECT_EQ(rg.value.kind, fin::comptime::ValueKind::Bool);
+    EXPECT_EQ(rg.value.text, "true");
 }
