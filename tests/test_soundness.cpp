@@ -1766,6 +1766,28 @@ TEST(Soundness_TypeAliases, GenericArgumentsOnAnAliasReachItsTarget) {
     EXPECT_EQ(direct.exitCode, 0) << stripAnsi(direct.err);
 }
 
+TEST(Soundness_TypeAliases, AGenericUnionAliasIsDeclaredAndInstantiable) {
+    // ADR 0046: `Offer<T, E>` (lib/std/typing.fin) is an erasure-union alias,
+    // so a generic union alias declares its name and a use with concrete
+    // arguments instantiates by substitution. A bound written over one is
+    // unchecked the way every non-struct constraint is, which is what
+    // `enums.fin:13` needs to resolve.
+    const FincRun r = compile("type Offer<T, E> = T | E;\n"
+                              "fun f<X: Offer<int, string>>(v: X) <int> { return 0; }\n"
+                              "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
+
+    // The control: a use with the wrong arity reports, so the declaration is
+    // a template with two parameters and not a name that swallows anything.
+    const FincRun wrong = compile("type Offer<T, E> = T | E;\n"
+                                 "fun f<X: Offer<int>>(v: X) <int> { return 0; }\n"
+                                 "fun main() <int> { return 0; }\n");
+    EXPECT_EQ(wrong.exitCode, 1) << stripAnsi(wrong.err);
+    EXPECT_NE(stripAnsi(wrong.err).find("Generic count mismatch"), std::string::npos)
+        << stripAnsi(wrong.err);
+}
+
 TEST(Soundness_ErrorRecovery, AMemberDefaultIsReportedOncePerProgramNotOncePerPass) {
     // Not a cascade -- the opposite failure, and found while fixing the fields
     // above. visit(StructDeclaration) walked every member default twice: once in

@@ -6447,6 +6447,15 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         return llvm_build_global_string_ptr(ctx.builder, unesc, "str");
     }
     if (n.kind == ast_ident()) {
+        // `m1778` is a literal meaning "not implemented" (the C++ frontend
+        // lexes it as its own token and refuses it wherever lowering reaches
+        // it). The checker types it `void*` and says nothing, so the refusal
+        // lives here, in every position, with the reference's message.
+        if (cg_str_eq(n.name, "m1778")) {
+            cg_dprintf(2, "codegen: 'm1778' is not lowered yet\n");
+            refuse_and_poison(ctx);
+            return null;
+        }
         if (cg_str_eq(n.name, "NULL") || cg_str_eq(n.name, "null")) {
             return llvm_const_null(ctx.ptr_ty);
         }
@@ -10594,10 +10603,17 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) != null) {
             return;
         }
+        // `blame m1778` is refused at lowering, like the C++ backend refuses
+        // it (`codegen: 'm1778' is not lowered yet`, exit 1, even in dead
+        // code): the checker accepts the marker, so lowering it to an abort
+        // would give the marker a runtime meaning the reference denies it.
+        if (stmt.left != null && stmt.left.kind == ast_ident() && cg_str_eq(stmt.left.name, "m1778")) {
+            cg_dprintf(2, "codegen: 'm1778' is not lowered yet\n");
+            refuse_and_poison(ctx);
+            return;
+        }
         let is_unconditional <bool> = false;
         if (stmt.left == null) {
-            is_unconditional = true;
-        } else if (stmt.left.kind == ast_ident() && cg_str_eq(stmt.left.name, "m1778")) {
             is_unconditional = true;
         }
 

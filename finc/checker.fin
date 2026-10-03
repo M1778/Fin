@@ -786,6 +786,41 @@ pub struct Checker {
           return sym.kind == sym_struct();
       }
 
+      // The enum half of the rule above: the prefix of a flattened
+      // `Target_method` when it names a declared enum (`Result_unwrap` ->
+      // `Result`), "" otherwise. An enum method's receiver is its first
+      // parameter naming the enum rather than a parameter named `self`
+      // (C++ isReceiverOf: pointer markers stripped, nominal type compared),
+      // so the struct-only prefix would keep the receiver counted and every
+      // `r.unwrap()` would report one argument too many.
+      fun fn_enum_prefix(self: &Self, name: string) <string> {
+          if (name == null) { return ""; }
+          let len <int> = cast<int>(chk_strlen(name));
+          let i <int> = 0;
+          while (i < len) {
+              if (chk_str_eq(substr(name, i, 1), "_")) { break; }
+              i = i + 1;
+          }
+          if (i <= 0 || i >= len) { return ""; }
+          let prefix <string> = substr(name, 0, i);
+          if (!self.global_scope.has(prefix)) { return ""; }
+          let sym <Symbol> = self.global_scope.lookup(prefix);
+          if (sym.kind != sym_enum()) { return ""; }
+          return prefix;
+      }
+
+      // True when the first declared parameter types as the enum `target`
+      // (`enum_: Result<T, E>` for `Result`): pointer markers and generic
+      // arguments ignored, exactly the comparison C++ isReceiverOf makes.
+      fun first_param_is_enum_recv(self: &Self, fn_node: &AstNode, target: string) <bool> {
+          if (fn_node == null || fn_node.extra == null) { return false; }
+          if (target == null || chk_strlen(target) == cast<ulong>(0)) { return false; }
+          let ann <string> = fn_node.extra.type_annotation;
+          if (ann == null || chk_strlen(ann) == cast<ulong>(0)) { return false; }
+          let base <string> = self.chk_generic_base(self.chk_ptr_base(ann));
+          return chk_str_eq(base, target);
+      }
+
       fun record_arity(self: &Self, name: string, expected: int, required: int, variadic: int) <noret> {
           if (name == null || chk_strlen(name) == cast<ulong>(0)) { return; }
           if (self.arity_names == null) {
@@ -821,12 +856,15 @@ pub struct Checker {
       // Joins the written parameter spellings of fn_node with `,` (the
       // receiver dropped when skip_self, `...` markers always dropped, so
       // the segments line up with the arity registry's expected count).
+      // skip_self means the caller has decided the first parameter is the
+      // receiver -- a `self` for structs, an enum-typed first parameter for
+      // enums -- so the first entry drops on the caller's word alone.
       // split_generic_segs undoes the join at the call site; spellings
       // with no spaces keep every segment aligned.
       fun build_ptype_list(self: &Self, fn_node: &AstNode, skip_self: bool) <string> {
           let b <Buffer> = new_buffer(64);
           let first <bool> = true;
-          let drop <bool> = skip_self && self.first_param_is_self(fn_node);
+          let drop <bool> = skip_self;
           let idx <int> = 0;
           let p <&AstNode> = null;
           if (fn_node != null) { p = fn_node.extra; }
@@ -6547,19 +6585,13 @@ pub struct Checker {
           }
 
           if (stmt.kind == ast_blame_stmt()) {
-              // Owner decision: `m1778` stays purely a compile-time marker.
-              // `blame m1778;` never reaches lowering: the C++ backend refuses
-              // it at compile time (`codegen: 'm1778' is not lowered yet`,
-              // exit 1, even in dead code), so the checker refuses it here by
-              // the same name instead of letting codegen emit a runtime abort.
-              // Only the bare `blame m1778` condition is refused here: every
-              // other `m1778` path (parser literal, `void*` expression type,
-              // `--no-check` lowering) is untouched; a bare `m1778;`
-              // statement is refused by the expression-statement arm below.
-              if (stmt.left != null && stmt.left.kind == ast_ident() && chk_str_eq(stmt.left.name, "m1778")) {
-                  self.report_error("codegen: 'm1778' is not lowered yet", stmt.left.line, stmt.left.col);
-                  return;
-              }
+              // `blame m1778;` checks clean: the C++ frontend accepts it
+              // (`blame m1778` is a compile-time marker, `m1778` has `void*`
+              // type as a value) and refuses it only at lowering
+              // (`codegen: 'm1778' is not lowered yet`, exit 1, even in dead
+              // code). A check-time refusal here would be a diagnostic the
+              // reference never reports, so the checker walks what is raised
+              // and codegen owns the refusal.
               if (stmt.left != null) {
                   self.check_expression(stmt.left);
               }
@@ -6568,15 +6600,8 @@ pub struct Checker {
 
           if (stmt.kind == ast_expr_stmt()) {
               // Like `blame m1778` above: the C++ backend refuses a bare
-              // `m1778` at lowering (`codegen: 'm1778' is not lowered yet`,
-              // exit 1, located at the token), so the checker refuses it
-              // here by the same name and at the same position instead of
-              // letting codegen drop it silently. Only the bare statement
-              // is refused: `m1778` as a value keeps its `void*` type below.
-              if (stmt.left != null && stmt.left.kind == ast_ident() && chk_str_eq(stmt.left.name, "m1778")) {
-                  self.report_error("codegen: 'm1778' is not lowered yet", stmt.left.line, stmt.left.col);
-                  return;
-              }
+              // `m1778` at lowering, and the checker accepts it, so this arm
+              // walks the expression and says nothing either.
               if (stmt.left != null) {
                   self.check_expression(stmt.left);
               }
@@ -7996,14 +8021,27 @@ pub struct Checker {
                   if (self.fn_is_variadic(decl)) { is_var = 1; }
                   let f_exp <int> = self.count_fn_expected(decl);
                   let f_req <int> = self.count_fn_required(decl);
-                  if (self.first_param_is_self(decl) && self.fn_has_struct_prefix(decl.name)) {
+                  // The receiver is implicit at method call sites, so arity
+                  // excludes it: a `self` first parameter on a struct target
+                  // (the old rule), or -- on an enum target -- a first
+                  // parameter naming the enum (C++ buildMethodSignature drops
+                  // both; a `self` on an enum target drops by name alone).
+                  let drops_recv <bool> = false;
+                  if (self.first_param_is_self(decl)) {
+                      if (self.fn_has_struct_prefix(decl.name)) { drops_recv = true; }
+                      else if (!chk_str_eq(self.fn_enum_prefix(decl.name), "")) { drops_recv = true; }
+                  } else {
+                      let epre <string> = self.fn_enum_prefix(decl.name);
+                      if (!chk_str_eq(epre, "") && self.first_param_is_enum_recv(decl, epre)) { drops_recv = true; }
+                  }
+                  if (drops_recv) {
                       f_exp = f_exp - 1;
                       f_req = f_req - 1;
                       if (f_exp < 0) { f_exp = 0; }
                       if (f_req < 0) { f_req = 0; }
                   }
                   self.record_arity(decl.name, f_exp, f_req, is_var);
-                  self.record_ptypes(decl.name, decl, self.first_param_is_self(decl) && self.fn_has_struct_prefix(decl.name));
+                  self.record_ptypes(decl.name, decl, drops_recv);
                   // Declared generic parameters for the call site: free
                   // functions (`id` -> `T`) and flattened implements-block
                   // methods (`S_m` -> own params) alike (C++

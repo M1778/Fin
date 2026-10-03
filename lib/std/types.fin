@@ -101,6 +101,17 @@ pub type array<T> = [T];
 #[export]
 pub type Any = any;
 
+// `Offer<T, E>` is the erasure-union alias (ADR 0046): at check time the union
+// `T | E`, at runtime nothing -- a value of an instantiation is stored as one
+// of the alternatives with no tag of its own. It lives here and not beside
+// `ErrorLike` because it is a general alias like `Number` and `Any`, not a
+// `Result`-specific bound; and importing it drags in no template, so a file
+// that declares its own `Result` (tests/samples/enums.fin) takes no duplicate.
+// Its only use in the corpus is a bound (`E: Offer<string, Error>` there),
+// where a non-struct constraint is unchecked the way every one is.
+#[export]
+pub type Offer<T, E> = T | E;
+
 #[export]
 pub type nullptr = any;
 

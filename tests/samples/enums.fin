@@ -1,7 +1,7 @@
 //@ normative
-//@ unimplemented "Three diagnostics. This note is the one the rest of the corpus points at for what used to be called \"the prelude question\", so the answer is recorded here in full, 2026-08-27, and the other notes refer to this paragraph rather than restating it. The question was two questions and they have different answers. The INVENTION half -- a name used bare that no file declares, which in the corpus is `printf` alone: declared in eighteen samples, used bare in exactly two (interfaces.fin:18 and const.fin:68), and no builtin -- is answered by a new attribute. A declaration marked `#[global]` is visible to every file in the compiler session with no import, opt-in per declaration, and usable only inside `namespace std`; written outside it the attribute must be refused rather than ignored, because an attribute the compiler quietly drops is the same fault as a statement it quietly drops. `printf` in lib/std/stdio.fin is marked and nothing else is. The AMBIENCE half -- whether a `pub` declaration elsewhere in `namespace std` is visible to a sibling file that does not import it -- is answered no. `Any`, `Enum`, `getkeyid` and `keyidof` are each declared `pub` inside `#[export]` in lib/std and all four stay import-only, so a site that uses one owes an import. `getkeyid` and `keyidof` were never refusals at all: lib/std/enums.fin:24 and :31 declare both, and a note calling them undeclared is wrong twice over. Neither half covers a name written nowhere in the tree, and such a name may not be invented (ADR 0008). Both of line 13's bounds fall out of that. `Any` is the ambience half: it is `pub type Any = any;` at stdlib/types.fin:69 and lib/std/types.fin:35, and this file paid what it owes on line 4 -- the import stdio.fin:4 already writes verbatim, `import { Any } from types::std;` -- but supplying it does not clear the line, because a second gap sits behind the first: the file now reports `Undefined type '...'` at the same site, so `Any<...>` also needs `...` accepted as a generic argument (ADR 0018). stdlib/typing.fin:14 and stdlib/operators.fin:6 are the same shape and measure the same way. `Offer` is neither half: it is declared in no file in the corpus or lib/std, so it is booked and stays refused, and this sample cannot compile until the owner says what it is. `color1.0` on 38 is positional payload access and reads now: `.N` is slot N of whichever member the value holds, and `Color`'s two members are `uint{8}` at position 0 either way, so the comparison against 100 is checked for real (Soundness_PositionalMembers). `@implements Result<T, E>::unwrap` on 25 registers the method now -- a single-member overwrite adds a member the target does not declare, and `r.unwrap()` on 45 and 48 pass nothing because an enum method's receiver is its first parameter (Soundness_MemberOverwrite, Soundness_EnumMethodReceiver). What that uncovered is the lambda's body, which had never been analysed, and both of its diagnostics are about the sample's own text. `Ok(T)` on 26 hands a type where a payload value goes: the corpus asks which member a value holds twice, and both times it writes `getkeyid(enum_) == keyidof(Ok)` (stdlib/typing.fin:29, stdlib/stdio.fin:56) -- this line is the sketch, and line 24's own comment defers to the stdlib for it. Whether a type name may stand for any value of that type in a comparison is settled against: `Ok(T)` denotes the member, with `T` as disambiguation (ADR 0037), and a type is never a value. Lowering waits on enum representation all the same, so until it lands the diagnostic is correct. Line 29 read `blame enum_.1` and is repaired to `.0`, which is the one edit this file needed: stdlib/typing.fin:32 is the same else-branch of the same `unwrap` on the same `Result` and writes `blame enum_.0`, and `.N` is slot N of the payload the value holds rather than an index over the members -- which stdlib/stdio.fin settles by reading `Ok`'s payload as `.0` with `Err` declared first. Each member of `Result` carries one payload, so position 1 existed on neither, and the compiler said so (`Enum 'Result' has no payload at position 1`). `Ok(T)` and `Err(E)` disagree at position 0 and which member the value holds is not statically known, so the slot is an `any` and `blame` of it is the raise form rather than the assert form (Soundness_Blame.RaisingAValueOfErasedTypeIsAccepted). What works: the enum is a real type -- `Color::RGB(100, 200, 50)` on 35 and `Color::RGBA(0, 0, 0, 100)` on 36 construct and have their `uint{8}` payloads checked, the generic parameters on 13 are declared for the members that use them, and the import on line 3 resolves. `Ok(10)` on 44 and `Err(\"Blame ME!\")` on 47 construct a `Result<int, string>` now: `extern Result::Ok as Ok;` on 19-20 binds the symbol, and an enumerator is a constructor whose generic arguments come from what is written to it -- the argument says one parameter and the other comes from the annotation on 44 and from the variable being assigned to on 47, since each member of `Result` mentions one of T and E and neither mentions both (Soundness_EnumInference)"
+//@ ok
 import { Error } from error::std;
-import { Any } from types::std;
+import { Any, Offer } from types::std;
 @define printf(fmt: string, ...) <noret>;
 
 enum Color {
@@ -48,3 +48,35 @@ fun main() <noret> {
 	r.unwrap(); // This raises an error
 
 }
+// NOTE (this file's header note lives here, at the end, so the code above keeps
+// the line numbers the rest of the corpus cites).
+//
+// What this file specifies: enums are named types (`Color` on 7, `Result<T, E>`
+// on 13) with payloaded members constructed by calling them
+// (`Color::RGB(100, 200, 50)` on 35), a single-member `@implements` overwrite
+// registering `unwrap` (25), and receiver-implicit calls (`r.unwrap()` on 45
+// and 48 pass nothing: an enum method's receiver is its first parameter).
+//
+// Line 13's bounds both resolve. `Any<...>` is elision over the `Any` alias,
+// and `Offer<string, Error>` is the erasure-union alias ADR 0046 declares in
+// lib/std/types.fin: a union `T | E` at check time, nothing at runtime, and
+// unchecked as a bound the way every non-struct constraint is. Both names are
+// imported on lines 3-4 alongside `Error`; nothing here is ambient and nothing
+// is invented (the prelude question, kept in short because other notes point
+// at it: a name no file declares gets no builtin -- `printf` alone is marked
+// `#[global]` in lib/std/stdio.fin -- and a `pub` name elsewhere in namespace
+// std stays import-only, so `Any`, `Enum`, `getkeyid` and `keyidof` all owe
+// their import).
+//
+// What the check accepts further: `Ok(T)` on 26 denotes the member, with `T`
+// as disambiguation (ADR 0037), and a type is never a value. `enum_.0` on 27
+// and 29 is the payload slot `Ok` and `Err` disagree on, so it is erased and
+// `blame` of it is the raise form. `.0` on 38 reads `Color`'s agreed slot and
+// is checked for real. `Ok(10)` on 44 and `Err("Blame ME!")` on 47 infer the
+// instantiation from the annotation and the assignment. `blame m1778` on 41
+// checks clean and is refused only at lowering, like every `m1778`.
+//
+// What lowering does not do yet: a `-o` build is refused by name -- the
+// `@implements` overwrite form, `m1778`, and the generic enum -- so `Result`
+// is a type-checking story today. Both compilers check this file clean; both
+// refuse its build in-kind.

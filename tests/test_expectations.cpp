@@ -600,7 +600,10 @@ TEST(Census, ThePassingSampleCountNeverFalls) {
     // 29 -> 31 on 2026-08-29, raised by the NOTE below rather than by a failure --
     // which is the mechanism working. Measured from a detached worktree at 4788753
     // built from scratch, so no agent's uncommitted work is in the number.
-    constexpr int kFloor = 31;
+    // 31 -> 43 on 2026-10-03, same mechanism: eleven promotions landed without
+    // raising the floor, and the Offer task's promotion of `enums.fin` made it
+    // twelve. Measured from the working tree with the task's changes built.
+    constexpr int kFloor = 43;
 
     const auto t = census();
     EXPECT_GE(t.ok, kFloor)

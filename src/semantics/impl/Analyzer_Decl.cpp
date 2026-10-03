@@ -1498,6 +1498,41 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
     // Enhanced support requires a TypeAlias type in the type system.
     
     if (!node.generic_params.empty()) {
+        // A generic *union* alias is a template over its alternatives:
+        // `type Offer<T, E> = T | E;` (lib/std/types.fin, ADR 0046). The
+        // parameters are declared in a scope of the alias's own -- the same
+        // declareGenericParams structs and enums get -- so the alternatives
+        // resolve with `T`/`E` meaning the parameters, and the UnionType keeps
+        // them as its generic arguments. A use with concrete arguments
+        // instantiates by substitution (Analyzer_Core.cpp, the
+        // StructType::instantiate rule), which UnionType::substitute already
+        // serves.
+        //
+        // Unions only. Any other generic alias (`type array<T> = [T]`) takes
+        // the early return below, which is what
+        // KnownDefect_TypeAliases.AGenericTypeAliasIsNeverDeclared pins. The
+        // line is principled rather than convenient: an erased union never
+        // materialises storage -- as a bound it is unchecked, as a value the
+        // layout pass refuses it -- so instantiating one needs no layout or
+        // lowering support, while an array or struct alias would.
+        if (!node.union_members.empty() && node.aliased_type && !node.has_implements) {
+            debugLog(fg(fmt::color::yellow), "      [Type] Generic union alias '{}' -- declaring template.\n",
+                     node.name);
+            enterScope();
+            std::vector<std::shared_ptr<Type>> genArgs;
+            declareGenericParams(node.generic_params, &genArgs);
+            std::vector<std::shared_ptr<Type>> alternatives;
+            alternatives.push_back(resolveTypeOrError(node.aliased_type.get()));
+            for (auto& member : node.union_members)
+                alternatives.push_back(resolveTypeOrError(member.get()));
+            exitScope();
+            auto aliasType = std::make_shared<UnionType>(node.name, std::move(alternatives));
+            aliasType->generic_args = std::move(genArgs);
+            currentScope->defineType(node.name, aliasType);
+            debugLog(fg(fmt::color::gray), "      [Type] Defined generic union alias '{}' -> '{}'\n",
+                     node.name, aliasType->toString());
+            return;
+        }
         debugLog(fg(fmt::color::yellow), "      [Warning] Generic type aliases are partially supported.\n");
         // We can't fully resolve it yet without instantiation.
         // We should define a placeholder or template.

@@ -25,6 +25,13 @@ public:
     // Every alternative in written order; `alternatives[0]` is the alias's
     // `aliased_type`, the rest its `union_members`.
     std::vector<TypePtr> alternatives;
+    // The alias's generic parameters when it is a template (`Offer<T, E>`,
+    // ADR 0046): the GenericTypes `declareGenericParams` collected at
+    // declaration, exactly as StructType::generic_args. Empty for a concrete
+    // union alias (`Number`). A use with concrete arguments instantiates by
+    // substitution (instantiate, below); the template itself is never a value
+    // type, which is what makes the alias an erasure.
+    std::vector<TypePtr> generic_args;
 
     UnionType(std::string name, std::vector<TypePtr> alts)
         : alias(std::move(name)), alternatives(std::move(alts)) {}
@@ -41,6 +48,11 @@ public:
 
     TypePtr substitute(const TypeMap& mapping, TypePtr selfReplacement = nullptr) override;
     TypePtr clone() const override;
+
+    // `Offer<string, Error>` from `Offer<T, E>`: the StructType::instantiate
+    // rule, with the same arity contract (a mismatch is null, and the caller
+    // reports `Generic count mismatch`).
+    TypePtr instantiate(const std::vector<TypePtr>& concreteArgs);
 };
 
 } // namespace fin

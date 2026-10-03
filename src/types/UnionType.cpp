@@ -32,18 +32,38 @@ bool UnionType::isAssignableTo(const Type& other) const {
 }
 
 TypePtr UnionType::substitute(const TypeMap& mapping, TypePtr selfReplacement) {
+    std::vector<TypePtr> newArgs;
+    newArgs.reserve(generic_args.size());
+    for (const auto& g : generic_args)
+        newArgs.push_back(g ? g->substitute(mapping, selfReplacement) : nullptr);
     std::vector<TypePtr> sub;
     sub.reserve(alternatives.size());
     for (const auto& a : alternatives)
         sub.push_back(a ? a->substitute(mapping, selfReplacement) : nullptr);
-    return std::make_shared<UnionType>(alias, std::move(sub));
+    auto nu = std::make_shared<UnionType>(alias, std::move(sub));
+    nu->generic_args = std::move(newArgs);
+    return nu;
+}
+
+TypePtr UnionType::instantiate(const std::vector<TypePtr>& concreteArgs) {
+    if (concreteArgs.size() != generic_args.size()) return nullptr;
+    TypeMap mapping;
+    for (size_t i = 0; i < generic_args.size(); ++i) {
+        mapping[generic_args[i]->toString()] = concreteArgs[i];
+    }
+    return substitute(mapping);
 }
 
 TypePtr UnionType::clone() const {
+    std::vector<TypePtr> args;
+    args.reserve(generic_args.size());
+    for (const auto& g : generic_args) args.push_back(g ? g->clone() : nullptr);
     std::vector<TypePtr> copy;
     copy.reserve(alternatives.size());
     for (const auto& a : alternatives) copy.push_back(a ? a->clone() : nullptr);
-    return std::make_shared<UnionType>(alias, std::move(copy));
+    auto nu = std::make_shared<UnionType>(alias, std::move(copy));
+    nu->generic_args = std::move(args);
+    return nu;
 }
 
 } // namespace fin

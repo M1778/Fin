@@ -463,6 +463,18 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
              auto instantiated = structDef->instantiate(args);
              if (instantiated) type = instantiated;
              else error(*node, "Generic count mismatch");
+        } else if (auto uni = type->as<UnionType>()) {
+             // A generic union alias instantiated: `Offer<string, Error>`
+             // (ADR 0046). The template carries its parameters in generic_args;
+             // a concrete alias used with arguments keeps the old answer (a
+             // struct of that name), which nothing in the corpus writes.
+             if (!uni->generic_args.empty()) {
+                 auto instantiated = uni->instantiate(args);
+                 if (instantiated) type = instantiated;
+                 else error(*node, "Generic count mismatch");
+             } else {
+                 type = std::make_shared<StructType>(node->name, args);
+             }
         } else if (auto* dyn = type->as<DynamicType>()) {
              // ADR 0038: A bound written Any<Printable> narrows to implementors of
              // Printable, so method calls through such a value resolve against the bound.
