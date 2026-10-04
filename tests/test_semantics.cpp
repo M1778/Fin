@@ -446,46 +446,20 @@ TEST(SemanticAnalyzer, ImplementsOverMetaParamsStaysBool) {
 }
 
 TEST(SemanticAnalyzer, ImplementsThroughCompilerApiEliminatesArm) {
-    // The compiler-API spelling folds through the same op: one predicate
-    // behind `@implements(...)` and `compiler.types.implements(...)`.
-    //
-    // NOTE (grammar gap, not this stage): the C++ grammar cannot spell
-    // `.implements` after DOT -- a member there must be IDENTIFIER and
-    // `implements` lexes as KW_IMPLEMENTS -- so the test plants the
-    // MethodCall the parser will build once the grammar owner allows it.
-    // The interpreter half below covers the spelling on its own.
-    auto diag = std::make_unique<fin::DiagnosticEngine>("", "<test>");
-    diag->setColorMode(fin::ColorMode::Never);
-    auto parsed = fin::testing::parseSource(std::string(kImplementsShapes) +
+    // Grammar now spells `.implements` after DOT (parser.y: `DOT
+    // KW_IMPLEMENTS`, the `@implements`/`attr_id` precedent for a keyword in
+    // member position), so the compiler-API spelling parses directly to the
+    // MethodCall the old pin planted by hand -- and folds through the same op
+    // as `@implements(...)`.
+    auto a = analyze(std::string(kImplementsShapes) +
         "#[use(compiler)]\n"
         "#[use(compiler.components.types)]\n"
         "fun main() <noret> {\n"
-        "    if (true) {\n"
+        "    if (compiler.types.implements(User, Printable)) {\n"
         "    } else {\n"
         "        let bad <NoSuchType> = 1;\n"
         "    }\n"
-        "}\n", *diag);
-    ASSERT_TRUE(parsed.parsed);
-    class IfFinder : public fin::StructuralWalk {
-    public:
-        std::vector<fin::IfStatement*> ifs;
-        bool enter(fin::ASTNode& node) override {
-            if (auto* i = dynamic_cast<fin::IfStatement*>(&node)) ifs.push_back(i);
-            return true;
-        }
-    };
-    IfFinder finder;
-    finder.walk(*parsed.ast);
-    ASSERT_EQ(finder.ifs.size(), 1u);
-    auto obj = std::make_unique<fin::MemberAccess>(
-        std::make_unique<fin::Identifier>("compiler"), "types");
-    std::vector<std::unique_ptr<fin::Expression>> args;
-    args.push_back(std::make_unique<fin::Identifier>("User"));
-    args.push_back(std::make_unique<fin::Identifier>("Printable"));
-    finder.ifs[0]->condition = std::make_unique<fin::MethodCall>(
-        std::move(obj), "implements", std::move(args));
-    fin::SemanticAnalyzer analyzer(*diag, false);
-    analyzer.visit(*parsed.ast);
-    EXPECT_FALSE(analyzer.hasError || diag->hasErrors())
-        << "the API spelling must fold like @implements";
+        "}\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean()) << "the API spelling must fold like @implements; errors: " << a.errorCount;
 }

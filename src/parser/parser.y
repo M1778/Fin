@@ -2446,6 +2446,15 @@ expression:
         $$ = std::make_unique<fin::MemberAccess>(std::move($1), $3);
         $$->setLoc(@$);
     }
+    /* `compiler.types.implements(S, I)` -- the compiler-API spelling of the
+       `@implements` query. `implements` lexes as KW_IMPLEMENTS, so a member
+       there needs its own alternative, the `AT KW_IMPLEMENTS` precedent for a
+       keyword in a name position. A MemberAccess like any other: the postfix
+       call rule turns it into the MethodCall the fold already answers. */
+    | expression DOT KW_IMPLEMENTS {
+        $$ = std::make_unique<fin::MemberAccess>(std::move($1), "implements");
+        $$->setLoc(@$);
+    }
     /* Turbofish on a dotted path: `a.b.c::<T>()`. Every other turbofish
        production in this grammar begins with a bare IDENTIFIER, so `foo::<T>()`
        and `mod::<T>::bar()` parsed and `compiler.structs.select_field::<int>()`
@@ -2719,6 +2728,13 @@ no_struct_expression:
     }
     | no_struct_expression DOT IDENTIFIER {
         $$ = std::make_unique<fin::MemberAccess>(std::move($1), $3);
+        $$->setLoc(@$);
+    }
+    /* The struct-free half of the `DOT KW_IMPLEMENTS` production above: an
+       `if` condition is a no-struct position, which is where the
+       `compiler.types.implements(...)` guard is written. */
+    | no_struct_expression DOT KW_IMPLEMENTS {
+        $$ = std::make_unique<fin::MemberAccess>(std::move($1), "implements");
         $$->setLoc(@$);
     }
     | no_struct_expression DOT IDENTIFIER DOUBLE_COLON LT type_list GT LPAREN arguments RPAREN {
