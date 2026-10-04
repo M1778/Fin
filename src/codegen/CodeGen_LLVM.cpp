@@ -14107,6 +14107,18 @@ private:
     CgVal buildStructValue(
         ASTNode& node, const std::string& structName,
         const std::vector<std::pair<std::string, std::unique_ptr<Expression>>>& literalFields) {
+        // A concrete struct from a loaded module lays out on first need
+        // (ensureConcreteStruct): an `<auto>`-annotated literal can be the
+        // first use that names it, where an annotated one's declaration mapped
+        // the type first and laid it out before the literal was reached.
+        // Anything ensure leaves out -- unknown names, templates, forward
+        // declarations -- is still the refusal below, where the literal is
+        // written. An ensure that reported (unlowerable) returns past it
+        // rather than refusing a second time.
+        if (structs_.find(structName) == structs_.end()) {
+            ensureConcreteStruct(structName);
+            if (failed_) return CgVal{};
+        }
         auto found = structs_.find(structName);
         if (found == structs_.end() || !found->second.complete) {
             unsupported(node, fmt::format("a literal of struct '{}'", structName));

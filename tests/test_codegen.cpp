@@ -7597,6 +7597,51 @@ BACKEND_TEST(Soundness_Codegen, AnImportedConcreteStructServesAsABase) {
     fs::remove_all(dir, ec);
 }
 
+BACKEND_TEST(Soundness_Codegen, AnImportedStructLiteralLowers) {
+    // tests/samples/importing.fin:19 (`Vector3{...}` from another file): a
+    // literal of an imported concrete struct lowers through the module
+    // boundary exactly as a same-module literal does. `<auto>` pins the
+    // regression: a `<V3>` annotation maps the type first and lays the struct
+    // out before the literal is reached, masking the gap.
+    const fs::path dir = uniqueTempPath("fin_impllit", "");
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    ASSERT_TRUE(fs::is_directory(dir)) << ec.message();
+    {
+        std::ofstream f(dir / "vlib.fin", std::ios::binary);
+        f << "pub struct V3 {\n"
+             << "    x <int>,\n"
+             << "    y <int>,\n"
+             << "    z <int>,\n"
+             << "}\n";
+    }
+    const fs::path src = uniqueTempPath("fin_impllit_root", ".fin");
+    const fs::path exe = uniqueTempPath("fin_impllit_exe");
+    {
+        std::ofstream f(src, std::ios::binary);
+        f << std::string(kPrintf)
+          << "import { V3 } from vlib;\n"
+          << "fun main() <noret> {\n"
+          << "    let v <auto> = V3{ x: 1, y: 2, z: 3 };\n"
+          << "    printf(\"%d %d %d\\n\", v.x, v.y, v.z);\n"
+          << "}\n";
+    }
+    const FincRun c =
+        runFinc({src.string(), "-o", exe.string(), "-I", dir.string()});
+    EXPECT_EQ(c.exitCode, 0) << stripAnsi(c.err);
+    std::string out;
+    if (c.exitCode == 0 && fs::exists(exe)) {
+        const fs::path outPath = uniqueTempPath("fin_impllit_out");
+        EXPECT_EQ(fin::runProcess({exe.string()}, outPath.string(), outPath.string()), 0);
+        out = readProcessOutput(outPath.string());
+        fs::remove(outPath, ec);
+    }
+    EXPECT_EQ(out, "1 2 3\n") << stripAnsi(c.err);
+    fs::remove(src, ec);
+    fs::remove(exe, ec);
+    fs::remove_all(dir, ec);
+}
+
 BACKEND_TEST(Soundness_Codegen, AClassAttributeDoesNotChangeLayout) {
     // ADR 0026: a class lowers exactly as a struct. The attribute is accepted
     // and ignored for layout -- which is what lets a `#[class]` base from
