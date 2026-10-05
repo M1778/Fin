@@ -17,7 +17,7 @@ void printUsage(std::FILE* out) {
     fmt::print(out, "Options:\n");
     fmt::print(out, "  -o <path>              Build an executable at <path>; without it finc only checks\n");
     fmt::print(out, "  -c                     Compile to an object file and do not link\n");
-    fmt::print(out, "  -O0, -O1, -O2, -O3     Optimisation level for a '-o' build (default -O0)\n");
+    fmt::print(out, "  -O0, -O1, -O2, -O3     Optimisation level for '-o' and '-c' builds (default -O0)\n");
     fmt::print(out, "  -I, --include <path>   Add a module search path\n");
     fmt::print(out, "  --fin-libs <paths>     Library search paths, '{}'-separated;\n", fin::kSearchPathSeparator);
     fmt::print(out, "                         replaces $FIN_LIBS rather than adding to it\n");
