@@ -128,6 +128,20 @@ pub fun append_string(path: string, content: string) <bool> {
     return written >= 0;
 }
 
+// Copies a whole file byte for byte. Reads the source through `read_to_string`
+// and writes it with `write_string`, so a missing source reads as null and
+// reports `false` rather than creating an empty destination.
+#[export]
+pub fun copy_file(src: string, dst: string) <bool> {
+    if (src == null) { return false; }
+    if (dst == null) { return false; }
+    let content? <string> = read_to_string(src);
+    if (content == null) { return false; }
+    let ok <bool> = write_string(dst, content?);
+    free_file_content(content);
+    return ok;
+}
+
 #[llvm_name="mkdir"]
 @define fs_mkdir(path: string, mode: int) <int>;
 

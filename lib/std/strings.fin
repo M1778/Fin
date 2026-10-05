@@ -584,4 +584,58 @@ pub fun join(parts: &Collection<string>, separator: string) <string> {
     return out;
   }
 
+// Splits on a whole separator string rather than a single character. Matches
+// left to right without overlapping -- `split_str("aaa", "aa")` is `["", "a"]` --
+// and an empty separator returns the whole string as its one part, so
+// `join(split_str(x, s), s)` gives `x` back for any separator, the same round-trip
+// `split` documents for its character form.
+//
+// Every part is fresh memory and so is the `Collection`; a caller frees each part
+// with `free_str` and the container with `delete`.
+#[export]
+pub fun split_str(s: string, sep: string) <&Collection<string>> {
+    let parts <&Collection<string>> = new Collection::<string>{};
+    if (sep == null || cast<int>(strings_len(sep)) == 0) {
+        parts.push(clone(s));
+        return parts;
+      }
+    let bytes <[char]> = to_chars(s);
+    let gaps <[char]> = to_chars(sep);
+    let total <int> = cast<int>(strings_len(s));
+    let nsep <int> = cast<int>(strings_len(sep));
+    let begin <int> = 0;
+    let i <int> = 0;
+    while (i + nsep <= total) {
+        let hit <bool> = true;
+        for (let k <int> = 0; k < nsep; k++) {
+            if (bytes[i + k] != gaps[k]) { hit = false; break; }
+          }
+        if (hit) {
+            parts.push(from_chars(bytes, begin, i - begin));
+            i += nsep;
+            begin = i;
+          } else {
+            i++;
+          }
+      }
+    parts.push(from_chars(bytes, begin, total - begin));
+    delete bytes;
+    delete gaps;
+    return parts;
+  }
+
+// Replaces every non-overlapping occurrence of `needle` with `to`. An empty `needle`
+// matches everywhere, which no caller means, so it returns a fresh copy of `s`
+// instead of looping. The result is fresh memory; `free_str` releases it.
+#[export]
+pub fun replace(s: string, needle: string, to: string) <string> {
+    let parts <&Collection<string>> = split_str(s, needle);
+    let out <string> = join(parts, to);
+    for (let i <int> = 0; i < parts.len(); i++) {
+        free_str(parts.get(i));
+      }
+    delete parts;
+    return out;
+  }
+
 }

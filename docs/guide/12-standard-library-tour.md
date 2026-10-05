@@ -52,7 +52,10 @@ The typed helpers are declared as `print<X: Printable>(object: X)` and
 `Printable`. A plain string is not automatically an implementation of that interface.
 String-specific helpers include `print_str`, `println_str`, `eprint_str`, and
 `eprintln_str`. These declarations type-check, but ordinary imported helper calls
-are not emitted. `println("hello")` is not a universal print builtin.
+are not emitted. Concrete-typed helpers do emit: `print_bool`/`println_bool`,
+`eprint_int`/`eprintln_int`, and `print_double`/`println_double`, each with an
+`eprint_*`/`eprintln_*` stderr half, build and run. `println("hello")` is not a
+universal print builtin.
 
 ## `Collection<T>`
 
@@ -133,8 +136,16 @@ populated map holding the written entries.
 
 `strings::std` declares `len`, `equals`, `compare`, `find`, `contains`,
 `index_of_char`, `starts_with`, `ends_with`, `substr`, `concat`, `trim`,
-`to_upper`, `to_lower`, `split`, `join`, `to_chars`, `from_chars`, and `free_str`.
-Search functions return indices or `-1`; `equals` compares bytes.
+`to_upper`, `to_lower`, `split`, `split_str`, `replace`, `join`, `to_chars`,
+`from_chars`, and `free_str`.
+Search functions return indices or `-1`; `equals` compares bytes. `split_str`
+splits on a whole separator string, without overlapping, and `replace` rewrites
+every non-overlapping occurrence; `join(split_str(x, s), s)` gives `x` back, the
+same round-trip `split` documents for its character form. Both build and run.
+Import order matters on the stage2 compiler when `path::std` is also imported:
+both modules declare `join`, and with `path::std` first the stage2 resolver reads
+the `join` inside `replace` as the path one (`Type mismatch: expected 'string',
+got '&Collection<string>'`); importing `strings::std` first selects the string one.
 
 These ordinary string and integer-algorithm imports build and run:
 
