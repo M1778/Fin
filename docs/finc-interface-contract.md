@@ -126,6 +126,7 @@ file — a bad flag, a file that could not be read. Check for null; do not print
 --debug-sema           Print semantic analysis details
 --debug-codegen        Print backend and linker details
 --no-check             Skip semantic analysis (unsafe)
+--no-fin-guard         Reject bare 'let x = ...'; default rewrites to '<auto>' with a warning
 --version / --help
 ```
 

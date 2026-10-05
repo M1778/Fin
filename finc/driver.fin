@@ -2396,6 +2396,7 @@ pub fun print_help() <int> {
     printf("  --dump-tokens          Print the scanned tokens\n");
     printf("  --dump-ast             Print the parsed AST\n");
     printf("  --no-check             Skip semantic analysis (unsafe)\n");
+    printf("  --no-fin-guard         Reject bare 'let x = ...'; default rewrites to '<auto>' with a warning\n");
     printf("  --version              Print version and machine contract version\n");
     printf("  --help                 Show this message\n");
     printf("\nExit codes: 0 success, 1 diagnostics, 2 usage, 3 internal error.\n");
@@ -2421,7 +2422,8 @@ pub fun compile_source_file(
     dump_tokens: bool,
     dump_ast: bool,
     emit_c_only: bool,
-    no_check: bool
+    no_check: bool,
+    fin_guard: bool
 ) <int> {
     // 1. Read source code
     let source? <string> = read_to_string(filename);
@@ -2654,6 +2656,7 @@ pub fun compile_source_file(
     // rather than crashing or lowering silently.
     if (!no_check) {
         let chk <Checker> = new_checker(filename);
+        chk.fin_guard_enabled = fin_guard;
         let check_ok <bool> = chk.check_program(root);
         if (!check_ok) {
             err_dprintf(2, "finc: %d semantic error(s) found\n", chk.diag.error_count);

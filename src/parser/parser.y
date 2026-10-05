@@ -672,6 +672,19 @@ declaration_body:
         $$ = std::make_unique<fin::VariableDeclaration>(false, $2, std::move($5), std::move($8));
         $$->setLoc(@$);
     }
+    /* fin-guard: `let c = expr` with no annotation and no `?`. Accepted here
+       and spelled as `<auto>` so every later pass meets the type it already
+       understands; the flag is what tells semantics this was rewritten, so an
+       explicit `let c <auto> = expr` stays silent. Guarded (warn) or refused
+       (error under --no-fin-guard) in Analyzer_Decl. */
+    | KW_LET IDENTIFIER EQUAL expression SEMICOLON {
+        auto autoType = std::make_unique<fin::TypeNode>("auto");
+        autoType->setLoc(@3);
+        auto var = std::make_unique<fin::VariableDeclaration>(true, $2, std::move(autoType), std::move($4));
+        var->finGuardRewritten = true;
+        $$ = std::move(var);
+        $$->setLoc(@$);
+    }
     | type_definition { $$ = std::move($1); }
     ;
 
@@ -1920,6 +1933,16 @@ variable_declaration:
     | KW_CONST IDENTIFIER QUESTION LT type GT EQUAL expression SEMICOLON {
         $5->is_nullable = true;
         $$ = std::make_unique<fin::VariableDeclaration>(false, $2, std::move($5), std::move($8));
+        $$->setLoc(@$);
+    }
+    /* fin-guard, for-loop header form: the same bare `let c = expr` as the
+       declaration_body production above, so the two spellings cannot disagree. */
+    | KW_LET IDENTIFIER EQUAL expression SEMICOLON {
+        auto autoType = std::make_unique<fin::TypeNode>("auto");
+        autoType->setLoc(@3);
+        auto var = std::make_unique<fin::VariableDeclaration>(true, $2, std::move(autoType), std::move($4));
+        var->finGuardRewritten = true;
+        $$ = std::move(var);
         $$->setLoc(@$);
     }
     ;

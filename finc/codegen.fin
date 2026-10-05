@@ -592,6 +592,140 @@ fun get_node_struct_name(ctx: &FnContext, node: &AstNode) <string> {
             }
             si = si + 1;
         }
+    } else if (node.kind == ast_call_expr()) {
+        // A member read on a call result (`lookup(b).kind`): the base
+        // struct is the callee's return, never the callee. Prefer the
+        // checker's resolved spelling (generic instantiations record it),
+        // else the declared return of the resolved method. "" when
+        // neither answers: callers keep their old path, never a guess.
+        if (node.resolved_spelling != null && cg_strlen(node.resolved_spelling) > cast<ulong>(0)) {
+            let cb_rs <string> = cg_trim_spaces(node.resolved_spelling);
+            let cb_rlen <int> = cast<int>(cg_strlen(cb_rs));
+            if (cb_rlen > 1 && (cg_str_eq(substr(cb_rs, 0, 1), "&") || cg_str_eq(substr(cb_rs, 0, 1), "*"))) {
+                cb_rs = substr(cb_rs, 1, cb_rlen - 1);
+                cb_rlen = cb_rlen - 1;
+            }
+            if (cb_rlen > 1 && cg_str_eq(substr(cb_rs, cb_rlen - 1, 1), "*")) {
+                cb_rs = substr(cb_rs, 0, cb_rlen - 1);
+                cb_rlen = cb_rlen - 1;
+            }
+            let cb_ri <int> = 0;
+            while (cb_ri < cb_rlen) {
+                if (cg_str_eq(substr(cb_rs, cb_ri, 1), "<")) {
+                    cb_rs = substr(cb_rs, 0, cb_ri);
+                    break;
+                }
+                cb_ri = cb_ri + 1;
+            }
+            return cg_trim_spaces(cb_rs);
+        }
+        let cb_want_base <string> = "";
+        let cb_want_short <string> = "";
+        if (node.name != null && cg_strlen(node.name) > cast<ulong>(0)) {
+            // Flattened `Struct_method` (the checker rewrites method calls):
+            // the prefix names the owner, the short names the method.
+            let cb_nm <string> = node.name;
+            let cb_nlen <int> = cast<int>(cg_strlen(cb_nm));
+            let cb_ui <int> = 0;
+            while (cb_ui < cb_nlen) {
+                if (cg_str_eq(substr(cb_nm, cb_ui, 1), "_")) {
+                    let cb_pre <string> = substr(cb_nm, 0, cb_ui);
+                    if (cg_strlen(cb_pre) > cast<ulong>(0) && find_struct(ctx, cb_pre) != null) {
+                        cb_want_base = cb_pre;
+                        cb_want_short = substr(cb_nm, cb_ui + 1, cb_nlen - cb_ui - 1);
+                        break;
+                    }
+                }
+                cb_ui = cb_ui + 1;
+            }
+        }
+        if (cg_strlen(cb_want_base) == cast<ulong>(0) && node.left != null) {
+            // Dot-call shape (`recv.method(...)`): the receiver's struct
+            // owns the method, so its declared return is the base.
+            let cb_rec <&AstNode> = node.left.left;
+            if (cb_rec == null) { cb_rec = node.left; }
+            if (cb_rec != null && cb_rec.kind == ast_unary_expr() && cb_rec.left != null) {
+                if (cb_rec.name != null && (cg_str_eq(cb_rec.name, "*") || cg_str_eq(cb_rec.name, "&"))) {
+                    cb_rec = cb_rec.left;
+                }
+            }
+            let cb_rst <string> = get_node_struct_name(ctx, cb_rec);
+            if (cb_rst != null && cg_strlen(cb_rst) > cast<ulong>(0)) {
+                let cb_rb <string> = cg_trim_spaces(cb_rst);
+                let cb_rbl <int> = cast<int>(cg_strlen(cb_rb));
+                let cb_oi <int> = 0;
+                while (cb_oi < cb_rbl) {
+                    if (cg_str_eq(substr(cb_rb, cb_oi, 1), "<")) {
+                        cb_rb = substr(cb_rb, 0, cb_oi);
+                        break;
+                    }
+                    cb_oi = cb_oi + 1;
+                }
+                cb_rb = cg_trim_spaces(cb_rb);
+                if (cg_strlen(cb_rb) > cast<ulong>(0) && node.name != null && cg_strlen(node.name) > cast<ulong>(0)) {
+                    cb_want_base = cb_rb;
+                    cb_want_short = node.name;
+                    // A flattened `Base_method` name carries its owner:
+                    // read the short form so the walk below matches.
+                    let cb_bl <int> = cast<int>(cg_strlen(cb_rb));
+                    let cb_nl <int> = cast<int>(cg_strlen(node.name));
+                    if (cb_nl > cb_bl + 1 && cg_str_eq(substr(node.name, 0, cb_bl), cb_rb) && cg_str_eq(substr(node.name, cb_bl, 1), "_")) {
+                        cb_want_short = substr(node.name, cb_bl + 1, cb_nl - cb_bl - 1);
+                    }
+                }
+            }
+        }
+        if (cg_strlen(cb_want_base) > cast<ulong>(0) && cg_strlen(cb_want_short) > cast<ulong>(0)) {
+            // The declared return of the resolved method, read off the
+            // recorded method chain where the AST is still at hand.
+            let cb_st <&StructInfo> = find_struct(ctx, cb_want_base);
+            if (cb_st != null && cb_st.method_head != null) {
+                let cb_m <&AstNode> = cb_st.method_head;
+                while (cb_m != null) {
+                    if (cb_m.kind == ast_fun_decl() && cb_m.name != null) {
+                        let cb_hitm <bool> = false;
+                        if (cg_str_eq(cb_m.name, cb_want_short)) { cb_hitm = true; }
+                        if (cb_hitm == false) {
+                            let cb_mnl <int> = cast<int>(cg_strlen(cb_m.name));
+                            let cb_bl2 <int> = cast<int>(cg_strlen(cb_want_base));
+                            let cb_sl2 <int> = cast<int>(cg_strlen(cb_want_short));
+                            if (cb_mnl == cb_bl2 + 1 + cb_sl2 && cg_str_eq(substr(cb_m.name, 0, cb_bl2), cb_want_base)) {
+                                let cb_msep <string> = substr(cb_m.name, cb_bl2, 1);
+                                if ((cg_str_eq(cb_msep, "_") || cg_str_eq(cb_msep, ".")) && cg_str_eq(substr(cb_m.name, cb_bl2 + 1, cb_sl2), cb_want_short)) {
+                                    cb_hitm = true;
+                                }
+                            }
+                        }
+                        if (cb_hitm && cb_m.type_annotation != null && cg_strlen(cb_m.type_annotation) > cast<ulong>(0)) {
+                            let cb_ret3 <string> = cg_trim_spaces(cb_m.type_annotation);
+                            let cb_rl3 <int> = cast<int>(cg_strlen(cb_ret3));
+                            if (cb_rl3 > 1 && (cg_str_eq(substr(cb_ret3, 0, 1), "&") || cg_str_eq(substr(cb_ret3, 0, 1), "*"))) {
+                                cb_ret3 = substr(cb_ret3, 1, cb_rl3 - 1);
+                                cb_rl3 = cb_rl3 - 1;
+                            }
+                            if (cb_rl3 > 1 && cg_str_eq(substr(cb_ret3, cb_rl3 - 1, 1), "*")) {
+                                cb_ret3 = substr(cb_ret3, 0, cb_rl3 - 1);
+                                cb_rl3 = cb_rl3 - 1;
+                            }
+                            cb_ret3 = cg_trim_spaces(cb_ret3);
+                            let cb_b3 <string> = cb_ret3;
+                            let cb_bi3 <int> = 0;
+                            while (cb_bi3 < cb_rl3) {
+                                if (cg_str_eq(substr(cb_ret3, cb_bi3, 1), "<")) {
+                                    cb_b3 = substr(cb_ret3, 0, cb_bi3);
+                                    break;
+                                }
+                                cb_bi3 = cb_bi3 + 1;
+                            }
+                            cb_b3 = cg_trim_spaces(cb_b3);
+                            if (cg_str_eq(cb_b3, "Self")) { return cb_want_base; }
+                            return cb_b3;
+                        }
+                    }
+                    cb_m = cb_m.right;
+                }
+            }
+        }
     } else if (node.kind == ast_index_expr()) {
         let arr_st <string> = get_node_struct_name(ctx, node.left);
         let len <int> = cast<int>(cg_strlen(arr_st));
@@ -8816,14 +8950,35 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             refuse_and_poison(ctx);
             return null;
         }
+        // Whether the node is a `compiler`-rooted member path (the
+        // desugared receiver of `compiler.types.implements(...)`), which
+        // is not a query argument: skip it like the checker does.
+        fun cg_is_compiler_recv(node: &AstNode) <bool> {
+            let cur <&AstNode> = node;
+            while (cur != null && cur.kind == ast_member_access()) {
+                cur = cur.left;
+            }
+            if (cur == null || cur.kind != ast_ident()) { return false; }
+            if (cur.name == null) { return false; }
+            return cg_str_eq(cur.name, "compiler");
+        }
+
         // `@implements` static fold for concrete named pairs (Stage B):
         // two identifiers naming a known struct and interface lower to a
         // bool constant via the conformance predicate. Anything else
         // (a `$struct`/`$interface` value, a generic spelling) keeps the
         // refusal below, never a guessed answer.
         if (cg_str_eq(n.name, "implements") || cg_str_eq(n.name, "@implements")) {
+            let imp_head <&AstNode> = n.left;
+            if (imp_head != null) {
+                let imp_first <&AstNode> = imp_head.left;
+                if (imp_first == null) { imp_first = imp_head; }
+                if (cg_is_compiler_recv(imp_first)) {
+                    imp_head = imp_head.right;
+                }
+            }
             let imp_argc <int> = 0;
-            let imp_w <&AstNode> = n.left;
+            let imp_w <&AstNode> = imp_head;
             while (imp_w != null) {
                 imp_argc = imp_argc + 1;
                 imp_w = imp_w.right;
@@ -8835,12 +8990,12 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             }
             let imp_a0 <&AstNode> = null;
             let imp_a1 <&AstNode> = null;
-            if (n.left != null) {
-                imp_a0 = n.left.left;
-                if (imp_a0 == null) { imp_a0 = n.left; }
-                if (n.left.right != null) {
-                    imp_a1 = n.left.right.left;
-                    if (imp_a1 == null) { imp_a1 = n.left.right; }
+            if (imp_head != null) {
+                imp_a0 = imp_head.left;
+                if (imp_a0 == null) { imp_a0 = imp_head; }
+                if (imp_head.right != null) {
+                    imp_a1 = imp_head.right.left;
+                    if (imp_a1 == null) { imp_a1 = imp_head.right; }
                 }
             }
             if (imp_a0 != null && imp_a1 != null &&

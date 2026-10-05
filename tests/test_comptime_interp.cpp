@@ -1755,10 +1755,12 @@ TEST(ComptimeImplements, HookAnswersBothSpellings) {
     auto rh = interp.evaluateBody(*h->body, env);
     ASSERT_EQ(rh.status, fin::comptime::BodyStatus::Returned) << rh.detail;
     EXPECT_EQ(rh.value.text, "true");
-    // The compiler-API spelling answers through the same hook. NOTE (grammar
-    // gap, not this stage): `.implements` cannot parse after DOT (member
-    // must be IDENTIFIER), so the call is built by hand -- the shape the
-    // parser will produce once the grammar owner allows it.
+    // The compiler-API spelling answers through the same hook. NOTE: the
+    // grammar gap is closed (`DOT KW_IMPLEMENTS` parses, so this is the
+    // shape the parser produces); the call is still built by hand here
+    // because this test covers the interpreter path, not the parser --
+    // the parsed spelling is covered by
+    // SemanticAnalyzer.ImplementsThroughCompilerApiEliminatesArm.
     auto obj = std::make_unique<fin::MemberAccess>(
         std::make_unique<fin::Identifier>("compiler"), "types");
     std::vector<std::unique_ptr<fin::Expression>> args;

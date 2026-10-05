@@ -32,6 +32,7 @@ void CloneVisitor::visit(VariableDeclaration& node) {
     );
     res->is_public = node.is_public;
     res->attributes = cloneVector(node.attributes);
+    res->finGuardRewritten = node.finGuardRewritten;
     res->setLoc(node.loc);
     result = std::move(res);
 }

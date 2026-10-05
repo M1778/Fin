@@ -38,6 +38,7 @@ pub fun run_finc(args: [string], count: int) <int> {
     p.add_flag("--dump-tokens", "", "Print token stream");
     p.add_flag("--dump-ast", "", "Print parsed AST");
     p.add_flag("--no-check", "", "Skip semantic analysis (unsafe)");
+    p.add_flag("--no-fin-guard", "", "Reject bare 'let x = ...' instead of rewriting to '<auto>'");
     p.add_option("-o", "-o", "", "Output path");
     p.add_option("--color", "", "", "Color mode: auto, always, never (accepted; output is never colored)");
     p.add_flag("--color=auto", "", "Color mode (accepted; output is never colored)");
@@ -90,6 +91,9 @@ pub fun run_finc(args: [string], count: int) <int> {
     let dump_tokens <bool> = p.get_flag("--dump-tokens");
     let dump_ast <bool> = p.get_flag("--dump-ast");
     let no_check <bool> = p.get_flag("--no-check");
+    let no_fin_guard <bool> = p.get_flag("--no-fin-guard");
+    let fin_guard <bool> = true;
+    if (no_fin_guard) { fin_guard = false; }
 
     let res <int> = compile_source_file(
         input_file,
@@ -98,7 +102,8 @@ pub fun run_finc(args: [string], count: int) <int> {
         dump_tokens,
         dump_ast,
         emit_c,
-        no_check
+        no_check,
+        fin_guard
     );
 
     free_arg_parser(p);

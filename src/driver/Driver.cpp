@@ -194,6 +194,7 @@ int Driver::compile() {
         SemanticAnalyzer analyzer(diag, options.debugSema);
         analyzer.setModuleLoader(&loader); // Use same loader
         analyzer.setExternalGlobalScope(loader.sharedGlobalScope());
+        analyzer.setFinGuard(options.finGuard);
         analyzer.visit(*ast);
 
         if (analyzer.hasError || diag.hasErrors()) {

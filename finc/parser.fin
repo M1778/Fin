@@ -1677,9 +1677,18 @@ pub struct Parser {
                   self.stream.advance();
                   let mem_tok <Token> = self.stream.peek();
                   let is_valid_mem <bool> = false;
+                  let is_impl_kw <bool> = false;
                   if (mem_tok.kind == tok_ident() || mem_tok.kind == tok_int_lit()) {
                       self.stream.advance();
                       is_valid_mem = true;
+                  } else if (mem_tok.kind == kw_implements()) {
+                      // Mirror of the C++ `DOT KW_IMPLEMENTS` carve-out:
+                      // `implements` lexes as a keyword, so the member
+                      // position needs its own alternative for
+                      // `compiler.types.implements(T, ...)` to parse.
+                      self.stream.advance();
+                      is_valid_mem = true;
+                      is_impl_kw = true;
                   }
                   if (is_valid_mem) {
                       let is_macro <bool> = false;
@@ -1723,7 +1732,14 @@ pub struct Parser {
                           }
                       } else {
                           let m_turbofish <string> = "";
-                          if (self.match_token(tok_double_colon())) {
+                          if (is_impl_kw && self.stream.check(tok_double_colon())) {
+                              // C++ rejects turbofish on the carve-out
+                              // (`x.implements::<T>()` is a syntax error
+                              // there); accepting-and-ignoring it here would
+                              // be a silent divergence, so refuse it too.
+                              let dc <Token> = self.stream.peek();
+                              self.report_error("unexpected '::' after 'implements'", dc.line, dc.col);
+                          } else if (self.match_token(tok_double_colon())) {
                               if (self.stream.check(tok_lt())) {
                                   m_turbofish = self.parse_type();
                               }
@@ -1892,6 +1908,7 @@ pub struct Parser {
               return null;
           }
           let var_name <string> = id_tok.text;
+          let is_let <bool> = (let_tok.kind == kw_let());
           let var_nullable <bool> = false;
           if (self.match_token(tok_question())) {
               // nullable variable e.g. let source? <string>; kept in the
@@ -1899,9 +1916,11 @@ pub struct Parser {
               var_nullable = true;
           }
 
+          let has_ann <bool> = false;
           let type_ann <string> = "auto";
           if (self.stream.check(tok_lt())) {
               type_ann = self.parse_type();
+              has_ann = true;
           }
           if (var_nullable) {
               type_ann = p_nullable_ann(type_ann);
@@ -1912,11 +1931,19 @@ pub struct Parser {
               init_expr = self.parse_expression(0);
           }
 
+          // fin-guard: bare `let c = e` (no `<...>`, no `?`, `let` only)
+          // spells as "" so the checker can tell a rewrite from a written
+          // `<auto>` (which stays silent). `const` and `?` keep today's
+          // silent `auto` path; `let c;` with no init is not a rewrite.
+          if (is_let && !has_ann && !var_nullable && init_expr != null) {
+              type_ann = "";
+          }
+
           // Refusing a float literal for a non-float-typed variable here is
           // the last seam that still knows it was a float: downstream it is
           // already an IntegerLiteral and would silently become its int part.
           if (init_expr != null && init_expr.kind == ast_literal_int()) {
-              if (init_expr.type_annotation != null && p_str_eq(init_expr.type_annotation, "float") && !p_str_eq(type_ann, "float") && !p_str_eq(type_ann, "double") && !p_str_eq(type_ann, "auto") && !p_str_eq(type_ann, "float?") && !p_str_eq(type_ann, "double?")) {
+              if (init_expr.type_annotation != null && p_str_eq(init_expr.type_annotation, "float") && !p_str_eq(type_ann, "float") && !p_str_eq(type_ann, "double") && !p_str_eq(type_ann, "auto") && !p_str_eq(type_ann, "") && !p_str_eq(type_ann, "float?") && !p_str_eq(type_ann, "double?")) {
                   let msg_buf <string> = p_calloc(cast<ulong>(128), cast<ulong>(1));
                   p_snprintf(msg_buf, cast<ulong>(128), "Type mismatch: expected '%s', got 'float'", type_ann);
                   self.report_error(msg_buf, init_expr.line, init_expr.col);

@@ -13,6 +13,7 @@
 #include "LoopBackEdge.hpp"
 #include "MovedAnalysis.hpp"
 #include <set>
+#include <unordered_set>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -51,6 +52,8 @@ public:
 
     void setModuleLoader(ModuleLoader* loader) { this->loader = loader; }
     void setExternalGlobalScope(const std::shared_ptr<Scope>& scope);
+    // fin-guard, threaded from CompilerOptions by the driver (default on).
+    void setFinGuard(bool enabled) { finGuardEnabled = enabled; }
     
     std::shared_ptr<Scope> getGlobalScope() { return globalScope; }
 
@@ -202,6 +205,9 @@ private:
     DiagnosticEngine& diag;
     bool debugMode;
     ModuleLoader* loader = nullptr; // Reference to loader
+    // fin-guard (default on): bare `let x = ...` rewrites to `<auto>` with a
+    // warning; off rejects it. Set from CompilerOptions by the driver.
+    bool finGuardEnabled = true;
 
     std::vector<std::shared_ptr<Scope>> scopeStack;
 
@@ -296,6 +302,11 @@ private:
     events::MovedAnalysis moved_;
     std::set<std::string> w7_refused_;
     std::vector<events::W7FiredHandler> w7_fired_;
+    // The empty blocks a folded `@defined`/`@implements` guard left behind
+    // when it pruned its untaken arm (Analyzer_Stmt visit(IfStatement&)).
+    // checkReturnPaths answers from the taken arm when it meets one; every
+    // other walker treats them as the empty blocks they are.
+    std::unordered_set<const Block*> prunedArms_;
     // Wave-4 step 20 (W10): this module's loop_back_edge latch points, the
     // pre-pass refused set, the fired log, and the function-local loop
     // nesting depth (1 = outermost). Saved and reset on function and lambda

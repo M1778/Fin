@@ -14,6 +14,24 @@
 namespace fin {
 
 void SemanticAnalyzer::visit(VariableDeclaration& node) {
+    // fin-guard: `let <name> = ...` with no annotation. The parser already
+    // spelled the type as `<auto>` so later passes need no new shape; this
+    // flag is the only thing that tells a rewrite apart from a written `<auto>`.
+    if (node.finGuardRewritten) {
+        if (!finGuardEnabled) {
+            error(node, "bare 'let " + node.name + "' needs a type annotation or '?' (fin-guard is off)");
+            return;
+        }
+        if (!node.type || node.type->name != "auto") {
+            auto autoType = std::make_unique<TypeNode>("auto");
+            autoType->setLoc(node.loc);
+            node.type = std::move(autoType);
+        }
+        // warnOnHostBranch precedent: warning() counts but never fails the build.
+        warning(node, "fin-guard rewrote 'let " + node.name + " = ...' as 'let " +
+                      node.name + " <auto> = ...' (pass --no-fin-guard to reject this instead)");
+        node.finGuardRewritten = false;
+    }
     validateAttributes(node.attributes);
     auto type = resolveTypeFromAST(node.type.get());
 

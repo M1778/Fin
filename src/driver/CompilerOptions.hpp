@@ -44,6 +44,10 @@ struct CompilerOptions {
     bool skipSemantics = false;
     bool skipCodegen = false;
 
+    // fin-guard (default on): `let <name> = ...` with no annotation rewrites to
+    // `let <name> <auto> = ...` with a warning. `--no-fin-guard` rejects it.
+    bool finGuard = true;
+
     // `-c`: stop at the object file and do not link. A third mode beside "check"
     // and "build an executable", and the one a Fin file that is a library fits --
     // ten corpus samples have no `main`, which is a diagnostic under `-o` and is

@@ -27,6 +27,7 @@ void printUsage(std::FILE* out) {
     fmt::print(out, "  --debug-sema           Print semantic analysis details\n");
     fmt::print(out, "  --debug-codegen        Print what the backend lowers and the link command\n");
     fmt::print(out, "  --no-check             Skip semantic analysis (unsafe)\n");
+    fmt::print(out, "  --no-fin-guard         Reject bare 'let x = ...'; default rewrites to '<auto>' with a warning\n");
     fmt::print(out, "  --version              Print version and machine contract version\n");
     fmt::print(out, "  --help                 Show this message\n");
     fmt::print(out, "\nExit codes: 0 success, 1 diagnostics, 2 usage, 3 internal error.\n");
@@ -135,6 +136,7 @@ int main(int argc, char** argv) {
             if (arg == "--debug-ast")  { opts.debugParser = true;   continue; }
             if (arg == "--debug-sema") { opts.debugSema = true;     continue; }
             if (arg == "--no-check")   { opts.skipSemantics = true; continue; }
+            if (arg == "--no-fin-guard") { opts.finGuard = false; continue; }
             if (arg == "--debug-codegen") { opts.debugCodegen = true; continue; }
 
             if (arg == "-c") { opts.compileOnly = true; continue; }

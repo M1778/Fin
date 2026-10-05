@@ -194,6 +194,17 @@ void SemanticAnalyzer::visit(IfStatement& node) {
             folded.value.kind == comptime::ValueKind::Bool) {
             const bool take = (folded.value.text == "true");
             if (take) {
+                // The guard folded true: the else arm is dead for every
+                // downstream consumer, so prune it to an empty block. Analysis
+                // already skipped it; without the prune codegen still walks it
+                // and refuses the hard error inside. Recorded in prunedArms_
+                // so checkReturnPaths answers from the taken arm.
+                if (node.else_stmt) {
+                    auto pruned = std::make_unique<Block>(
+                        std::vector<std::unique_ptr<Statement>>{});
+                    prunedArms_.insert(pruned.get());
+                    node.else_stmt = std::move(pruned);
+                }
                 if (injectedWalk_) {
                     node.then_block->accept(*this);
                     return;
@@ -203,6 +214,16 @@ void SemanticAnalyzer::visit(IfStatement& node) {
                 auto thenEnd = moved_.snapshot();
                 moved_.installJoin(thenEnd, snap);
                 return;
+            }
+            // The guard folded false: the then arm is dead -- prune it to an
+            // empty block (see the take-true prune above) and walk the else.
+            // Pruned before the no-else return so a dead then with no else
+            // still lowers to nothing.
+            {
+                auto pruned = std::make_unique<Block>(
+                    std::vector<std::unique_ptr<Statement>>{});
+                prunedArms_.insert(pruned.get());
+                node.then_block = std::move(pruned);
             }
             if (!node.else_stmt) return;
             if (injectedWalk_) {
@@ -519,6 +540,18 @@ bool SemanticAnalyzer::checkReturnPaths(Statement* node) {
     }
 
     if (auto* ifStmt = dynamic_cast<IfStatement*>(node)) {
+        // A folded guard's pruned arm is unreachable, so the taken arm
+        // decides: without this a both-arms-return `if` over a folded guard
+        // reports a missing return once the dead arm is an empty block.
+        if (ifStmt->else_stmt) {
+            const auto* elseBlock = dynamic_cast<const Block*>(ifStmt->else_stmt.get());
+            if (elseBlock && prunedArms_.count(elseBlock) != 0)
+                return checkReturnPaths(ifStmt->then_block.get());
+        }
+        if (prunedArms_.count(ifStmt->then_block.get()) != 0) {
+            if (ifStmt->else_stmt) return checkReturnPaths(ifStmt->else_stmt.get());
+            return false;
+        }
         if (ifStmt->else_stmt) {
             return checkReturnPaths(ifStmt->then_block.get()) && 
                    checkReturnPaths(ifStmt->else_stmt.get());

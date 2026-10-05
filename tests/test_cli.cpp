@@ -3050,3 +3050,45 @@ TEST(Soundness_MachineContract, NoSampleTerminatesTheCompilerBySignal) {
         << withLibs
         << "The per-sample corpus runner does not set FIN_LIBS, so it cannot see these.";
 }
+
+// --- fin-guard --------------------------------------------------------------
+//
+// `let <name> = ...` with no annotation and no `?` rewrites to
+// `let <name> <auto> = ...` with one warning per site (exit 0), and
+// `--no-fin-guard` rejects it instead (exit 1).
+
+TEST(FinGuard, BareLetRewritesToAutoWithWarningByDefault) {
+    TempFin f("fun main() <noret> {\n  let c = 10;\n}\n", "guard_on");
+    auto r = runFinc({f.str()});
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << "a warning never fails the build:\n" << err;
+    EXPECT_EQ(countOccurrences(err,
+        "fin-guard rewrote 'let c = ...' as 'let c <auto> = ...' "
+        "(pass --no-fin-guard to reject this instead)"), 1u)
+        << "exactly one warning per site, verbatim:\n" << err;
+}
+
+TEST(FinGuard, BareLetIsRejectedWhenGuardIsOff) {
+    TempFin f("fun main() <noret> {\n  let c = 10;\n}\n", "guard_off");
+    auto r = runFinc({f.str(), "--no-fin-guard"});
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 1) << err;
+    EXPECT_NE(err.find("bare 'let c' needs a type annotation or '?' (fin-guard is off)"),
+              std::string::npos) << err;
+}
+
+TEST(FinGuard, ExplicitAutoStaysSilent) {
+    // The control: the flag marks a rewrite, so a written `<auto>` warns nothing.
+    TempFin f("fun main() <noret> {\n  let c <auto> = 10;\n}\n", "guard_auto");
+    auto r = runFinc({f.str()});
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << err;
+    EXPECT_EQ(err.find("fin-guard"), std::string::npos)
+        << "a written '<auto>' is not a rewrite:\n" << err;
+}
+
+TEST(FinGuard, FlagIsAdvertisedInHelp) {
+    auto r = runFinc({"--help"});
+    EXPECT_EQ(r.exitCode, 0);
+    EXPECT_NE(r.out.find("--no-fin-guard"), std::string::npos);
+}

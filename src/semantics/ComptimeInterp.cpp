@@ -670,14 +670,25 @@ ExprResult Interpreter::evaluateMethod(const MethodCall& node, const Env& env) {
     // Grant checking is the analyzer's (this model never carries grants);
     // unknown names stay a gap exactly as there.
     if (node.method_name == "implements" && node.object && asTypesImplementsCall(node)) {
-        if (node.args.size() != 2)
+        // A rewritten call (the analyzer's MethodCall door spends the
+        // qualifier into `resolved_call`, lowerModuleCall pattern): the
+        // arguments live on the plain spelling, which is also what the
+        // backend lowers, so the fold reads them there.
+        const FunctionCall* plain = nullptr;
+        if (node.resolved_call) {
+            plain = dynamic_cast<const FunctionCall*>(node.resolved_call.get());
+            if (!plain || !plain->is_special || plain->name != "implements") plain = nullptr;
+        }
+        const std::vector<std::unique_ptr<Expression>>& qargs =
+            plain ? plain->args : node.args;
+        if (qargs.size() != 2)
             return ExprResult{ExprStatus::Gap, {},
                               "'compiler.types.implements' expects 2 arguments, got " +
-                                  std::to_string(node.args.size())};
+                                  std::to_string(qargs.size())};
         std::string sName;
         std::string iName;
-        if (!asImplementsTypeName(node.args[0].get(), &sName) ||
-            !asImplementsTypeName(node.args[1].get(), &iName))
+        if (!asImplementsTypeName(qargs[0].get(), &sName) ||
+            !asImplementsTypeName(qargs[1].get(), &iName))
             return ExprResult{ExprStatus::Gap, {},
                               "'compiler.types.implements' needs type names at comptime "
                               "(a $struct/$interface value lowers through the runtime chain)"};

@@ -545,6 +545,9 @@ pub struct Checker {
       // scope): the enclosing `fun` whose generic bounds own a `T` receiver.
       // Saved/restored per function like current_ret_type; "" outside bodies.
       current_fn <string> = "",
+      // fin-guard (default on): bare `let x = ...` rewrites to `<auto>`
+      // with a warning; off rejects it. Set from the driver flag.
+      fin_guard_enabled <bool> = true,
 
     pub:
       fun report_error(self: &Self, msg: string, line: int, col: int) <noret> {
@@ -1148,7 +1151,12 @@ pub struct Checker {
         if (chk_str_eq(t, "$struct") || chk_str_eq(t, "$type")) { return true; }
         let b <string> = self.chk_generic_base(t);
         if (self.global_scope.has(b)) {
-            return self.global_scope.lookup(b).kind == sym_struct();
+            // Bound before reading: a chained `lookup(b).kind` misreads
+            // `kind` on a self-built stage (heap garbage, not the field),
+            // while the bound local reads correctly. Tested: free-form
+            // `@implements` with named types fails chained, passes bound.
+            let bsym <Symbol> = self.global_scope.lookup(b);
+            return bsym.kind == sym_struct();
         }
         return false;
     }
@@ -1157,7 +1165,8 @@ pub struct Checker {
         if (chk_str_eq(t, "$interface") || chk_str_eq(t, "$type")) { return true; }
         let b <string> = self.chk_generic_base(t);
         if (self.global_scope.has(b)) {
-            return self.global_scope.lookup(b).kind == sym_interface();
+            let bsym <Symbol> = self.global_scope.lookup(b);
+            return bsym.kind == sym_interface();
         }
         return false;
     }
@@ -1845,6 +1854,31 @@ pub struct Checker {
           return false;
       }
 
+      // True when `member` is a declared enumerator of enum `enum_name`
+      // (C++ namesAnEnumerator): the enum is declared and pass 1 registers
+      // the member under `E_m`/`E::m`, so a bare name of that spelling under
+      // a `$enum_member` expectation is the member, not a value of the enum.
+      fun api_is_enumerator(self: &Self, enum_name: string, member: string) <bool> {
+          if (enum_name == null || member == null) { return false; }
+          if (!self.global_scope.has(enum_name)) { return false; }
+          let esym <Symbol> = self.global_scope.lookup(enum_name);
+          if (esym.kind != sym_enum()) { return false; }
+          let b1 <Buffer> = new_buffer(64);
+          b1.write_string(enum_name);
+          b1.write_char('_');
+          b1.write_string(member);
+          let q1 <string> = b1.to_string();
+          free_buffer(b1);
+          if (self.global_scope.has(q1)) { return true; }
+          let b2 <Buffer> = new_buffer(64);
+          b2.write_string(enum_name);
+          b2.write_string("::");
+          b2.write_string(member);
+          let q2 <string> = b2.to_string();
+          free_buffer(b2);
+          return self.global_scope.has(q2);
+      }
+
       // One call argument against its written parameter spelling: the
       // narrowing check C++ checkCallArguments runs per argument through
       // checkType (refused at the argument, like `=` and `return`). Shared
@@ -1854,6 +1888,13 @@ pub struct Checker {
       // resolved here exactly like the plain-call path resolves it.
       fun chk_check_arg_type(self: &Self, actual_arg: &AstNode, at: string, want_raw: string) <noret> {
           let want <string> = self.resolve_type(chk_trim(want_raw));
+          // A bare enumerator name where `$enum_member` is expected is that
+          // member (C++ visit(Identifier&) hint rule): `extern E::A as A`
+          // then `p(A)` types `A` as `$enum_member`, not `E`.
+          if (chk_str_eq(want, "$enum_member") && actual_arg != null &&
+              actual_arg.kind == ast_ident() && self.api_is_enumerator(at, actual_arg.name)) {
+              return;
+          }
           // An unbound bare word on either side is a generic parameter the
           // C++ frontend infers (checkGenericCall), never a mismatch: the
           // declaration already diagnosed the genuinely-undefined, so this
@@ -2209,7 +2250,8 @@ pub struct Checker {
           if (chk_str_eq(name, "types") || chk_str_eq(name, "structs") ||
               chk_str_eq(name, "enums") || chk_str_eq(name, "system") ||
               chk_str_eq(name, "layout") || chk_str_eq(name, "events") ||
-              chk_str_eq(name, "diag") || chk_str_eq(name, "scopes")) {
+              chk_str_eq(name, "diag") || chk_str_eq(name, "scopes") ||
+              chk_str_eq(name, "symbols")) {
               return true;
           }
           return false;
@@ -2304,6 +2346,12 @@ pub struct Checker {
               if (chk_str_eq(member, "live_pointers_quote")) { return 0; }
               return -1;
           }
+          // `defined` backs `@defined` (one predicate behind both
+          // spellings, C++ answerDefined): arity 1, a call, like the rest.
+          if (chk_str_eq(comp, "symbols")) {
+              if (chk_str_eq(member, "defined")) { return 2; }
+              return -1;
+          }
           return -1;
       }
 
@@ -2371,6 +2419,10 @@ pub struct Checker {
           }
           if (chk_str_eq(comp, "diag")) { return "noret"; }
           if (chk_str_eq(comp, "scopes")) { return "quote"; }
+          if (chk_str_eq(comp, "symbols")) {
+              if (chk_str_eq(member, "defined")) { return "bool"; }
+              return "void";
+          }
           return "void";
       }
 
@@ -2866,6 +2918,10 @@ pub struct Checker {
               return "";
           }
           if (chk_str_eq(comp, "diag")) { return "string"; }
+          if (chk_str_eq(comp, "symbols")) {
+              if (chk_str_eq(member, "defined")) { return "string"; }
+              return "";
+          }
           return "";
       }
 
@@ -2947,6 +3003,20 @@ pub struct Checker {
           return self.api_member_ret(comp, member, turbofish);
       }
 
+      // Whether the receiver of a dotted call is a `compiler`-rooted
+      // path (`compiler.types` in `compiler.types.implements(...)`):
+      // the first written argument is the desugared receiver, not a
+      // query argument, so the `@implements` branch below must let it
+      // fall through to the compiler-API dispatcher (mirror of the C++
+      // `DOT KW_IMPLEMENTS` carve-out reaching the existing fold).
+      fun call_recv_is_compiler(self: &Self, expr: &AstNode) <bool> {
+          if (expr == null || expr.left == null) { return false; }
+          let first <&AstNode> = expr.left.left;
+          if (first == null) { first = expr.left; }
+          if (first.kind != ast_member_access()) { return false; }
+          return self.api_compiler_root(first);
+      }
+
       // Whether the receiver is rooted at `compiler`: the leftmost
       // identifier names it.
       fun api_compiler_root(self: &Self, node: &AstNode) <bool> {
@@ -2965,6 +3035,18 @@ pub struct Checker {
           // the arguments for their own diagnostics and stop.
           if (chk_str_eq(recv, "error")) {
               self.api_walk_args(expr.left);
+              return "error";
+          }
+          // The `compiler` name itself needs `#[use(compiler)]` (C++
+          // applyUseAttributes binds it per declaration): a component grant
+          // alone leaves it undefined. The Arm-phase top-level `enable` is
+          // consumed before analysis and needs no grant.
+          let is_top_enable <bool> = self.in_function == 0 &&
+              ((chk_str_eq(recv, "compiler.events") && chk_str_eq(member, "enable")) ||
+               (chk_str_eq(recv, "compiler") && chk_str_eq(member, "events")));
+          if (!is_top_enable && !self.api_has_grant("compiler")) {
+              self.api_walk_args(expr.left);
+              self.report_error("Undefined variable 'compiler'", expr.line, expr.col);
               return "error";
           }
           let turbo <string> = expr.type_annotation;
@@ -3189,8 +3271,12 @@ pub struct Checker {
           if (chk_str_starts_with(path, "compiler.components.")) {
               let cname <string> = substr(path, 20, cast<int>(chk_strlen(path)) - 20);
               if (chk_str_eq(member, "present") || chk_str_eq(member, "granted")) { return "bool"; }
-              if (chk_str_eq(member, "version")) { return "int"; }
-              if (chk_str_eq(member, "name")) { return "string"; }
+              // Read, not called: the signature, which is what a function
+              // value is (C++ Layer 3 returns the FunctionType, spelling
+              // `fn() -> int`). The use site (return, let) then mismatches
+              // like C++ instead of accepting.
+              if (chk_str_eq(member, "version")) { return "fn() -> int"; }
+              if (chk_str_eq(member, "name")) { return "fn() -> string"; }
               if (self.quiet_compiler == 0) {
                   let b3 <Buffer> = new_buffer(160);
                   b3.write_string("A component reference has no member '");
@@ -4940,7 +5026,7 @@ pub struct Checker {
                   if (expr.left != null) { self.check_expression(expr.left); }
                   return "int";
               }
-              if (chk_str_eq(expr.name, "@implements") || chk_str_eq(expr.name, "implements")) {
+              if ((chk_str_eq(expr.name, "@implements") || chk_str_eq(expr.name, "implements")) && !self.call_recv_is_compiler(expr)) {
                   let ic <int> = self.count_call_args(expr.left, false);
                   if (ic != 2) {
                       let ib <Buffer> = new_buffer(64);
@@ -4977,7 +5063,7 @@ pub struct Checker {
                   }
                   return "bool";
               }
-              if (chk_str_eq(expr.name, "@defined") || chk_str_eq(expr.name, "defined")) {
+              if ((chk_str_eq(expr.name, "@defined") || chk_str_eq(expr.name, "defined")) && !self.call_recv_is_compiler(expr)) {
                   let dc <int> = self.count_call_args(expr.left, false);
                   if (dc != 1) {
                       let db <Buffer> = new_buffer(64);
@@ -6396,6 +6482,30 @@ pub struct Checker {
 
           if (stmt.kind == ast_var_decl()) {
               self.api_validate_attrs(stmt.attr_text, true, false, stmt.line, stmt.col);
+              // fin-guard: bare `let c = e` arrives as "" (parser marker).
+              // Guard on rewrites to `<auto>` with one warning per site;
+              // guard off rejects. A written `<auto>` is "auto", not "",
+              // so it stays silent. Warnings never fail the build.
+              if (chk_strlen(stmt.type_annotation) == cast<ulong>(0) && stmt.left != null) {
+                  if (!self.fin_guard_enabled) {
+                      let eb <Buffer> = new_buffer(128);
+                      eb.write_string("bare 'let ");
+                      eb.write_string(stmt.name);
+                      eb.write_string("' needs a type annotation or '?' (fin-guard is off)");
+                      self.report_error(eb.to_string(), stmt.line, stmt.col);
+                      free_buffer(eb);
+                      return;
+                  }
+                  let wb <Buffer> = new_buffer(160);
+                  wb.write_string("fin-guard rewrote 'let ");
+                  wb.write_string(stmt.name);
+                  wb.write_string(" = ...' as 'let ");
+                  wb.write_string(stmt.name);
+                  wb.write_string(" <auto> = ...' (pass --no-fin-guard to reject this instead)");
+                  self.report_warning(wb.to_string(), stmt.line, stmt.col);
+                  free_buffer(wb);
+                  stmt.type_annotation = "auto";
+              }
               let inferred <string> = "auto";
               // The narrowing check below observes only a substituted call
               // value (see last_call_subst): anything else leaves the flag
@@ -6470,6 +6580,19 @@ pub struct Checker {
                           self.report_type_mismatch(stmt.type_annotation, inferred, stmt.left.line, stmt.left.col);
                       }
                   }
+                  // A component path read as a value (`compiler.types` is a
+                  // component, C++ CompilerApiType spelling
+                  // `'compiler.types'`): not a `$type` or any other declared
+                  // type. Refused at the value like C++ (`Type mismatch:
+                  // expected '$type', got 'compiler.types'`). Explicit
+                  // annotations only; `auto` above took the path spelling.
+                  if (!was_auto && stmt.left != null && inferred != null &&
+                      chk_str_starts_with(inferred, "compiler.") &&
+                      self.chk_is_known_type_name(stmt.type_annotation)) {
+                      if (!self.chk_types_compatible(inferred, stmt.type_annotation)) {
+                          self.report_type_mismatch(stmt.type_annotation, inferred, stmt.left.line, stmt.left.col);
+                      }
+                  }
                   // Plain explicit annotations check like `=` (C++
                   // checkInitializer): `let y <string> = 1` is refused at
                   // the value. Owns only what no earlier arm answers:
@@ -6501,7 +6624,9 @@ pub struct Checker {
                       chk_strchr(inferred, 123) == null && chk_strchr(inferred, 125) == null &&
                       chk_strchr(stmt.type_annotation, 123) == null && chk_strchr(stmt.type_annotation, 125) == null &&
                       !(stmt.left.kind == ast_call_expr() && chk_strchr(inferred, 40) != null) &&
-                      !chk_str_contains(stmt.type_annotation, "fn(") && !chk_str_contains(inferred, "fn(") &&
+                      !chk_str_contains(stmt.type_annotation, "fn(") &&
+                      (!chk_str_contains(inferred, "fn(") ||
+                       (stmt.left != null && self.api_is_compiler_path(stmt.left))) &&
                       !self.chk_arr_literal_all_fit(stmt.left, stmt.type_annotation)) {
                       if (!self.chk_types_compatible(inferred, stmt.type_annotation)) {
                           let pi <string> = chk_strip_parens(inferred);
@@ -8267,6 +8392,32 @@ pub struct Checker {
                   self.api_validate_attrs(decl.attr_text, true, false, decl.line, decl.col);
               } else if (decl.kind == ast_var_decl()) {
                   self.api_validate_attrs(decl.attr_text, true, false, decl.line, decl.col);
+                  // fin-guard, top-level form: same bare "" marker as the
+                  // statement form above, so the two spellings cannot disagree.
+                  if (chk_strlen(decl.type_annotation) == cast<ulong>(0) && decl.left != null) {
+                      if (!self.fin_guard_enabled) {
+                          let teb <Buffer> = new_buffer(128);
+                          teb.write_string("bare 'let ");
+                          teb.write_string(decl.name);
+                          teb.write_string("' needs a type annotation or '?' (fin-guard is off)");
+                          self.report_error(teb.to_string(), decl.line, decl.col);
+                          free_buffer(teb);
+                      } else {
+                          let twb <Buffer> = new_buffer(160);
+                          twb.write_string("fin-guard rewrote 'let ");
+                          twb.write_string(decl.name);
+                          twb.write_string(" = ...' as 'let ");
+                          twb.write_string(decl.name);
+                          twb.write_string(" <auto> = ...' (pass --no-fin-guard to reject this instead)");
+                          self.report_warning(twb.to_string(), decl.line, decl.col);
+                          free_buffer(twb);
+                          decl.type_annotation = "auto";
+                      }
+                      if (!self.fin_guard_enabled) {
+                          decl = decl.right;
+                          continue;
+                      }
+                  }
                   // Wave-5 slice 4: a top-level tie resolves in the scope
                   // around it, like any other declaration of one.
                   self.check_slaveof_tie(decl.attr_text, decl.name, decl.line, decl.col);

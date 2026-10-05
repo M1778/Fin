@@ -4514,6 +4514,104 @@ BACKEND_TEST(Soundness_Codegen, ImplementsQueryOverLiteralsAnswersTrue) {
     EXPECT_EQ(b.out, "compat-true\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, AUseAttributeOnAFunctionLowers) {
+    // `#[use(...)]` grants are analyzer-side: the names resolve inside the
+    // body, and by lowering time the body is ordinary code. The analyzer
+    // binds them (applyUseAttributes); refusing the attribute here would
+    // reject what the analyzer accepted.
+    const Built b = build(std::string(kPrintf) +
+        "interface Printable {\n"
+        "    pub fun to_string() <string>;\n"
+        "}\n"
+        "struct User: <Printable> {\n"
+        "    name <string>,\n"
+        "    pub fun to_string() <string> {\n"
+        "        return \"User\";\n"
+        "    }\n"
+        "}\n"
+        "#[use(compiler)]\n"
+        "#[use(compiler.components.types)]\n"
+        "fun check() <bool> {\n"
+        "    return compiler.types.implements(User, Printable);\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    if (check()) {\n"
+        "        printf(\"api-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"api-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "api-true\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AUseAttributeOnAMethodLowers) {
+    // Same grant one level in: visit(FunctionDeclaration) covers methods, so
+    // the analyzer binds `compiler` into the method body scope, and by
+    // lowering time the body is ordinary code.
+    const Built b = build(std::string(kPrintf) +
+        "interface Printable {\n"
+        "    pub fun to_string() <string>;\n"
+        "}\n"
+        "struct User: <Printable> {\n"
+        "    name <string>,\n"
+        "    pub fun to_string() <string> {\n"
+        "        return \"User\";\n"
+        "    }\n"
+        "}\n"
+        "struct Probe {\n"
+        "    v <int>,\n"
+        "    #[use(compiler)]\n"
+        "    #[use(compiler.components.types)]\n"
+        "    pub fun check() <bool> {\n"
+        "        return compiler.types.implements(User, Printable);\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let p <Probe> = Probe { v: 1 };\n"
+        "    if (p.check()) {\n"
+        "        printf(\"method-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"method-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "method-true\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AUseAttributeOnAGenericFunctionLowers) {
+    // Same grant on a template: the analyzer binds it (a generic function
+    // shares the FunctionDeclaration visitor), registration keeps the
+    // template, and each instantiation lowers the body as ordinary code.
+    const Built b = build(std::string(kPrintf) +
+        "interface Printable {\n"
+        "    pub fun to_string() <string>;\n"
+        "}\n"
+        "struct User: <Printable> {\n"
+        "    name <string>,\n"
+        "    pub fun to_string() <string> {\n"
+        "        return \"User\";\n"
+        "    }\n"
+        "}\n"
+        "#[use(compiler)]\n"
+        "#[use(compiler.components.types)]\n"
+        "fun gcheck<T>(v: T) <bool> {\n"
+        "    return compiler.types.implements(User, Printable);\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    if (gcheck::<int>(1)) {\n"
+        "        printf(\"generic-true\\n\");\n"
+        "    } else {\n"
+        "        printf(\"generic-false\\n\");\n"
+        "    }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "generic-true\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, ImplementsQueryOverLiteralsAnswersFalse) {
     // The same chain saying no: the struct lacks the interface's method, so
     // no tid pair matches and the answer is false -- the honest negative,
@@ -16039,4 +16137,129 @@ BACKEND_TEST(Soundness_Codegen, ADeleteOfAStackAddressAborts) {
     EXPECT_NE(b.runExit, 0) << b.why();
     EXPECT_EQ(b.out.find("unreached"), std::string::npos) << b.why();
     EXPECT_NE(b.out.find("invalid pointer"), std::string::npos) << b.why();
+}
+
+// DA1: a folded `@defined`/`@implements` guard eliminates the untaken arm for
+// lowering, not just checking. Each test puts a hard error (`NoSuchType`,
+// which lowering refuses by name) in the dead arm: before the prune the
+// compile fails, after it the program lowers and runs the taken arm.
+BACKEND_TEST(Soundness_Codegen, DefinedTrueFoldPrunesElseArmForLowering) {
+    const Built b = build(std::string(kPrintf) +
+        "struct S {\n"
+        "    x <int>,\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    if (@defined(\"S\")) {\n"
+        "        printf(\"taken\\n\");\n"
+        "    } else {\n"
+        "        let bad <NoSuchType> = 1;\n"
+        "    }\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "taken\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, DefinedFalseFoldPrunesThenArmForLowering) {
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    if (@defined(\"NoSuchSymbol_xyz\")) {\n"
+        "        let bad <NoSuchType> = 1;\n"
+        "    } else {\n"
+        "        printf(\"else-taken\\n\");\n"
+        "    }\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "else-taken\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ImplementsTrueFoldPrunesElseArmForLowering) {
+    const Built b = build(std::string(kPrintf) +
+        "interface Printable {\n"
+        "    pub fun to_string() <string>;\n"
+        "}\n"
+        "struct User: <Printable> {\n"
+        "    name <string>,\n"
+        "    age <int>,\n"
+        "    pub fun to_string() <string> {\n"
+        "        return \"User\";\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    if (@implements(User, Printable)) {\n"
+        "        printf(\"taken\\n\");\n"
+        "    } else {\n"
+        "        let bad <NoSuchType> = 1;\n"
+        "    }\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "taken\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ImplementsFalseFoldPrunesThenArmForLowering) {
+    const Built b = build(std::string(kPrintf) +
+        "interface Printable {\n"
+        "    pub fun to_string() <string>;\n"
+        "}\n"
+        "struct Empty {\n"
+        "    x <int>,\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    if (@implements(Empty, Printable)) {\n"
+        "        let bad <NoSuchType> = 1;\n"
+        "    } else {\n"
+        "        printf(\"else-taken\\n\");\n"
+        "    }\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "else-taken\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, DefinedFoldBothArmsReturnStillCompiles) {
+    // The pruned arm is unreachable, so return-path analysis answers from
+    // the taken arm: a both-arms-return `if` over a folded guard is not a
+    // missing return.
+    const Built b = build(std::string(kPrintf) +
+        "struct S {\n"
+        "    x <int>,\n"
+        "}\n"
+        "fun pick() <int> {\n"
+        "    if (@defined(\"S\")) {\n"
+        "        return 1;\n"
+        "    } else {\n"
+        "        return 2;\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", pick());\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ImplementsFoldBothArmsReturnStillCompiles) {
+    const Built b = build(std::string(kPrintf) +
+        "interface Printable {\n"
+        "    pub fun to_string() <string>;\n"
+        "}\n"
+        "struct Empty {\n"
+        "    x <int>,\n"
+        "}\n"
+        "fun pick() <int> {\n"
+        "    if (@implements(Empty, Printable)) {\n"
+        "        return 1;\n"
+        "    } else {\n"
+        "        return 2;\n"
+        "    }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"%d\\n\", pick());\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2\n") << b.why();
 }

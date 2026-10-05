@@ -2285,6 +2285,21 @@ void SemanticAnalyzer::visit(MethodCall& node) {
     if (auto* api = dynamic_cast<const CompilerApiType*>(objType.get())) {
         lastExprType = resolveCompilerApi(node, *api, node.method_name,
                                          &node.args, &node.generic_args);
+        // `compiler.types.implements(a, b)`: spend the qualifier in the front
+        // end (the lowerModuleCall pattern above: `args` move into the plain
+        // call, keeping single ownership; forEachChild emits the resolved
+        // call). The backend deals in symbols and a component path has no
+        // address, so without the rewrite the call refuses with
+        // `the name 'compiler'`. `types` is the only component with an
+        // `implements` member; anything else failed above and keeps its
+        // diagnostic. The comptime fold reads through `resolved_call`
+        // (evaluateMethod), so elimination still folds.
+        if (lastExprType && api->path == "types" && node.method_name == "implements") {
+            auto call = std::make_unique<FunctionCall>("implements", std::move(node.args));
+            call->is_special = true;
+            call->setLoc(node.loc);
+            node.resolved_call = std::move(call);
+        }
         return;
     }
 

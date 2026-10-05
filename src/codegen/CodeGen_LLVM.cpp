@@ -4248,6 +4248,9 @@ private:
         // (`#[overwrite]`), and a method is a symbol like any other.
         if (!attributesAreJustLlvmName(m, m.attributes, "method")) return false;
         for (auto& attr : m.attributes) {
+            // `#[use(...)]` asks nothing of emission (see attributesAreJustLlvmName):
+            // the analyzer bound the grant into the body scope already.
+            if (attr->name == "use") continue;
             // The valued form is what attributesAreJustLlvmName lets through, and
             // a method may not have it: an instantiation's method is emitted once
             // per binding, and one name over two of them is either a duplicate
@@ -4499,8 +4502,9 @@ private:
     }
 
     // A generic function from a loaded module, registered on first call on
-    // the same terms as declareTopLevel registers a root one (ADR 0032): any
-    // attribute refuses, a bodiless one is skipped, and the root wins a name
+    // the same terms as declareTopLevel registers a root one (ADR 0032):
+    // `#[export]` and analyzer-side `#[use(...)]` pass, any other attribute
+    // refuses, a bodiless one is skipped, and the root wins a name
     // both declare. Silent null when no module declares it, which the caller
     // reports as the call it was.
     FunctionDeclaration* ensureFnTemplate(const std::string& name) {
@@ -4516,6 +4520,7 @@ private:
                     return fnTemplates_[fn->name];
                 for (auto& attr : fn->attributes) {
                     if (attr->name == "export" && attr->is_flag) continue;
+                    if (attr->name == "use") continue;
                     unsupported(*fn,
                                 fmt::format("the attribute '{}' on a generic function",
                                             attr->name));
@@ -5297,8 +5302,12 @@ private:
                     // Flag-form `#[export]` is accepted as import-visibility only
                     // (ADR 0033), on the same terms as a struct template's: the
                     // instance keeps shared linkage.
+                    // `#[use(...)]` is analyzer-side (see attributesAreJustLlvmName):
+                    // the grant is bound into the body scope, so the template body
+                    // lowers as ordinary code at each instantiation.
                     for (auto& attr : fn->attributes) {
                         if (attr->name == "export" && attr->is_flag) continue;
+                        if (attr->name == "use") continue;
                         unsupported(*fn,
                                     fmt::format("the attribute '{}' on a generic function",
                                                 attr->name));
@@ -5371,6 +5380,14 @@ private:
         for (auto& attr : attributes) {
             if (attr->name == "llvm_name" && !attr->is_flag) continue;
             if (attr->name == "export" && attr->is_flag) continue;
+            // `#[use(...)]` on a function or a method asks this file for nothing:
+            // the grant binds names into the body scope in the analyzer
+            // (applyUseAttributes -- visit(FunctionDeclaration) covers methods,
+            // and a generic function shares that visitor), and by lowering time
+            // the body is ordinary code. Anything else still refuses.
+            if (attr->name == "use" &&
+                (std::string(what) == "function" || std::string(what) == "method"))
+                continue;
             unsupported(node, fmt::format("the attribute '{}' on a {}", attr->name, what));
             return false;
         }
