@@ -138,6 +138,21 @@ pub struct AstNode {
       // type_annotation rather than written into it (C++ record-don't-replace).
       // Empty where nothing was resolved; codegen prefers it with fallback.
       resolved_spelling <string> = "",
+      // Dropped `operator X implements ...` declarations on a struct: the
+      // parser keeps no body node for them (the body lives in the named
+      // function), so the member chain cannot see them. `;`-joined operator
+      // symbols (`[];=`) for the conformance check, which must count them
+      // as provided. Empty where the struct declares none that way.
+      impl_ops <string> = "",
+      // C++ declaration range for blame sites (conformance, missing
+      // return): the first token's line/col (attributes, then `pub`, then
+      // the keyword) and the closing brace's end column. The C++ node
+      // range underlines end-minus-begin, so the caret and the `did you
+      // mean` token both read off these. 0 where the parser did not
+      // record one; the checker falls back to line/col then.
+      blame_line <int> = 0,
+      blame_col <int> = 0,
+      close_col <int> = 0,
       line <int> = 1,
       col <int> = 1,
       left <&AstNode> = null,

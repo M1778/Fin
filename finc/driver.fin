@@ -1855,6 +1855,14 @@ priv struct Mx {
               while (p < self.n && mx_is_ident_char(self.bytes[p])) { p++; }
           }
           let name <string> = from_chars(self.bytes, start, p - start);
+          // `operator` is a keyword, never a macro name: `pub operator !() <T>;`
+          // declares a negation operator. The C++ grammar builds a macro call
+          // only from an expression, and a bare `operator` is not one (an
+          // `operator!(x)` in expression position is a syntax error there).
+          if (drv_str_eq(name, "operator")) {
+              self.mx_copy_to(p);
+              return true;
+          }
           let j <int> = p;
           while (j < self.n && (self.bytes[j] == ' ' || self.bytes[j] == '\t' || self.bytes[j] == '\r' || self.bytes[j] == '\n')) { j++; }
           if (j < self.n && self.bytes[j] == '!' && (j + 1 >= self.n || self.bytes[j + 1] != '=')) {
@@ -2324,8 +2332,6 @@ priv fun resolve_module_spec(spec: string, importer: string) <string> {
     let bare <string> = drv_unquote(spec);
     if (drv_str_eq(bare, "argparse::std")) { return drv_resolve_std("argparse", importer); }
     if (drv_str_eq(bare, "collection::std")) { return drv_resolve_std("collection", importer); }
-    if (drv_str_eq(bare, "operators::std")) { return ""; }
-    if (drv_str_eq(bare, "error::std")) { return ""; }
     if (drv_str_eq(bare, "token::std")) { return drv_resolve_std("token", importer); }
     if (drv_str_eq(bare, "scanner::std")) { return drv_resolve_std("scanner", importer); }
     if (drv_str_eq(bare, "parse::std")) { return drv_resolve_std("parse", importer); }
@@ -2659,7 +2665,8 @@ pub fun compile_source_file(
         chk.fin_guard_enabled = fin_guard;
         let check_ok <bool> = chk.check_program(root);
         if (!check_ok) {
-            err_dprintf(2, "finc: %d semantic error(s) found\n", chk.diag.error_count);
+            // No summary line: the C++ Driver prints none in human mode,
+            // so the check sweep agrees bytes on the diagnostics alone.
             delete tokens;
             free_parser(p);
             free_checker(chk);
@@ -2670,12 +2677,15 @@ pub fun compile_source_file(
         free_checker(chk);
     }
 
-    // If check-only mode (no -o, no -c), clean up and exit 0
+    // If check-only mode (no -o, no -c), clean up and exit 0.
+    // Mirrors C++ Driver::compile's diag.success("Build Successful."):
+    // every success reports it on stderr, so the check sweep agrees bytes.
     if (drv_str_eq(out_path, "") && !is_compile_only) {
         delete tokens;
         free_parser(p);
         free_ast(root);
         free_file_content(source);
+        err_dprintf(2, "Build Successful.\n");
         return 0;
     }
 
@@ -2722,6 +2732,7 @@ pub fun compile_source_file(
 
     if (is_compile_only) {
         if (own_o) { free_string(target_o); }
+        err_dprintf(2, "Build Successful.\n");
         return 0;
     }
 
@@ -2750,5 +2761,6 @@ pub fun compile_source_file(
         return 1;
     }
 
+    err_dprintf(2, "Build Successful.\n");
     return 0;
 }
