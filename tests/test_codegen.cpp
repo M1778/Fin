@@ -4950,7 +4950,14 @@ BACKEND_TEST(Soundness_Codegen, ABlameM1778WithAMessageGoesToStderr) {
     const std::string onErr = readProcessOutput(errOnly.string());
 
     EXPECT_EQ(onOut, "") << "a reached marker reached stdout:\n" << onOut;
-    EXPECT_EQ(onErr, src.string() + ":2: Fin blames to stderr\n") << onErr;
+    // A shell that reports the abort may append its own epilogue to the
+    // redirected stderr (CI's bash prints `Aborted (core dumped)` where this
+    // machine's prints nothing): the compiler's line must be exact, the
+    // shell's epilogue is tolerated in its observed spellings.
+    const std::string pinned = src.string() + ":2: Fin blames to stderr\n";
+    EXPECT_TRUE(onErr == pinned || onErr == pinned + "Aborted\n" ||
+                onErr == pinned + "Aborted (core dumped)\n")
+        << "stderr was:\n" << onErr;
 
     std::error_code ec;
     fs::remove(src, ec);
