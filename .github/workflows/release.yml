@@ -18,7 +18,11 @@ name: Release
 
 on:
   push:
-    tags: ['v[0-9]+.[0-9]+.[0-9]+*']
+    # No trailing wildcard: preflight requires the tag to equal v<CMake
+    # version> exactly, and a CMake project VERSION carries no prerelease
+    # suffix, so a suffixed tag could only fail there. Prerelease tags stay
+    # unmatched rather than burning a matrix that cannot succeed.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
     inputs:
       publish:
