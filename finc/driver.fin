@@ -6,6 +6,7 @@ import { AstNode, free_ast, ast_fun_decl } from ast::std;
 import { format_stmt } from printer::std;
 import { read_to_string, write_string, remove_file, free_file_content, file_exists, file_size } from fs::std;
 import { run_command, exec_command, ProcessResult, free_process_result } from process::std;
+import { getenv } from env::std;
 import { Buffer, new_buffer, free_buffer, free_string } from buffer::std;
 
 import { Parser, new_parser, free_parser } from finc.parser;
@@ -2442,10 +2443,37 @@ priv fun drv_host_os() <int> {
     return kind;
 }
 
+// The FIN_LLVM_MAJOR pin as digits, or "" when it names no keg. The C++
+// probe reads the same pin at compile time (src/utils/Process.cpp:85-89);
+// the stage reads it at link time from the environment, never hardcoded,
+// so a toolchain bump needs no edit here. Anything but digits names no
+// Homebrew keg and falls through to the unversioned probes below.
+priv fun drv_llvm_major() <string> {
+    let major <string> = getenv("FIN_LLVM_MAJOR");
+    if (major == null) { return ""; }
+    let n <int> = cast<int>(drv_strlen(major));
+    if (n <= 0) { return ""; }
+    let b <[char]> = to_chars(major);
+    for (let i <int> = 0; i < n; i++) {
+        if (!mx_is_digit(b[i])) { delete b; return ""; }
+    }
+    delete b;
+    return major;
+}
+
 // First Homebrew llvm keg lib dir holding libLLVM.dylib, or "".
-// Apple-silicon brew lives under /opt/homebrew, Intel under /usr/local;
-// anything else is the caller's explicit refusal, not a third guess.
+// Versioned `llvm@<major>` kegs first -- CI installs llvm@22, not unversioned
+// llvm -- then the unversioned fallback, mirroring brewLlvmLibDir in
+// src/utils/Process.cpp exactly (Apple-silicon /opt/homebrew, then Intel
+// /usr/local). Anything else is the caller's explicit refusal, not a guess.
 priv fun drv_brew_llvm_lib() <string> {
+    let major <string> = drv_llvm_major();
+    if (!drv_str_eq(major, "")) {
+        let ah <string> = concat(concat("/opt/homebrew/opt/llvm@", major), "/lib");
+        if (file_exists(concat(ah, "/libLLVM.dylib"))) { return ah; }
+        let ih <string> = concat(concat("/usr/local/opt/llvm@", major), "/lib");
+        if (file_exists(concat(ih, "/libLLVM.dylib"))) { return ih; }
+    }
     if (file_exists("/opt/homebrew/opt/llvm/lib/libLLVM.dylib")) {
         return "/opt/homebrew/opt/llvm/lib";
     }
@@ -2802,7 +2830,7 @@ pub fun compile_source_file(
     if (host_os == 2) {
         let keg <string> = drv_brew_llvm_lib();
         if (drv_str_eq(keg, "")) {
-            err_dprintf(2, "finc: error: linking on macOS needs Homebrew LLVM (no libLLVM.dylib under /opt/homebrew/opt/llvm or /usr/local/opt/llvm)\n");
+            err_dprintf(2, "finc: error: linking on macOS needs Homebrew LLVM (no libLLVM.dylib under /opt/homebrew/opt/llvm[@<major>] or /usr/local/opt/llvm[@<major>])\n");
             free_buffer(b_bin);
             if (is_temp_o) {
                 remove_file(target_o);
