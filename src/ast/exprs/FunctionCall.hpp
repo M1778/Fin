@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <optional>
 
 namespace fin {
 
@@ -48,6 +49,16 @@ public:
     // still sees them in place.
     std::string resolved_method_owner;
     bool resolved_method_static = false;
+    // The loaded module this bare call resolved to, by index into
+    // ModuleLoader::modulePrograms() (the backend's `modules_` in the same
+    // order). `pick(0)` in a file importing two modules that both define
+    // `pick` is the last import's, not the first in load order. Set by
+    // SemanticAnalyzer::visit(FunctionCall&) where the callee is an imported
+    // generic function, read on the backend's generic path to instantiate
+    // THAT module's template under a module-qualified key. Empty everywhere
+    // else -- where the callee is the file's own, concrete, or local -- so
+    // those calls lower exactly as before.
+    std::optional<size_t> resolved_generic_owner;
     FunctionCall(std::string n, std::vector<std::unique_ptr<Expression>> a);
     void accept(Visitor& v) override;
 };

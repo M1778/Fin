@@ -61,6 +61,10 @@ void CloneVisitor::visit(FunctionCall& node) {
     // by name to the free function the frontend did not bind.
     res->resolved_method_owner = node.resolved_method_owner;
     res->resolved_method_static = node.resolved_method_static;
+    // The import provenance travels with the node, for the same reason as the
+    // method binding above: a clone without it would lower by load order to a
+    // template the frontend did not resolve to.
+    res->resolved_generic_owner = node.resolved_generic_owner;
     res->setLoc(node.loc);
     result = std::move(res);
 }

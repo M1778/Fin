@@ -182,6 +182,16 @@ std::string ModuleLoader::identityOf(const std::string& path) const {
     return resolved.string();
 }
 
+std::optional<size_t> ModuleLoader::indexOfModule(const std::shared_ptr<Scope>& scope) const {
+    // The scope a successful load was analysed into, recorded beside the
+    // push to astStorage it was analysed from. A cached load returns the
+    // same scope object, so this answers it too.
+    if (!scope) return std::nullopt;
+    auto it = scopeModuleIndex_.find(scope.get());
+    if (it == scopeModuleIndex_.end()) return std::nullopt;
+    return it->second;
+}
+
 void ModuleLoader::beginRootFile(const std::string& path) {
     // Keyed the same way every other entry is, so the root is recognised however an
     // import spells it -- "main", "./main", or a symlink to it.
@@ -329,6 +339,7 @@ std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, b
     }
 
     astStorage.push_back(std::move(moduleAST));
+    scopeModuleIndex_[moduleScope.get()] = astStorage.size() - 1;
     moduleCache[key] = moduleScope;
     loadingStack.erase(key);
     

@@ -7854,6 +7854,106 @@ BACKEND_TEST(Soundness_Codegen, TwoModulesDefiningTheSameGenericEachRunTheirOwnB
     fs::remove_all(dir, ec);
 }
 
+BACKEND_TEST(Soundness_Codegen, ARootCallToADuplicateGenericRunsTheResolvedModulesBody) {
+    // The root imports the generic NAME from two modules that both define it
+    // with different bodies, and calls it directly. The analyzer binds the
+    // last import, so each order runs the last import's body: the backend
+    // used to instantiate the first-loaded module's template, printing the
+    // other module's answer in each order.
+    const fs::path dir = uniqueTempPath("fin_rootgendupe", "");
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    ASSERT_TRUE(fs::is_directory(dir)) << ec.message();
+    {
+        std::ofstream f(dir / "amod.fin", std::ios::binary);
+        f << "pub fun pick<T>(x: T) <int> {\n"
+          << "    return 1;\n"
+          << "}\n";
+    }
+    {
+        std::ofstream f(dir / "bmod.fin", std::ios::binary);
+        f << "pub fun pick<T>(x: T) <int> {\n"
+          << "    return 2;\n"
+          << "}\n";
+    }
+    const std::pair<const char*, const char*> cases[] = {
+        {"import { pick } from amod;\n"
+         "import { pick } from bmod;\n", "2\n"},
+        {"import { pick } from bmod;\n"
+         "import { pick } from amod;\n", "1\n"},
+    };
+    for (const auto& [imports, want] : cases) {
+        const fs::path src = uniqueTempPath("fin_rootgendupe_root", ".fin");
+        const fs::path exe = uniqueTempPath("fin_rootgendupe_exe");
+        {
+            std::ofstream f(src, std::ios::binary);
+            f << std::string(kPrintf) << imports
+              << "fun main() <noret> {\n"
+              << "    printf(\"%d\\n\", pick(0));\n"
+              << "}\n";
+        }
+        const FincRun c =
+            runFinc({src.string(), "-o", exe.string(), "-I", dir.string()});
+        EXPECT_EQ(c.exitCode, 0) << stripAnsi(c.err);
+        std::string out;
+        if (c.exitCode == 0 && fs::exists(exe)) {
+            const fs::path outPath = uniqueTempPath("fin_rootgendupe_out");
+            EXPECT_EQ(fin::runProcess({exe.string()}, outPath.string(), outPath.string()), 0);
+            out = readProcessOutput(outPath.string());
+            fs::remove(outPath, ec);
+        }
+        EXPECT_EQ(out, want) << "a root call runs the resolved (last-imported) body:\n"
+                             << imports << stripAnsi(c.err);
+        fs::remove(src, ec);
+        fs::remove(exe, ec);
+    }
+    fs::remove_all(dir, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, ARootCallToDivergentDuplicateGenericsStillRefuses) {
+    // Same setup with signatures that disagree: amod's generic takes anything
+    // and bmod's takes a string. The call is checked against the resolved
+    // (last-imported) module's signature, so a call it cannot take refuses
+    // loudly at the call instead of instantiating the other module's body.
+    const fs::path dir = uniqueTempPath("fin_divgendupe", "");
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    ASSERT_TRUE(fs::is_directory(dir)) << ec.message();
+    {
+        std::ofstream f(dir / "amod.fin", std::ios::binary);
+        f << "pub fun pick<T>(x: T) <int> {\n"
+          << "    return 1;\n"
+          << "}\n";
+    }
+    {
+        std::ofstream f(dir / "bmod.fin", std::ios::binary);
+        f << "pub fun pick(x: string) <int> {\n"
+          << "    return 2;\n"
+          << "}\n";
+    }
+    const fs::path src = uniqueTempPath("fin_divgendupe_root", ".fin");
+    const fs::path exe = uniqueTempPath("fin_divgendupe_exe");
+    {
+        std::ofstream f(src, std::ios::binary);
+        f << std::string(kPrintf)
+          << "import { pick } from amod;\n"
+          << "import { pick } from bmod;\n"
+          << "fun main() <noret> {\n"
+          << "    printf(\"%d\\n\", pick(0));\n"
+          << "}\n";
+    }
+    const FincRun c =
+        runFinc({src.string(), "-o", exe.string(), "-I", dir.string()});
+    EXPECT_NE(c.exitCode, 0) << stripAnsi(c.err);
+    EXPECT_NE(stripAnsi(c.err).find("expected 'string', got 'int'"),
+              std::string::npos)
+        << stripAnsi(c.err);
+    EXPECT_FALSE(fs::exists(exe));
+    fs::remove(src, ec);
+    fs::remove(exe, ec);
+    fs::remove_all(dir, ec);
+}
+
 BACKEND_TEST(Soundness_Codegen, AClassAttributeDoesNotChangeLayout) {
     // ADR 0026: a class lowers exactly as a struct. The attribute is accepted
     // and ignored for layout -- which is what lets a `#[class]` base from

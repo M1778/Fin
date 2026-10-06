@@ -1973,6 +1973,20 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
                 // globals are not frame data), and skipped on the check walk
                 // like every other capture recording.
                 if (!injectedWalk_) noteLambdaUse(funcName);
+                // Which loaded module this bare name was imported from, when it
+                // was: the backend instantiates THAT module's generic template
+                // rather than the first one in load order (see FunctionCall::
+                // resolved_generic_owner). Only a still-generic callee records
+                // it -- a concrete call never reaches the template path that
+                // reads this -- and only an imported name has anything to
+                // record: a file-scope `fun` of the same name erases the entry
+                // where it is declared, so a call to the file's own generic
+                // keeps preferring it.
+                if (funcType && mentionsGenericParam(funcType)) {
+                    auto pit = importedOwner_.find(funcName);
+                    if (pit != importedOwner_.end())
+                        node.resolved_generic_owner = pit->second;
+                }
             }
         }
     }

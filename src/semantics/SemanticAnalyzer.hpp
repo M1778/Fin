@@ -650,6 +650,16 @@ private:
     const std::vector<std::string>* lookupMethodGenerics(
         const std::shared_ptr<StructType>& structType, const std::string& methodName) const;
 
+    // Which loaded module an imported bare name came from, by index into
+    // ModuleLoader::modulePrograms() (the backend's `modules_` in the same
+    // order). A named import overwrites and a star import binds only what the
+    // scope lacks -- exactly what visit(ImportModule&) does to the scope, so
+    // this always agrees with it -- and a file-scope `fun` of the same name
+    // erases, so a call that resolves to the file's own declaration records
+    // nothing. Read in visit(FunctionCall&) to stamp the resolved module on
+    // the call for the backend.
+    std::unordered_map<std::string, size_t> importedOwner_;
+
     // Records on a `::` call which instantiation of a generic target it resolved to,
     // for the backend to map instead of the bare template (HANDOFF section 6, item 6).
     // Records nothing where that instantiation has no node to spell it -- see
