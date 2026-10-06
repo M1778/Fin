@@ -67,6 +67,13 @@ struct AllowEntry {
 // went the same way (the stage lowers the $struct-seeded return now).
 // Each remaining entry must go away with a one-line deletion.
 const AllowEntry kAllowlist[] = {
+    // Sentinel: a deduced-size array with `= {}` has size 0, which is
+    // ill-formed (MSVC rejects it with C2466; GCC/Clang accept it as an
+    // extension). The empty-string entry never matches a real (stem, kind)
+    // pair -- stems are sample file stems, kinds are "stage-build-refusal"
+    // or "stderr-wording" -- so lookup semantics stay "empty allowlist".
+    // It is inert beside real entries; delete it with the last real entry.
+    {"", "", "", ""},
 };
 
 const AllowEntry* lookupAllow(const std::string& stem, const std::string& kind) {
