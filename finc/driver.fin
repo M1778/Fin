@@ -2798,7 +2798,7 @@ pub fun compile_source_file(
     free_file_content(source);
 
     if (!ok_gen) {
-        err_dprintf(2, "finc: error: LLVM code generation failed\n");
+        err_dprintf(2, "finc: error: LLVM code generation failed for '%s'\n", filename);
         remove_file(target_o);
         if (own_o) { free_string(target_o); }
         return 1;
@@ -2862,7 +2862,7 @@ pub fun compile_source_file(
         free_string(target_o);
     }
     if (status != 0) {
-        err_dprintf(2, "finc: linker failed with status %d\n", status);
+        err_dprintf(2, "finc: linker failed with status %d linking '%s'\n", status, target_bin);
         return 1;
     }
 
