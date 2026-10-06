@@ -4683,6 +4683,26 @@ private:
         return nullptr;
     }
 
+    // The defining module's own generic of a bare name, for a body that module
+    // owns (see currentOwner_). The analyzer resolves a module body's bare
+    // calls against its defining module first, so the backend must instantiate
+    // THAT template rather than the first one in load order, which is what
+    // ensureFnTemplate finds. Pure lookup beside ensureFnTemplate: no
+    // registration, because two modules' templates share one bare name and one
+    // shared entry is the silent sharing this exists to remove. Null when the
+    // owner declares no such generic, which falls back to load-order lookup
+    // exactly as before.
+    static FunctionDeclaration* ownerFnTemplate(const std::string& name,
+                                               const Program* owner) {
+        if (!owner) return nullptr;
+        for (auto& stmt : owner->statements) {
+            auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get());
+            if (!fn || fn->name != name || fn->generic_params.empty()) continue;
+            return fn;
+        }
+        return nullptr;
+    }
+
     bool instantiateInterface(const TypeNode& node, std::string& out) {
         auto found = interfaces_.find(node.name);
         if (found == interfaces_.end() || !found->second.decl) {
@@ -11145,6 +11165,32 @@ private:
         // A generic function from a loaded module registers on first call, on
         // the same terms as a root one (ADR 0032) -- including the attribute
         // refusal, which is what an `#[export]` on one reports.
+        //
+        // Before the ordinary lookup, because a body its defining module owns
+        // instantiates the module's own generic under a module-qualified key,
+        // not the first template in load order: amod's body calls amod's
+        // `pick` and bmod's body calls bmod's, whatever the import order. The
+        // analyzer resolves a module body's bare calls against its defining
+        // module first, so the backend instantiates THAT declaration -- which
+        // is what ownerFnTemplate finds -- and the qualified key is what keeps
+        // the two instances apart. When the owner declares no such generic
+        // this falls through, keeping the earlier load-order hit.
+        if (FunctionDeclaration* mine = ownerFnTemplate(node.name, currentOwner_)) {
+            for (auto& attr : mine->attributes) {
+                if (attr->name == "export" && attr->is_flag) continue;
+                if (attr->name == "use") continue;
+                unsupported(*mine,
+                            fmt::format("the attribute '{}' on a generic function",
+                                        attr->name));
+                return;
+            }
+            if (mine->body != nullptr) {
+                TemplateCallee inner = calleeOf(*mine);
+                inner.keyBase = moduleKeyOf(currentOwner_, node.name);
+                emitTemplateCall(node, inner);
+                return;
+            }
+        }
         auto tmpl = fnTemplates_.find(node.name);
         if (tmpl == fnTemplates_.end() && ensureFnTemplate(node.name))
             tmpl = fnTemplates_.find(node.name);
