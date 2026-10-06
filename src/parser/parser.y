@@ -685,6 +685,16 @@ declaration_body:
         $$ = std::move(var);
         $$->setLoc(@$);
     }
+    /* fin-guard, `const` spelling of the same rewrite: `const c = expr` meets
+       the same `<auto>` + flag path, so the guard cannot disagree by keyword. */
+    | KW_CONST IDENTIFIER EQUAL expression SEMICOLON {
+        auto autoType = std::make_unique<fin::TypeNode>("auto");
+        autoType->setLoc(@3);
+        auto var = std::make_unique<fin::VariableDeclaration>(false, $2, std::move(autoType), std::move($4));
+        var->finGuardRewritten = true;
+        $$ = std::move(var);
+        $$->setLoc(@$);
+    }
     | type_definition { $$ = std::move($1); }
     ;
 
@@ -1941,6 +1951,16 @@ variable_declaration:
         auto autoType = std::make_unique<fin::TypeNode>("auto");
         autoType->setLoc(@3);
         auto var = std::make_unique<fin::VariableDeclaration>(true, $2, std::move(autoType), std::move($4));
+        var->finGuardRewritten = true;
+        $$ = std::move(var);
+        $$->setLoc(@$);
+    }
+    /* fin-guard, for-loop header form of bare `const c = expr`: same rewrite
+       as the declaration_body production above. */
+    | KW_CONST IDENTIFIER EQUAL expression SEMICOLON {
+        auto autoType = std::make_unique<fin::TypeNode>("auto");
+        autoType->setLoc(@3);
+        auto var = std::make_unique<fin::VariableDeclaration>(false, $2, std::move(autoType), std::move($4));
         var->finGuardRewritten = true;
         $$ = std::move(var);
         $$->setLoc(@$);

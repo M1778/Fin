@@ -3087,6 +3087,36 @@ TEST(FinGuard, ExplicitAutoStaysSilent) {
         << "a written '<auto>' is not a rewrite:\n" << err;
 }
 
+TEST(FinGuard, BareConstRewritesToAutoWithWarningByDefault) {
+    TempFin f("fun main() <noret> {\n  const c = 10;\n}\n", "guard_on_const");
+    auto r = runFinc({f.str()});
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << "a warning never fails the build:\n" << err;
+    EXPECT_EQ(countOccurrences(err,
+        "fin-guard rewrote 'const c = ...' as 'const c <auto> = ...' "
+        "(pass --no-fin-guard to reject this instead)"), 1u)
+        << "exactly one warning per site, verbatim:\n" << err;
+}
+
+TEST(FinGuard, BareConstIsRejectedWhenGuardIsOff) {
+    TempFin f("fun main() <noret> {\n  const c = 10;\n}\n", "guard_off_const");
+    auto r = runFinc({f.str(), "--no-fin-guard"});
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 1) << err;
+    EXPECT_NE(err.find("bare 'const c' needs a type annotation or '?' (fin-guard is off)"),
+              std::string::npos) << err;
+}
+
+TEST(FinGuard, ExplicitConstAutoStaysSilent) {
+    // The control: the flag marks a rewrite, so a written `<auto>` warns nothing.
+    TempFin f("fun main() <noret> {\n  const c <auto> = 10;\n}\n", "guard_auto_const");
+    auto r = runFinc({f.str()});
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << err;
+    EXPECT_EQ(err.find("fin-guard"), std::string::npos)
+        << "a written '<auto>' is not a rewrite:\n" << err;
+}
+
 TEST(FinGuard, FlagIsAdvertisedInHelp) {
     auto r = runFinc({"--help"});
     EXPECT_EQ(r.exitCode, 0);
