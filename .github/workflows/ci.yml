@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, wave3-semantics]
+    branches: [master, wave3-semantics, wave4-selfhost]
   pull_request:
   workflow_dispatch:
 
@@ -141,6 +141,36 @@ jobs:
 
       - name: Build
         run: cmake --build build --config "$FIN_BUILD_TYPE" --parallel
+
+      - name: Bootstrap self-hosted stages and check the fixed point
+        # Linux-only: the stage driver links by shelling out to
+        # `cc -no-pie ... -Wl,--as-needed -lLLVM-22 -lm`
+        # (finc/driver.fin), so a stage `-o` build cannot link on macOS
+        # (Apple ld rejects --as-needed; Homebrew has no libLLVM-22) or on
+        # Windows (no cc on PATH). Those rows keep today's behavior -- the
+        # ctest agreement suite skips without build/finc_stage2
+        # (tests/test_stage_agreement.cpp) -- until the stage driver learns
+        # platform linking (a compiler change, owned by a wave4-selfhost
+        # follow-up). This step failing, not skipping, is what removes the
+        # suite's only silent-skip path on Linux: with finc_stage2 present,
+        # every runnable normative-ok sample is built and run by BOTH
+        # compilers in the Test step below, and any divergence fails there.
+        if: runner.os == 'Linux'
+        run: |
+          for candidate in "build/finc" "build/$FIN_BUILD_TYPE/finc"; do
+            if [ -x "$candidate" ]; then finc="$candidate"; break; fi
+          done
+          if [ -z "${finc:-}" ]; then
+            echo "::error::no finc binary under build/"
+            exit 1
+          fi
+          # The stage resolves `package::std` imports through the working
+          # directory, so both builds run from the repo root (the default).
+          "$finc" finc/main.fin --color=never -o build/finc_stage2
+          ./build/finc_stage2 --version
+          ./build/finc_stage2 finc/main.fin --color=never -o build/finc_stage3
+          # Fixed point: a self-hosted compiler compiling itself must converge.
+          cmp build/finc_stage2 build/finc_stage3
 
       - name: Test
         # No `|| true`, and no continue-on-error.  A corpus sample that is known

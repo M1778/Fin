@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - wave3-semantics
+      - wave4-selfhost
     paths:
       - 'docs/**'
       - '.github/workflows/deploy-pages.yml'
