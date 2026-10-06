@@ -189,9 +189,11 @@ int Driver::compile() {
             for (const auto& libDir : bundledLibraryPaths()) {
                 const std::string dir =
                     std::filesystem::path(libDir).lexically_normal().string();
-                if (rootCanon.size() > dir.size() &&
-                    rootCanon.compare(0, dir.size(), dir) == 0 &&
-                    (rootCanon[dir.size()] == '/' || dir.back() == '/')) {
+                // Separator-aware, not a `'/'` string match: on Windows both
+                // spellings are native, so the old check never saw a library
+                // root there and preloaded the stdio prelude into every
+                // standalone stdlib check, manufacturing a cycle.
+                if (pathIsUnderDir(rootCanon, dir)) {
                     rootIsLibrary = true;
                     break;
                 }

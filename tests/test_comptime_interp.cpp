@@ -16,6 +16,7 @@
 #include "ast/stmts/Statement.hpp"
 #include "diagnostics/DiagnosticEngine.hpp"
 #include "semantics/ComptimeInterp.hpp"
+#include "utils/Process.hpp"
 
 using namespace fin::testing;
 
@@ -1046,11 +1047,13 @@ Built buildRun(const std::string& code) {
     b.compileErr = stripAnsi(c.err);
     if (b.compileExit == 0 && std::filesystem::exists(exe)) {
         std::filesystem::path outPath = uniqueTempPath("fin_comptime_out");
-        std::string cmd = std::string("'") + exe.string() + "' > '" + outPath.string() + "' 2>&1";
-        (void)std::system(cmd.c_str());
+        // No shell, for the reason given at test_events_w5.cpp's runner.
+        // readProcessOutput, not a raw read: the exact-match assertions below
+        // compare against `\n`-joined expectations, and a raw read keeps the
+        // `\r` of Windows text-mode redirection.
+        fin::runProcess({exe.string()}, outPath.string(), outPath.string());
         b.ran = true;
-        std::ifstream f(outPath, std::ios::binary);
-        b.out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        b.out = readProcessOutput(outPath.string());
         std::error_code ec;
         std::filesystem::remove(outPath, ec);
     }

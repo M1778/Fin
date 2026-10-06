@@ -53,6 +53,36 @@ inline std::vector<std::string> splitSearchPaths(const std::string& list) {
     return paths;
 }
 
+// Whether `file` lies strictly under directory `dir`, by spelling rather
+// than by interrogating the disk. Both must already be absolute and
+// normalised (canonical / lexically_normal): this answers only the prefix
+// question, so an unnormalised `dir` containing `..` gets string-prefix
+// answers. A trailing separator on `dir` is ignored.
+//
+// The separator after the prefix is platform-aware. On Windows both '/' and
+// '\\' are separators by OS rule, so either one after a matched prefix means
+// "under" (forward-slash spellings arrive from CMake-baked absolute paths and
+// generic_string joins); on POSIX only '/' does, because '\\' is a valid
+// filename character. Case is intentionally not folded: both inputs in every
+// caller come from the filesystem itself (canonical paths and
+// executable-relative directories), so their case already agrees.
+inline bool pathIsUnderDir(const std::string& file, const std::string& dir) {
+    size_t len = dir.size();
+#ifdef _WIN32
+    while (len > 0 && (dir[len - 1] == '/' || dir[len - 1] == '\\')) --len;
+#else
+    while (len > 0 && dir[len - 1] == '/') --len;
+#endif
+    if (len == 0 || file.size() <= len) return false;
+    if (file.compare(0, len, dir, 0, len) != 0) return false;
+    const char c = file[len];
+#ifdef _WIN32
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
+
 // The absolute path of the running executable, or an empty string when the
 // platform will not say. Every branch is a platform call rather than `argv[0]`,
 // which is whatever the caller chose to pass and is a bare name under a PATH
