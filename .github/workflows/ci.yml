@@ -165,8 +165,15 @@ jobs:
             exit 1
           fi
           # The stage resolves `package::std` imports through the working
-          # directory, so both builds run from the repo root (the default).
-          "$finc" finc/main.fin --color=never -o build/finc_stage2
+          # directory, so all builds run from the repo root (the default).
+          # Three stages, mirroring the local pipeline: the C++ compiler
+          # links PIE (its linkCommand passes no -no-pie) while the stage
+          # driver links non-PIE, so a C++-built stage can never be
+          # byte-identical to a stage-built one -- the fixed point is
+          # stage2 == stage3, and build/finc_stage2 (stage-built) is what
+          # the agreement suite below compares against build/finc.
+          "$finc" finc/main.fin --color=never -o build/finc_stage1
+          ./build/finc_stage1 finc/main.fin --color=never -o build/finc_stage2
           ./build/finc_stage2 --version
           ./build/finc_stage2 finc/main.fin --color=never -o build/finc_stage3
           # Fixed point: a self-hosted compiler compiling itself must converge.
