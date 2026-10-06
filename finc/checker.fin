@@ -6782,14 +6782,19 @@ pub struct Checker {
 
           if (stmt.kind == ast_var_decl()) {
               self.api_validate_attrs(stmt.attr_text, true, false, stmt.line, stmt.col);
-              // fin-guard: bare `let c = e` arrives as "" (parser marker).
-              // Guard on rewrites to `<auto>` with one warning per site;
-              // guard off rejects. A written `<auto>` is "auto", not "",
-              // so it stays silent. Warnings never fail the build.
+              // fin-guard: bare `let c = e` or `const c = e` arrives as ""
+              // (parser marker). Guard on rewrites to `<auto>` with one
+              // warning per site; guard off rejects. A written `<auto>` is
+              // "auto", not "", so it stays silent. Warnings never fail
+              // the build. `str_val` names the noun the source wrote.
               if (chk_strlen(stmt.type_annotation) == cast<ulong>(0) && stmt.left != null) {
+                  let gkw <string> = "let";
+                  if (chk_str_eq(stmt.str_val, "const")) { gkw = "const"; }
                   if (!self.fin_guard_enabled) {
                       let eb <Buffer> = new_buffer(128);
-                      eb.write_string("bare 'let ");
+                      eb.write_string("bare '");
+                      eb.write_string(gkw);
+                      eb.write_string(" ");
                       eb.write_string(stmt.name);
                       eb.write_string("' needs a type annotation or '?' (fin-guard is off)");
                       self.report_error(eb.to_string(), stmt.line, stmt.col);
@@ -6797,14 +6802,37 @@ pub struct Checker {
                       return;
                   }
                   let wb <Buffer> = new_buffer(160);
-                  wb.write_string("fin-guard rewrote 'let ");
+                  wb.write_string("fin-guard rewrote '");
+                  wb.write_string(gkw);
+                  wb.write_string(" ");
                   wb.write_string(stmt.name);
-                  wb.write_string(" = ...' as 'let ");
+                  wb.write_string(" = ...' as '");
+                  wb.write_string(gkw);
+                  wb.write_string(" ");
                   wb.write_string(stmt.name);
                   wb.write_string(" <auto> = ...' (pass --no-fin-guard to reject this instead)");
                   self.report_warning(wb.to_string(), stmt.line, stmt.col);
                   free_buffer(wb);
                   stmt.type_annotation = "auto";
+              }
+              // No annotation and no initializer (`let d;`): nothing to
+              // infer from, so no guard rewrite is possible. C++ has no
+              // production for this shape (a syntax error there), so the
+              // stage refuses it at check time. Absorbed `#cdef` names
+              // share the auto+null shape and are exempt (parser marks
+              // them); `str_val` names the noun for `const d;` too.
+              if (stmt.left == null && chk_str_eq(stmt.type_annotation, "auto") && !chk_str_eq(stmt.str_val, "cdef")) {
+                  let nkw <string> = "let";
+                  if (chk_str_eq(stmt.str_val, "const")) { nkw = "const"; }
+                  let nb <Buffer> = new_buffer(128);
+                  nb.write_string("'");
+                  nb.write_string(nkw);
+                  nb.write_string(" ");
+                  nb.write_string(stmt.name);
+                  nb.write_string("' needs a type annotation, '?' or an initializer");
+                  self.report_error(nb.to_string(), stmt.line, stmt.col);
+                  free_buffer(nb);
+                  return;
               }
               let inferred <string> = "auto";
               // The narrowing check below observes only a substituted call
@@ -9250,20 +9278,29 @@ pub struct Checker {
               } else if (decl.kind == ast_var_decl()) {
                   self.api_validate_attrs(decl.attr_text, true, false, decl.line, decl.col);
                   // fin-guard, top-level form: same bare "" marker as the
-                  // statement form above, so the two spellings cannot disagree.
+                  // statement form above, so the two spellings cannot
+                  // disagree. `str_val` names the noun the source wrote.
                   if (chk_strlen(decl.type_annotation) == cast<ulong>(0) && decl.left != null) {
+                      let gkw <string> = "let";
+                      if (chk_str_eq(decl.str_val, "const")) { gkw = "const"; }
                       if (!self.fin_guard_enabled) {
                           let teb <Buffer> = new_buffer(128);
-                          teb.write_string("bare 'let ");
+                          teb.write_string("bare '");
+                          teb.write_string(gkw);
+                          teb.write_string(" ");
                           teb.write_string(decl.name);
                           teb.write_string("' needs a type annotation or '?' (fin-guard is off)");
                           self.report_error(teb.to_string(), decl.line, decl.col);
                           free_buffer(teb);
                       } else {
                           let twb <Buffer> = new_buffer(160);
-                          twb.write_string("fin-guard rewrote 'let ");
+                          twb.write_string("fin-guard rewrote '");
+                          twb.write_string(gkw);
+                          twb.write_string(" ");
                           twb.write_string(decl.name);
-                          twb.write_string(" = ...' as 'let ");
+                          twb.write_string(" = ...' as '");
+                          twb.write_string(gkw);
+                          twb.write_string(" ");
                           twb.write_string(decl.name);
                           twb.write_string(" <auto> = ...' (pass --no-fin-guard to reject this instead)");
                           self.report_warning(twb.to_string(), decl.line, decl.col);
@@ -9274,6 +9311,23 @@ pub struct Checker {
                           decl = decl.right;
                           continue;
                       }
+                  }
+                  // No annotation and no initializer, top-level form: same
+                  // refusal as the statement form above. Absorbed `#cdef`
+                  // names share the shape and are exempt (parser marks them).
+                  if (decl.left == null && chk_str_eq(decl.type_annotation, "auto") && !chk_str_eq(decl.str_val, "cdef")) {
+                      let nkw <string> = "let";
+                      if (chk_str_eq(decl.str_val, "const")) { nkw = "const"; }
+                      let nnb <Buffer> = new_buffer(128);
+                      nnb.write_string("'");
+                      nnb.write_string(nkw);
+                      nnb.write_string(" ");
+                      nnb.write_string(decl.name);
+                      nnb.write_string("' needs a type annotation, '?' or an initializer");
+                      self.report_error(nnb.to_string(), decl.line, decl.col);
+                      free_buffer(nnb);
+                      decl = decl.right;
+                      continue;
                   }
                   // Wave-5 slice 4: a top-level tie resolves in the scope
                   // around it, like any other declaration of one.

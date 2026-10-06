@@ -1948,11 +1948,15 @@ pub struct Parser {
               init_expr = self.parse_expression(0);
           }
 
-          // fin-guard: bare `let c = e` (no `<...>`, no `?`, `let` only)
-          // spells as "" so the checker can tell a rewrite from a written
-          // `<auto>` (which stays silent). `const` and `?` keep today's
+          // fin-guard: bare `let c = e` or `const c = e` (no `<...>`,
+          // no `?`) spells as "" so the checker can tell a rewrite from
+          // a written `<auto>` (which stays silent). `?` keeps today's
           // silent `auto` path; `let c;` with no init is not a rewrite.
-          if (is_let && !has_ann && !var_nullable && init_expr != null) {
+          // A bare `const` also rides `str_val` ("const"), a field no
+          // var_decl reader uses, so the checker warns with the noun
+          // the source wrote (`let` leaves ""). Set below, beside the
+          // node it marks.
+          if (!has_ann && !var_nullable && init_expr != null) {
               type_ann = "";
           }
 
@@ -1968,7 +1972,11 @@ pub struct Parser {
           }
 
           self.expect(tok_semicolon(), "expected ';' after variable declaration");
-          return make_var_decl(var_name, type_ann, init_expr, let_tok.line, let_tok.col);
+          let vd <&AstNode> = make_var_decl(var_name, type_ann, init_expr, let_tok.line, let_tok.col);
+          if (!is_let && !has_ann && !var_nullable) {
+              vd.str_val = "const";
+          }
+          return vd;
       }
 
       fun parse_return(self: &Self) <&AstNode> {
@@ -4379,6 +4387,10 @@ self.top_attr_col = 0;
                        }
                        if (is_cdef && p_strlen(def_name) > cast<ulong>(0)) {
                            decl = make_var_decl(def_name, "auto", def_val, cur.line, cur.col);
+                           // Not a written `let d;`: a valueless `#cdef FOO`
+                           // absorbs as auto+null too, so it carries its
+                           // origin for the checker's no-init check.
+                           decl.str_val = "cdef";
                        }
                    }
                    current_attr_val = "";
