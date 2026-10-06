@@ -8746,9 +8746,14 @@ BACKEND_TEST(Soundness_Codegen, AThreadedDeallocateClaimantLowersAndRuns) {
 
 BACKEND_TEST(Soundness_Codegen, ADoubleDeleteStillAbortsWithoutClaimant) {
     // No claimant, so both deletes lower to `free`: the second frees what the
-    // first already freed, and glibc aborts. Pinned because the claimant
-    // replaces the `free` -- the default path must keep doing what it does
-    // today.
+    // first already freed, and the allocator aborts. Pinned as an abort fate,
+    // not as wording: glibc says "double free", macOS libmalloc and the
+    // Windows heap say something else or nothing, and heap state can turn the
+    // same program into a SIGSEGV instead of a SIGABRT (exit 139 with the
+    // shell's "Segmentation fault" line and no libc text at all). A signal
+    // death arrives as -1 through runProcess, a heap-fault exit is also
+    // nonzero, and `done` never prints on any of those paths -- so nonzero
+    // exit plus the missing marker is the whole assertion.
     const Built b = build(std::string(kPrintf) +
         "struct P { pub a <int> }\n"
         "fun main() <noret> {\n"
@@ -8760,7 +8765,7 @@ BACKEND_TEST(Soundness_Codegen, ADoubleDeleteStillAbortsWithoutClaimant) {
     ASSERT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_NE(b.runExit, 0) << b.why();
-    EXPECT_NE(b.out.find("double free"), std::string::npos) << b.why();
+    EXPECT_EQ(b.out.find("done"), std::string::npos) << b.why();
 }
 
 // ---------------------------------------------------------------------------
@@ -16377,8 +16382,9 @@ BACKEND_TEST(Soundness_Codegen, AStaticMethodOnASelfPointerGuardsItsStores) {
 BACKEND_TEST(Soundness_Codegen, ADeleteOfAStackAddressAborts) {
     // tests/samples/simple_pointers.fin:10 (`delete &temp`) documents the
     // abort: freeing a stack address is not a success path. Pinned as an abort
-    // (non-zero exit, `unreached` never printed), with glibc's text, the same
-    // way ADoubleDeleteStillAbortsWithoutClaimant pins "double free".
+    // fate (non-zero exit, `unreached` never printed), not as wording: glibc
+    // says "invalid pointer" where other allocators say something else or
+    // nothing, and the program aborts on all of them.
     const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
         "    let x <int> = 5;\n"
@@ -16389,7 +16395,6 @@ BACKEND_TEST(Soundness_Codegen, ADeleteOfAStackAddressAborts) {
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_NE(b.runExit, 0) << b.why();
     EXPECT_EQ(b.out.find("unreached"), std::string::npos) << b.why();
-    EXPECT_NE(b.out.find("invalid pointer"), std::string::npos) << b.why();
 }
 
 // DA1: a folded `@defined`/`@implements` guard eliminates the untaken arm for
