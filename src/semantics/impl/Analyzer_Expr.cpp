@@ -950,6 +950,11 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         // which the corpus writes no site.
         // A comparison has two operand targets; report an overflowing literal
         // against the opposite operand before the ordinary compatibility check.
+        // The targeted report below and the general one after it take the same
+        // (node, actual, expected), so a literal that fires the first would be
+        // reported twice (`n == -1` on a `ulong` printed the same diagnostic
+        // twice). checkType is deterministic in its arguments, so once the
+        // targeted check has run the general one can add nothing: skip it.
         bool leftNegative = false;
         bool rightNegative = false;
         const bool leftConstant = integerConstant(*node.left, leftNegative);
@@ -958,11 +963,13 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
             !constantFitsType(*node.left, *rightCmp)) {
             checkType(*node.left, leftCmp, rightCmp);
         }
+        bool rightLiteralChecked = false;
         if (!nullComparison && rightConstant &&
             !constantFitsType(*node.right, *leftCmp)) {
+            rightLiteralChecked = true;
             checkType(*node.right, rightCmp, leftCmp);
         }
-        if (!nullComparison &&
+        if (!rightLiteralChecked && !nullComparison &&
             !constantFitsType(*node.right, *leftCmp) &&
             !constantFitsType(*node.left, *rightCmp) &&
             !(widerInteger(leftCmp, rightCmp) &&

@@ -155,6 +155,10 @@ priv fun p_clone_node(node: &AstNode) <&AstNode> {
     c.int_val = node.int_val;
     c.str_val = node.str_val;
     c.attr_text = node.attr_text;
+    c.impl_ops = node.impl_ops;
+    c.blame_line = node.blame_line;
+    c.blame_col = node.blame_col;
+    c.close_col = node.close_col;
     c.line = node.line;
     c.col = node.col;
     if (node.left != null) { c.left = p_clone_node(node.left); }
@@ -233,6 +237,19 @@ pub struct Parser {
       pending_iface_tail <&AstNode> = null,
       // Per-file literal sequence for synthesized struct names.
       anon_seq <int> = 0,
+      // Last `operator X implements ...` symbol seen on the dropped path
+      // (parse_operator returns null there: no body node exists). The
+      // enclosing parse_struct_rest collects it into the struct's impl_ops;
+      // cleared before every parse_operator call so a stale value can never
+      // leak across members.
+      dropped_impl_op <string> = "",
+      // First top-level `#[...]` of the pending run (current_attr_val's
+      // text): the C++ declaration range opens at the attributes, so blame
+      // sites (conformance, missing-return) read it. Set with the text,
+      // cleared with it at every reset, read-and-cleared by the struct and
+      // function paths; 0 when no attribute is pending.
+      top_attr_line <int> = 0,
+      top_attr_col <int> = 0,
 
     pub:
       fun report_error(self: &Self, msg: string, line: int, col: int) <noret> {
@@ -247,7 +264,7 @@ pub struct Parser {
           }
           self.had_error = true;
           self.diag.add_error();
-          let snip <string> = format_snippet(self.source_file, line, col, diag_error(), msg, "", 3);
+          let snip <string> = format_snippet(self.source_file, line, col, diag_error(), msg, "", 0);
           p_dprintf(2, "%s", snip);
           free_diag_str(snip);
       }
@@ -1525,7 +1542,7 @@ pub struct Parser {
               anon_b.write_int(self.anon_seq);
               let anon_name <string> = anon_b.to_string();
               free_buffer(anon_b);
-              let anon_decl <&AstNode> = self.parse_struct_rest(anon_name, "", "", cur.line, cur.col);
+              let anon_decl <&AstNode> = self.parse_struct_rest(anon_name, "", "", cur.line, cur.col, 0, 0);
               if (anon_decl != null) {
                   self.stash_anon_struct(anon_decl);
               }
@@ -2394,7 +2411,7 @@ pub struct Parser {
       // members the same way, so the checker's constructor gate holds for
       // both. Expects `{` next; saves and restores the enclosing
       // struct context so a literal inside a method nests.
-      fun parse_struct_rest(self: &Self, struct_name: string, struct_generics: string, struct_parents: string, st_line: int, st_col: int) <&AstNode> {
+      fun parse_struct_rest(self: &Self, struct_name: string, struct_generics: string, struct_parents: string, st_line: int, st_col: int, bl_line: int, bl_col: int) <&AstNode> {
           let outer_struct <string> = "";
           if (self.current_struct != null) { outer_struct = self.current_struct; }
           self.current_struct = struct_name;
@@ -2405,6 +2422,11 @@ pub struct Parser {
           let fields_tail <&AstNode> = null;
           let methods_head <&AstNode> = null;
           let methods_tail <&AstNode> = null;
+          // Implements-provided operators (`operator[] implements ...`)
+          // drop out of the member chain (no body node); their symbols
+          // collect here for the struct's impl_ops instead.
+          let impl_buf <Buffer> = new_buffer(32);
+          let impl_first <bool> = true;
 
           // Visibility state for members: `pub:`/`priv:` labels set the
           // default (public when no label seen, matching C++); an inline
@@ -2517,6 +2539,7 @@ pub struct Parser {
 
               // Operators inside struct
               if (cur.kind == kw_operator()) {
+                  self.dropped_impl_op = "";
                   let op_node <&AstNode> = self.parse_operator(struct_name);
                   if (op_node != null) {
                       op_node.is_pub = inline_pub;
@@ -2527,6 +2550,11 @@ pub struct Parser {
                           methods_tail.right = op_node;
                           methods_tail = op_node;
                       }
+                  } else if (p_strlen(self.dropped_impl_op) > cast<ulong>(0)) {
+                      if (!impl_first) { impl_buf.write_char(';'); }
+                      impl_buf.write_string(self.dropped_impl_op);
+                      impl_first = false;
+                      self.dropped_impl_op = "";
                   }
                   continue;
               }
@@ -2625,6 +2653,11 @@ pub struct Parser {
               self.stream.advance();
           }
 
+          let rb_close <int> = 0;
+          if (self.stream.check(tok_rbrace())) {
+              let rb_tok <Token> = self.stream.peek();
+              rb_close = rb_tok.col + 1;
+          }
           self.expect(tok_rbrace(), "expected '}' after struct body");
 
           let st_node <&AstNode> = new AstNode{};
@@ -2634,13 +2667,35 @@ pub struct Parser {
           st_node.str_val = struct_parents;
           st_node.left = fields_head;
           st_node.extra = methods_head;
+          st_node.impl_ops = impl_buf.to_string();
+          free_buffer(impl_buf);
           st_node.line = st_line;
           st_node.col = st_col;
+          st_node.blame_line = bl_line;
+          st_node.blame_col = bl_col;
+          st_node.close_col = rb_close;
           self.current_struct = outer_struct;
           return st_node;
       }
 
       fun parse_struct(self: &Self) <&AstNode> {
+          // C++ blame opens at the first token: pending attributes, then
+          // `pub`/`priv`, then the keyword. This decl consumes pending
+          // attributes either way.
+          let bl_line <int> = 0;
+          let bl_col <int> = 0;
+          if (self.top_attr_line > 0) {
+              bl_line = self.top_attr_line;
+              bl_col = self.top_attr_col;
+          } else {
+              let pk <Token> = self.stream.peek();
+              if (pk.kind == kw_pub() || pk.kind == kw_priv()) {
+                  bl_line = pk.line;
+                  bl_col = pk.col;
+              }
+          }
+          self.top_attr_line = 0;
+          self.top_attr_col = 0;
           let is_pub <bool> = false;
           if (self.match_token(kw_pub())) {
               is_pub = true;
@@ -2653,6 +2708,10 @@ pub struct Parser {
           } else {
               self.report_error("expected 'struct'", st_tok.line, st_tok.col);
               return null;
+          }
+          if (bl_line <= 0) {
+              bl_line = st_tok.line;
+              bl_col = st_tok.col;
           }
 
           let id_tok <Token> = self.stream.peek();
@@ -2692,7 +2751,7 @@ pub struct Parser {
               return st_fwd;
           }
 
-          let st_node <&AstNode> = self.parse_struct_rest(struct_name, struct_generics, struct_parents, st_tok.line, st_tok.col);
+          let st_node <&AstNode> = self.parse_struct_rest(struct_name, struct_generics, struct_parents, st_tok.line, st_tok.col, bl_line, bl_col);
           self.current_struct = "";
           return st_node;
       }
@@ -2932,13 +2991,25 @@ pub struct Parser {
                              break;
                          }
                      } else if (tk.kind == tok_shr()) {
-                         // Fused `>>` closes two levels; the final one
-                         // breaks without entering the buffer.
+                         // Fused `>>` closes two levels (parse_type keeps
+                         // the inner closer the same way): both inner keeps
+                         // `>>` and goes on; the final one keeps `>` and
+                         // breaks. Over-close stays a silent drop, as before.
                          depth = depth - 2;
-                         if (depth <= 0) {
+                         if (depth > 0) {
+                             if (!gen_first) { gen_buf.write_char(' '); }
+                             gen_buf.write_string(">>");
+                             gen_first = false;
                              self.stream.advance();
-                             break;
+                             continue;
                          }
+                         if (depth == 0) {
+                             if (!gen_first) { gen_buf.write_char(' '); }
+                             gen_buf.write_char('>');
+                             gen_first = false;
+                         }
+                         self.stream.advance();
+                         break;
                      }
                     if (tk.text != null) {
                         if (!gen_first) { gen_buf.write_char(' '); }
@@ -2981,13 +3052,18 @@ pub struct Parser {
                     if (p_nullable) {
                         p_type_str = p_nullable_ann(p_type_str);
                     }
+                    // A default is an initializer (C++ checkInitializer):
+                    // kept on the parameter (the field-default convention)
+                    // so the checker can type it against the annotation.
+                    let p_default <&AstNode> = null;
                     if (self.match_token(tok_equal())) {
-                        let def_expr <&AstNode> = self.parse_expression(0);
+                        p_default = self.parse_expression(0);
                     }
                     let p_node <&AstNode> = new AstNode{};
                     p_node.kind = ast_param();
                     p_node.name = p_name;
                     p_node.type_annotation = p_type_str;
+                    p_node.left = p_default;
                     p_node.line = param_tok.line;
                     p_node.col = param_tok.col;
 
@@ -3035,6 +3111,24 @@ pub struct Parser {
        }
 
        fun parse_function(self: &Self, struct_ctx: string) <&AstNode> {
+           // C++ blame opens at the first token: pending attributes
+           // (top-level only), then `pub`/`priv`, then `fun`. This decl
+           // consumes pending attributes either way.
+           let bl_line <int> = 0;
+           let bl_col <int> = 0;
+           let in_struct <bool> = struct_ctx != null && p_strlen(struct_ctx) > 0;
+           if (!in_struct && self.top_attr_line > 0) {
+               bl_line = self.top_attr_line;
+               bl_col = self.top_attr_col;
+           } else {
+               let pk <Token> = self.stream.peek();
+               if (pk.kind == kw_pub() || pk.kind == kw_priv()) {
+                   bl_line = pk.line;
+                   bl_col = pk.col;
+               }
+           }
+           self.top_attr_line = 0;
+           self.top_attr_col = 0;
            let is_pub <bool> = false;
            if (self.match_token(kw_pub())) {
                is_pub = true;
@@ -3043,6 +3137,11 @@ pub struct Parser {
            }
            let is_nullable_fn <int> = 0;
            if (self.stream.check(kw_fun())) {
+               if (bl_line <= 0) {
+                   let fk <Token> = self.stream.peek();
+                   bl_line = fk.line;
+                   bl_col = fk.col;
+               }
                self.stream.advance();
                if (self.match_token(tok_question())) {
                    is_nullable_fn = 1;
@@ -3086,13 +3185,24 @@ pub struct Parser {
                              break;
                          }
                      } else if (tk.kind == tok_shr()) {
-                         // Fused `>>` closes two levels; the final one
-                         // breaks without entering the buffer.
+                         // Fused `>>` closes two levels (see
+                         // parse_function_tail): both inner keeps `>>`,
+                         // the final one keeps `>`, over-close drops.
                          depth = depth - 2;
-                         if (depth <= 0) {
+                         if (depth > 0) {
+                             if (!gen_first) { gen_buf.write_char(' '); }
+                             gen_buf.write_string(">>");
+                             gen_first = false;
                              self.stream.advance();
-                             break;
+                             continue;
                          }
+                         if (depth == 0) {
+                             if (!gen_first) { gen_buf.write_char(' '); }
+                             gen_buf.write_char('>');
+                             gen_first = false;
+                         }
+                         self.stream.advance();
+                         break;
                      }
                     if (tk.text != null) {
                         if (!gen_first) { gen_buf.write_char(' '); }
@@ -3114,6 +3224,11 @@ pub struct Parser {
                 let p_pos <int> = self.stream.position();
                 if (self.match_token(kw_const())) {
                     // consume const parameter modifier
+                }
+                if (self.match_token(tok_ampersand()) || self.match_token(95)) {
+                    // consume reference marker (`const &arr`), like
+                    // parse_function_tail: the marker is not recorded, so
+                    // the checker sees a plain parameter either way.
                 }
                 let is_variadic <bool> = false;
                 if (self.match_token(tok_ellipsis())) {
@@ -3142,13 +3257,18 @@ pub struct Parser {
                     if (p_type_str_pending_nullable) {
                         p_type_str = p_nullable_ann(p_type_str);
                     }
+                    // A default is an initializer (C++ checkInitializer):
+                    // kept on the parameter (the field-default convention)
+                    // so the checker can type it against the annotation.
+                    let p_default2 <&AstNode> = null;
                     if (self.match_token(tok_equal())) {
-                        let def_expr <&AstNode> = self.parse_expression(0);
+                        p_default2 = self.parse_expression(0);
                     }
                     let p_node <&AstNode> = new AstNode{};
                     p_node.kind = ast_param();
                     p_node.name = p_name;
                     p_node.type_annotation = p_type_str;
+                    p_node.left = p_default2;
                     p_node.line = param_tok.line;
                     p_node.col = param_tok.col;
 
@@ -3238,8 +3358,13 @@ pub struct Parser {
           }
 
           let body <&AstNode> = null;
+          let body_close <int> = 0;
           if (self.stream.check(tok_lbrace())) {
               body = self.parse_block();
+              let prev <Token> = self.stream.previous();
+              if (prev.kind == tok_rbrace()) {
+                  body_close = prev.col + 1;
+              }
               if (ctor_inits_head != null && body != null) {
                   ctor_inits_tail.right = body.left;
                   body.left = ctor_inits_head;
@@ -3258,6 +3383,9 @@ pub struct Parser {
           fn_node.int_val = is_nullable_fn;
           fn_node.line = id_tok.line;
           fn_node.col = id_tok.col;
+          fn_node.blame_line = bl_line;
+          fn_node.blame_col = bl_col;
+          fn_node.close_col = body_close;
           return fn_node;
       }
 
@@ -3405,6 +3533,11 @@ pub struct Parser {
                   self.stream.advance();
               }
               self.match_token(tok_semicolon());
+              // No body node for an implements-provided operator: the body
+              // lives in the named function. The symbol rides the
+              // side-channel into the struct's impl_ops (conformance reads
+              // it); every other consumer keeps seeing nothing, as before.
+              self.dropped_impl_op = sym_str;
               return null;
           }
 
@@ -4101,6 +4234,8 @@ pub struct Parser {
               if (cur.kind == tok_error()) {
                   self.consume_error_token("unexpected token at top-level declaration");
                   current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                   continue;
               }
 
@@ -4119,6 +4254,8 @@ pub struct Parser {
                    self.stream.advance(); // consume {
                    attr_block_val = current_attr_val;
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                    continue;
                }
                if (cur.kind == tok_rbrace() && self.stream.peek_at(1).kind == tok_percent()) {
@@ -4126,6 +4263,8 @@ pub struct Parser {
                    self.stream.advance(); // consume %
                    attr_block_val = "";
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                    continue;
                }
 
@@ -4158,6 +4297,8 @@ pub struct Parser {
                             free_buffer(joined);
                         } else {
                             current_attr_val = attr_txt;
+                            self.top_attr_line = cur.line;
+                            self.top_attr_col = cur.col;
                         }
                         self.expect(tok_rbracket(), "expected ']' after attribute");
                         continue;
@@ -4241,6 +4382,8 @@ pub struct Parser {
                        }
                    }
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                    if (decl != null) {
                        if (head == null) { head = decl; tail = decl; }
                        else { tail.right = decl; tail = decl; }
@@ -4256,6 +4399,8 @@ pub struct Parser {
                        self.stream.advance();
                        decl = self.parse_define(current_attr_val);
                        current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                    } else if (next_at.kind == 56 || (next_at.kind == tok_ident() && p_str_eq(next_at.text, "special"))) {
                        self.stream.advance();
                        if (self.stream.check(tok_lparen())) {
@@ -4277,6 +4422,8 @@ pub struct Parser {
                            decl.int_val = 2;
                        }
                        current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                    } else if (next_at.kind == 54 || (next_at.kind == tok_ident() && p_str_eq(next_at.text, "implements"))) {
                        self.stream.advance();
                        if (self.stream.check(tok_lparen())) {
@@ -4334,6 +4481,8 @@ pub struct Parser {
                                }
                            }
                            current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                            continue;
                         } else if (self.stream.check(tok_lbrace())) {
                             self.stream.advance();
@@ -4366,6 +4515,8 @@ pub struct Parser {
                             self.expect(tok_rbrace(), "expected '}' after implements block");
                         }
                        current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                        continue;
                    } else if (next_at.kind == 22 || (next_at.kind == tok_ident() && p_str_eq(next_at.text, "macro"))) {
                        self.stream.advance();
@@ -4383,6 +4534,8 @@ pub struct Parser {
                            }
                        }
                        current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                        continue;
                    } else if (next_at.kind == tok_ident() && !p_str_eq(next_at.text, "define") &&
                               !p_str_eq(next_at.text, "special") && !p_str_eq(next_at.text, "implements") &&
@@ -4422,10 +4575,14 @@ pub struct Parser {
                        at_stmt.col = cur.col;
                        decl = at_stmt;
                        current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                    } else {
                        self.report_error("unexpected token after '@'", cur.line, cur.col);
                        self.stream.advance();
                        current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                        continue;
                    }
                } else if (cur.kind == kw_pub() || cur.kind == kw_priv()) {
@@ -4448,20 +4605,35 @@ pub struct Parser {
                            let id_t <Token> = self.stream.advance();
                            ta_name = id_t.text;
                        }
+                       let ta_generics <string> = "";
                        if (self.stream.check(tok_lt())) {
                            self.stream.advance();
                            let d <int> = 1;
+                           let gb <Buffer> = new_buffer(32);
+                           let gfirst <bool> = true;
                            while (!self.stream.is_at_end() && d > 0) {
                                let tk <Token> = self.stream.peek();
                                if (tk.kind == tok_lt()) { d++; }
                                else if (tk.kind == tok_gt() || tk.kind == tok_shr()) { d = d - p_generic_close_step(tk.kind); }
+                               if (d > 0 && tk.text != null) {
+                                   if (!gfirst) { gb.write_char(' '); }
+                                   gb.write_string(tk.text);
+                                   gfirst = false;
+                               }
                                self.stream.advance();
                            }
+                           ta_generics = gb.to_string();
+                           free_buffer(gb);
                        }
                        let target_t <string> = "void";
                        if (self.match_token(tok_equal())) {
                            let b_depth <int> = 0;
                            let tb <Buffer> = new_buffer(64);
+                           // Space-separate tokens: the target is re-scanned
+                           // for words (`any implements <Enum>`), and a bare
+                           // join glues `any`+`implements` into one unknown
+                           // word. Same join the generics capture above uses.
+                           let tfirst <bool> = true;
                            while (!self.stream.is_at_end()) {
                                let tk <Token> = self.stream.peek();
                                if (tk.kind == tok_semicolon() && b_depth == 0) {
@@ -4474,7 +4646,9 @@ pub struct Parser {
                                    if (b_depth > 0) { b_depth--; }
                                }
                                if (tk.text != null) {
+                                   if (!tfirst) { tb.write_char(' '); }
                                    tb.write_string(tk.text);
+                                   tfirst = false;
                                }
                                self.stream.advance();
                            }
@@ -4488,11 +4662,14 @@ pub struct Parser {
                            ta_node.kind = ast_type_alias();
                            ta_node.name = ta_name;
                            ta_node.type_annotation = target_t;
+                           ta_node.str_val = ta_generics;
                            ta_node.line = t_kw.line;
                            ta_node.col = t_kw.col;
                            decl = ta_node;
                        }
                        current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                    } else if (next.kind == 54 || (next.kind == tok_ident() && p_str_eq(next.text, "implements"))) {
                        self.stream.advance(); // consume pub/priv
                        self.stream.advance(); // consume implements
@@ -4501,6 +4678,8 @@ pub struct Parser {
                        }
                        self.match_token(tok_semicolon());
                        current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                        continue;
                    } else {
                        decl = self.parse_function("");
@@ -4509,6 +4688,8 @@ pub struct Parser {
                        decl.attr_text = current_attr_val;
                    }
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                } else if (cur.kind == 52 || (cur.kind == tok_ident() && (p_str_eq(cur.text, "type") || p_str_eq(cur.text, "alias")))) {
                    let t_kw <Token> = self.stream.advance(); // consume type
                    let ta_name <string> = "";
@@ -4516,20 +4697,33 @@ pub struct Parser {
                        let id_t <Token> = self.stream.advance();
                        ta_name = id_t.text;
                    }
+                   let ta_generics2 <string> = "";
                    if (self.stream.check(tok_lt())) {
                        self.stream.advance();
                        let d <int> = 1;
+                       let gb <Buffer> = new_buffer(32);
+                       let gfirst <bool> = true;
                        while (!self.stream.is_at_end() && d > 0) {
                            let tk <Token> = self.stream.peek();
                            if (tk.kind == tok_lt()) { d++; }
                            else if (tk.kind == tok_gt() || tk.kind == tok_shr()) { d = d - p_generic_close_step(tk.kind); }
+                           if (d > 0 && tk.text != null) {
+                               if (!gfirst) { gb.write_char(' '); }
+                               gb.write_string(tk.text);
+                               gfirst = false;
+                           }
                            self.stream.advance();
                        }
+                       ta_generics2 = gb.to_string();
+                       free_buffer(gb);
                    }
                    let target_t <string> = "void";
                    if (self.match_token(tok_equal())) {
                        let b_depth <int> = 0;
                        let tb <Buffer> = new_buffer(64);
+                       // Space-separated like the first alias branch: a bare
+                       // join glues `any`+`implements` into one unknown word.
+                       let tfirst <bool> = true;
                        while (!self.stream.is_at_end()) {
                            let tk <Token> = self.stream.peek();
                            if (tk.kind == tok_semicolon() && b_depth == 0) {
@@ -4542,7 +4736,9 @@ pub struct Parser {
                                if (b_depth > 0) { b_depth--; }
                            }
                            if (tk.text != null) {
+                               if (!tfirst) { tb.write_char(' '); }
                                tb.write_string(tk.text);
+                               tfirst = false;
                            }
                            self.stream.advance();
                        }
@@ -4556,11 +4752,14 @@ pub struct Parser {
                        ta_node.kind = ast_type_alias();
                        ta_node.name = ta_name;
                        ta_node.type_annotation = target_t;
+                       ta_node.str_val = ta_generics2;
                        ta_node.line = t_kw.line;
                        ta_node.col = t_kw.col;
                        decl = ta_node;
                    }
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                } else if (cur.kind == 36 || (cur.kind == tok_ident() && p_str_eq(cur.text, "extern"))) {
                    self.stream.advance(); // consume 'extern'
                    if (self.stream.check(tok_star())) {
@@ -4581,6 +4780,8 @@ pub struct Parser {
                        self.match_token(tok_semicolon());
                    }
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                    continue;
                } else if (cur.kind == kw_struct() || cur.kind == 53 || (cur.kind == tok_ident() && p_str_eq(cur.text, "class"))) {
                    decl = self.parse_struct();
@@ -4588,36 +4789,48 @@ pub struct Parser {
                        decl.attr_text = current_attr_val;
                    }
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                } else if (cur.kind == kw_enum()) {
                    decl = self.parse_enum();
                    if (decl != null && p_strlen(current_attr_val) > cast<ulong>(0)) {
                        decl.attr_text = current_attr_val;
                    }
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                } else if (cur.kind == kw_interface()) {
                    decl = self.parse_interface();
                    if (decl != null && p_strlen(current_attr_val) > cast<ulong>(0)) {
                        decl.attr_text = current_attr_val;
                    }
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                } else if (cur.kind == kw_fun()) {
                    decl = self.parse_function("");
                    if (decl != null && p_strlen(current_attr_val) > cast<ulong>(0) && p_strlen(decl.attr_text) == cast<ulong>(0)) {
                        decl.attr_text = current_attr_val;
                    }
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                } else if (cur.kind == kw_operator()) {
                    decl = self.parse_operator("");
                    if (decl != null && p_strlen(current_attr_val) > cast<ulong>(0) && p_strlen(decl.attr_text) == cast<ulong>(0)) {
                        decl.attr_text = current_attr_val;
                    }
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                 } else if (cur.kind == kw_let() || cur.kind == kw_const()) {
                     decl = self.parse_var_decl();
                     if (decl != null && p_strlen(current_attr_val) > cast<ulong>(0)) {
                         decl.attr_text = current_attr_val;
                     }
                     current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                } else if (cur.kind == kw_import()) {
                    let imp_tok <Token> = self.stream.advance();
                    let from_spec <string> = "";
@@ -4678,6 +4891,8 @@ pub struct Parser {
                        }
                    }
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                } else if (cur.kind == kw_namespace()) {
                    self.stream.advance();
                    if (self.stream.check(tok_ident())) {
@@ -4690,6 +4905,8 @@ pub struct Parser {
                        self.stream.advance();
                    }
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                    continue;
                } else if (cur.kind == tok_percent()) {
                    self.stream.advance();
@@ -4790,6 +5007,8 @@ pub struct Parser {
                         }
                         self.expect(tok_rbrace(), "expected '}' after implements block");
                        current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                        continue;
                    } else {
                        // Top-level `compiler...;` (wave 4): only the Arm-phase
@@ -4809,16 +5028,22 @@ pub struct Parser {
                            ce_stmt.col = cur.col;
                            decl = ce_stmt;
                            current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                        } else {
                            self.report_error("unexpected token at top-level declaration", cur.line, cur.col);
                            self.stream.advance();
                            current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                        }
                    }
                } else {
                    self.report_error("unexpected token at top-level declaration", cur.line, cur.col);
                    self.stream.advance();
                    current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                }
 
                 if (decl != null) {
@@ -4831,6 +5056,8 @@ pub struct Parser {
                     }
                     if (p_strlen(attr_block_val) == cast<ulong>(0)) {
                         current_attr_val = "";
+self.top_attr_line = 0;
+self.top_attr_col = 0;
                     }
                     if (head == null) {
                         head = decl;

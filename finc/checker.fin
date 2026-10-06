@@ -151,13 +151,15 @@ priv fun chk_trim(s: string) <string> {
 priv fun chk_strip_width(s: string) <string> {
     // Drops a `{N}` width annotation: widths are ignored by this check,
     // which only ever misses an error that way, never invents one.
+    // Trimmed: alias targets join tokens with spaces (`uint { 64 }`), so
+    // the core may carry whitespace the keyword match below rejects.
     if (s == null) { return ""; }
     let w <string> = chk_strchr(s, 123);
-    if (w == null) { return s; }
+    if (w == null) { return chk_trim(s); }
     let total <int> = cast<int>(chk_strlen(s));
     let wlen <int> = cast<int>(chk_strlen(w));
-    if (wlen >= total) { return s; }
-    return substr(s, 0, total - wlen);
+    if (wlen >= total) { return chk_trim(s); }
+    return chk_trim(substr(s, 0, total - wlen));
 }
 
 priv fun chk_strip_parens(s: string) <string> {
@@ -295,6 +297,59 @@ priv fun chk_is_int_const(node: &AstNode) <bool> {
         return node.left.kind == ast_literal_int() && !chk_str_eq(node.left.type_annotation, "float");
     }
     return false;
+}
+
+// Syntactic negative constant: `-` over an integer literal (`-0` counts;
+// C++ integerConstant is syntactic too, which the `-0` probe pins).
+priv fun chk_is_neg_const(node: &AstNode) <bool> {
+    if (node == null) { return false; }
+    if (node.kind == ast_unary_expr() && chk_str_eq(node.name, "-")) {
+        return chk_is_int_const(node);
+    }
+    return false;
+}
+
+// Decimal length of an integer literal's spelling: original digits when
+// kept, else the value rendered (C++ node ranges cover the source text).
+priv fun chk_int_spelling_len(value: int, str_val: string) <int> {
+    if (chk_is_digits(str_val)) { return cast<int>(chk_strlen(str_val)); }
+    let ib <Buffer> = new_buffer(24);
+    ib.write_int(value);
+    let s <string> = ib.to_string();
+    let n <int> = cast<int>(chk_strlen(s));
+    free_buffer(ib);
+    return n;
+}
+
+// Source length of an integer-constant operand (C++ node range): the `-`
+// plus the magnitude spelling, or the literal spelling itself.
+priv fun chk_const_operand_span(node: &AstNode) <int> {
+    if (node == null) { return 1; }
+    if (node.kind == ast_unary_expr() && chk_str_eq(node.name, "-") && node.left != null &&
+        node.left.kind == ast_literal_int()) {
+        return 1 + chk_int_spelling_len(node.left.int_val, node.left.str_val);
+    }
+    if (node.kind == ast_literal_int()) {
+        return chk_int_spelling_len(node.int_val, node.str_val);
+    }
+    return 1;
+}
+
+// Source span of a value in initializer position (C++ node ranges): an
+// integer constant spans its spelling, a string literal its quoted text,
+// anything else the bare point (0 = caller falls back to the token span).
+priv fun chk_operand_span(node: &AstNode) <int> {
+    if (node == null) { return 0; }
+    if (node.kind == ast_unary_expr() || node.kind == ast_literal_int()) {
+        return chk_const_operand_span(node);
+    }
+    if (node.kind == ast_literal_string()) {
+        if (node.str_val != null && chk_strlen(node.str_val) > cast<ulong>(0)) {
+            return cast<int>(chk_strlen(node.str_val));
+        }
+        return 2;
+    }
+    return 0;
 }
 
 // Verdict for a bare integer constant against a declared integer type: 0
@@ -548,6 +603,10 @@ pub struct Checker {
       // fin-guard (default on): bare `let x = ...` rewrites to `<auto>`
       // with a warning; off rejects it. Set from the driver flag.
       fin_guard_enabled <bool> = true,
+      // Program root for file-scope lookups from expression depth (enum
+      // members for variant-construction checks): set by check_program,
+      // the file's own declarations, never merged imports.
+      prog_root <&AstNode> = null,
 
     pub:
       fun report_error(self: &Self, msg: string, line: int, col: int) <noret> {
@@ -555,16 +614,43 @@ pub struct Checker {
           if (self.quiet_recheck > 0) { return; }
           self.had_error = true;
           self.diag.add_error();
-          let snip <string> = format_snippet(self.source_file, line, col, diag_error(), msg, "", 3);
+          let snip <string> = format_snippet(self.source_file, line, col, diag_error(), msg, "", 0);
           chk_dprintf(2, "%s", snip);
           free_diag_str(snip);
+      }
+
+      // A diagnostic on a measured range: the span is the C++ node range
+      // the reference would underline (end column minus begin column), so
+      // the caret and the `did you mean` token both agree byte for byte.
+      fun report_error_spanned(self: &Self, msg: string, line: int, col: int, span: int) <noret> {
+          if (self.quiet_recheck > 0) { return; }
+          self.had_error = true;
+          self.diag.add_error();
+          let snip <string> = format_snippet(self.source_file, line, col, diag_error(), msg, "", span);
+          chk_dprintf(2, "%s", snip);
+          free_diag_str(snip);
+      }
+
+      // A declaration blamed at its C++ range (blame_* + close_col) when
+      // the parser recorded one, else at its own site with the token span.
+      fun report_decl_range(self: &Self, msg: string, node: &AstNode) <noret> {
+          if (node != null && node.blame_line > 0) {
+              let sp <int> = 1;
+              if (node.close_col > node.blame_col) {
+                  sp = node.close_col - node.blame_col;
+              }
+              self.report_error_spanned(msg, node.blame_line, node.blame_col, sp);
+              return;
+          }
+          if (node == null) { return; }
+          self.report_error(msg, node.line, node.col);
       }
 
       // A warning never fails the build (C++ warning/note): counted
       // apart from errors, printed the same way.
       fun report_warning(self: &Self, msg: string, line: int, col: int) <noret> {
           self.diag.add_warning();
-          let snip <string> = format_snippet(self.source_file, line, col, diag_warning(), msg, "", 3);
+          let snip <string> = format_snippet(self.source_file, line, col, diag_warning(), msg, "", 0);
           chk_dprintf(2, "%s", snip);
           free_diag_str(snip);
       }
@@ -1815,6 +1901,19 @@ pub struct Checker {
           free_buffer(b);
       }
 
+      // report_type_mismatch on a measured range (comparison constants):
+      // the span is the operand's source length, like the C++ node range.
+      fun report_cmp_neg_const(self: &Self, expected: string, actual: string, node: &AstNode) <noret> {
+          let b <Buffer> = new_buffer(96);
+          b.write_string("Type mismatch: expected '");
+          b.write_string(expected);
+          b.write_string("', got '");
+          b.write_string(actual);
+          b.write_string("'");
+          self.report_error_spanned(b.to_string(), node.line, node.col, chk_const_operand_span(node));
+          free_buffer(b);
+      }
+
       // True when any identifier word inside a type spelling is not a
       // known type name (`Pair<A, B>` mentions `A`: the callee's generic
       // parameter, which C++ infers from the argument instead of
@@ -2980,6 +3079,11 @@ pub struct Checker {
                   self.api_walk_args(arg_head);
                   return "error";
               }
+          }
+          // Written type arguments resolve as types here too (Slice G):
+          // `gettype::<T>` for a value `T` is `Undefined type 'T'`.
+          if (turbofish != null && chk_strlen(turbofish) > cast<ulong>(0)) {
+              self.check_turbofish_words(turbofish, line, col);
           }
           let actual <int> = self.count_call_args(arg_head, false);
           self.check_arity("Operation", full, arity, arity, actual, line, col);
@@ -4709,6 +4813,19 @@ pub struct Checker {
                   chk_str_eq(expr.name, "<") || chk_str_eq(expr.name, ">") ||
                   chk_str_eq(expr.name, "<=") || chk_str_eq(expr.name, ">=") ||
                   chk_str_eq(expr.name, "&&") || chk_str_eq(expr.name, "||")) {
+                  // A negative constant is not an unsigned value (C++
+                  // visit(BinaryOp) targeted literal check): `n == -1` on
+                  // `n: ulong` refuses at the constant, once. Narrow on
+                  // purpose: the general comparison check (other pairs,
+                  // constant on the left) is unbuilt in the stage, and the
+                  // sweep asks only for this shape.
+                  if (!chk_str_eq(expr.name, "&&") && !chk_str_eq(expr.name, "||")) {
+                      let cmp_bits <int> = chk_int_bits(t_left);
+                      if (cmp_bits > 0 && !chk_int_is_signed(t_left) && chk_is_neg_const(expr.right)) {
+                          self.report_cmp_neg_const(t_left, t_right, expr.right);
+                          return "error";
+                      }
+                  }
                   return "bool";
               }
               if (chk_str_eq(expr.name, "<<") || chk_str_eq(expr.name, ">>")) {
@@ -5803,6 +5920,21 @@ pub struct Checker {
                           }
                       }
                   }
+                  // Enum-variant construction with a concrete payload
+                  // checks its arguments against the payload (Slice M):
+                  // the lookup reads declarations only; the per-argument
+                  // check rides the walk below, which owns arg types.
+                  // Arity must match, else the count diagnostic (which
+                  // only the callee's own registry owns) stays silent.
+                  let ev_segs <[string]> = new [string, 64]{};
+                  let ev_pn <int> = 0;
+                  if (!is_mod_call && !hit_method && !call_recv_skip && chk_strchr(expr.name, 58) == null) {
+                      let ev_pay <string> = self.enum_variant_payload(expr.name);
+                      if (!chk_str_eq(ev_pay, "")) {
+                          ev_pn = self.split_generic_segs(ev_pay, ev_segs);
+                          if (ev_pn != self.count_call_args(expr.left, false)) { ev_pn = 0; }
+                      }
+                  }
                   // Generic substitution for this call (C++ checkGenericCall):
                   // a free function's turbofish binds its declared
                   // parameters positionally (the written seed, which
@@ -5828,6 +5960,8 @@ pub struct Checker {
                   let has_turbo <bool> = expr.type_annotation != null &&
                       chk_strlen(expr.type_annotation) > cast<ulong>(0);
                   if (has_turbo && is_free_shape) {
+                      // Written type arguments resolve as types (Slice G).
+                      self.check_turbofish_words(expr.type_annotation, expr.line, expr.col);
                       bind_n = self.lookup_generic_pnames(expr.name, bind_names);
                       if (bind_n == 0) {
                           // Written arguments to a declared non-generic
@@ -5905,6 +6039,9 @@ pub struct Checker {
                       let actual_arg <&AstNode> = arg.left;
                       if (actual_arg == null) { actual_arg = arg; }
                       let at <string> = self.check_expression(actual_arg);
+                      if (ev_pn > 0 && ai < ev_pn) {
+                          self.chk_check_init_arg(actual_arg, at, chk_trim(ev_segs[ai]));
+                      }
                       if (pcheck && !(pskip && ai == 0)) {
                           let si <int> = ai;
                           if (pskip) { si = si - 1; }
@@ -5965,6 +6102,7 @@ pub struct Checker {
                       arg = arg.right;
                   }
                   delete psegs;
+                  delete ev_segs;
                   // One unambiguous `$struct` handle seeds an unbound bare
                   // return (C++ checkGenericCall's structLiteralTypes_
                   // seeding): `make_default(struct { ... })` types the call
@@ -6155,6 +6293,11 @@ pub struct Checker {
                   // Meta-type bases are opaque: layout reads go through the
                   // `layout` component under either spelling (C++
                   // tryLayoutMember), and anything else is not a struct.
+                  // One exception (C++ Analyzer_Expr member access):
+                  // `$enum_member._keyid` is the intrinsic key id, an int.
+                  if (chk_str_eq(t_base, "$enum_member") && chk_str_eq(expr.name, "_keyid")) {
+                      return "int";
+                  }
                   if (chk_str_eq(t_base, "$type") || chk_str_eq(t_base, "$struct") ||
                       chk_str_eq(t_base, "$interface") || chk_str_eq(t_base, "$enum_member")) {
                       if ((chk_str_eq(t_base, "$type") || chk_str_eq(t_base, "$struct")) &&
@@ -6811,11 +6954,65 @@ pub struct Checker {
           }
       }
 
+      // A parameter default is an initializer (C++ visitParameterDefaults
+      // via checkInitializer): `= null` is absence, a fitting integer
+      // constant fits, anything else must be compatible with the declared
+      // type, reported at the default value.
+      fun check_param_default(self: &Self, p: &AstNode) <noret> {
+          if (p == null || p.left == null) { return; }
+          if (p.type_annotation == null || chk_strlen(p.type_annotation) == cast<ulong>(0)) { return; }
+          let got <string> = self.check_expression(p.left);
+          self.chk_check_init_arg(p.left, got, p.type_annotation);
+      }
+
+      // Default-value mismatch on a measured range: integer constants and
+      // string literals span their source length (C++ node ranges),
+      // anything else the bare token point.
+      fun report_default_mismatch(self: &Self, expected: string, actual: string, node: &AstNode) <noret> {
+          let b <Buffer> = new_buffer(96);
+          b.write_string("Type mismatch: expected '");
+          b.write_string(expected);
+          b.write_string("', got '");
+          b.write_string(actual);
+          b.write_string("'");
+          let m <string> = b.to_string();
+          free_buffer(b);
+          let sp <int> = chk_operand_span(node);
+          if (sp > 0) {
+              self.report_error_spanned(m, node.line, node.col, sp);
+          } else {
+              self.report_error(m, node.line, node.col);
+          }
+      }
+
+      // One initializer-argument check (defaults and variant payloads
+      // share it): a fitting integer constant fits, `null` is absence,
+      // anything else must be compatible with the want, reported at the
+      // value like C++ checkInitializer/checkCallArguments.
+      fun chk_check_init_arg(self: &Self, actual_arg: &AstNode, got: string, want: string) <noret> {
+          if (actual_arg == null) { return; }
+          if (want == null || chk_strlen(want) == cast<ulong>(0)) { return; }
+          let w <string> = self.resolve_type(want);
+          if (chk_int_bits(w) > 0) {
+              let v <int> = chk_big_const_verdict(actual_arg, w);
+              if (v == 2) {
+                  self.report_error("An integer constant is too large to represent", actual_arg.line, actual_arg.col);
+                  return;
+              }
+              if (v == 1) {
+                  self.report_default_mismatch(w, got, actual_arg);
+                  return;
+              }
+          }
+          if (!self.chk_types_compatible(got, w)) {
+              self.report_default_mismatch(w, got, actual_arg);
+          }
+      }
+
       fun check_function(self: &Self, fn_node: &AstNode) <noret> {
           if (fn_node == null) { return; }
 
-          self.check_function_signature_types(fn_node);
-          // A nested definition must not leak its context: returns and
+          self.check_function_signature_types(fn_node);          // A nested definition must not leak its context: returns and
           // break/continue after it belong to the enclosing function.
           let saved_ret <string> = self.current_ret_type;
           let saved_loop <int> = self.loop_depth;
@@ -6905,6 +7102,14 @@ pub struct Checker {
               p_cur = p_cur.right;
           }
 
+          // Parameter defaults check before the body (C++ order: defaults
+          // fire before anything the body reports).
+          let d_cur <&AstNode> = fn_node.extra;
+          while (d_cur != null) {
+              self.check_param_default(d_cur);
+              d_cur = d_cur.right;
+          }
+
           // Check body
           if (fn_node.left != null) {
               let b_cur <&AstNode> = fn_node.left.left;
@@ -6949,12 +7154,18 @@ pub struct Checker {
           if (!is_special && !is_nullable_fn && !is_ctor && fn_node.left != null &&
               !chk_str_eq(ret_t, "void") && !chk_str_eq(ret_t, "noret") && !chk_str_eq(ret_t, "auto")) {
               if (!self.check_return_paths(fn_node.left)) {
+                  // C++ names the bare function (`own`, not `rptr_own`)
+                  // at the declaration's first token (C++ node range).
+                  let disp <string> = fn_node.name;
+                  let short <string> = self.bare_short_of(fn_node.name, self.current_struct);
+                  if (!chk_str_eq(short, "")) { disp = short; }
                   let b <Buffer> = new_buffer(128);
                   b.write_string("Function '");
-                  b.write_string(fn_node.name);
+                  b.write_string(disp);
                   b.write_string("' is missing a return statement on some paths");
-                  self.report_error(b.to_string(), fn_node.line, fn_node.col);
+                  let m <string> = b.to_string();
                   free_buffer(b);
+                  self.report_decl_range(m, fn_node);
               }
           }
 
@@ -7014,6 +7225,63 @@ pub struct Checker {
           return scount;
       }
 
+      // Payload of the enum member `name` (`Err <IOError>` answers
+      // `IOError`): "" unless a payloaded member of that name is declared
+      // and its payload is fully concrete (no generic words: `Ok <T>`
+      // unifies in C++ and stays silent here). First declaration wins:
+      // the driver appends imported modules after the file's own
+      // declarations, so in-file members beat imported ones like C++
+      // scope order. Imported-only names keep today's silence.
+      fun enum_variant_payload(self: &Self, name: string) <string> {
+          if (name == null || chk_strlen(name) == cast<ulong>(0)) { return ""; }
+          if (chk_strchr(name, 58) != null) { return ""; }
+          if (self.prog_root == null) { return ""; }
+          let d <&AstNode> = self.prog_root.left;
+          while (d != null) {
+              if (d.kind == ast_enum_decl()) {
+                  let m <&AstNode> = d.left;
+                  while (m != null) {
+                      if (m.kind == ast_var_decl() && chk_str_eq(m.name, name) && m.int_val == 1 &&
+                          m.type_annotation != null && chk_strlen(m.type_annotation) > cast<ulong>(0)) {
+                          if (self.chk_spelling_has_unknown_word(m.type_annotation)) { return ""; }
+                          return m.type_annotation;
+                      }
+                      m = m.right;
+                  }
+              }
+              d = d.right;
+          }
+          return "";
+      }
+
+      // Turbofish arguments are type positions (C++ resolves them as
+      // types in the caller's scope): every word must name a builtin, a
+      // declared type, or a generic parameter of the enclosing function
+      // (`f::<NoSuch>` and `gettype::<T>` for a value `T` are both
+      // `Undefined type`). The caller's own recorded generics, plus the
+      // struct single-letter vocabulary inside struct bodies (the
+      // check_function recipe), not the callee's: binding is positional.
+      fun check_turbofish_words(self: &Self, turbo: string, line: int, col: int) <noret> {
+          if (turbo == null || chk_strlen(turbo) == cast<ulong>(0)) { return; }
+          let tsegs <[string]> = new [string, 64]{};
+          let tn <int> = self.split_turbofish(turbo, tsegs);
+          let tp_pnames <[string]> = new [string, 64]{};
+          let tp_n <int> = 0;
+          if (self.current_fn != null && chk_strlen(self.current_fn) > cast<ulong>(0)) {
+              tp_n = self.lookup_generic_pnames(self.current_fn, tp_pnames);
+              tp_n = self.merge_scope_pnames(self.current_fn, tp_pnames, tp_n);
+          }
+          if (chk_strlen(self.current_struct) > cast<ulong>(0)) {
+              tp_n = self.add_single_letter_pnames(tp_pnames, tp_n);
+          }
+          let ti <int> = 0;
+          while (ti < tn) {
+              if (!self.check_bound_words(tsegs[ti], tp_pnames, tp_n, line, col)) { break; }
+              ti = ti + 1;
+          }
+          delete tsegs;
+          delete tp_pnames;
+      }
       // Number of top-level generic arguments in a turbofish or generic
     // parameter string (`int`, `<int>`, `<int, string>`). Bracket
     // tolerant: parse_type spellings may or may not carry the outer
@@ -7093,6 +7361,46 @@ pub struct Checker {
       // searching inside the first `<...>` so an enum's own name (before
       // `<`) never wins over a bound word (after `<`). -1 when unreadable
       // or absent; the caller keeps the decl site then (never a bogus col).
+      fun source_line_text(self: &Self, path: string, line_no: int) <string> {
+          if (path == null || line_no < 1) { return ""; }
+          let text? <string> = read_to_string(path);
+          if (text == null) { return ""; }
+          let total <int> = cast<int>(chk_strlen(text?));
+          let bytes <[char]> = to_chars(text?);
+          let cur <int> = 1;
+          let start <int> = 0;
+          let found_start <int> = -1;
+          let found_len <int> = 0;
+          let i <int> = 0;
+          while (i <= total) {
+              if (i == total || bytes[i] == cast<char>(10)) {
+                  if (cur == line_no) {
+                      found_start = start;
+                      found_len = i - start;
+                      if (found_len > 0 && bytes[start + found_len - 1] == cast<char>(13)) {
+                          found_len = found_len - 1;
+                      }
+                      break;
+                  }
+                  cur = cur + 1;
+                  start = i + 1;
+              }
+              i = i + 1;
+          }
+          let out <string> = "";
+          if (found_start >= 0 && found_len > 0) {
+              let lb <Buffer> = new_buffer(found_len + 1);
+              let k <int> = 0;
+              while (k < found_len) {
+                  lb.write_char(bytes[found_start + k]);
+                  k = k + 1;
+              }
+              out = lb.to_string();
+              free_buffer(lb);
+          }
+          delete bytes;
+          return out;
+      }
       fun source_word_col(self: &Self, path: string, line_no: int, word: string) <int> {
           if (path == null || word == null) { return -1; }
           if (line_no < 1) { return -1; }
@@ -7137,31 +7445,41 @@ pub struct Checker {
           if (lt >= 0) { search_from = lt + 1; }
           let wchars <[char]> = to_chars(word);
           let best <int> = -1;
-          let p <int> = search_from;
-          while (p + wlen <= found_len) {
-              let k <int> = 0;
-              while (k < wlen) {
-                  if (bytes[found_start + p + k] != wchars[k]) { break; }
-                  k = k + 1;
-              }
-              if (k == wlen) {
-                  let before_ok <bool> = true;
-                  if (p > 0) {
-                      let bc <char> = bytes[found_start + p - 1];
-                      if ((bc >= 'a' && bc <= 'z') || (bc >= 'A' && bc <= 'Z') || (bc >= '0' && bc <= '9') || bc == '_' || bc == '$') {
-                          before_ok = false;
-                      }
+          // Prefer the occurrence inside the first `<...>`: a bound word
+          // (`Bar` in `enum Foo<Bar>`) must win over the declared name
+          // before it. When nothing matches there (an alias target like
+          // `Any` in `type Output = Any<...>;` sits before the first `<`),
+          // fall back to the whole line rather than the declaration site.
+          let attempt <int> = 0;
+          while (attempt < 2 && best < 0) {
+              let p <int> = search_from;
+              if (attempt == 1) { p = 0; }
+              while (p + wlen <= found_len) {
+                  let k <int> = 0;
+                  while (k < wlen) {
+                      if (bytes[found_start + p + k] != wchars[k]) { break; }
+                      k = k + 1;
                   }
-                  let after_ok <bool> = true;
-                  if (p + wlen < found_len) {
-                      let ac <char> = bytes[found_start + p + wlen];
-                      if ((ac >= 'a' && ac <= 'z') || (ac >= 'A' && ac <= 'Z') || (ac >= '0' && ac <= '9') || ac == '_' || ac == '$') {
-                          after_ok = false;
+                  if (k == wlen) {
+                      let before_ok <bool> = true;
+                      if (p > 0) {
+                          let bc <char> = bytes[found_start + p - 1];
+                          if ((bc >= 'a' && bc <= 'z') || (bc >= 'A' && bc <= 'Z') || (bc >= '0' && bc <= '9') || bc == '_' || bc == '$') {
+                              before_ok = false;
+                          }
                       }
+                      let after_ok <bool> = true;
+                      if (p + wlen < found_len) {
+                          let ac <char> = bytes[found_start + p + wlen];
+                          if ((ac >= 'a' && ac <= 'z') || (ac >= 'A' && ac <= 'Z') || (ac >= '0' && ac <= '9') || ac == '_' || ac == '$') {
+                              after_ok = false;
+                          }
+                      }
+                      if (before_ok && after_ok) { best = p + 1; break; }
                   }
-                  if (before_ok && after_ok) { best = p + 1; break; }
+                  p = p + 1;
               }
-              p = p + 1;
+              attempt = attempt + 1;
           }
           delete bytes;
           delete wchars;
@@ -7169,7 +7487,57 @@ pub struct Checker {
           return best;
       }
 
-      // Every identifier inside a type/bound string must be a generic
+      // Source length of the type expression opening at 1-based `col` of
+      // `line_text`: the identifier, any balanced `<...>`/`[...]` groups hung
+      // off it, and trailing `?` nullables (C++ TypeNode ranges cover the
+      // whole application, so `Strict<Stream>` underlines 14, not 6).
+      // Never less than 1.
+      fun chk_type_expr_span(self: &Self, line_text: string, col: int) <int> {
+    if (line_text == null || col < 1) { return 1; }
+    let total <int> = cast<int>(chk_strlen(line_text));
+    let idx <int> = col - 1;
+    if (idx >= total) { return 1; }
+    let bytes <[char]> = to_chars(line_text);
+    let p <int> = idx;
+    while (p < total) {
+        let c <char> = bytes[p];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$') {
+            p = p + 1;
+        } else {
+            break;
+        }
+    }
+    let groups <int> = 1;
+    while (groups > 0) {
+        groups = 0;
+        if (p < total && bytes[p] == cast<char>(60)) {
+            let depth <int> = 1;
+            p = p + 1;
+            while (p < total && depth > 0) {
+                if (bytes[p] == cast<char>(60)) { depth = depth + 1; }
+                else if (bytes[p] == cast<char>(62)) { depth = depth - 1; }
+                p = p + 1;
+            }
+            groups = 1;
+        } else if (p < total && bytes[p] == cast<char>(91)) {
+            let depth2 <int> = 1;
+            p = p + 1;
+            while (p < total && depth2 > 0) {
+                if (bytes[p] == cast<char>(91)) { depth2 = depth2 + 1; }
+                else if (bytes[p] == cast<char>(93)) { depth2 = depth2 - 1; }
+                p = p + 1;
+            }
+            groups = 1;
+        }
+    }
+    while (p < total && bytes[p] == cast<char>(63)) { p = p + 1; }
+    delete bytes;
+    let span <int> = p - idx;
+    if (span < 1) { span = 1; }
+    return span;
+}
+
+// Every identifier inside a type/bound string must be a generic
       // parameter, a builtin type keyword, or a declared struct/enum/
       // interface/type alias. Reports the first unknown word and returns false.
       fun check_bound_words(self: &Self, bound: string, pnames: [string], pcount: int, line: int, col: int) <bool> {
@@ -7217,8 +7585,26 @@ pub struct Checker {
                           let use_col <int> = col;
                           let exact <int> = self.source_word_col(self.source_file, line, w);
                           if (exact > 0) { use_col = exact; }
-                          self.report_error(b.to_string(), line, use_col);
+                          // A word opening its bound underlines the whole
+                          // type expression (C++ TypeNode range):
+                          // `Strict<Stream>` spans 14, `Any<...>` 8. Anything
+                          // nested keeps the bare token span.
+                          let m <string> = b.to_string();
                           free_buffer(b);
+                          let wspan <int> = 0;
+                          let wlen <int> = cast<int>(chk_strlen(w));
+                          let tb <string> = chk_trim(nbound);
+                          if (cast<int>(chk_strlen(tb)) >= wlen && chk_str_eq(substr(tb, 0, wlen), w)) {
+                              let ln <string> = self.source_line_text(self.source_file, line);
+                              if (!chk_str_eq(ln, "")) {
+                                  wspan = self.chk_type_expr_span(ln, use_col);
+                              }
+                          }
+                          if (wspan > 0) {
+                              self.report_error_spanned(m, line, use_col, wspan);
+                          } else {
+                              self.report_error(m, line, use_col);
+                          }
                           delete bchars;
                           return false;
                       }
@@ -7229,6 +7615,187 @@ pub struct Checker {
           }
           delete bchars;
           return true;
+      }
+
+      // Struct conformance (`struct S : <I>`): every interface parent must
+      // be satisfied, mirroring C++ Analyzer_Decl's post-body check, which
+      // reports `Struct 'S' does not implement interface 'I'` once per
+      // failing parent. Presence-level: required fields, methods, and
+      // operators must exist by name (an `operator=` satisfies an
+      // `operator []=` requirement, one-directional like C++), and a
+      // required constructor/destructor must exist. C++ additionally checks
+      // field TYPES and constructor SIGNATURES; no corpus file separates
+      // those verdicts from presence, so that strictness waits for one.
+      // ponytail: presence-only; deepen to signatures when a corpus case
+      // turns on types rather than names.
+      fun chk_parent_base(self: &Self, seg: string) <string> {
+          // `Index`, `IStream<T>` -> `Index`, `IStream`.
+          if (seg == null) { return ""; }
+          let s <string> = chk_trim(seg);
+          let len <int> = cast<int>(chk_strlen(s));
+          let i <int> = 0;
+          while (i < len) {
+              if (chk_str_eq(substr(s, i, 1), "<")) {
+                  return chk_trim(substr(s, 0, i));
+              }
+              i = i + 1;
+          }
+          return s;
+      }
+
+      fun chk_member_class(self: &Self, short: string, owner: string) <int> {
+          // 0 method, 1 operator, 2 constructor, 3 destructor.
+          if (chk_str_eq(short, "destructor")) { return 3; }
+          if (chk_str_eq(short, "constructor") || chk_str_eq(short, owner) || chk_str_eq(short, "Self")) { return 2; }
+          if (chk_strlen(short) > cast<ulong>(8) && chk_str_eq(substr(short, 0, 8), "operator")) { return 1; }
+          return 0;
+      }
+
+      fun chk_op_in_impl_list(self: &Self, impl_ops: string, sym: string) <bool> {
+          // `;`-joined symbols the parser kept for `operator X implements
+          // ...` declarations, which carry no body node.
+          if (impl_ops == null || sym == null) { return false; }
+          if (chk_strlen(impl_ops) == cast<ulong>(0) || chk_strlen(sym) == cast<ulong>(0)) { return false; }
+          let ilen <int> = cast<int>(chk_strlen(impl_ops));
+          let i <int> = 0;
+          let start <int> = 0;
+          while (i <= ilen) {
+              if (i == ilen || chk_str_eq(substr(impl_ops, i, 1), ";")) {
+                  if (i > start) {
+                      let part <string> = substr(impl_ops, start, i - start);
+                      if (chk_str_eq(part, sym)) { return true; }
+                      if (chk_str_eq(sym, "[]=") && chk_str_eq(part, "=")) { return true; }
+                  }
+                  start = i + 1;
+              }
+              i = i + 1;
+          }
+          return false;
+      }
+
+      fun struct_provides_field(self: &Self, decl: &AstNode, want: string) <bool> {
+          let f <&AstNode> = decl.left;
+          while (f != null) {
+              if (chk_str_eq(f.name, want)) { return true; }
+              f = f.right;
+          }
+          return false;
+      }
+
+      fun struct_provides_method(self: &Self, decl: &AstNode, want: string) <bool> {
+          let m <&AstNode> = decl.extra;
+          while (m != null) {
+              let ms <string> = self.bare_short_of(m.name, decl.name);
+              if (!chk_str_eq(ms, "") && self.chk_member_class(ms, decl.name) == 0 && chk_str_eq(ms, want)) { return true; }
+              m = m.right;
+          }
+          return false;
+      }
+
+      fun struct_provides_operator(self: &Self, decl: &AstNode, want_sym: string) <bool> {
+          let m <&AstNode> = decl.extra;
+          while (m != null) {
+              let ms <string> = self.bare_short_of(m.name, decl.name);
+              if (!chk_str_eq(ms, "") && self.chk_member_class(ms, decl.name) == 1) {
+                  let got <string> = substr(ms, 8, cast<int>(chk_strlen(ms)) - 8);
+                  if (chk_str_eq(got, want_sym)) { return true; }
+                  if (chk_str_eq(want_sym, "[]=") && chk_str_eq(got, "=")) { return true; }
+              }
+              m = m.right;
+          }
+          return self.chk_op_in_impl_list(decl.impl_ops, want_sym);
+      }
+
+      fun struct_has_ctor(self: &Self, decl: &AstNode) <bool> {
+          let m <&AstNode> = decl.extra;
+          while (m != null) {
+              let ms <string> = self.bare_short_of(m.name, decl.name);
+              if (!chk_str_eq(ms, "") && self.chk_member_class(ms, decl.name) == 2) { return true; }
+              m = m.right;
+          }
+          return false;
+      }
+
+      fun struct_has_dtor(self: &Self, decl: &AstNode) <bool> {
+          let m <&AstNode> = decl.extra;
+          while (m != null) {
+              let ms <string> = self.bare_short_of(m.name, decl.name);
+              if (!chk_str_eq(ms, "") && self.chk_member_class(ms, decl.name) == 3) { return true; }
+              m = m.right;
+          }
+          return false;
+      }
+
+      fun check_one_conformance(self: &Self, root: &AstNode, decl: &AstNode, pname: string) <noret> {
+          // Inheritance is not conformance: only interface parents are
+          // checked, and unknown parents stay silent (their own diagnostic
+          // owns them). C++ skips non-interface parents the same way.
+          if (!self.global_scope.has(pname)) { return; }
+          let psym <Symbol> = self.global_scope.lookup(pname);
+          if (psym.kind != sym_interface()) { return; }
+          let idecl <&AstNode> = null;
+          let d <&AstNode> = root.left;
+          while (d != null) {
+              if (d.kind == ast_interface_decl() && chk_str_eq(d.name, pname)) { idecl = d; break; }
+              d = d.right;
+          }
+          if (idecl == null) { return; }
+          let ok <bool> = true;
+          let f <&AstNode> = idecl.left;
+          while (f != null && ok) {
+              if (!self.struct_provides_field(decl, f.name)) { ok = false; }
+              f = f.right;
+          }
+          let need_ctor <bool> = false;
+          let need_dtor <bool> = false;
+          let m <&AstNode> = idecl.extra;
+          while (m != null && ok) {
+              let ms <string> = self.bare_short_of(m.name, pname);
+              if (!chk_str_eq(ms, "")) {
+                  let mc <int> = self.chk_member_class(ms, pname);
+                  if (mc == 1) {
+                      let sym <string> = substr(ms, 8, cast<int>(chk_strlen(ms)) - 8);
+                      if (!self.struct_provides_operator(decl, sym)) { ok = false; }
+                  } else if (mc == 0) {
+                      if (!self.struct_provides_method(decl, ms)) { ok = false; }
+                  } else if (mc == 2) {
+                      need_ctor = true;
+                  } else {
+                      need_dtor = true;
+                  }
+              }
+              m = m.right;
+          }
+          if (ok && need_ctor && !self.struct_has_ctor(decl)) { ok = false; }
+          if (ok && need_dtor && !self.struct_has_dtor(decl)) { ok = false; }
+          if (!ok) {
+              let b <Buffer> = new_buffer(96);
+              b.write_string("Struct '");
+              b.write_string(decl.name);
+              b.write_string("' does not implement interface '");
+              b.write_string(pname);
+              b.write_string("'");
+              let m <string> = b.to_string();
+              free_buffer(b);
+              self.report_decl_range(m, decl);
+          }
+      }
+
+      fun check_struct_conformance(self: &Self, root: &AstNode, decl: &AstNode) <noret> {
+          // A forward declaration declares no members; the real one owns it.
+          if (decl.int_val == 1) { return; }
+          if (decl.str_val == null || chk_strlen(decl.str_val) == cast<ulong>(0)) { return; }
+          let psegs <[string]> = new [string, 64]{};
+          let pcount <int> = self.split_generic_segs(decl.str_val, psegs);
+          let pi <int> = 0;
+          while (pi < pcount) {
+              let pname <string> = self.chk_parent_base(psegs[pi]);
+              if (chk_strlen(pname) > cast<ulong>(0)) {
+                  self.check_one_conformance(root, decl, pname);
+              }
+              pi = pi + 1;
+          }
+          delete psegs;
       }
 
       fun check_enum_bounds(self: &Self, decl: &AstNode) <noret> {
@@ -7799,6 +8366,46 @@ pub struct Checker {
                   return base;
               }
           }
+          // ADR 0038: `any<I, ...>` narrows to implementors of `I`. A bound
+          // whose base resolves to `any` reads its arguments first-struct-
+          // wins (C++ getStructType over DynamicType bounds), so
+          // `X: Any<Printable>` finds `Printable`'s members. Plain `any`
+          // carries no arguments and stays unresolvable. Trimmed: bound
+          // spellings join tokens with spaces (`Any < Printable >`), so
+          // the base may carry whitespace the bare compare rejects.
+          let any_base <string> = chk_trim(self.resolve_type(chk_trim(base)));
+          if (chk_str_eq(any_base, "any")) {
+              let blen <int> = cast<int>(chk_strlen(b));
+              let open_at <int> = -1;
+              let oi <int> = 0;
+              while (oi < blen) {
+                  if (chk_str_eq(substr(b, oi, 1), "<")) { open_at = oi; break; }
+                  oi = oi + 1;
+              }
+              if (open_at >= 0) {
+                  let close_at <int> = -1;
+                  let cj <int> = blen - 1;
+                  while (cj > open_at) {
+                      if (chk_str_eq(substr(b, cj, 1), ">")) { close_at = cj; break; }
+                      cj = cj - 1;
+                  }
+                  if (close_at > open_at) {
+                      let inner <string> = substr(b, open_at + 1, close_at - open_at - 1);
+                      let asegs <[string]> = new [string, 64]{};
+                      let an <int> = self.split_generic_segs(inner, asegs);
+                      let ai <int> = 0;
+                      while (ai < an) {
+                          let ar <string> = self.resolve_bound_struct(chk_trim(asegs[ai]), depth + 1);
+                          if (!chk_str_eq(ar, "")) {
+                              delete asegs;
+                              return ar;
+                          }
+                          ai = ai + 1;
+                      }
+                      delete asegs;
+                  }
+              }
+          }
           return "";
       }
 
@@ -7987,6 +8594,7 @@ pub struct Checker {
 
       fun check_program(self: &Self, root: &AstNode) <bool> {
           if (root == null) { return true; }
+          self.prog_root = root;
 
           // Pass 1: Declare top-level functions, structs, globals, and type aliases in global scope
           let decl <&AstNode> = root.left;
@@ -8349,6 +8957,26 @@ pub struct Checker {
                   self.api_validate_attrs(decl.attr_text, true, false, decl.line, decl.col);
                   self.api_validate_fields(decl);
                   self.current_struct = decl.name;
+                  // Field annotations resolve with the struct's own generic
+                  // parameters in scope (C++ StructMember type resolution):
+                  // every word must name a parameter, a builtin, or a
+                  // declared type, like parameters and alias targets.
+                  let fsegs <[string]> = new [string, 64]{};
+                  let fpnames <[string]> = new [string, 64]{};
+                  let fpcount <int> = 0;
+                  if (decl.type_annotation != null && chk_strlen(decl.type_annotation) > cast<ulong>(0)) {
+                      let fsct <int> = self.split_generic_segs(decl.type_annotation, fsegs);
+                      fpcount = self.collect_bound_pnames(fsegs, fsct, fpnames, 0);
+                  }
+                  let fld <&AstNode> = decl.left;
+                  while (fld != null) {
+                      if (fld.type_annotation != null && chk_strlen(fld.type_annotation) > cast<ulong>(0)) {
+                          self.check_bound_words(fld.type_annotation, fpnames, fpcount, fld.line, fld.col);
+                      }
+                      fld = fld.right;
+                  }
+                  delete fsegs;
+                  delete fpnames;
                   // Declaration-ordered seen set for FRONTEND WINS: reset per
                   // struct, add each method before its body so self binds and
                   // later siblings stay free (C++ structScopes order).
@@ -8381,6 +9009,9 @@ pub struct Checker {
                       self.check_function(m);
                       m = m.right;
                   }
+                  // Declared parents (`: <I, J>`) must be satisfied, like C++
+                  // checks after the bodies (Analyzer_Decl conformance).
+                  self.check_struct_conformance(root, decl);
                   self.current_struct = "";
                   self.current_method_short = "";
               } else if (decl.kind == ast_fun_decl()) {
@@ -8390,6 +9021,49 @@ pub struct Checker {
                   self.check_enum_bounds(decl);
               } else if (decl.kind == ast_interface_decl()) {
                   self.api_validate_attrs(decl.attr_text, true, false, decl.line, decl.col);
+                  // Interface member signatures check like C++ (which walks
+                  // interface members): annotations, then defaults, in
+                  // declaration order. Bodies do not exist here. Defaults
+                  // analyze in a scope with the parameters registered, so a
+                  // default naming a sibling parameter resolves like C++.
+                  let im <&AstNode> = decl.extra;
+                  while (im != null) {
+                      if (im.kind == ast_fun_decl()) {
+                          self.check_function_signature_types(im);
+                          self.enter_scope();
+                          let rp <&AstNode> = im.extra;
+                          while (rp != null) {
+                              let r_type <string> = self.resolve_type(rp.type_annotation);
+                              let r_sym <Symbol> = make_var_sym(rp.name, r_type, false);
+                              if (!self.current_scope.insert_symbol(r_sym)) {
+                                  self.report_error("duplicate parameter name", rp.line, rp.col);
+                              }
+                              rp = rp.right;
+                          }
+                          let ip <&AstNode> = im.extra;
+                          while (ip != null) {
+                              self.check_param_default(ip);
+                              ip = ip.right;
+                          }
+                          self.exit_scope();
+                      }
+                      im = im.right;
+                  }
+              } else if (decl.kind == ast_type_alias()) {
+                  // The target names real types: C++ visit(TypeDefinition&)
+                  // resolves it, so `type Output = Any<...>;` with no `Any`
+                  // in scope is `Undefined type 'Any'`, not a silent alias.
+                  // The name itself still defines (pass 1 ran first), like C++.
+                  let asegs <[string]> = new [string, 64]{};
+                  let apnames <[string]> = new [string, 64]{};
+                  let apcount <int> = 0;
+                  if (decl.str_val != null && chk_strlen(decl.str_val) > cast<ulong>(0)) {
+                      let ascount <int> = self.split_generic_segs(decl.str_val, asegs);
+                      apcount = self.collect_bound_pnames(asegs, ascount, apnames, 0);
+                  }
+                  self.check_bound_words(decl.type_annotation, apnames, apcount, decl.line, decl.col);
+                  delete asegs;
+                  delete apnames;
               } else if (decl.kind == ast_var_decl()) {
                   self.api_validate_attrs(decl.attr_text, true, false, decl.line, decl.col);
                   // fin-guard, top-level form: same bare "" marker as the

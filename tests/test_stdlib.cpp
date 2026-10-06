@@ -963,10 +963,10 @@ TEST(Soundness_BundledStdlib, EveryModuleChecksCleanThroughAnImport) {
     // The blanket claim the guide chapter makes, held to account one module at a time so
     // that a failure names the module rather than "the stdlib".
     //
-    // Through an *import* and not standalone, deliberately: `finc lib/std/stdio.fin` and
-    // `finc lib/std/error.fin` each report a circular dependency when they are the root
-    // file, which is a loader limitation rather than a fault in either file, and
-    // TwoModulesDoNotCheckStandalone below is where that is recorded. Every module has
+    // Through an *import* and not standalone, deliberately: every module also
+    // checks clean as a root file (Soundness_BundledStdlib below sweeps the
+    // whole directory), but the route a program actually uses is the import,
+    // and that is what this table holds to account. Every module has
     // to be clean by the route a program actually uses.
     for (const char* module : {"error", "collection", "hashmap", "types", "typing",
                                "enums", "operators", "stdptr", "stdio", "strings",
@@ -1240,38 +1240,25 @@ TEST(Soundness_BundledStdlib, AModuleNamedStringCannotExist) {
         << err;
 }
 
-TEST(KnownDefect_BundledStdlib, TwoModulesDoNotCheckStandalone) {
-    // `finc lib/std/stdio.fin` and `finc lib/std/error.fin` each report a circular
-    // dependency when they are the root file. Neither is a cycle in the source: stdio
-    // imports error and error imports nothing, so the graph is a single edge. What
-    // produces it is the driver preloading stdio before analysing the root file (ADR
-    // 0021's eager-loading consequence) -- so compiling either of those two *as* the root
-    // means the file is already on the loader's in-progress stack when its own import is
-    // reached.
-    //
-    // Every other module checks clean standalone, which is what makes this two files and
-    // not a general limitation. Recorded rather than fixed because the fix is in the
-    // loader's cycle detection and that is not the stdlib's lane.
-    //
-    // Inverts into Soundness_BundledStdlib.EveryModuleChecksCleanStandalone: delete this
-    // and add "stdio" and "error" to a standalone loop.
-    for (const char* module : {"stdio", "error"}) {
-        const std::string path = testsDir() + "/../lib/std/" + module + ".fin";
-        const std::string err = stripAnsi(runFinc({path}, {{"FIN_LIBS", ""}}).err);
-        EXPECT_NE(err.find("circular dependency"), std::string::npos)
-            << "GOOD NEWS: lib/std/" << module << ".fin checks standalone now. Invert\n"
-               "this test into EveryModuleChecksCleanStandalone and drop the caveat from\n"
-               "docs/guide/12-standard-library-tour.md.\n"
+TEST(Soundness_BundledStdlib, EveryModuleChecksCleanStandalone) {
+    // Inverted from KnownDefect_BundledStdlib.TwoModulesDoNotCheckStandalone:
+    // the driver no longer preloads the ambient stdio prelude when the root
+    // file is itself a library module, so the preload-induced cycle on
+    // stdio/error (and enums) is gone and every module checks clean as a
+    // root file. Enumerated from the directory rather than hardcoded, so a
+    // module gained or lost updates the coverage without a second edit.
+    // NOTE for the stdlib/gaps lane: the caveat in
+    // docs/guide/12-standard-library-tour.md still describes the old cycle;
+    // that file is yours, please drop it.
+    const fs::path libDir = fs::path(testsDir()) / ".." / "lib" / "std";
+    bool sawAny = false;
+    for (const auto& entry : fs::directory_iterator(libDir)) {
+        if (entry.path().extension() != ".fin") continue;
+        sawAny = true;
+        const std::string err = stripAnsi(runFinc({entry.path().string()}, {{"FIN_LIBS", ""}}).err);
+        EXPECT_EQ(errorCount(err), 0u)
+            << entry.path().filename().string() << " does not check clean standalone.\n"
             << err;
     }
-
-    // The control, and it is what makes the above about those two files rather than about
-    // compiling anything in lib/std directly: a module that imports nothing loads fine as
-    // a root file.
-    const std::string path = testsDir() + "/../lib/std/collection.fin";
-    const std::string ok = stripAnsi(runFinc({path}, {{"FIN_LIBS", ""}}).err);
-    EXPECT_EQ(errorCount(ok), 0u)
-        << "collection.fin must still check standalone, or the test above is measuring\n"
-           "something wider than the two files it names.\n"
-        << ok;
+    EXPECT_TRUE(sawAny) << "no .fin files under " << libDir.string();
 }

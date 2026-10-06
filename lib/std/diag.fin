@@ -6,6 +6,8 @@
 
 namespace std {
 
+import { Buffer, new_buffer, free_buffer } from buffer::std;
+
 // Severity levels
 pub const DIAG_NOTE <int> = 0;
 pub const DIAG_WARNING <int> = 1;
@@ -148,20 +150,133 @@ pub fun format_refusal(file: string, line: int, col: int, msg: string) <string> 
     return format_simple(file, line, col, diag_refusal(), msg);
 }
 
-// Formats a compiler diagnostic with source snippet and caret underline:
+// Formats a compiler diagnostic with source snippet and caret underline,
+// byte-identical to the C++ DiagnosticEngine's human rendering (which the
+// stage mirrors; the reference owns the layout):
 //
 // ```
 // error: unexpected token
-//   --> src/main.fin:10:5
-//    |
-// 10 |     let x = 1;
-//    |     ^^^
+//    --> src/main.fin:10:5
+//     |
+//  10 |     let x = 1;
+//     |     ^^^ here
 // ```
 //
-// An empty `source_line` means the caller reports a bare point, not a range:
-// the line is re-read from `file` and the span is the token at `col`, so the
-// snippet still shows the source and the underline still covers the token.
-// A caller that already holds the text passes it and owns both values.
+// `span_len > 0` is an explicit span (a node range the caller measured);
+// anything else means the caller reports a bare point: the line is re-read
+// from `file` and the span is the token at `col`. The `did you mean` hint
+// is the C++ reportError auto-pass on the same token (Levenshtein over the
+// keyword table, previous-word fallback), so a span that is wrong also
+// suggests wrong: callers owe the true span, not an approximation.
+priv fun diag_str_eq(a: string, b: string) <bool> {
+    if (a == null) { return b == null; }
+    if (b == null) { return false; }
+    let alen <int> = cast<int>(diag_strlen(a));
+    if (alen != cast<int>(diag_strlen(b))) { return false; }
+    if (alen == 0) { return true; }
+    let ab <[char]> = new [char, alen + 1]{};
+    let bb <[char]> = new [char, alen + 1]{};
+    let copied1 <&char> = diag_bytes_out(&ab[0], a, cast<ulong>(alen));
+    let copied2 <&char> = diag_bytes_out(&bb[0], b, cast<ulong>(alen));
+    ab[alen] = cast<char>(0);
+    bb[alen] = cast<char>(0);
+    let i <int> = 0;
+    while (i < alen) {
+        if (ab[i] != bb[i]) { delete ab; delete bb; return false; }
+        i = i + 1;
+    }
+    delete ab;
+    delete bb;
+    return true;
+}
+
+// Byte-wise Levenshtein distance (C++ utils::levenshtein_distance): two
+// rows, substitution cost 0/1, no transpositions.
+priv fun diag_lev(a: string, b: string) <int> {
+    if (a == null) {
+        if (b == null) { return 0; }
+        return cast<int>(diag_strlen(b));
+    }
+    if (b == null) { return cast<int>(diag_strlen(a)); }
+    let m <int> = cast<int>(diag_strlen(a));
+    let n <int> = cast<int>(diag_strlen(b));
+    if (m == 0) { return n; }
+    if (n == 0) { return m; }
+    let ab <[char]> = new [char, m + 1]{};
+    let bb <[char]> = new [char, n + 1]{};
+    let c1 <&char> = diag_bytes_out(&ab[0], a, cast<ulong>(m));
+    let c2 <&char> = diag_bytes_out(&bb[0], b, cast<ulong>(n));
+    ab[m] = cast<char>(0);
+    bb[n] = cast<char>(0);
+    let prev <[int]> = new [int, n + 1]{};
+    let cur <[int]> = new [int, n + 1]{};
+    let j <int> = 0;
+    while (j <= n) { prev[j] = j; j = j + 1; }
+    let i <int> = 1;
+    while (i <= m) {
+        cur[0] = i;
+        let jj <int> = 1;
+        while (jj <= n) {
+            let cost <int> = 1;
+            if (ab[i - 1] == bb[jj - 1]) { cost = 0; }
+            let best <int> = prev[jj] + 1;
+            if (cur[jj - 1] + 1 < best) { best = cur[jj - 1] + 1; }
+            if (prev[jj - 1] + cost < best) { best = prev[jj - 1] + cost; }
+            cur[jj] = best;
+            jj = jj + 1;
+        }
+        let k <int> = 0;
+        while (k <= n) { prev[k] = cur[k]; k = k + 1; }
+        i = i + 1;
+    }
+    let res <int> = prev[n];
+    delete prev;
+    delete cur;
+    delete ab;
+    delete bb;
+    return res;
+}
+
+// Closest keyword to `word` (C++ DiagnosticEngine::checkTypo): same table,
+// same order (first best wins ties), threshold 1 under length 4 else 2,
+// and the distance must beat the word length (a keyword never suggests
+// itself). "" when nothing qualifies.
+priv fun diag_check_typo(word: string) <string> {
+    if (word == null || diag_strlen(word) == cast<ulong>(0)) { return ""; }
+    let wlen <int> = cast<int>(diag_strlen(word));
+    let best <string> = "";
+    let best_dist <int> = 100;
+    let kwi <int> = 0;
+    while (kwi < 35) {
+        let kw <string> = "";
+        if (kwi == 0) { kw = "fun"; } else if (kwi == 1) { kw = "struct"; }
+        else if (kwi == 2) { kw = "enum"; } else if (kwi == 3) { kw = "let"; }
+        else if (kwi == 4) { kw = "const"; } else if (kwi == 5) { kw = "bez"; }
+        else if (kwi == 6) { kw = "beton"; } else if (kwi == 7) { kw = "if"; }
+        else if (kwi == 8) { kw = "else"; } else if (kwi == 9) { kw = "elseif"; }
+        else if (kwi == 10) { kw = "while"; } else if (kwi == 11) { kw = "for"; }
+        else if (kwi == 12) { kw = "foreach"; } else if (kwi == 13) { kw = "return"; }
+        else if (kwi == 14) { kw = "break"; } else if (kwi == 15) { kw = "continue"; }
+        else if (kwi == 16) { kw = "import"; } else if (kwi == 17) { kw = "sizeof"; }
+        else if (kwi == 18) { kw = "typeof"; } else if (kwi == 19) { kw = "new"; }
+        else if (kwi == 20) { kw = "delete"; } else if (kwi == 21) { kw = "cast"; }
+        else if (kwi == 22) { kw = "interface"; } else if (kwi == 23) { kw = "pub"; }
+        else if (kwi == 24) { kw = "priv"; } else if (kwi == 25) { kw = "static"; }
+        else if (kwi == 26) { kw = "macro"; } else if (kwi == 27) { kw = "operator"; }
+        else if (kwi == 28) { kw = "from"; } else if (kwi == 29) { kw = "as"; }
+        else if (kwi == 30) { kw = "true"; } else if (kwi == 31) { kw = "false"; }
+        else if (kwi == 32) { kw = "null"; } else if (kwi == 33) { kw = "self"; }
+        else { kw = "super"; }
+        let d <int> = diag_lev(word, kw);
+        if (d < best_dist) { best_dist = d; best = kw; }
+        kwi = kwi + 1;
+    }
+    // 35 entries: indices 0..33 above, `super` on the trailing else.
+    let threshold <int> = 2;
+    if (wlen < 4) { threshold = 1; }
+    if (best_dist <= threshold && best_dist < wlen) { return best; }
+    return "";
+}
 priv fun diag_is_ident(b: char) <bool> {
     if (b >= 'a' && b <= 'z') { return true; }
     if (b >= 'A' && b <= 'Z') { return true; }
@@ -270,51 +385,155 @@ priv fun diag_token_span(line_text: string, col: int) <int> {
     return span;
 }
 
+// `span` bytes of `body` from 1-based `col`, or "" when the range is not
+// inside the line (C++ extractTokenText guard: a location past the line end
+// extracts nothing, and nothing suggests nothing).
+priv fun diag_slice(body: string, col: int, span: int) <string> {
+    if (body == null || span <= 0 || col < 1) { return ""; }
+    let total <int> = cast<int>(diag_strlen(body));
+    let start <int> = col - 1;
+    if (start >= total || start + span > total) { return ""; }
+    let out <string> = diag_calloc(cast<ulong>(span + 1), cast<ulong>(1));
+    if (out == null) { return ""; }
+    let bytes <[char]> = new [char, total + 1]{};
+    let copied <&char> = diag_bytes_out(&bytes[0], body, cast<ulong>(total));
+    bytes[total] = cast<char>(0);
+    let moved <string> = diag_memcpy(out, &bytes[start], cast<ulong>(span));
+    delete bytes;
+    return out;
+}
+
+// The word before 1-based `col` on `body`, or "" (C++ getPreviousWordLoc
+// honesty rule: a column past the line end, or nothing but spaces before
+// it, yields no word, and an empty word suggests nothing downstream).
+priv fun diag_prev_word(body: string, col: int) <string> {
+    if (body == null) { return ""; }
+    let total <int> = cast<int>(diag_strlen(body));
+    if (col - 1 > total) { return ""; }
+    if (total == 0) { return ""; }
+    let bytes <[char]> = new [char, total + 1]{};
+    let copied <&char> = diag_bytes_out(&bytes[0], body, cast<ulong>(total));
+    bytes[total] = cast<char>(0);
+    let cursor <int> = col - 2;
+    while (cursor >= 0 && (bytes[cursor] == cast<char>(32) || bytes[cursor] == cast<char>(9) ||
+           bytes[cursor] == cast<char>(11) || bytes[cursor] == cast<char>(12))) {
+        cursor = cursor - 1;
+    }
+    if (cursor < 0) { delete bytes; return ""; }
+    let end <int> = cursor + 1;
+    while (cursor >= 0 && diag_is_ident(bytes[cursor])) { cursor = cursor - 1; }
+    let start <int> = cursor + 1;
+    if (start >= end) { delete bytes; return ""; }
+    let wlen <int> = end - start;
+    let out <string> = diag_calloc(cast<ulong>(wlen + 1), cast<ulong>(1));
+    if (out == null) { delete bytes; return ""; }
+    let moved <string> = diag_memcpy(out, &bytes[start], cast<ulong>(wlen));
+    delete bytes;
+    return out;
+}
+
 #[export]
 pub fun format_snippet(file: string, line: int, col: int, level: int, msg: string, source_line: string, span_len: int) <string> {
-    let buf <string> = diag_calloc(cast<ulong>(1024), cast<ulong>(1));
     let lvl <string> = level_name(level);
 
     let body <string> = source_line;
-    let span <int> = span_len;
     let owns_body <bool> = false;
     if (body == null || diag_strlen(body) == cast<ulong>(0)) {
         let disk? <string> = diag_snippet_line(file, line);
         if (disk != null) {
             body = disk?;
             owns_body = true;
-            span = diag_token_span(body, col);
         }
     }
 
-    let caret_buf <[char]> = new [char, 128]{};
-    for (let i <int> = 0; i < 127; i++) {
-        caret_buf[i] = ' ';
+    // Explicit span wins; otherwise the identifier at `col`, or 1 when
+    // `col` sits on no identifier character.
+    let span <int> = span_len;
+    if (span <= 0) {
+        if (body == null) { span = 1; }
+        else { span = diag_token_span(body, col); }
     }
-    let col_idx <int> = col - 1;
-    if (col_idx < 0) { col_idx = 0; }
-    if (col_idx > 120) { col_idx = 120; }
-    let slen <int> = span;
-    if (slen < 1) { slen = 1; }
-    for (let j <int> = 0; j < slen && (col_idx + j) < 126; j++) {
-        caret_buf[col_idx + j] = '^';
+    if (span < 1) { span = 1; }
+
+    // C++ reportError auto-pass on the same token: `did you mean 'x'?`,
+    // else the previous word's `looks suspicious` variant. A span that is
+    // wrong suggests wrong, which is why callers owe the true span.
+    let help <string> = "";
+    if (body != null) {
+        let tok <string> = diag_slice(body, col, span);
+        if (!diag_str_eq(tok, "")) {
+            let sug <string> = diag_check_typo(tok);
+            if (diag_str_eq(sug, tok)) { sug = ""; }
+            if (!diag_str_eq(sug, "")) {
+                let hb <Buffer> = new_buffer(64);
+                hb.write_string("did you mean '");
+                hb.write_string(sug);
+                hb.write_string("'?");
+                help = hb.to_string();
+                free_buffer(hb);
+            } else {
+                let pw <string> = diag_prev_word(body, col);
+                if (!diag_str_eq(pw, "")) {
+                    let psug <string> = diag_check_typo(pw);
+                    if (diag_str_eq(psug, pw)) { psug = ""; }
+                    if (!diag_str_eq(psug, "")) {
+                        let pb <Buffer> = new_buffer(96);
+                        pb.write_string("the word '");
+                        pb.write_string(pw);
+                        pb.write_string("' looks suspicious. Did you mean '");
+                        pb.write_string(psug);
+                        pb.write_string("'?");
+                        help = pb.to_string();
+                        free_buffer(pb);
+                    }
+                }
+            }
+        }
     }
-    let total_len <int> = col_idx + slen;
-    if (total_len > 127) { total_len = 127; }
-    caret_buf[total_len] = cast<char>(0);
 
-    let caret_str <string> = diag_calloc(cast<ulong>(128), cast<ulong>(1));
-    diag_memcpy(caret_str, &caret_buf[0], cast<ulong>(total_len));
-    delete caret_buf;
+    let numbuf <Buffer> = new_buffer(16);
+    numbuf.write_int(line);
+    let numstr <string> = numbuf.to_string();
+    free_buffer(numbuf);
+    let nlen <int> = cast<int>(diag_strlen(numstr));
 
-    let written <int> = diag_snprintf(buf, cast<ulong>(1024),
-        "%s:%d:%d: %s: %s\n  --> %s:%d:%d\n   |\n%4d | %s\n   | %s\n",
-        file, line, col, lvl, msg, file, line, col, line, body, caret_str);
-    diag_free(caret_str);
+    let out <Buffer> = new_buffer(4096);
+    out.write_string(lvl);
+    out.write_string(": ");
+    out.write_string(msg);
+    out.write_string("\n   --> ");
+    out.write_string(file);
+    out.write_char(':');
+    out.write_int(line);
+    out.write_char(':');
+    out.write_int(col);
+    out.write_string("\n ");
+    let pi <int> = 0;
+    while (pi < nlen) { out.write_char(' '); pi = pi + 1; }
+    out.write_string(" |\n ");
+    out.write_string(numstr);
+    out.write_string(" | ");
+    if (body != null) { out.write_string(body); }
+    out.write_string("\n ");
+    let qi <int> = 0;
+    while (qi < nlen) { out.write_char(' '); qi = qi + 1; }
+    out.write_string(" | ");
+    let si <int> = 1;
+    while (si < col) { out.write_char(' '); si = si + 1; }
+    let ci <int> = 0;
+    while (ci < span) { out.write_char('^'); ci = ci + 1; }
+    out.write_string(" here\n");
+    if (!diag_str_eq(help, "")) {
+        out.write_string("   = help: ");
+        out.write_string(help);
+        out.write_string("\n");
+    }
+    let res <string> = out.to_string();
+    free_buffer(out);
     if (owns_body) {
         diag_free(body);
     }
-    return buf;
+    return res;
 }
 
 // Frees formatted diagnostic string buffers.

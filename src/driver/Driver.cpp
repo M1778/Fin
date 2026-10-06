@@ -169,7 +169,38 @@ int Driver::compile() {
     // The standard I/O module owns the explicit ambient `#[global] printf`
     // declaration. Load it before the root analyzer so its published binding is
     // available without an import, while all other std names remain import-only.
-    loader.loadGlobalModuleIfPresent("stdio", true);
+    // Skipped when the root file IS it: preloading the file being compiled is
+    // a self-cycle, not a module to go and load (checking lib/std/stdio.fin
+    // standalone reported `circular dependency detected` on itself).
+    //
+    // Also skipped when the root is itself a library module (under the bundled
+    // lib dir): the ambient prelude is for programs, and preloading it while
+    // checking a module stdio itself imports (enums, error) manufactures a
+    // cycle the file's own imports never create. No library module needs the
+    // prelude (only stdio calls bare `printf`, and it declares it), and a
+    // genuine cycle through user-written imports still reports through the
+    // normal import machinery, prelude or not.
+    bool rootIsLibrary = false;
+    {
+        std::error_code ec;
+        const std::string rootCanon =
+            std::filesystem::canonical(options.inputFile, ec).string();
+        if (!ec) {
+            for (const auto& libDir : bundledLibraryPaths()) {
+                const std::string dir =
+                    std::filesystem::path(libDir).lexically_normal().string();
+                if (rootCanon.size() > dir.size() &&
+                    rootCanon.compare(0, dir.size(), dir) == 0 &&
+                    (rootCanon[dir.size()] == '/' || dir.back() == '/')) {
+                    rootIsLibrary = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (!rootIsLibrary) {
+        loader.loadGlobalModuleIfPresent("stdio", true, options.inputFile);
+    }
     // ----------------------------
 
     // 3.5 Macro Expansion
