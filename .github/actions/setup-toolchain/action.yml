@@ -93,8 +93,14 @@ runs:
           echo "deb http://apt.llvm.org/$codename/ llvm-toolchain-$codename-$FIN_LLVM_MAJOR main" \
             | sudo tee "/etc/apt/sources.list.d/llvm-$FIN_LLVM_MAJOR.list"
           retry sudo apt-get update
-          retry sudo apt-get install -y "llvm-$FIN_LLVM_MAJOR-dev"
+          retry sudo apt-get install -y "llvm-$FIN_LLVM_MAJOR-dev" "llvm-$FIN_LLVM_MAJOR"
           echo "LLVM_DIR=$(llvm-config-$FIN_LLVM_MAJOR --cmakedir)" >> "$GITHUB_ENV"
+          # The tools package owns the tool binaries (llvm-objdump included)
+          # but drops them in /usr/lib/llvm-<major>/bin, off PATH -- while a
+          # codegen test disassembles with llvm-objdump and skips without it,
+          # tripping the no-quiet-skips guard. Put the dir on PATH instead of
+          # symlinking one tool, so every LLVM tool resolves the same way.
+          echo "/usr/lib/llvm-$FIN_LLVM_MAJOR/bin" >> "$GITHUB_PATH"
 
       - name: Install LLVM ${{ env.FIN_LLVM_MAJOR }} (macOS)
         if: runner.os == 'macOS'
