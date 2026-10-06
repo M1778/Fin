@@ -44,8 +44,8 @@ struct CompilerOptions {
     bool skipSemantics = false;
     bool skipCodegen = false;
 
-    // fin-guard (default on): `let <name> = ...` with no annotation rewrites to
-    // `let <name> <auto> = ...` with a warning. `--no-fin-guard` rejects it.
+    // fin-guard (default on): `let`/`const <name> = ...` with no annotation
+    // rewrites to `<name> <auto> = ...` with a warning. `--no-fin-guard` rejects it.
     bool finGuard = true;
 
     // `-c`: stop at the object file and do not link. A third mode beside "check"

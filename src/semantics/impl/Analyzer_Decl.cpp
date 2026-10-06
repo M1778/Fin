@@ -18,8 +18,12 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
     // spelled the type as `<auto>` so later passes need no new shape; this
     // flag is the only thing that tells a rewrite apart from a written `<auto>`.
     if (node.finGuardRewritten) {
+        // `const` took the same rewrite path in the parser, so the diagnostic
+        // names the keyword the program wrote: `is_mutable` is what tells a
+        // `let` (true) from a `const` (false).
+        const std::string kw = node.is_mutable ? "let" : "const";
         if (!finGuardEnabled) {
-            error(node, "bare 'let " + node.name + "' needs a type annotation or '?' (fin-guard is off)");
+            error(node, "bare '" + kw + " " + node.name + "' needs a type annotation or '?' (fin-guard is off)");
             return;
         }
         if (!node.type || node.type->name != "auto") {
@@ -28,7 +32,7 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
             node.type = std::move(autoType);
         }
         // warnOnHostBranch precedent: warning() counts but never fails the build.
-        warning(node, "fin-guard rewrote 'let " + node.name + " = ...' as 'let " +
+        warning(node, "fin-guard rewrote '" + kw + " " + node.name + " = ...' as '" + kw + " " +
                       node.name + " <auto> = ...' (pass --no-fin-guard to reject this instead)");
         node.finGuardRewritten = false;
     }

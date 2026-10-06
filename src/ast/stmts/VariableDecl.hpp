@@ -17,10 +17,10 @@ public:
     std::unique_ptr<TypeNode> type;
     std::unique_ptr<Expression> initializer;
     std::vector<std::unique_ptr<Attribute>> attributes;
-    // fin-guard: the parser accepted `let <name> = ...` with no annotation and
-    // spelled the type as `<auto>`; semantics warns (or errors when the guard
-    // is off) on this flag rather than on the type, so an explicit
-    // `let <name> <auto> = ...` stays silent.
+    // fin-guard: the parser accepted `let`/`const <name> = ...` with no
+    // annotation and spelled the type as `<auto>`; semantics warns (or errors
+    // when the guard is off) on this flag rather than on the type, so an
+    // explicit `<name> <auto> = ...` stays silent.
     bool finGuardRewritten = false;
 
     VariableDeclaration(bool mut, std::string n, std::unique_ptr<TypeNode> t, std::unique_ptr<Expression> init);

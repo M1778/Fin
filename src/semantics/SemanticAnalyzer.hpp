@@ -205,7 +205,7 @@ private:
     DiagnosticEngine& diag;
     bool debugMode;
     ModuleLoader* loader = nullptr; // Reference to loader
-    // fin-guard (default on): bare `let x = ...` rewrites to `<auto>` with a
+    // fin-guard (default on): bare `let`/`const x = ...` rewrites to `<auto>` with a
     // warning; off rejects it. Set from CompilerOptions by the driver.
     bool finGuardEnabled = true;
 
