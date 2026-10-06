@@ -6214,8 +6214,17 @@ BACKEND_TEST(Soundness_Codegen, AMovedTiedBindingStillSkipsItsDestructor) {
 // on macOS the tool exists but is not on PATH: fall back to the keg bins for
 // the LLVM this compiler was built against, then the unversioned keg.
 static std::string objdumpPath() {
-    if (std::system("llvm-objdump --version > /dev/null 2>&1") == 0)
-        return "llvm-objdump";
+    // Probed by running, never by shelling: `> /dev/null` is a POSIX spelling
+    // and fails on Windows cmd even when llvm-objdump is on PATH, which
+    // skipped ASlaveofOnPlainDataLowersIdentically there with a reason that
+    // blamed PATH for a shell-spelling problem.
+    const fs::path probeOut = uniqueTempPath("fin_objdump_probe");
+    const bool found =
+        fin::runProcess({"llvm-objdump", "--version"}, probeOut.string(),
+                        probeOut.string()) == 0;
+    std::error_code probeEc;
+    fs::remove(probeOut, probeEc);
+    if (found) return "llvm-objdump";
 #ifdef __APPLE__
     std::vector<std::string> bins;
 #ifdef FIN_LLVM_MAJOR

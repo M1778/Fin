@@ -708,6 +708,36 @@ TEST(SearchPaths, OrderIsPreserved) {
               (V{"/1", "/2", "/3"}));
 }
 
+// `Driver.cpp` preloads the ambient stdio prelude for every root file except
+// one that is itself a library module. That membership test used to compare
+// strings and demand a `'/'` after the prefix, which is never the spelling on
+// Windows -- so every standalone stdlib check there preloaded stdio and died
+// on a manufactured `circular dependency detected`. These pin the helper that
+// check now goes through.
+TEST(SearchPaths, PathUnderDirNeedsASeparatorAfterThePrefix) {
+    EXPECT_TRUE(fin::pathIsUnderDir("/a/lib/std/enums.fin", "/a/lib/std"));
+    EXPECT_FALSE(fin::pathIsUnderDir("/a/lib/std", "/a/lib/std"));
+    EXPECT_FALSE(fin::pathIsUnderDir("/a/lib", "/a/lib/std"));
+    EXPECT_FALSE(fin::pathIsUnderDir("/a/lib/std2/enums.fin", "/a/lib/std"));
+    EXPECT_TRUE(fin::pathIsUnderDir("/a/lib/std/enums.fin", "/a/lib/std/"));
+}
+#ifdef _WIN32
+TEST(SearchPaths, PathUnderDirAcceptsEitherSeparatorOnWindows) {
+    // Both spellings are separator-consistent (the caller's contract); the
+    // mixed `D:/.../tests\..\lib\std` spelling argv can carry never reaches
+    // this helper -- canonical() normalises it first, and the join that built
+    // it is normalised at its own site (test_stdlib.cpp).
+    EXPECT_TRUE(fin::pathIsUnderDir("D:\\a\\lib\\std\\enums.fin", "D:\\a\\lib\\std"));
+    EXPECT_TRUE(fin::pathIsUnderDir("D:/a/lib/std/enums.fin", "D:/a/lib/std"));
+    EXPECT_TRUE(fin::pathIsUnderDir("D:\\a\\lib\\std\\enums.fin", "D:\\a\\lib\\std\\"));
+    EXPECT_FALSE(fin::pathIsUnderDir("D:\\a\\lib\\std2\\enums.fin", "D:\\a\\lib\\std"));
+}
+#else
+TEST(SearchPaths, PathUnderDirTreatsBackslashAsANameCharacterOnPosix) {
+    EXPECT_FALSE(fin::pathIsUnderDir("/a/lib/std\\enums.fin", "/a/lib/std"));
+}
+#endif
+
 TEST(SearchPaths, APathContainingASpaceSurvivesIntact) {
     using V = std::vector<std::string>;
     EXPECT_EQ(fin::splitSearchPaths("/a dir/with spaces"), (V{"/a dir/with spaces"}));

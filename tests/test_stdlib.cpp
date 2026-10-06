@@ -1284,7 +1284,13 @@ TEST(Soundness_BundledStdlib, EveryModuleChecksCleanStandalone) {
     // NOTE for the stdlib/gaps lane: the caveat in
     // docs/guide/12-standard-library-tour.md still describes the old cycle;
     // that file is yours, please drop it.
-    const fs::path libDir = fs::path(testsDir()) / ".." / "lib" / "std";
+    // Normalised at the join: CMake bakes FIN_TESTS_DIR with forward slashes,
+    // and `operator/` appends with the native separator, so without this the
+    // entries below reach finc as mixed spellings like
+    // `D:/a/Fin/Fin/tests\..\lib\std\enums.fin`. The compiler answers identity
+    // questions canonically, but nothing should hand it a spelling it built by
+    // joining.
+    const fs::path libDir = (fs::path(testsDir()) / ".." / "lib" / "std").lexically_normal();
     bool sawAny = false;
     for (const auto& entry : fs::directory_iterator(libDir)) {
         if (entry.path().extension() != ".fin") continue;

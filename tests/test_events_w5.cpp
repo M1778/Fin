@@ -16,6 +16,7 @@
 #include "semantics/EventFiring.hpp"
 #include "semantics/EventRegistry.hpp"
 #include "semantics/SemanticAnalyzer.hpp"
+#include "utils/Process.hpp"
 
 // Wave-4 step 17 (docs/compiler-api.md §3.2, §3.8), W5 floor: the firing loop
 // plus `struct_layout_finalised` and `variable_declared`.
@@ -415,15 +416,6 @@ TEST(W5VarDecl, SpliceLandsAfterItsDeclaration) {
 
 namespace {
 
-std::string w5shellQuote(const std::string& s) {
-    std::string out = "'";
-    for (char c : s) {
-        if (c == '\'') out += "'\\''";
-        else out += c;
-    }
-    return out + "'";
-}
-
 // Compiles a string to a real executable and runs it: the Fin-level probe
 // that an injected marker survives lowering and executes.
 struct W5Built {
@@ -447,13 +439,13 @@ W5Built w5buildRun(const std::string& code) {
     b.compileErr = stripAnsi(c.err);
     if (b.compileExit == 0 && fs::exists(exe)) {
         fs::path outPath = uniqueTempPath("fin_w5_out");
-        std::string cmd =
-            w5shellQuote(exe.string()) + " > " + w5shellQuote(outPath.string()) + " 2>&1";
-        int status = std::system(cmd.c_str());
-        b.runExit = status;
+        // No shell: single-quote quoting is POSIX-only, and on Windows cmd it
+        // fails every run with `The filename, directory name, or volume label
+        // syntax is incorrect.` while leaving stdout empty. runProcess passes
+        // argv literally on every host (cf. test_codegen.cpp's build()).
+        b.runExit = fin::runProcess({exe.string()}, outPath.string(), outPath.string());
         b.ran = true;
-        std::ifstream f(outPath, std::ios::binary);
-        b.out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        b.out = readProcessOutput(outPath.string());
         std::error_code ec;
         fs::remove(outPath, ec);
     }

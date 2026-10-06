@@ -17,6 +17,7 @@
 #include "semantics/EventRegistry.hpp"
 #include "semantics/LoopBackEdge.hpp"
 #include "semantics/SemanticAnalyzer.hpp"
+#include "utils/Process.hpp"
 
 // Wave-4 step 20 (docs/compiler-api.md §3.2), W10: `loop_back_edge` — the
 // LAST floor event (owner Q9: floor-last). A tracing collector needs
@@ -440,15 +441,6 @@ TEST(W10Order, CoRegisteredHandlersOrderByModuleDagThenDeclaration) {
 
 namespace {
 
-std::string w10shellQuote(const std::string& s) {
-    std::string out = "'";
-    for (char c : s) {
-        if (c == '\'') out += "'\\''";
-        else out += c;
-    }
-    return out + "'";
-}
-
 struct W10Built {
     int compileExit = -1;
     std::string compileErr;
@@ -470,13 +462,10 @@ W10Built w10buildRun(const std::string& code) {
     b.compileErr = stripAnsi(c.err);
     if (b.compileExit == 0 && fs::exists(exe)) {
         fs::path outPath = uniqueTempPath("fin_w10_out");
-        std::string cmd =
-            w10shellQuote(exe.string()) + " > " + w10shellQuote(outPath.string()) + " 2>&1";
-        int status = std::system(cmd.c_str());
-        b.runExit = status;
+        // No shell, for the reason given at test_events_w5.cpp's runner.
+        b.runExit = fin::runProcess({exe.string()}, outPath.string(), outPath.string());
         b.ran = true;
-        std::ifstream f(outPath, std::ios::binary);
-        b.out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        b.out = readProcessOutput(outPath.string());
         std::error_code ec;
         fs::remove(outPath, ec);
     }

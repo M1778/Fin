@@ -14,6 +14,7 @@
 #include "semantics/MovedAnalysis.hpp"
 #include "semantics/SemanticAnalyzer.hpp"
 #include "types/StructType.hpp"
+#include "utils/Process.hpp"
 
 // Wave-4 step 17 (docs/compiler-api.md §3.2), W7: `variable_scope_exit` plus
 // the moved analysis, including MovedMaybe.
@@ -564,15 +565,6 @@ TEST(W7Compose, HasDestructorQueryResolves) {
 
 namespace {
 
-std::string w7shellQuote(const std::string& s) {
-    std::string out = "'";
-    for (char c : s) {
-        if (c == '\'') out += "'\\''";
-        else out += c;
-    }
-    return out + "'";
-}
-
 // Compiles a string to a real executable and runs it: the Fin-level probe
 // that an injected marker survives lowering and executes.
 struct W7Built {
@@ -596,13 +588,10 @@ W7Built w7buildRun(const std::string& code) {
     b.compileErr = stripAnsi(c.err);
     if (b.compileExit == 0 && fs::exists(exe)) {
         fs::path outPath = uniqueTempPath("fin_w7_out");
-        std::string cmd =
-            w7shellQuote(exe.string()) + " > " + w7shellQuote(outPath.string()) + " 2>&1";
-        int status = std::system(cmd.c_str());
-        b.runExit = status;
+        // No shell, for the reason given at test_events_w5.cpp's runner.
+        b.runExit = fin::runProcess({exe.string()}, outPath.string(), outPath.string());
         b.ran = true;
-        std::ifstream f(outPath, std::ios::binary);
-        b.out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        b.out = readProcessOutput(outPath.string());
         std::error_code ec;
         fs::remove(outPath, ec);
     }
