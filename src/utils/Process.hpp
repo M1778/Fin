@@ -18,4 +18,9 @@ int runProcess(const std::vector<std::string>& args,
 std::vector<std::string> linkCommand(const std::vector<std::string>& objects,
                                      const std::string& output);
 
+// First Homebrew llvm keg lib dir holding libLLVM.dylib, or "" on other
+// hosts or when no keg is installed. The macOS default link line points
+// -L at it; the test suite pins the line per host through this helper.
+std::string brewLlvmLibDir();
+
 }

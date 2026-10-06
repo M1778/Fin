@@ -298,9 +298,11 @@ namespace {
 // The port of the link step to fin::linkCommand dropped the libraries the
 // self-host compiler needs at link time: `cc obj -o out` links a plain sample
 // but a program that calls the LLVM C API fails with `undefined reference to
-// LLVMBuildCall2`. The pre-port Driver::runLinker always appended
-// `-Wl,--as-needed -lLLVM-<major> -lm` unless FIN_LDFLAGS overrode it; the two
-// tests below pin both halves of that contract on the argv itself.
+// LLVMBuildCall2`. The pre-port Driver::runLinker always appended LLVM
+// libraries unless FIN_LDFLAGS overrode it -- `-Wl,--as-needed -lLLVM-<major>
+// -lm` on Linux, `-L<keg> -lLLVM -lm` on macOS where Apple ld(1) rejects
+// --as-needed and Homebrew's keg is libLLVM.dylib; the two tests below pin
+// both halves of that contract on the argv itself, per host.
 class ScopedEnv {
 public:
     ScopedEnv(const char* name, const char* value) : name_(name) {
@@ -323,6 +325,7 @@ private:
     bool had_ = false;
 };
 
+#ifndef __APPLE__  // Apple arm builds its expectation from fin::brewLlvmLibDir.
 std::string expectedLlvmLib() {
 #ifdef FIN_LLVM_MAJOR
 #define FIN_TEST_STRINGIFY_HELPER(x) #x
@@ -334,14 +337,26 @@ std::string expectedLlvmLib() {
     return "-lLLVM-22";
 #endif
 }
+#endif
 
 }  // namespace
 
 TEST(LinkCommand, AppendsLlvmLibrariesAfterTheOutput) {
     ScopedEnv cc("FIN_CC", nullptr);
     ScopedEnv ldflags("FIN_LDFLAGS", nullptr);
+#ifdef __APPLE__
+    // Same fate, different words: Apple ld(1) rejects --as-needed and the
+    // Homebrew keg is libLLVM.dylib under -L<keg>, so the words differ while
+    // the contract (LLVM libs after the output) holds.
+    std::vector<std::string> expected{"cc", "a.o", "-o", "a.out"};
+    const std::string keg = fin::brewLlvmLibDir();
+    if (!keg.empty()) expected.push_back("-L" + keg);
+    expected.push_back("-lLLVM");
+    expected.push_back("-lm");
+#else
     const std::vector<std::string> expected{"cc", "a.o", "-o", "a.out",
                                             "-Wl,--as-needed", expectedLlvmLib(), "-lm"};
+#endif
     EXPECT_EQ(fin::linkCommand({"a.o"}, "a.out"), expected);
 }
 
@@ -6195,6 +6210,29 @@ BACKEND_TEST(Soundness_Codegen, AMovedTiedBindingStillSkipsItsDestructor) {
     EXPECT_EQ(b.out, "body\ndtor 1\nafter\ndtor 0\n") << b.why();
 }
 
+// llvm-objdump by PATH, or "" when absent. Homebrew kegs are keg-only, so
+// on macOS the tool exists but is not on PATH: fall back to the keg bins for
+// the LLVM this compiler was built against, then the unversioned keg.
+static std::string objdumpPath() {
+    if (std::system("llvm-objdump --version > /dev/null 2>&1") == 0)
+        return "llvm-objdump";
+#ifdef __APPLE__
+    std::vector<std::string> bins;
+#ifdef FIN_LLVM_MAJOR
+    for (const char* root : {"/opt/homebrew", "/usr/local"})
+        bins.push_back(std::string(root) + "/opt/llvm@" +
+                       std::to_string(FIN_LLVM_MAJOR) + "/bin/llvm-objdump");
+#endif
+    bins.push_back("/opt/homebrew/opt/llvm/bin/llvm-objdump");
+    bins.push_back("/usr/local/opt/llvm/bin/llvm-objdump");
+    for (const auto& bin : bins) {
+        std::error_code ec;
+        if (fs::exists(bin, ec)) return bin;
+    }
+#endif
+    return "";
+}
+
 BACKEND_TEST(Soundness_Codegen, ASlaveofOnPlainDataLowersIdentically) {
     // The narrowed no-op half: destructor-less storage has no scope-exit
     // cleanup to delay, so tying it must not change the generated code at
@@ -6217,7 +6255,8 @@ BACKEND_TEST(Soundness_Codegen, ASlaveofOnPlainDataLowersIdentically) {
         "    let m <int> = 2;\n"
         "    printf(\"%d\\n\", z + m);\n"
         "}\n";
-    if (std::system("llvm-objdump --version > /dev/null 2>&1") != 0)
+    const std::string objdump = objdumpPath();
+    if (objdump.empty())
         GTEST_SKIP() << "llvm-objdump not on PATH";
     // `finc -c` writes <stem>.o beside the working directory: recover each
     // object by the stem of the source that produced it.
@@ -6230,11 +6269,11 @@ BACKEND_TEST(Soundness_Codegen, ASlaveofOnPlainDataLowersIdentically) {
         if (c.exitCode != 0) return fs::path{};
         return obj;
     };
-    auto disassemble = [](const fs::path& obj) {
+    auto disassemble = [&objdump](const fs::path& obj) {
         // No shell: the object path reaches llvm-objdump as one argv element,
         // and merged stdout/stderr lands in a file the same as `2>&1` did.
         fs::path tmp = uniqueTempPath("fin_slaveof_dis");
-        if (fin::runProcess({"llvm-objdump", "-d", "--no-show-raw-insn", obj.string()},
+        if (fin::runProcess({objdump, "-d", "--no-show-raw-insn", obj.string()},
                             tmp.string(), tmp.string()) != 0)
             return std::string{};
         std::string out = readProcessOutput(tmp.string());

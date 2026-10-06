@@ -1,6 +1,7 @@
 #include "Process.hpp"
 
 #include <cstdlib>
+#include <filesystem>
 #include <sstream>
 
 #ifdef _WIN32
@@ -58,9 +59,42 @@ std::vector<std::string> defaultLinkLibs() {
 #else
     const std::string llvmLib = "-lLLVM-22";
 #endif
+#ifdef __APPLE__
+    // Apple ld(1) rejects the GNU --as-needed option, and Homebrew's keg
+    // ships libLLVM.dylib rather than libLLVM-<major>: -L<keg> -lLLVM -lm,
+    // the same line the stage driver emits (finc/driver.fin). Without a keg
+    // there is no working line; keep -lLLVM unqualified so ld names the
+    // missing library instead of linking against a guessed path.
+    const std::string keg = brewLlvmLibDir();
+    if (!keg.empty()) return {"-L" + keg, "-lLLVM", "-lm"};
+    return {"-lLLVM", "-lm"};
+#else
     return {"-Wl,--as-needed", llvmLib, "-lm"};
+#endif
 }
 
+}
+
+std::string brewLlvmLibDir() {
+#ifdef __APPLE__
+    // First Homebrew llvm keg lib dir holding libLLVM.dylib, or "". Mirrors
+    // drv_brew_llvm_lib in finc/driver.fin, plus the versioned keg
+    // (`llvm@<major>`) the toolchain installs: Apple-silicon brew lives
+    // under /opt/homebrew, Intel under /usr/local.
+    std::vector<std::string> kegs;
+#ifdef FIN_LLVM_MAJOR
+    for (const char* root : {"/opt/homebrew", "/usr/local"})
+        kegs.push_back(std::string(root) + "/opt/llvm@" +
+                       std::to_string(FIN_LLVM_MAJOR) + "/lib");
+#endif
+    kegs.push_back("/opt/homebrew/opt/llvm/lib");
+    kegs.push_back("/usr/local/opt/llvm/lib");
+    for (const auto& dir : kegs) {
+        std::error_code ec;
+        if (std::filesystem::exists(dir + "/libLLVM.dylib", ec)) return dir;
+    }
+#endif
+    return "";
 }
 
 int runProcess(const std::vector<std::string>& args,
