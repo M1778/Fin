@@ -1,7 +1,7 @@
-# The `finc` interface, contract 1
+# The `finc` interface, contract 2
 
 This is the command-line interface used by `finn` and other tools. It describes
-the current compiler, `0.4.0 (contract 1)`. ADR 0009 records the contract's design;
+the current compiler, `0.4.0 (contract 2)`. ADR 0009 records the contract's design;
 `tests/test_cli.cpp` and `tests/test_codegen.cpp` check its behavior.
 
 `finc file.fin` checks source. Add `-o app` to build an executable or `-c` to emit
@@ -11,7 +11,7 @@ an object. Code generation requires a build with the LLVM backend enabled.
 
 ```
 $ finc --version
-finc 0.4.0 (contract 1)
+finc 0.4.0 (contract 2)
 ```
 
 Format: `finc <semver> (contract <int>)`, one line, on **stdout**, exit `0`. The two numbers move
@@ -117,7 +117,7 @@ file — a bad flag, a file that could not be read. Check for null; do not print
 ```
 -o <path>              Build an executable at this path (or name the object with -c)
 -c                     Emit an object file without linking
--O0, -O1, -O2, -O3     Optimisation level (default -O0)
+-O0, -O1, -O2, -O3     Optimisation level for '-o' and '-c' builds (default -O0)
 -I, --include <path>   Add a module search path
 --fin-libs <paths>     Library search paths, platform-separated
 --diagnostics=<fmt>    human (default) or json
@@ -133,7 +133,8 @@ file — a bad flag, a file that could not be read. Check for null; do not print
 **An unknown flag is an error (`2`), never ignored.** A toolchain whose flags fail silently is the worst
 case for a caller that builds argv programmatically. A second positional argument is also `2`.
 
-Without `-o` or `-c`, success means the source passed frontend checks. With `-o`,
+Without `-o` or `-c`, success means the source passed frontend checks. An `-O`
+level passed without `-o` or `-c` has no effect. With `-o`,
 success means the executable was linked at the requested path. With `-c`, success
 means the object was written; the default name is `<input stem>.o` in the working
 directory. Supplying `-o` alongside `-c` overrides that object path. An executable

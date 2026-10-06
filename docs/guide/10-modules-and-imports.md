@@ -36,9 +36,12 @@ module call
 
 ## What crosses the backend boundary
 
-Imported generic structs can instantiate in the root program. Ordinary imported
-Fin function bodies are not emitted into that program. Resolving the function's
-signature does not make the call executable. This example builds and runs:
+Imported generic structs can instantiate in the root program. Whether an ordinary
+imported Fin function body reaches the backend depends on the call: many library
+calls (`println_str`, `len`, `split_str`, `replace`, `print_bool`, `copy_file`)
+build and run, while other paths are still refused. Resolving the function's
+signature does not by itself make a call executable, so build the program to
+confirm. This example builds and runs:
 
 ```fin
 import { println_str } from stdio::std;
@@ -64,6 +67,16 @@ finc docs/examples/modules/main.fin -o module-demo
 ```
 
 The documentation checker builds and runs those files too.
+
+## Same-named declarations in two modules
+
+A call inside an imported module resolves to that module's own same-named
+declaration, regardless of the root program's import order. `strings::std` and
+`path::std` both declare `join` with different signatures, and `strings::std`
+`replace` calls `join` on its split parts: that inner call reaches strings'
+`join` even when `path::std` is imported first. (No ADR records this rule yet;
+it is covered by `Soundness_Modules.AModuleBodyCallsItsOwnModulesFunctionWhateverTheImportOrder`
+in `tests/test_stdlib.cpp`.)
 
 ## Quoted and pathless imports
 

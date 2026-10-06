@@ -5,16 +5,18 @@ The shipped library is [lib/std](../../lib/std/), not the design drafts under
 library names need an import; `printf` is ambient and `format!` is a compiler builtin.
 
 **Importable does not mean executable.** The loader publishes signatures and
-retains generic templates, but ordinary imported Fin function bodies still do not
-reach the backend. Template methods can encounter further limits such as `any`
-conversions or unsupported calls. The examples below mark those boundaries.
+retains generic templates, and many ordinary imported Fin function bodies now
+reach the backend: `len`, `split_str`, `replace`, `Deque` get/set, `stem`,
+`normalize`, `print_bool`, and `copy_file` all build and run. Other paths are
+still refused, so resolving a signature does not by itself make a call
+executable. The examples below mark those boundaries.
 
 ## Choose a module
 
 | Module | Main declarations | Application boundary |
 | --- | --- | --- |
-| [stdio](../../lib/std/stdio.fin) | `printf`, `Printable`, printing helpers, `Stream`, `File`, `IOResult<T>` | Ambient `printf` runs; ordinary helper calls and payload results have backend limits |
-| [strings](../../lib/std/strings.fin) | Length, byte comparison, search, transforms, splitting/joining | Ordinary imported functions are frontend-only; allocating calls require caller cleanup |
+| [stdio](../../lib/std/stdio.fin) | `printf`, `Printable`, printing helpers, `Stream`, `File`, `IOResult<T>` | Ambient `printf` runs; concrete-typed helpers such as `println_str` and `print_bool` build and run; other helper calls and payload results have backend limits |
+| [strings](../../lib/std/strings.fin) | Length, byte comparison, search, transforms, splitting/joining | `len`, `split_str`, `replace`, and other imports build and run; allocating calls return owned storage requiring caller cleanup |
 | [math](../../lib/std/math.fin) | Numeric helpers, integer algorithms | Check each imported call before using it in an executable |
 | [collection](../../lib/std/collection.fin) | `Collection<T>`, `CollectionError`, `coll!` | The concrete integer example below runs; buffer cleanup is incomplete; `from_prototype` stores entries via `push`, so `coll![...]` builds a populated collection |
 | [hashmap](../../lib/std/hashmap.fin) | `HashMap<K,V>`, `HashMapError`, `map!` | Erased/custom-hasher paths and method emission have limits; `from_prototype` stores entries via `__set`, so `map!{...}` builds a populated map |
@@ -51,8 +53,8 @@ The typed helpers are declared as `print<X: Printable>(object: X)` and
 `println<X: Printable>(object: X)`; implement `format_str() <string>` to satisfy
 `Printable`. A plain string is not automatically an implementation of that interface.
 String-specific helpers include `print_str`, `println_str`, `eprint_str`, and
-`eprintln_str`. These declarations type-check, but ordinary imported helper calls
-are not emitted. Concrete-typed helpers do emit: `print_bool`/`println_bool`,
+`eprintln_str`. `println_str` builds and runs, as do the concrete-typed helpers
+`print_bool`/`println_bool`,
 `eprint_int`/`eprintln_int`, and `print_double`/`println_double`, each with an
 `eprint_*`/`eprintln_*` stderr half, build and run. `println("hello")` is not a
 universal print builtin.
@@ -179,8 +181,9 @@ and exposes static `exists`, `size`, `read_all`, `write_text`, `append_text`,
 `remove`, and `open`. For example, `write_text(path: string, text: string, count: int)`
 requires the byte count; it does not infer it from the string.
 
-These APIs use C wrappers and imported method bodies. They are not a verified
-end-to-end file API merely because their declarations are available. A direct C
+These file APIs are not a verified end-to-end path merely because their
+declarations are available: the `copy_file` import builds and runs, but check
+any other `File` call by building before relying on it. A direct C
 FFI operation is often the smallest executable path until those imports lower.
 
 `typing::std` declares `Result<T,E>` with `Ok`/`Err`; `stdio::std` declares
