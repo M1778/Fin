@@ -1430,6 +1430,20 @@ public:
         });
     }
 
+    // Every local is a fixed-size slot, so every one lives in the entry block.
+    // An alloca executes where it is placed: one put down inside a loop body
+    // runs per iteration and grows the stack without bound (a `let` in a loop
+    // segfaulted at -O0 past ~1M iterations), while one in the entry block runs
+    // once. Entry dominates everything, so dominance is kept by construction;
+    // the fallback covers emission with no function on the stack, if any.
+    llvm::AllocaInst* entryAlloca(llvm::Type* type, const llvm::Twine& name) {
+        llvm::BasicBlock* here = builder_.GetInsertBlock();
+        llvm::Function* fn = here ? here->getParent() : nullptr;
+        if (!fn) return builder_.CreateAlloca(type, nullptr, name);
+        llvm::IRBuilder<> atEntry(&fn->getEntryBlock(), fn->getEntryBlock().begin());
+        return atEntry.CreateAlloca(type, nullptr, name);
+    }
+
     // The root program plus the loader's successfully analysed modules
     // (ADR 0032), borrowed: the driver owns the loader for the whole run, so
     // these outlive this emitter. Registration reads out of them; emission
@@ -5889,8 +5903,7 @@ private:
                     // so it boxes by address like a struct: the payload points
                     // at a copy, and the unbox loads it back whole -- env
                     // included, which boxing the code word alone would drop.
-                    auto* tmp = builder_.CreateAlloca(from.type.llvmType, nullptr,
-                                                      "any.closure.tmp");
+                    auto* tmp = entryAlloca(from.type.llvmType, "any.closure.tmp");
                     builder_.CreateStore(from.value, tmp);
                     payload = builder_.CreatePointerCast(tmp, llvm::PointerType::getUnqual(ctx_), "any.addr");
                 } else if (from.type.kind == CgType::Kind::Int) {
@@ -5904,7 +5917,7 @@ private:
                 } else if (from.address) {
                     payload = builder_.CreatePointerCast(from.address, llvm::PointerType::getUnqual(ctx_), "any.addr");
                 } else if (from.type.isStruct()) {
-                    auto* alloca = builder_.CreateAlloca(from.type.llvmType, nullptr, "any.struct.tmp");
+                    auto* alloca = entryAlloca(from.type.llvmType, "any.struct.tmp");
                     builder_.CreateStore(from.value, alloca);
                     payload = builder_.CreatePointerCast(alloca, llvm::PointerType::getUnqual(ctx_), "any.addr");
                 } else {
@@ -6840,7 +6853,7 @@ private:
         // and so a method may rebind `self` -- a pointer parameter is assignable.
         size_t index = 0;
         if (info.hasReceiver && !info.paramTypes.empty()) {
-            auto* slot = builder_.CreateAlloca(info.paramTypes[0].llvmType, nullptr, "self");
+            auto* slot = entryAlloca(info.paramTypes[0].llvmType, "self");
             builder_.CreateStore(info.fn->getArg(0), slot);
             scopes_.back()["self"] = Local{slot, info.paramTypes[0], nextLocalOrder_++};
             index = 1;
@@ -6854,7 +6867,7 @@ private:
         if (info.hasEnvParam) {
             const unsigned envArg = info.hasReceiver ? 1u : 0u;
             auto* ptrTy = types_.pointerType().llvmType;
-            auto* eslot = builder_.CreateAlloca(ptrTy, nullptr, "env");
+            auto* eslot = entryAlloca(ptrTy, "env");
             builder_.CreateStore(info.fn->getArg(envArg), eslot);
             captureEnvSlot_ = eslot;
             captureEnvType_ = captureCarryEnv_;
@@ -6900,7 +6913,7 @@ private:
             llvm::Value* pair = llvm::UndefValue::get(arrType.llvmType);
             pair = builder_.CreateInsertValue(pair, buffer, {0}, "argv.pair.ptr");
             pair = builder_.CreateInsertValue(pair, count, {1}, "argv.pair.len");
-            auto* slot = builder_.CreateAlloca(arrType.llvmType, nullptr, argName);
+            auto* slot = entryAlloca(arrType.llvmType, argName);
             builder_.CreateStore(pair, slot);
             scopes_.back()[argName] = Local{slot, arrType, nextLocalOrder_++};
         } else {
@@ -6913,8 +6926,7 @@ private:
                 // Written or injected, `self` is the slot above and not a second one.
                 if (info.hasReceiver && p->name == "self") continue;
                 if (index >= info.paramTypes.size()) break;
-                auto* slot = builder_.CreateAlloca(info.paramTypes[index].llvmType, nullptr,
-                                                   p->name);
+                auto* slot = entryAlloca(info.paramTypes[index].llvmType, p->name);
                 builder_.CreateStore(info.fn->getArg((unsigned)argIndex), slot);
                 scopes_.back()[p->name] = Local{slot, info.paramTypes[index], nextLocalOrder_++};
                 ++index;
@@ -7826,8 +7838,7 @@ private:
             llvm::Value* env = buildCaptureEnv(node, tmpl.envType, fields);
             if (!env) return false;
             tmpl.envSlot = node.name + ".fin.env";
-            auto* slot = builder_.CreateAlloca(types_.pointerType().llvmType, nullptr,
-                                               tmpl.envSlot);
+            auto* slot = entryAlloca(types_.pointerType().llvmType, tmpl.envSlot);
             builder_.CreateStore(env, slot);
             scopes_.back()[tmpl.envSlot] =
                 Local{slot, types_.pointerType(), nextLocalOrder_++};
@@ -7985,7 +7996,7 @@ private:
         CgType type = declared ? *declared : init.type;
         if (type.isVoid()) { unsupported(node, "a variable of type 'void'"); return; }
 
-        auto* slot = builder_.CreateAlloca(type.llvmType, nullptr, node.name);
+        auto* slot = entryAlloca(type.llvmType, node.name);
         if (init.ok()) {
             llvm::Value* stored = convert(node, init, type);
             if (!stored) return;
@@ -9064,11 +9075,11 @@ private:
         llvm::Value* homeL = nullptr;
         llvm::Value* homeR = nullptr;
         if (!lhs.type.isDynamicArray) {
-            homeL = builder_.CreateAlloca(lhs.type.llvmType, nullptr, "cmparr.l");
+            homeL = entryAlloca(lhs.type.llvmType, "cmparr.l");
             builder_.CreateStore(lhs.value, homeL);
         }
         if (!rhs.type.isDynamicArray) {
-            homeR = builder_.CreateAlloca(rhs.type.llvmType, nullptr, "cmparr.r");
+            homeR = entryAlloca(rhs.type.llvmType, "cmparr.r");
             builder_.CreateStore(rhs.value, homeR);
         }
         llvm::Value* lenL = lhs.type.isDynamicArray
@@ -9087,8 +9098,8 @@ private:
 
         // Seeded with the length answer, so a mismatch skips the loop already
         // decided; the loop only ever ANDs element answers into it.
-        auto* acc = builder_.CreateAlloca(builder_.getInt1Ty(), nullptr, "cmparr.acc");
-        auto* counter = builder_.CreateAlloca(counterType.llvmType, nullptr, "cmparr.i");
+        auto* acc = entryAlloca(builder_.getInt1Ty(), "cmparr.acc");
+        auto* counter = entryAlloca(counterType.llvmType, "cmparr.i");
         builder_.CreateStore(lenEq, acc);
         builder_.CreateStore(llvm::ConstantInt::get(counterType.llvmType, 0), counter);
         builder_.CreateCondBr(lenEq, loopBB, endBB);
@@ -9915,10 +9926,8 @@ private:
         scan.valuesData = builder_.CreateExtractValue(valuesPair, {0}, "prototype.values.data");
 
         auto* fn = currentFn_->fn;
-        auto* indexSlot = builder_.CreateAlloca(builder_.getInt32Ty(), nullptr,
-                                                "prototype.index");
-        auto* foundSlot = builder_.CreateAlloca(builder_.getInt1Ty(), nullptr,
-                                                "prototype.found");
+        auto* indexSlot = entryAlloca(builder_.getInt32Ty(), "prototype.index");
+        auto* foundSlot = entryAlloca(builder_.getInt1Ty(), "prototype.found");
         builder_.CreateStore(builder_.getInt32(0), indexSlot);
         builder_.CreateStore(builder_.getInt1(false), foundSlot);
 
@@ -11314,7 +11323,7 @@ private:
             }
             // The caller owns the object. It is allocated here, its address is passed
             // as parameter 0, and the call's value is what the constructor left in it.
-            ctorStorage = builder_.CreateAlloca(asStruct->second.llvmType, nullptr, name);
+            ctorStorage = entryAlloca(asStruct->second.llvmType, name);
             // Zeroed first, so a field no constructor assigns reads as zero rather
             // than as whatever the frame held -- the answer a local with no
             // initialiser gets here too.
@@ -11356,7 +11365,7 @@ private:
         }
         CgType enumType = *enumTypeOpt;
 
-        llvm::AllocaInst* slot = builder_.CreateAlloca(enumInfo.llvmType, nullptr, "enum.tmp");
+        llvm::AllocaInst* slot = entryAlloca(enumInfo.llvmType, "enum.tmp");
         builder_.CreateStore(llvm::Constant::getNullValue(enumInfo.llvmType), slot);
 
         llvm::Value* tagPtr = builder_.CreateStructGEP(enumInfo.llvmType, slot, 0, "tag");
@@ -12348,12 +12357,12 @@ private:
 
         // The three slots, before the loop rather than inside it: an alloca in the body
         // is a fresh frame slot on every iteration.
-        auto* counter = builder_.CreateAlloca(counterType.llvmType, nullptr, "foreach.i");
+        auto* counter = entryAlloca(counterType.llvmType, "foreach.i");
         builder_.CreateStore(llvm::ConstantInt::get(counterType.llvmType, 0), counter);
-        auto* elementSlot = builder_.CreateAlloca(element.llvmType, nullptr, node.var_name);
+        auto* elementSlot = entryAlloca(element.llvmType, node.var_name);
         llvm::AllocaInst* indexSlot = nullptr;
         if (indexType) {
-            indexSlot = builder_.CreateAlloca(indexType->llvmType, nullptr, node.index_name);
+            indexSlot = entryAlloca(indexType->llvmType, node.index_name);
         }
         // Ordinary locals from here on, which is what makes the body's reads of them
         // the same code any other read of a local is.
@@ -13342,7 +13351,7 @@ private:
                 if (val.address) {
                     receiver = Addr{val.address, val.type};
                 } else if (val.type.isStruct() && val.value) {
-                    llvm::Value* tmpSlot = builder_.CreateAlloca(val.type.llvmType, nullptr, "rvalue.receiver");
+                    llvm::Value* tmpSlot = entryAlloca(val.type.llvmType, "rvalue.receiver");
                     builder_.CreateStore(val.value, tmpSlot);
                     receiver = Addr{tmpSlot, val.type};
                 } else if (val.type.isPointer() && val.type.pointee && val.type.pointee->isStruct() && val.value) {
@@ -13934,7 +13943,7 @@ private:
                         } else if (object.address) {
                             addr = object.address;
                         } else {
-                            addr = builder_.CreateAlloca(enumInfo->llvmType, nullptr, "enum.tmp");
+                            addr = entryAlloca(enumInfo->llvmType, "enum.tmp");
                             builder_.CreateStore(object.value, addr);
                         }
 
@@ -13966,7 +13975,7 @@ private:
                     } else if (object.address) {
                         enumAddr = object.address;
                     } else {
-                        enumAddr = builder_.CreateAlloca(enumInfo->llvmType, nullptr, "enum.tmp");
+                        enumAddr = entryAlloca(enumInfo->llvmType, "enum.tmp");
                         builder_.CreateStore(object.value, enumAddr);
                     }
                     llvm::Value* tagPtr = builder_.CreateStructGEP(
@@ -14496,8 +14505,7 @@ private:
         auto* close = llvm::BasicBlock::Create(ctx_, "prototype.remove.close", fn);
         auto* done  = llvm::BasicBlock::Create(ctx_, "prototype.remove.done", fn);
 
-        auto* cursor = builder_.CreateAlloca(builder_.getInt32Ty(), nullptr,
-                                             "prototype.remove.at");
+        auto* cursor = entryAlloca(builder_.getInt32Ty(), "prototype.remove.at");
         builder_.CreateStore(scan->index, cursor);
         auto* last = builder_.CreateSub(scan->length, builder_.getInt32(1),
                                         "prototype.remove.last");

@@ -460,6 +460,54 @@ BACKEND_TEST(Soundness_Codegen, AnOptimisedBuildRunsTheSameProgram) {
     fs::remove(outPath, ec);
 }
 
+BACKEND_TEST(Soundness_Codegen, ALoopLocalStructAgreesAcrossOptimisationLevels) {
+    // A `let` inside a loop body used to lower its slot where the loop runs, so
+    // each iteration grew the stack and two million iterations segfaulted at
+    // -O0 (-O1 and above folded the loop away, which hid it). The levels must
+    // agree: the sum of (2i+1) over i in [0, N) is N*N, whatever the level.
+    const fs::path src = uniqueTempPath("fin_opt_loop", ".fin");
+    const fs::path exe0 = uniqueTempPath("fin_opt_loop_exe0");
+    const fs::path exe2 = uniqueTempPath("fin_opt_loop_exe2");
+    {
+        std::ofstream f(src, std::ios::binary);
+        const std::string code = std::string(kPrintf) +
+            "struct Pair {\n"
+            "    x <long>,\n"
+            "    y <long>\n"
+            "    fun sum(self: &Self) <long> { return self.x + self.y; }\n"
+            "}\n"
+            "fun main() <noret> {\n"
+            "    let total <long> = 0;\n"
+            "    for (i: long = 0; i < 2000000; i++) {\n"
+            "        let p <Pair> = Pair { x: i, y: i + 1 };\n"
+            "        total = total + p.sum();\n"
+            "    }\n"
+            "    printf(\"%lld\\n\", total);\n"
+            "}\n";
+        f.write(code.data(), (std::streamsize)code.size());
+    }
+    const FincRun c0 = runFinc({src.string(), "-o", exe0.string()});
+    EXPECT_EQ(c0.exitCode, 0) << stripAnsi(c0.err);
+    const FincRun c2 = runFinc({src.string(), "-O2", "-o", exe2.string()});
+    EXPECT_EQ(c2.exitCode, 0) << stripAnsi(c2.err);
+    ASSERT_TRUE(fs::exists(exe0)) << stripAnsi(c0.err);
+    ASSERT_TRUE(fs::exists(exe2)) << stripAnsi(c2.err);
+
+    const fs::path out0 = uniqueTempPath("fin_opt_loop_out0");
+    EXPECT_EQ(fin::runProcess({exe0.string()}, out0.string(), out0.string()), 0);
+    EXPECT_EQ(readProcessOutput(out0.string()), "4000000000000\n");
+    const fs::path out2 = uniqueTempPath("fin_opt_loop_out2");
+    EXPECT_EQ(fin::runProcess({exe2.string()}, out2.string(), out2.string()), 0);
+    EXPECT_EQ(readProcessOutput(out2.string()), "4000000000000\n");
+
+    std::error_code ec;
+    fs::remove(src, ec);
+    fs::remove(exe0, ec);
+    fs::remove(exe2, ec);
+    fs::remove(out0, ec);
+    fs::remove(out2, ec);
+}
+
 BACKEND_TEST(Soundness_Codegen, AnUnknownOptimisationLevelIsAUsageError) {
     // Spelled out rather than parsed as a number: `-O9` means nothing, and a flag
     // that silently means something else is the failure mode a programmatic caller
