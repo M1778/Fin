@@ -5,7 +5,7 @@ import { Scanner, new_scanner, free_scanner } from scanner::std;
 import { AstNode, free_ast, ast_fun_decl } from ast::std;
 import { format_stmt } from printer::std;
 import { read_to_string, write_string, remove_file, free_file_content, file_exists, file_size } from fs::std;
-import { run_command } from process::std;
+import { run_command, exec_command, ProcessResult, free_process_result } from process::std;
 import { Buffer, new_buffer, free_buffer, free_string } from buffer::std;
 
 import { Parser, new_parser, free_parser } from finc.parser;
@@ -2409,6 +2409,52 @@ pub fun print_help() <int> {
     return 0;
 }
 
+// ---- Stage link line: one per host ------------------------------------------
+//
+// The stage links by shelling out. The historical line is GNU/Linux-only:
+// `--as-needed` is a GNU-ld option that Apple ld(1) rejects as an unknown
+// option, and Homebrew's llvm keg ships libLLVM.dylib, not libLLVM-22 -- so
+// the link line is chosen per host, read from `uname -s` via exec_command
+// (process::std). Where there is no `uname` (Windows) the host reads as
+// unknown and is refused by name instead of linked with a guessed line.
+//
+// Linux keeps the historical bytes exactly (the stage fixed-point proof
+// depends on it). macOS drops `--as-needed` and `-no-pie` (Apple ld(1) takes
+// -pie as the default and -no_pie as the opt-out; non-PIE is unsupported on
+// arm64, so PIE stays on) and points at the Homebrew keg's lib dir, where
+// the name is the unversioned -lLLVM. Anything else is an explicit refusal
+// per the backend invariant, never a guessed command. The macOS and refusal
+// arms are untestable on this host; they are shaped to match the Apple ld(1)
+// and MSVC-link (via clang) conventions the C++ driver's linkCommand already
+// follows (src/utils/Process.cpp:147-176), not to observed behavior.
+
+// 0 = unknown (refuse), 1 = Linux, 2 = macOS.
+priv fun drv_host_os() <int> {
+    let r <ProcessResult> = exec_command("uname -s");
+    let kind <int> = 0;
+    if (r.exit_code == 0 && r.output != null) {
+        let os <string> = trim(r.output);
+        if (drv_str_eq(os, "Linux")) { kind = 1; }
+        else if (drv_str_eq(os, "Darwin")) { kind = 2; }
+        free_string(os);
+    }
+    free_process_result(r);
+    return kind;
+}
+
+// First Homebrew llvm keg lib dir holding libLLVM.dylib, or "".
+// Apple-silicon brew lives under /opt/homebrew, Intel under /usr/local;
+// anything else is the caller's explicit refusal, not a third guess.
+priv fun drv_brew_llvm_lib() <string> {
+    if (file_exists("/opt/homebrew/opt/llvm/lib/libLLVM.dylib")) {
+        return "/opt/homebrew/opt/llvm/lib";
+    }
+    if (file_exists("/usr/local/opt/llvm/lib/libLLVM.dylib")) {
+        return "/usr/local/opt/llvm/lib";
+    }
+    return "";
+}
+
 priv fun drv_has_main(root: &AstNode) <bool> {
     if (root == null) { return false; }
     let decl <&AstNode> = root.left;
@@ -2742,12 +2788,43 @@ pub fun compile_source_file(
         target_bin = "a.out";
     }
 
+    let host_os <int> = drv_host_os();
+    if (host_os == 0) {
+        err_dprintf(2, "finc: error: linking on this host is not supported (expected Linux or macOS); refusing to guess a link line\n");
+        if (is_temp_o) {
+            remove_file(target_o);
+            free_string(target_o);
+        }
+        return 1;
+    }
+
     let b_bin <Buffer> = new_buffer(128);
-    b_bin.write_string("cc -no-pie ");
-    b_bin.write_string(target_o);
-    b_bin.write_string(" -o ");
-    b_bin.write_string(target_bin);
-    b_bin.write_string(" -Wl,--as-needed -lLLVM-22 -lm");
+    if (host_os == 2) {
+        let keg <string> = drv_brew_llvm_lib();
+        if (drv_str_eq(keg, "")) {
+            err_dprintf(2, "finc: error: linking on macOS needs Homebrew LLVM (no libLLVM.dylib under /opt/homebrew/opt/llvm or /usr/local/opt/llvm)\n");
+            free_buffer(b_bin);
+            if (is_temp_o) {
+                remove_file(target_o);
+                free_string(target_o);
+            }
+            return 1;
+        }
+        b_bin.write_string("cc ");
+        b_bin.write_string(target_o);
+        b_bin.write_string(" -o ");
+        b_bin.write_string(target_bin);
+        b_bin.write_string(" -L");
+        b_bin.write_string(keg);
+        b_bin.write_string(" -lLLVM -lm");
+    } else {
+        // Linux: the historical line, byte for byte.
+        b_bin.write_string("cc -no-pie ");
+        b_bin.write_string(target_o);
+        b_bin.write_string(" -o ");
+        b_bin.write_string(target_bin);
+        b_bin.write_string(" -Wl,--as-needed -lLLVM-22 -lm");
+    }
     let bin_cmd_str <string> = b_bin.to_string();
     let status <int> = run_command(bin_cmd_str);
     free_string(bin_cmd_str);
