@@ -54,6 +54,14 @@ public:
         return astStorage;
     }
 
+    // Which entry of modulePrograms() a loaded module's scope came from, so
+    // the analyzer can record which module an imported name was bound from
+    // (FunctionCall::resolved_generic_owner). The backend reads the same
+    // vector in the same order as `modules_`, so the index travels across
+    // the handoff. Nullopt when the scope is not a loaded module's (a unit
+    // test's hand-built scope).
+    std::optional<size_t> indexOfModule(const std::shared_ptr<Scope>& scope) const;
+
     // The codegen half of `#[global]` (ADR 0021). Publishing an ambient name into the
     // shared scope makes a call to it type-check; it does not make the call *link*,
     // because the declaration that named the C symbol lives in a module whose AST
@@ -113,6 +121,10 @@ private:
     // misspelled one is exactly what the failure needs to be able to name.
     std::vector<std::string> requestedPaths;
     std::vector<std::unique_ptr<Program>> astStorage;
+    // The scope each loaded module was analysed into, by its index in
+    // astStorage above. A load that hits the cache returns the same scope
+    // object, so one entry per successful load is exact.
+    std::unordered_map<const Scope*, size_t> scopeModuleIndex_;
 
     // One prototype per ambiently-published extern, in publication order, owned here
     // rather than pointed at inside `astStorage`: the copy the driver splices into the

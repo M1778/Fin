@@ -453,6 +453,13 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
         Symbol funSym{node.name, funcType, false, true};
         funSym.is_function = true;
         currentScope->parent->define(funSym);
+        // The file's own declaration takes the name back from any import that
+        // bound it (the define above overwrote the import's symbol): erase the
+        // import's provenance with it, so a call to the file's own generic
+        // keeps instantiating it. Only at file scope -- a nested `fun` of the
+        // same name shadows within its body and leaves file-scope calls
+        // resolving to the import.
+        if (currentScope->parent == globalScope.get()) importedOwner_.erase(node.name);
         debugLog(fg(fmt::color::gray), "      [Register] Registered function '{}' in parent scope\n", node.name);
     }
     // The declaration-order names a turbofish binds to. Free functions here;
@@ -1195,8 +1202,15 @@ void SemanticAnalyzer::visit(ImportModule& node) {
     // parents: the module scope has no parent today and this must not start
     // importing a parent's contents if it ever gains one.
     if (node.targets.size() == 1 && node.targets[0] == "*") {
-        for (const auto& kv : moduleScope->symbols)
-            if (!currentScope->resolve(kv.first)) currentScope->define(kv.second);
+        const std::optional<size_t> starOwner = loader->indexOfModule(moduleScope);
+        for (const auto& kv : moduleScope->symbols) {
+            if (!currentScope->resolve(kv.first)) {
+                currentScope->define(kv.second);
+                // Bound only what the scope lacked, like the define above, so
+                // an earlier explicit binding keeps its provenance with its name.
+                if (starOwner) importedOwner_[kv.first] = *starOwner;
+            }
+        }
         for (const auto& kv : moduleScope->types)
             if (!currentScope->resolveType(kv.first)) currentScope->defineType(kv.first, kv.second);
         node.consumed = true;
@@ -1206,10 +1220,15 @@ void SemanticAnalyzer::visit(ImportModule& node) {
     // Case 1: Specific Imports: import { A, B } from "lib"
     if (!node.targets.empty()) {
         bool allBound = true;
+        const std::optional<size_t> targetOwner = loader->indexOfModule(moduleScope);
         for (const auto& target : node.targets) {
             bool found = false;
             if (auto* sym = moduleScope->resolve(target)) {
                 currentScope->define(*sym); // Copy symbol
+                // Which module the name came from, for the backend's generic
+                // instantiation (see importedOwner_): overwritten like the
+                // binding itself, so the last import wins here as in the scope.
+                if (targetOwner) importedOwner_[target] = *targetOwner;
                 found = true;
             }
             if (auto type = moduleScope->resolveType(target)) {

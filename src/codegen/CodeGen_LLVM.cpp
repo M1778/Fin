@@ -11191,6 +11191,37 @@ private:
                 return;
             }
         }
+        // A bare call the frontend resolved to one loaded module's generic:
+        // `pick(0)` in a file importing two modules that both define `pick`
+        // is the last import's. Instantiated from THAT module's declaration
+        // under its module-qualified key -- the same key the owner path above
+        // uses -- and not from the first template in load order, which is
+        // what the lookup below finds. After the owner path, which answers a
+        // module body's call to its own generic; before the ordinary lookup,
+        // for the same reason it is before it. Falls through on a stale index
+        // or a module that declares no such generic, keeping the earlier
+        // load-order hit exactly as before.
+        if (node.resolved_generic_owner) {
+            const size_t provIdx = *node.resolved_generic_owner;
+            const Program* prov =
+                provIdx < modules_.size() ? modules_[provIdx] : nullptr;
+            if (FunctionDeclaration* theirs = ownerFnTemplate(node.name, prov)) {
+                for (auto& attr : theirs->attributes) {
+                    if (attr->name == "export" && attr->is_flag) continue;
+                    if (attr->name == "use") continue;
+                    unsupported(*theirs,
+                                fmt::format("the attribute '{}' on a generic function",
+                                            attr->name));
+                    return;
+                }
+                if (theirs->body != nullptr) {
+                    TemplateCallee inner = calleeOf(*theirs);
+                    inner.keyBase = moduleKeyOf(prov, node.name);
+                    emitTemplateCall(node, inner);
+                    return;
+                }
+            }
+        }
         auto tmpl = fnTemplates_.find(node.name);
         if (tmpl == fnTemplates_.end() && ensureFnTemplate(node.name))
             tmpl = fnTemplates_.find(node.name);
