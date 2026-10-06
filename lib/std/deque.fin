@@ -102,6 +102,27 @@ pub struct Deque<T> {
           return self._arr[idx];
       }
 
+      // Positional read without removing. The only non-destructive way to reach
+      // a middle element: `peek` covers the ends and `pop` destroys. The wrap
+      // is a subtract and not a modulo: `head + index` is below `2 * cap`
+      // whenever the index is in bounds, so one correction lands in range.
+      fun get(self: &Self, index: int) <T> {
+          blame index >= 0, "Deque.get: index out of bounds";
+          blame index < self.filled, "Deque.get: index out of bounds";
+          let at <int> = self.head + index;
+          if (at >= self.cap) { at = at - self.cap; }
+          return self._arr[at];
+      }
+
+      // Positional write. Same addressing as `get`.
+      fun set(self: &Self, index: int, value: T) <noret> {
+          blame index >= 0, "Deque.set: index out of bounds";
+          blame index < self.filled, "Deque.set: index out of bounds";
+          let at <int> = self.head + index;
+          if (at >= self.cap) { at = at - self.cap; }
+          self._arr[at] = value;
+      }
+
       fun clear(self: &Self) <noret> {
           self.head = 0;
           self.tail = 0;

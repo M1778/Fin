@@ -219,6 +219,54 @@ pub fun print_int(value: int) <noret> { printf("%d", value); }
 #[export]
 pub fun println_int(value: int) <noret> { printf("%d\n", value); }
 
+// The `bool` the typed layer had no spelling for: `%d` renders it `1`/`0`, the
+// same convention `print_int` uses, so a caller printing a flag does not
+// hand-write a format string for it.
+#[export]
+pub fun print_bool(value: bool) <noret> { printf("%d", value); }
+
+#[export]
+pub fun println_bool(value: bool) <noret> { printf("%d\n", value); }
+
+#[export]
+pub fun eprint_bool(value: bool) <noret> {
+    let written <int> = io_dprintf(2, "%d", value);
+  }
+
+#[export]
+pub fun eprintln_bool(value: bool) <noret> {
+    let written <int> = io_dprintf(2, "%d\n", value);
+  }
+
+// The stderr half `print_int` never got. Same rendering, the other stream.
+#[export]
+pub fun eprint_int(value: int) <noret> {
+    let written <int> = io_dprintf(2, "%d", value);
+  }
+
+#[export]
+pub fun eprintln_int(value: int) <noret> {
+    let written <int> = io_dprintf(2, "%d\n", value);
+  }
+
+// The floating-point half. `%g` gives the shortest round-tripping spelling --
+// `2.5` rather than `%f`'s `2.500000` -- the same choice `number2str_float` makes.
+#[export]
+pub fun print_double(value: double) <noret> { printf("%g", value); }
+
+#[export]
+pub fun println_double(value: double) <noret> { printf("%g\n", value); }
+
+#[export]
+pub fun eprint_double(value: double) <noret> {
+    let written <int> = io_dprintf(2, "%g", value);
+  }
+
+#[export]
+pub fun eprintln_double(value: double) <noret> {
+    let written <int> = io_dprintf(2, "%g\n", value);
+  }
+
 // `fflush(null)` flushes every open stream, which is what C specifies for a null argument.
 // It lowers, which is worth stating because a null passed to a pointer parameter is not
 // always accepted here.
