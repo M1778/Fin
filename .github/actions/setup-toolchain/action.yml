@@ -40,14 +40,18 @@ runs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bison flex
+          # apt mirrors flake; retry the network operations, fail otherwise.
+          retry() { local n=0; until "$@"; do n=$((n+1)); if [ "$n" -ge 5 ]; then return 1; fi; sleep $((n*10)); done; }
+          retry sudo apt-get update
+          retry sudo apt-get install -y bison flex
 
       - name: Install bison and flex (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          brew install bison flex
+          # Homebrew bottles flake; retry the network operation, fail otherwise.
+          retry() { local n=0; until "$@"; do n=$((n+1)); if [ "$n" -ge 5 ]; then return 1; fi; sleep $((n*10)); done; }
+          retry brew install bison flex
           echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
 
@@ -55,7 +59,21 @@ runs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri $env:WINFLEXBISON_URL -OutFile winflexbison.zip
+          # github release-asset downloads flake with transient 5xx (observed
+          # HTTP 500 storm on the LLVM archive, PR #9 windows-arm64 setup in
+          # 51s). Same host class serves this zip, so retry instead of failing
+          # the job on the first attempt.
+          $attempt = 0
+          while ($true) {
+            $attempt++
+            try {
+              Invoke-WebRequest -Uri $env:WINFLEXBISON_URL -OutFile winflexbison.zip
+              break
+            } catch {
+              if ($attempt -ge 5) { throw }
+              Start-Sleep -Seconds (10 * $attempt)
+            }
+          }
           $got = (Get-FileHash winflexbison.zip -Algorithm SHA256).Hash.ToLower()
           if ($got -ne $env:WINFLEXBISON_SHA256) {
             throw "winflexbison.zip has sha256 $got, expected $env:WINFLEXBISON_SHA256"
@@ -68,20 +86,22 @@ runs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          retry() { local n=0; until "$@"; do n=$((n+1)); if [ "$n" -ge 5 ]; then return 1; fi; sleep $((n*10)); done; }
           codename="$(lsb_release -cs)"
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
             | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
           echo "deb http://apt.llvm.org/$codename/ llvm-toolchain-$codename-$FIN_LLVM_MAJOR main" \
             | sudo tee "/etc/apt/sources.list.d/llvm-$FIN_LLVM_MAJOR.list"
-          sudo apt-get update
-          sudo apt-get install -y "llvm-$FIN_LLVM_MAJOR-dev"
+          retry sudo apt-get update
+          retry sudo apt-get install -y "llvm-$FIN_LLVM_MAJOR-dev"
           echo "LLVM_DIR=$(llvm-config-$FIN_LLVM_MAJOR --cmakedir)" >> "$GITHUB_ENV"
 
       - name: Install LLVM ${{ env.FIN_LLVM_MAJOR }} (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          brew install "llvm@$FIN_LLVM_MAJOR"
+          retry() { local n=0; until "$@"; do n=$((n+1)); if [ "$n" -ge 5 ]; then return 1; fi; sleep $((n*10)); done; }
+          retry brew install "llvm@$FIN_LLVM_MAJOR"
           prefix="$(brew --prefix "llvm@$FIN_LLVM_MAJOR")"
           echo "LLVM_DIR=$prefix/lib/cmake/llvm" >> "$GITHUB_ENV"
 
@@ -96,7 +116,15 @@ runs:
           fi
           name="clang+llvm-$FIN_LLVM_VERSION-$tar_arch-pc-windows-msvc"
           url="https://github.com/llvm/llvm-project/releases/download/llvmorg-$FIN_LLVM_VERSION/$name.tar.xz"
-          curl -fL --retry 3 --retry-all-errors -o llvm.tar.xz "$url"
+          # Release-asset downloads flake with transient 5xx: run 37485563495
+          # windows-arm64 exhausted `--retry 3` (1/2/4s backoff, ~8s total) on
+          # four consecutive HTTP 500s while the same URL returned 200 in every
+          # other recent run. Generous retries with backoff; a persistently
+          # dead URL still fails this step, which is what the pin check above
+          # and the Build job are for.
+          curl -fL --retry 10 --retry-all-errors --retry-delay 10 \
+            --retry-max-time 600 --connect-timeout 30 \
+            -o llvm.tar.xz "$url"
           dest="$(cygpath -u "$RUNNER_TEMP")/llvm"
           mkdir -p "$dest"
           tar -xf llvm.tar.xz -C "$dest" --strip-components=1
