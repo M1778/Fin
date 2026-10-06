@@ -6,6 +6,14 @@ If `finc` is already installed, run `finc --version` and `finc --help`. Keep the
 release layout intact: `bin/finc` sits beside `lib/std`. Moving the binary alone
 can make standard-library imports disappear.
 
+For a release install without cloning by hand, pipe the installer to POSIX `sh`
+(it clones into `~/Fin`, or `$FIN_DIR` when set, then builds and smoke-tests
+a backend compiler):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/M1778/Fin/master/install.sh | sh
+```
+
 To build this repository on Linux or macOS, install:
 
 - A C++20 compiler and CMake 3.20 or newer.
@@ -100,7 +108,7 @@ frontend supports some forms the backend cannot generate yet.
 | `--diagnostics=json` | Newline-delimited JSON diagnostics on stderr |
 | `--color=never` | Plain diagnostic output |
 | `--debug-codegen` | Show backend and linker details |
-| `-O0` through `-O3` | Optimization level; default `-O0` |
+| `-O0` through `-O3` | Optimization level for `-o` and `-c` builds; default `-O0`; ignored by check-only runs |
 
 A library path list uses `:` on Unix and `;` on Windows. `-I` alone does not remove
 the bundled standard library. See [module resolution](10-modules-and-imports.md).

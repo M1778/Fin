@@ -27,6 +27,11 @@ Fin 7
 from which to infer a type. For an empty array, write the element type:
 `let items <[int]> = [];`.
 
+A bare `let x = 3;` with no type annotation is rewritten to `let x <auto> = 3;`
+with a warning by fin-guard, which is on by default. Pass `--no-fin-guard` to
+reject bare declarations instead: the same line then fails with
+`bare 'let x' needs a type annotation`.
+
 ## Builtin types
 
 These need no import. Aliases such as `i32` belong to `types::std` instead.
