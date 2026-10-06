@@ -142,10 +142,10 @@ Search functions return indices or `-1`; `equals` compares bytes. `split_str`
 splits on a whole separator string, without overlapping, and `replace` rewrites
 every non-overlapping occurrence; `join(split_str(x, s), s)` gives `x` back, the
 same round-trip `split` documents for its character form. Both build and run.
-Import order matters on the stage2 compiler when `path::std` is also imported:
-both modules declare `join`, and with `path::std` first the stage2 resolver reads
-the `join` inside `replace` as the path one (`Type mismatch: expected 'string',
-got '&Collection<string>'`); importing `strings::std` first selects the string one.
+Both `strings::std` and `path::std` declare `join` with different signatures;
+a call inside one module always resolves to that module's own definition
+regardless of import order, so the `join` inside `replace` is the string one
+even when `path::std` is imported first.
 
 These ordinary string and integer-algorithm imports build and run:
 

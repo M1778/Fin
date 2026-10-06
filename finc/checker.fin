@@ -607,6 +607,26 @@ pub struct Checker {
       // members for variant-construction checks): set by check_program,
       // the file's own declarations, never merged imports.
       prog_root <&AstNode> = null,
+      // Duplicate top-level `fun` definitions across merged modules
+      // (`join` in strings vs path, `to_chars` in strings vs path):
+      // the driver appends whole module files, so pass 1 keeps the
+      // first spelling and renames later ones to `<name>__dup<N>`
+      // (dup_claim_name), and bare calls resolve to the nearest
+      // same-origin definition (dup_resolve) instead of by import
+      // order. Each module chunk is appended atomically, so nearest
+      // IS the caller's own module — the C++ ModuleLoader answer,
+      // which checks each module in its own scope. Bounded: 64
+      // aliases and 2048 seen names; beyond that later duplicates
+      // keep the old first-wins checking.
+      dup_seen <[string]>,
+      dup_seen_count <int> = 0,
+      dup_alias <[string]>,
+      dup_alias_orig <[string]>,
+      dup_alias_count <int> = 0,
+      // Chain index of the top-level declaration whose body pass 2 is
+      // checking (struct methods share their struct's): the "you are
+      // here" mark the nearest-definition search measures from.
+      current_def_pos <int> = 0,
 
     pub:
       fun report_error(self: &Self, msg: string, line: int, col: int) <noret> {
@@ -1000,6 +1020,129 @@ pub struct Checker {
               i = i + 1;
           }
           return -1;
+      }
+
+      // Claims a top-level function spelling for pass 1: the first
+      // occurrence keeps its name, later duplicates take `<name>__dup<N>`
+      // (N counts earlier duplicates of the same original). The alias
+      // must be free in the scope built so far and among claimed
+      // aliases, so a user-written `<name>__dup<N>` bumps the counter
+      // instead of colliding.
+      fun dup_claim_name(self: &Self, name: string) <string> {
+          if (name == null || chk_strlen(name) == cast<ulong>(0)) { return name; }
+          if (self.dup_seen == null) {
+              self.dup_seen = new [string, 2048]{};
+              self.dup_seen_count = 0;
+          }
+          let seen <bool> = false;
+          let si <int> = 0;
+          while (si < self.dup_seen_count) {
+              if (chk_str_eq(self.dup_seen[si], name)) { seen = true; break; }
+              si = si + 1;
+          }
+          if (!seen) {
+              if (self.dup_seen_count < 2048) {
+                  self.dup_seen[self.dup_seen_count] = name;
+                  self.dup_seen_count = self.dup_seen_count + 1;
+              }
+              return name;
+          }
+          if (self.dup_alias == null) {
+              self.dup_alias = new [string, 64]{};
+              self.dup_alias_orig = new [string, 64]{};
+              self.dup_alias_count = 0;
+          }
+          if (self.dup_alias_count >= 64) { return name; }
+          let k <int> = 1;
+          let ai <int> = 0;
+          while (ai < self.dup_alias_count) {
+              if (chk_str_eq(self.dup_alias_orig[ai], name)) { k = k + 1; }
+              ai = ai + 1;
+          }
+          let cand <string> = name;
+          let done <bool> = false;
+          while (!done) {
+              let b <Buffer> = new_buffer(64);
+              b.write_string(name);
+              b.write_string("__dup");
+              b.write_int(k);
+              cand = b.to_string();
+              free_buffer(b);
+              done = true;
+              if (self.global_scope.has(cand)) { k = k + 1; done = false; }
+              else {
+                  let aj <int> = 0;
+                  while (aj < self.dup_alias_count) {
+                      if (chk_str_eq(self.dup_alias[aj], cand)) {
+                          k = k + 1;
+                          done = false;
+                          break;
+                      }
+                      aj = aj + 1;
+                  }
+              }
+          }
+          self.dup_alias[self.dup_alias_count] = cand;
+          self.dup_alias_orig[self.dup_alias_count] = name;
+          self.dup_alias_count = self.dup_alias_count + 1;
+          return cand;
+      }
+
+      // The original name behind a possibly-aliased definition or call.
+      fun dup_orig_of(self: &Self, name: string) <string> {
+          if (name == null || self.dup_alias == null) { return name; }
+          let i <int> = 0;
+          while (i < self.dup_alias_count) {
+              if (chk_str_eq(self.dup_alias[i], name)) { return self.dup_alias_orig[i]; }
+              i = i + 1;
+          }
+          return name;
+      }
+
+      // True when some duplicate was claimed for this original name.
+      fun dup_involved(self: &Self, orig: string) <bool> {
+          if (orig == null || self.dup_alias == null) { return false; }
+          let i <int> = 0;
+          while (i < self.dup_alias_count) {
+              if (chk_str_eq(self.dup_alias_orig[i], orig)) { return true; }
+              i = i + 1;
+          }
+          return false;
+      }
+
+      // Nearest same-origin top-level `fun` for a bare call: walks the
+      // program chain in pass-1 order, so walk positions agree with
+      // current_def_pos. Ties go to the earlier definition (first-wins,
+      // exactly the old rule where no module owns the call). Names with
+      // no duplicate pass through untouched.
+      fun dup_resolve(self: &Self, name: string) <string> {
+          let orig <string> = self.dup_orig_of(name);
+          if (!self.dup_involved(orig)) { return name; }
+          if (self.prog_root == null) { return name; }
+          let best <string> = name;
+          let best_dist <int> = -1;
+          let best_idx <int> = 0;
+          let idx <int> = 0;
+          let d <&AstNode> = self.prog_root.left;
+          while (d != null) {
+              // Bodiless declarations (`@define` externs) own no calls:
+              // they keep first-wins like the C++ ambient rule, so only
+              // bodied definitions compete here.
+              if (d.kind == ast_fun_decl() && d.left != null) {
+                  if (chk_str_eq(self.dup_orig_of(d.name), orig)) {
+                      let dist <int> = idx - self.current_def_pos;
+                      if (dist < 0) { dist = 0 - dist; }
+                      if (best_dist < 0 || dist < best_dist || (dist == best_dist && idx < best_idx)) {
+                          best_dist = dist;
+                          best_idx = idx;
+                          best = d.name;
+                      }
+                  }
+              }
+              d = d.right;
+              idx = idx + 1;
+          }
+          return best;
       }
 
       // Moved-state helpers (C++ MovedAnalysis, straight-line core with
@@ -5793,6 +5936,20 @@ pub struct Checker {
                           }
                       }
                   }
+                  // Duplicate definitions across merged modules
+                  // (strings.join vs path.join): bind the nearest
+                  // same-origin definition — the caller's own module —
+                  // never the import order (C++ checks each module in
+                  // its own scope). Method, scoped, and module calls
+                  // resolved above keep their names, as do free calls
+                  // carrying a struct prefix.
+                  if (!hit_method && !is_mod_call && chk_strchr(expr.name, 58) == null &&
+                      chk_str_eq(self.struct_prefix_of(expr.name), "")) {
+                      let dup_final <string> = self.dup_resolve(expr.name);
+                      if (!chk_str_eq(dup_final, expr.name)) {
+                          expr.name = dup_final;
+                      }
+                  }
                   if (!self.current_scope.has(expr.name) && !is_coll_method) {
                       let b <Buffer> = new_buffer(64);
                       b.write_string("call to undeclared function: ");
@@ -7018,6 +7175,10 @@ pub struct Checker {
           let saved_loop <int> = self.loop_depth;
           let saved_fn <string> = self.current_fn;
           self.current_fn = fn_node.name;
+          // Nested definitions keep the enclosing declaration's chain
+          // position: they have none of their own, and the outer one
+          // is the module they live in.
+          let saved_defpos <int> = self.current_def_pos;
           let ret_ann <string> = self.resolve_type(fn_node.type_annotation);
           // `fun?` declares a nullable return: `<long>` here means `<long?>`,
           // so returns check against `T?` (C++ NullableType return). The
@@ -7173,6 +7334,7 @@ pub struct Checker {
           self.current_ret_type = saved_ret;
           self.loop_depth = saved_loop;
           self.current_fn = saved_fn;
+          self.current_def_pos = saved_defpos;
           let rgi <int> = 0;
           while (rgi < 8) {
               self.grants[rgi] = saved_grants[rgi];
@@ -8731,6 +8893,21 @@ pub struct Checker {
                       }
                   }
               } else if (decl.kind == ast_fun_decl()) {
+                  // Duplicate top-level functions across merged modules
+                  // (strings.join vs path.join): the first keeps its
+                  // spelling, later ones take `<name>__dup<N>` so the
+                  // checker and the backend agree on which body a call
+                  // names (dup_resolve picks the caller's own below).
+                  // Bodiless declarations (`@define` externs) never
+                  // claim: two externs of one name publish one C symbol
+                  // (first-wins, like C++ retainAmbientPrototype), so
+                  // renaming one would orphan its callers at link time.
+                  if (decl.left != null) {
+                      let claimed <string> = self.dup_claim_name(decl.name);
+                      if (!chk_str_eq(claimed, decl.name)) {
+                          decl.name = claimed;
+                      }
+                  }
                   // Flattened `Target_method`s carry their visibility on the
                   // node (parser records `pub:`/`priv:` + inline markers);
                   // a `priv` marker only means something on a struct member,
@@ -8952,7 +9129,13 @@ pub struct Checker {
 
           // Pass 2: Check definitions
           decl = root.left;
+          let p2_idx <int> = 0;
           while (decl != null) {
+              // Chain position for nearest-definition resolution
+              // (dup_resolve): every top-level declaration counts, so
+              // these positions agree with the pass-1-order walk there.
+              p2_idx = p2_idx + 1;
+              self.current_def_pos = p2_idx;
               if (decl.kind == ast_struct_decl()) {
                   self.api_validate_attrs(decl.attr_text, true, false, decl.line, decl.col);
                   self.api_validate_fields(decl);

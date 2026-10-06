@@ -593,6 +593,13 @@ struct FnInfo {
     // slot, and an indirect call threads the pair's second word into it.
     bool hasEnvParam = false;
     bool isConstructor = false;
+    // The AST declaration this entry was declared from. A module body calling a
+    // bare name its own module also declares reuses this entry only when it is
+    // that same declaration, and declares its own module-qualified entry
+    // otherwise -- which is what stops the first module in load order from
+    // silently answering every module's calls. Set in declareFunction, the one
+    // place entries are created.
+    const ASTNode* source = nullptr;
 };
 
 // The one place that maps a written type name to a representation. Returns
@@ -3495,6 +3502,131 @@ private:
         return false;
     }
 
+    // The unit that owns a queued body, or null for the root program. Bodies
+    // are queued from many declaration paths but drained in one, so the owner
+    // is recovered from the queued node rather than threaded through every
+    // path: a node is owned by the unit whose statements contain it, top-level
+    // or nested in a struct or implements block. Null both for the root and
+    // for a node no unit contains, and both mean the same thing downstream --
+    // first-in-load-order lookup, exactly as before.
+    const Program* ownerOf(const ASTNode* node) const {
+        if (!node) return nullptr;
+        auto inUnit = [node](const Program* unit) {
+            if (!unit) return false;
+            for (auto& stmt : unit->statements) {
+                if (stmt.get() == node) return true;
+                if (auto* s = dynamic_cast<const StructDeclaration*>(stmt.get())) {
+                    for (auto& m : s->methods)
+                        if (m.get() == node) return true;
+                    for (auto& o : s->operators)
+                        if (o.get() == node) return true;
+                    for (auto& c : s->constructors)
+                        if (c.get() == node) return true;
+                    if (s->destructor.get() == node) return true;
+                }
+                if (auto* b = dynamic_cast<const ImplementsBlock*>(stmt.get())) {
+                    for (auto& m : b->methods)
+                        if (m.get() == node) return true;
+                    for (auto& o : b->operators)
+                        if (o.get() == node) return true;
+                    for (auto& c : b->constructors)
+                        if (c.get() == node) return true;
+                    if (b->overwrite_value.get() == node) return true;
+                }
+            }
+            return false;
+        };
+        if (inUnit(rootProgram_)) return nullptr;
+        for (const Program* unit : modules_)
+            if (inUnit(unit)) return unit;
+        return nullptr;
+    }
+
+    // The functions_ key (and default LLVM symbol) for a module's own
+    // declaration: qualified by the module's load index, so two modules
+    // declaring one Fin name get two entries and two bodies instead of the
+    // first silently answering both modules' calls. Dotted like a methodKey,
+    // which no Fin spelling can collide with: struct and function names are
+    // identifiers and carry no dots.
+    std::string moduleKeyOf(const Program* owner, const std::string& name) const {
+        for (size_t i = 0; i < modules_.size(); ++i) {
+            if (modules_[i] == owner)
+                return "mod." + std::to_string(i) + "." + name;
+        }
+        return "mod.?." + name;  // defensive: ownerOf only returns units from modules_
+    }
+
+    // One module's own declaration of a bare name, declared on first call from
+    // a body that module owns (see currentOwner_). The analyzer resolves a
+    // module body's bare calls against its defining module first -- `replace`
+    // in strings.fin calls strings' `join` whatever the import order -- so the
+    // backend must declare THAT declaration rather than the first one in load
+    // order, which is what ensureModuleCallable finds. When the unqualified
+    // entry already comes from this same declaration it is reused, so
+    // recursion and root calls share one body instead of emitting two.
+    //
+    // True when handled, including when it reported a refusal, mirroring
+    // ensureModuleCallable; false when the owner declares no such name (or
+    // only a generic, which stays on ensureFnTemplate's path), which falls
+    // back to load-order lookup exactly as before.
+    bool ensureOwnerCallable(const std::string& name, const Program* owner) {
+        if (!owner) return false;
+        const std::string key = moduleKeyOf(owner, name);
+        if (functions_.count(key)) return true;
+        FunctionDeclaration* fn = nullptr;
+        DefineDeclaration* def = nullptr;
+        for (auto& stmt : owner->statements) {
+            if (auto* f = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
+                if (f->name == name) { fn = f; break; }
+            } else if (auto* d = dynamic_cast<DefineDeclaration*>(stmt.get())) {
+                if (d->name == name) { def = d; break; }
+            }
+        }
+        if (!fn && !def) return false;
+        if (fn && !fn->generic_params.empty()) return false;
+        const ASTNode* mine = fn ? static_cast<const ASTNode*>(fn)
+                                : static_cast<const ASTNode*>(def);
+        auto unqualified = functions_.find(name);
+        if (unqualified != functions_.end() && unqualified->second.source == mine)
+            return true;
+        if (fn) {
+            if (!attributesAreJustLlvmName(*fn, fn->attributes, "function"))
+                return true;  // already reported
+            if (!fn->body) {
+                unsupported(*fn, fmt::format("a call to '{}', which has no body "
+                                             "anywhere in this compilation",
+                                             name));
+                return true;
+            }
+            // The module-qualified symbol, unless the declaration publishes a C
+            // symbol with #[llvm_name]: two modules' bodies under one symbol is
+            // the silent wrong code this exists to remove, while a C symbol is
+            // the link contract and keeps its spelling.
+            std::string symbol = key;
+            for (auto& attr : fn->attributes) {
+                if (attr->name == "llvm_name" && !attr->is_flag) {
+                    symbol = attr->value_str;
+                    break;
+                }
+            }
+            declareFunction(*fn, key, symbol, fn->params,
+                            fn->return_type.get(), /*isVarArg=*/false,
+                            /*isExtern=*/false);
+            auto declared = functions_.find(key);
+            if (declared == functions_.end()) return true;
+            declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
+            pendingBodies_.push_back(PendingBody{fn, &fn->params, fn->body.get(),
+                                                 key, nullptr, ""});
+            return true;
+        }
+        if (!defineAttributesAreReadable(*def)) return true;
+        declareFunction(*def, key,
+                        symbolNameOf(def->attributes, def->name), def->params,
+                        def->return_type.get(), def->is_vararg,
+                        /*isExtern=*/true);
+        return true;
+    }
+
     void declareStructs(Program& program) {
         std::vector<StructDeclaration*> decls;
         for (auto& stmt : program.statements) {
@@ -4087,7 +4219,10 @@ private:
             ScopedBindings bound(types_, job.bindings);
             std::string savedStruct = std::move(currentStructName_);
             currentStructName_ = job.structName;
+            const Program* savedOwner = currentOwner_;
+            currentOwner_ = ownerOf(job.node);
             emitBody(*job.node, *job.params, *job.body, job.key);
+            currentOwner_ = savedOwner;
             currentStructName_ = std::move(savedStruct);
         }
         // Cleared, because run() drains more than once and a second entry block on a
@@ -5462,6 +5597,7 @@ private:
         if (functions_.count(name)) return;  // first declaration wins, as the analyzer's does
 
         FnInfo info;
+        info.source = &node;
         info.isVarArg = isVarArg;
         info.hasReceiver = (receiver != nullptr);
         // A lambda's closure environment travels as a leading `ptr` parameter.
@@ -7174,6 +7310,14 @@ private:
         //    snapshotted their names, types and env layout, and the body reads them
         //    through the env parameter the call threads in -- per instance, because
         //    a capture's type may itself mention the outer parameters.
+        //
+        //    A named instance's bare calls resolve against the template's defining
+        //    module, the same rule drainPendingBodies applies to queued bodies: a
+        //    module generic called from the root still calls its own module's
+        //    names. A lambda keeps its caller's context, which is where it was
+        //    written.
+        const Program* savedOwner = currentOwner_;
+        if (!tmpl.lambda) currentOwner_ = ownerOf(tmpl.node);
         if (tmpl.lambda) {
             std::vector<std::string> enclosing = tmpl.lambda->enclosing;
             enclosing.swap(enclosingNames_);
@@ -7187,6 +7331,7 @@ private:
         } else {
             emitBodyOf(*tmpl.node, *tmpl.params, tmpl.block, tmpl.value, key);
         }
+        currentOwner_ = savedOwner;
         return !failed_;
     }
 
@@ -11291,6 +11436,17 @@ private:
         if (!isCtorCall && tryEnumTagIntrinsic(node, name)) return;
         if (!isCtorCall && tryMetaIntrinsic(node, name)) return;
         auto found = functions_.find(emittedName);
+        if (!isCtorCall && currentOwner_) {
+            // A body its defining module owns calls the module's own
+            // declaration, not the first one in load order: strings' `replace`
+            // calls strings' `join` even when path's `join` loaded first --
+            // and even when the root already called path's `join`, which is
+            // why this runs before the unqualified lookup below rather than
+            // only on a miss. When the owner declares no such name (or only a
+            // generic) this falls through, keeping the earlier hit.
+            if (ensureOwnerCallable(name, currentOwner_))
+                found = functions_.find(moduleKeyOf(currentOwner_, emittedName));
+        }
         if (found == functions_.end() && !isCtorCall) {
             // A function or `@define` the module declares: `c_socket` from
             // lib/std/networking.fin, or a plain `fun` a stdlib module defines.
@@ -15168,6 +15324,14 @@ private:
     // rather than a pointer: draining can instantiate a template, which
     // inserts into structs_ while bodies are being read.
     std::string currentStructName_;
+    // The module owning the body currently being emitted, or null for the root
+    // program. A module body's bare calls resolve against this unit first, the
+    // way the analyzer resolves them against the defining module: strings'
+    // `replace` calls strings' `join` whatever loaded first. Set per body in
+    // drainPendingBodies (recovered from the queued node) and around a generic
+    // instance's inline emission in instantiateTemplate; null everywhere else,
+    // where lookup keeps its first-in-load-order rule.
+    const Program* currentOwner_ = nullptr;
     // The `$struct` handle rule's per-body context, for `st{}` (see
     // structHandleTarget): which parameter names are `$struct` handles, and
     // which bare generic the body's return type seeds. Set in emitBodyOf for

@@ -652,6 +652,40 @@ TEST(Soundness_Modules, AQualifiedCallReachesTheSymbolTheRetainedPrototypeNames)
         << err;
 }
 
+TEST(Soundness_Modules, AModuleBodyCallsItsOwnModulesFunctionWhateverTheImportOrder) {
+    // `path::std` and `strings::std` both publish a free `join` with different
+    // signatures, and `strings::std`'s `replace` calls `join` on its split parts.
+    // That inner call is module-local: `replace("aaa", "aa", "b")` is `ba`
+    // whichever import comes first. The backend used to declare the first-loaded
+    // module's `join` for the inner call, so the path-first order ran path's
+    // `join` on strings' parts and printed garbage.
+    for (const char* imports : {"import { join } from path::std;\n"
+                                "import { replace } from strings::std;\n",
+                                "import { replace } from strings::std;\n"
+                                "import { join } from path::std;\n"}) {
+        EXPECT_EQ(buildBundledAndRun(
+                      std::string(imports) +
+                      "fun main() <noret> { printf(\"%s\\n\", replace(\"aaa\", \"aa\", \"b\")); }\n"),
+                  "ba\n")
+            << "import order must not change what a module body calls:\n" << imports;
+    }
+}
+
+TEST(Soundness_Modules, AModuleBodyKeepsItsOwnFunctionWhenTheRootCallsTheOtherOnes) {
+    // The harder half of the above: the root calls path's `join` directly, so
+    // the first-in-load-order entry for `join` exists before strings'
+    // `replace` ever emits. The inner call must still reach strings' `join` --
+    // an unqualified hit cannot short-circuit module-local resolution.
+    EXPECT_EQ(buildBundledAndRun(
+                  "import { join } from path::std;\n"
+                  "import { replace } from strings::std;\n"
+                  "fun main() <noret> {\n"
+                  "  let j <string> = join(\"a\", \"b\");\n"
+                  "  printf(\"%s %s\\n\", j, replace(\"aaa\", \"aa\", \"b\"));\n"
+                  "}\n"),
+              "a/b ba\n");
+}
+
 TEST(KnownDefect_Modules, RenamingAnAmbientNameInTheRootFileBreaksBothSpellingsAlike) {
     // The residual hazard, booked rather than repaired, and bookable because the two
     // spellings now agree. A file that redeclares an ambient name wins in
