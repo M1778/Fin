@@ -7795,6 +7795,65 @@ BACKEND_TEST(Soundness_Codegen, AnImportedStructLiteralLowers) {
     fs::remove_all(dir, ec);
 }
 
+BACKEND_TEST(Soundness_Codegen, TwoModulesDefiningTheSameGenericEachRunTheirOwnBody) {
+    // Two modules publish one generic name with different bodies, and each
+    // calls its own through a module-local wrapper. Each instantiation runs
+    // its own body whichever import comes first: the backend used to
+    // instantiate the first-loaded module's template for both inner calls, so
+    // one import order printed `1 1` and the other `2 2`.
+    const fs::path dir = uniqueTempPath("fin_gendupe", "");
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    ASSERT_TRUE(fs::is_directory(dir)) << ec.message();
+    {
+        std::ofstream f(dir / "amod.fin", std::ios::binary);
+        f << "pub fun pick<T>(x: T) <int> {\n"
+          << "    return 1;\n"
+          << "}\n"
+          << "pub fun run_a() <int> {\n"
+          << "    return pick(0);\n"
+          << "}\n";
+    }
+    {
+        std::ofstream f(dir / "bmod.fin", std::ios::binary);
+        f << "pub fun pick<T>(x: T) <int> {\n"
+          << "    return 2;\n"
+          << "}\n"
+          << "pub fun run_b() <int> {\n"
+          << "    return pick(0);\n"
+          << "}\n";
+    }
+    for (const char* imports : {"import { run_a } from amod;\n"
+                                "import { run_b } from bmod;\n",
+                                "import { run_b } from bmod;\n"
+                                "import { run_a } from amod;\n"}) {
+        const fs::path src = uniqueTempPath("fin_gendupe_root", ".fin");
+        const fs::path exe = uniqueTempPath("fin_gendupe_exe");
+        {
+            std::ofstream f(src, std::ios::binary);
+            f << std::string(kPrintf) << imports
+              << "fun main() <noret> {\n"
+              << "    printf(\"%d %d\\n\", run_a(), run_b());\n"
+              << "}\n";
+        }
+        const FincRun c =
+            runFinc({src.string(), "-o", exe.string(), "-I", dir.string()});
+        EXPECT_EQ(c.exitCode, 0) << stripAnsi(c.err);
+        std::string out;
+        if (c.exitCode == 0 && fs::exists(exe)) {
+            const fs::path outPath = uniqueTempPath("fin_gendupe_out");
+            EXPECT_EQ(fin::runProcess({exe.string()}, outPath.string(), outPath.string()), 0);
+            out = readProcessOutput(outPath.string());
+            fs::remove(outPath, ec);
+        }
+        EXPECT_EQ(out, "1 2\n") << "import order must not change whose body runs:\n"
+                                << imports << stripAnsi(c.err);
+        fs::remove(src, ec);
+        fs::remove(exe, ec);
+    }
+    fs::remove_all(dir, ec);
+}
+
 BACKEND_TEST(Soundness_Codegen, AClassAttributeDoesNotChangeLayout) {
     // ADR 0026: a class lowers exactly as a struct. The attribute is accepted
     // and ignored for layout -- which is what lets a `#[class]` base from
