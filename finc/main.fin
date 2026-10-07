@@ -26,6 +26,9 @@ import {
 #[llvm_name="free"]
 @define m_free(p: string) <noret>;
 
+#[llvm_name="strcmp"]
+@define m_strcmp(a: string, b: string) <int>;
+
 #[llvm_name="dprintf"]
 @define m_dprintf(fd: int, fmt: string, ...) <int>;
 
@@ -35,6 +38,10 @@ pub fun run_finc(args: [string], count: int) <int> {
     p.add_flag("--version", "-v", "Print version");
     p.add_flag("--help", "-h", "Show help");
     p.add_flag("-c", "-c", "Compile to object file without linking");
+    p.add_flag("-O0", "", "Optimisation level for '-o' and '-c' builds (default -O0)");
+    p.add_flag("-O1", "", "Optimisation level for '-o' and '-c' builds");
+    p.add_flag("-O2", "", "Optimisation level for '-o' and '-c' builds");
+    p.add_flag("-O3", "", "Optimisation level for '-o' and '-c' builds");
     p.add_flag("--dump-tokens", "", "Print token stream");
     p.add_flag("--dump-ast", "", "Print parsed AST");
     p.add_flag("--no-check", "", "Skip semantic analysis (unsafe)");
@@ -95,6 +102,16 @@ pub fun run_finc(args: [string], count: int) <int> {
     let fin_guard <bool> = true;
     if (no_fin_guard) { fin_guard = false; }
 
+    // Last `-O` on the command line wins, mirroring the C++ driver
+    // (src/main.cpp), which overwrites `opts.optLevel` per flag.
+    let opt_level <int> = 0;
+    for (let oi <int> = 0; oi < count; oi++) {
+        if (m_strcmp(args[oi], "-O0") == 0) { opt_level = 0; }
+        else if (m_strcmp(args[oi], "-O1") == 0) { opt_level = 1; }
+        else if (m_strcmp(args[oi], "-O2") == 0) { opt_level = 2; }
+        else if (m_strcmp(args[oi], "-O3") == 0) { opt_level = 3; }
+    }
+
     let res <int> = compile_source_file(
         input_file,
         out_file,
@@ -103,7 +120,8 @@ pub fun run_finc(args: [string], count: int) <int> {
         dump_ast,
         emit_c,
         no_check,
-        fin_guard
+        fin_guard,
+        opt_level
     );
 
     free_arg_parser(p);

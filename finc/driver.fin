@@ -2400,6 +2400,7 @@ pub fun print_help() <int> {
     printf("Options:\n");
     printf("  -o <path>              Build an executable at <path>; without it finc only checks\n");
     printf("  -c                     Compile to an object file and do not link\n");
+    printf("  -O0, -O1, -O2, -O3     Optimisation level for '-o' and '-c' builds (default -O0)\n");
     printf("  --dump-tokens          Print the scanned tokens\n");
     printf("  --dump-ast             Print the parsed AST\n");
     printf("  --no-check             Skip semantic analysis (unsafe)\n");
@@ -2503,7 +2504,8 @@ pub fun compile_source_file(
     dump_ast: bool,
     emit_c_only: bool,
     no_check: bool,
-    fin_guard: bool
+    fin_guard: bool,
+    opt_level: int
 ) <int> {
     // 1. Read source code
     let source? <string> = read_to_string(filename);
@@ -2790,7 +2792,7 @@ pub fun compile_source_file(
         own_o = true;
     }
 
-    let ok_gen <bool> = generate_llvm_code(root, target_o, 0, filename);
+    let ok_gen <bool> = generate_llvm_code(root, target_o, opt_level, filename);
 
     delete tokens;
     free_parser(p);
