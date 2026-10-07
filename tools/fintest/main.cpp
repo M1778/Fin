@@ -47,7 +47,12 @@
 #include <vector>
 
 #ifdef _WIN32
-#include <process.h>
+// windows.h defines min/max macros that break std::min below; NOMINMAX
+// suppresses them (cf. src/utils/Process.cpp, which includes windows.h).
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #define FINTEST_GETPID _getpid
 #else
 #include <fcntl.h>
@@ -74,14 +79,27 @@ constexpr int kDefaultRunTimeoutSeconds = 10;
 constexpr size_t kMaxDetailLines = 10;
 
 #ifdef _WIN32
-std::string shellQuote(const std::string& s) {
-    std::string out = "'";
-    for (char c : s) {
-        if (c == '\'') out += "'\\''";
-        else out += c;
+// Microsoft CRT command-line decoding: backslashes before a quote and before
+// the closing quote double, each literal quote is backslash-escaped, and the
+// whole argument is wrapped in double quotes (adapted from the quote helper in
+// src/utils/Process.cpp — fintest links nothing, so the helper lives here
+// rather than dragging fin_core into the runner). The old helper wrapped in
+// POSIX single quotes, which cmd.exe does not recognise as quoting.
+std::string argvQuote(const std::string& arg) {
+    std::string out = "\"";
+    size_t slashes = 0;
+    for (char c : arg) {
+        if (c == '\\') {
+            ++slashes;
+            continue;
+        }
+        out.append(slashes * (c == '"' ? 2 : 1), '\\');
+        slashes = 0;
+        if (c == '"') out += '\\';
+        out += c;
     }
-    out += "'";
-    return out;
+    out.append(slashes * 2, '\\');
+    return out + '"';
 }
 #endif
 
@@ -258,21 +276,73 @@ Proc runWithCapture(const std::vector<std::string>& argv, int timeoutSecs) {
 
 #else  // _WIN32: no fork/signal decoding; exit codes only, crash classes degrade.
 
-// Shell out with stdout/stderr captured via temp files (cf. runFinc).
-Proc runWithCapture(const std::vector<std::string>& argv, int /*timeoutSecs*/) {
+// No shell: the old code built a POSIX single-quoted string and ran it through
+// std::system, which on Windows goes through cmd.exe — single quotes quote
+// nothing there, so every spawn failed with `The filename, directory name, or
+// volume label syntax is incorrect.` before any Fin code ran (wave4-selfhost
+// run 37566508425). Arguments now go to CreateProcess literally (cf.
+// fin::runProcess on Windows), stdout/stderr to temp files through inherited
+// handles instead of `>` redirection, and timeoutSecs arms a
+// WaitForSingleObject deadline mirroring the POSIX waitpid deadline above —
+// past it the child is terminated and timedOut is set. 0 means wait unbounded
+// (compile step — no deadline policy there).
+Proc runWithCapture(const std::vector<std::string>& argv, int timeoutSecs) {
     Proc p;
+    if (argv.empty()) return p;
     const std::string outPath = uniqueTempPath("fintest_out");
     const std::string errPath = uniqueTempPath("fintest_err");
+    // CreateProcess may modify the command line, so it needs a mutable buffer.
     std::string cmd;
     for (const auto& a : argv) {
-        if (!cmd.empty()) cmd += " ";
-        cmd += shellQuote(a);
+        if (!cmd.empty()) cmd += ' ';
+        cmd += argvQuote(a);
     }
-    cmd += " > " + shellQuote(outPath) + " 2> " + shellQuote(errPath);
-    const int status = std::system(cmd.c_str());
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE hOut = CreateFileA(outPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                              &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE hErr = CreateFileA(errPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                              &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hOut == INVALID_HANDLE_VALUE || hErr == INVALID_HANDLE_VALUE) {
+        if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
+        if (hErr != INVALID_HANDLE_VALUE) CloseHandle(hErr);
+        return p;
+    }
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = hOut;
+    si.hStdError = hErr;
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE,
+                                        0, nullptr, nullptr, &si, &pi);
+    CloseHandle(hOut);
+    CloseHandle(hErr);
+    if (!started) return p;
     p.launched = true;
-    p.exited = true;
-    p.exitCode = status;
+    if (timeoutSecs <= 0) {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+    } else {
+        const ULONGLONG deadline =
+            GetTickCount64() + static_cast<ULONGLONG>(timeoutSecs) * 1000u;
+        for (;;) {
+            const DWORD r = WaitForSingleObject(pi.hProcess, 10);
+            if (r != WAIT_TIMEOUT) break;
+            if (GetTickCount64() >= deadline) {
+                TerminateProcess(pi.hProcess, 1);
+                p.timedOut = true;
+                WaitForSingleObject(pi.hProcess, INFINITE);
+                break;
+            }
+        }
+    }
+    DWORD status = 0;
+    if (GetExitCodeProcess(pi.hProcess, &status)) {
+        p.exited = true;
+        p.exitCode = static_cast<int>(status);
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
     p.out = readWholeFile(outPath);
     p.err = readWholeFile(errPath);
     std::error_code ec;
