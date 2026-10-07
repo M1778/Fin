@@ -1,6 +1,8 @@
 // LLVM-C API bindings for the Fin Self-Hosting Compiler
 // Implements ADR 0002 and ADR 0043 (pure LLVM lowering)
 
+import { starts_with } from strings::std;
+
 namespace finc {
 
 pub struct LLVMModule {}
@@ -184,6 +186,23 @@ pub struct LLVMBlockArgs {
 
 #[llvm_name="LLVMInitializeX86AsmPrinter"]
 @define llvm_init_x86_asm_printer() <noret>;
+
+// AArch64 mirrors the X86 set above one for one: the C++ backend
+// (CodeGen_LLVM.cpp) calls InitializeNativeTarget* which registers the
+// host's target, so the stage backend must name AArch64 for ARM hosts.
+// No other target is named: on every other host the X86 path below runs,
+// exactly as before.
+#[llvm_name="LLVMInitializeAArch64TargetInfo"]
+@define llvm_init_aarch64_target_info() <noret>;
+
+#[llvm_name="LLVMInitializeAArch64Target"]
+@define llvm_init_aarch64_target() <noret>;
+
+#[llvm_name="LLVMInitializeAArch64TargetMC"]
+@define llvm_init_aarch64_target_mc() <noret>;
+
+#[llvm_name="LLVMInitializeAArch64AsmPrinter"]
+@define llvm_init_aarch64_asm_printer() <noret>;
 
 #[llvm_name="LLVMGetDefaultTargetTriple"]
 @define llvm_get_default_triple() <string>;
@@ -585,6 +604,20 @@ pub struct LLVMBlockArgs {
 // Helper: Initialize native LLVM target machine
 #[export]
 pub fun init_native_target() <bool> {
+    // The C++ backend (CodeGen_LLVM.cpp) calls InitializeNativeTarget*,
+    // which registers the host's target, whatever it is. The stage backend
+    // names its targets explicitly, so it branches on the default triple:
+    // AArch64 for ARM hosts (aarch64 Linux, arm64 Darwin), X86 otherwise.
+    // An x86_64 triple never enters the gated path, so x86_64 behavior is
+    // the same four calls it has always been.
+    let triple <string> = llvm_get_default_triple();
+    if (starts_with(triple, "aarch64") || starts_with(triple, "arm64")) {
+        llvm_init_aarch64_target_info();
+        llvm_init_aarch64_target();
+        llvm_init_aarch64_target_mc();
+        llvm_init_aarch64_asm_printer();
+        return true;
+    }
     llvm_init_x86_target_info();
     llvm_init_x86_target();
     llvm_init_x86_target_mc();
