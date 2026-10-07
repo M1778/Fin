@@ -1,8 +1,14 @@
 //@ normative
 //@ ok
 @define printf(fmt: string, ...) <noret>;
+// The single-precision libc spellings: `sin`/`cos`/`sqrt` are double, so a
+// float prototype over those names reads stack garbage as a double (visible
+// only once -O2 moves the guard). `sinf`/`cosf`/`sqrtf` are the real ABI.
+#[llvm_name="sinf"]
 @define sin(f: float) <float>;
+#[llvm_name="cosf"]
 @define cos(f: float) <float>;
+#[llvm_name="sqrtf"]
 @define sqrt(f: float) <float>;
 
 #[llvm_name="vec2_f32"]
