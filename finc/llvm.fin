@@ -11,6 +11,8 @@ pub struct LLVMBasicBlock {}
 pub struct LLVMTarget {}
 pub struct LLVMTargetMachine {}
 pub struct LLVMContext {}
+pub struct LLVMPassBuilderOptions {}
+pub struct LLVMOptError {}
 
 pub struct LLVMTargetSlot {
     pub:
@@ -197,6 +199,25 @@ pub struct LLVMBlockArgs {
 
 #[llvm_name="LLVMDisposeTargetMachine"]
 @define llvm_dispose_target_machine(tm: &LLVMTargetMachine) <noret>;
+
+// New-pass-manager default pipeline (mirrors the C++ backend's
+// buildPerModuleDefaultPipeline in src/codegen/CodeGen_LLVM.cpp).
+// LLVMRunPasses returns null on success; any other value consumes into
+// LLVMGetErrorMessage, whose string LLVMDisposeErrorMessage frees.
+#[llvm_name="LLVMCreatePassBuilderOptions"]
+@define llvm_create_pass_builder_options() <&LLVMPassBuilderOptions>;
+
+#[llvm_name="LLVMDisposePassBuilderOptions"]
+@define llvm_dispose_pass_builder_options(opts: &LLVMPassBuilderOptions) <noret>;
+
+#[llvm_name="LLVMRunPasses"]
+@define llvm_run_passes(m: &LLVMModule, passes: string, tm: &LLVMTargetMachine, opts: &LLVMPassBuilderOptions) <&LLVMOptError>;
+
+#[llvm_name="LLVMGetErrorMessage"]
+@define llvm_get_error_message(err: &LLVMOptError) <string>;
+
+#[llvm_name="LLVMDisposeErrorMessage"]
+@define llvm_dispose_error_message(msg: string) <noret>;
 
 // Module
 #[llvm_name="LLVMModuleCreateWithName"]
@@ -584,7 +605,31 @@ pub fun emit_module_to_object(m: &LLVMModule, object_path: string, opt_level: in
         return false;
     }
     let target <&LLVMTarget> = tgt_slot.ptr;
-    let tm <&LLVMTargetMachine> = llvm_create_target_machine(target, triple, "generic", "", opt_level, 0, 0);
+    // Mirror the C++ backend (CodeGen_LLVM.cpp): the machine's own level is
+    // Default for any -O1..-O3 and None at -O0; the IR pipeline below is the
+    // half that level does not cover. Clamped to the 0..3 argv domain.
+    let clamped <int> = opt_level;
+    if (clamped < 0) { clamped = 0; }
+    if (clamped > 3) { clamped = 3; }
+    let cg_opt <int> = 0;
+    if (clamped > 0) { cg_opt = 2; }
+    let tm <&LLVMTargetMachine> = llvm_create_target_machine(target, triple, "generic", "", cg_opt, 0, 0);
+    if (clamped > 0) {
+        let pipe <string> = "default<O1>";
+        if (clamped >= 3) { pipe = "default<O3>"; }
+        else if (clamped == 2) { pipe = "default<O2>"; }
+        let pb_opts <&LLVMPassBuilderOptions> = llvm_create_pass_builder_options();
+        let perr <&LLVMOptError> = llvm_run_passes(m, pipe, tm, pb_opts);
+        llvm_dispose_pass_builder_options(pb_opts);
+        if (perr != null) {
+            let emsg <string> = llvm_get_error_message(perr);
+            llvm_dispose_error_message(emsg);
+            llvm_dispose_target_machine(tm);
+            delete tgt_slot;
+            delete err_slot;
+            return false;
+        }
+    }
     // codegen = 1 for LLVMObjectFile
     let emit_rc <int> = llvm_target_machine_emit_to_file(tm, m, object_path, 1, err_slot);
     llvm_dispose_target_machine(tm);
