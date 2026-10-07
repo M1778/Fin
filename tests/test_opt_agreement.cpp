@@ -222,8 +222,10 @@ struct LevelAgreement {
 // response varies by version and environment); `enums` and `nullifier` abort
 // on a Fin blame (erased payload, absent denullify). For these stems stderr
 // is the runtime's rendering, not the program's output, so it is not compared
-// once both sides signaled with matching (empty) stdout. Fate and stdout stay
-// exact: a level that exits 0 where the reference aborts is a miscompile.
+// once both sides signaled with matching (empty) stdout. Stdout stays exact,
+// and so does fate outside the abort class; inside it, abnormal death agrees
+// across fatal signals (a level that exits 0 where the reference aborts is
+// still a miscompile). Mirrors StageAgreement's abort-class rule.
 bool isOptAbortClass(const std::string& stem) {
     return stem == "enums" || stem == "nullifier" || stem == "simple_pointers";
 }
@@ -234,8 +236,14 @@ LevelAgreement checkLevelAgreement(const std::string& stem, const FincRun& baseB
     LevelAgreement a;
     a.buildExitMatch = baseBuild.exitCode == otherBuild.exitCode;
     a.buildStderrMatch = baseBuild.err == otherBuild.err;
+    // Abort-class stems agree on abnormal death regardless of which fatal
+    // signal a given libc delivers (SIGABRT with text here, SIGSEGV silent
+    // there): fate is "both signaled", exactly as StageAgreement's
+    // abort-class rule. Everywhere else the signal stays exact.
+    const bool abortDeath = isOptAbortClass(stem) && baseRun.signaled && otherRun.signaled;
     a.fateMatch = (baseRun.exited && otherRun.exited && baseRun.exitCode == otherRun.exitCode) ||
-                  (baseRun.signaled && otherRun.signaled && baseRun.termSig == otherRun.termSig);
+                  (baseRun.signaled && otherRun.signaled &&
+                   (baseRun.termSig == otherRun.termSig || abortDeath));
     a.stdoutMatch = baseRun.out == otherRun.out;
     const bool abortClass = isOptAbortClass(stem) && baseRun.signaled && otherRun.signaled;
     a.stderrMatch = (abortClass && a.stdoutMatch && baseRun.out.empty())
@@ -317,7 +325,7 @@ TEST(OptAgreementLogic, OptDriftDivergesOnItsOwnAxis) {
     EXPECT_FALSE(checkLevelAgreement("loops", build, run, warnBuild, run).buildStderrMatch);
 }
 
-TEST(OptAgreementLogic, AbortClassSkipsStderrButKeepsFateExact) {
+TEST(OptAgreementLogic, AbortClassSkipsStderrAndToleratesSignal) {
     // enums aborts on a Fin blame; the rendering is the runtime's, not the
     // program's, so differing stderr still agrees -- but only when both sides
     // signaled with matching empty stdout.
@@ -340,16 +348,18 @@ TEST(OptAgreementLogic, AbortClassSkipsStderrButKeepsFateExact) {
         EXPECT_TRUE(a.agrees()) << stem;
     }
     // A level that exits 0 where the reference aborts is a miscompile, even on
-    // an abort-class stem: fate stays exact, unlike StageAgreement's
-    // cross-signal tolerance.
+    // an abort-class stem.
     Proc exited;
     exited.exited = true;
     exited.exitCode = 0;
     EXPECT_FALSE(checkLevelAgreement("enums", build, aborted("x\n"), build, exited).fateMatch);
+    // Cross-signal abnormal death agrees inside the abort class (SIGABRT with
+    // text on one libc, SIGSEGV silent on another): same rule as
+    // StageAgreement, whose CI libc segfaults where local aborts.
     Proc segv;
     segv.signaled = true;
     segv.termSig = 11;
-    EXPECT_FALSE(checkLevelAgreement("nullifier", build, aborted("x\n"), build, segv).fateMatch);
+    EXPECT_TRUE(checkLevelAgreement("nullifier", build, aborted("x\n"), build, segv).agrees());
     // And outside the abort-class stems the same stderr difference fails.
     const LevelAgreement other =
         checkLevelAgreement("loops", build, aborted("first rendering\n"), build,
