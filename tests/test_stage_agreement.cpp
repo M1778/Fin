@@ -423,8 +423,9 @@ TEST_P(StageAgreement, RunAgreesAcrossCompilers) {
     const bool cppBuilt = cppBuild.exitCode == 0 && fs::exists(cppExe);
     if (!cppBuilt) {
         removeIfExists(cppExe);
+        const std::string firstErr = cppBuild.err.substr(0, cppBuild.err.find('\n'));
         GTEST_SKIP() << "reference (C++) build refuses " << stem << " (exit " << cppBuild.exitCode
-                     << "); not runnable";
+                     << "); not runnable; first stderr line: " << firstErr;
     }
 
     // Stage build, serialized: the stage cross-links concurrent `-o` builds
