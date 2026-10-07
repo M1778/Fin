@@ -20,6 +20,7 @@ add_executable(fin_tests
     test_module_loader.cpp
     test_macro_expander.cpp
     test_stage_agreement.cpp
+    test_opt_agreement.cpp
     Corpus.cpp
     Pipeline.cpp
 )
