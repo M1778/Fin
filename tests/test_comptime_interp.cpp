@@ -1744,6 +1744,9 @@ TEST(ComptimeImplements, HookAnswersBothSpellings) {
         "}\n"
         "@special h() <bool> {\n"
         "  return @implements(S, I);\n"
+        "}\n"
+        "@special g() <bool> {\n"
+        "  return compiler.types.implements(S, I);\n"
         "}\n");
     ASSERT_TRUE(p.result.parsed);
     auto* h = findSpecial(*p.result.ast, "h");
@@ -1758,12 +1761,18 @@ TEST(ComptimeImplements, HookAnswersBothSpellings) {
     auto rh = interp.evaluateBody(*h->body, env);
     ASSERT_EQ(rh.status, fin::comptime::BodyStatus::Returned) << rh.detail;
     EXPECT_EQ(rh.value.text, "true");
-    // The compiler-API spelling answers through the same hook. NOTE: the
-    // grammar gap is closed (`DOT KW_IMPLEMENTS` parses, so this is the
-    // shape the parser produces); the call is still built by hand here
-    // because this test covers the interpreter path, not the parser --
-    // the parsed spelling is covered by
-    // SemanticAnalyzer.ImplementsThroughCompilerApiEliminatesArm.
+    // The compiler-API spelling parses directly (`DOT KW_IMPLEMENTS`, the
+    // `@implements`/`attr_id` precedent for a keyword in member position)
+    // and answers through the same hook.
+    auto* g = findSpecial(*p.result.ast, "g");
+    ASSERT_NE(g, nullptr);
+    auto rp = interp.evaluateBody(*g->body, env);
+    ASSERT_EQ(rp.status, fin::comptime::BodyStatus::Returned) << rp.detail;
+    EXPECT_EQ(rp.value.text, "true");
+    // The same call built by hand: AST-shape control for the interpreter
+    // path (the parsed spelling above covers the parser shape; the analyzer
+    // spelling is covered by
+    // SemanticAnalyzer.ImplementsThroughCompilerApiEliminatesArm).
     auto obj = std::make_unique<fin::MemberAccess>(
         std::make_unique<fin::Identifier>("compiler"), "types");
     std::vector<std::unique_ptr<fin::Expression>> args;
