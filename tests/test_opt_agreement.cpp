@@ -75,8 +75,13 @@ Proc spawnCapture(const std::string& bin, const std::vector<std::string>& args) 
     std::vector<std::string> cmd{bin};
     cmd.insert(cmd.end(), args.begin(), args.end());
     const int rc = fin::runProcess(cmd, outPath.string(), errPath.string());
-    p.launched = rc >= -1;
-    if (rc >= 0) {
+    // Windows has no signals through this API: every termination -- clean
+    // exit or abort -- arrives as an exit code, and only -1 (launch failure)
+    // is not one. Abort codes are large unsigned values (0xC0000409 for a
+    // failed abort) that read negative as int; treating only rc == -1 as
+    // unlaunched keeps them comparable by code.
+    p.launched = rc != -1;
+    if (rc != -1) {
         p.exited = true;
         p.exitCode = rc;
     }
@@ -360,6 +365,17 @@ TEST(OptAgreementLogic, AbortClassSkipsStderrAndToleratesSignal) {
     segv.signaled = true;
     segv.termSig = 11;
     EXPECT_TRUE(checkLevelAgreement("nullifier", build, aborted("x\n"), build, segv).agrees());
+    // Windows shape: no signals through runProcess, aborts arrive as exit
+    // codes. Same code both sides agrees by exit equality; different abort
+    // codes disagree.
+    Proc wabort, wabort2;
+    wabort.exited = true;
+    wabort.exitCode = -1073740791;
+    wabort2.exited = true;
+    wabort2.exitCode = -1073740791;
+    EXPECT_TRUE(checkLevelAgreement("nullifier", build, wabort, build, wabort2).agrees());
+    wabort2.exitCode = -1073741819;
+    EXPECT_FALSE(checkLevelAgreement("nullifier", build, wabort, build, wabort2).agrees());
     // And outside the abort-class stems the same stderr difference fails.
     const LevelAgreement other =
         checkLevelAgreement("loops", build, aborted("first rendering\n"), build,

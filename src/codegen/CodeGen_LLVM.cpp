@@ -8457,6 +8457,28 @@ private:
 
     // ---- expressions ------------------------------------------------------
 
+    // One global per distinct byte sequence (see internedStrings_): the same
+    // shape CreateGlobalString builds -- private linkage, unnamed_addr,
+    // NUL-terminated, align 1 -- as a constant GEP, so every spelling of one
+    // literal is one pointer on every object format, not just ELF.
+    llvm::Constant* internedString(const std::string& bytes) {
+        auto it = internedStrings_.find(bytes);
+        if (it != internedStrings_.end()) return it->second;
+        llvm::Constant* arr = llvm::ConstantDataArray::getString(ctx_, bytes, true);
+        auto* gv = new llvm::GlobalVariable(module_, arr->getType(), true,
+                                            llvm::GlobalValue::PrivateLinkage,
+                                            arr, ".str");
+        gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+        gv->setAlignment(llvm::Align(1));
+        llvm::Type* i32 = llvm::Type::getInt32Ty(ctx_);
+        llvm::Constant* zero = llvm::ConstantInt::get(i32, 0);
+        llvm::Constant* idx[2] = {zero, zero};
+        llvm::Constant* ptr = llvm::ConstantExpr::getGetElementPtr(
+            arr->getType(), gv, llvm::ArrayRef<llvm::Constant*>(idx, 2));
+        internedStrings_.emplace(bytes, ptr);
+        return ptr;
+    }
+
     void visit(Literal& node) override {
         switch (node.kind) {
             case ASTTokenKind::INTEGER: {
@@ -8495,7 +8517,7 @@ private:
             }
             case ASTTokenKind::STRING_LITERAL: {
                 CgType t = *types_.byName("string");
-                value_ = CgVal{builder_.CreateGlobalString(decodeLiteral(node.value)), t};
+                value_ = CgVal{internedString(decodeLiteral(node.value)), t};
                 return;
             }
             case ASTTokenKind::KW_NULL:
@@ -15221,6 +15243,12 @@ private:
     // -- the lexer initialises every one with a null one (see CodeGen.hpp on why this is
     // a parameter of generateObject and not recoverable from anything else it gets).
     std::string sourceName_;
+    // Identical string literals share one global. The backend used to emit one
+    // `.str` global per occurrence and rely on the linker to merge them: true
+    // for ELF string sections, false for COFF, so two spellings of one literal
+    // were two pointers on Windows while HashMap<string, *> hashes and compares
+    // by address (lib/std/hashmap.fin) -- lookups missed there and only there.
+    std::unordered_map<std::string, llvm::Constant*> internedStrings_;
     // Two flags, because "the compile failed" and "the unit in hand cannot be
     // finished" are different facts and one bool was doing both jobs.
     //

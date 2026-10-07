@@ -89,7 +89,8 @@ const AllowEntry* lookupAllow(const std::string& stem, const std::string& kind) 
 // the real fate, so this decodes waitpid status directly (cf. fintest's
 // runWithCapture, which exists for the same reason). Windows has no
 // fork/waitpid: there it degrades to runProcess and signals are not
-// distinguished (documented, not silent).
+// distinguished (documented, not silent) -- an abort arrives as a nonzero
+// exit code, so abort agreement there compares codes, not signals.
 // ---------------------------------------------------------------------------
 
 struct Proc {
@@ -110,8 +111,14 @@ Proc spawnCapture(const std::string& bin, const std::vector<std::string>& args) 
     std::vector<std::string> cmd{bin};
     cmd.insert(cmd.end(), args.begin(), args.end());
     const int rc = fin::runProcess(cmd, outPath.string(), errPath.string());
-    p.launched = rc >= -1;
-    if (rc >= 0) {
+    // Windows has no signals through this API: every termination -- clean
+    // exit or abort -- arrives as an exit code, and only -1 (launch failure)
+    // is not one. Abort codes are large unsigned values (0xC0000409 for a
+    // failed abort, access violations likewise) that read negative as int;
+    // treating only rc == -1 as unlaunched keeps them comparable by code, so
+    // two sides aborting the same way agree and different deaths disagree.
+    p.launched = rc != -1;
+    if (rc != -1) {
         p.exited = true;
         p.exitCode = rc;
     }
@@ -407,6 +414,17 @@ TEST(StageAgreementLogic, SimplePointersAgreesOnAbortClass) {
     const RunAgreement other = checkRunAgreement("loops", segv, munmap);
     EXPECT_TRUE(other.stdoutMatch);
     EXPECT_FALSE(other.agrees());
+    // Windows shape: no signals through runProcess, so aborts arrive as
+    // exit codes (0xC0000409 read as int). Same code both sides agrees by
+    // exit equality; different abort codes disagree.
+    Proc wabort, wabort2;
+    wabort.exited = true;
+    wabort.exitCode = -1073740791;
+    wabort2.exited = true;
+    wabort2.exitCode = -1073740791;
+    EXPECT_TRUE(checkRunAgreement("simple_pointers", wabort, wabort2).agrees());
+    wabort2.exitCode = -1073741819;
+    EXPECT_FALSE(checkRunAgreement("simple_pointers", wabort, wabort2).agrees());
 }
 
 TEST(StageAgreementLogic, BuildVerdictsRouteEveryShape) {
