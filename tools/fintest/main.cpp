@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -53,6 +54,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <process.h>  // _getpid for the temp-file prefix below
 #define FINTEST_GETPID _getpid
 #else
 #include <fcntl.h>
@@ -148,6 +150,16 @@ std::string uniqueTempPath(const std::string& prefix, const std::string& suffix 
     return (fs::temp_directory_path() / name).string();
 }
 
+// Separators the child spawn accepts. CMake bakes FINC_BINARY with forward
+// slashes and ctest passes test paths the same way (`D:/a/Fin/Fin/...`), and
+// a quoted forward-slash image path fails the Windows launch with `The
+// filename, directory name, or volume label syntax is incorrect.` Every
+// spawned path goes through this before argv construction. On POSIX
+// make_preferred is identity, so Linux TAP is byte-identical by construction.
+std::string nativePath(const std::string& p) {
+    return fs::path(p).make_preferred().string();
+}
+
 // TAP diagnostics: every line a `#` comment on stdout. Bounded: the first
 // kMaxDetailLines lines verbatim, then one count line — the single TAP
 // format for every outcome class, not a second (e.g. summary) format.
@@ -187,6 +199,10 @@ std::string firstAssertionLine(const std::string& text) {
 
 struct Proc {
     bool launched = false;  // false: fork/exec itself failed (tool broken)
+    // Why not, when !launched: the Win32 code or errno at the failing call.
+    // A bare `launched=false` once hid every Windows spawn failure behind
+    // `compile failed (exit 1)` with an empty body; the call sites print this.
+    std::string launchError;
     bool exited = false;    // WIFEXITED — exitCode valid
     int exitCode = -1;
     bool signaled = false;  // WIFSIGNALED — termSig valid (WTERMSIG)
@@ -214,7 +230,10 @@ Proc runWithCapture(const std::vector<std::string>& argv, int timeoutSecs) {
     cargs.push_back(nullptr);
 
     const pid_t pid = fork();
-    if (pid < 0) return p;
+    if (pid < 0) {
+        p.launchError = "cannot fork: errno " + std::to_string(errno);
+        return p;
+    }
     if (pid == 0) {
         setpgid(0, 0);
         const int ofd =
@@ -288,21 +307,31 @@ Proc runWithCapture(const std::vector<std::string>& argv, int timeoutSecs) {
 // (compile step — no deadline policy there).
 Proc runWithCapture(const std::vector<std::string>& argv, int timeoutSecs) {
     Proc p;
-    if (argv.empty()) return p;
-    const std::string outPath = uniqueTempPath("fintest_out");
-    const std::string errPath = uniqueTempPath("fintest_err");
+    if (argv.empty()) {
+        p.launchError = "cannot launch: no argv";
+        return p;
+    }
+    const std::string outPath = nativePath(uniqueTempPath("fintest_out"));
+    const std::string errPath = nativePath(uniqueTempPath("fintest_err"));
     // CreateProcess may modify the command line, so it needs a mutable buffer.
+    // Every element goes through nativePath: the finc image arrives with
+    // forward slashes (FINC_BINARY) and so do the test and -o paths.
     std::string cmd;
     for (const auto& a : argv) {
         if (!cmd.empty()) cmd += ' ';
-        cmd += argvQuote(a);
+        cmd += argvQuote(nativePath(a));
     }
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     HANDLE hOut = CreateFileA(outPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                               &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const DWORD outCode = (hOut == INVALID_HANDLE_VALUE) ? GetLastError() : 0;
     HANDLE hErr = CreateFileA(errPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                               &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const DWORD errCode = (hErr == INVALID_HANDLE_VALUE) ? GetLastError() : 0;
     if (hOut == INVALID_HANDLE_VALUE || hErr == INVALID_HANDLE_VALUE) {
+        const bool outBad = (hOut == INVALID_HANDLE_VALUE);
+        p.launchError = "cannot create temp file " + (outBad ? outPath : errPath) +
+                        ": Win32 " + std::to_string(outBad ? outCode : errCode);
         if (hOut != INVALID_HANDLE_VALUE) CloseHandle(hOut);
         if (hErr != INVALID_HANDLE_VALUE) CloseHandle(hErr);
         return p;
@@ -318,7 +347,11 @@ Proc runWithCapture(const std::vector<std::string>& argv, int timeoutSecs) {
                                         0, nullptr, nullptr, &si, &pi);
     CloseHandle(hOut);
     CloseHandle(hErr);
-    if (!started) return p;
+    if (!started) {
+        p.launchError = "cannot launch " + nativePath(argv[0]) + ": Win32 " +
+                        std::to_string(GetLastError());
+        return p;
+    }
     p.launched = true;
     if (timeoutSecs <= 0) {
         WaitForSingleObject(pi.hProcess, INFINITE);
@@ -503,7 +536,9 @@ int main(int argc, char** argv) {
         std::string body;
         if (!c.launched) {
             std::cout << "not ok " << n << " " << f << "\n";
-            std::cout << "# fintest: tool broken: cannot launch finc\n";
+            std::cout << "# fintest: tool broken: "
+                      << (c.launchError.empty() ? "cannot launch finc" : c.launchError)
+                      << "\n";
             return 3;
         } else if (c.signaled) {
             // A finc crash is a test failure, never runner-internal: exit 1
@@ -526,7 +561,10 @@ int main(int argc, char** argv) {
                 const Proc r = runWithCapture({exe}, runTimeoutSeconds);
                 if (!r.launched) {
                     std::cout << "not ok " << n << " " << f << "\n";
-                    std::cout << "# fintest: tool broken: cannot launch test\n";
+                    std::cout << "# fintest: tool broken: "
+                              << (r.launchError.empty() ? "cannot launch test"
+                                                        : r.launchError)
+                              << "\n";
                     return 3;
                 } else if (r.timedOut) {
                     header = "timeout after " +
