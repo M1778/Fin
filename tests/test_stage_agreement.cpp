@@ -262,12 +262,29 @@ std::string normalizedStderr(const std::string& stem, const std::string& err) {
     return err;
 }
 
+// simple_pointers frees a stack address: undefined behavior, and the C
+// library's response varies by version and environment (SIGABRT with
+// `free(): invalid pointer` on one glibc, `munmap_chunk(): invalid pointer`
+// on another, SIGSEGV with no text at all elsewhere). The sample's contract
+// is only that the program dies abnormally with no output, so for this stem
+// agreement means both sides signaled with byte-identical (empty) stdout;
+// stderr is libc's and is not compared. Scoped to this stem on purpose:
+// everywhere else a stage segfault where C++ aborts is a miscompile, not a
+// libc difference, and exact fate+stderr agreement is what catches it.
+bool isAbortClassAgreement(const std::string& stem) {
+    return stem == "simple_pointers";
+}
+
 RunAgreement checkRunAgreement(const std::string& stem, const Proc& cpp, const Proc& stage) {
     RunAgreement a;
+    const bool abortClass = isAbortClassAgreement(stem) && cpp.signaled && stage.signaled;
     a.fateMatch = (cpp.exited && stage.exited && cpp.exitCode == stage.exitCode) ||
-                  (cpp.signaled && stage.signaled && cpp.termSig == stage.termSig);
+                  (cpp.signaled && stage.signaled &&
+                   (cpp.termSig == stage.termSig || abortClass));
     a.stdoutMatch = cpp.out == stage.out;
-    a.stderrMatch = normalizedStderr(stem, cpp.err) == normalizedStderr(stem, stage.err);
+    a.stderrMatch = (abortClass && a.stdoutMatch && cpp.out.empty())
+                        ? true
+                        : normalizedStderr(stem, cpp.err) == normalizedStderr(stem, stage.err);
     return a;
 }
 
@@ -361,10 +378,12 @@ TEST(StageAgreementLogic, PostFixConstShapeAgrees) {
     EXPECT_TRUE(a.agrees()) << "fate " << procFate(cpp) << " vs " << procFate(stage);
 }
 
-TEST(StageAgreementLogic, SimplePointersStderrAgreesByteExact) {
-    // Bare-T monomorphization converged the glibc spelling: both sides abort
-    // with `free(): invalid pointer`, so no normalization remains and the
-    // identical pair agrees under every stem.
+TEST(StageAgreementLogic, SimplePointersAgreesOnAbortClass) {
+    // simple_pointers frees a stack address: the libc response varies
+    // (SIGABRT with `free(): invalid pointer` here, `munmap_chunk` there,
+    // SIGSEGV with no text elsewhere), so agreement is abort-class scoped
+    // to this stem: both signaled, stdout byte-identical (empty), stderr
+    // uncompared. The identical pair still agrees everywhere.
     Proc cpp, stage;
     cpp.signaled = true;
     cpp.termSig = 6;
@@ -374,6 +393,20 @@ TEST(StageAgreementLogic, SimplePointersStderrAgreesByteExact) {
     stage.err = "free(): invalid pointer\n";
     EXPECT_TRUE(checkRunAgreement("simple_pointers", cpp, stage).agrees());
     EXPECT_TRUE(checkRunAgreement("loops", cpp, stage).agrees());
+    // The CI shape: C++ segfaults silently, stage aborts with munmap text.
+    // Agrees under simple_pointers, and must NOT agree anywhere else (a
+    // stage segfault where C++ aborts is a miscompile outside this stem).
+    Proc segv, munmap;
+    segv.signaled = true;
+    segv.termSig = 11;
+    segv.err = "";
+    munmap.signaled = true;
+    munmap.termSig = 6;
+    munmap.err = "munmap_chunk(): invalid pointer\n";
+    EXPECT_TRUE(checkRunAgreement("simple_pointers", segv, munmap).agrees());
+    const RunAgreement other = checkRunAgreement("loops", segv, munmap);
+    EXPECT_TRUE(other.stdoutMatch);
+    EXPECT_FALSE(other.agrees());
 }
 
 TEST(StageAgreementLogic, BuildVerdictsRouteEveryShape) {
