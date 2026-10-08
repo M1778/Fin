@@ -1,13 +1,24 @@
 # ADR 0010: the matrix that proves finc builds is the thing that ships it.
 #
-# Six archives, named `finc-<semver>-<rust-target-triple>`, because `finn` builds
-# the expected asset name from its own build-time target constant.  Matching on
-# an OS substring alone is the bug in `finn`'s download.rs:62-65 that hands an
-# arm64 user an x86_64 build; a name carrying both OS and arch makes that
-# mismatch impossible rather than merely discouraged.
+# Portable archives, named `finc-<semver>-<rust-target-triple>`, because `finn`
+# builds the expected asset name from its own build-time target constant.
+# Matching on an OS substring alone is the bug in `finn`'s download.rs:62-65
+# that hands an arm64 user an x86_64 build; a name carrying both OS and arch
+# makes that mismatch impossible rather than merely discouraged.
 #
 # Every archive unpacks to exactly `bin/finc[.exe]` and `lib/std/**`.  There is
 # no version directory inside: `finn` supplies the versioned parent.
+#
+# On top of the portable archives each platform ships its native installable,
+# built in the same job from the same staged tree the archive came from:
+# a Windows setup exe (Inno Setup, wrapping the zip's bytes), Ubuntu .deb and
+# Fedora .rpm (FHS layout: /usr/bin/finc + /usr/lib/std, which the compiler's
+# <exe-dir>/../lib/std rule resolves with no wrapper), and macOS .dmg images
+# carrying the same bin/lib tree. Arch Linux is served by the static musl
+# tarball -- rolling release plus zero distro coupling beats a snapshot-built
+# .pkg (see tools/packaging/PKGBUILD, a wrapper prototype, not a CI product).
+# The distro/installer/dmg names never collide with the portable pattern, so
+# they stay out of index.json: `finn` keeps reading exactly the portable set.
 #
 # Each sha256 is published twice -- as an `<asset>.sha256` sidecar next to the
 # asset, and inside the version index.  The index is authoritative; the sidecar
@@ -121,22 +132,32 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
             conan_arch: x86_64
+            llvm_arch: x86_64
             generator: Ninja
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             conan_arch: armv8
+            llvm_arch: x86_64
             generator: Ninja
           - target: x86_64-apple-darwin
             runner: macos-15-intel
             conan_arch: x86_64
+            llvm_arch: x86_64
             generator: Ninja
           - target: aarch64-apple-darwin
             runner: macos-15
             conan_arch: armv8
+            llvm_arch: x86_64
             generator: Ninja
           - target: x86_64-pc-windows-msvc
             runner: windows-2022
             conan_arch: x86_64
+            llvm_arch: x86_64
+            generator: Ninja
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            conan_arch: armv8
+            llvm_arch: aarch64
             generator: Ninja
     env:
       FIN_VERSION: ${{ needs.preflight.outputs.version }}
@@ -145,6 +166,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-toolchain
+        with:
+          # The input is only read by the Windows LLVM step; Linux and macOS
+          # rows carry the default so every row names what it enforces.
+          llvm-arch: ${{ matrix.llvm_arch }}
 
       - name: Build
         run: |
@@ -193,6 +218,9 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then binary=stage/bin/finc.exe; fi
           uv run --no-project python .github/scripts/check_arch.py "$binary" "$FIN_TARGET"
           uv run --no-project python tests/tools/check_docs.py --finc "$binary"
+          # Every artifact class below repackages these same bytes, so the
+          # version proof lives here once: the binary that ships answers.
+          "$binary" --version
           ls -R stage
 
       - name: Archive (tar.gz)
@@ -207,19 +235,91 @@ jobs:
             -DestinationPath "finc-$env:FIN_VERSION-$env:FIN_TARGET.zip" `
             -CompressionLevel Optimal
 
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        run: |
+          # Inno Setup wraps the portable zip's bytes -- the same stage/ tree,
+          # plus an optional PATH entry. No custom installer code; the script
+          # is tools/packaging/finc.iss and the version comes from /D defines.
+          iscc="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          if [ ! -x "$iscc" ]; then choco install innosetup -y --no-progress; fi
+          [ -x "$iscc" ] || { echo "::error::ISCC.exe not found after install"; exit 1; }
+          case "$FIN_TARGET" in
+            aarch64*) fin_arch=arm64 ;;
+            *) fin_arch=x64compatible ;;
+          esac
+          root="$(cygpath -w "$(pwd)")"
+          "$iscc" "/DFinVersion=$FIN_VERSION" "/DFinTarget=$FIN_TARGET" \
+            "/DFinArch=$fin_arch" "/DRepoRoot=$root" "/O$root" tools/packaging/finc.iss
+          # Proof: silent-install to a scratch dir and run what it installed.
+          setup="finc-$FIN_VERSION-$FIN_TARGET-setup.exe"
+          [ -f "$setup" ] || { echo "::error::$setup was not produced"; exit 1; }
+          dest="$(cygpath -u "$RUNNER_TEMP")/finc-install-test"
+          rm -rf "$dest"
+          "./$setup" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART "/DIR=$(cygpath -w "$dest")"
+          "$dest/bin/finc.exe" --version
+
+      - name: macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          # The dmg carries the same bin/finc + lib/std tree as the tarball,
+          # so the compiler's <exe-dir>/../lib/std rule holds wherever the
+          # user drags it. Proved by attaching and running what is inside.
+          bash tools/packaging/build-dmg.sh stage "$FIN_VERSION" "$FIN_TARGET" \
+            "finc-$FIN_VERSION-$FIN_TARGET.dmg"
+          mnt="$(mktemp -d)"
+          hdiutil attach "finc-$FIN_VERSION-$FIN_TARGET.dmg" \
+            -mountpoint "$mnt" -nobrowse
+          "$mnt/finc-$FIN_VERSION-$FIN_TARGET/bin/finc" --version
+          hdiutil detach "$mnt"
+
+      - name: Linux distro packages
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          # The LLVM runtime dependency is read off the binary, not guessed: a
+          # shared libLLVM names the distro runtime package, a static link
+          # means no dependency line at all (the musl tarball's case).
+          deb_dep=""; rpm_dep=""
+          if ldd stage/bin/finc | grep -q 'libLLVM'; then
+            deb_dep="libllvm22"; rpm_dep="llvm-libs"
+          fi
+          echo "LLVM runtime deps: deb='$deb_dep' rpm='$rpm_dep'"
+          bash tools/packaging/build-deb.sh stage "$FIN_VERSION" "$FIN_TARGET" \
+            "finc-$FIN_VERSION-$FIN_TARGET.deb" "$deb_dep"
+          # Proof without root: unpack the deb and run what it installs, from
+          # a foreign directory so the bundled stdlib has to resolve through
+          # the installed /usr/bin -> /usr/lib/std layout.
+          dpkg-deb --info "finc-$FIN_VERSION-$FIN_TARGET.deb"
+          rm -rf deb-test && mkdir deb-test
+          dpkg-deb -x "finc-$FIN_VERSION-$FIN_TARGET.deb" deb-test
+          ./deb-test/usr/bin/finc --version
+          prove="$(mktemp -d)"
+          cp tests/samples/basic.fin "$prove/"
+          ( cd "$prove" && "$GITHUB_WORKSPACE/deb-test/usr/bin/finc" -c basic.fin )
+          # The .rpm needs rpmbuild, which Ubuntu does not ship: install it the
+          # same way any other build tool is installed here, with retries.
+          retry() { local n=0; until "$@"; do n=$((n+1)); if [ "$n" -ge 5 ]; then return 1; fi; sleep $((n*10)); done; }
+          retry sudo apt-get install -y rpm cpio
+          bash tools/packaging/build-rpm.sh stage "$FIN_VERSION" "$FIN_TARGET" \
+            "finc-$FIN_VERSION-$FIN_TARGET.rpm" "$rpm_dep"
+          rpm -qlp "finc-$FIN_VERSION-$FIN_TARGET.rpm"
+          rm -rf rpm-test && mkdir rpm-test
+          ( cd rpm-test && rpm2cpio "../finc-$FIN_VERSION-$FIN_TARGET.rpm" | cpio -idmv )
+          ./rpm-test/usr/bin/finc --version
+
       - name: Checksum
         run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            asset="finc-$FIN_VERSION-$FIN_TARGET.zip"
-          else
-            asset="finc-$FIN_VERSION-$FIN_TARGET.tar.gz"
-          fi
+          # Every shippable asset gets a sidecar, portable or native alike.
           if command -v sha256sum >/dev/null; then
-            sha256sum "$asset" > "$asset.sha256"
+            sum() { sha256sum "$1"; }
           else
-            shasum -a 256 "$asset" > "$asset.sha256"
+            sum() { shasum -a 256 "$1"; }
           fi
-          cat "$asset.sha256"
+          for asset in finc-"$FIN_VERSION"-*; do
+            case "$asset" in *.sha256) continue ;; esac
+            sum "$asset" > "$asset.sha256"
+            cat "$asset.sha256"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -228,6 +328,10 @@ jobs:
           path: |
             finc-*.tar.gz
             finc-*.zip
+            finc-*.deb
+            finc-*.rpm
+            finc-*-setup.exe
+            finc-*.dmg
             finc-*.sha256
 
   # musl is built inside an Alpine container rather than on the host, so the
@@ -280,6 +384,7 @@ jobs:
             exit 1
           fi
           python3 .github/scripts/check_arch.py stage-musl/bin/finc "$FIN_TARGET"
+          stage-musl/bin/finc --version
 
       - name: Archive and checksum
         run: |
@@ -314,7 +419,7 @@ jobs:
           pattern: asset-*
           merge-multiple: true
 
-      - name: Check that all six archives are present and intact
+      - name: Check that all thirteen assets are present and intact
         run: |
           cd dist
           expected="
@@ -324,6 +429,13 @@ jobs:
           finc-$FIN_VERSION-x86_64-apple-darwin.tar.gz
           finc-$FIN_VERSION-aarch64-apple-darwin.tar.gz
           finc-$FIN_VERSION-x86_64-pc-windows-msvc.zip
+          finc-$FIN_VERSION-aarch64-pc-windows-msvc.zip
+          finc-$FIN_VERSION-x86_64-unknown-linux-gnu.deb
+          finc-$FIN_VERSION-x86_64-unknown-linux-gnu.rpm
+          finc-$FIN_VERSION-x86_64-pc-windows-msvc-setup.exe
+          finc-$FIN_VERSION-aarch64-pc-windows-msvc-setup.exe
+          finc-$FIN_VERSION-x86_64-apple-darwin.dmg
+          finc-$FIN_VERSION-aarch64-apple-darwin.dmg
           "
           missing=0
           for f in $expected; do
@@ -365,10 +477,14 @@ jobs:
         if: github.ref_type == 'tag' || inputs.publish
         run: |
           notes="finc $FIN_VERSION
-          
-          Each archive unpacks to \`bin/finc\` and \`lib/std/\`.  Verify a download with
-          its \`.sha256\` sidecar; \`index.json\` carries the authoritative sums and is
-          what \`finn\` reads."
+
+          Portable archives (\`finc-<version>-<target>\`) unpack to \`bin/finc[.exe]\`
+          and \`lib/std/\`. Native installables: Windows setup exe (per arch),
+          Ubuntu .deb and Fedora .rpm (\`finc-<version>-x86_64-unknown-linux-gnu.*\`;
+          install with \`apt\`/\`dnf\`), macOS .dmg per arch. Arch Linux: use the
+          static musl tarball (no distro coupling) with tools/packaging/PKGBUILD.
+          Verify a download with its \`.sha256\` sidecar; \`index.json\` carries the
+          authoritative sums and is what \`finn\` reads (portable archives only)."
           flags=()
           if [ "${{ needs.preflight.outputs.prerelease }}" = "true" ]; then flags+=(--prerelease); fi
           gh release create "$FIN_TAG" --target "$GITHUB_SHA" \
