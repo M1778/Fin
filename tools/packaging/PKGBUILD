@@ -1,0 +1,30 @@
+# Arch Linux packaging: the static musl tarball IS the Arch installable.
+#
+# Arch is rolling and glibc-led, so a musl-static finc has no distro coupling
+# at all -- the same finc-<version>-x86_64-unknown-linux-musl.tar.gz the
+# release publishes installs on Arch today and after the next glibc bump. That
+# is why there is no CI-built .pkg.tar.zst: a native package built on one
+# Arch snapshot is staler than a static binary by construction.
+#
+# This PKGBUILD wraps that tarball for makepkg/AUR use. Per release, bump
+# `pkgver` to the tag's version and fill `sha256sums` from the tarball's
+# `.sha256` sidecar on the release page.
+pkgname=finc-bin
+pkgver=0.4.0
+pkgrel=1
+pkgdesc='Fin systems programming language compiler (static binary)'
+arch=('x86_64')
+url='https://github.com/M1778/Fin'
+license=('GPL-3.0-only')
+provides=('finc')
+conflicts=('finc')
+source=("finc-$pkgver-x86_64-unknown-linux-musl.tar.gz::https://github.com/M1778/Fin/releases/download/v$pkgver/finc-$pkgver-x86_64-unknown-linux-musl.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  # FHS for the same reason as the .deb/.rpm: /usr/bin/finc resolves
+  # /usr/lib/std through the compiler's <exe-dir>/../lib/std rule.
+  install -Dm755 bin/finc "$pkgdir/usr/bin/finc"
+  mkdir -p "$pkgdir/usr/lib/std"
+  install -m644 lib/std/*.fin -t "$pkgdir/usr/lib/std/"
+}
