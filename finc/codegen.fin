@@ -322,6 +322,12 @@ pub struct FnContext {
       // the AST is in hand; read by generic-name consults during lowering.
       // Empty keeps every non-generic body exactly as before.
       cur_gen <string> = "",
+      // Expected result spelling for the call under lowering (`&Vec2<float>`
+      // for `let v <&Vec2<float>> = Vec2::zero()`). Set by `let` lowering
+      // around its initializer, restored after; read only by the static
+      // cache for Self-returning statics no argument binds. Empty
+      // everywhere else, so every other call lowers exactly as before.
+      call_want <string> = "",
 }
 
 fun fn_ctx_add_var(ctx: &FnContext, name: string, val: &LLVMValue, ty: &LLVMType, type_ann: string) <noret> {
@@ -6683,6 +6689,165 @@ fun cg_static_self_cache_sym(ctx: &FnContext, st: &StructInfo, struct_name: stri
     return sym;
 }
 
+// A Self-returning static with no bindable parameters (`zero()`) names no
+// instantiation at the call: the caches above decline it and the eager body
+// erases the arguments, so omitted struct defaults evaluate against the
+// bare template (an int default for `x <T>` reads back garbage under a
+// float instantiation). Where the `let` target names the concrete
+// instantiation (`let v <&Vec2<float>> = Vec2::zero()`), instantiate per
+// that spelling -- one declare + drained body per key, the same shape as
+// the Self-rooted statics above. Anything exotic stays eager.
+fun cg_static_expected_sym(ctx: &FnContext, struct_name: string, mshort: string, n: &AstNode) <&FnSymbol> {
+    if (ctx == null || struct_name == null || mshort == null || n == null) { return null; }
+    if (ctx.call_want == null || cg_strlen(ctx.call_want) == cast<ulong>(0)) { return null; }
+    let st <&StructInfo> = find_struct(ctx, struct_name);
+    if (st == null) { return null; }
+    if (st.gen_params == null || cg_strlen(st.gen_params) == cast<ulong>(0)) { return null; }
+    let tmpl <&AstNode> = cg_find_method_ast(ctx, struct_name, mshort);
+    if (tmpl == null || tmpl.kind != ast_fun_decl() || tmpl.left == null) { return null; }
+    // Only methods without their own generic parameters: an uninferred `U`
+    // is exotic, like above.
+    let mneed <[string]> = new [string, 64]{};
+    let mn <int> = cg_method_param_names(tmpl.str_val, mneed, 64);
+    delete mneed;
+    if (mn > 0) { return null; }
+    // Only Self/owner-returning statics: the key binds the construction
+    // the body performs, nothing else.
+    let ret <string> = "";
+    if (tmpl.type_annotation != null) { ret = cg_trim_spaces(tmpl.type_annotation); }
+    let rlen <int> = cast<int>(cg_strlen(ret));
+    while (rlen > 1 && (cg_str_eq(substr(ret, 0, 1), "&") || cg_str_eq(substr(ret, 0, 1), "*"))) {
+        ret = cg_trim_spaces(substr(ret, 1, rlen - 1));
+        rlen = cast<int>(cg_strlen(ret));
+    }
+    while (rlen > 1 && cg_str_eq(substr(ret, rlen - 1, 1), "*")) {
+        ret = cg_trim_spaces(substr(ret, 0, rlen - 1));
+        rlen = cast<int>(cg_strlen(ret));
+    }
+    {
+        let rcut <int> = rlen;
+        let ri <int> = 0;
+        while (ri < rlen) {
+            if (cg_str_eq(substr(ret, ri, 1), "<")) { rcut = ri; break; }
+            ri = ri + 1;
+        }
+        ret = cg_trim_spaces(substr(ret, 0, rcut));
+    }
+    if (!cg_str_eq(ret, "Self") && !cg_str_eq(ret, struct_name)) { return null; }
+    // The expected spelling names the instantiation (`&Vec2<float>` ->
+    // `Vec2<float>`); anything else stays eager.
+    let full <string> = cg_trim_spaces(ctx.call_want);
+    let flen <int> = cast<int>(cg_strlen(full));
+    while (flen > 1 && (cg_str_eq(substr(full, 0, 1), "&") || cg_str_eq(substr(full, 0, 1), "*"))) {
+        full = cg_trim_spaces(substr(full, 1, flen - 1));
+        flen = cast<int>(cg_strlen(full));
+    }
+    while (flen > 1 && cg_str_eq(substr(full, flen - 1, 1), "*")) {
+        full = cg_trim_spaces(substr(full, 0, flen - 1));
+        flen = cast<int>(cg_strlen(full));
+    }
+    let open_at <int> = -1;
+    let oi <int> = 0;
+    while (oi < flen) {
+        if (cg_str_eq(substr(full, oi, 1), "<")) { open_at = oi; break; }
+        oi = oi + 1;
+    }
+    if (open_at <= 0) { return null; }
+    let close_at <int> = -1;
+    let cj <int> = flen - 1;
+    while (cj > open_at) {
+        if (cg_str_eq(substr(full, cj, 1), ">")) { close_at = cj; break; }
+        cj = cj + 1;
+    }
+    if (close_at < 0) { return null; }
+    let base <string> = cg_trim_spaces(substr(full, 0, open_at));
+    if (!cg_str_eq(base, struct_name)) { return null; }
+    let inner <string> = substr(full, open_at + 1, close_at - open_at - 1);
+    let s_params <[string]> = new [string, 64]{};
+    let s_args <[string]> = new [string, 64]{};
+    let scount <int> = cg_split_top(st.gen_params, s_params, 64);
+    let acount <int> = cg_split_top(inner, s_args, 64);
+    if (scount <= 0 || acount != scount) { delete s_params; delete s_args; return null; }
+    let gi <int> = 0;
+    while (gi < scount) {
+        s_args[gi] = cg_trim_spaces(s_args[gi]);
+        if (cg_strlen(s_args[gi]) == cast<ulong>(0) || cg_str_eq(s_args[gi], "Self") || cg_is_generic_ann(ctx, s_args[gi])) { delete s_params; delete s_args; return null; }
+        if (!cg_modellable_seg(ctx, s_args[gi])) { delete s_params; delete s_args; return null; }
+        gi = gi + 1;
+    }
+    // Same key shape as the caches above (`Base<args>.method<>`): one
+    // declare + drained body per key, asking twice finds the first.
+    let kb <Buffer> = new_buffer(128);
+    kb.write_string(struct_name);
+    kb.write_char('<');
+    let kji <int> = 0;
+    while (kji < scount) {
+        if (kji > 0) { kb.write_string(", "); }
+        kb.write_string(s_args[kji]);
+        kji = kji + 1;
+    }
+    kb.write_char('>');
+    kb.write_char('.');
+    kb.write_string(mshort);
+    kb.write_string("<>");
+    let key <string> = kb.to_string();
+    free_buffer(kb);
+    let hit <&FnSymbol> = fn_ctx_find_fn(ctx, key);
+    if (hit != null) { delete s_params; delete s_args; return hit; }
+    let inner_b <Buffer> = new_buffer(64);
+    let iji <int> = 0;
+    while (iji < scount) {
+        if (iji > 0) { inner_b.write_string(", "); }
+        inner_b.write_string(s_args[iji]);
+        iji = iji + 1;
+    }
+    let inner_j <string> = inner_b.to_string();
+    free_buffer(inner_b);
+    let has_eq <bool> = cg_fn_uses_generic_eq(tmpl, false);
+    let has_ne <bool> = cg_fn_uses_generic_eq(tmpl, true);
+    let disp_b <Buffer> = new_buffer(64);
+    disp_b.write_string(struct_name);
+    disp_b.write_char('.');
+    disp_b.write_string(mshort);
+    let disp <string> = disp_b.to_string();
+    free_buffer(disp_b);
+    if (has_eq) {
+        if (cg_check_generic_eq_args(ctx, disp, inner_j, false)) { delete s_params; delete s_args; return null; }
+    }
+    if (has_ne) {
+        if (cg_check_generic_eq_args(ctx, disp, inner_j, true)) { delete s_params; delete s_args; return null; }
+    }
+    let params <[string]> = new [string, 128]{};
+    let args <[string]> = new [string, 128]{};
+    let ti <int> = 0;
+    while (ti < scount) {
+        params[ti] = s_params[ti];
+        args[ti] = s_args[ti];
+        ti = ti + 1;
+    }
+    params[scount] = "Self";
+    args[scount] = full;
+    params[scount + 1] = struct_name;
+    args[scount + 1] = full;
+    let clone <&AstNode> = cg_clone_subst(tmpl, params, args, scount + 2);
+    delete params;
+    delete args;
+    delete s_params;
+    delete s_args;
+    if (clone == null) { return null; }
+    clone.name = key;
+    clone.right = null;
+    clone.str_val = "";
+    ctx.fn_sym_count = declare_function(ctx.module, clone, ctx.fn_syms, ctx.fn_sym_count, ctx.interfaces, ctx.interface_count);
+    let sym <&FnSymbol> = fn_ctx_find_fn(ctx, key);
+    if (sym == null || sym.fn_val == null) {
+        return null;
+    }
+    sym.tmpl = clone;
+    sym.tmpl_done = false;
+    return sym;
+}
+
 fun cg_static_cache_sym(ctx: &FnContext, struct_name: string, mshort: string, n: &AstNode) <&FnSymbol> {
     if (ctx == null || struct_name == null || mshort == null || n == null) { return null; }
     if (cg_strlen(struct_name) == cast<ulong>(0) || cg_strlen(mshort) == cast<ulong>(0)) { return null; }
@@ -6839,6 +7004,10 @@ fun cg_static_cache_sym(ctx: &FnContext, struct_name: string, mshort: string, n:
         pw = pw.right;
         cw = cw.right;
     }
+    // Last: a Self-returning static the shapes above decline (`zero()`)
+    // instantiates per the `let` target spelling, where one names it.
+    let exp_hit <&FnSymbol> = cg_static_expected_sym(ctx, struct_name, mshort, n);
+    if (exp_hit != null) { delete s_params; return exp_hit; }
     delete s_params;
     return null;
 }
@@ -7419,24 +7588,79 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 arr_val = llvm_build_load2(ctx.builder, ctx.ptr_ty, arr_val, "ref_arr");
             }
             if (is_prototype_node(ctx, n.left)) {
-                // Direct prototype subscript `p[k]`. The values live in the
-                // header's vals buffer as i64 words; an integer index walks
-                // them positionally and the word returns raw for the consumer
-                // to coerce. A non-integer key keeps the legacy slot-0 read:
-                // key search is not modeled on stage.
+                // Direct prototype subscript `p[k]`. The header holds
+                // parallel keys/vals buffers of i64 words; an integer key
+                // scans the keys for the word and reads the value at the
+                // same position (C++ emitPrototypeLookup), blaming when no
+                // key matches. A non-integer key keeps the legacy slot-0
+                // read: key search is not modeled on stage for those.
                 let idx_ty_p <&LLVMType> = llvm_type_of(idx_val);
                 if (cg_is_int_llvm(ctx, idx_ty_p)) {
+                    let key64 <&LLVMValue> = coerce_val(ctx, idx_val, ctx.i64_ty);
+                    let ind_k <&LLVMIndices> = new LLVMIndices{};
+                    ind_k.i0 = llvm_const_int(ctx.i64_ty, 0, 0);
+                    let k_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_k, 1, "pk_p");
+                    delete ind_k;
+                    let k_buf <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, k_ptr, "k_buf");
+                    let ind_l <&LLVMIndices> = new LLVMIndices{};
+                    ind_l.i0 = llvm_const_int(ctx.i64_ty, 1, 0);
+                    let len_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, arr_val, ind_l, 1, "plen_p");
+                    delete ind_l;
+                    let len64 <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, len_ptr, "plen");
                     let ind_v <&LLVMIndices> = new LLVMIndices{};
                     ind_v.i0 = llvm_const_int(ctx.i64_ty, 2, 0);
                     let pv_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.ptr_ty, arr_val, ind_v, 1, "pv_p");
                     delete ind_v;
                     let v_buf <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, pv_ptr, "v_buf");
-                    let idx64_p <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "pidx64");
-                    let ind_p <&LLVMIndices> = new LLVMIndices{};
-                    ind_p.i0 = idx64_p;
-                    let vp_gep <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, v_buf, ind_p, 1, "pval");
-                    delete ind_p;
-                    return llvm_build_load2(ctx.builder, ctx.i64_ty, vp_gep, "pval_ld");
+                    let cur_s <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.i64_ty, "pfind.i");
+                    llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, 0, 0), cur_s);
+                    let at_s <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.i64_ty, "pfind.at");
+                    llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, 0, 0), at_s);
+                    let hit_s <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.i1_ty, "pfind.hit");
+                    llvm_build_store(ctx.builder, llvm_const_int(ctx.i1_ty, 0, 0), hit_s);
+                    let scan_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pfind.scan");
+                    let body_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pfind.body");
+                    let pfound_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pfind.found");
+                    let next_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pfind.next");
+                    let pdone_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pfind.done");
+                    let phit_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pfind.hit");
+                    let pmiss_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "pfind.miss");
+                    llvm_build_br(ctx.builder, scan_bb);
+                    llvm_position_builder(ctx.builder, scan_bb);
+                    let cur_i <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, cur_s, "pfind.i");
+                    let pmore <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_ult(), cur_i, len64, "pfind.more");
+                    llvm_build_cond_br(ctx.builder, pmore, body_bb, pdone_bb);
+                    llvm_position_builder(ctx.builder, body_bb);
+                    let ind_c <&LLVMIndices> = new LLVMIndices{};
+                    ind_c.i0 = cur_i;
+                    let cand_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, k_buf, ind_c, 1, "pkey");
+                    delete ind_c;
+                    let cand <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, cand_ptr, "pkey.ld");
+                    let key_eq <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), cand, key64, "pkey.eq");
+                    llvm_build_cond_br(ctx.builder, key_eq, pfound_bb, next_bb);
+                    llvm_position_builder(ctx.builder, pfound_bb);
+                    llvm_build_store(ctx.builder, llvm_const_int(ctx.i1_ty, 1, 0), hit_s);
+                    llvm_build_store(ctx.builder, cur_i, at_s);
+                    llvm_build_br(ctx.builder, pdone_bb);
+                    llvm_position_builder(ctx.builder, next_bb);
+                    llvm_build_store(ctx.builder, llvm_build_add(ctx.builder, cur_i, llvm_const_int(ctx.i64_ty, 1, 0), "pfind.nxt"), cur_s);
+                    llvm_build_br(ctx.builder, scan_bb);
+                    llvm_position_builder(ctx.builder, pdone_bb);
+                    let was_hit <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i1_ty, hit_s, "pfind.was");
+                    llvm_build_cond_br(ctx.builder, was_hit, phit_bb, pmiss_bb);
+                    llvm_position_builder(ctx.builder, pmiss_bb);
+                    cg_emit_absent_blame(ctx, n.line, "this lookup because the key is not in the prototype");
+                    let ab_fn <&LLVMValue> = get_or_declare_abort(ctx);
+                    let ab_ty <&LLVMType> = llvm_global_get_value_type(ab_fn);
+                    llvm_build_call2(ctx.builder, ab_ty, ab_fn, null, 0, "");
+                    llvm_build_unreachable(ctx.builder);
+                    llvm_position_builder(ctx.builder, phit_bb);
+                    let at_i <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, at_s, "pfind.at");
+                    let ind_h <&LLVMIndices> = new LLVMIndices{};
+                    ind_h.i0 = at_i;
+                    let hit_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, v_buf, ind_h, 1, "pval");
+                    delete ind_h;
+                    return llvm_build_load2(ctx.builder, ctx.i64_ty, hit_ptr, "pval.ld");
                 }
                 let ind_v <&LLVMIndices> = new LLVMIndices{};
                 ind_v.i0 = llvm_const_int(ctx.i64_ty, 2, 0);
@@ -8959,11 +9183,11 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             // Only explicit spellings gate (`Box<int>`); bare and elided
             // forms keep today's lowering and the method-call gate owns
             // those paths.
+            let gate_spell <string> = st_name;
+            if (n.resolved_spelling != null && cg_strlen(n.resolved_spelling) > cast<ulong>(0)) {
+                gate_spell = n.resolved_spelling;
+            }
             {
-                let gate_spell <string> = st_name;
-                if (n.resolved_spelling != null && cg_strlen(n.resolved_spelling) > cast<ulong>(0)) {
-                    gate_spell = n.resolved_spelling;
-                }
                 let glen <int> = 0;
                 if (gate_spell != null) { glen = cast<int>(cg_strlen(gate_spell)); }
                 let gopen <int> = -1;
@@ -8993,6 +9217,12 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     st_name = cg_trim_spaces(substr(st_name, 0, sopen));
                 }
             }
+            // Per-instantiation field view (C++ buildStructValue evaluates
+            // defaults in the instantiated context): `Vec2<float>` answers
+            // `float` for `x <T>` where the bare template answers pointer.
+            // Bare or unknown spellings answer the template (or null), and
+            // the loops below fall back to the declared field type.
+            let lit_inst <&StructInfo> = cg_ensure_struct_instance(ctx, gate_spell);
             let f_cur <&AstNode> = n.left;
             while (f_cur != null) {
                 let saved_hint <bool> = ctx.arr_hint_auto;
@@ -9020,6 +9250,29 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                         refuse_and_poison(ctx);
                         llvm_build_unreachable(ctx.builder);
                         return null;
+                    }
+                }
+                // A numeric init into a float/double slot converts (C++
+                // converts an int literal for a float field; storing the
+                // raw word reads back garbage). Other slots lower as before.
+                {
+                    let f_sub <&LLVMType> = f_want;
+                    if (lit_inst != null) {
+                        let f_sfi <int> = 0;
+                        while (f_sfi < lit_inst.field_count) {
+                            let f_sf <&StructFieldInfo> = lit_inst.fields[f_sfi];
+                            if (f_sf != null && cg_str_eq(f_sf.name, f_cur.name)) {
+                                f_sub = map_type(ctx, f_sf.type_annotation);
+                                break;
+                            }
+                            f_sfi = f_sfi + 1;
+                        }
+                    }
+                    if (f_val != null && f_sub != null && (f_sub == ctx.float_ty || f_sub == ctx.double_ty)) {
+                        let f_vt <&LLVMType> = llvm_type_of(f_val);
+                        if (f_vt != f_sub && (f_vt == ctx.i32_ty || f_vt == ctx.i64_ty || f_vt == ctx.i8_ty || f_vt == ctx.i16_ty || f_vt == ctx.i1_ty || f_vt == ctx.float_ty || f_vt == ctx.double_ty)) {
+                            f_val = coerce_val(ctx, f_val, f_sub);
+                        }
                     }
                 }
                 let f_idx <int> = find_field_index_by_name(ctx, st_name, f_cur.name);
@@ -9069,6 +9322,28 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                             refuse_and_poison(ctx);
                             llvm_build_unreachable(ctx.builder);
                             return null;
+                        }
+                    }
+                    // Same numeric conversion as written fields above: an
+                    // int default (`x <float> = 1`) reads 1.0 on C++.
+                    {
+                        let d_sub <&LLVMType> = d_want;
+                        if (lit_inst != null) {
+                            let d_sfi <int> = 0;
+                            while (d_sfi < lit_inst.field_count) {
+                                let d_sf <&StructFieldInfo> = lit_inst.fields[d_sfi];
+                                if (d_sf != null && cg_str_eq(d_sf.name, d_fld.name)) {
+                                    d_sub = map_type(ctx, d_sf.type_annotation);
+                                    break;
+                                }
+                                d_sfi = d_sfi + 1;
+                            }
+                        }
+                        if (d_val != null && d_sub != null && (d_sub == ctx.float_ty || d_sub == ctx.double_ty)) {
+                            let d_vt <&LLVMType> = llvm_type_of(d_val);
+                            if (d_vt != d_sub && (d_vt == ctx.i32_ty || d_vt == ctx.i64_ty || d_vt == ctx.i8_ty || d_vt == ctx.i16_ty || d_vt == ctx.i1_ty || d_vt == ctx.float_ty || d_vt == ctx.double_ty)) {
+                                d_val = coerce_val(ctx, d_val, d_sub);
+                            }
                         }
                     }
                     let d_idx <int> = find_field_index_by_name(ctx, st_name, d_fld.name);
@@ -10996,7 +11271,16 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
             v.tie_master = tie_master;
         }
         if (stmt.left != null) {
+            // The `let` target spelling is the expected call-result type
+            // (`&Vec2<float>` for `= Vec2::zero()`): the static cache reads
+            // it to instantiate Self-returning statics no argument binds.
+            // Saved and restored like arr_hint_auto, so nesting is exact.
+            let saved_want <string> = ctx.call_want;
+            if (stmt.left.kind == ast_call_expr()) {
+                ctx.call_want = ty_ann;
+            }
             let init_val <&LLVMValue> = lower_expr(ctx, stmt.left);
+            ctx.call_want = saved_want;
             if (init_val == null) {
                 // Storing nothing leaves the slot uninitialized and the
                 // program prints stack garbage with exit 0. Refuse instead.
