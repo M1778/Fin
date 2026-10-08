@@ -1362,6 +1362,99 @@ BACKEND_TEST(Soundness_Codegen, TwoDynamicArraysOfOneElementTypeAreTheSameType) 
     EXPECT_EQ(b.out, "3 4\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, AFixedArrayDecaysIntoADynamicReference) {
+    // An inferred fixed array passed by `&` where `&[T]` is expected: the
+    // analyzer admits the decay (ArrayType admits fixed into dynamic), so the
+    // backend must materialise the `{ptr, len}` pair rather than hand the
+    // callee the fixed storage. Handing it over raw made the callee read the
+    // first elements as a data pointer and segfault at -O0. The `+ 1` proves
+    // the write went through the reference into the caller's storage: a
+    // lowering that merely stopped crashing would print `7 3 4`.
+    // Both optimisation levels in one test: the crash reproduced at -O0 while
+    // -O2 happened to fold it away, and the levels must agree.
+    const std::string code = std::string(kPrintf) +
+        "fun take(array: &[int]) <noret> {\n"
+        "    let t <int>;\n"
+        "    t = array[0];\n"
+        "    array[0] = t + 1;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let myarr = [7, 3, 4];\n"
+        "    take(&myarr);\n"
+        "    printf(\"%d %d %d\\n\", myarr[0], myarr[1], myarr[2]);\n"
+        "}\n";
+    const fs::path src = uniqueTempPath("fin_decay", ".fin");
+    const fs::path exe0 = uniqueTempPath("fin_decay_exe0");
+    const fs::path exe2 = uniqueTempPath("fin_decay_exe2");
+    {
+        std::ofstream f(src, std::ios::binary);
+        f.write(code.data(), (std::streamsize)code.size());
+    }
+    const FincRun c0 = runFinc({src.string(), "-o", exe0.string()});
+    EXPECT_EQ(c0.exitCode, 0) << stripAnsi(c0.err);
+    const FincRun c2 = runFinc({src.string(), "-O2", "-o", exe2.string()});
+    EXPECT_EQ(c2.exitCode, 0) << stripAnsi(c2.err);
+    ASSERT_TRUE(fs::exists(exe0)) << stripAnsi(c0.err);
+    ASSERT_TRUE(fs::exists(exe2)) << stripAnsi(c2.err);
+
+    const fs::path out0 = uniqueTempPath("fin_decay_out0");
+    EXPECT_EQ(fin::runProcess({exe0.string()}, out0.string(), out0.string()), 0);
+    EXPECT_EQ(readProcessOutput(out0.string()), "8 3 4\n");
+    const fs::path out2 = uniqueTempPath("fin_decay_out2");
+    EXPECT_EQ(fin::runProcess({exe2.string()}, out2.string(), out2.string()), 0);
+    EXPECT_EQ(readProcessOutput(out2.string()), "8 3 4\n");
+
+    std::error_code ec;
+    fs::remove(src, ec);
+    fs::remove(exe0, ec);
+    fs::remove(exe2, ec);
+    fs::remove(out0, ec);
+    fs::remove(out2, ec);
+}
+
+BACKEND_TEST(Soundness_Codegen, AFixedArrayDecaysIntoAGenericDynamicReference) {
+    // The same decay through a generic `&[T]` parameter: monomorphisation must
+    // still materialise the pair. The element move proves both the read and
+    // the write went through the reference.
+    const std::string code = std::string(kPrintf) +
+        "type Number = int | uint | float | short | long | ushort | ulong | double;\n"
+        "fun touch<T: Number>(array: &[T]) <noret> {\n"
+        "    array[0] = array[8];\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let myarr = [7, 3, 4, 7, 12, 4, 6, 9, 0];\n"
+        "    touch(&myarr);\n"
+        "    printf(\"%d %d %d\\n\", myarr[0], myarr[1], myarr[8]);\n"
+        "}\n";
+    const fs::path src = uniqueTempPath("fin_gdecay", ".fin");
+    const fs::path exe0 = uniqueTempPath("fin_gdecay_exe0");
+    const fs::path exe2 = uniqueTempPath("fin_gdecay_exe2");
+    {
+        std::ofstream f(src, std::ios::binary);
+        f.write(code.data(), (std::streamsize)code.size());
+    }
+    const FincRun c0 = runFinc({src.string(), "-o", exe0.string()});
+    EXPECT_EQ(c0.exitCode, 0) << stripAnsi(c0.err);
+    const FincRun c2 = runFinc({src.string(), "-O2", "-o", exe2.string()});
+    EXPECT_EQ(c2.exitCode, 0) << stripAnsi(c2.err);
+    ASSERT_TRUE(fs::exists(exe0)) << stripAnsi(c0.err);
+    ASSERT_TRUE(fs::exists(exe2)) << stripAnsi(c2.err);
+
+    const fs::path out0 = uniqueTempPath("fin_gdecay_out0");
+    EXPECT_EQ(fin::runProcess({exe0.string()}, out0.string(), out0.string()), 0);
+    EXPECT_EQ(readProcessOutput(out0.string()), "0 3 0\n");
+    const fs::path out2 = uniqueTempPath("fin_gdecay_out2");
+    EXPECT_EQ(fin::runProcess({exe2.string()}, out2.string(), out2.string()), 0);
+    EXPECT_EQ(readProcessOutput(out2.string()), "0 3 0\n");
+
+    std::error_code ec;
+    fs::remove(src, ec);
+    fs::remove(exe0, ec);
+    fs::remove(exe2, ec);
+    fs::remove(out0, ec);
+    fs::remove(out2, ec);
+}
+
 BACKEND_TEST(Soundness_Codegen, AnArrayAllocationIsAPairAndNotAPointerToAFixedArray) {
     // `new [T, n]{}` is the one allocation whose result is not a pointer. The analyzer
     // types it `[T]` (`self._arr = new [T, amount]{}` at stdlib/collection.fin:54

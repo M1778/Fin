@@ -8454,6 +8454,320 @@ pub struct Checker {
           delete psegs;
       }
 
+      // Duplicate operator refusal (C++ codegen lowerableOperator): two
+      // operators of one token are two definitions of one symbol, and the
+      // backend keeps the first, so the second body would silently not run.
+      // Reports `codegen: a second operator 'X' on struct 'Y' is not lowered
+      // yet` at the second declaration, like C++.
+      fun check_duplicate_operators(self: &Self, decl: &AstNode) <noret> {
+          if (decl == null) { return; }
+          let seen <[string]> = new [string, 32]{};
+          let n <int> = 0;
+          let m <&AstNode> = decl.extra;
+          while (m != null) {
+              let ms <string> = self.bare_short_of(m.name, decl.name);
+              if (!chk_str_eq(ms, "") && self.chk_member_class(ms, decl.name) == 1) {
+                  let sym <string> = substr(ms, 8, cast<int>(chk_strlen(ms)) - 8);
+                  let dup <bool> = false;
+                  let i <int> = 0;
+                  while (i < n) {
+                      if (chk_str_eq(seen[i], sym)) { dup = true; break; }
+                      i = i + 1;
+                  }
+                  if (dup) {
+                      let b <Buffer> = new_buffer(96);
+                      b.write_string("codegen: a second operator '");
+                      b.write_string(sym);
+                      b.write_string("' on struct '");
+                      b.write_string(decl.name);
+                      b.write_string("' is not lowered yet");
+                      let msg <string> = b.to_string();
+                      free_buffer(b);
+                      self.report_error(msg, m.line, m.col);
+                  } else {
+                      if (n < 32) {
+                          seen[n] = sym;
+                          n = n + 1;
+                      }
+                  }
+              }
+              m = m.right;
+          }
+          delete seen;
+      }
+
+      // Whole-word search for `needle` in `hay`, -1 when absent. Word
+      // boundaries use the identifier test so `myimplements` never matches.
+      fun impl_find_word(self: &Self, hay: string, needle: string) <int> {
+          if (hay == null || needle == null) { return -1; }
+          let hlen <int> = cast<int>(chk_strlen(hay));
+          let nlen <int> = cast<int>(chk_strlen(needle));
+          if (nlen <= 0 || nlen > hlen) { return -1; }
+          let i <int> = 0;
+          while (i + nlen <= hlen) {
+              if (chk_str_eq(substr(hay, i, nlen), needle)) {
+                  let pre_ok <bool> = true;
+                  if (i > 0) {
+                      if (self.bare_is_ident_char(substr(hay, i - 1, 1))) { pre_ok = false; }
+                  }
+                  let post_ok <bool> = true;
+                  if (i + nlen < hlen) {
+                      if (self.bare_is_ident_char(substr(hay, i + nlen, 1))) { post_ok = false; }
+                  }
+                  if (pre_ok && post_ok) { return i; }
+              }
+              i = i + 1;
+          }
+          return -1;
+      }
+
+      // Base name before the first delimiter (`Addable<Point>> {` answers
+      // `Addable`). "" when nothing precedes one.
+      fun impl_base_before_delims(self: &Self, s: string) <string> {
+          if (s == null) { return ""; }
+          let len <int> = cast<int>(chk_strlen(s));
+          let i <int> = 0;
+          while (i < len) {
+              let ch <string> = substr(s, i, 1);
+              if (chk_str_eq(ch, "<") || chk_str_eq(ch, ">") || chk_str_eq(ch, ",") ||
+                  chk_str_eq(ch, " ") || chk_str_eq(ch, "\t") || chk_str_eq(ch, "{") ||
+                  chk_str_eq(ch, ";") || chk_str_eq(ch, "(") || chk_str_eq(ch, ")")) {
+                  break;
+              }
+              i = i + 1;
+          }
+          if (i <= 0) { return ""; }
+          return chk_trim(substr(s, 0, i));
+      }
+
+      // 1-based column of `word` as a whole word in `code`, -1 when absent.
+      fun impl_word_col(self: &Self, code: string, word: string) <int> {
+          let pos <int> = self.impl_find_word(code, word);
+          if (pos < 0) { return -1; }
+          return pos + 1;
+      }
+
+      // A flattened `Target_member` (an implements-block body the parser
+      // filed as a top-level `Target_member`) satisfies a method requirement.
+      // Own struct members count too, via the struct-parent helper.
+      fun impl_provides_method(self: &Self, root: &AstNode, tdecl: &AstNode, tname: string, want: string) <bool> {
+          if (tdecl != null && tdecl.kind == ast_struct_decl()) {
+              if (self.struct_provides_method(tdecl, want)) { return true; }
+          }
+          let d <&AstNode> = root.left;
+          while (d != null) {
+              if (d.kind == ast_fun_decl()) {
+                  let sh <string> = self.bare_short_of(d.name, tname);
+                  if (!chk_str_eq(sh, "") && self.chk_member_class(sh, tname) == 0 && chk_str_eq(sh, want)) { return true; }
+              }
+              d = d.right;
+          }
+          return false;
+      }
+
+      // Same, for an operator requirement (`=` still satisfies `[]=`,
+      // one-directional like the struct-parent check).
+      fun impl_provides_operator(self: &Self, root: &AstNode, tdecl: &AstNode, tname: string, want_sym: string) <bool> {
+          if (tdecl != null && tdecl.kind == ast_struct_decl()) {
+              if (self.struct_provides_operator(tdecl, want_sym)) { return true; }
+          }
+          let d <&AstNode> = root.left;
+          while (d != null) {
+              if (d.kind == ast_fun_decl()) {
+                  let sh <string> = self.bare_short_of(d.name, tname);
+                  if (!chk_str_eq(sh, "") && self.chk_member_class(sh, tname) == 1) {
+                      let got <string> = substr(sh, 8, cast<int>(chk_strlen(sh)) - 8);
+                      if (chk_str_eq(got, want_sym)) { return true; }
+                      if (chk_str_eq(want_sym, "[]=") && chk_str_eq(got, "=")) { return true; }
+                  }
+              }
+              d = d.right;
+          }
+          return false;
+      }
+
+      // Same, for constructor and destructor requirements (own plus
+      // flattened `Target_Target` / `Target_constructor` spellings).
+      fun impl_has_ctor(self: &Self, root: &AstNode, tdecl: &AstNode, tname: string) <bool> {
+          if (tdecl != null && tdecl.kind == ast_struct_decl()) {
+              if (self.struct_has_ctor(tdecl)) { return true; }
+          }
+          let d <&AstNode> = root.left;
+          while (d != null) {
+              if (d.kind == ast_fun_decl()) {
+                  let sh <string> = self.bare_short_of(d.name, tname);
+                  if (!chk_str_eq(sh, "") && self.chk_member_class(sh, tname) == 2) { return true; }
+              }
+              d = d.right;
+          }
+          return false;
+      }
+
+      fun impl_has_dtor(self: &Self, root: &AstNode, tdecl: &AstNode, tname: string) <bool> {
+          if (tdecl != null && tdecl.kind == ast_struct_decl()) {
+              if (self.struct_has_dtor(tdecl)) { return true; }
+          }
+          let d <&AstNode> = root.left;
+          while (d != null) {
+              if (d.kind == ast_fun_decl()) {
+                  let sh <string> = self.bare_short_of(d.name, tname);
+                  if (!chk_str_eq(sh, "") && self.chk_member_class(sh, tname) == 3) { return true; }
+              }
+              d = d.right;
+          }
+          return false;
+      }
+
+      // One implements claim (`tname implements <iname>` at line/col):
+      // every interface member must be provided by the target's own struct
+      // members plus its flattened `Target_*` top-level bodies. Presence
+      // only, like the struct-parent check; wording and site mirror C++.
+      fun check_one_implements(self: &Self, root: &AstNode, tname: string, iname: string, line: int, col: int) <noret> {
+          if (!self.global_scope.has(tname)) { return; }
+          let tsym <Symbol> = self.global_scope.lookup(tname);
+          if (tsym.kind != sym_struct() && tsym.kind != sym_enum()) { return; }
+          if (!self.global_scope.has(iname)) { return; }
+          let isym <Symbol> = self.global_scope.lookup(iname);
+          if (isym.kind != sym_interface()) { return; }
+          let tdecl <&AstNode> = null;
+          let idecl <&AstNode> = null;
+          let d <&AstNode> = root.left;
+          while (d != null) {
+              if (chk_str_eq(d.name, tname) && (d.kind == ast_struct_decl() || d.kind == ast_enum_decl())) { tdecl = d; }
+              if (d.kind == ast_interface_decl() && chk_str_eq(d.name, iname)) { idecl = d; }
+              d = d.right;
+          }
+          if (tdecl == null || idecl == null) { return; }
+          let ok <bool> = true;
+          let f <&AstNode> = idecl.left;
+          while (f != null && ok) {
+              if (tdecl.kind == ast_struct_decl()) {
+                  if (!self.struct_provides_field(tdecl, f.name)) { ok = false; }
+              } else {
+                  ok = false;
+              }
+              f = f.right;
+          }
+          let need_ctor <bool> = false;
+          let need_dtor <bool> = false;
+          let m <&AstNode> = idecl.extra;
+          while (m != null && ok) {
+              let ms <string> = self.bare_short_of(m.name, iname);
+              if (!chk_str_eq(ms, "")) {
+                  let mc <int> = self.chk_member_class(ms, iname);
+                  if (mc == 1) {
+                      let sym <string> = substr(ms, 8, cast<int>(chk_strlen(ms)) - 8);
+                      if (!self.impl_provides_operator(root, tdecl, tname, sym)) { ok = false; }
+                  } else if (mc == 0) {
+                      if (!self.impl_provides_method(root, tdecl, tname, ms)) { ok = false; }
+                  } else if (mc == 2) {
+                      need_ctor = true;
+                  } else {
+                      need_dtor = true;
+                  }
+              }
+              m = m.right;
+          }
+          if (ok && need_ctor && !self.impl_has_ctor(root, tdecl, tname)) { ok = false; }
+          if (ok && need_dtor && !self.impl_has_dtor(root, tdecl, tname)) { ok = false; }
+          if (!ok) {
+              let b <Buffer> = new_buffer(96);
+              b.write_string("'");
+              b.write_string(tname);
+              b.write_string("' does not fully implement interface '");
+              b.write_string(iname);
+              b.write_string("'");
+              let msg <string> = b.to_string();
+              free_buffer(b);
+              self.report_error(msg, line, col);
+          }
+      }
+
+      // One source line: a top-level `Target implements <Iface...>` block
+      // header. Comment-stripped, so `// ... implements ...` never counts.
+      // The parser drops the claim (members flatten to `Target_member`
+      // with no interface recorded), so the claim is re-read here like the
+      // `static` keyword is (bare_decl_is_static). Type aliases, bounds,
+      // and `any implements` spellings fail the target/interface shape
+      // and stay silent.
+      fun check_implements_line(self: &Self, root: &AstNode, line: string, line_no: int) <noret> {
+          if (line == null || chk_strlen(line) == cast<ulong>(0)) { return; }
+          let code <string> = line;
+          let llen <int> = cast<int>(chk_strlen(code));
+          let ci <int> = 0;
+          while (ci + 1 < llen) {
+              if (chk_str_eq(substr(code, ci, 1), "/") && chk_str_eq(substr(code, ci + 1, 1), "/")) {
+                  code = substr(code, 0, ci);
+                  break;
+              }
+              ci = ci + 1;
+          }
+          code = chk_trim(code);
+          if (chk_strlen(code) == cast<ulong>(0)) { return; }
+          let pos <int> = self.impl_find_word(code, "implements");
+          if (pos < 0) { return; }
+          let left <string> = chk_trim(substr(code, 0, pos));
+          let rlen <int> = cast<int>(chk_strlen(code)) - pos - 10;
+          if (rlen <= 0) { return; }
+          let right <string> = chk_trim(substr(code, pos + 10, rlen));
+          if (chk_strlen(right) == cast<ulong>(0)) { return; }
+          if (!chk_str_eq(substr(right, 0, 1), "<")) { return; }
+          if (chk_strchr(left, 61) != null) { return; }
+          if (chk_strchr(left, 58) != null) { return; }
+          if (chk_strchr(left, 40) != null) { return; }
+          if (chk_strchr(left, 41) != null) { return; }
+          if (chk_strchr(left, 59) != null) { return; }
+          if (chk_strchr(left, 124) != null) { return; }
+          if (chk_strchr(left, 36) != null) { return; }
+          let tbase <string> = left;
+          let tlt <int> = self.chk_find_substr(left, "<");
+          if (tlt >= 0) { tbase = chk_trim(substr(left, 0, tlt)); }
+          if (!self.chk_is_bare_word(tbase)) { return; }
+          let rinner <string> = chk_trim(substr(right, 1, cast<int>(chk_strlen(right)) - 1));
+          let ibase <string> = self.impl_base_before_delims(rinner);
+          if (!self.chk_is_bare_word(ibase)) { return; }
+          let col <int> = self.impl_word_col(code, tbase);
+          if (col < 1) { col = 1; }
+          self.check_one_implements(root, tbase, ibase, line_no, col);
+      }
+
+      // Implements-block conformance (`Target implements <Iface>`): the
+      // parser files block bodies as top-level `Target_member` and drops
+      // the interface, so the claim is re-read from the source line. Each
+      // header is checked presence-level against the interface, own plus
+      // flattened members, reporting C++'s wording at the header.
+      fun check_implements_blocks(self: &Self, root: &AstNode) <noret> {
+          if (self.source_file == null || chk_strlen(self.source_file) == cast<ulong>(0)) { return; }
+          if (root == null) { return; }
+          let text? <string> = read_to_string(self.source_file);
+          if (text == null) { return; }
+          let total <int> = cast<int>(chk_strlen(text?));
+          let bytes <[char]> = to_chars(text?);
+          let line_no <int> = 1;
+          let start <int> = 0;
+          let i <int> = 0;
+          while (i <= total) {
+              let is_nl <bool> = false;
+              if (i == total) { is_nl = true; }
+              else {
+                  if (bytes[i] == cast<char>(10)) { is_nl = true; }
+              }
+              if (is_nl) {
+                  let len <int> = i - start;
+                  if (len > 0 && bytes[i - 1] == cast<char>(13)) { len = len - 1; }
+                  if (len > 0) {
+                      let line <string> = substr(text?, start, len);
+                      self.check_implements_line(root, line, line_no);
+                  }
+                  line_no = line_no + 1;
+                  start = i + 1;
+              }
+              i = i + 1;
+          }
+          delete bytes;
+          free_file_content(text?);
+      }
+
       fun check_enum_bounds(self: &Self, decl: &AstNode) <noret> {
           let gen <string> = decl.type_annotation;
           if (gen == null || chk_strlen(gen) == cast<ulong>(0)) { return; }
@@ -9775,6 +10089,9 @@ pub struct Checker {
                   // Declared parents (`: <I, J>`) must be satisfied, like C++
                   // checks after the bodies (Analyzer_Decl conformance).
                   self.check_struct_conformance(root, decl);
+                  // Two operators of one token are one symbol twice (C++
+                  // lowerableOperator refusal above).
+                  self.check_duplicate_operators(decl);
                   self.current_struct = "";
                   self.current_method_short = "";
               } else if (decl.kind == ast_fun_decl()) {
@@ -9893,6 +10210,11 @@ pub struct Checker {
               }
               decl = decl.right;
           }
+
+          // Implements-block claims (`Target implements <Iface>`) the parser
+          // flattens away: re-read from the source and check presence-level,
+          // like C++ Analyzer_Decl does after its block walk.
+          self.check_implements_blocks(root);
 
           self.api_report_single_protocols();
 

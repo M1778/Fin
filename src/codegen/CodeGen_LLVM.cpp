@@ -5927,6 +5927,45 @@ private:
     // program well-typed. It converts and never checks: `int` into `long`, an
     // integer constant into a float parameter. A pair it cannot convert is a gap in
     // this slice, not a type error, so it refuses rather than emitting a bitcast.
+    //
+    // A `&[T, N]` where a `&[T]` is expected: the analyzer admits the decay (a
+    // fixed array is assignable to a dynamic one), but the two pointees are
+    // different representations -- `[N x T]` storage against a `{ptr, len}`
+    // pair -- so passing the storage through as the pair hands the callee the
+    // first elements as a data pointer (a clean build, then a segfault in the
+    // callee at -O0). The pair is materialised in a frame slot instead: the
+    // data points at the fixed storage itself, so reads and writes through the
+    // reference reach the caller's array, and the length is the extent. The
+    // slot outlives the call it is passed to, which is the only use a
+    // by-reference parameter makes of it.
+    llvm::Value* decayFixedArrayRef(ASTNode& node, const CgVal& from,
+                                    const CgType& to) {
+        const CgType* fixed = from.type.pointee.get();
+        const CgType* dyn = to.pointee.get();
+        if (!fixed || !dyn || !fixed->isArray() || !dyn->isArray() ||
+            fixed->isDynamicArray || !dyn->isDynamicArray || !fixed->element ||
+            !dyn->element || !fixed->element->llvmType ||
+            fixed->element->llvmType != dyn->element->llvmType ||
+            fixed->extent > 0x7fffffffull) {
+            unsupported(node, fmt::format("this conversion (from '{}' to '{}')",
+                                          describe(from.type), describe(to)));
+            return nullptr;
+        }
+        llvm::Value* data = builder_.CreateInBoundsGEP(
+            fixed->llvmType, from.value,
+            {builder_.getInt64(0), builder_.getInt64(0)}, "decay.data");
+        llvm::Value* pair = llvm::UndefValue::get(dyn->llvmType);
+        pair = builder_.CreateInsertValue(pair, data, {0}, "decay.pair");
+        pair = builder_.CreateInsertValue(
+            pair,
+            llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx_),
+                                      (uint32_t)fixed->extent),
+            {1});
+        llvm::AllocaInst* slot = entryAlloca(dyn->llvmType, "decay.arr");
+        builder_.CreateStore(pair, slot);
+        return slot;
+    }
+
     bool interfaceMethodSignature(const InterfaceInfo& iface, const std::string& name,
                                   llvm::FunctionType*& signature, CgType& result,
                                   std::vector<CgType>& params) {
@@ -6294,7 +6333,22 @@ private:
                                                     from.value, "deref");
             return convert(node, CgVal{read, *from.type.pointee}, to, explicitCast);
         }
-        if (from.type.llvmType == to.llvmType) return from.value;
+        if (from.type.llvmType == to.llvmType) {
+            // One `ptr` in the IR for every Fin pointer, so this line is true for
+            // any two of them -- including `&[T, N]` and `&[T]`, whose pointees
+            // are different representations. Only identical pointees pass through
+            // untouched; a fixed array into a dynamic reference decays, and
+            // anything else mismatched refuses rather than handing the callee
+            // bytes in the wrong shape. Void is exempt: a void pointee has no
+            // representation to get wrong, and every pointer is one word.
+            if (from.type.isPointer() && to.isPointer() && from.type.pointee &&
+                to.pointee && !from.type.pointee->isVoid() &&
+                !to.pointee->isVoid() && from.type.pointee->llvmType &&
+                to.pointee->llvmType &&
+                from.type.pointee->llvmType != to.pointee->llvmType)
+                return decayFixedArrayRef(node, from, to);
+            return from.value;
+        }
 
         if (to.llvmType && to.llvmType->isStructTy() &&
             to.llvmType->getStructName() == "fin.enum_member" &&
