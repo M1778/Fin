@@ -3210,6 +3210,39 @@ fun get_or_declare_memcpy(ctx: &FnContext) <&LLVMValue> {
     return memcpy_fn;
 }
 
+// Declares C `strlen` once per module for string content comparison:
+// `size_t strlen(const char *)`. Lengths come from here, never from
+// NUL-terminated comparison: the `==` contract is same-length AND
+// byte-equal over the full bytes.
+fun get_or_declare_strlen(ctx: &FnContext) <&LLVMValue> {
+    let strlen_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "strlen");
+    if (strlen_fn == null) {
+        let s_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
+        s_params.t0 = ctx.ptr_ty;
+        let s_ty <&LLVMType> = llvm_function_type(ctx.i64_ty, s_params, 1, 0);
+        delete s_params;
+        strlen_fn = llvm_add_function(ctx.module, "strlen", s_ty);
+    }
+    return strlen_fn;
+}
+
+// Declares C `memcmp` once per module for string content comparison:
+// `int memcmp(const void *, const void *, size_t)`, length in words
+// like every other count here.
+fun get_or_declare_memcmp(ctx: &FnContext) <&LLVMValue> {
+    let memcmp_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "memcmp");
+    if (memcmp_fn == null) {
+        let m_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
+        m_params.t0 = ctx.ptr_ty;
+        m_params.t1 = ctx.ptr_ty;
+        m_params.t2 = ctx.i64_ty;
+        let m_ty <&LLVMType> = llvm_function_type(ctx.i32_ty, m_params, 3, 0);
+        delete m_params;
+        memcmp_fn = llvm_add_function(ctx.module, "memcmp", m_ty);
+    }
+    return memcmp_fn;
+}
+
 // Whether a member store (or compound update) lands inside the object a
 // name roots: `p.a = ...` counts for `p`, and for `w.b` (whose root is
 // still `w`); anything else does not.
@@ -4574,6 +4607,95 @@ fun cg_eq_struct_name(ctx: &FnContext, spelling: string, want_ne: bool) <string>
     if (!want_ne && st.has_eq) { return ""; }
     if (want_ne && (st.has_ne || st.has_eq)) { return ""; }
     return spelling;
+}
+
+// Whether an operand spelling is the plain `string` type. Only the bare
+// spelling answers true: pointers, arrays, nullables (`string?`) and
+// generic parameters keep their existing lowering.
+fun cg_ann_is_string(ann: string) <bool> {
+    if (ann == null) { return false; }
+    return cg_str_eq(cg_trim_spaces(ann), "string");
+}
+
+// Whether an `==`/`!=` operand is known to be a `string`: a string
+// literal, or an operand whose spelling is the bare `string` annotation
+// (idents, members, index results, `cast<string>`). Calls and other
+// computed shapes carry no spelling and answer false here; the checker
+// rejects `==` across mismatched types, so a known string beside an
+// unknown-typed operand still implies a string pair at runtime.
+fun cg_operand_is_string(ctx: &FnContext, node: &AstNode) <bool> {
+    if (node == null) { return false; }
+    if (node.kind == ast_literal_string()) { return true; }
+    return cg_ann_is_string(cg_eq_operand_ann(ctx, node));
+}
+
+// Content equality for two `string` words: true iff same length AND
+// byte-equal over the full bytes (memcmp semantics; lengths, not
+// NUL-termination). Either side null falls back to pointer equality
+// (both null is true, one null is false), so a null beside a string
+// never reaches strlen. `want_ne` negates for `!=`.
+fun cg_lower_string_eq(ctx: &FnContext, lhs: &LLVMValue, rhs: &LLVMValue, want_ne: bool) <&LLVMValue> {
+    let nullv <&LLVMValue> = llvm_const_null(ctx.ptr_ty);
+    let l_null <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), lhs, nullv, "str.null.l");
+    let r_null <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), rhs, nullv, "str.null.r");
+    let either_null <&LLVMValue> = llvm_build_or(ctx.builder, l_null, r_null, "str.either.null");
+    let null_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "streq.null");
+    let content_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "streq.content");
+    let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "streq.end");
+    llvm_build_cond_br(ctx.builder, either_null, null_bb, content_bb);
+    llvm_position_builder(ctx.builder, null_bb);
+    let ptr_res <&LLVMValue> = null;
+    if (want_ne) {
+        ptr_res = llvm_build_icmp(ctx.builder, llvm_int_ne(), lhs, rhs, "str.ptr.ne");
+    } else {
+        ptr_res = llvm_build_icmp(ctx.builder, llvm_int_eq(), lhs, rhs, "str.ptr.eq");
+    }
+    let null_exit <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+    llvm_build_br(ctx.builder, end_bb);
+    llvm_position_builder(ctx.builder, content_bb);
+    let strlen_fn <&LLVMValue> = get_or_declare_strlen(ctx);
+    let strlen_ty <&LLVMType> = llvm_global_get_value_type(strlen_fn);
+    let llen_args <&LLVMValueArgs> = new LLVMValueArgs{};
+    llen_args.v0 = lhs;
+    let llen <&LLVMValue> = llvm_build_call2(ctx.builder, strlen_ty, strlen_fn, llen_args, 1, "str.llen");
+    delete llen_args;
+    let rlen_args <&LLVMValueArgs> = new LLVMValueArgs{};
+    rlen_args.v0 = rhs;
+    let rlen <&LLVMValue> = llvm_build_call2(ctx.builder, strlen_ty, strlen_fn, rlen_args, 1, "str.rlen");
+    delete rlen_args;
+    let memcmp_fn <&LLVMValue> = get_or_declare_memcmp(ctx);
+    let memcmp_ty <&LLVMType> = llvm_global_get_value_type(memcmp_fn);
+    let cmp_args <&LLVMValueArgs> = new LLVMValueArgs{};
+    cmp_args.v0 = lhs;
+    cmp_args.v1 = rhs;
+    cmp_args.v2 = llen;
+    let cmp <&LLVMValue> = llvm_build_call2(ctx.builder, memcmp_ty, memcmp_fn, cmp_args, 3, "str.cmp");
+    delete cmp_args;
+    let zero32 <&LLVMValue> = llvm_const_int(ctx.i32_ty, 0, 0);
+    let content_res <&LLVMValue> = null;
+    if (want_ne) {
+        let lens_ne <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_ne(), llen, rlen, "str.lens.ne");
+        let bytes_ne <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_ne(), cmp, zero32, "str.bytes.ne");
+        content_res = llvm_build_or(ctx.builder, lens_ne, bytes_ne, "str.content.ne");
+    } else {
+        let lens_eq <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), llen, rlen, "str.lens.eq");
+        let bytes_eq <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_eq(), cmp, zero32, "str.bytes.eq");
+        content_res = llvm_build_and(ctx.builder, lens_eq, bytes_eq, "str.content.eq");
+    }
+    let content_exit <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+    llvm_build_br(ctx.builder, end_bb);
+    llvm_position_builder(ctx.builder, end_bb);
+    let phi <&LLVMValue> = llvm_build_phi(ctx.builder, ctx.i1_ty, "str.eq");
+    let phi_vals <&LLVMValueArgs> = new LLVMValueArgs{};
+    phi_vals.v0 = ptr_res;
+    phi_vals.v1 = content_res;
+    let phi_blks <&LLVMBlockArgs> = new LLVMBlockArgs{};
+    phi_blks.b0 = null_exit;
+    phi_blks.b1 = content_exit;
+    llvm_add_incoming(phi, phi_vals, phi_blks, 2);
+    delete phi_vals;
+    delete phi_blks;
+    return phi;
 }
 
 // MC1 ordering: declare_function and the method-cache helpers sit before
@@ -7439,20 +7561,13 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                             if (cg_str_eq(v.type_annotation, "string")) {
                                 let base_val <&LLVMValue> = lower_expr(ctx, base_node);
                                 if (base_val != null) {
-                                    let strlen_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "strlen");
-                                    if (strlen_fn == null) {
-                                        let s_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-                                        s_params.t0 = ctx.ptr_ty;
-                                        let s_ty <&LLVMType> = llvm_function_type(ctx.i32_ty, s_params, 1, 0);
-                                        delete s_params;
-                                        strlen_fn = llvm_add_function(ctx.module, "strlen", s_ty);
-                                    }
+                                    let strlen_fn <&LLVMValue> = get_or_declare_strlen(ctx);
                                     let s_fn_ty <&LLVMType> = llvm_global_get_value_type(strlen_fn);
                                     let s_args <&LLVMValueArgs> = new LLVMValueArgs{};
                                     s_args.v0 = base_val;
-                                    let s_res <&LLVMValue> = llvm_build_call2(ctx.builder, s_fn_ty, strlen_fn, s_args, 1, "strlen");
+                                    let s_res64 <&LLVMValue> = llvm_build_call2(ctx.builder, s_fn_ty, strlen_fn, s_args, 1, "strlen");
                                     delete s_args;
-                                    return s_res;
+                                    return llvm_build_trunc(ctx.builder, s_res64, ctx.i32_ty, "strlen32");
                                 }
                             }
                         }
@@ -7479,20 +7594,13 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     if (cg_str_eq(cg_trim_spaces(base_ann), "string")) {
                         let base_val_s <&LLVMValue> = lower_expr(ctx, base_node);
                         if (base_val_s != null) {
-                            let strlen_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "strlen");
-                            if (strlen_fn == null) {
-                                let s_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-                                s_params.t0 = ctx.ptr_ty;
-                                let s_ty <&LLVMType> = llvm_function_type(ctx.i32_ty, s_params, 1, 0);
-                                delete s_params;
-                                strlen_fn = llvm_add_function(ctx.module, "strlen", s_ty);
-                            }
+                            let strlen_fn <&LLVMValue> = get_or_declare_strlen(ctx);
                             let s_fn_ty <&LLVMType> = llvm_global_get_value_type(strlen_fn);
                             let s_args <&LLVMValueArgs> = new LLVMValueArgs{};
                             s_args.v0 = base_val_s;
-                            let s_res <&LLVMValue> = llvm_build_call2(ctx.builder, s_fn_ty, strlen_fn, s_args, 1, "strlen");
+                            let s_res64 <&LLVMValue> = llvm_build_call2(ctx.builder, s_fn_ty, strlen_fn, s_args, 1, "strlen");
                             delete s_args;
-                            return s_res;
+                            return llvm_build_trunc(ctx.builder, s_res64, ctx.i32_ty, "strlen32");
                         }
                     }
                 }
@@ -8409,6 +8517,22 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         }
         if (cg_str_eq(n.name, "==") || cg_str_eq(n.name, "!=")) {
             let is_eq <bool> = cg_str_eq(n.name, "==");
+            // `string ==`/`!=` compares content: same length AND byte-equal
+            // over the full bytes. A null literal beside a string keeps
+            // pointer comparison (the `s == null` presence question); one
+            // known-`string` side suffices, since the checker rejects `==`
+            // across mismatched types. Generic-annotated sides stay out:
+            // an erased parameter's bits are not known to be characters.
+            // Only two pointer words take the content path, so every other
+            // shape keeps its existing lowering.
+            let l_ann <string> = cg_eq_operand_ann(ctx, n.left);
+            let r_ann <string> = cg_eq_operand_ann(ctx, n.right);
+            if (l_ty == ctx.ptr_ty && r_ty == ctx.ptr_ty &&
+                !cg_is_null_lit(ctx, lhs) && !cg_is_null_lit(ctx, rhs) &&
+                !cg_is_generic_ann(ctx, l_ann) && !cg_is_generic_ann(ctx, r_ann) &&
+                (cg_operand_is_string(ctx, n.left) || cg_operand_is_string(ctx, n.right))) {
+                return cg_lower_string_eq(ctx, lhs, rhs, !is_eq);
+            }
             if (n.right != null && n.right.kind == ast_call_expr() && cg_str_eq(n.right.name, "__fin_array_literal")) {
                 // lhs already holds the buffer: a plain array lowers to its
                 // data pointer and a member access to the loaded field value.

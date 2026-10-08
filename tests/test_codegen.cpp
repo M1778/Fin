@@ -16530,3 +16530,116 @@ BACKEND_TEST(Soundness_Codegen, ImplementsFoldBothArmsReturnStillCompiles) {
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "2\n") << b.why();
 }
+
+// ---------------------------------------------------------------------------
+// String `==`/`!=` compare content.
+//
+// Until the content-equality lowering, `==` on two strings was a pointer
+// `ICmpEQ`: two spellings of one literal were equal only because literals
+// are pooled, and `clone("lit") == "lit"` was false. The contract (ADR 0049)
+// is memcmp semantics over the full bytes: same length AND byte-equal, with
+// `!=` its negation. Ordering on strings stays refused (pinned below), and
+// `== null` still compares the pointer (pinned below).
+//
+// `clone` is transliterated here rather than imported: one copy, no import,
+// the same way strings.fin's own measurements were taken.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A fresh copy of a short string, in 64 bytes that the caller owns. Every
+// test below needs a second pointer to the same bytes, which is what makes
+// pointer equality and content equality disagree.
+const char* const kCloneHelper =
+    "#[llvm_name=\"calloc\"]\n"
+    "@define mycalloc(count: ulong, size: ulong) <string>;\n"
+    "#[llvm_name=\"strcpy\"]\n"
+    "@define mycopy(dst: string, src: string) <string>;\n"
+    "fun clone(s: string) <string> {\n"
+    "    let out <string> = mycalloc(cast<ulong>(64), cast<ulong>(1));\n"
+    "    let c <string> = mycopy(out, s);\n"
+    "    return out;\n"
+    "}\n";
+
+}  // namespace
+
+BACKEND_TEST(Soundness_Codegen, StringEqualityComparesContentNotPointers) {
+    const Built b = build(std::string(kPrintf) + kCloneHelper +
+        "fun main() <noret> {\n"
+        "    let c <string> = clone(\"lit\");\n"
+        "    if (c == \"lit\") { printf(\"clone-eq\\n\"); } else { printf(\"clone-ne\\n\"); }\n"
+        "    if (c != \"lit\") { printf(\"clone-ne2\\n\"); } else { printf(\"clone-eq2\\n\"); }\n"
+        "    if (\"lit\" == \"lit\") { printf(\"pool-eq\\n\"); } else { printf(\"pool-ne\\n\"); }\n"
+        "    if (\"abc\" == \"abd\") { printf(\"BAD1\\n\"); } else { printf(\"diff-ne\\n\"); }\n"
+        "    if (\"hi\" == \"hip\") { printf(\"BAD2\\n\"); } else { printf(\"len-ne\\n\"); }\n"
+        "    if (\"\" == clone(\"\")) { printf(\"empty-eq\\n\"); } else { printf(\"BAD3\\n\"); }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "clone-eq\nclone-eq2\npool-eq\ndiff-ne\nlen-ne\nempty-eq\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, StringOrderingIsStillRefused) {
+    // Ordering on strings is neither content-based nor pointer-based: it is
+    // refused ("an ordering on a pointer"), and the content-equality change
+    // deliberately leaves it there (ADR 0049 leftover). This pins the refusal
+    // so a future ordering rule has to move it on purpose.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    if (\"a\" < \"b\") { printf(\"lt\\n\"); } else { printf(\"ge\\n\"); }\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("an ordering on a pointer"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, StringNullComparisonsStillCompareThePointer) {
+    // `== null` has no content to compare: a null-valued variable is unequal
+    // to every string and equal to null. The null guard in the content
+    // lowering exists so the first of these stays an answer instead of
+    // becoming a `strlen` of null.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let n <string> = null;\n"
+        "    if (n == \"lit\") { printf(\"BAD\\n\"); } else { printf(\"null-ne\\n\"); }\n"
+        "    if (n == null) { printf(\"null-eq\\n\"); } else { printf(\"BAD2\\n\"); }\n"
+        "    if (n != \"lit\") { printf(\"null-ne2\\n\"); } else { printf(\"BAD3\\n\"); }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "null-ne\nnull-eq\nnull-ne2\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, StringMapLookupHitsComputedKeys) {
+    // The map half of the contract: equal strings must share buckets, so a
+    // key computed at run time finds the entry a literal stored. Pointer
+    // hashing missed this (`missing`); content hashing hits it.
+    const Built b = build(std::string(kPrintf) + kCloneHelper +
+        "import { HashMap } from hashmap::std;\n"
+        "fun main() <noret> {\n"
+        "    let m <auto> = HashMap::<string, int>();\n"
+        "    m.__set(\"k\", 42);\n"
+        "    let q <string> = clone(\"k\");\n"
+        "    if (m.exists(q)) { printf(\"found %d\\n\", m.__get(q)); }\n"
+        "    else { printf(\"missing\\n\"); }\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "found 42\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, IntMapLookupStillWorks) {
+    // The non-string lock: whatever the string hash becomes, `HashMap` with
+    // `int` keys keeps working exactly as before. A string-only hash in the
+    // generic body would refuse this at codegen; this test is what forbids it.
+    const Built b = build(std::string(kPrintf) +
+        "import { HashMap } from hashmap::std;\n"
+        "fun main() <noret> {\n"
+        "    let m <auto> = HashMap::<int, int>();\n"
+        "    m.__set(7, 70);\n"
+        "    m.__set(8, 80);\n"
+        "    printf(\"%d %d\\n\", m.__get(7), m.__get(8));\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "70 80\n") << b.why();
+}

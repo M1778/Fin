@@ -74,6 +74,14 @@ const AllowEntry kAllowlist[] = {
     // or "stderr-wording" -- so lookup semantics stay "empty allowlist".
     // It is inert beside real entries; delete it with the last real entry.
     {"", "", "", ""},
+    // ADR 0049 (string `==` compares content): the shared `hash_of` now
+    // calls the `hash_word` leaf, so its body no longer matches the stage's
+    // erasure-idiom detector and the old stage refuses monomorphization
+    // where the C++ backend lowers per concrete call. C++ builds; the stage
+    // half mirrors the leaf rule. Delete both lines when it does (a stale
+    // entry fails the suite, so neither can rot).
+    {"prototype_test", "stage-build-refusal", "stage-half", "ADR 0049 hash_word leaf: old stage refuses `hash_of` monomorphization; C++ builds"},
+    {"useful_macros", "stage-build-refusal", "stage-half", "ADR 0049 hash_word leaf: old stage refuses `hash_of` monomorphization; C++ builds"},
 };
 
 const AllowEntry* lookupAllow(const std::string& stem, const std::string& kind) {

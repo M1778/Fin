@@ -458,6 +458,16 @@ INSTANTIATE_TEST_SUITE_P(
 
 class OptStage : public ::testing::TestWithParam<Sample> {};
 
+// Interim stage gap, same convention as test_stage_agreement.cpp's
+// allowlist (which this suite does not share, so the two stems live here
+// too). ADR 0049: the shared `hash_of` calls the `hash_word` leaf, the old
+// stage refuses monomorphization, C++ builds. Delete both stems when the
+// stage mirrors the leaf -- the stale leg below fails the suite if one
+// builds, so neither can rot.
+bool optStageToleratedRefusal(const std::string& stem) {
+    return stem == "prototype_test" || stem == "useful_macros";
+}
+
 TEST_P(OptStage, StageAgreesWithFincAtEachOptLevel) {
     const std::string path = GetParam().path;
     const std::string stem = fs::path(path).stem().string();
@@ -493,6 +503,22 @@ TEST_P(OptStage, StageAgreesWithFincAtEachOptLevel) {
         }
         const bool stageBuilt =
             stageBuild.exited && stageBuild.exitCode == 0 && fs::exists(stageExe);
+        if (!stageBuilt && optStageToleratedRefusal(stem)) {
+            // Tolerated IFF an orderly refusal (exit 1 with a diagnostic): a
+            // stage crash is a new shape, not the listed one.
+            EXPECT_TRUE(stageBuild.exited && stageBuild.exitCode == 1)
+                << stem << " " << level << ": allowlisted as a build refusal but the stage "
+                << procFate(stageBuild) << ":\n" << stageBuild.err;
+            ::testing::Test::RecordProperty("allowlisted", "ADR 0049 hash_word leaf (stage-half mirror pending)");
+            removeIfExists(fincExe);
+            removeIfExists(stageExe);
+            continue;
+        }
+        if (stageBuilt && optStageToleratedRefusal(stem)) {
+            removeIfExists(fincExe);
+            removeIfExists(stageExe);
+            FAIL() << stem << " " << level << ": stage now builds it -- delete it from optStageToleratedRefusal";
+        }
         EXPECT_TRUE(stageBuild.exited && stageBuild.exitCode == fincBuild.exitCode)
             << stem << " " << level << ": stage build " << procFate(stageBuild)
             << " vs finc exit " << fincBuild.exitCode << ":\n" << stageBuild.err;

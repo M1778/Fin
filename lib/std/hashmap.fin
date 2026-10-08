@@ -12,19 +12,19 @@
 //
 // HOW A KEY REACHES A BUCKET, and the one decision worth reading before using this.
 //
-// `hash_of<T>` folds `cast<int>(key)` -- the key's own machine value -- through two
-// primes. For an `int`, `char`, `bool` or `uint` key that is the value itself. For a
-// `string` key it is the *pointer*, not the bytes, and that is deliberate rather than
-// a shortcut: `==` on two `string`s in this compiler compares pointers, measured by
-// building the comparison and running it (two spellings of "hello" in one program are
-// equal because the literals are pooled; `strdup("hello") == "hello"` is false). A
-// content hash paired with a pointer equality is the one combination that is actually
-// broken -- two equal-by-`==` keys must never land in different buckets, and two
-// unequal keys landing in the same bucket only costs a probe. So the hash is
-// consistent with the equality the language gives, and it will need changing on the
-// day `==` on `string` starts comparing bytes. Until then, a `string`-keyed map works
-// for keys that are literals or are kept alive by the caller, which is what the corpus
-// does (`deeptest4.fin:12` writes `a["Hi"] = ...` and `:16` reads `a["Hi"]`).
+// `hash_of<T>` folds `hash_word::<T>(key)` -- the key's word -- through two
+// primes. For an `int`, `char`, `bool` or `uint` key the word is the value
+// itself. For a `string` key it is FNV-1a over the bytes, and that is what
+// keeps string-keyed maps correct now that `==` on two `string`s compares
+// bytes: equal keys must share buckets, and two unequal keys sharing one
+// only costs a probe. The word for a string is computed by the compiler
+// rather than here, because Fin has no type-directed dispatch -- see
+// `hash_word` -- and both compilers implement the same rule with the same
+// constants, so both partition string keys identically. Until `==` compared
+// bytes the hash was the address, deliberately; a content hash paired with
+// a pointer equality would have been the one combination that is actually
+// broken, and the address paired with a content equality would be the same
+// breakage in the other direction.
 //
 // A caller who needs a different hash supplies one. `hasher <fn(any) -> int>` is a
 // field, `HashMap::with_hasher(f)` is the static that sets it, and `hash_key` consults
@@ -78,17 +78,37 @@ namespace std {
 #[export]
 pub struct HashMapError : <Error> {}
 
-// The default hash: fold the key's machine value through two primes so that both
-// halves of a wide value reach the result. Every intermediate is bounded by
+// The one per-type rule the compiler owns, so that `hash_of` below can stay
+// generic. Declared bodiless like `keyidof`/`getkeyid`/`resolve_type`:
+// nothing defines it, and the backend lowers the call per concrete `T`
+// instead of emitting one. A real body would win over the rule, the way a
+// definition wins for those three.
+//
+// For a `string` the word is a content hash -- FNV-1a over the `strlen`
+// bytes (offset basis 2166136261, prime 16777619, 32-bit wrap) -- so equal
+// strings share buckets. For anything else it is the machine value
+// `cast<int>(key)` has always given, and `hash_of` folds it exactly as
+// before.
+//
+// This shape is load-bearing rather than tidy. Fin has no overloading, no
+// specialization and no static-if, so a string-specific operation written
+// into `hash_of`'s body would refuse every non-string instantiation at
+// codegen, and `HashMap<int, int>` is a working program today. The dispatch
+// lives in the backend's per-type lowering instead, and both compilers
+// implement the same rule with the same constants.
+pub fun hash_word<T>(key: T) <int>;
+
+// The default hash: the key's word through two primes so that both halves
+// of a wide value reach the result. Every intermediate is bounded by
 // 1000003 * 31, which fits an `int`, so nothing here relies on wraparound.
 //
-// `cast<int>(key)` is what makes this generic over an arbitrary `T` at all. It is
-// accepted for every key type the corpus uses and for a struct as well; what a struct
-// hashes to is its truncated representation, and see the header on why that is not the
-// part that limits struct keys.
+// The word is `hash_word::<T>(key)`: the machine value for anything but a
+// `string`, the FNV-1a content hash for one. See the header on why the two
+// must agree with `==`, and see `hash_word` on why the rule lives in the
+// compiler rather than in this body.
 #[export]
 pub fun hash_of<T>(key: T) <int> {
-    let raw <int> = cast<int>(key);
+    let raw <int> = hash_word::<T>(key);
     let low <int> = raw % 1000003;
     if (low < 0) { low = 0 - low; }
     let high <int> = (raw / 1000003) % 1000003;

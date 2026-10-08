@@ -3375,6 +3375,112 @@ private:
         return true;
     }
 
+    // `hash_word::<T>(key)` -- the hashable word (lib/std/hashmap.fin): FNV-1a
+    // over the bytes for a `string`, the `cast<int>` machine value for
+    // anything else, so `hash_of` stays generic and equal strings share
+    // buckets (ADR 0049).
+    //
+    // A bodiless generic declaration lowered per concrete argument, on the
+    // same footing as `keyidof`/`getkeyid`/`resolve_type` above: a definition
+    // anywhere visible wins and lowers as itself, and the alternative is a
+    // link against a symbol nothing defines. The gate is the declaration
+    // being generic and bodiless -- a non-generic extern of the same name is
+    // an ordinary call and falls through.
+    bool hashWordDeclIsBodilessGeneric() {
+        if (auto it = fnTemplates_.find("hash_word"); it != fnTemplates_.end()) {
+            // The root wins a name both declare, so a root entry settles it:
+            // bodiless is ours, a body is a definition that wins.
+            return it->second && !it->second->generic_params.empty() &&
+                   !it->second->body;
+        }
+        for (const Program* unit : modules_) {
+            if (!unit) continue;
+            for (auto& stmt : unit->statements) {
+                auto* fn = dynamic_cast<FunctionDeclaration*>(stmt.get());
+                if (!fn || fn->name != "hash_word" || fn->generic_params.empty())
+                    continue;
+                return fn->body == nullptr;
+            }
+        }
+        return false;
+    }
+
+    bool tryHashWordIntrinsic(FunctionCall& node, const std::string& name) {
+        if (name != "hash_word" || node.args.size() != 1) return false;
+        if (auto found = functions_.find(name);
+            found != functions_.end() && !found->second.fn->isDeclaration())
+            return false;
+        if (!hashWordDeclIsBodilessGeneric()) return false;
+        emitHashWord(node);
+        return true;
+    }
+
+    // FNV-1a over the `strlen` bytes, 32-bit wrap: offset basis 2166136261,
+    // prime 16777619. The empty string hashes as the basis. Same constants
+    // both compilers implement, so both partition string keys identically.
+    void emitStringHash(ASTNode& node, llvm::Value* data, const CgType& intTy) {
+        if (!currentFn_) {
+            unsupported(node, "this hash outside a function");
+            return;
+        }
+        llvm::FunctionCallee measure = runtimeFn(
+            node, "strlen",
+            llvm::FunctionType::get(llvm::Type::getInt64Ty(ctx_),
+                                    {llvm::PointerType::getUnqual(ctx_)}, false),
+            "a string hash");
+        if (!measure) return;
+        llvm::Value* len = builder_.CreateCall(measure, {data}, "hash.len");
+        llvm::Type* i32 = builder_.getInt32Ty();
+        llvm::Type* i64 = llvm::Type::getInt64Ty(ctx_);
+        llvm::AllocaInst* hSlot = entryAlloca(i32, "hash.h");
+        llvm::AllocaInst* iSlot = entryAlloca(i64, "hash.i");
+        builder_.CreateStore(builder_.getInt32(0x811C9DC5u), hSlot);
+        builder_.CreateStore(llvm::ConstantInt::get(i64, 0), iSlot);
+        auto* condBB = llvm::BasicBlock::Create(ctx_, "hash.loop", currentFn_->fn);
+        auto* bodyBB = llvm::BasicBlock::Create(ctx_, "hash.body", currentFn_->fn);
+        auto* endBB = llvm::BasicBlock::Create(ctx_, "hash.end", currentFn_->fn);
+        builder_.CreateBr(condBB);
+        builder_.SetInsertPoint(condBB);
+        llvm::Value* at = builder_.CreateLoad(i64, iSlot, "hash.i");
+        builder_.CreateCondBr(builder_.CreateICmpULT(at, len, "hash.more"), bodyBB,
+                              endBB);
+        builder_.SetInsertPoint(bodyBB);
+        llvm::Value* i = builder_.CreateLoad(i64, iSlot, "hash.i");
+        llvm::Value* bytePtr = builder_.CreateInBoundsGEP(
+            builder_.getInt8Ty(), data, i, "hash.byte");
+        llvm::Value* byte = builder_.CreateLoad(builder_.getInt8Ty(), bytePtr, "hash.b");
+        llvm::Value* h = builder_.CreateLoad(i32, hSlot, "hash.h");
+        llvm::Value* mixed =
+            builder_.CreateXor(h, builder_.CreateZExt(byte, i32), "hash.xor");
+        builder_.CreateStore(
+            builder_.CreateMul(mixed, builder_.getInt32(16777619u), "hash.mul"),
+            hSlot);
+        builder_.CreateStore(
+            builder_.CreateAdd(i, llvm::ConstantInt::get(i64, 1), "hash.next"),
+            iSlot);
+        builder_.CreateBr(condBB);
+        builder_.SetInsertPoint(endBB);
+        value_ = CgVal{builder_.CreateLoad(i32, hSlot, "hash.result"), intTy};
+    }
+
+    void emitHashWord(FunctionCall& node) {
+        CgVal key = emit(*node.args[0]);
+        if (failed_) return;
+        if (!key.ok()) { unsupported(node, "this argument"); return; }
+        CgType intTy = *types_.byName("int");
+        if (key.type.isPointer() && !key.type.pointee) {
+            emitStringHash(node, key.value, intTy);
+            return;
+        }
+        // Anything else hashes its machine value: exactly what `cast<int>(key)`
+        // gave `hash_of` before, through the same conversion with the same
+        // explicitness, so `int`, `char`, `bool`, `uint` and struct keys hash
+        // exactly as they did.
+        llvm::Value* raw = convert(node, key, intTy, /*explicitCast=*/true);
+        if (!raw) return;
+        value_ = CgVal{raw, intTy};
+    }
+
     StructDeclaration* findModuleStruct(const std::string& name) {
         for (const Program* unit : modules_) {
             if (!unit) continue;
@@ -6000,12 +6106,12 @@ private:
         }
         // A pointer into a non-bool integer is its address bits, but only as
         // an explicit `cast`: what `cast<int>(key)` means for the default
-        // hasher (lib/std/hashmap.fin:91), where equal pointers must hash
-        // equal. An *implicit* pointer where an integer is expected is the
-        // dereference below (what the analyzer admitted) or a refusal, never
-        // address bits -- `take(&v)` for `take(x: int)` reads the pointee,
-        // and answering the address instead would link cleanly and pass
-        // garbage.
+        // hasher's non-string keys (lib/std/hashmap.fin's `hash_word`),
+        // where equal pointers must hash equal. An *implicit* pointer where
+        // an integer is expected is the dereference below (what the analyzer
+        // admitted) or a refusal, never address bits -- `take(&v)` for
+        // `take(x: int)` reads the pointee, and answering the address instead
+        // would link cleanly and pass garbage.
         // Truncated or zero-extended to the target width through the integer
         // path below. `bool` is excluded: truncating an address to one bit
         // answers "is the low bit set", not "is it null" -- that question is
@@ -7728,6 +7834,22 @@ private:
     // in Analyzer_Expr (booked), so a backend that trusted the analyzer's answer would
     // instantiate `ident::<long>(5)` at int.
     void emitTemplateCall(FunctionCall& node, const TemplateCallee& tmpl) {
+        // The hash word before anything else, on the same footing as the tag
+        // intrinsics in emitNamedCall: a bodiless template has no body to
+        // instantiate, so without this the call falls through to a refusal.
+        // The gate is the template being bodiless -- a body wins and
+        // instantiates as itself.
+        if (tmpl.display == "hash_word" && !tmpl.lambda && !tmpl.block &&
+            !tmpl.value) {
+            if (node.args.size() != 1) {
+                unsupported(node, fmt::format("a call to '{}' with {} argument(s) "
+                                              "where it declares 1",
+                                              tmpl.display, node.args.size()));
+                return;
+            }
+            emitHashWord(node);
+            return;
+        }
         // First, and at the call rather than at the declaration: this is the point at
         // which the template stops being a recipe, and the representation ADR 0002
         // reserves for an erased parameter is what would have to be laid out. Before
@@ -9353,6 +9475,74 @@ private:
             result = builder_.CreateXor(result, builder_.getInt1(true), "cmpneg");
         return CgVal{result, boolType};
     }
+    // Content equality for two `string` values: same length AND byte-equal.
+    //
+    // A `string` is NUL-terminated bytes (byName), so `strlen` IS the length
+    // and `memcmp` over the bytes is the comparison -- lengths first, then
+    // bytes, never NUL-termination as the decision. `memcmp` runs over the
+    // shorter length with the lengths ANDed in, so unequal lengths decide
+    // false without reading past either terminator.
+    //
+    // Either side may hold null at run time (`let s <string> = null`), which
+    // `== null` answers by pointer above but `s == t` reaches here: the null
+    // guard answers those before any `strlen` runs, because a call executes
+    // even where its result would be discarded, so a select would still crash.
+    // Null against null is true, null against bytes is false -- the same
+    // answers the pointer comparison gave.
+    //
+    // Outside a function there is no block to build in, so this refuses the
+    // way array equality does. Nothing working is lost: a string comparison
+    // in a global initialiser never lowered (a non-constant initialiser is
+    // refused before it gets here).
+    llvm::Value* emitStringContentEquality(ASTNode& node, llvm::Value* a,
+                                            llvm::Value* b) {
+        if (!currentFn_) {
+            unsupported(node, "this operator outside a function");
+            return nullptr;
+        }
+        llvm::Value* nil =
+            llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(ctx_));
+        llvm::Value* aNull = builder_.CreateICmpEQ(a, nil, "streq.anull");
+        llvm::Value* bNull = builder_.CreateICmpEQ(b, nil, "streq.bnull");
+        llvm::Value* eitherNull = builder_.CreateOr(aNull, bNull, "streq.either");
+        llvm::Value* bothNull = builder_.CreateAnd(aNull, bNull, "streq.both");
+        auto* nullBB = llvm::BasicBlock::Create(ctx_, "streq.null", currentFn_->fn);
+        auto* strBB = llvm::BasicBlock::Create(ctx_, "streq.str", currentFn_->fn);
+        auto* endBB = llvm::BasicBlock::Create(ctx_, "streq.end", currentFn_->fn);
+        builder_.CreateCondBr(eitherNull, nullBB, strBB);
+        builder_.SetInsertPoint(nullBB);
+        builder_.CreateBr(endBB);
+        builder_.SetInsertPoint(strBB);
+        llvm::FunctionCallee measure = runtimeFn(
+            node, "strlen",
+            llvm::FunctionType::get(llvm::Type::getInt64Ty(ctx_),
+                                    {llvm::PointerType::getUnqual(ctx_)}, false),
+            "a string comparison");
+        if (!measure) return nullptr;
+        llvm::Value* lenA = builder_.CreateCall(measure, {a}, "streq.lena");
+        llvm::Value* lenB = builder_.CreateCall(measure, {b}, "streq.lenb");
+        llvm::Value* lenEq = builder_.CreateICmpEQ(lenA, lenB, "streq.leneq");
+        llvm::Value* shorter = builder_.CreateICmpULT(lenA, lenB, "streq.shorter");
+        llvm::Value* minLen = builder_.CreateSelect(shorter, lenA, lenB, "streq.minlen");
+        llvm::FunctionCallee compare = runtimeFn(
+            node, "memcmp",
+            llvm::FunctionType::get(builder_.getInt32Ty(),
+                                    {llvm::PointerType::getUnqual(ctx_),
+                                     llvm::PointerType::getUnqual(ctx_),
+                                     llvm::Type::getInt64Ty(ctx_)}, false),
+            "a string comparison");
+        if (!compare) return nullptr;
+        llvm::Value* diff = builder_.CreateCall(compare, {a, b, minLen}, "streq.memcmp");
+        llvm::Value* bytesEq =
+            builder_.CreateICmpEQ(diff, builder_.getInt32(0), "streq.byteseq");
+        llvm::Value* contentEq = builder_.CreateAnd(lenEq, bytesEq, "streq.eq");
+        builder_.CreateBr(endBB);
+        builder_.SetInsertPoint(endBB);
+        auto* phi = builder_.CreatePHI(builder_.getInt1Ty(), 2, "streq.result");
+        phi->addIncoming(bothNull, nullBB);
+        phi->addIncoming(contentEq, strBB);
+        return phi;
+    }
     // What is derivable is listed here and nothing else is: integers and bools by
     // value, floats by IEEE equality, strings by their bytes, other pointers by
     // identity, structs field by field, and fixed arrays element by element.
@@ -9367,15 +9557,10 @@ private:
                 if (keyType.pointee) {
                     return builder_.CreateICmpEQ(a, b, "key.eq");
                 }
-                llvm::FunctionCallee cmp = runtimeFn(
-                    node, "strcmp",
-                    llvm::FunctionType::get(builder_.getInt32Ty(),
-                                            {llvm::PointerType::getUnqual(ctx_),
-                                             llvm::PointerType::getUnqual(ctx_)}, false),
-                    "a string key comparison");
-                if (!cmp) return nullptr;
-                llvm::Value* diff = builder_.CreateCall(cmp, {a, b}, "key.strcmp");
-                return builder_.CreateICmpEQ(diff, builder_.getInt32(0), "key.eq");
+                // A `string` key compares by content, so `==` agrees with
+                // lookup. The null guard inside covers a null key the same
+                // way the runtime comparison covers one.
+                return emitStringContentEquality(node, a, b);
             }
             case CgType::Kind::Struct: {
                 if (keyType.isAny) {
@@ -9388,34 +9573,30 @@ private:
                     llvm::Value* exactEq = builder_.CreateAnd(typeEq, ptrEq, "any.eq");
                     auto stringType = types_.byName("string");
                     // Strings compare by bytes, but the byte comparison must
-                    // only RUN for strings: calling `strcmp` on two arbitrary
-                    // payloads reads whatever they point at, and an
-                    // int-holding blob's payload points nowhere.
+                    // only RUN for strings: measuring two arbitrary payloads
+                    // reads whatever they point at, and an int-holding blob's
+                    // payload points nowhere.
                     if (stringType && currentFn_) {
                         int64_t strTid = typeIdOf(*stringType);
                         llvm::Value* isStr = builder_.CreateICmpEQ(ta, builder_.getInt64(strTid), "any.is_str");
                         llvm::Value* bothStr = builder_.CreateAnd(typeEq, isStr, "any.both_str");
-                        llvm::FunctionCallee cmp = runtimeFn(
-                            node, "strcmp",
-                            llvm::FunctionType::get(builder_.getInt32Ty(),
-                                                    {llvm::PointerType::getUnqual(ctx_),
-                                                     llvm::PointerType::getUnqual(ctx_)}, false),
-                            "a string key comparison");
-                        if (cmp) {
-                            auto* strBB = llvm::BasicBlock::Create(ctx_, "any.strcmp", currentFn_->fn);
-                            auto* endBB = llvm::BasicBlock::Create(ctx_, "any.eq.done", currentFn_->fn);
-                            auto* preBB = builder_.GetInsertBlock();
-                            builder_.CreateCondBr(bothStr, strBB, endBB);
-                            builder_.SetInsertPoint(strBB);
-                            llvm::Value* diff = builder_.CreateCall(cmp, {pa, pb}, "any.strcmp");
-                            llvm::Value* strEq = builder_.CreateICmpEQ(diff, builder_.getInt32(0), "any.streq");
-                            builder_.CreateBr(endBB);
-                            builder_.SetInsertPoint(endBB);
-                            auto* phi = builder_.CreatePHI(builder_.getInt1Ty(), 2, "any.eq.str");
-                            phi->addIncoming(builder_.getInt1(false), preBB);
-                            phi->addIncoming(strEq, strBB);
-                            exactEq = builder_.CreateOr(exactEq, phi, "any.eq.or.str");
-                        }
+                        auto* strBB = llvm::BasicBlock::Create(ctx_, "any.str", currentFn_->fn);
+                        auto* endBB = llvm::BasicBlock::Create(ctx_, "any.eq.done", currentFn_->fn);
+                        auto* preBB = builder_.GetInsertBlock();
+                        builder_.CreateCondBr(bothStr, strBB, endBB);
+                        builder_.SetInsertPoint(strBB);
+                        llvm::Value* strEq = emitStringContentEquality(node, pa, pb);
+                        if (!strEq) return nullptr;
+                        // The helper leaves the builder in its own end block
+                        // after its null guard: that block, not strBB, is the
+                        // predecessor this PHI must name.
+                        llvm::BasicBlock* strDone = builder_.GetInsertBlock();
+                        builder_.CreateBr(endBB);
+                        builder_.SetInsertPoint(endBB);
+                        auto* phi = builder_.CreatePHI(builder_.getInt1Ty(), 2, "any.eq.str");
+                        phi->addIncoming(builder_.getInt1(false), preBB);
+                        phi->addIncoming(strEq, strDone);
+                        exactEq = builder_.CreateOr(exactEq, phi, "any.eq.or.str");
                     }
                     return exactEq;
                 }
@@ -9928,6 +10109,19 @@ private:
                 }
                 unsupported(node, "an operator on a pointer");
                 return CgVal{};
+            }
+            // Two `string`s (pointers with nothing recorded past them)
+            // compare by content: same length and byte-equal, with `!=` its
+            // negation. `== null` returned above, and a null-valued variable
+            // against bytes is answered by the guard inside. Ordering on any
+            // pointer still refuses above.
+            if (!lhs.type.pointee && !rhs.type.pointee) {
+                llvm::Value* eq = emitStringContentEquality(node, lhs.value, rhs.value);
+                if (!eq) return CgVal{};
+                CgType boolType = *types_.byName("bool");
+                if (op == ASTTokenKind::NOTEQ)
+                    eq = builder_.CreateNot(eq, "strne");
+                return CgVal{eq, boolType};
             }
             // No convert: there is one pointer type in the IR, so a `&int` and a bare
             // `null` are already the same operand type.
@@ -11534,6 +11728,7 @@ private:
         // conversion from the tag constant to whatever `$enum_member` mapped to).
         if (!isCtorCall && tryEnumTagIntrinsic(node, name)) return;
         if (!isCtorCall && tryMetaIntrinsic(node, name)) return;
+        if (!isCtorCall && tryHashWordIntrinsic(node, name)) return;
         auto found = functions_.find(emittedName);
         if (!isCtorCall && currentOwner_) {
             // A body its defining module owns calls the module's own
