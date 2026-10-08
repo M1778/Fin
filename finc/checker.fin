@@ -205,26 +205,322 @@ priv fun chk_int_is_signed(name: string) <bool> {
     return true;
 }
 
-// Greatest magnitude a target integer holds, as decimal text (C++
-// constantFitsType: signed max 2^(b-1)-1, unsigned max 2^b-1; negated limit
-// 2^(b-1) for a `-` over a literal). Text compare avoids any 64-bit overflow.
-priv fun chk_int_max_text(bits: int, signed: bool, neg: bool) <string> {
+priv fun chk_digit_val(ch: string) <int> {
+    if (chk_str_eq(ch, "0")) { return 0; }
+    if (chk_str_eq(ch, "1")) { return 1; }
+    if (chk_str_eq(ch, "2")) { return 2; }
+    if (chk_str_eq(ch, "3")) { return 3; }
+    if (chk_str_eq(ch, "4")) { return 4; }
+    if (chk_str_eq(ch, "5")) { return 5; }
+    if (chk_str_eq(ch, "6")) { return 6; }
+    if (chk_str_eq(ch, "7")) { return 7; }
+    if (chk_str_eq(ch, "8")) { return 8; }
+    if (chk_str_eq(ch, "9")) { return 9; }
+    return -1;
+}
+
+// The written `{N}` width on an integer spelling (`int{65}` -> 65),
+// tolerating the spaces alias targets carry (`uint { 64 }`). -1 when
+// there is none or it is not plain digits (an expression width like
+// `{8*8}` stores no width in C++, so the base stands). Saturates past
+// six digits: no readable constant can test a wider bound.
+priv fun chk_width_of(s: string) <int> {
+    if (s == null) { return -1; }
+    let len <int> = cast<int>(chk_strlen(s));
+    let i <int> = 0;
+    while (i < len) {
+        if (chk_str_eq(substr(s, i, 1), "{")) { break; }
+        i = i + 1;
+    }
+    if (i >= len) { return -1; }
+    let j <int> = i + 1;
+    while (j < len && (chk_str_eq(substr(s, j, 1), " ") || chk_str_eq(substr(s, j, 1), "\t"))) { j = j + 1; }
+    let dstart <int> = j;
+    while (j < len && chk_digit_val(substr(s, j, 1)) >= 0) { j = j + 1; }
+    if (j <= dstart) { return -1; }
+    let k <int> = j;
+    while (k < len && (chk_str_eq(substr(s, k, 1), " ") || chk_str_eq(substr(s, k, 1), "\t"))) { k = k + 1; }
+    if (k >= len || !chk_str_eq(substr(s, k, 1), "}")) { return -1; }
+    if (j - dstart > 6) { return 1000000; }
+    let w <int> = 0;
+    let d <int> = dstart;
+    while (d < j) {
+        w = w * 10 + chk_digit_val(substr(s, d, 1));
+        d = d + 1;
+    }
+    return w;
+}
+
+// Effective integer width in bits: the base name's, overridden by a
+// written `{N}` (C++ resolves `int{64}` into the type, ADR 0022). -1
+// for non-integers, including pointer spellings (a pointer is not an
+// integer) and widths on non-integer bases (`float{128}` is `float`).
+priv fun chk_eff_bits(s: string) <int> {
+    if (s == null) { return -1; }
+    let len <int> = cast<int>(chk_strlen(s));
+    if (len > 1 && (chk_str_eq(substr(s, 0, 1), "&") || chk_str_eq(substr(s, len - 1, 1), "*"))) { return -1; }
+    let base <int> = chk_int_bits(s);
+    if (base <= 0) { return -1; }
+    let w <int> = chk_width_of(s);
+    if (w < 0) { return base; }
+    return w;
+}
+
+// Exact decimal text of 2^b for 0 <= b <= 64: the constant-fit limits
+// below compare against these instead of the old 8/16/32/64 buckets,
+// which admitted 200 into a `uint{7}`.
+priv fun chk_pow2_text(b: int) <string> {
+    if (b < 0) { return "1"; }
+    if (b > 64) { return "18446744073709551616"; }
+    let digits <[int]> = new [int, 70]{};
+    digits[0] = 1;
+    let nd <int> = 1;
+    let k <int> = 0;
+    while (k < b) {
+        let carry <int> = 0;
+        let i <int> = 0;
+        while (i < nd) {
+            let v <int> = digits[i] * 2 + carry;
+            digits[i] = v % 10;
+            carry = v / 10;
+            i = i + 1;
+        }
+        while (carry > 0) {
+            digits[nd] = carry % 10;
+            carry = carry / 10;
+            nd = nd + 1;
+        }
+        k = k + 1;
+    }
+    let ob <Buffer> = new_buffer(nd + 1);
+    let r <int> = nd - 1;
+    while (r >= 0) {
+        ob.write_int(digits[r]);
+        r = r - 1;
+    }
+    let out <string> = ob.to_string();
+    free_buffer(ob);
+    return out;
+}
+
+// Verdict for a magnitude (pure digits) against an integer target of
+// `bits` width: 0 fits, 1 plain mismatch, 2 too large to represent.
+// C++ constantFitsType bit for bit: a negated limit of 2^(b-1), a
+// signed max of 2^(b-1)-1, an unsigned max of 2^b-1; anything 64 or
+// wider takes every readable magnitude (`mag >= 2^lim` refuses, which
+// is `mag > 2^lim - 1` without spelling the minus one).
+priv fun chk_mag_verdict(mag: string, bits: int, signed: bool, neg: bool) <int> {
+    let m <string> = chk_strip_leading_zeros(mag);
     if (neg) {
-        if (bits <= 8) { return "128"; }
-        if (bits <= 16) { return "32768"; }
-        if (bits <= 32) { return "2147483648"; }
-        return "9223372036854775808";
+        if (!signed) { return 1; }
+        let nl <string> = "9223372036854775808";
+        if (bits <= 64) { nl = chk_pow2_text(bits - 1); }
+        if (chk_digits_gt(m, nl)) { return 1; }
+        return 0;
     }
-    if (!signed) {
-        if (bits <= 8) { return "255"; }
-        if (bits <= 16) { return "65535"; }
-        if (bits <= 32) { return "4294967295"; }
-        return "18446744073709551615";
+    if (signed && bits >= 64) {
+        if (chk_digits_gt(m, "9223372036854775807")) { return 1; }
+        return 0;
     }
-    if (bits <= 8) { return "127"; }
-    if (bits <= 16) { return "32767"; }
-    if (bits <= 32) { return "2147483647"; }
-    return "9223372036854775807";
+    if (!signed && bits >= 64) {
+        if (chk_digits_gt(m, "18446744073709551615")) { return 2; }
+        return 0;
+    }
+    let lim <int> = bits;
+    if (signed) { lim = bits - 1; }
+    let p2 <string> = chk_pow2_text(lim);
+    if (chk_digits_gt(m, p2) || chk_str_eq(m, p2)) { return 1; }
+    return 0;
+}
+
+// True when the spelling writes an integer width outside the four the
+// backend represents (`int{9}`, `*uint{7}`): C++ refuses those where
+// they are declared, so the stage records them instead of lowering
+// past them. Expression widths (`{8*8}`) store no width and widths on
+// non-integers (`float{128}`) are dropped, both exactly like C++.
+priv fun chk_spelling_has_bad_width(s: string) <bool> {
+    if (s == null) { return false; }
+    let len <int> = cast<int>(chk_strlen(s));
+    let i <int> = 0;
+    while (i < len) {
+        if (!chk_str_eq(substr(s, i, 1), "{")) { i = i + 1; continue; }
+        let b <int> = i - 1;
+        while (b >= 0 && (chk_str_eq(substr(s, b, 1), " ") || chk_str_eq(substr(s, b, 1), "\t"))) { b = b - 1; }
+        let e <int> = b;
+        while (b >= 0) {
+            let ch <string> = substr(s, b, 1);
+            if ((chk_strcmp(ch, "a") >= 0 && chk_strcmp(ch, "z") <= 0) ||
+                (chk_strcmp(ch, "A") >= 0 && chk_strcmp(ch, "Z") <= 0) ||
+                (chk_strcmp(ch, "0") >= 0 && chk_strcmp(ch, "9") <= 0) ||
+                chk_str_eq(ch, "_")) { b = b - 1; } else { break; }
+        }
+        if (e >= b + 1) {
+            let base <string> = substr(s, b + 1, e - b);
+            if (chk_int_bits(base) > 0) {
+                let j <int> = i + 1;
+                while (j < len && (chk_str_eq(substr(s, j, 1), " ") || chk_str_eq(substr(s, j, 1), "\t"))) { j = j + 1; }
+                let ds <int> = j;
+                while (j < len && chk_digit_val(substr(s, j, 1)) >= 0) { j = j + 1; }
+                if (j > ds) {
+                    let k <int> = j;
+                    while (k < len && (chk_str_eq(substr(s, k, 1), " ") || chk_str_eq(substr(s, k, 1), "\t"))) { k = k + 1; }
+                    if (k < len && chk_str_eq(substr(s, k, 1), "}")) {
+                        let rs <string> = chk_strip_leading_zeros(substr(s, ds, j - ds));
+                        if (!chk_str_eq(rs, "8") && !chk_str_eq(rs, "16") &&
+                            !chk_str_eq(rs, "32") && !chk_str_eq(rs, "64")) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// First index of needle in hay at or after start, -1 when absent.
+priv fun chk_index_of(hay: string, needle: string, start: int) <int> {
+    if (hay == null || needle == null) { return -1; }
+    let hlen <int> = cast<int>(chk_strlen(hay));
+    let nlen <int> = cast<int>(chk_strlen(needle));
+    if (nlen <= 0 || start < 0 || start + nlen > hlen) { return -1; }
+    let i <int> = start;
+    while (i + nlen <= hlen) {
+        if (chk_str_eq(substr(hay, i, nlen), needle)) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// One-level pointer spellings read as C++ prints them (`*int{64}`
+// and `int{65}*` are both `&`-first there): `&T`, so a diagnostic
+// names the type both compilers agree on. Anything else (multi-level,
+// `void*`, brackets, generics, nullables) keeps its spelling.
+priv fun chk_canon_ptr(s: string) <string> {
+    if (s == null) { return s; }
+    let len <int> = cast<int>(chk_strlen(s));
+    if (len <= 1) { return s; }
+    let lead <int> = 0;
+    if (chk_str_eq(substr(s, 0, 1), "&") || chk_str_eq(substr(s, 0, 1), "*")) { lead = 1; }
+    let trail <int> = 0;
+    if (chk_str_eq(substr(s, len - 1, 1), "*")) { trail = 1; }
+    if (lead + trail != 1) { return s; }
+    let core <string> = s;
+    if (lead == 1) { core = substr(s, 1, len - 1); } else { core = substr(s, 0, len - 1); }
+    if (chk_str_eq(core, "") || chk_str_eq(core, "void")) { return s; }
+    let clen <int> = cast<int>(chk_strlen(core));
+    let i <int> = 0;
+    while (i < clen) {
+        let ch <string> = substr(core, i, 1);
+        if (chk_str_eq(ch, "&") || chk_str_eq(ch, "*") || chk_str_eq(ch, "[") ||
+            chk_str_eq(ch, "]") || chk_str_eq(ch, "(") || chk_str_eq(ch, ")") ||
+            chk_str_eq(ch, "<") || chk_str_eq(ch, ">") || chk_str_eq(ch, ",") ||
+            chk_str_eq(ch, ":") || chk_str_eq(ch, "?") || chk_str_eq(ch, "$")) {
+            return s;
+        }
+        i = i + 1;
+    }
+    let b <Buffer> = new_buffer(32);
+    b.write_char('&');
+    b.write_string(core);
+    let out <string> = b.to_string();
+    free_buffer(b);
+    return out;
+}
+
+// A prototype spelling (`{int, float}`): braces that group, not a
+// width. Width spellings (`int{9}`, `*int{64}`) never start with one,
+// so the narrowing checks tell them apart by the first character.
+priv fun chk_is_prototype_spelling(s: string) <bool> {
+    if (s == null) { return false; }
+    let t <string> = chk_trim(s);
+    if (chk_strlen(t) == cast<ulong>(0)) { return false; }
+    return chk_str_eq(substr(t, 0, 1), "{");
+}
+
+// Declared size of a bracketed array spelling (`[int, 6]` -> 6), -1
+// when unsized (`[int]`) or unreadable. Commas inside `<>` do not
+// split (`[Pair<int, int>, 3]` sizes 3).
+priv fun chk_arr_size(s: string) <int> {
+    if (s == null) { return -1; }
+    let len <int> = cast<int>(chk_strlen(s));
+    if (len < 3 || !chk_str_eq(substr(s, 0, 1), "[") || !chk_str_eq(substr(s, len - 1, 1), "]")) { return -1; }
+    let inner <string> = substr(s, 1, len - 2);
+    let ilen <int> = cast<int>(chk_strlen(inner));
+    let depth <int> = 0;
+    let i <int> = 0;
+    while (i < ilen) {
+        let ch <string> = substr(inner, i, 1);
+        if (chk_str_eq(ch, "<")) { depth = depth + 1; }
+        else if (chk_str_eq(ch, ">")) { if (depth > 0) { depth = depth - 1; } }
+        else if (chk_str_eq(ch, ",") && depth == 0) { break; }
+        i = i + 1;
+    }
+    if (i >= ilen) { return -1; }
+    let tail <string> = chk_trim(substr(inner, i + 1, ilen - i - 1));
+    let tlen <int> = cast<int>(chk_strlen(tail));
+    if (tlen <= 0 || tlen > 6) { return -1; }
+    let n <int> = 0;
+    let d <int> = 0;
+    while (d < tlen) {
+        let dv <int> = chk_digit_val(substr(tail, d, 1));
+        if (dv < 0) { return -1; }
+        n = n * 10 + dv;
+        d = d + 1;
+    }
+    return n;
+}
+
+// Canonical display of a sized array spelling (`[int,6]` ->
+// `[int, 6]`, like C++ ArrayType prints it), "" when unsized or
+// unreadable. The annotation keeps its written spacing; diagnostics
+// do not.
+priv fun chk_arr_canonical(s: string) <string> {
+    if (s == null) { return ""; }
+    if (chk_arr_size(s) < 0) { return ""; }
+    let len <int> = cast<int>(chk_strlen(s));
+    let inner <string> = substr(s, 1, len - 2);
+    let ilen <int> = cast<int>(chk_strlen(inner));
+    let adepth <int> = 0;
+    let ai <int> = 0;
+    while (ai < ilen) {
+        let ach <string> = substr(inner, ai, 1);
+        if (chk_str_eq(ach, "<")) { adepth = adepth + 1; }
+        else if (chk_str_eq(ach, ">")) { if (adepth > 0) { adepth = adepth - 1; } }
+        else if (chk_str_eq(ach, ",") && adepth == 0) { break; }
+        ai = ai + 1;
+    }
+    if (ai >= ilen) { return ""; }
+    let ahead <string> = chk_trim(substr(inner, 0, ai));
+    let atail <string> = chk_trim(substr(inner, ai + 1, ilen - ai - 1));
+    if (chk_strlen(ahead) == cast<ulong>(0)) { return ""; }
+    let ab <Buffer> = new_buffer(32);
+    ab.write_char('[');
+    ab.write_string(ahead);
+    ab.write_string(", ");
+    ab.write_string(atail);
+    ab.write_char(']');
+    let aout <string> = ab.to_string();
+    free_buffer(ab);
+    return aout;
+}
+
+// Numeric twin of the text compare in chk_big_const_verdict for literals
+// the parser carries on int_val: str_val is only set for out-of-int-range
+// spellings (parser.fin:437-442), so a narrow target like `char` never
+// sees digits. Same C++ constantFitsType limits, answered on the
+// rendered magnitude: 1 refuses like the text path.
+priv fun chk_small_const_verdict(value: int, neg: bool, target: string) <int> {
+    if (value < 0) {
+        if (!chk_int_is_signed(target)) { return 1; }
+        return 0;
+    }
+    let ib <Buffer> = new_buffer(24);
+    ib.write_int(value);
+    let mag <string> = ib.to_string();
+    free_buffer(ib);
+    return chk_mag_verdict(mag, chk_eff_bits(target), chk_int_is_signed(target), neg);
 }
 
 priv fun chk_strip_leading_zeros(s: string) <string> {
@@ -261,29 +557,6 @@ priv fun chk_digits_gt(a: string, b: string) <bool> {
     let yl <ulong> = chk_strlen(y);
     if (xl != yl) { return xl > yl; }
     return chk_strcmp(x, y) > 0;
-}
-
-// Numeric twin of the text compare in chk_big_const_verdict for literals
-// the parser carries on int_val: str_val is only set for out-of-int-range
-// spellings (parser.fin:437-442), so a narrow target like `char` never
-// sees digits. Same C++ constantFitsType limits, answered on the value:
-// 1 refuses like the text path.
-priv fun chk_small_const_verdict(value: int, neg: bool, target: string, bits: int) <int> {
-    if (neg) {
-        if (!chk_int_is_signed(target)) { return 1; }
-        if (bits <= 8 && value > 128) { return 1; }
-        if (bits <= 16 && value > 32768) { return 1; }
-        return 0;
-    }
-    if (value < 0 && !chk_int_is_signed(target)) { return 1; }
-    if (!chk_int_is_signed(target)) {
-        if (bits <= 8 && value > 255) { return 1; }
-        if (bits <= 16 && value > 65535) { return 1; }
-        return 0;
-    }
-    if (bits <= 8 && value > 127) { return 1; }
-    if (bits <= 16 && value > 32767) { return 1; }
-    return 0;
 }
 
 // True for the nodes chk_big_const_verdict reads a value from: a bare
@@ -360,7 +633,7 @@ priv fun chk_operand_span(node: &AstNode) <int> {
 // negative constant (the lexer never produces a signed token); anything
 // else is not a constant.
 priv fun chk_big_const_verdict(node: &AstNode, target: string) <int> {
-    let bits <int> = chk_int_bits(target);
+    let bits <int> = chk_eff_bits(target);
     if (bits <= 0) { return 0; }
     let neg <bool> = false;
     let lit <&AstNode> = node;
@@ -370,20 +643,9 @@ priv fun chk_big_const_verdict(node: &AstNode, target: string) <int> {
     }
     if (lit == null || lit.kind != ast_literal_int()) { return 0; }
     if (!chk_is_digits(lit.str_val)) {
-        return chk_small_const_verdict(lit.int_val, neg, target, bits);
+        return chk_small_const_verdict(lit.int_val, neg, target);
     }
-    let mag <string> = chk_strip_leading_zeros(lit.str_val);
-    if (neg) {
-        if (chk_int_is_signed(target)) {
-            if (chk_digits_gt(mag, chk_int_max_text(bits, true, true))) { return 1; }
-            return 0;
-        }
-        return 1;
-    }
-    if (!chk_int_is_signed(target) && bits >= 64 &&
-        chk_digits_gt(mag, "18446744073709551615")) { return 2; }
-    if (chk_digits_gt(mag, chk_int_max_text(bits, chk_int_is_signed(target), false))) { return 1; }
-    return 0;
+    return chk_mag_verdict(lit.str_val, bits, chk_int_is_signed(target), neg);
 }
 
 // Shift-count refusal (owner decision: refuse constants): a constant count
@@ -627,6 +889,17 @@ pub struct Checker {
       // checking (struct methods share their struct's): the "you are
       // here" mark the nearest-definition search measures from.
       current_def_pos <int> = 0,
+      // First unrepresentable integer width (`int{9}`, a `uint{7}`
+      // enum payload): a C++ codegen refusal, so the stage records it
+      // during checking and reports it after, only when no semantic
+      // error fired (a C++ frontend error suppresses its backend the
+      // same way). 0 none, 1 variable, 2 enum payload; first wins.
+      width_kind <int> = 0,
+      width_spell <string> = "",
+      width_name <string> = "",
+      width_line <int> = 0,
+      width_col <int> = 0,
+      width_file <string> = "",
 
     pub:
       fun report_error(self: &Self, msg: string, line: int, col: int) <noret> {
@@ -1318,13 +1591,15 @@ pub struct Checker {
           return n;
       }
 
-      // Strips one pointer marker (`&T` -> `T`, `T*` -> `T`); otherwise
-    // identity. C++ PointerType::equals answers the same question on the
-    // type graph, so the string check must not split `&T` from `T*`.
+      // Strips one pointer marker (`&T` -> `T`, `T*` -> `T`, `*T` ->
+    // `T`); otherwise identity. C++ PointerType::equals answers the
+    // same question on the type graph, so the string check must not
+    // split `&T` from `T*` -- or from `*T`, the other written pointer
+    // form, which C++ reads as a pointer too.
     fun chk_strip_ptr(self: &Self, s: string) <string> {
         if (s == null) { return ""; }
         let len <int> = cast<int>(chk_strlen(s));
-        if (len > 1 && chk_str_eq(substr(s, 0, 1), "&")) {
+        if (len > 1 && (chk_str_eq(substr(s, 0, 1), "&") || chk_str_eq(substr(s, 0, 1), "*"))) {
             return substr(s, 1, len - 1);
         }
         if (len > 1 && chk_str_eq(substr(s, len - 1, 1), "*")) {
@@ -1596,7 +1871,7 @@ pub struct Checker {
         return known;
     }
 
-    // Pointer depth: leading `&` plus trailing `*` (`&&&int` and
+    // Pointer depth: leading `&`/`*` plus trailing `*` (`&&&int` and
     // `int***` are both depth 3; C++ PointerType nests the same way).
     fun chk_ptr_depth(self: &Self, s: string) <int> {
         if (s == null) { return 0; }
@@ -1604,7 +1879,7 @@ pub struct Checker {
         let d <int> = 0;
         let i <int> = 0;
         while (i < len) {
-            if (chk_str_eq(substr(s, i, 1), "&")) {
+            if (chk_str_eq(substr(s, i, 1), "&") || chk_str_eq(substr(s, i, 1), "*")) {
                 d = d + 1;
                 i = i + 1;
             } else {
@@ -1623,13 +1898,14 @@ pub struct Checker {
         return d;
     }
 
-    // Base with all pointer markers removed (`&&&int` -> `int`).
+    // Base with all pointer markers removed (`&&&int` -> `int`,
+    // `*int` -> `int`: a leading `*` marks a pointer like `&` does).
     fun chk_ptr_base(self: &Self, s: string) <string> {
         if (s == null) { return ""; }
         let len <int> = cast<int>(chk_strlen(s));
         let i <int> = 0;
         while (i < len) {
-            if (chk_str_eq(substr(s, i, 1), "&")) { i = i + 1; } else { break; }
+            if (chk_str_eq(substr(s, i, 1), "&") || chk_str_eq(substr(s, i, 1), "*")) { i = i + 1; } else { break; }
         }
         let j <int> = len - 1;
         while (j >= i) {
@@ -2044,6 +2320,74 @@ pub struct Checker {
           free_buffer(b);
       }
 
+      // report_type_mismatch on a caller-measured range (array literals,
+      // operator-led values): the span is the value's source extent, like
+      // the C++ node range.
+      fun report_type_mismatch_spanned(self: &Self, expected: string, actual: string, line: int, col: int, span: int) <noret> {
+          let b <Buffer> = new_buffer(96);
+          b.write_string("Type mismatch: expected '");
+          b.write_string(expected);
+          b.write_string("', got '");
+          b.write_string(actual);
+          b.write_string("'");
+          let m <string> = b.to_string();
+          free_buffer(b);
+          self.report_error_spanned(m, line, col, span);
+      }
+
+      // Source extent of a value for the span above: bracket matching
+      // for literals (`[1,2,3]`), operator plus identifier run for
+      // prefix values (`&x`). Anything else answers 0 and the caller
+      // keeps the automatic token span. Quote-aware, so a `[` inside a
+      // string never unbalances the match.
+      fun chk_measured_span(self: &Self, node: &AstNode) <int> {
+          if (node == null) { return 0; }
+          let lt <string> = self.source_line_text(self.source_file, node.line);
+          if (lt == null || chk_strlen(lt) == cast<ulong>(0)) { return 0; }
+          let total <int> = cast<int>(chk_strlen(lt));
+          let idx <int> = node.col - 1;
+          if (idx < 0 || idx >= total) { return 0; }
+          let c <string> = substr(lt, idx, 1);
+          if (chk_str_eq(c, "[")) {
+              let depth <int> = 0;
+              let i <int> = idx;
+              let q <int> = 0;
+              while (i < total) {
+                  let ch <string> = substr(lt, i, 1);
+                  if (q == 1) {
+                      if (chk_str_eq(ch, "'")) { q = 0; }
+                  } else if (q == 2) {
+                      if (chk_str_eq(ch, "\\")) { i = i + 1; }
+                      else if (chk_str_eq(ch, "\"")) { q = 0; }
+                  } else {
+                      if (chk_str_eq(ch, "'")) { q = 1; }
+                      else if (chk_str_eq(ch, "\"")) { q = 2; }
+                      else if (chk_str_eq(ch, "[")) { depth = depth + 1; }
+                      else if (chk_str_eq(ch, "]")) {
+                          depth = depth - 1;
+                          if (depth <= 0) { return i - idx + 1; }
+                      }
+                  }
+                  i = i + 1;
+              }
+              return 0;
+          }
+          if (chk_str_eq(c, "&") || chk_str_eq(c, "*") || chk_str_eq(c, "!") ||
+              chk_str_eq(c, "-") || chk_str_eq(c, "+")) {
+              let j <int> = idx + 1;
+              while (j < total) {
+                  let d <string> = substr(lt, j, 1);
+                  if ((chk_strcmp(d, "a") >= 0 && chk_strcmp(d, "z") <= 0) ||
+                      (chk_strcmp(d, "A") >= 0 && chk_strcmp(d, "Z") <= 0) ||
+                      (chk_strcmp(d, "0") >= 0 && chk_strcmp(d, "9") <= 0) ||
+                      chk_str_eq(d, "_")) { j = j + 1; } else { break; }
+              }
+              if (j > idx + 1) { return j - idx; }
+              return 0;
+          }
+          return 0;
+      }
+
       // report_type_mismatch on a measured range (comparison constants):
       // the span is the operand's source length, like the C++ node range.
       fun report_cmp_neg_const(self: &Self, expected: string, actual: string, node: &AstNode) <noret> {
@@ -2408,7 +2752,8 @@ pub struct Checker {
       // Mirror of C++ isAssignableTo for the three sites this checker enforces
       // (return values, `=` assignments, call arguments): exact match after alias resolution,
       // plus the conversions the corpus writes without casts (nullable both
-      // directions, integer widening per ADR 0022, the one int->float rule,
+      // directions, integer widening per ADR 0022 over effective widths
+      // (`int{65}` is 65 bits, not `int`), the one int->float rule,
       // `any`/`object` targets, generic parameter targets, struct-to-interface
       // heritage). Anything unknown
       // (auto/error sentinels, void* nulls, Self) is accepted: this check may
@@ -2446,11 +2791,26 @@ pub struct Checker {
           if (chk_str_eq(self.chk_strip_ptr(a), self.chk_strip_ptr(e))) { return true; }
           // Same depth, same base: `&&&int` is `int***` (C++ PointerType
           // nesting). Depth 0 on either side stays a mismatch (`&int` is
-          // not `int`); `void*` conversions are answered above.
+          // not `int`); `void*` conversions are answered above. A
+          // redundant width through the pointer is the same type (C++
+          // PrimitiveType::equals), so `&int{32}` is `&int` while
+          // `&int{65}` stays refused like any other width mismatch.
           if (self.chk_ptr_depth(a) > 0 && self.chk_ptr_depth(a) == self.chk_ptr_depth(e)) {
               if (chk_str_eq(self.chk_ptr_base(a), self.chk_ptr_base(e))) { return true; }
+              let pa <string> = self.chk_ptr_base(a);
+              let pe <string> = self.chk_ptr_base(e);
+              if (chk_str_eq(chk_strip_width(pa), chk_strip_width(pe))) {
+                  let pb <int> = chk_eff_bits(pa);
+                  if (pb > 0 && pb == chk_eff_bits(pe) && chk_int_is_signed(pa) == chk_int_is_signed(pe)) { return true; }
+              }
           }
           if (self.chk_is_arr(a) && self.chk_is_arr(e)) {
+              // Two sized arrays agree on the count (C++ ArrayType
+              // extent): `[int, 5]` is not `[int, 6]`. Unsized either
+              // side keeps the element-only answer.
+              let asz <int> = chk_arr_size(a);
+              let esz <int> = chk_arr_size(e);
+              if (asz >= 0 && esz >= 0 && asz != esz) { return false; }
               return self.chk_types_compatible(self.chk_arr_elem(a), self.chk_arr_elem(e));
           }
           if (chk_str_eq(e, "void*") && self.chk_is_ptr_like(a)) { return true; }
@@ -2469,8 +2829,10 @@ pub struct Checker {
               if (a_args != e_args) { return true; }
           }
           if (chk_str_eq(a, "int") && chk_str_eq(e, "float")) { return true; }
-          let a_bits <int> = chk_int_bits(a);
-          let e_bits <int> = chk_int_bits(e);
+          // Widths compare: a written `{N}` is the type (C++ scalarOf),
+          // so `int{65}` neither widens to nor equals `int{64}`.
+          let a_bits <int> = chk_eff_bits(a);
+          let e_bits <int> = chk_eff_bits(e);
           if (a_bits > 0 && e_bits > 0) {
               if (e_bits > a_bits) { return true; }
               if (e_bits == a_bits && chk_int_is_signed(a) == chk_int_is_signed(e)) { return true; }
@@ -6105,9 +6467,12 @@ pub struct Checker {
                   // check rides the walk below, which owns arg types.
                   // Arity must match, else the count diagnostic (which
                   // only the callee's own registry owns) stays silent.
+                  // Qualified constructions (`Color::RGB`) check the same
+                  // way: the lookup resolves the member through its enum,
+                  // and anything else answers "" exactly as before.
                   let ev_segs <[string]> = new [string, 64]{};
                   let ev_pn <int> = 0;
-                  if (!is_mod_call && !hit_method && !call_recv_skip && chk_strchr(expr.name, 58) == null) {
+                  if (!is_mod_call && !hit_method && !call_recv_skip) {
                       let ev_pay <string> = self.enum_variant_payload(expr.name);
                       if (!chk_str_eq(ev_pay, "")) {
                           ev_pn = self.split_generic_segs(ev_pay, ev_segs);
@@ -6891,6 +7256,18 @@ pub struct Checker {
               // `type A = int` records `Collection<int>`), beside the
               // as-written annotation diagnostics keep pointing at.
               stmt.resolved_spelling = self.chk_resolve_generic_spelling(stmt.type_annotation);
+              // Unrepresentable integer widths (`int{9}`) are C++ codegen
+              // refusals, so the stage records the first and reports it
+              // after checking (a semantic error anywhere suppresses it,
+              // exactly like a C++ frontend error suppresses its backend).
+              if (self.width_kind == 0 && stmt.type_annotation != null &&
+                  chk_spelling_has_bad_width(stmt.type_annotation)) {
+                  self.width_kind = 1;
+                  self.width_spell = stmt.type_annotation;
+                  self.width_line = stmt.line;
+                  self.width_col = stmt.col;
+                  self.width_file = self.source_file;
+              }
               // A nullable binding initialised from a value checks like an
               // assignment (C++ checkInitializer): `long? = <int>` widens,
               // `char? = 65` does not (no constant-fit through `?`).
@@ -6917,6 +7294,38 @@ pub struct Checker {
                   if (!chk_str_eq(self.chk_strip_qmark(stmt.type_annotation), stmt.type_annotation)) {
                       if (!self.chk_types_compatible(inferred, stmt.type_annotation)) {
                           self.report_type_mismatch(stmt.type_annotation, inferred, stmt.left.line, stmt.left.col);
+                      }
+                  }
+                  // Array extents narrow like widths (C++ ArrayType extent):
+                  // a sized annotation against a literal of another size
+                  // is refused at the value, spelling both sides sized
+                  // (`expected '[int, 6]', got '[int, 5]'`). Unsized
+                  // either side keeps element checking.
+                  if (stmt.left != null && stmt.left.kind == ast_call_expr() &&
+                      chk_str_eq(stmt.left.name, "__fin_array_literal")) {
+                      let want_n <int> = chk_arr_size(stmt.type_annotation);
+                      if (want_n >= 0) {
+                          let got_n <int> = self.count_call_args(stmt.left.left, false);
+                          if (got_n != want_n) {
+                              let want_disp <string> = chk_arr_canonical(stmt.type_annotation);
+                              if (chk_str_eq(want_disp, "")) { want_disp = stmt.type_annotation; }
+                              let eb <Buffer> = new_buffer(64);
+                              eb.write_string("Type mismatch: expected '");
+                              eb.write_string(want_disp);
+                              eb.write_string("', got '[");
+                              eb.write_string(self.chk_arr_elem(inferred));
+                              eb.write_string(", ");
+                              eb.write_int(got_n);
+                              eb.write_string("]'");
+                              let em <string> = eb.to_string();
+                              free_buffer(eb);
+                              let esp <int> = self.chk_measured_span(stmt.left);
+                              if (esp > 0) {
+                                  self.report_error_spanned(em, stmt.left.line, stmt.left.col, esp);
+                              } else {
+                                  self.report_error(em, stmt.left.line, stmt.left.col);
+                              }
+                          }
                       }
                   }
                   // A bare big literal types as int but must fit the declared
@@ -6956,8 +7365,10 @@ pub struct Checker {
                   // arguments, and so do stage-spelling artifacts no user
                   // type writes: a call typed as a whole function (`f(key)`
                   // for an `f` of fn type models the callee, not the
-                  // result), a `,` spelling (`int,3*`), and `{...}` widths
-                  // (`*int{64}`). An array literal whose every element is
+                  // result), a `,` spelling (`int,3*`), and prototype
+                  // spellings (`{int, float}` group rather than annotate).
+                  // Written widths (`int{65}`, `*int{64}`) compare like
+                  // C++ compares them. An array literal whose every element is
                   // a fitting constant judges element-wise like C++; a
                   // mismatch is re-asked without parentheses (`&(&int)`
                   // is `&&int`) before it reports. Only misses, never
@@ -6973,8 +7384,7 @@ pub struct Checker {
                       self.chk_is_known_type_name(inferred) && self.chk_is_known_type_name(stmt.type_annotation) &&
                       !self.chk_mentions_gen_param(inferred) && !self.chk_mentions_gen_param(stmt.type_annotation) &&
                       chk_strchr(inferred, 44) == null &&
-                      chk_strchr(inferred, 123) == null && chk_strchr(inferred, 125) == null &&
-                      chk_strchr(stmt.type_annotation, 123) == null && chk_strchr(stmt.type_annotation, 125) == null &&
+                      !chk_is_prototype_spelling(inferred) && !chk_is_prototype_spelling(stmt.type_annotation) &&
                       !(stmt.left.kind == ast_call_expr() && chk_strchr(inferred, 40) != null) &&
                       !chk_str_contains(stmt.type_annotation, "fn(") &&
                       (!chk_str_contains(inferred, "fn(") ||
@@ -6989,7 +7399,15 @@ pub struct Checker {
                               paren_same = true;
                           }
                           if (!paren_same) {
-                              self.report_type_mismatch(stmt.type_annotation, inferred, stmt.left.line, stmt.left.col);
+                              // One-level pointers print `&`-first like C++.
+                              let exp_c <string> = chk_canon_ptr(stmt.type_annotation);
+                              let got_c <string> = chk_canon_ptr(inferred);
+                              let msp <int> = self.chk_measured_span(stmt.left);
+                              if (msp > 0) {
+                                  self.report_type_mismatch_spanned(exp_c, got_c, stmt.left.line, stmt.left.col, msp);
+                              } else {
+                                  self.report_type_mismatch(exp_c, got_c, stmt.left.line, stmt.left.col);
+                              }
                           }
                       }
                   }
@@ -7202,7 +7620,12 @@ pub struct Checker {
           if (actual_arg == null) { return; }
           if (want == null || chk_strlen(want) == cast<ulong>(0)) { return; }
           let w <string> = self.resolve_type(want);
-          if (chk_int_bits(w) > 0) {
+          // A fitting constant is accepted (C++ checkType reads the
+          // constant before assignability): only a misfit reports, and a
+          // fit returns before the compatibility check below, which a
+          // narrow target like `uint{8}` would otherwise fail against
+          // the literal's own `int`.
+          if (chk_int_bits(w) > 0 && chk_is_int_const(actual_arg)) {
               let v <int> = chk_big_const_verdict(actual_arg, w);
               if (v == 2) {
                   self.report_error("An integer constant is too large to represent", actual_arg.line, actual_arg.col);
@@ -7212,6 +7635,7 @@ pub struct Checker {
                   self.report_default_mismatch(w, got, actual_arg);
                   return;
               }
+              return;
           }
           if (!self.chk_types_compatible(got, w)) {
               self.report_default_mismatch(w, got, actual_arg);
@@ -7448,19 +7872,37 @@ pub struct Checker {
       // scope order. Imported-only names keep today's silence.
       fun enum_variant_payload(self: &Self, name: string) <string> {
           if (name == null || chk_strlen(name) == cast<ulong>(0)) { return ""; }
-          if (chk_strchr(name, 58) != null) { return ""; }
+          // A qualified construction (`Color::RGB`) reads the member of
+          // the named enum; anything else matches members directly.
+          // Only a declared enum qualifies, so a same-spelled free call
+          // can never answer here.
+          let qname <string> = name;
+          let qen <string> = "";
+          if (chk_strchr(name, 58) != null) {
+              let epos <int> = chk_index_of(name, "::", 0);
+              if (epos <= 0) { return ""; }
+              let en <string> = substr(name, 0, epos);
+              if (!self.global_scope.has(en)) { return ""; }
+              let een <Symbol> = self.global_scope.lookup(en);
+              if (een.kind != sym_enum()) { return ""; }
+              qname = substr(name, epos + 2, cast<int>(chk_strlen(name)) - epos - 2);
+              if (chk_strchr(qname, 58) != null) { return ""; }
+              qen = en;
+          }
           if (self.prog_root == null) { return ""; }
           let d <&AstNode> = self.prog_root.left;
           while (d != null) {
               if (d.kind == ast_enum_decl()) {
-                  let m <&AstNode> = d.left;
-                  while (m != null) {
-                      if (m.kind == ast_var_decl() && chk_str_eq(m.name, name) && m.int_val == 1 &&
-                          m.type_annotation != null && chk_strlen(m.type_annotation) > cast<ulong>(0)) {
-                          if (self.chk_spelling_has_unknown_word(m.type_annotation)) { return ""; }
-                          return m.type_annotation;
+                  if (chk_str_eq(qen, "") || chk_str_eq(d.name, qen)) {
+                      let m <&AstNode> = d.left;
+                      while (m != null) {
+                          if (m.kind == ast_var_decl() && chk_str_eq(m.name, qname) && m.int_val == 1 &&
+                              m.type_annotation != null && chk_strlen(m.type_annotation) > cast<ulong>(0)) {
+                              if (self.chk_spelling_has_unknown_word(m.type_annotation)) { return ""; }
+                              return m.type_annotation;
+                          }
+                          m = m.right;
                       }
-                      m = m.right;
                   }
               }
               d = d.right;
@@ -8043,6 +8485,92 @@ pub struct Checker {
           }
           delete segs;
           delete pnames;
+      }
+
+      // Records the first enum payload with an unrepresentable integer
+      // width (`RGB(uint{9}, ...)`): a C++ codegen refusal, reported
+      // after checking when nothing else failed. First program-wide win
+      // like the C++ first-refusal guard.
+      fun check_enum_payload_widths(self: &Self, decl: &AstNode) <noret> {
+          if (decl == null || self.width_kind != 0) { return; }
+          let m <&AstNode> = decl.left;
+          while (m != null) {
+              if (m.kind == ast_var_decl() && m.int_val == 1 &&
+                  m.type_annotation != null && chk_strlen(m.type_annotation) > cast<ulong>(0)) {
+                  let segs <[string]> = new [string, 64]{};
+                  let n <int> = self.split_generic_segs(m.type_annotation, segs);
+                  let i <int> = 0;
+                  while (i < n) {
+                      let seg <string> = chk_trim(segs[i]);
+                      if (chk_spelling_has_bad_width(self.resolve_type(seg))) {
+                          self.width_kind = 2;
+                          self.width_spell = seg;
+                          let nb <Buffer> = new_buffer(64);
+                          nb.write_string(decl.name);
+                          nb.write_string("::");
+                          nb.write_string(m.name);
+                          self.width_name = nb.to_string();
+                          free_buffer(nb);
+                          self.width_line = m.line;
+                          self.width_col = m.col;
+                          self.width_file = self.source_file;
+                          delete segs;
+                          return;
+                      }
+                      i = i + 1;
+                  }
+                  delete segs;
+              }
+              m = m.right;
+          }
+      }
+
+      // Reports the recorded width refusal: a variable names its type
+      // (`a variable of type 'int{9}' ...`), an enum payload names its
+      // member, both in the C++ codegen wording. Spans mirror the C++
+      // node ranges (the statement, the payload's base name).
+      fun emit_width_refusal(self: &Self) <noret> {
+          if (self.width_kind == 0) { return; }
+          if (self.width_kind == 1) {
+              let b <Buffer> = new_buffer(128);
+              b.write_string("codegen: a variable of type '");
+              b.write_string(self.width_spell);
+              b.write_string("' (supported integer widths are 8, 16, 32 or 64) is not lowered yet");
+              let msg <string> = b.to_string();
+              free_buffer(b);
+              let sp <int> = 1;
+              let lt <string> = self.source_line_text(self.width_file, self.width_line);
+              if (lt != null && chk_strlen(lt) > cast<ulong>(0)) {
+                  let ll <int> = cast<int>(chk_strlen(lt));
+                  while (ll > 0) {
+                      let tch <string> = substr(lt, ll - 1, 1);
+                      if (chk_str_eq(tch, " ") || chk_str_eq(tch, "\t") || chk_str_eq(tch, "\r")) { ll = ll - 1; } else { break; }
+                  }
+                  sp = ll - self.width_col + 1;
+                  if (sp < 1) { sp = 1; }
+              }
+              self.report_error_spanned(msg, self.width_line, self.width_col, sp);
+              return;
+          }
+          let eb <Buffer> = new_buffer(128);
+          eb.write_string("codegen: the payload type in enum member '");
+          eb.write_string(self.width_name);
+          eb.write_string("' is not lowered yet");
+          let emsg <string> = eb.to_string();
+          free_buffer(eb);
+          let ecol <int> = self.width_col;
+          let espan <int> = 1;
+          let elt <string> = self.source_line_text(self.width_file, self.width_line);
+          if (elt != null && chk_strlen(elt) > cast<ulong>(0)) {
+              let segt <string> = chk_trim(self.width_spell);
+              let at <int> = chk_index_of(elt, segt, 0);
+              if (at >= 0) {
+                  ecol = at + 1;
+                  let bo <int> = chk_index_of(segt, "{", 0);
+                  if (bo > 0) { espan = bo; } else { espan = cast<int>(chk_strlen(segt)); }
+              }
+          }
+          self.report_error_spanned(emsg, self.width_line, ecol, espan);
       }
 
       fun is_bound_name_known(self: &Self, w: string, pnames: [string], pcount: int) <bool> {
@@ -9254,6 +9782,7 @@ pub struct Checker {
               } else if (decl.kind == ast_enum_decl()) {
                   self.api_validate_attrs(decl.attr_text, true, false, decl.line, decl.col);
                   self.check_enum_bounds(decl);
+                  self.check_enum_payload_widths(decl);
               } else if (decl.kind == ast_interface_decl()) {
                   self.api_validate_attrs(decl.attr_text, true, false, decl.line, decl.col);
                   // Interface member signatures check like C++ (which walks
@@ -9366,6 +9895,10 @@ pub struct Checker {
           }
 
           self.api_report_single_protocols();
+
+          // A recorded width refusal fires only on an otherwise-clean
+          // check, like a C++ backend refusal after a clean frontend.
+          if (!self.had_error) { self.emit_width_refusal(); }
 
           return !self.had_error;
       }
