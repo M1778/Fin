@@ -4615,17 +4615,21 @@ fun cg_eq_struct_name(ctx: &FnContext, spelling: string, want_ne: bool) <string>
     return spelling;
 }
 
-// Whether an operand spelling is the plain `string` type. Only the bare
-// spelling answers true: pointers, arrays, nullables (`string?`) and
-// generic parameters keep their existing lowering.
+// Whether an operand spelling is a one-word `string`: the bare spelling or
+// the nullable `string?` spelling, which stays one word (absent is the null
+// word), so the same content lowering with its null guard applies. Anything
+// else (`&string`, arrays, generics) keeps its existing lowering.
 fun cg_ann_is_string(ann: string) <bool> {
     if (ann == null) { return false; }
-    return cg_str_eq(cg_trim_spaces(ann), "string");
+    let t <string> = cg_trim_spaces(ann);
+    if (cg_str_eq(t, "string")) { return true; }
+    return cg_str_eq(t, "string?");
 }
 
-// Whether an `==`/`!=` operand is known to be a `string`: a string
-// literal, or an operand whose spelling is the bare `string` annotation
-// (idents, members, index results, `cast<string>`). Calls and other
+// Whether an `==`/`!=` operand is known to be a one-word `string`: a string
+// literal, or an operand whose spelling is the bare `string` annotation or
+// the nullable `string?` spelling (idents, members, index results,
+// `cast<string>`). Calls and other
 // computed shapes carry no spelling and answer false here; the checker
 // rejects `==` across mismatched types, so a known string beside an
 // unknown-typed operand still implies a string pair at runtime.
