@@ -4819,6 +4819,24 @@ pub struct Checker {
           self.global_scope.insert_symbol(make_fn_sym("number2str_float", "string", true));
       }
 
+      // Records a call's result spelling beside the node (record-don't-
+      // replace): member and `==` lowering read `resolved_spelling` first,
+      // so a call result they would otherwise see as untyped compares and
+      // reads through its declared type (C++ spellType threads the same
+      // inferred return to its backend). Only where the callee is known:
+      // generic-instantiation records keep first-wins, and unknown results
+      // (`auto`, `void`, `error`, unbound parameters) keep the empty slot,
+      // which keeps the conservative fallback, never a guessed type.
+      fun chk_stamp_call_result(self: &Self, expr: &AstNode, spelling: string) <noret> {
+          if (expr == null) { return; }
+          if (spelling == null || chk_strlen(spelling) == cast<ulong>(0)) { return; }
+          if (chk_str_eq(spelling, "auto") || chk_str_eq(spelling, "void") ||
+              chk_str_eq(spelling, "error")) { return; }
+          if (expr.resolved_spelling != null && chk_strlen(expr.resolved_spelling) > cast<ulong>(0)) { return; }
+          if (!self.chk_is_known_type_name(spelling)) { return; }
+          expr.resolved_spelling = spelling;
+      }
+
       fun check_expression(self: &Self, expr: &AstNode) <string> {
           if (expr == null) { return "void"; }
 
@@ -5470,7 +5488,9 @@ pub struct Checker {
                                   if (reentry) { self.quiet_recheck = self.quiet_recheck - 1; }
                                   if (self.current_scope.has(fw_full)) {
                                       let fw_sym <Symbol> = self.current_scope.lookup(fw_full);
-                                      return self.resolve_type(fw_sym.type_name);
+                                      let fw_rt <string> = self.resolve_type(fw_sym.type_name);
+                                      self.chk_stamp_call_result(expr, fw_rt);
+                                      return fw_rt;
                                   }
                                   return "void";
                               }
@@ -5540,7 +5560,9 @@ pub struct Checker {
                                   if (reentry) { self.quiet_recheck = self.quiet_recheck - 1; }
                                   if (self.current_scope.has(fw_mfull)) {
                                       let fw_msym <Symbol> = self.current_scope.lookup(fw_mfull);
-                                      return self.resolve_type(fw_msym.type_name);
+                                      let fw_mrt <string> = self.resolve_type(fw_msym.type_name);
+                                      self.chk_stamp_call_result(expr, fw_mrt);
+                                      return fw_mrt;
                                   }
                                   return "void";
                               }
@@ -6335,6 +6357,7 @@ pub struct Checker {
                           delete s_vals;
                           delete bind_names;
                           delete bind_vals;
+                          self.chk_stamp_call_result(expr, subst);
                           return subst;
                       }
                       if (!self.chk_is_known_type_name(fn_rt)) {
@@ -6375,6 +6398,7 @@ pub struct Checker {
                       delete s_vals;
                       delete bind_names;
                       delete bind_vals;
+                      self.chk_stamp_call_result(expr, fn_rt);
                       return fn_rt;
                   }
                   delete s_names;
