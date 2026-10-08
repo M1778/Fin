@@ -4698,6 +4698,75 @@ fun cg_lower_string_eq(ctx: &FnContext, lhs: &LLVMValue, rhs: &LLVMValue, want_n
     return phi;
 }
 
+// Whether a declaration is the `hash_word` leaf: a bodiless generic
+// `hash_word` (lib/std/hashmap.fin), lowered per concrete `T` by the
+// backend on the footing of `keyidof`/`getkeyid` (a definition wins;
+// otherwise no symbol is emitted and none is needed). A non-generic
+// extern of the same name is an ordinary call and never counts here.
+fun cg_decl_is_hash_word_leaf(decl: &AstNode) <bool> {
+    if (decl == null || decl.kind != ast_fun_decl()) { return false; }
+    if (decl.name == null || !cg_str_eq(decl.name, "hash_word")) { return false; }
+    if (!is_generic_method(decl)) { return false; }
+    if (decl.left != null) { return false; }
+    return true;
+}
+
+// Whether a call resolves to the leaf (a definition wins and falls
+// through to the normal path).
+fun cg_hash_word_is_leaf(ctx: &FnContext, name: string) <bool> {
+    if (name == null || !cg_str_eq(name, "hash_word")) { return false; }
+    let sym <&FnSymbol> = fn_ctx_find_fn(ctx, name);
+    if (sym == null || sym.tmpl == null) { return false; }
+    let tmpl <&AstNode> = sym.tmpl;
+    if (tmpl.left != null) { return false; }
+    if (!is_generic_method(tmpl)) { return false; }
+    return true;
+}
+
+// FNV-1a over the `strlen` bytes, 32-bit wrap: offset basis 2166136261,
+// prime 16777619. The empty string hashes as the basis. Same constants
+// both compilers implement, so both partition string keys identically
+// (ADR 0049). Takes the already-lowered string word; lowering the
+// argument stays at the call site (this helper predates `lower_expr`,
+// which cannot be called forward).
+fun cg_hash_word_string(ctx: &FnContext, data: &LLVMValue) <&LLVMValue> {
+    if (ctx.fn_val == null || data == null) { return null; }
+    let strlen_fn <&LLVMValue> = get_or_declare_strlen(ctx);
+    let strlen_ty <&LLVMType> = llvm_global_get_value_type(strlen_fn);
+    let len_args <&LLVMValueArgs> = new LLVMValueArgs{};
+    len_args.v0 = data;
+    let len <&LLVMValue> = llvm_build_call2(ctx.builder, strlen_ty, strlen_fn, len_args, 1, "hash.len");
+    delete len_args;
+    let h_slot <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.i32_ty, "hash.h");
+    let i_slot <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.i64_ty, "hash.i");
+    llvm_build_store(ctx.builder, llvm_const_int_of_string(ctx.i32_ty, "2166136261", 10), h_slot);
+    llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, 0, 0), i_slot);
+    let cond_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "hash.loop");
+    let body_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "hash.body");
+    let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "hash.end");
+    llvm_build_br(ctx.builder, cond_bb);
+    llvm_position_builder(ctx.builder, cond_bb);
+    let at <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, i_slot, "hash.i");
+    let more <&LLVMValue> = llvm_build_icmp(ctx.builder, llvm_int_ult(), at, len, "hash.more");
+    llvm_build_cond_br(ctx.builder, more, body_bb, end_bb);
+    llvm_position_builder(ctx.builder, body_bb);
+    let i <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i64_ty, i_slot, "hash.i");
+    let ind <&LLVMIndices> = new LLVMIndices{};
+    ind.i0 = i;
+    let byte_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i8_ty, data, ind, 1, "hash.byte");
+    delete ind;
+    let byte <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i8_ty, byte_ptr, "hash.b");
+    let h <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.i32_ty, h_slot, "hash.h");
+    let zb <&LLVMValue> = llvm_build_zext(ctx.builder, byte, ctx.i32_ty, "hash.z");
+    let mixed <&LLVMValue> = llvm_build_xor(ctx.builder, h, zb, "hash.xor");
+    let prime <&LLVMValue> = llvm_const_int(ctx.i32_ty, 16777619, 0);
+    llvm_build_store(ctx.builder, llvm_build_mul(ctx.builder, mixed, prime, "hash.mul"), h_slot);
+    llvm_build_store(ctx.builder, llvm_build_add(ctx.builder, i, llvm_const_int(ctx.i64_ty, 1, 0), "hash.next"), i_slot);
+    llvm_build_br(ctx.builder, cond_bb);
+    llvm_position_builder(ctx.builder, end_bb);
+    return llvm_build_load2(ctx.builder, ctx.i32_ty, h_slot, "hash.result");
+}
+
 // MC1 ordering: declare_function and the method-cache helpers sit before
 // lower_expr because their signatures name imported types (&AstNode/
 // &LLVMModule), which the C++ checker does not hoist: a forward call from
@@ -9317,6 +9386,48 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             }
             return llvm_const_int(ctx.i32_ty, 0, 0);
         }
+        // `hash_word::<T>(key)` -- the hashable word (ADR 0049): FNV-1a for
+        // a `string`, the `cast<int>` machine value otherwise. A bodiless
+        // generic declaration lowered per concrete argument, on the footing
+        // of `keyidof`/`getkeyid` above (a definition wins and falls
+        // through). Generic or exotic spellings fall through to the old
+        // path, which owns every refusal.
+        if (cg_str_eq(n.name, "hash_word") && n.left != null) {
+            if (cg_hash_word_is_leaf(ctx, n.name)) {
+                let hw_argc <int> = 0;
+                let hw_cw <&AstNode> = n.left;
+                while (hw_cw != null && hw_argc < 3) {
+                    hw_argc = hw_argc + 1;
+                    hw_cw = hw_cw.right;
+                }
+                if (hw_argc != 1) {
+                    cg_dprintf(2, "finc codegen refusal: a call to 'hash_word' with %d argument(s) where it declares 1\n", hw_argc);
+                    refuse_and_poison(ctx);
+                    return null;
+                }
+                let hw_actual <&AstNode> = n.left.left;
+                if (hw_actual == null) { hw_actual = n.left; }
+                let hw_spell <string> = cg_free_spelling_of(ctx, hw_actual, 8);
+                if (cg_strlen(hw_spell) > cast<ulong>(0)) {
+                    let hw_s <string> = cg_trim_spaces(cg_strip_markers(hw_spell));
+                    if (!cg_str_eq(hw_s, "Self") && !cg_is_generic_ann(ctx, hw_s) && !cg_is_type_param(hw_s)) {
+                        if (cg_str_eq(hw_s, "string")) {
+                            let hw_data <&LLVMValue> = lower_expr(ctx, hw_actual);
+                            if (hw_data != null) {
+                                let hw_h <&LLVMValue> = cg_hash_word_string(ctx, hw_data);
+                                if (hw_h != null) { return hw_h; }
+                            }
+                        } else if (cg_free_modellable(ctx, hw_s, 8)) {
+                            let hw_v <&LLVMValue> = lower_expr(ctx, hw_actual);
+                            if (hw_v != null) {
+                                let hw_w <&LLVMValue> = coerce_val(ctx, hw_v, ctx.i32_ty);
+                                if (hw_w != null) { return hw_w; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let em_call <&EnumMemberInfo> = find_enum_member_global(ctx, n.name);
         if (em_call != null) {
             let en_owner <&EnumInfo> = find_enum_for_member(ctx, em_call.name);
@@ -12709,10 +12820,20 @@ pub fun lower_decl(
     if (decl.kind == ast_fun_decl()) {
         // FG1/MM2: free generics over structs or bare parameters lower on
         // demand (see pass 1.5): skipping them here keeps uncalled generics
-        // out of the object.
-        if (decl.int_val != 2 && (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count) || cg_decl_is_struct_seeded_generic(decl))) { return false; }
+        // out of the object. The `hash_word` leaf is bodiless and lowers per
+        // concrete call instead (ADR 0049), so it never declares either.
+        if (decl.int_val != 2 && (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count) || cg_decl_is_struct_seeded_generic(decl) || cg_decl_is_hash_word_leaf(decl))) { return false; }
         return lower_fun_decl(module, builder, decl, fn_syms, fn_sym_count, structs, struct_count, enums, enum_count, interfaces, interface_count, move_claim, src_file);
     } else if (decl.kind == ast_struct_decl()) {
+        // ADR 0049: `HashMap` methods lower on demand per instantiation
+        // (method/static caches), never eager. Eager emission would lower
+        // `T` as erased and refuse the `hash_of::<T>` call that only
+        // resolves per concrete key; the C++ backend never emits erased
+        // bodies for template structs either. Skipping keeps uncalled
+        // generics out and lets instances carry every diagnostic. Scoped to
+        // `HashMap` (the only caller of `hash_of`) so unrelated generics
+        // keep their existing lowering.
+        if (decl.name != null && cg_str_eq(decl.name, "HashMap")) { return false; }
         let refused <bool> = false;
         let m <&AstNode> = decl.extra;
         while (m != null) {
@@ -13577,9 +13698,11 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int, 
             // FG1/MM2: a free generic over a generic struct or over bare
             // parameters is a template, registered for on-demand per-call
             // instantiation like a generic method (MC1). A `$struct`-seeded
-            // return-only generic registers the same way. Anything else
-            // declares eager as before.
-            if (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count) || cg_decl_is_struct_seeded_generic(decl)) {
+            // return-only generic registers the same way. The `hash_word`
+            // leaf is bodiless and lowers per concrete call instead
+            // (ADR 0049), so it registers too and never declares.
+            // Anything else declares eager as before.
+            if (cg_decl_is_free_over_struct(decl, structs, struct_count) || cg_decl_is_free_bare_generic(decl, structs, struct_count) || cg_decl_is_struct_seeded_generic(decl) || cg_decl_is_hash_word_leaf(decl)) {
                 let dup <bool> = false;
                 let di <int> = 0;
                 while (di < fn_sym_count) {
