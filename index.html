@@ -56,7 +56,7 @@
 
       <!-- Action Items & Theme Toggle -->
       <div class="header-right">
-        <a href="https://github.com/Fin-Lang" target="_blank" rel="noopener noreferrer" class="header-action-btn" aria-label="GitHub Repository">
+        <a href="https://github.com/M1778/Fin" target="_blank" rel="noopener noreferrer" class="header-action-btn" aria-label="GitHub Repository">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
           </svg>
@@ -112,7 +112,7 @@
         </div>
         <div class="hero-install-box">
           <span class="hero-install-prompt">$</span>
-          <code class="hero-install-code">curl -fsSL https://fin-lang.org/install.sh | sh</code>
+          <code class="hero-install-code">curl -fsSL https://raw.githubusercontent.com/M1778/Fin/master/install.sh | sh</code>
           <button type="button" class="hero-copy-btn" id="hero-copy-install-btn" aria-label="Copy install command">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
@@ -267,7 +267,7 @@ fn main() {
       <div class="nav-section">
         <button type="button" class="nav-section-header">
           <span>Standard Library</span>
-          <span class="nav-badge">17 modules</span>
+          <span class="nav-badge">37 modules</span>
         </button>
         <ul class="nav-section-items">
           <li><a href="#stdlib-overview" class="nav-item-link"><span>Directory Overview</span></a></li>
@@ -390,7 +390,7 @@ fn main() {
               <button type="button" class="copy-btn"><span>Copy</span></button>
             </div>
             <pre><code class="language-bash">$ build/finc --version
-finc 0.4.0 (contract 1)</code></pre>
+finc 0.4.0 (contract 2)</code></pre>
           </div>
         </article>
 
@@ -416,11 +416,11 @@ finc -c program.fin
 # 3. Compile and link directly to an executable binary
 finc program.fin -o program
 
-# 4. Dump the generated LLVM IR to stdout
-finc -S program.fin
+# 4. Show backend lowering and the link command
+finc --debug-codegen program.fin -o program
 
 # 5. Inspect AST structure
-finc --dump-ast program.fin</code></pre>
+finc --debug-ast program.fin</code></pre>
           </div>
         </article>
 
@@ -925,7 +925,7 @@ fun calculate() &lt;int&gt; {
           <h2 id="stdlib-heading">Standard Library Modules <a href="#stdlib-heading" class="header-anchor">#</a></h2>
           <p class="doc-lead">
             The Fin standard library lives in <code>lib/std/</code> and ships beside the compiler.
-            All 17 modules declare their contents under <code>namespace std</code> and are imported using <code>from &lt;module&gt;::std</code>.
+            All 37 modules declare their contents under <code>namespace std</code> and are imported using <code>from &lt;module&gt;::std</code>.
           </p>
 
           <div class="callout callout-tip" style="margin-bottom: 28px;">
@@ -1103,9 +1103,8 @@ fun calculate() &lt;int&gt; {
               <tbody>
                 <tr><td><code>-o &lt;file&gt;</code></td><td>Path to binary</td><td>Compiles and links source into a standalone executable.</td></tr>
                 <tr><td><code>-c</code></td><td>Source file</td><td>Compiles source to a native object file (<code>.o</code>) without linking.</td></tr>
-                <tr><td><code>-S</code></td><td>Source file</td><td>Emits human-readable LLVM intermediate representation (IR).</td></tr>
-                <tr><td><code>--emit-llvm</code></td><td>Source file</td><td>Emits LLVM bitcode representation.</td></tr>
-                <tr><td><code>--dump-ast</code></td><td>Source file</td><td>Dumps internal Abstract Syntax Tree after parsing.</td></tr>
+                <tr><td><code>-O0</code>–<code>-O3</code></td><td>Optimization level</td><td>Applies to <code>-o</code> and <code>-c</code> builds only (default <code>-O0</code>); ignored by check-only runs.</td></tr>
+                <tr><td><code>--debug-ast</code></td><td>Source file</td><td>Prints the parsed AST.</td></tr>
                 <tr><td><code>--version</code></td><td>None</td><td>Displays compiler version and machine contract version.</td></tr>
                 <tr><td><code>--help</code></td><td>None</td><td>Displays complete list of available flags and diagnostic controls.</td></tr>
               </tbody>
@@ -1217,7 +1216,7 @@ fun calculate() &lt;int&gt; {
         <a href="stdlib.html">Standard Library</a>
         <a href="#pipeline-architecture">Compiler Flow</a>
         <a href="#compiler-cli">CLI Reference</a>
-        <a href="https://github.com/Fin-Lang" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/M1778/Fin" target="_blank" rel="noopener noreferrer">GitHub</a>
       </div>
     </div>
   </footer>
