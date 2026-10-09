@@ -3415,6 +3415,21 @@ BACKEND_TEST(Soundness_Codegen, AStructLiteralFollowsDeclarationOrderNotWrittenO
     EXPECT_EQ(b.out, "1 2 3\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, AShuffledLiteralStillTakesItsDefaults) {
+    // tests/samples/importing.fin:19's shape with both rules at once: the
+    // written fields arrive shuffled and the omitted one takes its default.
+    // Either rule alone passes while the combination mis-stores, so the one
+    // literal exercises both.
+    const Built b = build(std::string(kPrintf) +
+        "struct Point { x <int> = 99, y <int>, z <int> = 7 }\n"
+        "fun main() <noret> {\n"
+        "    let p <Point> = Point { y: 2, x: 1 };\n"
+        "    printf(\"%d %d %d\\n\", p.x, p.y, p.z);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 7\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AStructIsCopiedWhenAssigned) {
     // A Fin struct is a value. `q = p` copies, so writing through `q` must not be
     // visible through `p` -- the failure being one slot aliased by two names,
