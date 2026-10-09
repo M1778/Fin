@@ -618,8 +618,19 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
     // =========================================================
     
     // 1. Members
+    //
+    // Duplicate fields are a static program error, diagnosed here rather than
+    // downstream: the type's defineField overwrites in place, and codegen's
+    // refusal would otherwise misreport one as "not lowered yet" (#43). A
+    // local set rather than findField, because the hoist pass already defined
+    // these same fields on this same type.
+    std::unordered_set<std::string> seenFields;
     for (auto& member : node.members) {
         validateAttributes(member->attributes);
+        if (!seenFields.insert(member->name).second) {
+            error(*member, "duplicate field '" + member->name + "' in struct '" +
+                               node.name + "'");
+        }
         auto memberType = resolveTypeOrError(member->type.get());
         if (memberType->equals(*structType) && member->type->pointer_depth == 0) {
             error(*member, "Recursive struct member '" + member->name + "' must be a pointer");

@@ -25,6 +25,7 @@ struct Analysis {
     bool analyzerFlag = false;
     bool engineErrors = false;
     int errorCount = 0;
+    std::vector<fin::Diagnostic> diagnostics;
     std::shared_ptr<fin::Scope> globals;
 
     bool clean() const { return parsed && !analyzerFlag && !engineErrors; }
@@ -52,6 +53,7 @@ Analysis analyze(const std::string& code) {
     a.analyzerFlag = analyzer.hasError;
     a.engineErrors = diag->hasErrors();
     a.errorCount = diag->getErrorCount();
+    a.diagnostics = diag->getDiagnostics();
     a.globals = analyzer.getGlobalScope();
     // The scope holds no reference into the engine, but the AST does not outlive
     // this call, so nothing else may be read from `a` afterwards.
@@ -140,6 +142,32 @@ TEST(SemanticAnalyzer, RejectsAnUnknownStructField) {
     ASSERT_TRUE(a.parsed);
     EXPECT_TRUE(a.analyzerFlag || a.engineErrors)
         << "reading a field the struct does not declare must be a diagnostic";
+}
+
+TEST(SemanticAnalyzer, RejectsDuplicateStructFields) {
+    // Issue #43: `struct P { x <int>, x <int> }` is a static program error and
+    // must be diagnosed by semantics, not surface downstream as a codegen
+    // "not lowered yet" refusal. The diagnostic names the field and the struct
+    // and points at the second declaration.
+    for (const std::string& structDecl :
+         {"struct P { x <int>, x <int> }\n", "struct Q { x <int>, x <string> }\n"}) {
+        auto a = analyze(structDecl + "fun main() <noret> {}\n");
+        ASSERT_TRUE(a.parsed) << structDecl;
+        EXPECT_TRUE(a.analyzerFlag) << structDecl;
+        EXPECT_TRUE(a.engineErrors) << structDecl;
+        const char want = structDecl[7]; // 'P' or 'Q'
+        bool found = false;
+        for (const auto& d : a.diagnostics) {
+            if (d.severity != fin::DiagnosticSeverity::Error) continue;
+            if (d.message.find("uplicate") != std::string::npos &&
+                d.message.find("'x'") != std::string::npos &&
+                d.message.find(std::string("'") + want + "'") != std::string::npos) {
+                found = true;
+                EXPECT_EQ(d.line, 1) << d.message;
+            }
+        }
+        EXPECT_TRUE(found) << "no duplicate-field error for: " << structDecl;
+    }
 }
 
 TEST(SemanticAnalyzer, SetsHasErrorAndTheEngineTogether) {

@@ -10212,6 +10212,21 @@ private:
         const bool fp = common.kind == CgType::Kind::Float;
         CgType boolType = *types_.byName("bool");
 
+        // A constant zero divisor never reaches the folder: the IRBuilder folds
+        // an integer division or remainder by zero to poison, which runs as
+        // garbage, while the same operation through a runtime zero traps. Float
+        // is exempt -- `fdiv`/`frem` by zero are defined (inf/NaN), not poison.
+        if ((op == ASTTokenKind::DIV || op == ASTTokenKind::MOD) && !fp) {
+            if (const auto* divisor = llvm::dyn_cast<llvm::ConstantInt>(r);
+                divisor && divisor->isZero()) {
+                if (auto* bin = dynamic_cast<BinaryOp*>(&node))
+                    unsupported(*bin->right, "division by zero");
+                else
+                    unsupported(node, "division by zero");
+                return CgVal{};
+            }
+        }
+
         switch (op) {
             case ASTTokenKind::PLUS:
                 return CgVal{fp ? builder_.CreateFAdd(l, r) : builder_.CreateAdd(l, r), common};

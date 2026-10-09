@@ -791,6 +791,49 @@ BACKEND_TEST(Soundness_Codegen, ASpecialCallRefusalNamesTheCallee) {
     fs::remove(obj, ec);
 }
 
+BACKEND_TEST(Soundness_Codegen, AConstantDivisionByZeroIsRefused) {
+    // Issue #42: `1 / 0` folded through the IRBuilder's own folder, whose
+    // div-by-zero poison became whatever bits fell out, while the same division
+    // through a runtime zero divisor traps. A constant zero divisor is a
+    // compile-time diagnostic with the span on the divisor -- the divisor sits
+    // alone on line 3 so the location cannot pass against the whole expression.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let x <int> = 1 /\n"
+        "        0;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("division by zero"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find(".fin:3:"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AConstantModuloByZeroIsRefused) {
+    // Same hole as division: `1 % 0` folded to garbage while `1 % z` traps.
+    const Built b = build(
+        "fun main() <noret> {\n"
+        "    let x <int> = 1 % 0;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("division by zero"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find(".fin:2:"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ARuntimeZeroDivisorStillTraps) {
+    // The second path beside the two refusals above: a divisor the compiler
+    // cannot see stays a real division, and the hardware traps on zero.
+    const Built b = build(
+        "fun id(n: int) <int> { return n; }\n"
+        "fun main() <noret> {\n"
+        "    let z <int> = id(0);\n"
+        "    let x <int> = 1 / z;\n"
+        "    printf(\"%d\\n\", x);\n"
+        "}\n"
+        "@define printf(fmt: string, ...) <noret>;\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_NE(b.runExit, 0) << b.why();
+}
+
 // ---------------------------------------------------------------------------
 // Where a variable's refusal is reported.
 //
