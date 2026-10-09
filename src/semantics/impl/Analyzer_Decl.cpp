@@ -4,6 +4,8 @@
 #include "../../ast/decls/FunctionDecl.hpp"
 #include "../../ast/exprs/FunctionCall.hpp"
 #include "../../ast/exprs/Literal.hpp"
+#include "../../ast/exprs/MiscExpr.hpp"
+#include "../../ast/exprs/StructureExpr.hpp"
 #include "../../utils/ModuleLoader.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../BuiltinMacros.hpp"
@@ -12,6 +14,21 @@
 #include <filesystem>
 
 namespace fin {
+
+// Issue #46: whether `let x = <init>` is an ignored result rather than dead
+// storage. Any of these may run code for its effects, so the statement's
+// purpose can be the call and "remove it" would delete those effects -- the
+// warning's own suggested fix misfires. What stays warned is a pure-value
+// binding (`= 42`, `= other`, `= a + b`): removing that deletes nothing.
+bool isEffectfulInit(const Expression* e) {
+    return dynamic_cast<const FunctionCall*>(e) != nullptr ||
+           dynamic_cast<const MethodCall*>(e) != nullptr ||
+           dynamic_cast<const StaticMethodCall*>(e) != nullptr ||
+           dynamic_cast<const MacroCall*>(e) != nullptr ||
+           dynamic_cast<const MacroInvocation*>(e) != nullptr ||
+           dynamic_cast<const NewExpression*>(e) != nullptr ||
+           dynamic_cast<const StructInstantiation*>(e) != nullptr;
+}
 
 void SemanticAnalyzer::visit(VariableDeclaration& node) {
     // fin-guard: `let <name> = ...` with no annotation. The parser already
@@ -151,6 +168,10 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
         if (!lam->generic_params.empty()) sym.is_template = true;
     }
     currentScope->define(sym);
+    // Issue #46: this binding warns if it is never read -- unless its
+    // initializer may run code (see isEffectfulInit above), which makes the
+    // statement an ignored result rather than dead storage.
+    if (!isEffectfulInit(node.initializer.get())) recordLocalBinding(node);
 
     // Wave-4 step 17 (W7): the binding enters moved tracking Live. Skipped
     // on the check walk: injected code does not fire events (§3.3).

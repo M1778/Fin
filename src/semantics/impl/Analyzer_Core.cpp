@@ -128,6 +128,7 @@ SemanticAnalyzer::SemanticAnalyzer(DiagnosticEngine& d, bool debug)
     globalScope = std::make_shared<Scope>(nullptr);
     currentScope = globalScope;
     scopeStack.push_back(globalScope);
+    unusedStack_.emplace_back();
     
     // Builtins
     currentScope->defineType("int", std::make_shared<PrimitiveType>("int"));
@@ -245,12 +246,48 @@ void SemanticAnalyzer::enterScope() {
     auto newScope = std::make_shared<Scope>(currentScope.get());
     currentScope = newScope;
     scopeStack.push_back(newScope);
+    unusedStack_.emplace_back();
 }
 
 void SemanticAnalyzer::exitScope() {
     if (scopeStack.size() > 1) {
+        // Issue #46: the scope's never-read `let`/`const` locals warn here, in
+        // declaration order. Skipped on the check walk (injected code is not
+        // the user's to fix) and quiet under QuietPass via warning() itself.
+        // The global frame never pops, so file-scope bindings never warn.
+        if (!injectedWalk_) {
+            auto& frame = unusedStack_.back();
+            for (auto* decl : frame.decls) {
+                if (!decl || decl->name.empty() || decl->name[0] == '_') continue;
+                if (frame.used.count(decl->name)) continue;
+                warning(*decl, "unused variable '" + decl->name +
+                               "' is never read; remove it or prefix its name with '_'");
+            }
+        }
+        if (unusedStack_.size() > 1) unusedStack_.pop_back();
         scopeStack.pop_back();
         currentScope = scopeStack.back();
+    }
+}
+
+// Issue #46: records one `let`/`const` in the innermost open scope. Called
+// from visit(VariableDeclaration&) only, which is why parameters and `self`
+// (defined directly) never warn.
+void SemanticAnalyzer::recordLocalBinding(VariableDeclaration& node) {
+    if (!unusedStack_.empty()) unusedStack_.back().decls.push_back(&node);
+}
+
+// Issue #46: marks the nearest enclosing declaration of `name` read, mirroring
+// Scope::resolve. A use before an inner shadowing declaration still marks the
+// outer one, because the inner is not recorded until its declaration is walked.
+void SemanticAnalyzer::markLocalUsed(const std::string& name) {
+    for (auto it = unusedStack_.rbegin(); it != unusedStack_.rend(); ++it) {
+        for (const auto* decl : it->decls) {
+            if (decl && decl->name == name) {
+                it->used.insert(name);
+                return;
+            }
+        }
     }
 }
 

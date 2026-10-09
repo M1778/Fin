@@ -453,7 +453,10 @@ TEST(JsonDiagnostics, NoNonJsonByteReachesStderr) {
 
 TEST(JsonDiagnostics, ASuccessfulRunStillEmitsASummary) {
     TempFin f("fun main() <noret> {}\n");
-    auto r = runFinc({f.str(), "--diagnostics=json"});
+    // Hermetic: this program needs no library, and the shipped stdlib carries
+    // its own pre-existing never-read bindings (issue #46 warns on them), so a
+    // default-lib build emits diagnostics this test is not about.
+    auto r = runFinc({f.str(), "--diagnostics=json", "--fin-libs=/nonexistent/only"});
     auto lines = jsonLines(r.err);
     ASSERT_EQ(lines.size(), 1u) << r.err;
     EXPECT_NE(lines[0].find("\"kind\":\"summary\""), std::string::npos) << lines[0];
@@ -3151,4 +3154,90 @@ TEST(FinGuard, FlagIsAdvertisedInHelp) {
     auto r = runFinc({"--help"});
     EXPECT_EQ(r.exitCode, 0);
     EXPECT_NE(r.out.find("--no-fin-guard"), std::string::npos);
+}
+
+// --- Issue #46: warn on dead code -------------------------------------------
+//
+// Dead code builds silently from two directions: the backend discards
+// everything after a `return` in the same block, and never-read locals
+// compile without a whisper. Both are usually bugs, so both warn (exit 0).
+//
+// The standard library carries its own pre-existing never-read bindings
+// (e.g. `let written <int> = io_dprintf(...)` in lib/std/stdio.fin), so these
+// tests read only the diagnostics spanned in the file under test.
+
+namespace {
+
+std::vector<std::string> diagsInFile(const std::string& err, const std::string& path) {
+    std::vector<std::string> out;
+    for (const auto& d : jsonDiagnostics(err)) {
+        if (d.find("\"file\":\"" + path + "\"") != std::string::npos) out.push_back(d);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(DeadCode, UnreachableAfterReturnWarnsOnTheDeadStatement) {
+    TempFin f("fun main() <noret> {\n  printf(\"a\");\n  return;\n  printf(\"b\");\n}\n",
+              "dead_unreach");
+    auto r = runFinc({f.str(), "--diagnostics=json"});
+    const std::string err = r.err;
+    EXPECT_EQ(r.exitCode, 0) << "a warning never fails the build:\n" << err;
+    const auto mine = diagsInFile(err, f.str());
+    ASSERT_EQ(mine.size(), 1u) << "exactly one warning, on the dead statement:\n" << err;
+    EXPECT_NE(mine[0].find("\"severity\":\"warning\""), std::string::npos) << mine[0];
+    EXPECT_NE(mine[0].find("unreachable statement after 'return'"), std::string::npos)
+        << mine[0];
+    EXPECT_NE(mine[0].find("\"line\":4"), std::string::npos)
+        << "the warning is spanned on the dead printf (line 4), not the return:\n"
+        << mine[0];
+    EXPECT_EQ(err.find("\"warnings\":0"), std::string::npos)
+        << "the summary counts warnings instead of denying them:\n" << err;
+}
+
+TEST(DeadCode, NeverReadLocalWarnsNamingTheBinding) {
+    TempFin f("fun main() <noret> {\n  let unused_var <int> = 42;\n}\n", "dead_unused");
+    auto r = runFinc({f.str(), "--diagnostics=json"});
+    const std::string err = r.err;
+    EXPECT_EQ(r.exitCode, 0) << "a warning never fails the build:\n" << err;
+    const auto mine = diagsInFile(err, f.str());
+    ASSERT_EQ(mine.size(), 1u) << "exactly one warning, naming the binding:\n" << err;
+    EXPECT_NE(mine[0].find("\"severity\":\"warning\""), std::string::npos) << mine[0];
+    EXPECT_NE(mine[0].find("unused variable 'unused_var'"), std::string::npos)
+        << mine[0];
+}
+
+TEST(DeadCode, LiveCodeStaysSilent) {
+    // The control: a read local before `return`, and nothing after it.
+    TempFin f("fun main() <noret> {\n  let x <int> = 1;\n  printf(\"%d\", x);\n  return;\n}\n",
+              "dead_live");
+    auto r = runFinc({f.str(), "--diagnostics=json"});
+    const std::string err = r.err;
+    EXPECT_EQ(r.exitCode, 0) << err;
+    EXPECT_TRUE(diagsInFile(err, f.str()).empty()) << "live code warns nothing:\n" << err;
+}
+
+TEST(DeadCode, CallInitializedLocalStaysSilent) {
+    // The control: the ignored-result idiom (`let written <int> =
+    // io_dprintf(...)` in lib/std/stdio.fin:188) exists for the call's
+    // effects, so "remove it" would delete them and the binding warns nothing.
+    TempFin f("fun meaning() <int> {\n  return 42;\n}\n"
+              "fun main() <noret> {\n  let n <int> = meaning();\n}\n",
+              "dead_call");
+    auto r = runFinc({f.str(), "--diagnostics=json"});
+    const std::string err = r.err;
+    EXPECT_EQ(r.exitCode, 0) << err;
+    EXPECT_TRUE(diagsInFile(err, f.str()).empty()) << "an ignored result warns nothing:\n"
+                                                   << err;
+}
+
+TEST(DeadCode, UnderscorePrefixedLocalStaysSilent) {    // The control: a `_`-prefixed never-read local is the intentional form
+    // (tests/samples/stdlib/collection.fin:30, stdio.fin:112), so it warns nothing.
+    TempFin f("fun main() <noret> {\n  let _unused <int> = 42;\n}\n", "dead_underscore");
+    auto r = runFinc({f.str(), "--diagnostics=json"});
+    const std::string err = r.err;
+    EXPECT_EQ(r.exitCode, 0) << err;
+    EXPECT_TRUE(diagsInFile(err, f.str()).empty()) << "an intentional unused warns nothing:\n"
+                                                   << err;
 }

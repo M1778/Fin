@@ -9,6 +9,7 @@
 #include "../../ast/exprs/StructureExpr.hpp"
 #include "../../ast/exprs/UnaryOp.hpp"
 #include "../../ast/stmts/ControlFlow.hpp"
+#include "../../ast/stmts/VariableDecl.hpp"
 #include "../../types/TypeImpl.hpp"
 namespace fin {
 
@@ -106,7 +107,26 @@ void SemanticAnalyzer::visit(Block& node) {
     // fallthrough point per variable; jumps out recorded their own exits on
     // the way. Skipped on the check walk (§3.3).
     if (!injectedWalk_) moved_.enterBlock();
-    for (auto& stmt : node.statements) stmt->accept(*this);
+    // Issue #46: everything after a `return` in the same block is dead (the
+    // backend drops it in silence), so each statement past one warns, spanned
+    // on itself. Still walked, so errors inside still report. Warning-level
+    // only, never failing the build (the warnOnHostBranch precedent).
+    bool afterReturn = false;
+    for (auto& stmt : node.statements) {
+        // Skipped on the check walk like the scope-exit warnings in exitScope:
+        // injected code is not the user's to fix.
+        if (afterReturn && !injectedWalk_) {
+            // An expression statement carries the parser's default location,
+            // so the call inside it is the span a reader can find.
+            if (auto* es = dynamic_cast<ExpressionStatement*>(stmt.get());
+                es && es->expr)
+                warning(*es->expr, "unreachable statement after 'return' never runs; remove it");
+            else
+                warning(*stmt, "unreachable statement after 'return' never runs; remove it");
+        }
+        stmt->accept(*this);
+        if (!afterReturn && dynamic_cast<ReturnStatement*>(stmt.get())) afterReturn = true;
+    }
     if (!injectedWalk_) {
         auto w7report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
         moved_.exitBlock(node, w7report);

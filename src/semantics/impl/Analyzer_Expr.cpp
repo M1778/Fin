@@ -509,6 +509,10 @@ void SemanticAnalyzer::visit(Identifier& node) {
         // writes alike -- both need the env field -- and skipped on the check
         // walk, which must not mutate analysis results.
         if (!injectedWalk_) noteLambdaUse(node.name);
+        // Issue #46: a scope-resolved use reads the binding (a plain-`=`
+        // target included: rebinding without ever reading is still never-read,
+        // and the warning says so).
+        markLocalUsed(node.name);
         return;
     } 
     
@@ -1973,6 +1977,9 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
                 // globals are not frame data), and skipped on the check walk
                 // like every other capture recording.
                 if (!injectedWalk_) noteLambdaUse(funcName);
+                // Issue #46: this path never walks an Identifier for the
+                // callee, so the read is marked here rather than there.
+                markLocalUsed(funcName);
                 // Which loaded module this bare name was imported from, when it
                 // was: the backend instantiates THAT module's generic template
                 // rather than the first one in load order (see FunctionCall::

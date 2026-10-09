@@ -137,3 +137,26 @@ TEST_F(ParserTest, StructMethods) {
 //    registered zero file tests and the suite reported success.
 //    tests/Corpus.cpp::sampleFiles() replaces it: an absolute compile-time
 //    path, and zero-sample discovery is a hard failure.
+
+TEST_F(ParserTest, MissingSemicolonPointsAtEndOfBrokenLine) {
+    // Issue #44: `let x <int> = 1` without `;` reported
+    // `unexpected RBRACE` at 3:1; it must name `';'` at 2:end.
+    std::string code = "fun main() <noret> {\n    let x <int> = 1\n}\n";
+    fin::reset_lexer_location();
+    fin::Preprocessor pp;
+    const std::string processed = pp.process(code);
+    fin::DiagnosticEngine diag(processed, "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    fin::setLexerDiagnostics(&diag);
+    YY_BUFFER_STATE buffer = yy_scan_string(processed.c_str());
+    fin::parser parser(diag);
+    const int res = parser.parse();
+    yy_delete_buffer(buffer);
+    fin::setLexerDiagnostics(nullptr);
+    EXPECT_NE(res, 0);
+    ASSERT_FALSE(diag.getDiagnostics().empty());
+    const auto& d = diag.getDiagnostics().front();
+    EXPECT_EQ(d.line, 2) << "missing ';' must point at the broken line, not the next '}'";
+    EXPECT_NE(d.message.find("';'"), std::string::npos)
+        << "the diagnostic must name the missing ';', got: " << d.message;
+}

@@ -6,7 +6,7 @@
 %define api.namespace {fin}
 %define parse.assert
 %locations
-%define parse.error detailed
+%define parse.error custom
 
 %code requires {
     #if defined(_MSVC_LANG) && !defined(YY_CPLUSPLUS)
@@ -3302,4 +3302,89 @@ prototype_elements:
 
 void fin::parser::error(const location_type& l, const std::string& m) {
     diag.reportError(l, m);
+}
+
+// Issue #44: a missing `;` was reported at the next `}` (`unexpected RBRACE`
+// at 3:1) because Bison only sees the error when `}` cannot follow an
+// expression. When `;` is among the expected tokens, name it and point at the
+// end of the broken line instead. All other syntax errors keep the detailed
+// message byte-for-byte.
+void fin::parser::report_syntax_error(const context& yyctx) const {
+    int want = yyctx.expected_tokens(nullptr, 0);
+    bool needsSemi = false;
+    if (want > 0) {
+        std::vector<symbol_kind_type> exp((size_t)want);
+        const int got = yyctx.expected_tokens(exp.data(), want);
+        for (int i = 0; i < got; ++i) {
+            if (exp[i] == symbol_kind_type::S_SEMICOLON) {
+                needsSemi = true;
+                break;
+            }
+        }
+    }
+    const location_type& loc = yyctx.location();
+    if (needsSemi) {
+        const std::string curLine = diag.lineText(loc.begin.line);
+        bool firstOnLine = true;
+        for (int c = 0; c < loc.begin.column - 1; ++c) {
+            if (c >= (int)curLine.size()) break;
+            const char ch = curLine[(size_t)c];
+            if (ch != ' ' && ch != '\t') {
+                firstOnLine = false;
+                break;
+            }
+        }
+        if (firstOnLine && loc.begin.line > 1) {
+            const std::string prev = diag.lineText(loc.begin.line - 1);
+            bool prevHasCode = false;
+            for (char ch : prev) {
+                if (ch != ' ' && ch != '\t') {
+                    prevHasCode = true;
+                    break;
+                }
+            }
+            if (prevHasCode) {
+                const int eol = (int)prev.size() + 1;
+                location_type semiLoc = loc;
+                semiLoc.begin.line = loc.begin.line - 1;
+                semiLoc.begin.column = eol;
+                semiLoc.end.line = loc.begin.line - 1;
+                semiLoc.end.column = eol;
+                diag.reportError(semiLoc, "expected ';'");
+                return;
+            }
+        }
+        diag.reportError(loc, "expected ';'");
+        return;
+    }
+    if (yyctx.lookahead().empty()) {
+        diag.reportError(loc, "syntax error");
+        return;
+    }
+    enum { YYARGS_MAX = 5 };
+    symbol_kind_type yyarg[YYARGS_MAX];
+    yyarg[0] = yyctx.token();
+    const int yyn = yyctx.expected_tokens(yyarg + 1, YYARGS_MAX - 1);
+    const int yycount = yyn + 1;
+    const char* yyformat = nullptr;
+    switch (yycount) {
+        case 0: yyformat = "syntax error"; break;
+        case 1: yyformat = "syntax error, unexpected %s"; break;
+        case 2: yyformat = "syntax error, unexpected %s, expecting %s"; break;
+        case 3: yyformat = "syntax error, unexpected %s, expecting %s or %s"; break;
+        case 4: yyformat = "syntax error, unexpected %s, expecting %s or %s or %s"; break;
+        case 5: yyformat = "syntax error, unexpected %s, expecting %s or %s or %s or %s"; break;
+        default: yyformat = "syntax error, unexpected %s"; break;
+    }
+    std::string msg;
+    int yyi = 0;
+    for (const char* yyp = yyformat; *yyp; ++yyp) {
+        if (yyp[0] == '%' && yyp[1] == 's' && yyi < yycount) {
+            msg += symbol_name(yyarg[yyi++]);
+            ++yyp;
+        } else {
+            msg += *yyp;
+        }
+    }
+    diag.reportError(loc, msg);
 }

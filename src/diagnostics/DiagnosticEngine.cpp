@@ -232,6 +232,13 @@ std::string DiagnosticEngine::getLine(int lineNum) {
     return "";
 }
 
+std::string DiagnosticEngine::lineText(int lineNum) const {
+    if (lineNum > 0 && lineNum <= (int)lines.size()) {
+        return lines[(size_t)lineNum - 1];
+    }
+    return "";
+}
+
 std::string DiagnosticEngine::extractTokenText(const fin::location& loc) {
     std::string line = getLine(loc.begin.line);
     if (line.empty()) return "";

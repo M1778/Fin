@@ -463,6 +463,28 @@ private:
     // does an assignment nested under any other operator (e.g. `(x = 2) == 2`).
     void warnOnAssignmentInCondition(Expression& cond);
 
+    // Issue #46: warns on never-read `let`/`const` locals bound to pure
+    // values. One frame per open scope, pushed and popped with it, so
+    // shadowing resolves the way Scope::resolve does (nearest frame holding
+    // the name). Only visit(VariableDeclaration&) records -- parameters,
+    // `self`, catch and foreach bindings never warn, and neither does a
+    // binding whose initializer may run code (a call, method, `new`, struct
+    // construction or macro: the ignored-result idiom, whose removal would
+    // delete the effects) -- and only visit(Identifier&) (plus the
+    // closure-variable call path, which never walks an Identifier) marks.
+    // Warning-level only, never failing the build (the warnOnHostBranch
+    // precedent); a `_`-prefixed name is the intentional form and stays
+    // silent, as the corpus already uses it (stdlib/collection.fin:30).
+    struct UnusedLocalFrame {
+        // Non-owning: the tree outlives the walk, and a recorded declaration
+        // is warned at its scope's exit, before anything could drop it.
+        std::vector<VariableDeclaration*> decls;
+        std::unordered_set<std::string> used;
+    };
+    std::vector<UnusedLocalFrame> unusedStack_;
+    void recordLocalBinding(VariableDeclaration& node);
+    void markLocalUsed(const std::string& name);
+
     // The hybrid layout-member rule: `t.size` on a `$type`/`$struct` value reads
     // through the `layout` component and needs its grant, exactly as the
     // `compiler.layout.size_of(t)` call does. True when the member was a layout

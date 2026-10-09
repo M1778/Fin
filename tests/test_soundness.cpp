@@ -2596,18 +2596,25 @@ TEST(KnownDefect_Operators, EightOperatorsCanBeDeclaredAndNeverWritten) {
         << "`^=` does not lex as one operator\n" << xoreq;
 
     // And none of the eight is writable.
+    // And none of the eight is writable. (#44 reworded some of these:
+    // where `;` is among the expected tokens the diagnostic is now
+    // `expected ';'` instead of `syntax error` -- `&=` et al -- while `%=` in
+    // this grammar state keeps `syntax error, unexpected EQUAL`. Either
+    // spelling is the intended refusal; the compile still fails either way.)
     const char* binary[] = {"1 & 2", "1 | 2", "1 ^ 2"};
     for (const char* e : binary) {
         const std::string err = stripAnsi(compile(
             std::string("fun main() <int> { let a <auto> = ") + e + "; return 0; }\n").err);
-        EXPECT_NE(err.find("syntax error"), std::string::npos)
+        EXPECT_TRUE(err.find("syntax error") != std::string::npos ||
+                    err.find("expected ';'") != std::string::npos)
             << e << " has no binary production\n" << err;
     }
     const char* compound[] = {"%=", "&=", "|=", "<<=", ">>="};
     for (const char* op : compound) {
         const std::string err = stripAnsi(compile(
             std::string("fun main() <int> { let a <int> = 1; a ") + op + " 2; return 0; }\n").err);
-        EXPECT_NE(err.find("syntax error"), std::string::npos)
+        EXPECT_TRUE(err.find("syntax error") != std::string::npos ||
+                    err.find("expected ';'") != std::string::npos)
             << op << " has no assignment production\n" << err;
     }
 
@@ -6783,7 +6790,8 @@ TEST(Soundness_TypeLiterals, AReturnedTypeLiteralStillNeedsItsSemicolon) {
                      "      }\n"
                      "  }\n");
     EXPECT_EQ(r.exitCode, 1) << r.err;
-    EXPECT_NE(r.err.find("syntax error"), std::string::npos) << r.err;
+    // #44 reworded this case (`;` is expected after the `}`): `expected ';'`.
+    EXPECT_NE(r.err.find("expected ';'"), std::string::npos) << r.err;
 }
 
 TEST(Soundness_TypeLiterals, AnInterfaceMemberCarriesADefault) {

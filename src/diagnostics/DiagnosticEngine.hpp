@@ -94,6 +94,11 @@ public:
 
     void setSource(std::string src, std::string fname);
 
+    // The source line for parser error recovery (issue #44): the parser points
+    // a missing `;` at the end of the broken line, so it needs the line text to
+    // find that end and to tell first-on-line from mid-line.
+    std::string lineText(int lineNum) const;
+
     // Closes the stream. In JSON mode this writes the trailing summary object;
     // in human mode it writes nothing. `exitCode` is the process exit code the
     // driver is about to return, so a consumer can tell "finished clean" from
