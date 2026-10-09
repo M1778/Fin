@@ -214,3 +214,19 @@ legacy/
 # Per-agent build directories. Concurrent agents sharing one build directory
 # clobber each other's measurements, so each gets its own; none is an artifact.
 build-*/
+
+# Agent and harness local state: machine-specific tool config, hooks, and
+# session memory. Never source; every checkout regenerates its own.
+.claude/
+.codex/
+.opencode/
+.claude.json
+*.local.json
+
+# Editors, IDEs, OS droppings.
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
