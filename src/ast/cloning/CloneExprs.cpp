@@ -22,6 +22,7 @@ void CloneVisitor::visit(BinaryOp& node) {
         node.op,
         clone(node.right.get())
     );
+    res->parenthesized = node.parenthesized;
     res->setLoc(node.loc);
     result = std::move(res);
 }

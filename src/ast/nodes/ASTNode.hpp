@@ -59,7 +59,14 @@ public:
     NodeKind kind() const noexcept;
 };
 
-class Expression : public ASTNode {};
+class Expression : public ASTNode {
+public:
+    // True when the source wrapped this expression in parentheses. Recorded by
+    // the one parenthesised-primary rule (parser.y) rather than kept as a node,
+    // so the tree shape is unchanged: only the issue-#41 condition check reads
+    // it, as the "the assignment was intentional" escape.
+    bool parenthesized = false;
+};
 class Statement : public ASTNode {};
 
 } // namespace fin

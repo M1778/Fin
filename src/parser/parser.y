@@ -2972,7 +2972,7 @@ static_method_call:
 primary_no_struct:
     IDENTIFIER %prec PARAM_NAME_PREC { $$ = std::make_unique<fin::Identifier>($1); $$->setLoc(@$); }
     | literal { $$ = std::move($1); }
-    | LPAREN expression RPAREN { $$ = std::move($2); }
+    | LPAREN expression RPAREN { $$ = std::move($2); $$->parenthesized = true; }
     | prototype_literal { $$ = std::move($1); }
     
     /* Unquote Variable */

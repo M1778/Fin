@@ -788,3 +788,141 @@ W7_BACKEND_TEST(W7ThreadedProbe, ThreadedMarkerRunsAtScopeEnd) {
     EXPECT_NE(b.out.find("w7-threaded"), std::string::npos)
         << "the threaded handler's quote ran at the scope exit:\n" << b.out;
 }
+
+// --- compiler.diag.* in scope-exit handlers ----------------------------------
+// Parity with W5 (test_events_w5.cpp, Step 19): a handler's own diagnostics
+// execute at fire time instead of refusing as an unevaluable statement.
+// `error` records, suppresses that handler's injection at that point, and
+// fails the build; `warning`/`note` report and the quote still splices. Every
+// one names the handler, the event and the event point.
+
+namespace {
+
+const char* const kW7DiagGrants =
+    "#[use(compiler)]\n#[use(compiler.components.diag)]\n";
+
+} // namespace
+
+TEST(W7Diag, ErrorFromHandlerNamesHandlerEventAndPoint) {
+    auto r = w7compile(
+        std::string("@define printf(fmt: string, ...) <noret>;\n") +
+        kW7DiagGrants +
+        "#[on(variable_scope_exit)]\n@special h_exit(name: string, t: $type, exit_kind: int, moved: int) <quote> {\n"
+        "    compiler.diag.error(\"trace me\");\n"
+        "    return quote { printf(\"unreached\\n\"); };\n"
+        "}\n"
+        "compiler.events.enable(h_exit);\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = w7messages(stripAnsi(r.err));
+    EXPECT_NE(err.find("h_exit"), std::string::npos) << err;
+    EXPECT_NE(err.find("variable_scope_exit"), std::string::npos) << err;
+    EXPECT_NE(err.find("trace me"), std::string::npos) << err;
+    EXPECT_NE(err.find("x"), std::string::npos) << err;
+    // The diag call is executed, not gap-diagnosed: one point, one diagnostic.
+    EXPECT_EQ(w7errorCount(stripAnsi(r.err)), 1u) << r.err;
+}
+
+TEST(W7Diag, DiagCallNeedsTheGrant) {
+    // No `diag` grant: refused at the declaration, before anything fires.
+    auto r = w7compile(
+        std::string("#[use(compiler)]\n") +
+        "#[on(variable_scope_exit)]\n@special h_nogrant(name: string, t: $type, exit_kind: int, moved: int) <quote> {\n"
+        "    compiler.diag.error(\"trace me\");\n"
+        "    return quote { };\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = w7messages(stripAnsi(r.err));
+    EXPECT_NE(err.find("diag"), std::string::npos) << err;
+    EXPECT_NE(err.find("not granted"), std::string::npos) << err;
+}
+
+TEST(W7Diag, DiagMessageMustBeALiteral) {
+    // The line holds no string operations, so a message is a literal or it is
+    // refused by name — never evaluated into something it is not.
+    auto r = w7compile(
+        std::string("@define printf(fmt: string, ...) <noret>;\n") +
+        kW7DiagGrants +
+        "#[on(variable_scope_exit)]\n@special h_lit(name: string, t: $type, exit_kind: int, moved: int) <quote> {\n"
+        "    compiler.diag.error(name);\n"
+        "    return quote { printf(\"unreached\\n\"); };\n"
+        "}\n"
+        "compiler.events.enable(h_lit);\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = w7messages(stripAnsi(r.err));
+    EXPECT_NE(err.find("h_lit"), std::string::npos) << err;
+    EXPECT_NE(err.find("literal"), std::string::npos) << err;
+}
+
+TEST(W7Diag, NoteFromHandlerReportsWithoutFailing) {
+    auto r = w7compile(
+        std::string("@define printf(fmt: string, ...) <noret>;\n") +
+        kW7DiagGrants +
+        "#[on(variable_scope_exit)]\n@special h_note(name: string, t: $type, exit_kind: int, moved: int) <quote> {\n"
+        "    compiler.diag.note(\"fyi\");\n"
+        "    return quote { printf(\"w7-note\\n\"); };\n"
+        "}\n"
+        "compiler.events.enable(h_note);\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("h_note"), std::string::npos) << err;
+    EXPECT_NE(err.find("fyi"), std::string::npos) << err;
+}
+
+W7_BACKEND_TEST(W7DiagProbe, WarningFromHandlerWarnsAndStillSplices) {
+    W7Built b = w7buildRun(
+        std::string("@define printf(fmt: string, ...) <noret>;\n") +
+        kW7DiagGrants +
+        "#[on(variable_scope_exit)]\n@special h_warn(name: string, t: $type, exit_kind: int, moved: int) <quote> {\n"
+        "    compiler.diag.warning(\"careful\");\n"
+        "    return quote { printf(\"w7-warn-marker\\n\"); };\n"
+        "}\n"
+        "compiler.events.enable(h_warn);\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    printf(\"done\\n\");\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.compileErr;
+    ASSERT_TRUE(b.ran) << "compile exit " << b.compileExit << "\n" << b.compileErr;
+    EXPECT_NE(b.compileErr.find("warning"), std::string::npos) << b.compileErr;
+    EXPECT_NE(b.compileErr.find("h_warn"), std::string::npos) << b.compileErr;
+    EXPECT_NE(b.compileErr.find("careful"), std::string::npos) << b.compileErr;
+    EXPECT_NE(b.out.find("w7-warn-marker"), std::string::npos)
+        << "a warning does not suppress the injection:\n" << b.out;
+    EXPECT_NE(b.out.find("done"), std::string::npos) << b.out;
+}
+
+TEST(W7Diag, ErrorSuppressesItsOwnInjection) {
+    // §3.8 row one, scope-exit half: a handler that reports suppresses its
+    // own injection at that point, so the bad quote never reaches lowering.
+    // One point, one diagnostic — the suppression made visible.
+    auto r = w7compile(
+        std::string("@define printf(fmt: string, ...) <noret>;\n") +
+        kW7DiagGrants +
+        "#[on(variable_scope_exit)]\n@special h_stop(name: string, t: $type, exit_kind: int, moved: int) <quote> {\n"
+        "    compiler.diag.error(\"stop\");\n"
+        "    return quote { nosuchfn_xyz(); };\n"
+        "}\n"
+        "compiler.events.enable(h_stop);\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string stripped = stripAnsi(r.err);
+    EXPECT_EQ(w7errorCount(stripped), 1u) << r.err;
+    const std::string err = w7messages(stripped);
+    EXPECT_NE(err.find("h_stop"), std::string::npos) << err;
+    EXPECT_NE(err.find("stop"), std::string::npos) << err;
+    EXPECT_EQ(err.find("nosuchfn_xyz"), std::string::npos) << err;
+}

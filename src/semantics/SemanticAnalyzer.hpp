@@ -456,6 +456,13 @@ private:
     // error) is not also a warning on the same line.
     void warnOnHostBranch(SpecialDeclaration& node, bool hasSystemGrant);
 
+    // Issue #41: warns on a bare `=` directly under an if/while/for/ternary
+    // condition (`if (x = 2)`), naming the `=`/`==` suspicion. Warning-level
+    // only, never failing the build (the warnOnHostBranch precedent). A
+    // parenthesised assignment is the intentional form and stays silent, as
+    // does an assignment nested under any other operator (e.g. `(x = 2) == 2`).
+    void warnOnAssignmentInCondition(Expression& cond);
+
     // The hybrid layout-member rule: `t.size` on a `$type`/`$struct` value reads
     // through the `layout` component and needs its grant, exactly as the
     // `compiler.layout.size_of(t)` call does. True when the member was a layout

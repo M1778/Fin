@@ -15699,3 +15699,139 @@ TEST(Soundness_BareMethodCalls, AFreeCallInsideADifferentlyNamedMethodIsUnaffect
         "fun main() <int> { let s <S> = S{x: 0}; return s.other(1); }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #41: an assignment directly under a branch condition compiles with no
+// diagnostic (`if (x = 2)` assigns, branches, exits 0), so the classic `=` /
+// `==` typo is invisible. The fix is warning-level only (never fails the
+// build, the Soundness_HostBranch precedent): a bare `=` under an
+// if/while/for/ternary condition warns naming the assignment and suggesting
+// `==`; an intentional assignment stays silent behind extra parentheses or an
+// explicit comparison.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_AssignInCondition, IfWithAssignmentWarnsButBuilds) {
+    const FincRun r = compile(
+        "fun main() <int> {\n"
+        "  let x <int> = 1;\n"
+        "  if (x = 2) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << "a warning never fails the build:\n" << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("warning"), std::string::npos) << "a warning is reported:\n" << err;
+    EXPECT_NE(err.find("assignment"), std::string::npos)
+        << "the warning names the assignment:\n" << err;
+    EXPECT_NE(err.find("=="), std::string::npos)
+        << "the warning suggests '==':\n" << err;
+}
+
+TEST(Soundness_AssignInCondition, WhileWithAssignmentWarnsButBuilds) {
+    const FincRun r = compile(
+        "fun main() <int> {\n"
+        "  let x <int> = 1;\n"
+        "  while (x = 2) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << "a warning never fails the build:\n" << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("warning"), std::string::npos) << "a warning is reported:\n" << err;
+    EXPECT_NE(err.find("assignment"), std::string::npos)
+        << "the warning names the assignment:\n" << err;
+}
+
+TEST(Soundness_AssignInCondition, ForConditionWithAssignmentWarnsButBuilds) {
+    const FincRun r = compile(
+        "fun main() <int> {\n"
+        "  let x <int> = 1;\n"
+        "  for (i : int = 0; x = 2; i++) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << "a warning never fails the build:\n" << r.err;
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("warning"), std::string::npos) << "a warning is reported:\n" << err;
+    EXPECT_NE(err.find("assignment"), std::string::npos)
+        << "the warning names the assignment:\n" << err;
+}
+
+TEST(Soundness_AssignInCondition, TernaryConditionStaysSilent) {
+    // `x = 2 : 1 ? 0` binds as `x = (2 : 1 ? 0)` (the `:`/`?` outrank `=`),
+    // so a bare assignment is unspellable as a ternary condition: only the
+    // parenthesised and comparison forms reach the check, and both are silent.
+    const FincRun r = compile(
+        "fun main() <int> {\n"
+        "  let x <int> = 1;\n"
+        "  let y <int> = (x = 2) : 1 ? 0;\n"
+        "  let z <int> = x == 2 : 1 ? 0;\n"
+        "  return y + z;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("warning"), std::string::npos)
+        << "a ternary condition warns about nothing:\n" << r.err;
+}
+
+TEST(Soundness_AssignInCondition, EqualityComparisonIsSilent) {
+    const FincRun r = compile(
+        "fun main() <int> {\n"
+        "  let x <int> = 1;\n"
+        "  if (x == 2) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  while (x == 2) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("warning"), std::string::npos)
+        << "a comparison warns about nothing:\n" << r.err;
+}
+
+TEST(Soundness_AssignInCondition, ExtraParensStaySilent) {
+    // The intentional form: parentheses say the assignment was meant.
+    const FincRun r = compile(
+        "fun main() <int> {\n"
+        "  let x <int> = 1;\n"
+        "  if ((x = 2)) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("warning"), std::string::npos)
+        << "a parenthesised assignment warns about nothing:\n" << r.err;
+}
+
+TEST(Soundness_AssignInCondition, ExplicitComparisonStaysSilent) {
+    // The other intentional form: the assignment is an operand, not the condition.
+    const FincRun r = compile(
+        "fun main() <int> {\n"
+        "  let x <int> = 1;\n"
+        "  if ((x = 2) == 2) {\n"
+        "    return 1;\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("warning"), std::string::npos)
+        << "an assignment under an explicit comparison warns about nothing:\n" << r.err;
+}
+
+TEST(Soundness_AssignInCondition, PlainAssignmentStatementIsSilent) {
+    // The warning fires under a condition only: ordinary assignments stay quiet.
+    const FincRun r = compile(
+        "fun main() <int> {\n"
+        "  let x <int> = 1;\n"
+        "  x = 2;\n"
+        "  return x;\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(messagesOnly(stripAnsi(r.err)).find("warning"), std::string::npos)
+        << "an assignment statement warns about nothing:\n" << r.err;
+}

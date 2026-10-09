@@ -92,6 +92,13 @@ bool mentionsImplements(const Expression* e) {
 }
 }  // namespace
 
+void SemanticAnalyzer::warnOnAssignmentInCondition(Expression& cond) {
+    const auto* bin = dynamic_cast<const BinaryOp*>(&cond);
+    if (!bin || bin->op != ASTTokenKind::EQUAL || cond.parenthesized) return;
+    warning(cond, "assignment in condition: did you mean '==' instead of '='? "
+                  "If the assignment is intentional, wrap it in extra parentheses");
+}
+
 void SemanticAnalyzer::visit(Block& node) {
     enterScope();
     // Wave-4 step 17 (W7): a bare brace opens a scope (ADR 0011), and leaving
@@ -165,6 +172,7 @@ void SemanticAnalyzer::visit(ExpressionStatement& node) {
 
 void SemanticAnalyzer::visit(IfStatement& node) {
     node.condition->accept(*this);
+    if (node.condition) warnOnAssignmentInCondition(*node.condition);
     // B4 (ADR 0042): a `@defined`-mentioned guard that folds decides the
     // arm through ComptimeInterp (never around it). The untaken arm is
     // eliminated — its `@define`s never elaborate — and a taken `@define`
@@ -274,6 +282,7 @@ void SemanticAnalyzer::visit(WhileLoop& node) {
     }
 
     node.condition->accept(*this);
+    if (node.condition) warnOnAssignmentInCondition(*node.condition);
     // Wave-4 step 17 (W7): the body may run zero or more times, so its end
     // joins its start. A move in the body is Maybe past the loop.
     if (injectedWalk_) {
@@ -315,7 +324,10 @@ void SemanticAnalyzer::visit(ForLoop& node) {
         moved_.enterBlock();
     }
     if(node.init) node.init->accept(*this);
-    if(node.condition) node.condition->accept(*this);
+    if(node.condition) {
+        node.condition->accept(*this);
+        warnOnAssignmentInCondition(*node.condition);
+    }
     events::MovedAnalysis::Snapshot pre;
     if (track) pre = moved_.snapshot();
     if(node.increment) node.increment->accept(*this);

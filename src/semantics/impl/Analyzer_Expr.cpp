@@ -3504,6 +3504,7 @@ void SemanticAnalyzer::visit(QuoteExpression& node) {
 
 void SemanticAnalyzer::visit(TernaryOp& node) {
     node.condition->accept(*this);
+    if (node.condition) warnOnAssignmentInCondition(*node.condition);
     // Wave-4 step 17 (W7): exactly one arm runs, so the arms fork and join
     // like an if/else. A move in one arm only is Maybe past the join.
     if (injectedWalk_) {

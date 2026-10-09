@@ -1327,7 +1327,7 @@ void SemanticAnalyzer::visit(Program& node) {
     // (§3.3): the check walk above ran with injectedWalk_ set, during which
     // every hook below stayed silent.
     for (auto& fired : events::fireW7Events(node, event_registry_, moved_.points(),
-                                            w7_refused_, report))
+                                            w7_refused_, report, warnReport, noteReport))
         w7_fired_.push_back(std::move(fired));
     // Wave-4 step 20 (W10): loop_back_edge fires deferred, after W7. The walk
     // accumulated one latch point per loop statement; prepending to body
