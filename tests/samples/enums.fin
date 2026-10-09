@@ -76,7 +76,7 @@ fun main() <noret> {
 // instantiation from the annotation and the assignment. `blame m1778` on 41
 // checks clean and is refused only at lowering, like every `m1778`.
 //
-// What lowering does not do yet: a `-o` build is refused by name -- the
-// `@implements` overwrite form, `m1778`, and the generic enum -- so `Result`
-// is a type-checking story today. Both compilers check this file clean; both
-// refuse its build in-kind.
+// What lowering does not do yet: the `@implements` overwrite form, `m1778`,
+// and the generic enum stay refused by name. But `-o` builds on both
+// compilers now, and both binaries run to the same end: the erased-payload
+// `blame` at :29 aborts (exit 134, identical stderr).

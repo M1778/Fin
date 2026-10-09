@@ -2651,10 +2651,8 @@ BACKEND_TEST(Soundness_Codegen, AForeachOutsideAFunctionIsRefused) {
 // members with small non-negative literals. It is also what C does, which matters
 // at an `@define` boundary.
 //
-// A member *with* a payload is refused. `Result { Ok <T>, Err <U> }` is a tagged
-// union whose layout -- where the tag sits, whether the payloads overlap, what the
-// alignment of the whole is -- is an owner ruling and not a detail to be picked
-// here, and picking one would be an ABI other passes would then have to match.
+// A member *with* a payload lowers as the ADR 0041 tagged union (`{ i32, [MaxPayloadSize
+// x i8] }`); the tests below `AnEnumWithPayloadsLowersAsTaggedUnion` pin the ABI.
 
 BACKEND_TEST(Soundness_Codegen, AFieldlessEnumMemberIsAConstant) {
     // arrays_enums.fin:3-6 and :17 verbatim in shape: a written zero, and the member
