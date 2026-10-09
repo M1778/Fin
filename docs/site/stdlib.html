@@ -1,86 +1,56 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fin Standard Library — Module Reference &amp; API Documentation</title>
-  <meta name="description" content="Comprehensive documentation and API reference for the 37 standard library modules of the Fin systems programming language: stdio, fs, path, collection, hashmap, env, time, random, math, strings, and more.">
+  <title>Fin Standard Library - Module Reference &amp; API Documentation</title>
+  <meta name="description" content="Documentation and API reference for the standard library modules of the Fin systems programming language: stdio, fs, path, collection, hashmap, env, time, random, math, strings, and more.">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try {
+      const saved = localStorage.getItem('fin-docs-theme');
+      document.documentElement.dataset.theme = saved === 'light' || saved === 'dark'
+        ? saved : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    } catch (_) {
+      document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+  </script>
+  <link rel="preload" href="assets/manrope-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="styles.css">
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233B82F6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 2L2 7l10 5 10-5-10-5z'/><path d='M2 17l10 5 10-5'/><path d='M2 12l10 5 10-5'/></svg>">
+  <link rel="icon" type="image/svg+xml" href="assets/logo-placeholder.svg">
 </head>
 <body class="stdlib-page">
 
-  <!-- Top Sticky Navigation Bar -->
+  <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="site-header">
     <div class="header-container">
       <div class="header-left">
-        <button type="button" class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Toggle navigation drawer">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="3" y1="12" x2="21" y2="12"></line>
-            <line x1="3" y1="6" x2="21" y2="6"></line>
-            <line x1="3" y1="18" x2="21" y2="18"></line>
-          </svg>
-        </button>
-
+        <button type="button" class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Toggle navigation drawer" aria-expanded="false" aria-controls="stdlib-sidebar"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#menu-2"></use></svg></button>
         <a href="index.html" class="logo-link">
-          <div class="logo-icon" aria-hidden="true">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 20h16a1 1 0 0 0 1-1C19.5 9 12 3 12 3S8 11 4 19a1 1 0 0 0 0 1z"></path>
-              <path d="M12 9v11"></path>
-            </svg>
-          </div>
-          <div class="logo-text-group">
-            <span class="logo-title">Fin</span>
-            <span class="version-badge">v0.4.0</span>
-          </div>
+          <!-- Replace this placeholder with your own logo when it is ready. -->
+          <span class="logo-placeholder" data-logo-placeholder aria-hidden="true"><span class="mascot-face">^ᴗ^</span></span>
+          <span class="logo-text-group"><span class="logo-title">Fin</span><span class="docs-label">Documentation</span></span>
         </a>
-
-        <nav class="header-nav" aria-label="Primary Navigation">
-          <a href="index.html#quickstart" class="header-nav-link">Guide</a>
-          <a href="index.html#variables-types" class="header-nav-link">Syntax</a>
-          <a href="stdlib.html" class="header-nav-link active">Standard Library <span class="header-nav-badge">17 Modules</span></a>
-        </nav>
       </div>
-
-      <!-- Instant Search Trigger -->
       <div class="header-search">
-        <button type="button" class="search-trigger-btn" id="search-trigger-btn" aria-label="Open search modal">
-          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="11" cy="11" r="8"></circle>
-            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-          </svg>
-          <span class="search-placeholder">Search docs, stdlib, &amp; syntax...</span>
-          <kbd class="search-kbd">⌘K</kbd>
+        <button type="button" class="search-trigger-btn" id="search-trigger-btn" aria-label="Search documentation" aria-haspopup="dialog">
+          <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#search"></use></svg><span class="search-placeholder">Search documentation...</span><kbd class="search-kbd">Ctrl K</kbd>
         </button>
       </div>
-
-      <!-- Action Items & Theme Toggle -->
       <div class="header-right">
-        <a href="https://github.com/M1778/Fin" target="_blank" rel="noopener noreferrer" class="header-action-btn" aria-label="GitHub Repository">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
-          </svg>
-        </a>
-
-        <button type="button" class="header-action-btn" id="theme-toggle-btn" aria-label="Toggle color theme">
-          <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="5"></circle>
-            <line x1="12" y1="1" x2="12" y2="3"></line>
-            <line x1="12" y1="21" x2="12" y2="23"></line>
-            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-            <line x1="1" y1="12" x2="3" y2="12"></line>
-            <line x1="21" y1="12" x2="23" y2="12"></line>
-            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-          </svg>
-          <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-          </svg>
-        </button>
+        <a href="https://github.com/M1778/Fin" target="_blank" rel="noopener noreferrer" class="repository-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#brand-github"></use></svg><span>GitHub</span><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#arrow-up-right"></use></svg></a>
+        <button type="button" class="header-action-btn" id="theme-toggle-btn" aria-label="Toggle color theme"><svg class="icon sun-icon" aria-hidden="true"><use href="assets/icons.svg#sun"></use></svg><svg class="icon moon-icon" aria-hidden="true"><use href="assets/icons.svg#moon"></use></svg></button>
       </div>
     </div>
   </header>
+  <div class="docs-tabs">
+    <nav class="header-nav" aria-label="Primary Navigation">
+      <a href="index.html#quickstart" class="header-nav-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#book"></use></svg>Guide</a>
+      <a href="index.html#variables-types" class="header-nav-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>Syntax</a>
+      <a href="stdlib.html" class="header-nav-link active"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#package"></use></svg>Standard Library</a>
+      <a href="index.html#pipeline-architecture" class="header-nav-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#terminal-2"></use></svg>Compiler</a>
+    </nav>
+  </div>
 
   <!-- Mobile Backdrop Overlay -->
   <div class="sidebar-overlay" id="sidebar-overlay"></div>
@@ -88,14 +58,12 @@
   <!-- Standard Library Layout -->
   <div class="stdlib-layout">
     <!-- Sticky Left Sidebar -->
-    <aside class="stdlib-sidebar" id="stdlib-sidebar">
+    <aside class="stdlib-sidebar" id="stdlib-sidebar" aria-label="Standard Library navigation">
       <div class="stdlib-filter-box">
-        <svg class="stdlib-filter-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="11" cy="11" r="8"></circle>
-          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-        </svg>
-        <input type="text" id="stdlib-search-input" class="stdlib-filter-input" placeholder="Filter 37 modules..." aria-label="Filter modules">
+        <label class="stdlib-filter-label" for="stdlib-search-input">Find a module</label>
+        <input type="search" id="stdlib-search-input" class="stdlib-filter-input" placeholder="Filter modules..." aria-label="Filter modules">
       </div>
+      <p class="stdlib-filter-empty" id="stdlib-filter-empty" hidden>No modules match. Try another name.</p>
       <div class="stdlib-category-group"><div class="stdlib-category-title">Core &amp; I/O</div><ul class="stdlib-module-list">
 <li><a href="#module-stdio" class="stdlib-module-link"><span>stdio</span><span class="stdlib-module-count">10</span></a></li>
 <li><a href="#module-fs" class="stdlib-module-link"><span>fs</span><span class="stdlib-module-count">7</span></a></li>
@@ -128,14 +96,15 @@
     </aside>
 
     <!-- Main Content Area -->
-    <main class="stdlib-content">
+    <main class="stdlib-content" id="main-content" tabindex="-1">
       <div class="stdlib-hero-header">
+        <span class="section-tag">Standard Library</span>
         <h1 class="stdlib-hero-title">Standard Library Reference</h1>
         <p class="stdlib-hero-desc">
           The Fin standard library lives in <code>lib/std/</code> and ships beside the <code>finc</code> compiler.
           All modules declare their members under <code>namespace std</code> and are imported using <code>from &lt;module&gt;::std</code>.
-          Fin treats memory models as modular libraries rather than compiler burdens, providing zero-overhead, deterministic systems facilities.
         </p>
+        <div class="library-note"><span class="logo-placeholder" data-logo-placeholder aria-hidden="true"><span class="mascot-face">^ᴗ^</span></span><span>A little toolbox for your next big idea.</span><span class="library-heart" aria-hidden="true">♡</span></div>
       </div>
 
       <!-- Quick Jump Cards Grid -->
@@ -361,10 +330,7 @@
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -372,10 +338,7 @@
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -467,23 +430,14 @@
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">stdio_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -522,10 +476,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -533,10 +484,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -607,23 +555,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">fs_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -662,10 +601,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -673,10 +609,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -747,23 +680,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">path_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -806,10 +730,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -817,10 +738,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -961,23 +879,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">collection_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1017,10 +926,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1028,10 +934,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -1102,23 +1005,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">hashmap_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1158,10 +1052,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1169,10 +1060,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -1236,23 +1124,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">env_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1287,10 +1166,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1298,10 +1174,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -1351,23 +1224,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">time_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1401,10 +1265,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1412,10 +1273,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -1479,23 +1337,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">random_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1530,10 +1379,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1541,10 +1387,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -1657,23 +1500,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">math_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1709,10 +1543,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1720,10 +1551,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -1801,23 +1629,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">strings_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1853,10 +1672,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1864,10 +1680,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -1931,23 +1744,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">types_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1983,10 +1787,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -1994,10 +1795,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -2033,23 +1831,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">typing_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -2090,10 +1879,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -2101,10 +1887,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -2154,23 +1937,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">enums_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -2205,10 +1979,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -2216,10 +1987,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -2255,23 +2023,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">error_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -2299,10 +2058,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -2310,10 +2066,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -2377,23 +2130,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">operators_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -2434,10 +2178,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -2445,10 +2186,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -2505,23 +2243,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">memory_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -2559,10 +2288,7 @@ fun main() &lt;noret&gt; {
         <div class="code-header">
           <span class="code-title">Import Statement</span>
           <button type="button" class="copy-btn" aria-label="Copy import statement">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -2570,10 +2296,7 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>
         API Interface &amp; Signatures
       </h3>
       <div class="api-table-wrapper">
@@ -2609,23 +2332,14 @@ fun main() &lt;noret&gt; {
       </div>
 
       <h3 class="api-section-title">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-          <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
-          <polyline points="10 9 9 9 8 9"></polyline>
-        </svg>
+        <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#file-text"></use></svg>
         Usage Example
       </h3>
       <div class="code-block">
         <div class="code-header">
           <span class="code-title">stdptr_example.fin</span>
           <button type="button" class="copy-btn" aria-label="Copy code sample">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
+            <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
             <span>Copy</span>
           </button>
         </div>
@@ -2653,45 +2367,50 @@ fun main() &lt;noret&gt; {
     </section>
     
     </main>
+    <aside class="toc-sidebar" aria-label="Table of contents"><div class="toc-title"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#list"></use></svg>On this page</div><ul class="toc-list">
+<li class="toc-item"><a class="toc-link" href="#module-stdio">stdio</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-fs">fs</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-path">path</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-collection">collection</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-hashmap">hashmap</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-env">env</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-time">time</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-random">random</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-math">math</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-strings">strings</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-types">types</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-typing">typing</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-enums">enums</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-error">error</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-operators">operators</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-memory">memory</a></li>
+<li class="toc-item"><a class="toc-link" href="#module-stdptr">stdptr</a></li>
+</ul></aside>
   </div>
 
-  <!-- Search Modal Backdrop & Dialog -->
-  <div class="search-modal-backdrop" id="search-modal-backdrop" role="dialog" aria-modal="true" aria-label="Search documentation">
+  <dialog class="search-modal-backdrop" id="search-modal-backdrop" aria-label="Search documentation">
     <div class="search-modal">
       <div class="search-modal-header">
-        <svg class="search-modal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="11" cy="11" r="8"></circle>
-          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-        </svg>
-        <input type="text" class="search-modal-input" id="search-input" placeholder="Search functions, modules, syntax, and types..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-        <button type="button" class="search-close-btn" id="search-close-btn" aria-label="Close search">
-          <kbd class="search-modal-esc">ESC</kbd>
-        </button>
+        <svg class="icon search-modal-icon" aria-hidden="true"><use href="assets/icons.svg#search"></use></svg>
+        <label class="sr-only" id="search-input-label" for="search-input">Search documentation</label>
+        <input type="search" class="search-modal-input" id="search-input" placeholder="Search guides, modules, and syntax..." autocomplete="off" spellcheck="false">
+        <button type="button" class="search-modal-close-btn" id="search-close-btn" aria-label="Close search">ESC</button>
       </div>
-      <div class="search-results-list" id="search-results">
-        <!-- Injected via JavaScript -->
-      </div>
+      <div class="search-results" id="search-results" aria-live="polite"></div>
       <div class="search-modal-footer">
-        <div class="search-footer-hint">
-          <span class="search-footer-key">↑</span>
-          <span class="search-footer-key">↓</span>
-          <span>to navigate</span>
-        </div>
-        <div class="search-footer-hint">
-          <span class="search-footer-key">↵</span>
-          <span>to select</span>
-        </div>
-        <div class="search-footer-hint">
-          <span class="search-footer-key">ESC</span>
-          <span>to close</span>
+        <div class="search-shortcuts">
+          <span class="search-shortcut-item"><kbd>↑ ↓</kbd> to navigate</span>
+          <span class="search-shortcut-item"><kbd>↵</kbd> to select</span>
+          <span class="search-shortcut-item"><kbd>esc</kbd> to close</span>
         </div>
       </div>
     </div>
-  </div>
+  </dialog>
+  <div class="fin-toast" id="fin-toast" role="status" aria-live="polite"></div>
 
   <footer class="site-footer">
     <div class="footer-container">
-      <p class="footer-copy">Fin Systems Programming Language &bull; Standard Library Reference v0.4.0</p>
+      <p class="footer-copy">Fin Systems Programming Language</p>
       <div class="footer-links">
         <a href="index.html">Language Guide</a>
         <a href="stdlib.html">Standard Library</a>
