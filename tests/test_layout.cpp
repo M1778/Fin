@@ -664,6 +664,40 @@ TEST(Soundness_Layout, ANullablePointerAndNullableValueLayout) {
     EXPECT_EQ(layoutA.align, 4u);
 }
 
+TEST(Soundness_Layout, ANullableFieldFromSourceHasTheTaggedValueLayout) {
+    // Issue #31 / tests/samples/nullifier.fin:4: `pub b? <int>` type-checked
+    // `ok` while codegen refused the field. The hand-built struct above pins
+    // the numbers; this pins the seam that was actually broken -- the front
+    // end spelling `b? <int>` resolving to the ADR 0040 tagged aggregate
+    // `{ int, bool }` (payload 4, tag adjacent at 4, padded to 8 at align 4),
+    // presence = tag only, same rule as nullable values.
+    auto t = typeFromSource("struct A { pub b? <int>, }\n", "A");
+    ASSERT_TRUE(t != nullptr);
+    LayoutEngine e;
+    auto layout = must(e.layoutOf(t));
+    ASSERT_EQ(layout.fields.size(), 1u);
+    EXPECT_EQ(layout.fields[0].name, "b");
+    EXPECT_EQ(layout.fields[0].offset, 0u);
+    EXPECT_EQ(layout.fields[0].size, 8u) << "payload plus adjacent tag, not a bare int";
+    EXPECT_EQ(layout.fields[0].align, 4u);
+    EXPECT_EQ(layout.size, 8u);
+    EXPECT_EQ(layout.align, 4u);
+    EXPECT_TRUE(layout.pointers.empty());
+
+    // The tag's extent is observable through the next field: `c` sits past
+    // the whole `{ payload, tag }` pair, not past a bare payload.
+    auto s = typeFromSource("struct S { pub b? <int>, pub c <char>, }\n", "S");
+    ASSERT_TRUE(s != nullptr);
+    auto sl = must(e.layoutOf(s));
+    ASSERT_EQ(sl.fields.size(), 2u);
+    EXPECT_EQ(sl.fields[0].offset, 0u);
+    EXPECT_EQ(sl.fields[0].size, 8u);
+    EXPECT_EQ(sl.fields[1].name, "c");
+    EXPECT_EQ(sl.fields[1].offset, 8u);
+    EXPECT_EQ(sl.size, 12u);
+    EXPECT_EQ(sl.align, 4u);
+}
+
 TEST(Soundness_Layout, ARefusalInAFieldNamesTheFieldAndSurvivesToTheOuterType) {
     auto s = std::make_shared<StructType>("Outer");
     s->defineField("fine", prim("int"), true);
