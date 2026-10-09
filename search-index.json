@@ -281,7 +281,7 @@
   },
   {
     "id": "module-stdio",
-    "title": "std::stdio \u2014 Standard I/O, Stream & File",
+    "title": "std::stdio -Standard I/O, Stream & File",
     "category": "Standard Library",
     "tags": [
       "stdio",
@@ -300,7 +300,7 @@
   },
   {
     "id": "module-fs",
-    "title": "std::fs \u2014 Filesystem Operations",
+    "title": "std::fs -Filesystem Operations",
     "category": "Standard Library",
     "tags": [
       "fs",
@@ -317,7 +317,7 @@
   },
   {
     "id": "module-path",
-    "title": "std::path \u2014 Path Manipulation",
+    "title": "std::path -Path Manipulation",
     "category": "Standard Library",
     "tags": [
       "path",
@@ -334,7 +334,7 @@
   },
   {
     "id": "module-collection",
-    "title": "std::collection \u2014 Dynamic Array Collection<T>",
+    "title": "std::collection -Dynamic Array Collection<T>",
     "category": "Standard Library",
     "tags": [
       "collection",
@@ -354,7 +354,7 @@
   },
   {
     "id": "module-hashmap",
-    "title": "std::hashmap \u2014 Open-Addressing Hash Table",
+    "title": "std::hashmap -Open-Addressing Hash Table",
     "category": "Standard Library",
     "tags": [
       "hashmap",
@@ -372,7 +372,7 @@
   },
   {
     "id": "module-env",
-    "title": "std::env \u2014 Environment Variables & Process",
+    "title": "std::env -Environment Variables & Process",
     "category": "Standard Library",
     "tags": [
       "env",
@@ -389,7 +389,7 @@
   },
   {
     "id": "module-time",
-    "title": "std::time \u2014 Clocks & Sleep",
+    "title": "std::time -Clocks & Sleep",
     "category": "Standard Library",
     "tags": [
       "time",
@@ -406,7 +406,7 @@
   },
   {
     "id": "module-random",
-    "title": "std::random \u2014 PRNG & Distributions",
+    "title": "std::random -PRNG & Distributions",
     "category": "Standard Library",
     "tags": [
       "random",
@@ -422,7 +422,7 @@
   },
   {
     "id": "module-math",
-    "title": "std::math \u2014 Mathematical Functions & Constants",
+    "title": "std::math -Mathematical Functions & Constants",
     "category": "Standard Library",
     "tags": [
       "math",
@@ -447,7 +447,7 @@
   },
   {
     "id": "module-strings",
-    "title": "std::strings \u2014 String Manipulation",
+    "title": "std::strings -String Manipulation",
     "category": "Standard Library",
     "tags": [
       "strings",
@@ -465,7 +465,7 @@
   },
   {
     "id": "module-types",
-    "title": "std::types \u2014 Numeric Constraints & number2str",
+    "title": "std::types -Numeric Constraints & number2str",
     "category": "Standard Library",
     "tags": [
       "types",
@@ -481,7 +481,7 @@
   },
   {
     "id": "module-typing",
-    "title": "std::typing \u2014 Tagged Union Result<T, U>",
+    "title": "std::typing -Tagged Union Result<T, U>",
     "category": "Standard Library",
     "tags": [
       "typing",
@@ -497,7 +497,7 @@
   },
   {
     "id": "module-enums",
-    "title": "std::enums \u2014 Enum Reflection & Discriminants",
+    "title": "std::enums -Enum Reflection & Discriminants",
     "category": "Standard Library",
     "tags": [
       "enums",
@@ -512,7 +512,7 @@
   },
   {
     "id": "module-error",
-    "title": "std::error \u2014 Error Base Class",
+    "title": "std::error -Error Base Class",
     "category": "Standard Library",
     "tags": [
       "error",
@@ -527,7 +527,7 @@
   },
   {
     "id": "module-operators",
-    "title": "std::operators \u2014 Operator Overloading",
+    "title": "std::operators -Operator Overloading",
     "category": "Standard Library",
     "tags": [
       "operators",
@@ -544,7 +544,7 @@
   },
   {
     "id": "module-memory",
-    "title": "std::memory \u2014 Dynamic Heap & Arena Patterns",
+    "title": "std::memory -Dynamic Heap & Arena Patterns",
     "category": "Standard Library",
     "tags": [
       "memory",
@@ -560,7 +560,7 @@
   },
   {
     "id": "module-stdptr",
-    "title": "std::stdptr \u2014 Reference-Counted Pointer rptr<T>",
+    "title": "std::stdptr -Reference-Counted Pointer rptr<T>",
     "category": "Standard Library",
     "tags": [
       "stdptr",

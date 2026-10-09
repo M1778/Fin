@@ -1,147 +1,195 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fin — Systems Programming Language Documentation &amp; Reference</title>
+  <title>Fin - Systems Programming Language Documentation &amp; Reference</title>
   <meta name="description" content="Official documentation for Fin, a modern systems programming language where memory management is a library, the sample corpus is the specification, and backend lowering adheres to explicit refusal invariants.">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try {
+      const saved = localStorage.getItem('fin-docs-theme');
+      document.documentElement.dataset.theme = saved === 'light' || saved === 'dark'
+        ? saved : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    } catch (_) {
+      document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+  </script>
+  <link rel="preload" href="assets/manrope-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="styles.css">
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%233B82F6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 2L2 7l10 5 10-5-10-5z'/><path d='M2 17l10 5 10-5'/><path d='M2 12l10 5 10-5'/></svg>">
+  <link rel="icon" type="image/svg+xml" href="assets/logo-placeholder.svg">
 </head>
 <body>
 
-  <!-- Top Sticky Navigation Bar -->
+  <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="site-header">
     <div class="header-container">
       <div class="header-left">
-        <button type="button" class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Toggle navigation drawer">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="3" y1="12" x2="21" y2="12"></line>
-            <line x1="3" y1="6" x2="21" y2="6"></line>
-            <line x1="3" y1="18" x2="21" y2="18"></line>
-          </svg>
-        </button>
-
+        <button type="button" class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Toggle navigation drawer" aria-expanded="false" aria-controls="sidebar-nav"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#menu-2"></use></svg></button>
         <a href="index.html" class="logo-link">
-          <div class="logo-icon" aria-hidden="true">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 20h16a1 1 0 0 0 1-1C19.5 9 12 3 12 3S8 11 4 19a1 1 0 0 0 0 1z"></path>
-              <path d="M12 9v11"></path>
-            </svg>
-          </div>
-          <div class="logo-text-group">
-            <span class="logo-title">Fin</span>
-            <span class="version-badge">v0.4.0</span>
-          </div>
+          <!-- Replace this placeholder with your own logo when it is ready. -->
+          <span class="logo-placeholder" data-logo-placeholder aria-hidden="true"><span class="mascot-face">^ᴗ^</span></span>
+          <span class="logo-text-group"><span class="logo-title">Fin</span><span class="docs-label">Documentation</span></span>
         </a>
-
-        <nav class="header-nav" aria-label="Primary Navigation">
-          <a href="#quickstart" class="header-nav-link">Guide</a>
-          <a href="#variables-types" class="header-nav-link">Syntax</a>
-          <a href="stdlib.html" class="header-nav-link">Standard Library <span class="header-nav-badge">17 Modules</span></a>
-        </nav>
       </div>
-
-      <!-- Instant Search Trigger -->
       <div class="header-search">
-        <button type="button" class="search-trigger-btn" id="search-trigger-btn" aria-label="Open search modal">
-          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="11" cy="11" r="8"></circle>
-            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-          </svg>
-          <span class="search-placeholder">Search docs, stdlib, &amp; syntax...</span>
-          <kbd class="search-kbd">⌘K</kbd>
+        <button type="button" class="search-trigger-btn" id="search-trigger-btn" aria-label="Search documentation" aria-haspopup="dialog">
+          <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#search"></use></svg><span class="search-placeholder">Search documentation...</span><kbd class="search-kbd">Ctrl K</kbd>
         </button>
       </div>
-
-      <!-- Action Items & Theme Toggle -->
       <div class="header-right">
-        <a href="https://github.com/M1778/Fin" target="_blank" rel="noopener noreferrer" class="header-action-btn" aria-label="GitHub Repository">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path>
-          </svg>
-        </a>
-
-        <button type="button" class="header-action-btn" id="theme-toggle-btn" aria-label="Toggle color theme">
-          <!-- Sun Icon (shown in dark mode) -->
-          <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="5"></circle>
-            <line x1="12" y1="1" x2="12" y2="3"></line>
-            <line x1="12" y1="21" x2="12" y2="23"></line>
-            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-            <line x1="1" y1="12" x2="3" y2="12"></line>
-            <line x1="21" y1="12" x2="23" y2="12"></line>
-            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-          </svg>
-          <!-- Moon Icon (shown in light mode) -->
-          <svg class="moon-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-          </svg>
-        </button>
+        <a href="https://github.com/M1778/Fin" target="_blank" rel="noopener noreferrer" class="repository-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#brand-github"></use></svg><span>GitHub</span><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#arrow-up-right"></use></svg></a>
+        <button type="button" class="header-action-btn" id="theme-toggle-btn" aria-label="Toggle color theme"><svg class="icon sun-icon" aria-hidden="true"><use href="assets/icons.svg#sun"></use></svg><svg class="icon moon-icon" aria-hidden="true"><use href="assets/icons.svg#moon"></use></svg></button>
       </div>
     </div>
   </header>
+  <div class="docs-tabs">
+    <nav class="header-nav" aria-label="Primary Navigation">
+      <a href="#quickstart" class="header-nav-link active"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#book"></use></svg>Guide</a>
+      <a href="#variables-types" class="header-nav-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#code"></use></svg>Syntax</a>
+      <a href="stdlib.html" class="header-nav-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#package"></use></svg>Standard Library</a>
+      <a href="#pipeline-architecture" class="header-nav-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#terminal-2"></use></svg>Compiler</a>
+    </nav>
+  </div>
 
   <!-- Mobile Backdrop Overlay -->
   <div class="sidebar-overlay" id="sidebar-overlay"></div>
 
-  <!-- Hero Section (Modern Stripe / Vercel Developer Standard) -->
-  <section class="hero-section" id="hero">
-    <div class="hero-container">
-      <div class="hero-left">
-        <a href="stdlib.html" class="hero-announcement-pill">
-          <span class="hero-pulse-dot"></span>
-          <span>Fin v0.4.0 is live: 17 Standard Library Modules &rarr;</span>
-        </a>
-        <h1 class="hero-title">A statically-typed systems language with explicit memory semantics.</h1>
-        <p class="hero-subtitle">
-          Fin delivers structural prototypes, first-class enums with payloads, compile-time type verification, and zero-overhead C interop without garbage collection.
-        </p>
-        <div class="hero-actions">
-          <a href="#quickstart" class="btn-primary">
-            <span>Get Started &rarr;</span>
-          </a>
-          <a href="stdlib.html" class="btn-secondary">
-            <span>Standard Library (17)</span>
-          </a>
-          <a href="#pipeline-architecture" class="btn-secondary">
-            <span>Compiler Pipeline</span>
-          </a>
-        </div>
-        <div class="hero-install-box">
-          <span class="hero-install-prompt">$</span>
-          <code class="hero-install-code">curl -fsSL https://raw.githubusercontent.com/M1778/Fin/master/install.sh | sh</code>
-          <button type="button" class="hero-copy-btn" id="hero-copy-install-btn" aria-label="Copy install command">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
-            <span>Copy</span>
-          </button>
-        </div>
+  <!-- App Layout -->
+  <div class="app-layout">
+
+    <!-- Left Navigation Sidebar -->
+    <nav class="sidebar-nav" id="sidebar-nav" aria-label="Main Navigation">
+
+      <!-- Section: Getting Started -->
+      <div class="nav-section">
+        <button type="button" class="nav-section-header">
+          <span>Getting Started</span>
+          <svg class="icon nav-section-chevron" aria-hidden="true"><use href="assets/icons.svg#chevron-down"></use></svg>
+        </button>
+        <ul class="nav-section-items">
+          <li><a href="#intro" class="nav-item-link active"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#heart"></use></svg><span>Introduction</span></a></li>
+          <li><a href="#installation" class="nav-item-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#download"></use></svg><span>Installation &amp; Build</span></a></li>
+          <li><a href="#quickstart" class="nav-item-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#rocket"></use></svg><span>Quickstart</span></a></li>
+          <li><a href="#hello-world" class="nav-item-link"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#terminal-2"></use></svg><span>Hello, World!</span></a></li>
+        </ul>
       </div>
 
-      <!-- Interactive Code Block Showcase Window -->
+      <!-- Section: Language Tour -->
+      <div class="nav-section">
+        <button type="button" class="nav-section-header">
+          <span>Language Tour</span>
+          <svg class="icon nav-section-chevron" aria-hidden="true"><use href="assets/icons.svg#chevron-down"></use></svg>
+        </button>
+        <ul class="nav-section-items">
+          <li><a href="#variables-types" class="nav-item-link"><span>Variables &amp; Types</span></a></li>
+          <li><a href="#control-flow" class="nav-item-link"><span>Control Flow</span></a></li>
+          <li><a href="#functions" class="nav-item-link"><span>Functions &amp; Lambdas</span></a></li>
+          <li><a href="#structs-classes" class="nav-item-link"><span>Structs &amp; Methods</span></a></li>
+          <li><a href="#interfaces" class="nav-item-link"><span>Interfaces &amp; Generics</span></a></li>
+          <li><a href="#enums" class="nav-item-link"><span>Enums &amp; Tagged Unions</span></a></li>
+          <li><a href="#pointers-memory" class="nav-item-link"><span>Pointers &amp; Memory (rptr, wptr)</span></a></li>
+          <li><a href="#blame" class="nav-item-link"><span>Blame Error Handling</span></a></li>
+          <li><a href="#prototypes" class="nav-item-link"><span>Prototypes {K,V}</span></a></li>
+          <li><a href="#macros-specials" class="nav-item-link"><span>Macros &amp; Specials</span></a></li>
+        </ul>
+      </div>
+
+      <!-- Section: Standard Library -->
+      <div class="nav-section">
+        <button type="button" class="nav-section-header">
+          <span>Standard Library</span>
+          <svg class="icon nav-section-chevron" aria-hidden="true"><use href="assets/icons.svg#chevron-down"></use></svg>
+        </button>
+        <ul class="nav-section-items">
+          <li><a href="#stdlib-overview" class="nav-item-link"><span>Directory Overview</span></a></li>
+          <li><a href="stdlib.html" class="nav-item-link" style="color:var(--primary); font-weight:600;"><span>Standard Library &rarr;</span></a></li>
+        </ul>
+      </div>
+
+      <!-- Section: Compiler Architecture -->
+      <div class="nav-section">
+        <button type="button" class="nav-section-header">
+          <span>Compiler Reference</span>
+          <svg class="icon nav-section-chevron" aria-hidden="true"><use href="assets/icons.svg#chevron-down"></use></svg>
+        </button>
+        <ul class="nav-section-items">
+          <li><a href="#pipeline-architecture" class="nav-item-link"><span>Pipeline Flow</span></a></li>
+          <li><a href="#compiler-cli" class="nav-item-link"><span>CLI Flags &amp; Modes</span></a></li>
+          <li><a href="#compiler-invariants" class="nav-item-link"><span>Refusal Guarantee</span></a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-note"><a href="https://github.com/M1778/Fin" target="_blank" rel="noopener noreferrer"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#heart"></use></svg>Made for curious programmers</a></div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content" id="main-content" tabindex="-1">
+      <div class="content-container">
+
+        <!-- ===================================================================
+             1. GETTING STARTED
+             =================================================================== -->
+
+        <!-- Introduction -->
+        <article class="doc-section" id="intro">
+          <span id="hero"></span>
+          <span class="section-tag">Getting Started</span>
+          <h1 class="doc-title">Introduction to Fin</h1>
+          <p class="doc-lead">A systems programming language with explicit memory, native code, and a little room for fun.</p>
+
+          <div class="welcome-card">
+            <div class="companion" aria-hidden="true">
+              <span class="companion-sparkle">✦</span>
+              <span class="logo-placeholder" data-logo-placeholder><span class="mascot-face">^ᴗ^</span></span>
+              <span class="companion-heart">♡</span>
+            </div>
+            <div class="welcome-copy">
+              <strong>Your tiny compiler companion.</strong>
+              <p id="mascot-message" role="status" aria-live="polite">Big ideas, little steps. Let’s make something together.</p>
+              <button class="mascot-greet" id="mascot-greet" type="button" hidden>Say hi to Fin <span aria-hidden="true">♡</span></button>
+            </div>
+            <span class="welcome-sticker" aria-hidden="true">made with<br>♡ + code</span>
+          </div>
+          <div class="start-links">
+            <a class="start-link" href="#quickstart"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#rocket"></use></svg><span><strong>Quickstart</strong><small>From source to your first binary.</small></span><svg class="icon link-arrow" aria-hidden="true"><use href="assets/icons.svg#arrow-right"></use></svg></a>
+            <a class="start-link" href="stdlib.html"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#package"></use></svg><span><strong>Standard Library</strong><small>Find the tools for your program.</small></span><svg class="icon link-arrow" aria-hidden="true"><use href="assets/icons.svg#arrow-right"></use></svg></a>
+          </div>
+          <div class="code-block">
+            <div class="code-header"><span class="code-lang">hello.fin</span><button type="button" class="copy-btn" aria-label="Copy hello.fin"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg><span>Copy</span></button></div>
+            <pre><code class="language-fin">fun main() &lt;noret&gt; {
+    printf("Hello, Fin!\n");
+}</code></pre>
+          </div>
+
+          <p>Fin treats memory management as a library. The compiler checks your program, the sample corpus defines the language, and the LLVM backend reports an explicit refusal when it cannot generate code.</p>
+
+          <div class="callout callout-invariant">
+            <svg class="icon callout-icon" aria-hidden="true"><use href="assets/icons.svg#shield-check"></use></svg>
+            <div class="callout-body">
+              <strong>The Non-Negotiable Backend Invariant</strong>
+              <p>If code generation cannot lower a construct, it reports an explicit refusal. The Fin compiler will never silently drop runtime code or emit guessed LLVM IR. Every refusal explicitly names the construct and the ruling or architectural gap that governs it.</p>
+            </div>
+          </div>
+
+          <h2 id="core-philosophy">Core Philosophy <a href="#core-philosophy" class="header-anchor">#</a></h2>
+          <ul>
+            <li><strong>No Prose Specification:</strong> The language specification lives as code in <code>tests/samples/*.fin</code> . Each sample carries an explicit <code>//@</code> expectation (<code>ok</code>, <code>error</code>, or <code>unimplemented</code>) that tests and convicts the compiler.</li>
+            <li><strong>Single Unified Error Construct:</strong> <code>blame</code> replaces <code>assert</code>, <code>panic</code>, and <code>throw</code>. <code>blame condition;</code> asserts conditions, <code>blame Error(...);</code> raises error values, and <code>blame m1778;</code> marks unimplemented paths.</li>
+            <li><strong>First-Class Structural Prototypes:</strong> <code>{K,V}</code> serves as an inference-first structural map type that converts cleanly to nominal containers like <code>HashMap</code> and <code>Collection</code>.</li>
+            <li><strong>Two-Moment Layout Engine:</strong> Struct layout cleanly separates the <em>decide</em> phase (where header words and alignments are requested) from the <em>observe</em> phase (where byte sizes and typed pointer maps are queried).</li>
+          </ul>
+          <details class="code-comparison"><summary>Compare Fin, C, and Rust</summary>
       <div class="code-showcase-window">
         <div class="window-chrome">
-          <div class="window-dots">
-            <span class="window-dot red"></span>
-            <span class="window-dot yellow"></span>
-            <span class="window-dot green"></span>
-          </div>
           <div class="window-tabs" role="tablist">
-            <button type="button" class="code-tab-btn active" role="tab" data-tab="tab-fin">main.fin (Arena)</button>
-            <button type="button" class="code-tab-btn" role="tab" data-tab="tab-c">main.c (malloc/free)</button>
-            <button type="button" class="code-tab-btn" role="tab" data-tab="tab-rust">main.rs (Lifetimes)</button>
+            <button type="button" class="code-tab-btn active" role="tab" data-tab="tab-fin">Fin</button>
+            <button type="button" class="code-tab-btn" role="tab" data-tab="tab-c">C</button>
+            <button type="button" class="code-tab-btn" role="tab" data-tab="tab-rust">Rust</button>
           </div>
           <div class="window-actions">
             <button type="button" class="copy-btn" aria-label="Copy code sample">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-              </svg>
+              <svg class="icon " aria-hidden="true"><use href="assets/icons.svg#copy"></use></svg>
               <span>Copy</span>
             </button>
           </div>
@@ -216,121 +264,7 @@ fn main() {
           </div>
         </div>
       </div>
-    </div>
-  </section>
-
-  <!-- App Layout -->
-  <div class="app-layout">
-
-    <!-- Left Navigation Sidebar -->
-    <nav class="sidebar-nav" id="sidebar-nav" aria-label="Main Navigation">
-
-      <!-- Section: Getting Started -->
-      <div class="nav-section">
-        <button type="button" class="nav-section-header">
-          <span>Getting Started</span>
-          <svg class="nav-section-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
-        </button>
-        <ul class="nav-section-items">
-          <li><a href="#intro" class="nav-item-link active"><span>Introduction</span></a></li>
-          <li><a href="#installation" class="nav-item-link"><span>Installation &amp; Build</span></a></li>
-          <li><a href="#quickstart" class="nav-item-link"><span>Quickstart</span></a></li>
-          <li><a href="#hello-world" class="nav-item-link"><span>Hello, World!</span></a></li>
-        </ul>
-      </div>
-
-      <!-- Section: Language Tour -->
-      <div class="nav-section">
-        <button type="button" class="nav-section-header">
-          <span>Language Tour</span>
-          <svg class="nav-section-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
-        </button>
-        <ul class="nav-section-items">
-          <li><a href="#variables-types" class="nav-item-link"><span>Variables &amp; Types</span></a></li>
-          <li><a href="#control-flow" class="nav-item-link"><span>Control Flow</span></a></li>
-          <li><a href="#functions" class="nav-item-link"><span>Functions &amp; Lambdas</span></a></li>
-          <li><a href="#structs-classes" class="nav-item-link"><span>Structs &amp; Methods</span></a></li>
-          <li><a href="#interfaces" class="nav-item-link"><span>Interfaces &amp; Generics</span></a></li>
-          <li><a href="#enums" class="nav-item-link"><span>Enums &amp; Tagged Unions</span></a></li>
-          <li><a href="#pointers-memory" class="nav-item-link"><span>Pointers &amp; Memory (rptr, wptr)</span></a></li>
-          <li><a href="#blame" class="nav-item-link"><span>Blame Error Handling</span></a></li>
-          <li><a href="#prototypes" class="nav-item-link"><span>Prototypes {K,V}</span></a></li>
-          <li><a href="#macros-specials" class="nav-item-link"><span>Macros &amp; Specials</span></a></li>
-        </ul>
-      </div>
-
-      <!-- Section: Standard Library -->
-      <div class="nav-section">
-        <button type="button" class="nav-section-header">
-          <span>Standard Library</span>
-          <span class="nav-badge">37 modules</span>
-        </button>
-        <ul class="nav-section-items">
-          <li><a href="#stdlib-overview" class="nav-item-link"><span>Directory Overview</span></a></li>
-          <li><a href="stdlib.html" class="nav-item-link" style="color:var(--primary); font-weight:600;"><span>Full Stdlib Portal &rarr;</span></a></li>
-        </ul>
-      </div>
-
-      <!-- Section: Compiler Architecture -->
-      <div class="nav-section">
-        <button type="button" class="nav-section-header">
-          <span>Compiler Reference</span>
-          <svg class="nav-section-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
-        </button>
-        <ul class="nav-section-items">
-          <li><a href="#pipeline-architecture" class="nav-item-link"><span>Pipeline Flow</span></a></li>
-          <li><a href="#compiler-cli" class="nav-item-link"><span>CLI Flags &amp; Modes</span></a></li>
-          <li><a href="#compiler-invariants" class="nav-item-link"><span>Refusal Guarantee</span></a></li>
-        </ul>
-      </div>
-
-    </nav>
-
-    <!-- Main Content -->
-    <main class="main-content">
-      <div class="content-container">
-
-        <!-- ===================================================================
-             1. GETTING STARTED
-             =================================================================== -->
-
-        <!-- Introduction -->
-        <article class="doc-section" id="intro">
-          <span class="section-tag">Getting Started</span>
-          <h1 class="doc-title">Introduction to Fin</h1>
-          <p class="doc-lead">
-            Fin is a modern, high-performance systems programming language designed around three core pillars:
-            <strong>memory management as an explicit library</strong>, the <strong>sample corpus as the normative specification</strong>,
-            and <strong>strict refusal invariants</strong> in backend code generation.
-          </p>
-
-          <p>
-            Unlike languages that hide runtime garbage collectors behind magical runtimes or mandate complex borrow-checker lifecycles into the compiler core, Fin treats memory models as modular libraries . The compiler frontend focuses on rigorous semantic analysis, structural typing with prototypes, and compile-time event handlers, while the LLVM backend enforces strict safety guarantees without silently guessing intermediate representations.
-          </p>
-
-          <div class="callout callout-invariant">
-            <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-            </svg>
-            <div class="callout-body">
-              <strong>The Non-Negotiable Backend Invariant</strong>
-              <p>If code generation cannot lower a construct, it reports an explicit refusal. The Fin compiler will never silently drop runtime code or emit guessed LLVM IR. Every refusal explicitly names the construct and the ruling or architectural gap that governs it.</p>
-            </div>
-          </div>
-
-          <h2 id="core-philosophy">Core Philosophy <a href="#core-philosophy" class="header-anchor">#</a></h2>
-          <ul>
-            <li><strong>No Prose Specification:</strong> The language specification lives as code in <code>tests/samples/*.fin</code> . Each sample carries an explicit <code>//@</code> expectation (<code>ok</code>, <code>error</code>, or <code>unimplemented</code>) that tests and convicts the compiler.</li>
-            <li><strong>Single Unified Error Construct:</strong> <code>blame</code> replaces <code>assert</code>, <code>panic</code>, and <code>throw</code>. <code>blame condition;</code> asserts conditions, <code>blame Error(...);</code> raises error values, and <code>blame m1778;</code> marks unimplemented paths.</li>
-            <li><strong>First-Class Structural Prototypes:</strong> <code>{K,V}</code> serves as an inference-first structural map type that converts cleanly to nominal containers like <code>HashMap</code> and <code>Collection</code>.</li>
-            <li><strong>Two-Moment Layout Engine:</strong> Struct layout cleanly separates the <em>decide</em> phase (where header words and alignments are requested) from the <em>observe</em> phase (where byte sizes and typed pointer maps are queried).</li>
-          </ul>
+          </details>
         </article>
 
         <!-- Installation -->
@@ -340,6 +274,11 @@ fn main() {
           <p>
             The Fin compiler (<code>finc</code>) is built directly from source using modern CMake, Conan, Flex, Bison, and LLVM.
           </p>
+
+          <div class="code-block">
+            <div class="code-header"><span class="code-lang">Install from a release</span><button type="button" class="copy-btn" id="hero-copy-install-btn" aria-label="Copy install command"><span>Copy</span></button></div>
+            <pre><code class="language-bash">curl -fsSL https://raw.githubusercontent.com/M1778/Fin/master/install.sh | sh</code></pre>
+          </div>
 
           <h3 id="prerequisites">Prerequisites <a href="#prerequisites" class="header-anchor">#</a></h3>
           <div class="table-wrapper">
@@ -459,11 +398,7 @@ Hello, World from the Fin Systems Language!</code></pre>
           </div>
 
           <div class="callout callout-tip">
-            <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="12" cy="12" r="10"></circle>
-              <line x1="12" y1="16" x2="12" y2="12"></line>
-              <line x1="12" y1="8" x2="12.01" y2="8"></line>
-            </svg>
+            <svg class="icon callout-icon" aria-hidden="true"><use href="assets/icons.svg#bulb"></use></svg>
             <div class="callout-body">
               <strong>Return Types in Angle Brackets</strong>
               <p>In Fin, function return types are written after the parameter list inside angle brackets: <code>fun name(...) &lt;Type&gt;</code>. <code>&lt;noret&gt;</code> and <code>&lt;void&gt;</code> both represent functions that return no value.</p>
@@ -522,10 +457,10 @@ Hello, World from the Fin Systems Language!</code></pre>
                 <tr><td><code>short / ushort</code></td><td>16-bit signed / unsigned integer</td><td><code>i16 / u16</code></td></tr>
                 <tr><td><code>long / ulong</code></td><td>64-bit signed / unsigned integer</td><td><code>i64 / u64</code></td></tr>
                 <tr><td><code>float / double</code></td><td>32-bit / 64-bit IEEE 754 floating point</td><td><code>Float</code> constraint</td></tr>
-                <tr><td><code>bool</code></td><td>Boolean (<code>true</code> / <code>false</code>)</td><td>—</td></tr>
+                <tr><td><code>bool</code></td><td>Boolean (<code>true</code> / <code>false</code>)</td><td>-</td></tr>
                 <tr><td><code>char</code></td><td>8-bit character / byte</td><td><code>byte</code>, <code>u8</code></td></tr>
-                <tr><td><code>string</code></td><td>NUL-terminated immutable pointer to bytes</td><td>—</td></tr>
-                <tr><td><code>any</code></td><td>Compile-time type erasure</td><td>—</td></tr>
+                <tr><td><code>string</code></td><td>NUL-terminated immutable pointer to bytes</td><td>-</td></tr>
+                <tr><td><code>any</code></td><td>Compile-time type erasure</td><td>-</td></tr>
               </tbody>
             </table>
           </div>
@@ -716,11 +651,7 @@ pub fun render&lt;T: Drawable&gt;(item: T) &lt;noret&gt; {
           </div>
 
           <div class="callout callout-important">
-            <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
-              <line x1="12" y1="9" x2="12" y2="13"></line>
-              <line x1="12" y1="17" x2="12.01" y2="17"></line>
-            </svg>
+            <svg class="icon callout-icon" aria-hidden="true"><use href="assets/icons.svg#alert-triangle"></use></svg>
             <div class="callout-body">
               <strong>Constraint Sets vs. Storage Types</strong>
               <p>Constraint sets (such as <code>type Number = int | uint | float;</code>) are bounds for generic parameters and never concrete storage types. You cannot declare a field or variable of type <code>Number</code> directly.</p>
@@ -925,17 +856,14 @@ fun calculate() &lt;int&gt; {
           <h2 id="stdlib-heading">Standard Library Modules <a href="#stdlib-heading" class="header-anchor">#</a></h2>
           <p class="doc-lead">
             The Fin standard library lives in <code>lib/std/</code> and ships beside the compiler.
-            All 37 modules declare their contents under <code>namespace std</code> and are imported using <code>from &lt;module&gt;::std</code>.
+            The modules declare their contents under <code>namespace std</code> and are imported using <code>from &lt;module&gt;::std</code>.
           </p>
 
           <div class="callout callout-tip" style="margin-bottom: 28px;">
-            <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
-              <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
-            </svg>
+            <svg class="icon callout-icon" aria-hidden="true"><use href="assets/icons.svg#alert-triangle"></use></svg>
             <div class="callout-body">
               <strong>Dedicated Standard Library Documentation Portal</strong>
-              <p>For complete API signatures, parameters, return types, memory allocation lifecycles, and runnable Fin code examples for every module, visit the dedicated <a href="stdlib.html" style="text-decoration:underline; font-weight:600;">Fin Standard Library Portal &rarr;</a></p>
+              <p>For complete API signatures, parameters, return types, memory allocation lifecycles, and runnable Fin code examples for every module, visit the dedicated <a href="stdlib.html" style="text-decoration:underline; font-weight:600;">Standard Library &rarr;</a></p>
             </div>
           </div>
 
@@ -1011,8 +939,8 @@ fun calculate() &lt;int&gt; {
           </div>
 
           <div style="margin-top: 32px; text-align: center;">
-            <a href="stdlib.html" class="btn-primary" style="display:inline-flex; padding: 12px 28px; font-size: 15px;">
-              <span>Open Standard Library Documentation Portal (17 Modules) &rarr;</span>
+            <a href="stdlib.html" class="btn-primary" >
+              <span>Standard Library &rarr;</span>
             </a>
           </div>
         </article>
@@ -1070,11 +998,9 @@ fun calculate() &lt;int&gt; {
 
             <!-- Refusal Invariant Banner -->
             <div class="refusal-invariant-card">
-              <svg class="refusal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-              </svg>
+              <svg class="icon refusal-icon" aria-hidden="true"><use href="assets/icons.svg#shield-check"></use></svg>
               <div class="refusal-content">
-                <h4>⭐ Key Architectural Guarantee: Strict Backend Refusal Invariant</h4>
+                <strong>Key Architectural Guarantee: Strict Backend Refusal Invariant</strong>
                 <p>
                   If the LLVM code generator encounters an unhandled construct or cannot prove layout invariants, it reports an explicit refusal. The Fin compiler will NEVER silently guess intermediate representations, drop code paths, or emit unsound LLVM IR.
                 </p>
@@ -1103,7 +1029,7 @@ fun calculate() &lt;int&gt; {
               <tbody>
                 <tr><td><code>-o &lt;file&gt;</code></td><td>Path to binary</td><td>Compiles and links source into a standalone executable.</td></tr>
                 <tr><td><code>-c</code></td><td>Source file</td><td>Compiles source to a native object file (<code>.o</code>) without linking.</td></tr>
-                <tr><td><code>-O0</code>–<code>-O3</code></td><td>Optimization level</td><td>Applies to <code>-o</code> and <code>-c</code> builds only (default <code>-O0</code>); ignored by check-only runs.</td></tr>
+                <tr><td><code>-O0</code>-<code>-O3</code></td><td>Optimization level</td><td>Applies to <code>-o</code> and <code>-c</code> builds only (default <code>-O0</code>); ignored by check-only runs.</td></tr>
                 <tr><td><code>--debug-ast</code></td><td>Source file</td><td>Prints the parsed AST.</td></tr>
                 <tr><td><code>--version</code></td><td>None</td><td>Displays compiler version and machine contract version.</td></tr>
                 <tr><td><code>--help</code></td><td>None</td><td>Displays complete list of available flags and diagnostic controls.</td></tr>
@@ -1139,9 +1065,7 @@ fun calculate() &lt;int&gt; {
             A core principle of the Fin compiler is <strong>truth in code generation</strong>:
           </p>
           <div class="callout callout-invariant">
-            <svg class="callout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-            </svg>
+            <svg class="icon callout-icon" aria-hidden="true"><use href="assets/icons.svg#shield-check"></use></svg>
             <div class="callout-body">
               <strong>Non-Negotiable Refusal Invariant</strong>
               <p>Whenever the code generator encounters a type, operator, or construct that cannot be soundly lowered to machine code, it reports an explicit refusal: <code>codegen: &lt;construct&gt; is not lowered yet</code>. It will NEVER silently omit execution code or substitute stub IR.</p>
@@ -1153,7 +1077,7 @@ fun calculate() &lt;int&gt; {
 
     <!-- Right On This Page TOC -->
     <aside class="toc-sidebar" aria-label="Table of contents">
-      <div class="toc-title">On this page</div>
+      <div class="toc-title"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#list"></use></svg>On this page</div>
       <ul class="toc-list">
         <li class="toc-item"><a href="#intro" class="toc-link active">Introduction</a></li>
         <li class="toc-item"><a href="#installation" class="toc-link">Installation &amp; Build</a></li>
@@ -1174,42 +1098,34 @@ fun calculate() &lt;int&gt; {
         <li class="toc-item"><a href="#compiler-cli" class="toc-link">CLI Reference &amp; Flags</a></li>
         <li class="toc-item"><a href="#compiler-invariants" class="toc-link">Refusal Invariants</a></li>
       </ul>
+<div class="toc-help"><a href="https://github.com/M1778/Fin/blob/master/docs/site/index.html" target="_blank" rel="noopener noreferrer"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#pencil"></use></svg>View page source</a><a href="https://github.com/M1778/Fin/issues" target="_blank" rel="noopener noreferrer"><svg class="icon " aria-hidden="true"><use href="assets/icons.svg#message-circle"></use></svg>Report a docs issue</a></div>
     </aside>
 
   </div>
 
-  <!-- Search Modal Dialog -->
-  <div class="search-modal-backdrop" id="search-modal-backdrop" role="dialog" aria-modal="true" aria-label="Search Documentation">
+  <dialog class="search-modal-backdrop" id="search-modal-backdrop" aria-label="Search documentation">
     <div class="search-modal">
       <div class="search-modal-header">
-        <svg class="search-modal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="8"></circle>
-          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-        </svg>
-        <input type="text" class="search-modal-input" id="search-input" placeholder="Search guides, stdlib functions, and syntax..." autocomplete="off" spellcheck="false">
-        <button type="button" class="search-modal-close-btn" id="search-close-btn">ESC</button>
+        <svg class="icon search-modal-icon" aria-hidden="true"><use href="assets/icons.svg#search"></use></svg>
+        <label class="sr-only" id="search-input-label" for="search-input">Search documentation</label>
+        <input type="search" class="search-modal-input" id="search-input" placeholder="Search guides, modules, and syntax..." autocomplete="off" spellcheck="false">
+        <button type="button" class="search-modal-close-btn" id="search-close-btn" aria-label="Close search">ESC</button>
       </div>
-      <div class="search-results" id="search-results">
-        <!-- Live search results injected dynamically by app.js -->
-      </div>
+      <div class="search-results" id="search-results" aria-live="polite"></div>
       <div class="search-modal-footer">
         <div class="search-shortcuts">
-          <span class="search-shortcut-item"><kbd class="search-kbd">↑</kbd><kbd class="search-kbd">↓</kbd> to navigate</span>
-          <span class="search-shortcut-item"><kbd class="search-kbd">↵</kbd> to select</span>
-          <span class="search-shortcut-item"><kbd class="search-kbd">esc</kbd> to close</span>
+          <span class="search-shortcut-item"><kbd>↑ ↓</kbd> to navigate</span>
+          <span class="search-shortcut-item"><kbd>↵</kbd> to select</span>
+          <span class="search-shortcut-item"><kbd>esc</kbd> to close</span>
         </div>
-        <span>Fin Documentation Search</span>
       </div>
     </div>
-  </div>
-
-  <!-- Toast Notification Container -->
+  </dialog>
   <div class="fin-toast" id="fin-toast" role="status" aria-live="polite"></div>
 
-  <!-- Footer -->
   <footer class="site-footer">
     <div class="footer-container">
-      <p>© 2026 The Fin Language Project. Built with clean systems precision.</p>
+      <p>© 2026 The Fin Language Project.</p>
       <div class="footer-links">
         <a href="#hero">Overview</a>
         <a href="#quickstart">Quickstart</a>
