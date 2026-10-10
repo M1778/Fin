@@ -835,7 +835,7 @@ BACKEND_TEST(Soundness_Codegen, ARuntimeZeroDivisorStillTraps) {
         "@define printf(fmt: string, ...) <noret>;\n");
     EXPECT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
-#if defined(__aarch64__) || defined(__arm64__)
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64) || defined(_M_ARM)
     EXPECT_EQ(b.runExit, 0) << b.why();
     EXPECT_EQ(b.out, "0\n") << b.why();
 #else
