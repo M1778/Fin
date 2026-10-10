@@ -820,7 +820,11 @@ BACKEND_TEST(Soundness_Codegen, AConstantModuloByZeroIsRefused) {
 
 BACKEND_TEST(Soundness_Codegen, ARuntimeZeroDivisorStillTraps) {
     // The second path beside the two refusals above: a divisor the compiler
-    // cannot see stays a real division, and the hardware traps on zero.
+    // cannot see stays a real division. On x86 the hardware traps on zero;
+    // on AArch64 SDIV by zero is defined to return 0, so there is no trap
+    // to observe. Until issue #45 decides the trap policy (explicit check
+    // vs hardware behavior), the test asserts what each platform honestly
+    // does rather than pinning one CPU's answer everywhere.
     const Built b = build(
         "fun id(n: int) <int> { return n; }\n"
         "fun main() <noret> {\n"
@@ -831,7 +835,12 @@ BACKEND_TEST(Soundness_Codegen, ARuntimeZeroDivisorStillTraps) {
         "@define printf(fmt: string, ...) <noret>;\n");
     EXPECT_EQ(b.compileExit, 0) << b.why();
     ASSERT_TRUE(b.ran) << b.why();
+#if defined(__aarch64__) || defined(__arm64__)
+    EXPECT_EQ(b.runExit, 0) << b.why();
+    EXPECT_EQ(b.out, "0\n") << b.why();
+#else
     EXPECT_NE(b.runExit, 0) << b.why();
+#endif
 }
 
 // ---------------------------------------------------------------------------

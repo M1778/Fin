@@ -3169,9 +3169,17 @@ TEST(FinGuard, FlagIsAdvertisedInHelp) {
 namespace {
 
 std::vector<std::string> diagsInFile(const std::string& err, const std::string& path) {
+    // JSON escapes backslashes, so a Windows path never appears verbatim in
+    // the output: match the escaped spelling (`C:\\...`), which coincides
+    // with the raw spelling wherever paths carry no backslashes.
+    std::string escaped;
+    for (char c : path) {
+        if (c == '\\') escaped += "\\\\";
+        else escaped += c;
+    }
     std::vector<std::string> out;
     for (const auto& d : jsonDiagnostics(err)) {
-        if (d.find("\"file\":\"" + path + "\"") != std::string::npos) out.push_back(d);
+        if (d.find("\"file\":\"" + escaped + "\"") != std::string::npos) out.push_back(d);
     }
     return out;
 }
