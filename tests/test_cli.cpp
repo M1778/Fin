@@ -3393,13 +3393,8 @@ TEST(DeadCode, UnderscorePrefixedLocalStaysSilent) {    // The control: a `_`-pr
 
 namespace {
 
-// Reads the named section headers out of an ELF object via `readelf -S`.
-// Returns the raw text, suitable for a substring assertion. Uses readelf
-// (always present on the Linux builders) rather than llvm-dwarfdump so the
-// test does not depend on LLVM tooling the compiler itself needs.
-// On Windows there is no readelf: the spawn fails and the caller sees "".
-std::string readelfSections(const std::string& objectPath) {
-    const std::string cmd = "readelf -S " + objectPath + " 2>&1";
+// Runs a command and captures its combined stdout+stderr ("": spawn failed).
+static std::string captureCommand(const std::string& cmd) {
 #ifdef _WIN32
     FILE* pipe = _popen(cmd.c_str(), "r");
 #else
@@ -3417,26 +3412,24 @@ std::string readelfSections(const std::string& objectPath) {
     return out;
 }
 
+// Lists section names via `llvm-readobj --sections` (ships with every LLVM,
+// handles ELF/Mach-O/COFF alike), falling back to `readelf -S`. Returns the
+// raw text, suitable for a substring assertion on `.debug_info`/`.debug_line`
+// spellings both tools print. Uses LLVM tooling rather than readelf alone so
+// the test does not depend on binutils the compiler itself never needs;
+// `readelf` (Linux-only) stays as the fallback.
+std::string readelfSections(const std::string& objectPath) {
+    const std::string out = captureCommand("llvm-readobj --sections " + objectPath + " 2>&1");
+    if (out.find(".debug_") != std::string::npos || out.find("Format:") != std::string::npos)
+        return out;
+    return captureCommand("readelf -S " + objectPath + " 2>&1");
+}
+
 // Dumps `.debug_info` contents via `llvm-dwarfdump --debug-info`, which is
 // always present alongside the LLVM the compiler was built against. Returns the
 // raw text ("" when the tool is absent, as on Windows).
 std::string dwarfdumpInfo(const std::string& objectPath) {
-    const std::string cmd = "llvm-dwarfdump --debug-info " + objectPath + " 2>&1";
-#ifdef _WIN32
-    FILE* pipe = _popen(cmd.c_str(), "r");
-#else
-    FILE* pipe = popen(cmd.c_str(), "r");
-#endif
-    if (!pipe) return "";
-    std::string out;
-    char buf[4096];
-    while (fgets(buf, sizeof(buf), pipe)) out += buf;
-#ifdef _WIN32
-    _pclose(pipe);
-#else
-    pclose(pipe);
-#endif
-    return out;
+    return captureCommand("llvm-dwarfdump --debug-info " + objectPath + " 2>&1");
 }
 
 } // namespace
