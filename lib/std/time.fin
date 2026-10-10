@@ -20,21 +20,21 @@ namespace std {
 #[export]
 pub fun now() <long> {
     return time(null);
-  }
+}
 
 #[export]
 pub fun sleep_sec(secs: uint) <noret> {
     sleep(secs);
-  }
+}
 
 #[export]
 pub fun sleep_ms(ms: uint) <noret> {
     usleep(ms * cast<uint>(1000));
-  }
+}
 
 #[export]
 pub fun diff_sec(start: long, end: long) <long> {
     return end - start;
-  }
+}
 
 }

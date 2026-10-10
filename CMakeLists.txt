@@ -301,6 +301,7 @@ set_target_properties(finc PROPERTIES
 # fintest: minimal end-to-end TAP runner over `fintest/**/*_test.fin` (slice 1:
 # standalone binary, run directly; ctest wiring arrives in slice 2).
 add_subdirectory(tools/fintest)
+add_subdirectory(tools/fmt)
 
 # --- Install / package layout (ADR 0010) --------------------------------------
 # A release archive unpacks to exactly `bin/finc[.exe]` and `lib/std/**`, with

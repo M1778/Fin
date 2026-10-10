@@ -7,14 +7,14 @@
 
 import {
     Token, lookup_keyword,
-    tok_eof, tok_ident, tok_int_lit, tok_float_lit, tok_error,
-    tok_string_lit, tok_char_lit,
-    tok_plus, tok_minus, tok_star, tok_slash, tok_percent,
-    tok_equal, tok_eqeq, tok_noteq, tok_lt, tok_gt, tok_lteq, tok_gteq,
-    tok_and, tok_or, tok_not, tok_shl, tok_shr,
-    tok_lparen, tok_rparen, tok_lbrace, tok_rbrace,
-    tok_lbracket, tok_rbracket, tok_semicolon, tok_colon,
-    tok_comma, tok_dot
+      tok_eof, tok_ident, tok_int_lit, tok_float_lit, tok_error,
+      tok_string_lit, tok_char_lit,
+      tok_plus, tok_minus, tok_star, tok_slash, tok_percent,
+      tok_equal, tok_eqeq, tok_noteq, tok_lt, tok_gt, tok_lteq, tok_gteq,
+      tok_and, tok_or, tok_not, tok_shl, tok_shr,
+      tok_lparen, tok_rparen, tok_lbrace, tok_rbrace,
+      tok_lbracket, tok_rbracket, tok_semicolon, tok_colon,
+      tok_comma, tok_dot
 } from token::std;
 
 namespace std {
@@ -67,366 +67,366 @@ pub struct Scanner {
 
     pub:
       fun init(self: &Self, src: string) <noret> {
-          let n <int> = cast<int>(sc_strlen(src));
-          self._chars = new [char, n + 1]{};
-          sc_strcpy(&self._chars[0], src);
-          self._len = n;
-          self.cursor = 0;
-          self.line = 1;
-          self.col = 1;
-          self.start_pos = 0;
-          self.start_line = 1;
-          self.start_col = 1;
+        let n <int> = cast<int>(sc_strlen(src));
+        self._chars = new [char, n + 1]{};
+        sc_strcpy(&self._chars[0], src);
+        self._len = n;
+        self.cursor = 0;
+        self.line = 1;
+        self.col = 1;
+        self.start_pos = 0;
+        self.start_line = 1;
+        self.start_col = 1;
       }
 
       fun destroy(self: &Self) <noret> {
-          if (self._len > 0) {
-              delete self._chars;
-              self._len = 0;
-          }
+        if (self._len > 0) {
+            delete self._chars;
+            self._len = 0;
+        }
       }
 
       fun is_at_end(self: &Self) <bool> {
-          return self.cursor >= self._len;
+        return self.cursor >= self._len;
       }
 
       fun peek(self: &Self) <char> {
-          if (self.is_at_end()) { return cast<char>(0); }
-          return self._chars[self.cursor];
+        if (self.is_at_end()) { return cast<char>(0); }
+        return self._chars[self.cursor];
       }
 
       fun peek_next(self: &Self) <char> {
-          if (self.cursor + 1 >= self._len) { return cast<char>(0); }
-          return self._chars[self.cursor + 1];
+        if (self.cursor + 1 >= self._len) { return cast<char>(0); }
+        return self._chars[self.cursor + 1];
       }
 
       fun advance(self: &Self) <char> {
-          let c <char> = self.peek();
-          self.cursor++;
-          if (c == '\n') {
-              self.line++;
-              self.col = 1;
-          } else {
-              self.col++;
-          }
-          return c;
+        let c <char> = self.peek();
+        self.cursor++;
+        if (c == '\n') {
+            self.line++;
+            self.col = 1;
+        } else {
+            self.col++;
+        }
+        return c;
       }
 
       fun match_char(self: &Self, expected: char) <bool> {
-          if (self.is_at_end() || self.peek() != expected) {
-              return false;
-          }
-          self.advance();
-          return true;
+        if (self.is_at_end() || self.peek() != expected) {
+            return false;
+        }
+        self.advance();
+        return true;
       }
 
       // Returns true when a block comment ran into EOF still open, so the
       // caller can refuse it instead of silently swallowing the file tail.
       fun skip_whitespace_and_comments(self: &Self) <bool> {
-          while (!self.is_at_end()) {
-              let c <char> = self.peek();
-              if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-                  self.advance();
-              } else if (c == '/' && self.peek_next() == '/') {
-                  while (!self.is_at_end() && self.peek() != '\n') {
-                      self.advance();
-                  }
-              } else if (c == '/' && self.peek_next() == '*') {
-                  self.comment_open_line = self.line;
-                  self.comment_open_col = self.col;
-                  self.advance();
-                  self.advance();
-                  let depth <int> = 1;
-                  while (!self.is_at_end() && depth > 0) {
-                      if (self.peek() == '/' && self.peek_next() == '*') {
-                          self.advance();
-                          self.advance();
-                          depth++;
-                      } else if (self.peek() == '*' && self.peek_next() == '/') {
-                          self.advance();
-                          self.advance();
-                          depth--;
-                      } else {
-                          self.advance();
-                      }
-                  }
-                  if (depth > 0) {
-                      return true;
-                  }
-              } else {
-                  break;
-              }
-          }
-          return false;
+        while (!self.is_at_end()) {
+            let c <char> = self.peek();
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                self.advance();
+            } else if (c == '/' && self.peek_next() == '/') {
+                while (!self.is_at_end() && self.peek() != '\n') {
+                    self.advance();
+                }
+            } else if (c == '/' && self.peek_next() == '*') {
+                self.comment_open_line = self.line;
+                self.comment_open_col = self.col;
+                self.advance();
+                self.advance();
+                let depth <int> = 1;
+                while (!self.is_at_end() && depth > 0) {
+                    if (self.peek() == '/' && self.peek_next() == '*') {
+                        self.advance();
+                        self.advance();
+                        depth++;
+                    } else if (self.peek() == '*' && self.peek_next() == '/') {
+                        self.advance();
+                        self.advance();
+                        depth--;
+                    } else {
+                        self.advance();
+                    }
+                }
+                if (depth > 0) {
+                    return true;
+                }
+            } else {
+                break;
+            }
+        }
+        return false;
       }
 
       fun scan_token(self: &Self) <Token> {
-          if (self.skip_whitespace_and_comments()) {
-              return Token {
-                  kind: tok_error(),
+        if (self.skip_whitespace_and_comments()) {
+            return Token {
+                kind: tok_error(),
                   text: "unterminated block comment",
                   line: self.comment_open_line,
                   col: self.comment_open_col,
                   offset: self.cursor,
                   len: 0
-              };
-          }
-          self.start_pos = self.cursor;
-          self.start_line = self.line;
-          self.start_col = self.col;
+            };
+        }
+        self.start_pos = self.cursor;
+        self.start_line = self.line;
+        self.start_col = self.col;
 
-          if (self.is_at_end()) {
-              return Token {
-                  kind: tok_eof(),
+        if (self.is_at_end()) {
+            return Token {
+                kind: tok_eof(),
                   text: "",
                   line: self.line,
                   col: self.col,
                   offset: self.cursor,
                   len: 0
-              };
-          }
+            };
+        }
 
-          let c <char> = self.peek();
+        let c <char> = self.peek();
 
-          // A NUL byte inside the scanned span is never valid source. Refuse
-          // it as one error token and keep scanning the tail after it.
-          if (c == cast<char>(0) && !self.is_at_end()) {
-              self.advance();
-              return Token {
-                  kind: tok_error(),
+        // A NUL byte inside the scanned span is never valid source. Refuse
+        // it as one error token and keep scanning the tail after it.
+        if (c == cast<char>(0) && !self.is_at_end()) {
+            self.advance();
+            return Token {
+                kind: tok_error(),
                   text: "unrecognised byte in source: '\\x00'",
                   line: self.start_line,
                   col: self.start_col,
                   offset: self.start_pos,
                   len: 1
-              };
-          }
+            };
+        }
 
-          // Identifiers and keywords
-          if (is_alpha(c)) {
-              while (is_alnum(self.peek())) {
-                  self.advance();
-              }
-              let len <int> = self.cursor - self.start_pos;
-              let txt <string> = slice_str(self._chars, self.start_pos, len);
-              let k <int> = lookup_keyword(txt);
-              return Token {
-                  kind: k,
+        // Identifiers and keywords
+        if (is_alpha(c)) {
+            while (is_alnum(self.peek())) {
+                self.advance();
+            }
+            let len <int> = self.cursor - self.start_pos;
+            let txt <string> = slice_str(self._chars, self.start_pos, len);
+            let k <int> = lookup_keyword(txt);
+            return Token {
+                kind: k,
                   text: txt,
                   line: self.start_line,
                   col: self.start_col,
                   offset: self.start_pos,
                   len: len
-              };
-          }
+            };
+        }
 
-          // Numeric literals
-          if (is_digit(c)) {
-              let is_float <bool> = false;
-              if (c == '0' && (self.peek_next() == 'x' || self.peek_next() == 'X')) {
-                  self.advance(); // '0'
-                  self.advance(); // 'x'
-                  while (is_alnum(self.peek())) {
-                      self.advance();
-                  }
-              } else {
-                  while (is_digit(self.peek())) {
-                      self.advance();
-                  }
-                  if (self.peek() == '.' && is_digit(self.peek_next())) {
-                      is_float = true;
-                      self.advance(); // '.'
-                      while (is_digit(self.peek())) {
-                          self.advance();
-                      }
-                  }
-              }
-              let len <int> = self.cursor - self.start_pos;
-              let txt <string> = slice_str(self._chars, self.start_pos, len);
-              let num_kind <int> = tok_int_lit();
-              if (is_float) {
-                  num_kind = tok_float_lit();
-              }
-              return Token {
-                  kind: num_kind,
+        // Numeric literals
+        if (is_digit(c)) {
+            let is_float <bool> = false;
+            if (c == '0' && (self.peek_next() == 'x' || self.peek_next() == 'X')) {
+                self.advance(); // '0'
+                self.advance(); // 'x'
+                while (is_alnum(self.peek())) {
+                    self.advance();
+                }
+            } else {
+                while (is_digit(self.peek())) {
+                    self.advance();
+                }
+                if (self.peek() == '.' && is_digit(self.peek_next())) {
+                    is_float = true;
+                    self.advance(); // '.'
+                    while (is_digit(self.peek())) {
+                        self.advance();
+                    }
+                }
+            }
+            let len <int> = self.cursor - self.start_pos;
+            let txt <string> = slice_str(self._chars, self.start_pos, len);
+            let num_kind <int> = tok_int_lit();
+            if (is_float) {
+                num_kind = tok_float_lit();
+            }
+            return Token {
+                kind: num_kind,
                   text: txt,
                   line: self.start_line,
                   col: self.start_col,
                   offset: self.start_pos,
                   len: len
-              };
-          }
+            };
+        }
 
-          // String literals
-          if (c == '"') {
-              self.advance();
-              while (!self.is_at_end() && self.peek() != '"') {
-                  if (self.peek() == '\\') {
-                      self.advance();
-                      if (self.is_at_end()) { break; }
-                  }
-                  self.advance();
-              }
-              if (self.is_at_end()) {
-                  return Token {
-                      kind: tok_error(),
+        // String literals
+        if (c == '"') {
+            self.advance();
+            while (!self.is_at_end() && self.peek() != '"') {
+                if (self.peek() == '\\') {
+                    self.advance();
+                    if (self.is_at_end()) { break; }
+                }
+                self.advance();
+            }
+            if (self.is_at_end()) {
+                return Token {
+                    kind: tok_error(),
                       text: "unterminated string literal",
                       line: self.start_line,
                       col: self.start_col,
                       offset: self.start_pos,
                       len: self.cursor - self.start_pos
-                  };
-              }
-              self.advance();
-              let len <int> = self.cursor - self.start_pos;
-              let txt <string> = slice_str(self._chars, self.start_pos, len);
-              return Token {
-                  kind: tok_string_lit(),
+                };
+            }
+            self.advance();
+            let len <int> = self.cursor - self.start_pos;
+            let txt <string> = slice_str(self._chars, self.start_pos, len);
+            return Token {
+                kind: tok_string_lit(),
                   text: txt,
                   line: self.start_line,
                   col: self.start_col,
                   offset: self.start_pos,
                   len: len
-              };
-          }
+            };
+        }
 
-          // Character literals
-          if (c == '\'') {
-              self.advance();
-              while (!self.is_at_end() && self.peek() != '\'') {
-                  if (self.peek() == '\\') {
-                      self.advance();
-                      if (self.is_at_end()) { break; }
-                  }
-                  self.advance();
-              }
-              if (self.is_at_end()) {
-                  return Token {
-                      kind: tok_error(),
+        // Character literals
+        if (c == '\'') {
+            self.advance();
+            while (!self.is_at_end() && self.peek() != '\'') {
+                if (self.peek() == '\\') {
+                    self.advance();
+                    if (self.is_at_end()) { break; }
+                }
+                self.advance();
+            }
+            if (self.is_at_end()) {
+                return Token {
+                    kind: tok_error(),
                       text: "unterminated character literal",
                       line: self.start_line,
                       col: self.start_col,
                       offset: self.start_pos,
                       len: self.cursor - self.start_pos
-                  };
-              }
-              self.advance();
-              let len <int> = self.cursor - self.start_pos;
-              let txt <string> = slice_str(self._chars, self.start_pos, len);
-              return Token {
-                  kind: tok_char_lit(),
+                };
+            }
+            self.advance();
+            let len <int> = self.cursor - self.start_pos;
+            let txt <string> = slice_str(self._chars, self.start_pos, len);
+            return Token {
+                kind: tok_char_lit(),
                   text: txt,
                   line: self.start_line,
                   col: self.start_col,
                   offset: self.start_pos,
                   len: len
-              };
-          }
+            };
+        }
 
-          // Punctuation and operators
-          self.advance();
+        // Punctuation and operators
+        self.advance();
 
-          // Two-character operators
-          if (c == '=' && self.match_char('=')) {
-              return Token { kind: tok_eqeq(), text: "==", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '=' && self.match_char('>')) {
-              return Token { kind: 102, text: "=>", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '!' && self.match_char('=')) {
-              return Token { kind: tok_noteq(), text: "!=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '<' && self.match_char('=')) {
-              return Token { kind: tok_lteq(), text: "<=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          // Shifts sit after `<=`: `a <= b` must not scan as `a <` `= b`,
-          // and `<<=` stays `<<` + `=` (the expression grammar has no
-          // shift-assign; the parser refuses it by name).
-          if (c == '<' && self.match_char('<')) {
-              return Token { kind: tok_shl(), text: "<<", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '>' && self.match_char('=')) {
-              return Token { kind: tok_gteq(), text: ">=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '>' && self.match_char('>')) {
-              return Token { kind: tok_shr(), text: ">>", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '&' && self.match_char('&')) {
-              return Token { kind: tok_and(), text: "&&", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '|' && self.match_char('|')) {
-              return Token { kind: tok_or(), text: "||", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == ':' && self.match_char(':')) {
-              return Token { kind: 104, text: "::", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '+' && self.match_char('+')) {
-              return Token { kind: 96, text: "++", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '+' && self.match_char('=')) {
-              return Token { kind: 98, text: "+=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '-' && self.match_char('-')) {
-              return Token { kind: 97, text: "--", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '-' && self.match_char('>')) {
-              return Token { kind: 103, text: "->", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '-' && self.match_char('=')) {
-              return Token { kind: 99, text: "-=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '*' && self.match_char('=')) {
-              return Token { kind: 100, text: "*=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
-          if (c == '/' && self.match_char('=')) {
-              return Token { kind: 101, text: "/=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
-          }
+        // Two-character operators
+        if (c == '=' && self.match_char('=')) {
+            return Token { kind: tok_eqeq(), text: "==", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '=' && self.match_char('>')) {
+            return Token { kind: 102, text: "=>", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '!' && self.match_char('=')) {
+            return Token { kind: tok_noteq(), text: "!=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '<' && self.match_char('=')) {
+            return Token { kind: tok_lteq(), text: "<=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        // Shifts sit after `<=`: `a <= b` must not scan as `a <` `= b`,
+        // and `<<=` stays `<<` + `=` (the expression grammar has no
+        // shift-assign; the parser refuses it by name).
+        if (c == '<' && self.match_char('<')) {
+            return Token { kind: tok_shl(), text: "<<", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '>' && self.match_char('=')) {
+            return Token { kind: tok_gteq(), text: ">=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '>' && self.match_char('>')) {
+            return Token { kind: tok_shr(), text: ">>", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '&' && self.match_char('&')) {
+            return Token { kind: tok_and(), text: "&&", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '|' && self.match_char('|')) {
+            return Token { kind: tok_or(), text: "||", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == ':' && self.match_char(':')) {
+            return Token { kind: 104, text: "::", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '+' && self.match_char('+')) {
+            return Token { kind: 96, text: "++", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '+' && self.match_char('=')) {
+            return Token { kind: 98, text: "+=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '-' && self.match_char('-')) {
+            return Token { kind: 97, text: "--", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '-' && self.match_char('>')) {
+            return Token { kind: 103, text: "->", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '-' && self.match_char('=')) {
+            return Token { kind: 99, text: "-=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '*' && self.match_char('=')) {
+            return Token { kind: 100, text: "*=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
+        if (c == '/' && self.match_char('=')) {
+            return Token { kind: 101, text: "/=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 2 };
+        }
 
-          // Single-character tokens
-          if (c == '&') { return Token { kind: 95, text: "&", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '+') { return Token { kind: tok_plus(), text: "+", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '-') { return Token { kind: tok_minus(), text: "-", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '*') { return Token { kind: tok_star(), text: "*", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '/') { return Token { kind: tok_slash(), text: "/", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '%') { return Token { kind: tok_percent(), text: "%", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '=') { return Token { kind: tok_equal(), text: "=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '<') { return Token { kind: tok_lt(), text: "<", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '>') { return Token { kind: tok_gt(), text: ">", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '!') { return Token { kind: tok_not(), text: "!", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '(') { return Token { kind: tok_lparen(), text: "(", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == ')') { return Token { kind: tok_rparen(), text: ")", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '{') { return Token { kind: tok_lbrace(), text: "{", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '}') { return Token { kind: tok_rbrace(), text: "}", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '[') { return Token { kind: tok_lbracket(), text: "[", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == ']') { return Token { kind: tok_rbracket(), text: "]", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == ';') { return Token { kind: tok_semicolon(), text: ";", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == ':') { return Token { kind: tok_colon(), text: ":", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == ',') { return Token { kind: tok_comma(), text: ",", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '.') {
-              if (self.peek() == '.' && self.peek_next() == '.') {
-                  self.advance();
-                  self.advance();
-                  return Token { kind: 105, text: "...", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 3 };
-              }
-              return Token { kind: tok_dot(), text: ".", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 };
-          }
-          if (c == '?') { return Token { kind: 120, text: "?", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '@') { return Token { kind: 121, text: "@", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '#') { return Token { kind: 122, text: "#", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '$') { return Token { kind: 123, text: "$", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '|') { return Token { kind: 124, text: "|", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
-          if (c == '`') { return Token { kind: tok_ident(), text: "`", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        // Single-character tokens
+        if (c == '&') { return Token { kind: 95, text: "&", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '+') { return Token { kind: tok_plus(), text: "+", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '-') { return Token { kind: tok_minus(), text: "-", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '*') { return Token { kind: tok_star(), text: "*", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '/') { return Token { kind: tok_slash(), text: "/", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '%') { return Token { kind: tok_percent(), text: "%", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '=') { return Token { kind: tok_equal(), text: "=", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '<') { return Token { kind: tok_lt(), text: "<", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '>') { return Token { kind: tok_gt(), text: ">", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '!') { return Token { kind: tok_not(), text: "!", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '(') { return Token { kind: tok_lparen(), text: "(", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == ')') { return Token { kind: tok_rparen(), text: ")", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '{') { return Token { kind: tok_lbrace(), text: "{", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '}') { return Token { kind: tok_rbrace(), text: "}", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '[') { return Token { kind: tok_lbracket(), text: "[", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == ']') { return Token { kind: tok_rbracket(), text: "]", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == ';') { return Token { kind: tok_semicolon(), text: ";", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == ':') { return Token { kind: tok_colon(), text: ":", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == ',') { return Token { kind: tok_comma(), text: ",", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '.') {
+            if (self.peek() == '.' && self.peek_next() == '.') {
+                self.advance();
+                self.advance();
+                return Token { kind: 105, text: "...", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 3 };
+            }
+            return Token { kind: tok_dot(), text: ".", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 };
+        }
+        if (c == '?') { return Token { kind: 120, text: "?", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '@') { return Token { kind: 121, text: "@", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '#') { return Token { kind: 122, text: "#", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '$') { return Token { kind: 123, text: "$", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '|') { return Token { kind: 124, text: "|", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        if (c == '`') { return Token { kind: tok_ident(), text: "`", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
 
-          let len <int> = self.cursor - self.start_pos;
-          let txt <string> = slice_str(self._chars, self.start_pos, len);
-          return Token {
-              kind: 1,
+        let len <int> = self.cursor - self.start_pos;
+        let txt <string> = slice_str(self._chars, self.start_pos, len);
+        return Token {
+            kind: 1,
               text: txt,
               line: self.start_line,
               col: self.start_col,
               offset: self.start_pos,
               len: len
-          };
+        };
       }
 }
 

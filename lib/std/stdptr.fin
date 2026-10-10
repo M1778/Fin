@@ -136,17 +136,17 @@ pub struct OwnershipError : <Error> {}
 // worth having at all.
 #[export]
 pub struct wptr<T> {
-  pub:
-    readonly value <&T>,
-    readonly ref_counter <&int>,
+    pub:
+      readonly value <&T>,
+      readonly ref_counter <&int>,
 
-    // Honest because the count it reads is the one `rptr::release` decrements.
-    fun is_alive(self: &Self) <bool> {
+      // Honest because the count it reads is the one `rptr::release` decrements.
+      fun is_alive(self: &Self) <bool> {
         if (self.ref_counter == null) { return false; }
         return *self.ref_counter > 0;
       }
 
-    fun get(self: &Self) <&T> {
+      fun get(self: &Self) <&T> {
         blame self.ref_counter != null, "a weak pointer with no referent cannot be read";
         blame *self.ref_counter > 0, "the value this weak pointer refers to has been released";
         return self.value;
@@ -155,194 +155,194 @@ pub struct wptr<T> {
 
 #[export]
 interface rptr_iface<T> {
-  priv:
-    ref_counter <&int>;
-    borrow_counter <&int>;
+    priv:
+      ref_counter <&int>;
+      borrow_counter <&int>;
 
-  pub:
-    owned <bool>;
-    borrowed <bool>;
-    readonly restrict <&Self>;
-    readonly value <&T>;
+    pub:
+      owned <bool>;
+      borrowed <bool>;
+      readonly restrict <&Self>;
+      readonly value <&T>;
 
-    fun is_borrowed() <bool>;
-    fun is_givenback() <bool>;
-    fun is_owned() <bool>;
+      fun is_borrowed() <bool>;
+      fun is_givenback() <bool>;
+      fun is_owned() <bool>;
 
-    fun refs() <int>;
-    fun borrows() <int>;
+      fun refs() <int>;
+      fun borrows() <int>;
 
-    fun alias() <&Self>;
-    fun readonly_view() <&Self>;
-    fun weak() <wptr<T>>;
+      fun alias() <&Self>;
+      fun readonly_view() <&Self>;
+      fun weak() <wptr<T>>;
 
-    fun own() <&Self>;
-    fun borrow() <&Self>;
-    fun giveback() <noret>;
-    fun release() <noret>;
+      fun own() <&Self>;
+      fun borrow() <&Self>;
+      fun giveback() <noret>;
+      fun release() <noret>;
 
-    fun set(new_value: T) <noret>;
-    fun get() <&T>;
+      fun set(new_value: T) <noret>;
+      fun get() <&T>;
 }
 
 #[export]
 pub class rptr<T> : <rptr_iface> {
-  priv:
-    // Both are `&int` and both are shared with every handle over the same value. That
-    // sharing is what makes every count below an answer about the value rather than
-    // about this handle.
-    ref_counter <&int>,
-    borrow_counter <&int>,
+    priv:
+      // Both are `&int` and both are shared with every handle over the same value. That
+      // sharing is what makes every count below an answer about the value rather than
+      // about this handle.
+      ref_counter <&int>,
+      borrow_counter <&int>,
 
-  pub:
-    owned <bool> = false,
-    borrowed <bool> = false,
-    readonly restrict <&Self>,
-    readonly value <&T>,
+    pub:
+      owned <bool> = false,
+      borrowed <bool> = false,
+      readonly restrict <&Self>,
+      readonly value <&T>,
 
-    // These answer real state now, and the split is worth reading. `owned` and
-    // `borrowed` are per-*handle*: exactly one handle owns, and a handle is a borrow only
-    // if it was handed out by `borrow()`. `refs`, `borrows` and `is_givenback` are about
-    // the *value*, because they read the shared counters.
-    //
-    // A lender is therefore not itself "borrowed". `borrow()` used to set the lender's
-    // flag as well as the borrower's, and nothing cleared it -- `giveback()` clears the
-    // flag of the handle it is called on, and `const.fin:44` calls it on the borrowed
-    // handle -- so a handle that had ever lent said `is_borrowed()` forever. Found by
-    // transliterating this file to C and running the sequence; not predicted.
-    fun is_owned(self: &Self) <bool> { return self.owned; }
-    fun is_borrowed(self: &Self) <bool> { return self.borrowed; }
-    // About the value, not about this handle: "is anything outstanding". Reading the
-    // shared counter is what makes it an answer at all -- the old version read this
-    // handle's own flag, so a lender whose borrow was outstanding said `true`.
-    fun is_givenback(self: &Self) <bool> { return *self.borrow_counter == 0; }
+      // These answer real state now, and the split is worth reading. `owned` and
+      // `borrowed` are per-*handle*: exactly one handle owns, and a handle is a borrow only
+      // if it was handed out by `borrow()`. `refs`, `borrows` and `is_givenback` are about
+      // the *value*, because they read the shared counters.
+      //
+      // A lender is therefore not itself "borrowed". `borrow()` used to set the lender's
+      // flag as well as the borrower's, and nothing cleared it -- `giveback()` clears the
+      // flag of the handle it is called on, and `const.fin:44` calls it on the borrowed
+      // handle -- so a handle that had ever lent said `is_borrowed()` forever. Found by
+      // transliterating this file to C and running the sequence; not predicted.
+      fun is_owned(self: &Self) <bool> { return self.owned; }
+      fun is_borrowed(self: &Self) <bool> { return self.borrowed; }
+      // About the value, not about this handle: "is anything outstanding". Reading the
+      // shared counter is what makes it an answer at all -- the old version read this
+      // handle's own flag, so a lender whose borrow was outstanding said `true`.
+      fun is_givenback(self: &Self) <bool> { return *self.borrow_counter == 0; }
 
-    fun refs(self: &Self) <int> { return *self.ref_counter; }
-    fun borrows(self: &Self) <int> { return *self.borrow_counter; }
+      fun refs(self: &Self) <int> { return *self.ref_counter; }
+      fun borrows(self: &Self) <int> { return *self.borrow_counter; }
 
-    // A second handle over the same value and the same two counters. This is the one
-    // method that increments the reference count, and every handle-producing method below
-    // goes through it rather than incrementing on its own -- one writer, so the count
-    // cannot drift.
-    //
-    // The sibling is not the owner and is not a borrow; whoever asked for it says what it
-    // is. `restrict` is omitted from the literal because a `&Self` field cannot be given
-    // in one (see the header).
-    fun alias(self: &Self) <&Self> {
+      // A second handle over the same value and the same two counters. This is the one
+      // method that increments the reference count, and every handle-producing method below
+      // goes through it rather than incrementing on its own -- one writer, so the count
+      // cannot drift.
+      //
+      // The sibling is not the owner and is not a borrow; whoever asked for it says what it
+      // is. `restrict` is omitted from the literal because a `&Self` field cannot be given
+      // in one (see the header).
+      fun alias(self: &Self) <&Self> {
         blame *self.ref_counter > 0, "cannot alias a released pointer";
         *self.ref_counter = *self.ref_counter + 1;
         return new Self{ref_counter: self.ref_counter,
-                        borrow_counter: self.borrow_counter,
-                        owned: false, borrowed: false, value: self.value};
-      }
+              borrow_counter: self.borrow_counter,
+              owned: false, borrowed: false, value: self.value};
+        }
 
-    // A handle that owns nothing and borrows nothing, which is what "readonly" means
-    // here: it can `get` and it cannot `set`, because `set` requires one of the two
-    // claims. The field `const.fin:82` reads is `restrict`; this is the method form for a
-    // caller who wants a fresh one.
-    fun readonly_view(self: &Self) <&Self> {
-        return self.alias();
-      }
+        // A handle that owns nothing and borrows nothing, which is what "readonly" means
+        // here: it can `get` and it cannot `set`, because `set` requires one of the two
+        // claims. The field `const.fin:82` reads is `restrict`; this is the method form for a
+        // caller who wants a fresh one.
+        fun readonly_view(self: &Self) <&Self> {
+            return self.alias();
+        }
 
-    // A `wptr` over the same value. Deliberately does *not* go through `alias`: a weak
-    // handle must not increment, or it would keep the value alive and stop being weak.
-    fun weak(self: &Self) <wptr<T>> {
-        return wptr{value: self.value, ref_counter: self.ref_counter};
-      }
+        // A `wptr` over the same value. Deliberately does *not* go through `alias`: a weak
+        // handle must not increment, or it would keep the value alive and stop being weak.
+        fun weak(self: &Self) <wptr<T>> {
+            return wptr{value: self.value, ref_counter: self.ref_counter};
+        }
 
-    // Move ownership to a fresh handle and give up this one's claim. The returned handle
-    // is the owner; `self` keeps a reference and loses the right to write.
-    //
-    // The borrow guard reads the shared counter rather than this handle's flag, which is
-    // the difference the counters buy: a borrow taken through *another* handle blocks the
-    // move, and the old flag-only version could not see it.
-    fun own(self: &Self) <&Self> {
-        blame self.owned, "This instance is not the owner so it cannot pass ownership of value";
-        blame *self.borrow_counter == 0, "Cannot pass ownership while the value is borrowed";
-        let heir <&Self> = self.alias();
-        heir.owned = true;
-        self.owned = false;
-        return heir;
-      }
+        // Move ownership to a fresh handle and give up this one's claim. The returned handle
+        // is the owner; `self` keeps a reference and loses the right to write.
+        //
+        // The borrow guard reads the shared counter rather than this handle's flag, which is
+        // the difference the counters buy: a borrow taken through *another* handle blocks the
+        // move, and the old flag-only version could not see it.
+        fun own(self: &Self) <&Self> {
+            blame self.owned, "This instance is not the owner so it cannot pass ownership of value";
+            blame *self.borrow_counter == 0, "Cannot pass ownership while the value is borrowed";
+            let heir <&Self> = self.alias();
+            heir.owned = true;
+            self.owned = false;
+            return heir;
+        }
 
-    // Lend the value. The borrow count goes up, this handle records that it lent, and the
-    // returned handle records that it borrowed -- so `giveback` can be called on either
-    // and the count still balances.
-    fun borrow(self: &Self) <&Self> {
-        blame self.owned, "This instance is not the owner so it cannot lend the value";
-        blame *self.borrow_counter == 0, "the value is already borrowed";
-        *self.borrow_counter = *self.borrow_counter + 1;
-        let lent <&Self> = self.alias();
-        lent.borrowed = true;
-        return lent;
-      }
+        // Lend the value. The borrow count goes up, this handle records that it lent, and the
+        // returned handle records that it borrowed -- so `giveback` can be called on either
+        // and the count still balances.
+        fun borrow(self: &Self) <&Self> {
+            blame self.owned, "This instance is not the owner so it cannot lend the value";
+            blame *self.borrow_counter == 0, "the value is already borrowed";
+            *self.borrow_counter = *self.borrow_counter + 1;
+            let lent <&Self> = self.alias();
+            lent.borrowed = true;
+            return lent;
+        }
 
-    // Return a borrow, and it is the *borrower* who calls this -- `const.fin:44` writes
-    // `a.giveback()` on the handle `test_4` received from `ta2.borrow()`. Calling it on
-    // the lender raises, because the lender borrowed nothing.
-    //
-    // Guarded because an unguarded decrement drives the count negative, and a negative
-    // borrow count would admit every later `own()` and `release()`.
-    fun giveback(self: &Self) <noret> {
-        blame self.borrowed, "nothing was borrowed through this handle";
-        *self.borrow_counter = *self.borrow_counter - 1;
-        self.borrowed = false;
-      }
+        // Return a borrow, and it is the *borrower* who calls this -- `const.fin:44` writes
+        // `a.giveback()` on the handle `test_4` received from `ta2.borrow()`. Calling it on
+        // the lender raises, because the lender borrowed nothing.
+        //
+        // Guarded because an unguarded decrement drives the count negative, and a negative
+        // borrow count would admit every later `own()` and `release()`.
+        fun giveback(self: &Self) <noret> {
+            blame self.borrowed, "nothing was borrowed through this handle";
+            *self.borrow_counter = *self.borrow_counter - 1;
+            self.borrowed = false;
+        }
 
-    // Drop this handle's reference, and free the value when the last one goes. The two
-    // guards are the double free and the release-under-borrow.
-    fun release(self: &Self) <noret> {
-        blame *self.ref_counter > 0, "this pointer was already released";
-        blame *self.borrow_counter == 0, "cannot release while the value is borrowed";
-        *self.ref_counter = *self.ref_counter - 1;
-        self.owned = false;
-        self.borrowed = false;
-        if (*self.ref_counter == 0) {
-            delete self.value;
-            delete self.ref_counter;
-            delete self.borrow_counter;
-          }
-      }
+        // Drop this handle's reference, and free the value when the last one goes. The two
+        // guards are the double free and the release-under-borrow.
+        fun release(self: &Self) <noret> {
+            blame *self.ref_counter > 0, "this pointer was already released";
+            blame *self.borrow_counter == 0, "cannot release while the value is borrowed";
+            *self.ref_counter = *self.ref_counter - 1;
+            self.owned = false;
+            self.borrowed = false;
+            if (*self.ref_counter == 0) {
+                delete self.value;
+                delete self.ref_counter;
+                delete self.borrow_counter;
+            }
+        }
 
-    // A write needs a claim -- ownership or a borrow. `const.fin:28` writes exactly this
-    // rule out in a comment: "this will cause an error because we do not have ownership
-    // of the value".
-    fun set(self: &Self, new_value: T) <noret> {
-        blame self.owned || self.borrowed, "Cannot write through a pointer that neither owns nor borrows its value";
-        blame *self.ref_counter > 0, "cannot write through a released pointer";
-        *self.value = new_value;
-      }
+        // A write needs a claim -- ownership or a borrow. `const.fin:28` writes exactly this
+        // rule out in a comment: "this will cause an error because we do not have ownership
+        // of the value".
+        fun set(self: &Self, new_value: T) <noret> {
+            blame self.owned || self.borrowed, "Cannot write through a pointer that neither owns nor borrows its value";
+            blame *self.ref_counter > 0, "cannot write through a released pointer";
+            *self.value = new_value;
+        }
 
-    // A read needs only that the value is still there.
-    fun get(self: &Self) <&T> {
-        blame *self.ref_counter > 0, "cannot read through a released pointer";
-        return self.value;
-      }
+        // A read needs only that the value is still there.
+        fun get(self: &Self) <&T> {
+            blame *self.ref_counter > 0, "cannot read through a released pointer";
+            return self.value;
+        }
 
-    // `const.fin:80` writes `rptr(5)`, so the constructor takes the value, not a pointer
-    // to it. `new T{}` is the only way to reach the heap for a generic parameter --
-    // `new T(v)` is a syntax error, because `new` accepts `(...)` after a primitive type
-    // keyword and `{...}` after an identifier, and a generic parameter lexes as an
-    // identifier no matter what it is bound to. So: allocate zeroed, then write through.
-    //
-    // One reference for this handle plus one for the readonly snapshot below, no
-    // borrows, and this handle owns. `restrict` is a heap sibling built by
-    // `alias()` -- owned=false, borrowed=false -- so reading through it takes
-    // the readonly branch honestly (ADR 0045). It shares the value and both
-    // counters, which is why `refs()` reads 2 straight after `rptr(v)`.
-    rptr(initial_value: T) {
-        self.ref_counter = new int(1);
-        self.borrow_counter = new int(0);
-        self.value = new T{};
-        *self.value = initial_value;
-        self.owned = true;
-        self.borrowed = false;
-        self.restrict = self.alias();
-      }
+        // `const.fin:80` writes `rptr(5)`, so the constructor takes the value, not a pointer
+        // to it. `new T{}` is the only way to reach the heap for a generic parameter --
+        // `new T(v)` is a syntax error, because `new` accepts `(...)` after a primitive type
+        // keyword and `{...}` after an identifier, and a generic parameter lexes as an
+        // identifier no matter what it is bound to. So: allocate zeroed, then write through.
+        //
+        // One reference for this handle plus one for the readonly snapshot below, no
+        // borrows, and this handle owns. `restrict` is a heap sibling built by
+        // `alias()` -- owned=false, borrowed=false -- so reading through it takes
+        // the readonly branch honestly (ADR 0045). It shares the value and both
+        // counters, which is why `refs()` reads 2 straight after `rptr(v)`.
+        rptr(initial_value: T) {
+            self.ref_counter = new int(1);
+            self.borrow_counter = new int(0);
+            self.value = new T{};
+            *self.value = initial_value;
+            self.owned = true;
+            self.borrowed = false;
+            self.restrict = self.alias();
+        }
 
-    // Declared, empty, and load-bearing only as a shape. See the header: a body that
-    // released would need scope exit, which the backend does not run.
-    ~rptr() { }
-}
+        // Declared, empty, and load-bearing only as a shape. See the header: a body that
+        // released would need scope exit, which the backend does not run.
+        ~rptr() { }
+      }
 
 }

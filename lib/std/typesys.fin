@@ -55,25 +55,25 @@ pub struct Type {
 
     pub:
       fun is_numeric(self: &Self) <bool> {
-          return self.kind == 4 || self.kind == 5 || self.kind == 6 ||
-                 self.kind == 7 || self.kind == 8 || self.kind == 9;
+        return self.kind == 4 || self.kind == 5 || self.kind == 6 ||
+          self.kind == 7 || self.kind == 8 || self.kind == 9;
       }
 
       fun is_integer(self: &Self) <bool> {
-          return self.kind == 3 || self.kind == 4 || self.kind == 5 ||
-                 self.kind == 6 || self.kind == 7;
+        return self.kind == 3 || self.kind == 4 || self.kind == 5 ||
+          self.kind == 6 || self.kind == 7;
       }
 
       fun is_pointer(self: &Self) <bool> {
-          return self.kind == 11;
+        return self.kind == 11;
       }
 
       fun is_array(self: &Self) <bool> {
-          return self.kind == 12 || self.kind == 13;
+        return self.kind == 12 || self.kind == 13;
       }
 
       fun is_composite(self: &Self) <bool> {
-          return self.kind == 14 || self.kind == 15 || self.kind == 16;
+        return self.kind == 14 || self.kind == 15 || self.kind == 16;
       }
 }
 

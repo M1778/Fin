@@ -97,16 +97,16 @@ namespace std {
 pub struct Socket {
     fd <int>,
 
-    // Dials `host`:`port` and blocks until the connection is established.
-    // The `sockaddr_in` is built before the socket, so a malformed address
-    // blames before anything is opened.
-    static fun dial(host: string, port: int) <Socket> {
+      // Dials `host`:`port` and blocks until the connection is established.
+      // The `sockaddr_in` is built before the socket, so a malformed address
+      // blames before anything is opened.
+      static fun dial(host: string, port: int) <Socket> {
         blame port > 0, "a port is positive";
         let a <int> = c_inet_addr(host);
         blame a != -1, "cannot parse the address as a dotted quad";
         let addr <[int]> = new [int, 4]{};
         addr[0] = cast<int>(2 + cast<long>(port / 256) * 65536 +
-                            cast<long>(port % 256) * 16777216);
+          cast<long>(port % 256) * 16777216);
         addr[1] = a;
         let fd <int> = c_socket(2, 1, 0);   // AF_INET, SOCK_STREAM
         blame fd >= 0, "cannot open a socket";
@@ -114,7 +114,7 @@ pub struct Socket {
         if (err != 0) {
             c_close(fd);
             blame err == 0, "cannot connect";
-          }
+        }
         return Socket{fd: fd};
       }
 
@@ -127,7 +127,7 @@ pub struct Socket {
         blame backlog > 0, "a backlog is positive";
         let addr <[int]> = new [int, 4]{};
         addr[0] = cast<int>(2 + cast<long>(port / 256) * 65536 +
-                            cast<long>(port % 256) * 16777216);
+          cast<long>(port % 256) * 16777216);
         addr[1] = 0;                  // INADDR_ANY
         let fd <int> = c_socket(2, 1, 0);
         blame fd >= 0, "cannot open a socket";
@@ -135,14 +135,14 @@ pub struct Socket {
         if (bound != 0) {
             c_close(fd);
             blame bound == 0, "cannot bind";
-          }
+        }
         let err <int> = c_listen(fd, backlog);
         if (err != 0) {
             c_close(fd);
             blame err == 0, "cannot listen";
-          }
+        }
         return Socket{fd: fd};
-      }
+    }
 
     // Takes one connection. The peer address is C's to fill and this module's
     // to discard: a caller who wants it is asking for a second module, and a
@@ -153,7 +153,7 @@ pub struct Socket {
         let fd <int> = c_accept(self.fd, &peer[0], &peerlen);
         blame fd >= 0, "cannot accept a connection";
         return Socket{fd: fd};
-      }
+    }
 
     // Sends `text` and returns whether every byte went. A short send on a
     // blocking socket of this size is not a state a caller can mean anything
@@ -163,7 +163,7 @@ pub struct Socket {
         blame count >= 0, "a send count cannot be negative";
         let sent <int> = c_send(self.fd, text, count, 0);
         return sent == count;
-      }
+    }
 
     // Reads at most `cap` bytes into a fresh buffer and returns what arrived.
     // An empty read is the peer's half-close, returned as an empty array
@@ -175,16 +175,16 @@ pub struct Socket {
         blame got >= 0, "cannot receive";
         if (got == 0) {
             return buffer;
-          }
+        }
         let out <[char]> = new [char, got + 1]{};
         let i <int> = 0;
         while (i < got) {
             out[i] = buffer[i];
             i = i + 1;
-          }
+        }
         out[got] = cast<char>(0);
         return out;
-      }
+    }
 
     // The port this socket is bound to, in host order. `serve(0, ...)` asks the
     // kernel to choose one, and this is how the caller learns which: the local
@@ -204,16 +204,16 @@ pub struct Socket {
         let hi <uint> = (u / cast<uint>(65536)) % cast<uint>(256);
         let lo <uint> = (u / cast<uint>(16777216)) % cast<uint>(256);
         return cast<int>(hi * cast<uint>(256) + lo);
-      }
+    }
 
     // Closes. The second close of one descriptor is refused by the platform,
     // and the refusal says so here rather than being left to `close(2)`.
     fun shutdown(self: &Socket) <bool> {
         if (self.fd < 0) {
             return false;
-          }
+        }
         return c_close(self.fd) == 0;
-      }
-  }
+    }
+}
 
 }

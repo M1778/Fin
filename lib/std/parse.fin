@@ -102,75 +102,75 @@ pub struct TokenStream {
 
     pub:
       fun init(self: &Self, token_array: [Token], count: int) <noret> {
-          self._tokens = token_array;
-          self._count = count;
-          self.cursor = 0;
+        self._tokens = token_array;
+        self._count = count;
+        self.cursor = 0;
       }
 
       fun is_at_end(self: &Self) <bool> {
-          if (self.cursor >= self._count) { return true; }
-          return self._tokens[self.cursor].kind == 0;
+        if (self.cursor >= self._count) { return true; }
+        return self._tokens[self.cursor].kind == 0;
       }
 
       fun peek(self: &Self) <Token> {
-          if (self.cursor >= self._count) {
-              return Token { kind: 0, text: "", line: 1, col: 1, offset: 0, len: 0 };
-          }
-          return self._tokens[self.cursor];
+        if (self.cursor >= self._count) {
+            return Token { kind: 0, text: "", line: 1, col: 1, offset: 0, len: 0 };
+        }
+        return self._tokens[self.cursor];
       }
 
       fun peek_at(self: &Self, offset: int) <Token> {
-          let idx <int> = self.cursor + offset;
-          if (idx < 0 || idx >= self._count) {
-              return Token { kind: 0, text: "", line: 1, col: 1, offset: 0, len: 0 };
-          }
-          return self._tokens[idx];
+        let idx <int> = self.cursor + offset;
+        if (idx < 0 || idx >= self._count) {
+            return Token { kind: 0, text: "", line: 1, col: 1, offset: 0, len: 0 };
+        }
+        return self._tokens[idx];
       }
 
       fun advance(self: &Self) <Token> {
-          if (self.is_at_end()) {
-              return self.peek();
-          }
-          self.cursor++;
-          return self._tokens[self.cursor - 1];
+        if (self.is_at_end()) {
+            return self.peek();
+        }
+        self.cursor++;
+        return self._tokens[self.cursor - 1];
       }
 
       fun previous(self: &Self) <Token> {
-          if (self.cursor <= 0) {
-              return self.peek();
-          }
-          return self._tokens[self.cursor - 1];
+        if (self.cursor <= 0) {
+            return self.peek();
+        }
+        return self._tokens[self.cursor - 1];
       }
 
       fun check(self: &Self, kind: int) <bool> {
-          if (self.is_at_end()) { return false; }
-          return self.peek().kind == kind;
+        if (self.is_at_end()) { return false; }
+        return self.peek().kind == kind;
       }
 
       fun match_token(self: &Self, kind: int) <bool> {
-          if (self.check(kind)) {
-              self.advance();
-              return true;
-          }
-          return false;
+        if (self.check(kind)) {
+            self.advance();
+            return true;
+        }
+        return false;
       }
 
       fun expect(self: &Self, kind: int, error_msg: string) <Token> {
-          blame self.check(kind), error_msg;
-          return self.advance();
+        blame self.check(kind), error_msg;
+        return self.advance();
       }
 
       fun position(self: &Self) <int> {
-          return self.cursor;
+        return self.cursor;
       }
 
       fun seek(self: &Self, pos: int) <noret> {
-          self.cursor = pos;
+        self.cursor = pos;
       }
 
       fun remaining(self: &Self) <int> {
-          if (self.cursor >= self._count) { return 0; }
-          return self._count - self.cursor;
+        if (self.cursor >= self._count) { return 0; }
+        return self._count - self.cursor;
       }
 }
 

@@ -62,68 +62,68 @@ pub struct Scope {
 
     pub:
       fun has_local(self: &Self, name: string) <bool> {
-          for (let i <int> = 0; i < self.count; i++) {
-              if (str_eq(self.symbols[i].name, name)) {
-                  return true;
-              }
-          }
-          return false;
+        for (let i <int> = 0; i < self.count; i++) {
+            if (str_eq(self.symbols[i].name, name)) {
+                return true;
+            }
+        }
+        return false;
       }
 
       fun lookup_local(self: &Self, name: string) <Symbol> {
-          for (let i <int> = 0; i < self.count; i++) {
-              if (str_eq(self.symbols[i].name, name)) {
-                  return self.symbols[i];
-              }
-          }
-          return Symbol { name: "", kind: 0, type_name: "", is_pub: false, is_mut: false, line: 1, col: 1 };
+        for (let i <int> = 0; i < self.count; i++) {
+            if (str_eq(self.symbols[i].name, name)) {
+                return self.symbols[i];
+            }
+        }
+        return Symbol { name: "", kind: 0, type_name: "", is_pub: false, is_mut: false, line: 1, col: 1 };
       }
 
       fun insert_symbol(self: &Self, sym: Symbol) <bool> {
-          if (self.has_local(sym.name)) {
-              return false; // Duplicate symbol in same scope
-          }
-          if (self.count >= self.capacity) {
-              let next_cap <int> = self.capacity * 2;
-              if (next_cap < 32) { next_cap = 32; }
-              let next_arr <[Symbol]> = new [Symbol, next_cap]{};
-              for (let i <int> = 0; i < self.count; i++) {
-                  next_arr[i] = self.symbols[i];
-              }
-              delete self.symbols;
-              self.symbols = next_arr;
-              self.capacity = next_cap;
-          }
-          self.symbols[self.count] = sym;
-          self.count++;
-          return true;
+        if (self.has_local(sym.name)) {
+            return false; // Duplicate symbol in same scope
+        }
+        if (self.count >= self.capacity) {
+            let next_cap <int> = self.capacity * 2;
+            if (next_cap < 32) { next_cap = 32; }
+            let next_arr <[Symbol]> = new [Symbol, next_cap]{};
+            for (let i <int> = 0; i < self.count; i++) {
+                next_arr[i] = self.symbols[i];
+            }
+            delete self.symbols;
+            self.symbols = next_arr;
+            self.capacity = next_cap;
+        }
+        self.symbols[self.count] = sym;
+        self.count++;
+        return true;
       }
 
       fun has(self: &Self, name: string) <bool> {
-          if (self.has_local(name)) {
-              return true;
-          }
-          if (self.parent != null) {
-              return self.parent.has(name);
-          }
-          return false;
+        if (self.has_local(name)) {
+            return true;
+        }
+        if (self.parent != null) {
+            return self.parent.has(name);
+        }
+        return false;
       }
 
       fun lookup(self: &Self, name: string) <Symbol> {
-          if (self.has_local(name)) {
-              return self.lookup_local(name);
-          }
-          if (self.parent != null) {
-              return self.parent.lookup(name);
-          }
-          return Symbol { name: "", kind: 0, type_name: "", is_pub: false, is_mut: false, line: 1, col: 1 };
+        if (self.has_local(name)) {
+            return self.lookup_local(name);
+        }
+        if (self.parent != null) {
+            return self.parent.lookup(name);
+        }
+        return Symbol { name: "", kind: 0, type_name: "", is_pub: false, is_mut: false, line: 1, col: 1 };
       }
 
       fun depth(self: &Self) <int> {
-          if (self.parent == null) {
-              return 0;
-          }
-          return 1 + self.parent.depth();
+        if (self.parent == null) {
+            return 0;
+        }
+        return 1 + self.parent.depth();
       }
 }
 
@@ -152,12 +152,12 @@ pub fun free_scope(s: &Scope) <noret> {
 pub fun make_var_sym(name: string, type_name: string, is_mut: bool) <Symbol> {
     return Symbol {
         name: name,
-        kind: sym_variable(),
-        type_name: type_name,
-        is_pub: false,
-        is_mut: is_mut,
-        line: 1,
-        col: 1
+          kind: sym_variable(),
+          type_name: type_name,
+          is_pub: false,
+          is_mut: is_mut,
+          line: 1,
+          col: 1
     };
 }
 
@@ -166,12 +166,12 @@ pub fun make_var_sym(name: string, type_name: string, is_mut: bool) <Symbol> {
 pub fun make_fn_sym(name: string, sig_name: string, is_pub: bool) <Symbol> {
     return Symbol {
         name: name,
-        kind: sym_function(),
-        type_name: sig_name,
-        is_pub: is_pub,
-        is_mut: false,
-        line: 1,
-        col: 1
+          kind: sym_function(),
+          type_name: sig_name,
+          is_pub: is_pub,
+          is_mut: false,
+          line: 1,
+          col: 1
     };
 }
 

@@ -173,12 +173,12 @@ pub interface Printable {
 #[export]
 pub fun print<X: Printable>(object: X) <noret> {
     printf(object.format_str());
-  }
+}
 
 #[export]
 pub fun println<X: Printable>(object: X) <noret> {
     printf("%s\n", object.format_str());
-  }
+}
 
 // The same two on standard error. `dprintf(2, ...)` is what makes these possible at all --
 // verified by running a linked program and redirecting each stream separately, so this is
@@ -186,12 +186,12 @@ pub fun println<X: Printable>(object: X) <noret> {
 #[export]
 pub fun eprint<X: Printable>(object: X) <noret> {
     let written <int> = io_dprintf(2, "%s", object.format_str());
-  }
+}
 
 #[export]
 pub fun eprintln<X: Printable>(object: X) <noret> {
     let written <int> = io_dprintf(2, "%s\n", object.format_str());
-  }
+}
 
 // The un-`Printable` forms, for the values that have no `format_str` and never will. A
 // caller printing a `string` or an `int` should not have to wrap it in a struct, and
@@ -206,12 +206,12 @@ pub fun println_str(text: string) <noret> { printf("%s\n", text); }
 #[export]
 pub fun eprint_str(text: string) <noret> {
     let written <int> = io_dprintf(2, "%s", text);
-  }
+}
 
 #[export]
 pub fun eprintln_str(text: string) <noret> {
     let written <int> = io_dprintf(2, "%s\n", text);
-  }
+}
 
 #[export]
 pub fun print_int(value: int) <noret> { printf("%d", value); }
@@ -231,23 +231,23 @@ pub fun println_bool(value: bool) <noret> { printf("%d\n", value); }
 #[export]
 pub fun eprint_bool(value: bool) <noret> {
     let written <int> = io_dprintf(2, "%d", value);
-  }
+}
 
 #[export]
 pub fun eprintln_bool(value: bool) <noret> {
     let written <int> = io_dprintf(2, "%d\n", value);
-  }
+}
 
 // The stderr half `print_int` never got. Same rendering, the other stream.
 #[export]
 pub fun eprint_int(value: int) <noret> {
     let written <int> = io_dprintf(2, "%d", value);
-  }
+}
 
 #[export]
 pub fun eprintln_int(value: int) <noret> {
     let written <int> = io_dprintf(2, "%d\n", value);
-  }
+}
 
 // The floating-point half. `%g` gives the shortest round-tripping spelling --
 // `2.5` rather than `%f`'s `2.500000` -- the same choice `number2str_float` makes.
@@ -260,12 +260,12 @@ pub fun println_double(value: double) <noret> { printf("%g\n", value); }
 #[export]
 pub fun eprint_double(value: double) <noret> {
     let written <int> = io_dprintf(2, "%g", value);
-  }
+}
 
 #[export]
 pub fun eprintln_double(value: double) <noret> {
     let written <int> = io_dprintf(2, "%g\n", value);
-  }
+}
 
 // `fflush(null)` flushes every open stream, which is what C specifies for a null argument.
 // It lowers, which is worth stating because a null passed to a pointer parameter is not
@@ -273,7 +273,7 @@ pub fun eprintln_double(value: double) <noret> {
 #[export]
 pub fun flush() <noret> {
     let result <int> = io_fflush(null);
-  }
+}
 
 #[export]
 pub struct IOError : <Error> {}
@@ -285,8 +285,8 @@ struct Stream;
 #[export]
 pub enum IOResult<T> {
     pub Err <IOError>,
-    pub Ok <T>,
-  }
+      pub Ok <T>,
+}
 
 // The interface the draft wanted for `IOResult`, and the block that satisfies it. Both are
 // possible now for the reason at the top of this file: `keyidof(Ok)` resolves.
@@ -308,56 +308,56 @@ IOResult<T> implements <IIOResult> {
     pub fun unwrap(enum_ : IOResult<T>) <T> {
         if (getkeyid(enum_) == keyidof(Ok)) {
             return enum_.0;
-          } else {
+        } else {
             blame enum_.0;
-          }
-      }
+        }
+    }
 
     pub fun unwrap_or(enum_ : IOResult<T>, fallback: T) <T> {
         if (getkeyid(enum_) == keyidof(Ok)) {
             return enum_.0;
-          }
+        }
         return fallback;
-      }
+    }
 
     pub fun expect(enum_ : IOResult<T>) <noret> {
         if (getkeyid(enum_) == keyidof(Err)) {
             blame enum_.0;
-          }
-      }
+        }
+    }
 
     pub fun select(enum_ : IOResult<T>, callback : fn(T) -> void) <noret> {
         if (getkeyid(enum_) == keyidof(Ok)) {
             callback(enum_.0);
-          }
-      }
+        }
+    }
 
     pub fun is_ok(enum_ : IOResult<T>) <bool> {
         return getkeyid(enum_) == keyidof(Ok);
-      }
+    }
 
     pub fun is_err(enum_ : IOResult<T>) <bool> {
         return getkeyid(enum_) == keyidof(Err);
-      }
+    }
 }
 
 #[export]
 pub interface IStream {
-  priv:
+    priv:
       stream_length <int>;
       pointer <int>;
       stream <[char]>;
 
-  pub:
-    fun seek(offset: int) <bool>;
-    fun tell() <int>;
-    fun remaining() <int>;
-    fun rewind() <noret>;
-    fun read(nbytes: int) <[char]>;
-    fun read_all() <[char]>;
-    fun write(data: [char], count: int) <int>;
-    fun expand(nbytes: int) <noret>;
-    fun capacity() <int>;
+    pub:
+      fun seek(offset: int) <bool>;
+      fun tell() <int>;
+      fun remaining() <int>;
+      fun rewind() <noret>;
+      fun read(nbytes: int) <[char]>;
+      fun read_all() <[char]>;
+      fun write(data: [char], count: int) <int>;
+      fun expand(nbytes: int) <noret>;
+      fun capacity() <int>;
 }
 
 // An in-memory byte stream. `stream_length` is how much content it holds and
@@ -383,68 +383,68 @@ pub struct Stream : <IStream> {
       // which is where a sequence of full reads finishes. A negative offset is not: it
       // used to be accepted, and every read after it indexed below zero.
       fun seek(self: &Self, offset: int) <bool> {
-          if (offset < 0) { return false; }
-          if (offset > self.stream_length) { return false; }
-          self.pointer = offset;
-          return true;
-        }
+        if (offset < 0) { return false; }
+        if (offset > self.stream_length) { return false; }
+        self.pointer = offset;
+        return true;
+      }
 
       // Reads forward from the pointer, clamped to what is left, and leaves the pointer
       // past what it read. The version this replaces clamped `nbytes` against
       // `stream_length` and then allocated `want - self.pointer`, mixing a count with an
       // offset -- correct only when the pointer was 0 or the read was the whole stream.
       fun read(self: &Self, nbytes: int) <[char]> {
-          blame nbytes >= 0, "a read count cannot be negative";
-          let want <int> = nbytes;
-          let left <int> = self.stream_length - self.pointer;
-          if (want > left) { want = left; }
-          let out <[char]> = new [char, want]{};
-          for (let i <int> = 0; i < want; i++) {
-              out[i] = self.stream[self.pointer + i];
-            }
-          self.pointer += want;
-          return out;
+        blame nbytes >= 0, "a read count cannot be negative";
+        let want <int> = nbytes;
+        let left <int> = self.stream_length - self.pointer;
+        if (want > left) { want = left; }
+        let out <[char]> = new [char, want]{};
+        for (let i <int> = 0; i < want; i++) {
+            out[i] = self.stream[self.pointer + i];
         }
+        self.pointer += want;
+        return out;
+      }
 
       // What is left, not the whole stream. That is the difference that makes calling it
       // twice give the second call nothing rather than a duplicate of the first.
       fun read_all(self: &Self) <[char]> {
-          return self.read(self.stream_length - self.pointer);
-        }
+        return self.read(self.stream_length - self.pointer);
+      }
 
       // Writes at the pointer, growing the buffer if `count` does not fit, and extends
       // `stream_length` when it writes past the old end. Without this, `expand` could
       // only grow a buffer nothing could fill.
       fun write(self: &Self, data: [char], count: int) <int> {
-          blame count >= 0, "a write count cannot be negative";
-          let room <int> = self.stream.length - self.pointer;
-          if (count > room) { self.expand(count - room); }
-          for (let i <int> = 0; i < count; i++) {
-              self.stream[self.pointer + i] = data[i];
-            }
-          self.pointer += count;
-          if (self.pointer > self.stream_length) { self.stream_length = self.pointer; }
-          return count;
+        blame count >= 0, "a write count cannot be negative";
+        let room <int> = self.stream.length - self.pointer;
+        if (count > room) { self.expand(count - room); }
+        for (let i <int> = 0; i < count; i++) {
+            self.stream[self.pointer + i] = data[i];
         }
+        self.pointer += count;
+        if (self.pointer > self.stream_length) { self.stream_length = self.pointer; }
+        return count;
+      }
 
       // Grows the buffer by `nbytes` and copies the content across. The content length is
       // unchanged -- expanding makes room, it does not invent bytes -- which is what the
       // version this replaces got wrong when it added `nbytes` to `stream_length`.
       fun expand(self: &Self, nbytes: int) <noret> {
-          blame nbytes >= 0, "cannot expand by a negative amount";
-          let bigger <[char]> = new [char, self.stream.length + nbytes]{};
-          for (let i <int> = 0; i < self.stream_length; i++) {
-              bigger[i] = self.stream[i];
-            }
-          delete self.stream;
-          self.stream = bigger;
+        blame nbytes >= 0, "cannot expand by a negative amount";
+        let bigger <[char]> = new [char, self.stream.length + nbytes]{};
+        for (let i <int> = 0; i < self.stream_length; i++) {
+            bigger[i] = self.stream[i];
         }
+        delete self.stream;
+        self.stream = bigger;
+      }
 
       Stream(data: [char], length: int) {
-          self.stream = data;
-          self.stream_length = length;
-          self.pointer = 0;
-        }
+        self.stream = data;
+        self.stream_length = length;
+        self.pointer = 0;
+      }
 }
 
 // The draft's `PathLike`, declared. It was one of the names that kept `File` out of this
@@ -481,18 +481,18 @@ pub struct File : <FileIO> {
       // Asks the operating system. `F_OK` is 0. The draft returns
       // `path.length == 10 : true ? false` with a comment saying "for testing".
       static fun exists(path: string) <bool> {
-          return io_access(path, 0) == 0;
-        }
+        return io_access(path, 0) == 0;
+      }
 
       // The byte length, or `-1` when the file does not open. `SEEK_END` is 2.
       static fun size(path: string) <int> {
-          let handle <&void> = io_fopen(path, "rb");
-          if (handle == null) { return -1; }
-          let sought <int> = io_fseek(handle, cast<long>(0), 2);
-          let at <long> = io_ftell(handle);
-          let closed <int> = io_fclose(handle);
-          return cast<int>(at);
-        }
+        let handle <&void> = io_fopen(path, "rb");
+        if (handle == null) { return -1; }
+        let sought <int> = io_fseek(handle, cast<long>(0), 2);
+        let at <long> = io_ftell(handle);
+        let closed <int> = io_fclose(handle);
+        return cast<int>(at);
+      }
 
       // The whole file, NUL-terminated, in a fresh buffer. The terminator is why the
       // buffer is one longer than the file: a caller handing these bytes to anything that
@@ -503,16 +503,16 @@ pub struct File : <FileIO> {
       // (`Invalid cast from '[char]' to '&char'`), and taking the address of the first
       // element does what the cast was for.
       static fun read_all(path: string) <[char]> {
-          let extent <int> = File::size(path);
-          blame extent >= 0, "cannot read a file that does not open";
-          let handle <&void> = io_fopen(path, "rb");
-          blame handle != null, "cannot open the file for reading";
-          let buffer <[char]> = new [char, extent + 1]{};
-          let got <ulong> = io_fread(&buffer[0], cast<ulong>(1), cast<ulong>(extent), handle);
-          let closed <int> = io_fclose(handle);
-          buffer[extent] = cast<char>(0);
-          return buffer;
-        }
+        let extent <int> = File::size(path);
+        blame extent >= 0, "cannot read a file that does not open";
+        let handle <&void> = io_fopen(path, "rb");
+        blame handle != null, "cannot open the file for reading";
+        let buffer <[char]> = new [char, extent + 1]{};
+        let got <ulong> = io_fread(&buffer[0], cast<ulong>(1), cast<ulong>(extent), handle);
+        let closed <int> = io_fclose(handle);
+        buffer[extent] = cast<char>(0);
+        return buffer;
+      }
 
       // Writes `text` over whatever was there, and returns whether every byte went. The
       // buffer parameter of `io_fwrite` is a `string` and not a `&char` because a `string`
@@ -520,38 +520,38 @@ pub struct File : <FileIO> {
       // does not cast to one either -- so the extern is declared with the type the call
       // site has.
       static fun write_text(path: string, text: string, count: int) <bool> {
-          blame count >= 0, "a write count cannot be negative";
-          let handle <&void> = io_fopen(path, "wb");
-          if (handle == null) { return false; }
-          let wrote <ulong> = io_fwrite(text, cast<ulong>(1), cast<ulong>(count), handle);
-          let closed <int> = io_fclose(handle);
-          return cast<int>(wrote) == count;
-        }
+        blame count >= 0, "a write count cannot be negative";
+        let handle <&void> = io_fopen(path, "wb");
+        if (handle == null) { return false; }
+        let wrote <ulong> = io_fwrite(text, cast<ulong>(1), cast<ulong>(count), handle);
+        let closed <int> = io_fclose(handle);
+        return cast<int>(wrote) == count;
+      }
 
       // Appends instead of truncating. Same shape, `"ab"` instead of `"wb"`, and it is a
       // separate method rather than a mode parameter because a mode string is C's
       // vocabulary and not this library's.
       static fun append_text(path: string, text: string, count: int) <bool> {
-          blame count >= 0, "a write count cannot be negative";
-          let handle <&void> = io_fopen(path, "ab");
-          if (handle == null) { return false; }
-          let wrote <ulong> = io_fwrite(text, cast<ulong>(1), cast<ulong>(count), handle);
-          let closed <int> = io_fclose(handle);
-          return cast<int>(wrote) == count;
-        }
+        blame count >= 0, "a write count cannot be negative";
+        let handle <&void> = io_fopen(path, "ab");
+        if (handle == null) { return false; }
+        let wrote <ulong> = io_fwrite(text, cast<ulong>(1), cast<ulong>(count), handle);
+        let closed <int> = io_fclose(handle);
+        return cast<int>(wrote) == count;
+      }
 
       static fun remove(path: string) <bool> {
-          return io_remove(path) == 0;
-        }
+        return io_remove(path) == 0;
+      }
 
       // A `Stream` over a file's bytes, which is the draft's `File::open` with its
       // unresolvable parts replaced: the draft returns an `IOResult<Stream>` built with a
       // free `Ok(...)`/`Err(...)`, and a free enum constructor does not resolve. This
       // raises instead, which is the same failure the rest of this module signals with.
       static fun open(path: string) <Stream> {
-          let bytes <[char]> = File::read_all(path);
-          return Stream(bytes, bytes.length - 1);
-        }
-  }
+        let bytes <[char]> = File::read_all(path);
+        return Stream(bytes, bytes.length - 1);
+      }
+}
 
 }

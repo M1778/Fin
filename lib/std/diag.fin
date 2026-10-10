@@ -86,38 +86,38 @@ pub struct DiagnosticBag {
       refusal_count <int> = 0,
 
       fun add_error(self: &Self) <noret> {
-          self.error_count++;
+        self.error_count++;
       }
 
       fun add_warning(self: &Self) <noret> {
-          self.warn_count++;
+        self.warn_count++;
       }
 
       fun add_note(self: &Self) <noret> {
-          self.note_count++;
+        self.note_count++;
       }
 
       fun add_refusal(self: &Self) <noret> {
-          self.refusal_count++;
+        self.refusal_count++;
       }
 
       fun has_errors(self: &Self) <bool> {
-          return self.error_count > 0 || self.refusal_count > 0;
+        return self.error_count > 0 || self.refusal_count > 0;
       }
 
       fun has_warnings(self: &Self) <bool> {
-          return self.warn_count > 0;
+        return self.warn_count > 0;
       }
 
       fun total(self: &Self) <int> {
-          return self.error_count + self.warn_count + self.note_count + self.refusal_count;
+        return self.error_count + self.warn_count + self.note_count + self.refusal_count;
       }
 
       fun clear(self: &Self) <noret> {
-          self.error_count = 0;
-          self.warn_count = 0;
-          self.note_count = 0;
-          self.refusal_count = 0;
+        self.error_count = 0;
+        self.warn_count = 0;
+        self.note_count = 0;
+        self.refusal_count = 0;
       }
 }
 
@@ -416,9 +416,9 @@ priv fun diag_prev_word(body: string, col: int) <string> {
     bytes[total] = cast<char>(0);
     let cursor <int> = col - 2;
     while (cursor >= 0 && (bytes[cursor] == cast<char>(32) || bytes[cursor] == cast<char>(9) ||
-           bytes[cursor] == cast<char>(11) || bytes[cursor] == cast<char>(12))) {
+      bytes[cursor] == cast<char>(11) || bytes[cursor] == cast<char>(12))) {
         cursor = cursor - 1;
-    }
+      }
     if (cursor < 0) { delete bytes; return ""; }
     let end <int> = cursor + 1;
     while (cursor >= 0 && diag_is_ident(bytes[cursor])) { cursor = cursor - 1; }

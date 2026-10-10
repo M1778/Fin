@@ -24,88 +24,88 @@ pub struct CEmitter {
 
     pub:
       fun indent(self: &Self) <noret> {
-          self.buf.write_repeat(' ', self.indent_level * 4);
+        self.buf.write_repeat(' ', self.indent_level * 4);
       }
 
       fun emit_line(self: &Self, line: string) <noret> {
-          self.indent();
-          self.buf.write_line(line);
+        self.indent();
+        self.buf.write_line(line);
       }
 
       fun emit_raw(self: &Self, s: string) <noret> {
-          self.buf.write_string(s);
+        self.buf.write_string(s);
       }
 
       fun emit_int(self: &Self, n: int) <noret> {
-          self.buf.write_int(n);
+        self.buf.write_int(n);
       }
 
       fun emit_char(self: &Self, c: char) <noret> {
-          self.buf.write_char(c);
+        self.buf.write_char(c);
       }
 
       fun emit_prologue(self: &Self) <noret> {
-          self.buf.write_line("// Emitted by Fin self-hosting compiler");
-          self.buf.write_line("#include <stdint.h>");
-          self.buf.write_line("#include <stdbool.h>");
-          self.buf.write_line("#include <stdio.h>");
-          self.buf.write_line("#include <stdlib.h>");
-          self.buf.write_line("#include <string.h>");
-          self.buf.write_line("");
+        self.buf.write_line("// Emitted by Fin self-hosting compiler");
+        self.buf.write_line("#include <stdint.h>");
+        self.buf.write_line("#include <stdbool.h>");
+        self.buf.write_line("#include <stdio.h>");
+        self.buf.write_line("#include <stdlib.h>");
+        self.buf.write_line("#include <string.h>");
+        self.buf.write_line("");
       }
 
       fun emit_fn_header(self: &Self, ret_type: string, name: string, params: string) <noret> {
-          self.indent();
-          self.buf.write_string(ret_type);
-          self.buf.write_char(' ');
-          self.buf.write_string(name);
-          self.buf.write_char('(');
-          self.buf.write_string(params);
-          self.buf.write_line(") {");
-          self.indent_level++;
+        self.indent();
+        self.buf.write_string(ret_type);
+        self.buf.write_char(' ');
+        self.buf.write_string(name);
+        self.buf.write_char('(');
+        self.buf.write_string(params);
+        self.buf.write_line(") {");
+        self.indent_level++;
       }
 
       fun emit_fn_footer(self: &Self) <noret> {
-          if (self.indent_level > 0) {
-              self.indent_level--;
-          }
-          self.indent();
-          self.buf.write_line("}\n");
+        if (self.indent_level > 0) {
+            self.indent_level--;
+        }
+        self.indent();
+        self.buf.write_line("}\n");
       }
 
       fun emit_var_decl(self: &Self, c_type: string, name: string, init_val: string) <noret> {
-          self.indent();
-          self.buf.write_string(c_type);
-          self.buf.write_char(' ');
-          self.buf.write_string(name);
-          if (init_val != null && !str_eq(init_val, "")) {
-              self.buf.write_string(" = ");
-              self.buf.write_string(init_val);
-          }
-          self.buf.write_line(";");
+        self.indent();
+        self.buf.write_string(c_type);
+        self.buf.write_char(' ');
+        self.buf.write_string(name);
+        if (init_val != null && !str_eq(init_val, "")) {
+            self.buf.write_string(" = ");
+            self.buf.write_string(init_val);
+        }
+        self.buf.write_line(";");
       }
 
       fun emit_return(self: &Self, expr: string) <noret> {
-          self.indent();
-          self.buf.write_string("return");
-          if (expr != null && !str_eq(expr, "")) {
-              self.buf.write_char(' ');
-              self.buf.write_string(expr);
-          }
-          self.buf.write_line(";");
+        self.indent();
+        self.buf.write_string("return");
+        if (expr != null && !str_eq(expr, "")) {
+            self.buf.write_char(' ');
+            self.buf.write_string(expr);
+        }
+        self.buf.write_line(";");
       }
 
       fun emit_blame(self: &Self, cond: string, msg: string) <noret> {
-          self.indent();
-          self.buf.write_string("if (!(");
-          self.buf.write_string(cond);
-          self.buf.write_string(")) { fprintf(stderr, \"blame: %s\\n\", \"");
-          self.buf.write_string(msg);
-          self.buf.write_line("\"); abort(); }");
+        self.indent();
+        self.buf.write_string("if (!(");
+        self.buf.write_string(cond);
+        self.buf.write_string(")) { fprintf(stderr, \"blame: %s\\n\", \"");
+        self.buf.write_string(msg);
+        self.buf.write_line("\"); abort(); }");
       }
 
       fun get_code(self: &Self) <string> {
-          return self.buf.to_string();
+        return self.buf.to_string();
       }
 }
 
@@ -134,7 +134,7 @@ pub fun map_fin_type_to_c(fin_type: string) <string> {
 pub fun new_c_emitter() <CEmitter> {
     return CEmitter {
         buf: new_buffer(512),
-        indent_level: 0
+          indent_level: 0
     };
 }
 

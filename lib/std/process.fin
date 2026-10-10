@@ -91,7 +91,7 @@ pub fun exec_command(command: string) <ProcessResult> {
 
     return ProcessResult {
         exit_code: status,
-        output: res_str
+          output: res_str
     };
 }
 

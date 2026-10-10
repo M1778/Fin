@@ -148,7 +148,7 @@ pub fun number2str<T: Number>(number: T) <string> {
     let buffer <string> = types_alloc_zeroed(cast<ulong>(32), cast<ulong>(1));
     let written <int> = types_snprintf(buffer, cast<ulong>(32), "%d", cast<int>(number));
     return buffer;
-  }
+}
 
 // The same for the types `%d` would truncate. `%g` gives the shortest form that round-trips
 // -- `2.5` rather than `%f`'s `2.500000`.
@@ -157,7 +157,7 @@ pub fun number2str_float<T: Number>(number: T) <string> {
     let buffer <string> = types_alloc_zeroed(cast<ulong>(40), cast<ulong>(1));
     let written <int> = types_snprintf(buffer, cast<ulong>(40), "%g", cast<double>(number));
     return buffer;
-  }
+}
 
 // The other direction, which this module had no form of at all. Both follow C: a string
 // that parses to nothing gives 0, and there is no way to tell that from a string that
@@ -166,11 +166,11 @@ pub fun number2str_float<T: Number>(number: T) <string> {
 #[export]
 pub fun str2int(text: string) <int> {
     return cast<int>(types_strtol(text, null, 10));
-  }
+}
 
 #[export]
 pub fun str2double(text: string) <double> {
     return types_strtod(text, null);
-  }
+}
 
 }

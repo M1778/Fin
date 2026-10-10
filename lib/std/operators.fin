@@ -33,97 +33,97 @@ namespace ops {
 pub type Output = any;
 
 pub interface Equal {
-   pub operator ==(other: any) <Output>;
+    pub operator ==(other: any) <Output>;
 }
 pub interface NotEqual {
-   pub operator !=(other: any) <Output>;
+    pub operator !=(other: any) <Output>;
 }
 pub interface GreaterThan {
-   pub operator >(other: any) <Output>;
+    pub operator >(other: any) <Output>;
 }
 pub interface LessThan {
-   pub operator <(other: any) <Output>;
+    pub operator <(other: any) <Output>;
 }
 pub interface GreaterThanEqual {
-   pub operator >=(other: any) <Output>;
+    pub operator >=(other: any) <Output>;
 }
 pub interface LessThanEqual {
-   pub operator <=(other: any) <Output>;
+    pub operator <=(other: any) <Output>;
 }
 pub interface Add {
-   pub operator +(rhs: any) <Output>;
+    pub operator +(rhs: any) <Output>;
 }
 pub interface Addable {
-   pub operator +(rhs: any) <Output>;
+    pub operator +(rhs: any) <Output>;
 }
 pub interface AddAssign {
-   pub operator +=(rhs: any) <Output>;
+    pub operator +=(rhs: any) <Output>;
 }
 pub interface Sub {
-   pub operator -(rhs: any) <Output>;
+    pub operator -(rhs: any) <Output>;
 }
 pub interface SubAssign {
-   pub operator -=(rhs: any) <Output>;
+    pub operator -=(rhs: any) <Output>;
 }
 pub interface Mul {
-   pub operator *(rhs: any) <Output>;
+    pub operator *(rhs: any) <Output>;
 }
 pub interface MulAssign {
-   pub operator *=(rhs: any) <Output>;
+    pub operator *=(rhs: any) <Output>;
 }
 pub interface Div {
-   pub operator /(rhs: any) <Output>;
+    pub operator /(rhs: any) <Output>;
 }
 pub interface DivAssign {
-   pub operator /=(rhs: any) <Output>;
+    pub operator /=(rhs: any) <Output>;
 }
 pub interface Mod {
-   pub operator %(rhs: any) <Output>;
+    pub operator %(rhs: any) <Output>;
 }
 pub interface ModAssign {
-   pub operator %=(rhs: any) <Output>;
+    pub operator %=(rhs: any) <Output>;
 }
 pub interface BitAnd {
-   pub operator &(rhs: any) <Output>;
+    pub operator &(rhs: any) <Output>;
 }
 pub interface BitAndAssign {
-   pub operator &=(rhs: any) <Output>;
+    pub operator &=(rhs: any) <Output>;
 }
 pub interface BitOr {
-   pub operator |(rhs: any) <Output>;
+    pub operator |(rhs: any) <Output>;
 }
 pub interface BitOrAssign {
-   pub operator |=(rhs: any) <Output>;
+    pub operator |=(rhs: any) <Output>;
 }
 pub interface ShiftLeft {
-   pub operator <<(rhs: any) <Output>;
+    pub operator <<(rhs: any) <Output>;
 }
 pub interface ShiftLeftAssign {
-   pub operator <<=(rhs: any) <Output>;
+    pub operator <<=(rhs: any) <Output>;
 }
 pub interface ShiftRight {
-   pub operator >>(rhs: any) <Output>;
+    pub operator >>(rhs: any) <Output>;
 }
 pub interface ShiftRightAssign {
-   pub operator >>=(rhs: any) <Output>;
+    pub operator >>=(rhs: any) <Output>;
 }
 pub interface Unary {
-   pub operator `-() <Output>;
+    pub operator `-() <Output>;
 }
 pub interface Not {
-   pub operator !() <Output>;
+    pub operator !() <Output>;
 }
 pub interface Index {
-   pub operator [](idx: any) <Output>;
+    pub operator [](idx: any) <Output>;
 }
 pub interface IndexAssign {
-   pub operator []=(idx: any) <Output>;
+    pub operator []=(idx: any) <Output>;
 }
 pub interface Deref {
-   pub operator `*() <Output>;
+    pub operator `*() <Output>;
 }
 pub interface FnCall {
-   pub operator (...args: <[any]>) <Output>;
+    pub operator (...args: <[any]>) <Output>;
 }
 
 }

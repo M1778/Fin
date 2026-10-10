@@ -15,91 +15,91 @@ pub struct Deque<T> {
       cap <int> = 0,
 
       priv fun ensure(self: &Self) <noret> {
-          if (self.cap > 0) { return; }
-          self._arr = new [T, 8]{};
-          self.cap = 8;
-          self.head = 0;
-          self.tail = 0;
-          self.filled = 0;
+        if (self.cap > 0) { return; }
+        self._arr = new [T, 8]{};
+        self.cap = 8;
+        self.head = 0;
+        self.tail = 0;
+        self.filled = 0;
       }
 
       priv fun grow(self: &Self) <noret> {
-          let old_cap <int> = self.cap;
-          let new_cap <int> = old_cap * 2;
-          let fresh <[T]> = new [T, new_cap]{};
-          for (let i <int> = 0; i < self.filled; i++) {
-              let idx <int> = (self.head + i) % old_cap;
-              fresh[i] = self._arr[idx];
-          }
-          delete self._arr;
-          self._arr = fresh;
-          self.head = 0;
-          self.tail = self.filled;
-          self.cap = new_cap;
+        let old_cap <int> = self.cap;
+        let new_cap <int> = old_cap * 2;
+        let fresh <[T]> = new [T, new_cap]{};
+        for (let i <int> = 0; i < self.filled; i++) {
+            let idx <int> = (self.head + i) % old_cap;
+            fresh[i] = self._arr[idx];
+        }
+        delete self._arr;
+        self._arr = fresh;
+        self.head = 0;
+        self.tail = self.filled;
+        self.cap = new_cap;
       }
 
     pub:
       fun len(self: &Self) <int> {
-          return self.filled;
+        return self.filled;
       }
 
       fun is_empty(self: &Self) <bool> {
-          return self.filled == 0;
+        return self.filled == 0;
       }
 
       fun capacity(self: &Self) <int> {
-          return self.cap;
+        return self.cap;
       }
 
       fun push_back(self: &Self, item: T) <noret> {
-          self.ensure();
-          if (self.filled >= self.cap) {
-              self.grow();
-          }
-          self._arr[self.tail] = item;
-          self.tail = (self.tail + 1) % self.cap;
-          self.filled++;
+        self.ensure();
+        if (self.filled >= self.cap) {
+            self.grow();
+        }
+        self._arr[self.tail] = item;
+        self.tail = (self.tail + 1) % self.cap;
+        self.filled++;
       }
 
       fun push_front(self: &Self, item: T) <noret> {
-          self.ensure();
-          if (self.filled >= self.cap) {
-              self.grow();
-          }
-          self.head = (self.head - 1 + self.cap) % self.cap;
-          self._arr[self.head] = item;
-          self.filled++;
+        self.ensure();
+        if (self.filled >= self.cap) {
+            self.grow();
+        }
+        self.head = (self.head - 1 + self.cap) % self.cap;
+        self._arr[self.head] = item;
+        self.filled++;
       }
 
       fun pop_front(self: &Self) <T> {
-          self.ensure();
-          blame self.filled > 0, "pop_front on empty deque";
-          let item <T> = self._arr[self.head];
-          self.head = (self.head + 1) % self.cap;
-          self.filled--;
-          return item;
+        self.ensure();
+        blame self.filled > 0, "pop_front on empty deque";
+        let item <T> = self._arr[self.head];
+        self.head = (self.head + 1) % self.cap;
+        self.filled--;
+        return item;
       }
 
       fun pop_back(self: &Self) <T> {
-          self.ensure();
-          blame self.filled > 0, "pop_back on empty deque";
-          self.tail = (self.tail - 1 + self.cap) % self.cap;
-          let item <T> = self._arr[self.tail];
-          self.filled--;
-          return item;
+        self.ensure();
+        blame self.filled > 0, "pop_back on empty deque";
+        self.tail = (self.tail - 1 + self.cap) % self.cap;
+        let item <T> = self._arr[self.tail];
+        self.filled--;
+        return item;
       }
 
       fun peek_front(self: &Self) <T> {
-          self.ensure();
-          blame self.filled > 0, "peek_front on empty deque";
-          return self._arr[self.head];
+        self.ensure();
+        blame self.filled > 0, "peek_front on empty deque";
+        return self._arr[self.head];
       }
 
       fun peek_back(self: &Self) <T> {
-          self.ensure();
-          blame self.filled > 0, "peek_back on empty deque";
-          let idx <int> = (self.tail - 1 + self.cap) % self.cap;
-          return self._arr[idx];
+        self.ensure();
+        blame self.filled > 0, "peek_back on empty deque";
+        let idx <int> = (self.tail - 1 + self.cap) % self.cap;
+        return self._arr[idx];
       }
 
       // Positional read without removing. The only non-destructive way to reach
@@ -107,26 +107,26 @@ pub struct Deque<T> {
       // is a subtract and not a modulo: `head + index` is below `2 * cap`
       // whenever the index is in bounds, so one correction lands in range.
       fun get(self: &Self, index: int) <T> {
-          blame index >= 0, "Deque.get: index out of bounds";
-          blame index < self.filled, "Deque.get: index out of bounds";
-          let at <int> = self.head + index;
-          if (at >= self.cap) { at = at - self.cap; }
-          return self._arr[at];
+        blame index >= 0, "Deque.get: index out of bounds";
+        blame index < self.filled, "Deque.get: index out of bounds";
+        let at <int> = self.head + index;
+        if (at >= self.cap) { at = at - self.cap; }
+        return self._arr[at];
       }
 
       // Positional write. Same addressing as `get`.
       fun set(self: &Self, index: int, value: T) <noret> {
-          blame index >= 0, "Deque.set: index out of bounds";
-          blame index < self.filled, "Deque.set: index out of bounds";
-          let at <int> = self.head + index;
-          if (at >= self.cap) { at = at - self.cap; }
-          self._arr[at] = value;
+        blame index >= 0, "Deque.set: index out of bounds";
+        blame index < self.filled, "Deque.set: index out of bounds";
+        let at <int> = self.head + index;
+        if (at >= self.cap) { at = at - self.cap; }
+        self._arr[at] = value;
       }
 
       fun clear(self: &Self) <noret> {
-          self.head = 0;
-          self.tail = 0;
-          self.filled = 0;
+        self.head = 0;
+        self.tail = 0;
+        self.filled = 0;
       }
 }
 
@@ -137,27 +137,27 @@ pub struct Queue<T> {
 
     pub:
       fun len(self: &Self) <int> {
-          return self.inner.len();
+        return self.inner.len();
       }
 
       fun is_empty(self: &Self) <bool> {
-          return self.inner.is_empty();
+        return self.inner.is_empty();
       }
 
       fun push(self: &Self, item: T) <noret> {
-          self.inner.push_back(item);
+        self.inner.push_back(item);
       }
 
       fun pop(self: &Self) <T> {
-          return self.inner.pop_front();
+        return self.inner.pop_front();
       }
 
       fun peek(self: &Self) <T> {
-          return self.inner.peek_front();
+        return self.inner.peek_front();
       }
 
       fun clear(self: &Self) <noret> {
-          self.inner.clear();
+        self.inner.clear();
       }
 }
 
@@ -168,27 +168,27 @@ pub struct Stack<T> {
 
     pub:
       fun len(self: &Self) <int> {
-          return self.inner.len();
+        return self.inner.len();
       }
 
       fun is_empty(self: &Self) <bool> {
-          return self.inner.is_empty();
+        return self.inner.is_empty();
       }
 
       fun push(self: &Self, item: T) <noret> {
-          self.inner.push_back(item);
+        self.inner.push_back(item);
       }
 
       fun pop(self: &Self) <T> {
-          return self.inner.pop_back();
+        return self.inner.pop_back();
       }
 
       fun peek(self: &Self) <T> {
-          return self.inner.peek_back();
+        return self.inner.peek_back();
       }
 
       fun clear(self: &Self) <noret> {
-          self.inner.clear();
+        self.inner.clear();
       }
 }
 

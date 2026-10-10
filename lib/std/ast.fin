@@ -351,34 +351,34 @@ pub struct AstWalker {
 
     pub:
       fun walk(self: &Self, node: &AstNode) <noret> {
-          if (node == null) { return; }
-          self.node_count = self.node_count + 1;
-          self.depth = self.depth + 1;
-          if (self.depth > self.max_depth) {
-              self.max_depth = self.depth;
-          }
-          if (node.left != null) { self.walk(node.left); }
-          if (node.right != null) { self.walk(node.right); }
-          if (node.extra != null) { self.walk(node.extra); }
-          self.depth = self.depth - 1;
+        if (node == null) { return; }
+        self.node_count = self.node_count + 1;
+        self.depth = self.depth + 1;
+        if (self.depth > self.max_depth) {
+            self.max_depth = self.depth;
+        }
+        if (node.left != null) { self.walk(node.left); }
+        if (node.right != null) { self.walk(node.right); }
+        if (node.extra != null) { self.walk(node.extra); }
+        self.depth = self.depth - 1;
       }
 
       fun count_nodes(self: &Self, node: &AstNode) <int> {
-          self.node_count = 0;
-          self.depth = 0;
-          self.max_depth = 0;
-          self.walk(node);
-          return self.node_count;
+        self.node_count = 0;
+        self.depth = 0;
+        self.max_depth = 0;
+        self.walk(node);
+        return self.node_count;
       }
 
       fun count_kind(self: &Self, node: &AstNode, kind: int) <int> {
-          if (node == null) { return 0; }
-          let c <int> = 0;
-          if (node.kind == kind) { c = 1; }
-          if (node.left != null) { c = c + self.count_kind(node.left, kind); }
-          if (node.right != null) { c = c + self.count_kind(node.right, kind); }
-          if (node.extra != null) { c = c + self.count_kind(node.extra, kind); }
-          return c;
+        if (node == null) { return 0; }
+        let c <int> = 0;
+        if (node.kind == kind) { c = 1; }
+        if (node.left != null) { c = c + self.count_kind(node.left, kind); }
+        if (node.right != null) { c = c + self.count_kind(node.right, kind); }
+        if (node.extra != null) { c = c + self.count_kind(node.extra, kind); }
+        return c;
       }
 }
 

@@ -150,26 +150,26 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
       // The literal form runs no constructor, so nothing else may assume a constructor
       // ran; every method that touches a vector calls `ensure` first.
       priv fun ensure(self: &Self) <noret> {
-          if (self.cap > 0) { return; }
-          self.keys = new Collection::<T>{};
-          self.values = new Collection::<U>{};
-          self.live = new Collection::<bool>{};
-          self.buckets = new Collection::<int>{};
-          for (let i <int> = 0; i < 8; i++) { self.buckets.push(-1); }
-          self.cap = 8;
-          self.used = 0;
-          self.dead = 0;
+        if (self.cap > 0) { return; }
+        self.keys = new Collection::<T>{};
+        self.values = new Collection::<U>{};
+        self.live = new Collection::<bool>{};
+        self.buckets = new Collection::<int>{};
+        for (let i <int> = 0; i < 8; i++) { self.buckets.push(-1); }
+        self.cap = 8;
+        self.used = 0;
+        self.dead = 0;
       }
 
       // The hash, folded to non-negative so that `%` gives a bucket in range. `%` on a
       // negative left operand is negative in this compiler, so this is not decoration.
       priv fun hash_key(self: &Self, key: T) <int> {
-          if (self.hasher == null) { return hash_of::<T>(key); }
-          let f <fn(any) -> int> = self.hasher?;
-          let h <int> = f(key);
-          if (h < 0) { h = 0 - h; }
-          if (h < 0) { h = 0; }
-          return h;
+        if (self.hasher == null) { return hash_of::<T>(key); }
+        let f <fn(any) -> int> = self.hasher?;
+        let h <int> = f(key);
+        if (h < 0) { h = 0 - h; }
+        if (h < 0) { h = 0; }
+        return h;
       }
 
       // The probe sequence, and the only place it is written. Linear, stride 1: it is
@@ -180,39 +180,39 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
       // key -- while a `DELETED` one does not, which is the whole reason tombstones
       // exist rather than clearing the bucket on removal.
       fun get_index(self: &Self, other: T) <int> {
-          self.ensure();
-          if (self.used == 0) { return -1; }
-          let start <int> = self.hash_key(other) % self.cap;
-          for (let probe <int> = 0; probe < self.cap; probe++) {
-              let b <int> = (start + probe) % self.cap;
-              let slot <int> = self.buckets.get(b);
-              if (slot == -1) { return -1; }
-              if (slot >= 0) {
-                  if (self.keys.get(slot) == other) { return slot; }
-              }
-          }
-          return -1;
+        self.ensure();
+        if (self.used == 0) { return -1; }
+        let start <int> = self.hash_key(other) % self.cap;
+        for (let probe <int> = 0; probe < self.cap; probe++) {
+            let b <int> = (start + probe) % self.cap;
+            let slot <int> = self.buckets.get(b);
+            if (slot == -1) { return -1; }
+            if (slot >= 0) {
+                if (self.keys.get(slot) == other) { return slot; }
+            }
+        }
+        return -1;
       }
 
       fun exists(self: &Self, other: T) <bool> {
-          return self.get_index(other) >= 0;
+        return self.get_index(other) >= 0;
       }
 
       fun len(self: &Self) <int> {
-          self.ensure();
-          return self.used;
+        self.ensure();
+        return self.used;
       }
 
       fun is_empty(self: &Self) <bool> {
-          return self.len() == 0;
+        return self.len() == 0;
       }
 
       // The bucket vector's size, not the entry count. Reported because the load factor
       // is the only thing standing between this and quadratic behaviour, and a caller
       // who wants to check it needs both numbers.
       fun capacity(self: &Self) <int> {
-          self.ensure();
-          return self.cap;
+        self.ensure();
+        return self.cap;
       }
 
       // Rehash into a bucket vector of `bigger` entries, packing the live entries down
@@ -224,50 +224,50 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
       // The bucket vector is reused the same way -- `clear`, `reserve`, refill -- so its
       // buffer change goes through `Collection::allocate`, which frees the old buffer.
       priv fun rehash(self: &Self, bigger: int) <noret> {
-          let slots <int> = self.keys.len();
-          let w <int> = 0;
-          for (let r <int> = 0; r < slots; r++) {
-              if (self.live.get(r)) {
-                  if (w != r) {
-                      self.keys.__set(w, self.keys.get(r));
-                      self.values.__set(w, self.values.get(r));
-                      self.live.__set(w, true);
-                    }
-                  w++;
+        let slots <int> = self.keys.len();
+        let w <int> = 0;
+        for (let r <int> = 0; r < slots; r++) {
+            if (self.live.get(r)) {
+                if (w != r) {
+                    self.keys.__set(w, self.keys.get(r));
+                    self.values.__set(w, self.values.get(r));
+                    self.live.__set(w, true);
                 }
+                w++;
             }
-          for (let i <int> = w; i < slots; i++) {
-              self.keys.pop_last();
-              self.values.pop_last();
-              self.live.pop_last();
-            }
+        }
+        for (let i <int> = w; i < slots; i++) {
+            self.keys.pop_last();
+            self.values.pop_last();
+            self.live.pop_last();
+        }
 
-          self.cap = bigger;
-          self.buckets.clear();
-          self.buckets.reserve(bigger);
-          for (let i <int> = 0; i < bigger; i++) { self.buckets.push(-1); }
-          self.dead = 0;
+        self.cap = bigger;
+        self.buckets.clear();
+        self.buckets.reserve(bigger);
+        for (let i <int> = 0; i < bigger; i++) { self.buckets.push(-1); }
+        self.dead = 0;
 
-          for (let s <int> = 0; s < w; s++) {
-              let start <int> = self.hash_key(self.keys.get(s)) % self.cap;
-              for (let probe <int> = 0; probe < self.cap; probe++) {
-                  let b <int> = (start + probe) % self.cap;
-                  if (self.buckets.get(b) == -1) {
-                      self.buckets.__set(b, s);
-                      break;
-                    }
+        for (let s <int> = 0; s < w; s++) {
+            let start <int> = self.hash_key(self.keys.get(s)) % self.cap;
+            for (let probe <int> = 0; probe < self.cap; probe++) {
+                let b <int> = (start + probe) % self.cap;
+                if (self.buckets.get(b) == -1) {
+                    self.buckets.__set(b, s);
+                    break;
                 }
             }
         }
+      }
 
-    pub fun __set(self: &Self, key: T, value: U) <noret> {
+      pub fun __set(self: &Self, key: T, value: U) <noret> {
         self.ensure();
 
         let at <int> = self.get_index(key);
         if (at >= 0) {
             self.values.__set(at, value);
             return;
-          }
+        }
 
         // Load factor 0.75, counting tombstones: a table full of tombstones probes as
         // badly as a table full of entries, so both belong on the same side of the test.
@@ -280,7 +280,7 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
         if ((self.used + self.dead) * 4 >= self.cap * 3 || self.keys.len() > self.used * 2 + 16) {
             if (self.used * 4 >= self.cap * 3) { self.rehash(self.cap * 2); }
             else { self.rehash(self.cap); }
-          }
+        }
 
         let start <int> = self.hash_key(key) % self.cap;
         for (let probe <int> = 0; probe < self.cap; probe++) {
@@ -294,8 +294,8 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
                 self.buckets.__set(b, self.keys.len() - 1);
                 self.used++;
                 return;
-              }
-          }
+            }
+        }
 
         // Unreachable while the load factor holds: `grow` above guarantees a free
         // bucket, so arriving here means the invariant broke rather than that the
@@ -304,31 +304,31 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
         blame self.used < self.cap, "hash map has no free bucket";
       }
 
-    // A missing key stays an assertion, deliberately, and the reason is that the
-    // alternative is worse in this language rather than that it is better in general.
-    // Returning a `Result<U, HashMapError>` would make every read of a present key cost
-    // an `unwrap`, and `Result`'s `unwrap` is reached through an `implements` block on a
-    // generic enum -- which type-checks and is refused in codegen (`a generic enum
-    // 'Result' is not lowered yet`), so the safe spelling would be the one that cannot
-    // run. `exists` before `__get` is the two-call form that does work today, and
-    // `get_or` below is the one-call form for a caller with a default.
-    pub fun __get(self: &Self, other: T) <U> {
+      // A missing key stays an assertion, deliberately, and the reason is that the
+      // alternative is worse in this language rather than that it is better in general.
+      // Returning a `Result<U, HashMapError>` would make every read of a present key cost
+      // an `unwrap`, and `Result`'s `unwrap` is reached through an `implements` block on a
+      // generic enum -- which type-checks and is refused in codegen (`a generic enum
+      // 'Result' is not lowered yet`), so the safe spelling would be the one that cannot
+      // run. `exists` before `__get` is the two-call form that does work today, and
+      // `get_or` below is the one-call form for a caller with a default.
+      pub fun __get(self: &Self, other: T) <U> {
         let idx <int> = self.get_index(other);
         blame idx >= 0, "key not found";
         return self.values.get(idx);
       }
 
-    // The total lookup: the value, or `fallback` when the key is absent. No assertion,
-    // so this is what a caller who does not know whether the key is there should use.
-    pub fun get_or(self: &Self, other: T, fallback: U) <U> {
+      // The total lookup: the value, or `fallback` when the key is absent. No assertion,
+      // so this is what a caller who does not know whether the key is there should use.
+      pub fun get_or(self: &Self, other: T, fallback: U) <U> {
         let idx <int> = self.get_index(other);
         if (idx < 0) { return fallback; }
         return self.values.get(idx);
       }
 
-    // Tombstone the bucket and mark the slot dead. Returns whether anything was there.
-    // The key and value stay in their vectors until the next rehash packs them away.
-    pub fun remove(self: &Self, other: T) <bool> {
+      // Tombstone the bucket and mark the slot dead. Returns whether anything was there.
+      // The key and value stay in their vectors until the next rehash packs them away.
+      pub fun remove(self: &Self, other: T) <bool> {
         self.ensure();
         if (self.used == 0) { return false; }
         let start <int> = self.hash_key(other) % self.cap;
@@ -343,14 +343,14 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
                     self.used--;
                     self.dead++;
                     return true;
-                  }
-              }
-          }
+                }
+            }
+        }
         return false;
       }
 
-    // Empties the map without freeing anything, which is all this library can express.
-    pub fun clear(self: &Self) <noret> {
+      // Empties the map without freeing anything, which is all this library can express.
+      pub fun clear(self: &Self) <noret> {
         self.ensure();
         for (let b <int> = 0; b < self.cap; b++) { self.buckets.__set(b, -1); }
         let slots <int> = self.keys.len();
@@ -362,86 +362,86 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
         self.dead = 0;
       }
 
-    // Index-based iteration, because `foreach` over a struct is not a thing the
-    // language defines (KnownDefect_Foreach.TheIterableIsNeverCheckedForBeingIterable
-    // records that `foreach` does not even ask what it is walking). A caller walks
-    // `0 .. slot_count()` and skips the slots `is_live` denies:
-    //
-    //     for (let s <int> = 0; s < m.slot_count(); s++) {
-    //         if (m.is_live(s)) { ... m.key_at(s) ... m.value_at(s) ... }
-    //     }
-    //
-    // `slot_count` is not `len`: it counts slots currently held, live and dead alike.
-    // A rehash packs the live entries down, so it stays proportional to the live count
-    // plus the erasures since the last one.
-    pub fun slot_count(self: &Self) <int> {
+      // Index-based iteration, because `foreach` over a struct is not a thing the
+      // language defines (KnownDefect_Foreach.TheIterableIsNeverCheckedForBeingIterable
+      // records that `foreach` does not even ask what it is walking). A caller walks
+      // `0 .. slot_count()` and skips the slots `is_live` denies:
+      //
+      //     for (let s <int> = 0; s < m.slot_count(); s++) {
+      //         if (m.is_live(s)) { ... m.key_at(s) ... m.value_at(s) ... }
+      //     }
+      //
+      // `slot_count` is not `len`: it counts slots currently held, live and dead alike.
+      // A rehash packs the live entries down, so it stays proportional to the live count
+      // plus the erasures since the last one.
+      pub fun slot_count(self: &Self) <int> {
         self.ensure();
         return self.keys.len();
       }
 
-    pub fun is_live(self: &Self, slot: int) <bool> {
+      pub fun is_live(self: &Self, slot: int) <bool> {
         self.ensure();
         blame slot < self.keys.len(), "slot out of range";
         return self.live.get(slot);
       }
 
-    pub fun key_at(self: &Self, slot: int) <T> {
+      pub fun key_at(self: &Self, slot: int) <T> {
         self.ensure();
         blame slot < self.keys.len(), "slot out of range";
         return self.keys.get(slot);
       }
 
-    pub fun value_at(self: &Self, slot: int) <U> {
+      pub fun value_at(self: &Self, slot: int) <U> {
         self.ensure();
         blame slot < self.values.len(), "slot out of range";
         return self.values.get(slot);
       }
 
-    pub operator [](key: <T>) <U> {
+      pub operator [](key: <T>) <U> {
         return self.__get(key);
       }
 
-    pub operator []=(key: <T>, value: <U>) <noret> {
+      pub operator []=(key: <T>, value: <U>) <noret> {
         self.__set(key, value);
       }
 
-    // `HashMap::from_prototype({ "a" : 10, "b" : 20 })` in prototype_test.fin:27.
-    // The prototype arrives as two parallel arrays -- `prtp.0` the keys, `prtp.1`
-    // the values (stdlib/prototypes.fin:11-15) -- so each pair is stored in order
-    // through the existing `__set` path, which is what hashes the key and grows
-    // the table.
-    pub static fun from_prototype(prtp: {T, U}) <Self> {
+      // `HashMap::from_prototype({ "a" : 10, "b" : 20 })` in prototype_test.fin:27.
+      // The prototype arrives as two parallel arrays -- `prtp.0` the keys, `prtp.1`
+      // the values (stdlib/prototypes.fin:11-15) -- so each pair is stored in order
+      // through the existing `__set` path, which is what hashes the key and grows
+      // the table.
+      pub static fun from_prototype(prtp: {T, U}) <Self> {
         let out <HashMap<T, U>> = HashMap{keys: null, values: null, live: null, buckets: null,
-                                          cap: 0, used: 0, dead: 0, hasher: null};
-        let ks <[T]> = prtp.0;
-        let vs <[U]> = prtp.1;
-        for (let i <int> = 0; i < ks.length; i++) {
-            out.__set(ks[i], vs[i]);
-          }
-        return out;
-      }
+              cap: 0, used: 0, dead: 0, hasher: null};
+            let ks <[T]> = prtp.0;
+            let vs <[U]> = prtp.1;
+            for (let i <int> = 0; i < ks.length; i++) {
+                out.__set(ks[i], vs[i]);
+            }
+            return out;
+        }
 
-    // The extension point named in the header. `f` is handed the key as an `any` and
-    // returns anything; `hash_key` folds a negative result.
-    pub static fun with_hasher(f: fn(any) -> int) <Self> {
-        return HashMap{keys: null, values: null, live: null, buckets: null,
-                       cap: 0, used: 0, dead: 0, hasher: f};
-      }
+        // The extension point named in the header. `f` is handed the key as an `any` and
+        // returns anything; `hash_key` folds a negative result.
+        pub static fun with_hasher(f: fn(any) -> int) <Self> {
+            return HashMap{keys: null, values: null, live: null, buckets: null,
+                  cap: 0, used: 0, dead: 0, hasher: f};
+            }
 
-    HashMap() {
-        return new HashMap{keys: null, values: null, live: null, buckets: null,
-                           cap: 0, used: 0, dead: 0, hasher: null};
-      }
-  }
+            HashMap() {
+                return new HashMap{keys: null, values: null, live: null, buckets: null,
+                      cap: 0, used: 0, dead: 0, hasher: null};
+                }
+            }
 
-// The dictionary-shaped call `map!{"a" => 1}`, which useful_macros.fin:7 writes and ADR 0023
-// step 8 asks for here. `{...}` arrives as one prototype with the written keys (step 3), so
-// the body hands it straight to `from_prototype` and the macro is a rename rather than a
-// construction. The brace form also accepts a trailing comma where a prototype literal
-// written directly does not, which is why useful_macros.fin:9 can end in one. `HashMap::` is
-// qualified because a body may spell nothing but qualified paths and `$` unquotes (ADR 0020,
-// ADR 0023). The entries arrive through `from_prototype`, so the call builds a
-// `HashMap<string, int>` holding the written pairs.
-@macro map(p) { return quote { HashMap::from_prototype($p); }; }
+            // The dictionary-shaped call `map!{"a" => 1}`, which useful_macros.fin:7 writes and ADR 0023
+            // step 8 asks for here. `{...}` arrives as one prototype with the written keys (step 3), so
+            // the body hands it straight to `from_prototype` and the macro is a rename rather than a
+            // construction. The brace form also accepts a trailing comma where a prototype literal
+            // written directly does not, which is why useful_macros.fin:9 can end in one. `HashMap::` is
+            // qualified because a body may spell nothing but qualified paths and `$` unquotes (ADR 0020,
+            // ADR 0023). The entries arrive through `from_prototype`, so the call builds a
+            // `HashMap<string, int>` holding the written pairs.
+            @macro map(p) { return quote { HashMap::from_prototype($p); }; }
 
-}
+        }

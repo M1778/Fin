@@ -1,0 +1,34 @@
+//@ bundled
+namespace std {
+
+#[export]
+pub fun add(a: int, b: int) <int> {
+    return a + b;
+}
+
+#[export]
+pub fun ugly(a: int, b: int) <int> {
+    let total <int> = add(a,
+      b);
+    if (total == a) { return total; }
+    return total;
+}
+
+//@ plaindoc
+#[export]
+pub struct Pair {
+    pub:
+      first <int> = 0,
+      second <int> = 1,
+}
+
+}
+
+#[export]
+pub struct Wrap {
+    pub:
+      v <int> = 0,
+      fun get(self: &Self) <int> {
+        return self.v;
+      }
+}

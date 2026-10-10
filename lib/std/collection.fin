@@ -93,160 +93,160 @@ pub struct Collection<T> : <Index, IndexAssign> {
       // so `_arr` is null until something asks for it. `blame`ing on a null buffer would
       // punish the corpus's own idiom.
       priv fun ensure(self: &Self) <noret> {
-          if (self._arr == null) {
-              self._arr = new [T, 4]{};
-              self.filled = 0;
-            }
+        if (self._arr == null) {
+            self._arr = new [T, 4]{};
+            self.filled = 0;
         }
+      }
 
       fun len(self: &Self) <int> {
-          return self.filled;
-        }
+        return self.filled;
+      }
 
       fun is_empty(self: &Self) <bool> {
-          return self.filled == 0;
-        }
+        return self.filled == 0;
+      }
 
       // The buffer's extent, which is not `len()`. See the header on why both exist.
       fun capacity(self: &Self) <int> {
-          self.ensure();
-          return self._arr.length;
-        }
+        self.ensure();
+        return self._arr.length;
+      }
 
       // Doubling, not one-at-a-time: growing by one made pushing n items copy the
       // buffer n times.
       fun push(self: &Self, item: T) <noret> {
-          self.ensure();
-          if (self.filled >= self._arr.length) {
-              self.allocate(self._arr.length * 2);
-            }
-          self._arr[self.filled] = item;
-          self.filled++;
+        self.ensure();
+        if (self.filled >= self._arr.length) {
+            self.allocate(self._arr.length * 2);
         }
+        self._arr[self.filled] = item;
+        self.filled++;
+      }
 
       // Grow to hold at least `amount` elements without further allocation. A caller
       // who knows how many elements are coming pays one copy instead of log n.
       fun reserve(self: &Self, amount: int) <noret> {
-          self.ensure();
-          if (amount > self._arr.length) { self.allocate(amount); }
-        }
+        self.ensure();
+        if (amount > self._arr.length) { self.allocate(amount); }
+      }
 
       fun pop_last(self: &Self) <T> {
-          blame self.filled > 0, "pop_last on an empty collection";
-          self.filled--;
-          return self._arr[self.filled];
-        }
+        blame self.filled > 0, "pop_last on an empty collection";
+        self.filled--;
+        return self._arr[self.filled];
+      }
 
       // Bounds-checked, like every other index-taking method here. It used to be the
       // one that was not, which made it the unchecked path by accident.
       fun get(self: &Self, index: int) <T> {
-          self.ensure();
-          blame index >= 0, "Index out of bounds";
-          blame index < self.filled, "Index out of bounds";
-          return self._arr[index];
-        }
+        self.ensure();
+        blame index >= 0, "Index out of bounds";
+        blame index < self.filled, "Index out of bounds";
+        return self._arr[index];
+      }
 
       fun set(self: &Self, index: int, value: T) <noret> {
-          self.ensure();
-          blame index >= 0, "Index out of bounds";
-          blame index < self.filled, "Index out of bounds";
-          self._arr[index] = value;
-        }
+        self.ensure();
+        blame index >= 0, "Index out of bounds";
+        blame index < self.filled, "Index out of bounds";
+        self._arr[index] = value;
+      }
 
       fun first(self: &Self) <T> {
-          blame self.filled > 0, "first on an empty collection";
-          return self._arr[0];
-        }
+        blame self.filled > 0, "first on an empty collection";
+        return self._arr[0];
+      }
 
       fun last(self: &Self) <T> {
-          blame self.filled > 0, "last on an empty collection";
-          return self._arr[self.filled - 1];
-        }
+        blame self.filled > 0, "last on an empty collection";
+        return self._arr[self.filled - 1];
+      }
 
       // `-1` when absent, which is the same convention `HashMap::get_index` uses. See
       // the header on what `==` means for a `string` and why a struct element does not
       // reach codegen here.
       fun index_of(self: &Self, item: T) <int> {
-          self.ensure();
-          for (let i <int> = 0; i < self.filled; i++) {
-              if (self._arr[i] == item) { return i; }
-            }
-          return -1;
+        self.ensure();
+        for (let i <int> = 0; i < self.filled; i++) {
+            if (self._arr[i] == item) { return i; }
         }
+        return -1;
+      }
 
       fun contains(self: &Self, item: T) <bool> {
-          return self.index_of(item) >= 0;
-        }
+        return self.index_of(item) >= 0;
+      }
 
       // `index == len()` is allowed and appends, which is the one off-by-one worth
       // spelling out: inserting *at* the end is a legal insertion and reading at the end
       // is not a legal read.
       fun insert(self: &Self, index: int, item: T) <noret> {
-          self.ensure();
-          blame index >= 0, "Index out of bounds";
-          blame index <= self.filled, "Index out of bounds";
-          if (self.filled >= self._arr.length) {
-              self.allocate(self._arr.length * 2);
-            }
-          for (let i <int> = self.filled; i > index; i--) {
-              self._arr[i] = self._arr[i - 1];
-            }
-          self._arr[index] = item;
-          self.filled++;
+        self.ensure();
+        blame index >= 0, "Index out of bounds";
+        blame index <= self.filled, "Index out of bounds";
+        if (self.filled >= self._arr.length) {
+            self.allocate(self._arr.length * 2);
         }
+        for (let i <int> = self.filled; i > index; i--) {
+            self._arr[i] = self._arr[i - 1];
+        }
+        self._arr[index] = item;
+        self.filled++;
+      }
 
       // Shifts the tail down and returns what was removed. The vacated cell keeps its
       // last value; see the header's gap list on what that costs for an owning `T`.
       fun remove(self: &Self, index: int) <T> {
-          self.ensure();
-          blame index >= 0, "Index out of bounds";
-          blame index < self.filled, "Index out of bounds";
-          let gone <T> = self._arr[index];
-          for (let i <int> = index; i < self.filled - 1; i++) {
-              self._arr[i] = self._arr[i + 1];
-            }
-          self.filled--;
-          return gone;
+        self.ensure();
+        blame index >= 0, "Index out of bounds";
+        blame index < self.filled, "Index out of bounds";
+        let gone <T> = self._arr[index];
+        for (let i <int> = index; i < self.filled - 1; i++) {
+            self._arr[i] = self._arr[i + 1];
         }
+        self.filled--;
+        return gone;
+      }
 
       // Forgets every element without freeing the buffer, so a cleared collection can
       // be refilled without allocating. Freeing it would need `delete self._arr` and a
       // way to say "and never touch it again", which is `release`'s problem in
       // stdptr.fin and not solved here either.
       fun clear(self: &Self) <noret> {
-          self.filled = 0;
-        }
+        self.filled = 0;
+      }
 
       fun reverse(self: &Self) <noret> {
-          self.ensure();
-          let i <int> = 0;
-          let j <int> = self.filled - 1;
-          while (i < j) {
-              let held <T> = self._arr[i];
-              self._arr[i] = self._arr[j];
-              self._arr[j] = held;
-              i++;
-              j--;
-            }
+        self.ensure();
+        let i <int> = 0;
+        let j <int> = self.filled - 1;
+        while (i < j) {
+            let held <T> = self._arr[i];
+            self._arr[i] = self._arr[j];
+            self._arr[j] = held;
+            i++;
+            j--;
         }
+      }
 
       // Appends every element of `other`, in order. One `reserve` and then pushes, so
       // extending by n costs one copy rather than log n.
       fun extend(self: &Self, other: &Collection<T>) <noret> {
-          let n <int> = other.len();
-          self.reserve(self.filled + n);
-          for (let i <int> = 0; i < n; i++) {
-              self.push(other.get(i));
-            }
+        let n <int> = other.len();
+        self.reserve(self.filled + n);
+        for (let i <int> = 0; i < n; i++) {
+            self.push(other.get(i));
         }
+      }
 
-    priv fun allocate(self: &Self, amount: int) <noret> {
+      priv fun allocate(self: &Self, amount: int) <noret> {
         let want <int> = amount;
         if (want < 4) { want = 4; }
         let grown <[T]> = new [T, want]{};
         for (let i <int> = 0; i < self.filled; i++) {
             grown[i] = self._arr[i];
-          }
+        }
         // The old buffer, after the copy and before the handle to it is lost. Every
         // `_arr` this type holds came from `new` -- `ensure`'s or this line's -- so it is
         // always this method's to free. Guarded because `reserve` may be the first thing
@@ -255,42 +255,42 @@ pub struct Collection<T> : <Index, IndexAssign> {
         self._arr = grown;
       }
 
-    pub fun __get(self: &Self, index: int) <T> {
+      pub fun __get(self: &Self, index: int) <T> {
         self.ensure();
         blame index >= 0, "Index out of bounds";
         blame index < self.filled, "Index out of bounds";
         return self._arr[index];
       }
 
-    pub fun __set(self: &Self, index: int, value: T) <noret> {
+      pub fun __set(self: &Self, index: int, value: T) <noret> {
         self.ensure();
         blame index >= 0, "Index out of bounds";
         blame index < self.filled, "Index out of bounds";
         self._arr[index] = value;
       }
 
-    pub operator [](index: <int>) <T> {
+      pub operator [](index: <int>) <T> {
         return self.__get(index);
       }
 
-    pub operator []=(index: <int>, value: <T>) <noret> {
+      pub operator []=(index: <int>, value: <T>) <noret> {
         self.__set(index, value);
       }
 
-    // `Collection::from_prototype({ 0: 10, 1: 20 })` in prototype_test.fin:30. The
-    // prototype arrives as two parallel arrays -- `prtp.0` the keys, `prtp.1` the
-    // values (stdlib/prototypes.fin:11-15) -- so the values are pushed in order
-    // through the existing `push` path. The keys are ignored: a `Collection` is
-    // positional, and `coll![...]` arrives keyed `0..n-1` in insertion order.
-    pub static fun from_prototype(prtp: {int, T}) <Self> {
+      // `Collection::from_prototype({ 0: 10, 1: 20 })` in prototype_test.fin:30. The
+      // prototype arrives as two parallel arrays -- `prtp.0` the keys, `prtp.1` the
+      // values (stdlib/prototypes.fin:11-15) -- so the values are pushed in order
+      // through the existing `push` path. The keys are ignored: a `Collection` is
+      // positional, and `coll![...]` arrives keyed `0..n-1` in insertion order.
+      pub static fun from_prototype(prtp: {int, T}) <Self> {
         let out <Collection<T>> = Collection{filled: 0, _arr: new [T, 4]{}};
         let vals <[T]> = prtp.1;
         for (let i <int> = 0; i < vals.length; i++) {
             out.push(vals[i]);
-          }
+        }
         return out;
       }
-  }
+}
 
 // The list-shaped call `coll![1, 2, 3]`, which useful_macros.fin:12 writes and ADR 0023
 // step 8 asks for here. The bracket does the work the body would otherwise have to: step 3

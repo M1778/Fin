@@ -75,7 +75,7 @@ pub type ErrorLike = string | any implements <Error>;
 #[llvm_name="Result"]
 pub enum Result <T, U: ErrorLike> {
     Ok(T),
-    Err(U),
+      Err(U),
 }
 
 // EXACTLY THE DRAFT'S THREE REQUIREMENTS, and this is a corpus constraint rather than a
@@ -100,46 +100,46 @@ Result<T, U> implements <IResult> {
     pub fun unwrap(enum_ : Result<T, U>) <T> {
         if (getkeyid(enum_) == keyidof(Ok)) {
             return enum_.0;
-          } else {
+        } else {
             blame enum_.0;
-          }
-      }
+        }
+    }
 
     // The total form: the value, or `fallback` when this is an `Err`. `r.unwrap_or(0)`.
     // This is the one to reach for where `unwrap` would abort.
     pub fun unwrap_or(enum_ : Result<T, U>, fallback: T) <T> {
         if (getkeyid(enum_) == keyidof(Ok)) {
             return enum_.0;
-          }
+        }
         return fallback;
-      }
+    }
 
     // Raise if this is an `Err`, and say nothing if it is not. The draft's name and
     // signature; see the header on why it carries no message.
     pub fun expect(enum_ : Result<T, U>) <noret> {
         if (getkeyid(enum_) == keyidof(Err)) {
             blame enum_.0;
-          }
-      }
+        }
+    }
 
     // Run `callback` on the value if there is one. The `Ok`-only branch of a `match`
     // that the language does not have.
     pub fun select(enum_ : Result<T, U>, callback : fn(T) -> void) <noret> {
         if (getkeyid(enum_) == keyidof(Ok)) {
             callback(enum_.0);
-          }
-      }
+        }
+    }
 
     // The two questions a caller otherwise writes out by hand, which is the whole reason
     // they are here: `getkeyid(r) == keyidof(Ok)` needs both intrinsics imported at every
     // use site, and `r.is_ok()` needs none.
     pub fun is_ok(enum_ : Result<T, U>) <bool> {
         return getkeyid(enum_) == keyidof(Ok);
-      }
+    }
 
     pub fun is_err(enum_ : Result<T, U>) <bool> {
         return getkeyid(enum_) == keyidof(Err);
-      }
+    }
 }
 
 }

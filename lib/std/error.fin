@@ -64,12 +64,12 @@ namespace std {
 #[class]
 pub struct Error {
     pub message <string>,
-    pub error_id <int> = -1,
+      pub error_id <int> = -1,
 
-    // Two parameters, as the draft has it. `err_code` defaults to `-1`, which is the
-    // value the draft's body substitutes for its `null` sentinel, so the two spellings
-    // agree on what an unspecified code is.
-    Error(msg: string, err_code: int = -1) {
+      // Two parameters, as the draft has it. `err_code` defaults to `-1`, which is the
+      // value the draft's body substitutes for its `null` sentinel, so the two spellings
+      // agree on what an unspecified code is.
+      Error(msg: string, err_code: int = -1) {
         return new Error{message: msg, error_id: err_code};
       }
 
@@ -77,7 +77,7 @@ pub struct Error {
     // it, so it stays the cheap accessor and `describe` is the formatter.
     pub fun format(self: &Self) <string> {
         return self.message;
-      }
+    }
 
     // "Error <id>: <message>", in a fresh buffer the caller owns. 32 bytes of headroom
     // covers the widest `int` written as decimal plus the literal text.
@@ -85,16 +85,16 @@ pub struct Error {
         let want <int> = cast<int>(error_strlen(self.message)) + 32;
         let buf <string> = error_alloc(cast<ulong>(want));
         let written <int> = error_snprintf(buf, cast<ulong>(want), "Error %d: %s",
-                                          self.error_id, self.message);
+          self.error_id, self.message);
         return buf;
-      }
+    }
 
     // Whether a code was supplied. `-1` is the "none given" value the constructor's
     // default and the draft's sentinel agree on, so this is the question a caller
     // otherwise writes as a comparison against a magic number.
     pub fun has_code(self: &Self) <bool> {
         return self.error_id != -1;
-      }
-  }
+    }
+}
 
 }

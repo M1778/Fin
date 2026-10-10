@@ -2807,6 +2807,423 @@ fun cg_is_heap_struct_value(ctx: &FnContext, v: &LocalVar) <bool> {
     return find_struct(ctx, base) != null;
 }
 
+// Indexed access to the LLVM carrier structs (`LLVMTypeArgs` /
+// `LLVMValueArgs`, finc/llvm.fin). Fin selects fields statically, so each
+// op keeps one 64-arm chain here; the twelve sites below call these
+// instead of repeating it. Pure relocation: the same field stores and
+// loads execute for the same indices, and every call site keeps its
+// own range guard and overflow refusal. The carriers stay homogeneous
+// `&LLVMType` / `&LLVMValue` fields (the FFI contract the C++ backend
+// reads field-by-field); a heterogeneous field would need a new
+// accessor here, never a reinterpretation.
+fun cg_targs_set(a: &LLVMTypeArgs, i: int, v: &LLVMType) <noret> {
+    if (i == 0) { a.t0 = v; }
+    else if (i == 1) { a.t1 = v; }
+    else if (i == 2) { a.t2 = v; }
+    else if (i == 3) { a.t3 = v; }
+    else if (i == 4) { a.t4 = v; }
+    else if (i == 5) { a.t5 = v; }
+    else if (i == 6) { a.t6 = v; }
+    else if (i == 7) { a.t7 = v; }
+    else if (i == 8) { a.t8 = v; }
+    else if (i == 9) { a.t9 = v; }
+    else if (i == 10) { a.t10 = v; }
+    else if (i == 11) { a.t11 = v; }
+    else if (i == 12) { a.t12 = v; }
+    else if (i == 13) { a.t13 = v; }
+    else if (i == 14) { a.t14 = v; }
+    else if (i == 15) { a.t15 = v; }
+    else if (i == 16) { a.t16 = v; }
+    else if (i == 17) { a.t17 = v; }
+    else if (i == 18) { a.t18 = v; }
+    else if (i == 19) { a.t19 = v; }
+    else if (i == 20) { a.t20 = v; }
+    else if (i == 21) { a.t21 = v; }
+    else if (i == 22) { a.t22 = v; }
+    else if (i == 23) { a.t23 = v; }
+    else if (i == 24) { a.t24 = v; }
+    else if (i == 25) { a.t25 = v; }
+    else if (i == 26) { a.t26 = v; }
+    else if (i == 27) { a.t27 = v; }
+    else if (i == 28) { a.t28 = v; }
+    else if (i == 29) { a.t29 = v; }
+    else if (i == 30) { a.t30 = v; }
+    else if (i == 31) { a.t31 = v; }
+    else if (i == 32) { a.t32 = v; }
+    else if (i == 33) { a.t33 = v; }
+    else if (i == 34) { a.t34 = v; }
+    else if (i == 35) { a.t35 = v; }
+    else if (i == 36) { a.t36 = v; }
+    else if (i == 37) { a.t37 = v; }
+    else if (i == 38) { a.t38 = v; }
+    else if (i == 39) { a.t39 = v; }
+    else if (i == 40) { a.t40 = v; }
+    else if (i == 41) { a.t41 = v; }
+    else if (i == 42) { a.t42 = v; }
+    else if (i == 43) { a.t43 = v; }
+    else if (i == 44) { a.t44 = v; }
+    else if (i == 45) { a.t45 = v; }
+    else if (i == 46) { a.t46 = v; }
+    else if (i == 47) { a.t47 = v; }
+    else if (i == 48) { a.t48 = v; }
+    else if (i == 49) { a.t49 = v; }
+    else if (i == 50) { a.t50 = v; }
+    else if (i == 51) { a.t51 = v; }
+    else if (i == 52) { a.t52 = v; }
+    else if (i == 53) { a.t53 = v; }
+    else if (i == 54) { a.t54 = v; }
+    else if (i == 55) { a.t55 = v; }
+    else if (i == 56) { a.t56 = v; }
+    else if (i == 57) { a.t57 = v; }
+    else if (i == 58) { a.t58 = v; }
+    else if (i == 59) { a.t59 = v; }
+    else if (i == 60) { a.t60 = v; }
+    else if (i == 61) { a.t61 = v; }
+    else if (i == 62) { a.t62 = v; }
+    else if (i == 63) { a.t63 = v; }
+}
+
+fun cg_targs_at(a: &LLVMTypeArgs, i: int) <&LLVMType> {
+    if (i == 0) { return a.t0; }
+    else if (i == 1) { return a.t1; }
+    else if (i == 2) { return a.t2; }
+    else if (i == 3) { return a.t3; }
+    else if (i == 4) { return a.t4; }
+    else if (i == 5) { return a.t5; }
+    else if (i == 6) { return a.t6; }
+    else if (i == 7) { return a.t7; }
+    else if (i == 8) { return a.t8; }
+    else if (i == 9) { return a.t9; }
+    else if (i == 10) { return a.t10; }
+    else if (i == 11) { return a.t11; }
+    else if (i == 12) { return a.t12; }
+    else if (i == 13) { return a.t13; }
+    else if (i == 14) { return a.t14; }
+    else if (i == 15) { return a.t15; }
+    else if (i == 16) { return a.t16; }
+    else if (i == 17) { return a.t17; }
+    else if (i == 18) { return a.t18; }
+    else if (i == 19) { return a.t19; }
+    else if (i == 20) { return a.t20; }
+    else if (i == 21) { return a.t21; }
+    else if (i == 22) { return a.t22; }
+    else if (i == 23) { return a.t23; }
+    else if (i == 24) { return a.t24; }
+    else if (i == 25) { return a.t25; }
+    else if (i == 26) { return a.t26; }
+    else if (i == 27) { return a.t27; }
+    else if (i == 28) { return a.t28; }
+    else if (i == 29) { return a.t29; }
+    else if (i == 30) { return a.t30; }
+    else if (i == 31) { return a.t31; }
+    else if (i == 32) { return a.t32; }
+    else if (i == 33) { return a.t33; }
+    else if (i == 34) { return a.t34; }
+    else if (i == 35) { return a.t35; }
+    else if (i == 36) { return a.t36; }
+    else if (i == 37) { return a.t37; }
+    else if (i == 38) { return a.t38; }
+    else if (i == 39) { return a.t39; }
+    else if (i == 40) { return a.t40; }
+    else if (i == 41) { return a.t41; }
+    else if (i == 42) { return a.t42; }
+    else if (i == 43) { return a.t43; }
+    else if (i == 44) { return a.t44; }
+    else if (i == 45) { return a.t45; }
+    else if (i == 46) { return a.t46; }
+    else if (i == 47) { return a.t47; }
+    else if (i == 48) { return a.t48; }
+    else if (i == 49) { return a.t49; }
+    else if (i == 50) { return a.t50; }
+    else if (i == 51) { return a.t51; }
+    else if (i == 52) { return a.t52; }
+    else if (i == 53) { return a.t53; }
+    else if (i == 54) { return a.t54; }
+    else if (i == 55) { return a.t55; }
+    else if (i == 56) { return a.t56; }
+    else if (i == 57) { return a.t57; }
+    else if (i == 58) { return a.t58; }
+    else if (i == 59) { return a.t59; }
+    else if (i == 60) { return a.t60; }
+    else if (i == 61) { return a.t61; }
+    else if (i == 62) { return a.t62; }
+    else if (i == 63) { return a.t63; }
+    else { return null; }
+}
+
+fun cg_targs_count(a: &LLVMTypeArgs) <int> {
+    let n <int> = 0;
+    if (a.t0 != null) { n = n + 1; }
+    if (a.t1 != null) { n = n + 1; }
+    if (a.t2 != null) { n = n + 1; }
+    if (a.t3 != null) { n = n + 1; }
+    if (a.t4 != null) { n = n + 1; }
+    if (a.t5 != null) { n = n + 1; }
+    if (a.t6 != null) { n = n + 1; }
+    if (a.t7 != null) { n = n + 1; }
+    if (a.t8 != null) { n = n + 1; }
+    if (a.t9 != null) { n = n + 1; }
+    if (a.t10 != null) { n = n + 1; }
+    if (a.t11 != null) { n = n + 1; }
+    if (a.t12 != null) { n = n + 1; }
+    if (a.t13 != null) { n = n + 1; }
+    if (a.t14 != null) { n = n + 1; }
+    if (a.t15 != null) { n = n + 1; }
+    if (a.t16 != null) { n = n + 1; }
+    if (a.t17 != null) { n = n + 1; }
+    if (a.t18 != null) { n = n + 1; }
+    if (a.t19 != null) { n = n + 1; }
+    if (a.t20 != null) { n = n + 1; }
+    if (a.t21 != null) { n = n + 1; }
+    if (a.t22 != null) { n = n + 1; }
+    if (a.t23 != null) { n = n + 1; }
+    if (a.t24 != null) { n = n + 1; }
+    if (a.t25 != null) { n = n + 1; }
+    if (a.t26 != null) { n = n + 1; }
+    if (a.t27 != null) { n = n + 1; }
+    if (a.t28 != null) { n = n + 1; }
+    if (a.t29 != null) { n = n + 1; }
+    if (a.t30 != null) { n = n + 1; }
+    if (a.t31 != null) { n = n + 1; }
+    if (a.t32 != null) { n = n + 1; }
+    if (a.t33 != null) { n = n + 1; }
+    if (a.t34 != null) { n = n + 1; }
+    if (a.t35 != null) { n = n + 1; }
+    if (a.t36 != null) { n = n + 1; }
+    if (a.t37 != null) { n = n + 1; }
+    if (a.t38 != null) { n = n + 1; }
+    if (a.t39 != null) { n = n + 1; }
+    if (a.t40 != null) { n = n + 1; }
+    if (a.t41 != null) { n = n + 1; }
+    if (a.t42 != null) { n = n + 1; }
+    if (a.t43 != null) { n = n + 1; }
+    if (a.t44 != null) { n = n + 1; }
+    if (a.t45 != null) { n = n + 1; }
+    if (a.t46 != null) { n = n + 1; }
+    if (a.t47 != null) { n = n + 1; }
+    if (a.t48 != null) { n = n + 1; }
+    if (a.t49 != null) { n = n + 1; }
+    if (a.t50 != null) { n = n + 1; }
+    if (a.t51 != null) { n = n + 1; }
+    if (a.t52 != null) { n = n + 1; }
+    if (a.t53 != null) { n = n + 1; }
+    if (a.t54 != null) { n = n + 1; }
+    if (a.t55 != null) { n = n + 1; }
+    if (a.t56 != null) { n = n + 1; }
+    if (a.t57 != null) { n = n + 1; }
+    if (a.t58 != null) { n = n + 1; }
+    if (a.t59 != null) { n = n + 1; }
+    if (a.t60 != null) { n = n + 1; }
+    if (a.t61 != null) { n = n + 1; }
+    if (a.t62 != null) { n = n + 1; }
+    if (a.t63 != null) { n = n + 1; }
+    return n;
+}
+
+fun cg_targs_span(a: &LLVMTypeArgs) <int> {
+    let n <int> = 0;
+    if (a.t0 != null) { n = 1; }
+    if (a.t1 != null) { n = 2; }
+    if (a.t2 != null) { n = 3; }
+    if (a.t3 != null) { n = 4; }
+    if (a.t4 != null) { n = 5; }
+    if (a.t5 != null) { n = 6; }
+    if (a.t6 != null) { n = 7; }
+    if (a.t7 != null) { n = 8; }
+    if (a.t8 != null) { n = 9; }
+    if (a.t9 != null) { n = 10; }
+    if (a.t10 != null) { n = 11; }
+    if (a.t11 != null) { n = 12; }
+    if (a.t12 != null) { n = 13; }
+    if (a.t13 != null) { n = 14; }
+    if (a.t14 != null) { n = 15; }
+    if (a.t15 != null) { n = 16; }
+    if (a.t16 != null) { n = 17; }
+    if (a.t17 != null) { n = 18; }
+    if (a.t18 != null) { n = 19; }
+    if (a.t19 != null) { n = 20; }
+    if (a.t20 != null) { n = 21; }
+    if (a.t21 != null) { n = 22; }
+    if (a.t22 != null) { n = 23; }
+    if (a.t23 != null) { n = 24; }
+    if (a.t24 != null) { n = 25; }
+    if (a.t25 != null) { n = 26; }
+    if (a.t26 != null) { n = 27; }
+    if (a.t27 != null) { n = 28; }
+    if (a.t28 != null) { n = 29; }
+    if (a.t29 != null) { n = 30; }
+    if (a.t30 != null) { n = 31; }
+    if (a.t31 != null) { n = 32; }
+    if (a.t32 != null) { n = 33; }
+    if (a.t33 != null) { n = 34; }
+    if (a.t34 != null) { n = 35; }
+    if (a.t35 != null) { n = 36; }
+    if (a.t36 != null) { n = 37; }
+    if (a.t37 != null) { n = 38; }
+    if (a.t38 != null) { n = 39; }
+    if (a.t39 != null) { n = 40; }
+    if (a.t40 != null) { n = 41; }
+    if (a.t41 != null) { n = 42; }
+    if (a.t42 != null) { n = 43; }
+    if (a.t43 != null) { n = 44; }
+    if (a.t44 != null) { n = 45; }
+    if (a.t45 != null) { n = 46; }
+    if (a.t46 != null) { n = 47; }
+    if (a.t47 != null) { n = 48; }
+    if (a.t48 != null) { n = 49; }
+    if (a.t49 != null) { n = 50; }
+    if (a.t50 != null) { n = 51; }
+    if (a.t51 != null) { n = 52; }
+    if (a.t52 != null) { n = 53; }
+    if (a.t53 != null) { n = 54; }
+    if (a.t54 != null) { n = 55; }
+    if (a.t55 != null) { n = 56; }
+    if (a.t56 != null) { n = 57; }
+    if (a.t57 != null) { n = 58; }
+    if (a.t58 != null) { n = 59; }
+    if (a.t59 != null) { n = 60; }
+    if (a.t60 != null) { n = 61; }
+    if (a.t61 != null) { n = 62; }
+    if (a.t62 != null) { n = 63; }
+    if (a.t63 != null) { n = 64; }
+    return n;
+}
+
+fun cg_vargs_set(a: &LLVMValueArgs, i: int, v: &LLVMValue) <noret> {
+    if (i == 0) { a.v0 = v; }
+    else if (i == 1) { a.v1 = v; }
+    else if (i == 2) { a.v2 = v; }
+    else if (i == 3) { a.v3 = v; }
+    else if (i == 4) { a.v4 = v; }
+    else if (i == 5) { a.v5 = v; }
+    else if (i == 6) { a.v6 = v; }
+    else if (i == 7) { a.v7 = v; }
+    else if (i == 8) { a.v8 = v; }
+    else if (i == 9) { a.v9 = v; }
+    else if (i == 10) { a.v10 = v; }
+    else if (i == 11) { a.v11 = v; }
+    else if (i == 12) { a.v12 = v; }
+    else if (i == 13) { a.v13 = v; }
+    else if (i == 14) { a.v14 = v; }
+    else if (i == 15) { a.v15 = v; }
+    else if (i == 16) { a.v16 = v; }
+    else if (i == 17) { a.v17 = v; }
+    else if (i == 18) { a.v18 = v; }
+    else if (i == 19) { a.v19 = v; }
+    else if (i == 20) { a.v20 = v; }
+    else if (i == 21) { a.v21 = v; }
+    else if (i == 22) { a.v22 = v; }
+    else if (i == 23) { a.v23 = v; }
+    else if (i == 24) { a.v24 = v; }
+    else if (i == 25) { a.v25 = v; }
+    else if (i == 26) { a.v26 = v; }
+    else if (i == 27) { a.v27 = v; }
+    else if (i == 28) { a.v28 = v; }
+    else if (i == 29) { a.v29 = v; }
+    else if (i == 30) { a.v30 = v; }
+    else if (i == 31) { a.v31 = v; }
+    else if (i == 32) { a.v32 = v; }
+    else if (i == 33) { a.v33 = v; }
+    else if (i == 34) { a.v34 = v; }
+    else if (i == 35) { a.v35 = v; }
+    else if (i == 36) { a.v36 = v; }
+    else if (i == 37) { a.v37 = v; }
+    else if (i == 38) { a.v38 = v; }
+    else if (i == 39) { a.v39 = v; }
+    else if (i == 40) { a.v40 = v; }
+    else if (i == 41) { a.v41 = v; }
+    else if (i == 42) { a.v42 = v; }
+    else if (i == 43) { a.v43 = v; }
+    else if (i == 44) { a.v44 = v; }
+    else if (i == 45) { a.v45 = v; }
+    else if (i == 46) { a.v46 = v; }
+    else if (i == 47) { a.v47 = v; }
+    else if (i == 48) { a.v48 = v; }
+    else if (i == 49) { a.v49 = v; }
+    else if (i == 50) { a.v50 = v; }
+    else if (i == 51) { a.v51 = v; }
+    else if (i == 52) { a.v52 = v; }
+    else if (i == 53) { a.v53 = v; }
+    else if (i == 54) { a.v54 = v; }
+    else if (i == 55) { a.v55 = v; }
+    else if (i == 56) { a.v56 = v; }
+    else if (i == 57) { a.v57 = v; }
+    else if (i == 58) { a.v58 = v; }
+    else if (i == 59) { a.v59 = v; }
+    else if (i == 60) { a.v60 = v; }
+    else if (i == 61) { a.v61 = v; }
+    else if (i == 62) { a.v62 = v; }
+    else if (i == 63) { a.v63 = v; }
+}
+
+fun cg_vargs_at(a: &LLVMValueArgs, i: int) <&LLVMValue> {
+    if (i == 0) { return a.v0; }
+    else if (i == 1) { return a.v1; }
+    else if (i == 2) { return a.v2; }
+    else if (i == 3) { return a.v3; }
+    else if (i == 4) { return a.v4; }
+    else if (i == 5) { return a.v5; }
+    else if (i == 6) { return a.v6; }
+    else if (i == 7) { return a.v7; }
+    else if (i == 8) { return a.v8; }
+    else if (i == 9) { return a.v9; }
+    else if (i == 10) { return a.v10; }
+    else if (i == 11) { return a.v11; }
+    else if (i == 12) { return a.v12; }
+    else if (i == 13) { return a.v13; }
+    else if (i == 14) { return a.v14; }
+    else if (i == 15) { return a.v15; }
+    else if (i == 16) { return a.v16; }
+    else if (i == 17) { return a.v17; }
+    else if (i == 18) { return a.v18; }
+    else if (i == 19) { return a.v19; }
+    else if (i == 20) { return a.v20; }
+    else if (i == 21) { return a.v21; }
+    else if (i == 22) { return a.v22; }
+    else if (i == 23) { return a.v23; }
+    else if (i == 24) { return a.v24; }
+    else if (i == 25) { return a.v25; }
+    else if (i == 26) { return a.v26; }
+    else if (i == 27) { return a.v27; }
+    else if (i == 28) { return a.v28; }
+    else if (i == 29) { return a.v29; }
+    else if (i == 30) { return a.v30; }
+    else if (i == 31) { return a.v31; }
+    else if (i == 32) { return a.v32; }
+    else if (i == 33) { return a.v33; }
+    else if (i == 34) { return a.v34; }
+    else if (i == 35) { return a.v35; }
+    else if (i == 36) { return a.v36; }
+    else if (i == 37) { return a.v37; }
+    else if (i == 38) { return a.v38; }
+    else if (i == 39) { return a.v39; }
+    else if (i == 40) { return a.v40; }
+    else if (i == 41) { return a.v41; }
+    else if (i == 42) { return a.v42; }
+    else if (i == 43) { return a.v43; }
+    else if (i == 44) { return a.v44; }
+    else if (i == 45) { return a.v45; }
+    else if (i == 46) { return a.v46; }
+    else if (i == 47) { return a.v47; }
+    else if (i == 48) { return a.v48; }
+    else if (i == 49) { return a.v49; }
+    else if (i == 50) { return a.v50; }
+    else if (i == 51) { return a.v51; }
+    else if (i == 52) { return a.v52; }
+    else if (i == 53) { return a.v53; }
+    else if (i == 54) { return a.v54; }
+    else if (i == 55) { return a.v55; }
+    else if (i == 56) { return a.v56; }
+    else if (i == 57) { return a.v57; }
+    else if (i == 58) { return a.v58; }
+    else if (i == 59) { return a.v59; }
+    else if (i == 60) { return a.v60; }
+    else if (i == 61) { return a.v61; }
+    else if (i == 62) { return a.v62; }
+    else if (i == 63) { return a.v63; }
+    else { return null; }
+}
+
 // Build an LLVM function type from a `fn(P1, P2) -> R` annotation, mapping
 // each word through map_type (`any` reads as the word-sized pointer the
 // backend lowers it to). Null when the text is not a function type or has
@@ -2861,71 +3278,8 @@ fun cg_fn_type_from_ann(ctx: &FnContext, ann: string) <&LLVMType> {
             if (cg_strlen(seg) == cast<ulong>(0)) { seg_start = pi + 1; }
             else {
             let pt <&LLVMType> = map_type(ctx, seg);
-            if (p_count == 0) { params.t0 = pt; }
-            else if (p_count == 1) { params.t1 = pt; }
-            else if (p_count == 2) { params.t2 = pt; }
-            else if (p_count == 3) { params.t3 = pt; }
-            else if (p_count == 4) { params.t4 = pt; }
-            else if (p_count == 5) { params.t5 = pt; }
-            else if (p_count == 6) { params.t6 = pt; }
-            else if (p_count == 7) { params.t7 = pt; }
-            else if (p_count == 8) { params.t8 = pt; }
-            else if (p_count == 9) { params.t9 = pt; }
-            else if (p_count == 10) { params.t10 = pt; }
-            else if (p_count == 11) { params.t11 = pt; }
-            else if (p_count == 12) { params.t12 = pt; }
-            else if (p_count == 13) { params.t13 = pt; }
-            else if (p_count == 14) { params.t14 = pt; }
-            else if (p_count == 15) { params.t15 = pt; }
-            else if (p_count == 16) { params.t16 = pt; }
-            else if (p_count == 17) { params.t17 = pt; }
-            else if (p_count == 18) { params.t18 = pt; }
-            else if (p_count == 19) { params.t19 = pt; }
-            else if (p_count == 20) { params.t20 = pt; }
-            else if (p_count == 21) { params.t21 = pt; }
-            else if (p_count == 22) { params.t22 = pt; }
-            else if (p_count == 23) { params.t23 = pt; }
-            else if (p_count == 24) { params.t24 = pt; }
-            else if (p_count == 25) { params.t25 = pt; }
-            else if (p_count == 26) { params.t26 = pt; }
-            else if (p_count == 27) { params.t27 = pt; }
-            else if (p_count == 28) { params.t28 = pt; }
-            else if (p_count == 29) { params.t29 = pt; }
-            else if (p_count == 30) { params.t30 = pt; }
-            else if (p_count == 31) { params.t31 = pt; }
-            else if (p_count == 32) { params.t32 = pt; }
-            else if (p_count == 33) { params.t33 = pt; }
-            else if (p_count == 34) { params.t34 = pt; }
-            else if (p_count == 35) { params.t35 = pt; }
-            else if (p_count == 36) { params.t36 = pt; }
-            else if (p_count == 37) { params.t37 = pt; }
-            else if (p_count == 38) { params.t38 = pt; }
-            else if (p_count == 39) { params.t39 = pt; }
-            else if (p_count == 40) { params.t40 = pt; }
-            else if (p_count == 41) { params.t41 = pt; }
-            else if (p_count == 42) { params.t42 = pt; }
-            else if (p_count == 43) { params.t43 = pt; }
-            else if (p_count == 44) { params.t44 = pt; }
-            else if (p_count == 45) { params.t45 = pt; }
-            else if (p_count == 46) { params.t46 = pt; }
-            else if (p_count == 47) { params.t47 = pt; }
-            else if (p_count == 48) { params.t48 = pt; }
-            else if (p_count == 49) { params.t49 = pt; }
-            else if (p_count == 50) { params.t50 = pt; }
-            else if (p_count == 51) { params.t51 = pt; }
-            else if (p_count == 52) { params.t52 = pt; }
-            else if (p_count == 53) { params.t53 = pt; }
-            else if (p_count == 54) { params.t54 = pt; }
-            else if (p_count == 55) { params.t55 = pt; }
-            else if (p_count == 56) { params.t56 = pt; }
-            else if (p_count == 57) { params.t57 = pt; }
-            else if (p_count == 58) { params.t58 = pt; }
-            else if (p_count == 59) { params.t59 = pt; }
-            else if (p_count == 60) { params.t60 = pt; }
-            else if (p_count == 61) { params.t61 = pt; }
-            else if (p_count == 62) { params.t62 = pt; }
-            else if (p_count == 63) { params.t63 = pt; }
-            else { delete params; return null; }
+            if (p_count > 63) { delete params; return null; }
+            cg_targs_set(params, p_count, pt);
             p_count = p_count + 1;
             seg_start = pi + 1;
             }
@@ -4388,22 +4742,7 @@ fun sizeof_of_spelling(ctx: &FnContext, tname: string) <&LLVMType> {
             let f <&StructFieldInfo> = st.fields[fi];
             let ft <&LLVMType> = ctx.i32_ty;
             if (f != null) { ft = map_type(ctx, f.type_annotation); }
-            if (fi == 0) { s_args.t0 = ft; }
-            else if (fi == 1) { s_args.t1 = ft; }
-            else if (fi == 2) { s_args.t2 = ft; }
-            else if (fi == 3) { s_args.t3 = ft; }
-            else if (fi == 4) { s_args.t4 = ft; }
-            else if (fi == 5) { s_args.t5 = ft; }
-            else if (fi == 6) { s_args.t6 = ft; }
-            else if (fi == 7) { s_args.t7 = ft; }
-            else if (fi == 8) { s_args.t8 = ft; }
-            else if (fi == 9) { s_args.t9 = ft; }
-            else if (fi == 10) { s_args.t10 = ft; }
-            else if (fi == 11) { s_args.t11 = ft; }
-            else if (fi == 12) { s_args.t12 = ft; }
-            else if (fi == 13) { s_args.t13 = ft; }
-            else if (fi == 14) { s_args.t14 = ft; }
-            else if (fi == 15) { s_args.t15 = ft; }
+            cg_targs_set(s_args, fi, ft);
             fi = fi + 1;
         }
         let s_ty <&LLVMType> = llvm_struct_type(s_args, st.field_count, 0);
@@ -5055,70 +5394,7 @@ pub fun declare_function(
             delete p_args;
         }
 
-        if (p_count == 0) { param_types.t0 = pt; }
-        else if (p_count == 1) { param_types.t1 = pt; }
-        else if (p_count == 2) { param_types.t2 = pt; }
-        else if (p_count == 3) { param_types.t3 = pt; }
-        else if (p_count == 4) { param_types.t4 = pt; }
-        else if (p_count == 5) { param_types.t5 = pt; }
-        else if (p_count == 6) { param_types.t6 = pt; }
-        else if (p_count == 7) { param_types.t7 = pt; }
-        else if (p_count == 8) { param_types.t8 = pt; }
-        else if (p_count == 9) { param_types.t9 = pt; }
-        else if (p_count == 10) { param_types.t10 = pt; }
-        else if (p_count == 11) { param_types.t11 = pt; }
-        else if (p_count == 12) { param_types.t12 = pt; }
-        else if (p_count == 13) { param_types.t13 = pt; }
-        else if (p_count == 14) { param_types.t14 = pt; }
-        else if (p_count == 15) { param_types.t15 = pt; }
-        else if (p_count == 16) { param_types.t16 = pt; }
-        else if (p_count == 17) { param_types.t17 = pt; }
-        else if (p_count == 18) { param_types.t18 = pt; }
-        else if (p_count == 19) { param_types.t19 = pt; }
-        else if (p_count == 20) { param_types.t20 = pt; }
-        else if (p_count == 21) { param_types.t21 = pt; }
-        else if (p_count == 22) { param_types.t22 = pt; }
-        else if (p_count == 23) { param_types.t23 = pt; }
-        else if (p_count == 24) { param_types.t24 = pt; }
-        else if (p_count == 25) { param_types.t25 = pt; }
-        else if (p_count == 26) { param_types.t26 = pt; }
-        else if (p_count == 27) { param_types.t27 = pt; }
-        else if (p_count == 28) { param_types.t28 = pt; }
-        else if (p_count == 29) { param_types.t29 = pt; }
-        else if (p_count == 30) { param_types.t30 = pt; }
-        else if (p_count == 31) { param_types.t31 = pt; }
-        else if (p_count == 32) { param_types.t32 = pt; }
-        else if (p_count == 33) { param_types.t33 = pt; }
-        else if (p_count == 34) { param_types.t34 = pt; }
-        else if (p_count == 35) { param_types.t35 = pt; }
-        else if (p_count == 36) { param_types.t36 = pt; }
-        else if (p_count == 37) { param_types.t37 = pt; }
-        else if (p_count == 38) { param_types.t38 = pt; }
-        else if (p_count == 39) { param_types.t39 = pt; }
-        else if (p_count == 40) { param_types.t40 = pt; }
-        else if (p_count == 41) { param_types.t41 = pt; }
-        else if (p_count == 42) { param_types.t42 = pt; }
-        else if (p_count == 43) { param_types.t43 = pt; }
-        else if (p_count == 44) { param_types.t44 = pt; }
-        else if (p_count == 45) { param_types.t45 = pt; }
-        else if (p_count == 46) { param_types.t46 = pt; }
-        else if (p_count == 47) { param_types.t47 = pt; }
-        else if (p_count == 48) { param_types.t48 = pt; }
-        else if (p_count == 49) { param_types.t49 = pt; }
-        else if (p_count == 50) { param_types.t50 = pt; }
-        else if (p_count == 51) { param_types.t51 = pt; }
-        else if (p_count == 52) { param_types.t52 = pt; }
-        else if (p_count == 53) { param_types.t53 = pt; }
-        else if (p_count == 54) { param_types.t54 = pt; }
-        else if (p_count == 55) { param_types.t55 = pt; }
-        else if (p_count == 56) { param_types.t56 = pt; }
-        else if (p_count == 57) { param_types.t57 = pt; }
-        else if (p_count == 58) { param_types.t58 = pt; }
-        else if (p_count == 59) { param_types.t59 = pt; }
-        else if (p_count == 60) { param_types.t60 = pt; }
-        else if (p_count == 61) { param_types.t61 = pt; }
-        else if (p_count == 62) { param_types.t62 = pt; }
-        else if (p_count == 63) { param_types.t63 = pt; }
+        cg_targs_set(param_types, p_count, pt);
 
         p_count = p_count + 1;
         p_cur = p_cur.right;
@@ -9941,69 +10217,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                             if (actual_arg == null) { actual_arg = cur_wrap; }
                             let av <&LLVMValue> = lower_expr(ctx, actual_arg);
                             if (av == null) { if_bad = true; }
-                            if (if_arg_count == 1) { if_args.v1 = av; }
-                            else if (if_arg_count == 2) { if_args.v2 = av; }
-                            else if (if_arg_count == 3) { if_args.v3 = av; }
-                            else if (if_arg_count == 4) { if_args.v4 = av; }
-                            else if (if_arg_count == 5) { if_args.v5 = av; }
-                            else if (if_arg_count == 6) { if_args.v6 = av; }
-                            else if (if_arg_count == 7) { if_args.v7 = av; }
-                            else if (if_arg_count == 8) { if_args.v8 = av; }
-                            else if (if_arg_count == 9) { if_args.v9 = av; }
-                            else if (if_arg_count == 10) { if_args.v10 = av; }
-                            else if (if_arg_count == 11) { if_args.v11 = av; }
-                            else if (if_arg_count == 12) { if_args.v12 = av; }
-                            else if (if_arg_count == 13) { if_args.v13 = av; }
-                            else if (if_arg_count == 14) { if_args.v14 = av; }
-                            else if (if_arg_count == 15) { if_args.v15 = av; }
-                            else if (if_arg_count == 16) { if_args.v16 = av; }
-                            else if (if_arg_count == 17) { if_args.v17 = av; }
-                            else if (if_arg_count == 18) { if_args.v18 = av; }
-                            else if (if_arg_count == 19) { if_args.v19 = av; }
-                            else if (if_arg_count == 20) { if_args.v20 = av; }
-                            else if (if_arg_count == 21) { if_args.v21 = av; }
-                            else if (if_arg_count == 22) { if_args.v22 = av; }
-                            else if (if_arg_count == 23) { if_args.v23 = av; }
-                            else if (if_arg_count == 24) { if_args.v24 = av; }
-                            else if (if_arg_count == 25) { if_args.v25 = av; }
-                            else if (if_arg_count == 26) { if_args.v26 = av; }
-                            else if (if_arg_count == 27) { if_args.v27 = av; }
-                            else if (if_arg_count == 28) { if_args.v28 = av; }
-                            else if (if_arg_count == 29) { if_args.v29 = av; }
-                            else if (if_arg_count == 30) { if_args.v30 = av; }
-                            else if (if_arg_count == 31) { if_args.v31 = av; }
-                            else if (if_arg_count == 32) { if_args.v32 = av; }
-                            else if (if_arg_count == 33) { if_args.v33 = av; }
-                            else if (if_arg_count == 34) { if_args.v34 = av; }
-                            else if (if_arg_count == 35) { if_args.v35 = av; }
-                            else if (if_arg_count == 36) { if_args.v36 = av; }
-                            else if (if_arg_count == 37) { if_args.v37 = av; }
-                            else if (if_arg_count == 38) { if_args.v38 = av; }
-                            else if (if_arg_count == 39) { if_args.v39 = av; }
-                            else if (if_arg_count == 40) { if_args.v40 = av; }
-                            else if (if_arg_count == 41) { if_args.v41 = av; }
-                            else if (if_arg_count == 42) { if_args.v42 = av; }
-                            else if (if_arg_count == 43) { if_args.v43 = av; }
-                            else if (if_arg_count == 44) { if_args.v44 = av; }
-                            else if (if_arg_count == 45) { if_args.v45 = av; }
-                            else if (if_arg_count == 46) { if_args.v46 = av; }
-                            else if (if_arg_count == 47) { if_args.v47 = av; }
-                            else if (if_arg_count == 48) { if_args.v48 = av; }
-                            else if (if_arg_count == 49) { if_args.v49 = av; }
-                            else if (if_arg_count == 50) { if_args.v50 = av; }
-                            else if (if_arg_count == 51) { if_args.v51 = av; }
-                            else if (if_arg_count == 52) { if_args.v52 = av; }
-                            else if (if_arg_count == 53) { if_args.v53 = av; }
-                            else if (if_arg_count == 54) { if_args.v54 = av; }
-                            else if (if_arg_count == 55) { if_args.v55 = av; }
-                            else if (if_arg_count == 56) { if_args.v56 = av; }
-                            else if (if_arg_count == 57) { if_args.v57 = av; }
-                            else if (if_arg_count == 58) { if_args.v58 = av; }
-                            else if (if_arg_count == 59) { if_args.v59 = av; }
-                            else if (if_arg_count == 60) { if_args.v60 = av; }
-                            else if (if_arg_count == 61) { if_args.v61 = av; }
-                            else if (if_arg_count == 62) { if_args.v62 = av; }
-                            else if (if_arg_count == 63) { if_args.v63 = av; }
+                            cg_vargs_set(if_args, if_arg_count, av);
                             if_arg_count = if_arg_count + 1;
                             cur_wrap = cur_wrap.right;
                         }
@@ -10024,69 +10238,12 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                         let ret_t <&LLVMType> = map_type(ctx, m_info.ret_type);
                         let if_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
                         if_params.t0 = ctx.ptr_ty;
-                        if (if_arg_count > 1 && if_args.v1 != null) { if_params.t1 = llvm_type_of(if_args.v1); }
-                        if (if_arg_count > 2 && if_args.v2 != null) { if_params.t2 = llvm_type_of(if_args.v2); }
-                        if (if_arg_count > 3 && if_args.v3 != null) { if_params.t3 = llvm_type_of(if_args.v3); }
-                        if (if_arg_count > 4 && if_args.v4 != null) { if_params.t4 = llvm_type_of(if_args.v4); }
-                        if (if_arg_count > 5 && if_args.v5 != null) { if_params.t5 = llvm_type_of(if_args.v5); }
-                        if (if_arg_count > 6 && if_args.v6 != null) { if_params.t6 = llvm_type_of(if_args.v6); }
-                        if (if_arg_count > 7 && if_args.v7 != null) { if_params.t7 = llvm_type_of(if_args.v7); }
-                        if (if_arg_count > 8 && if_args.v8 != null) { if_params.t8 = llvm_type_of(if_args.v8); }
-                        if (if_arg_count > 9 && if_args.v9 != null) { if_params.t9 = llvm_type_of(if_args.v9); }
-                        if (if_arg_count > 10 && if_args.v10 != null) { if_params.t10 = llvm_type_of(if_args.v10); }
-                        if (if_arg_count > 11 && if_args.v11 != null) { if_params.t11 = llvm_type_of(if_args.v11); }
-                        if (if_arg_count > 12 && if_args.v12 != null) { if_params.t12 = llvm_type_of(if_args.v12); }
-                        if (if_arg_count > 13 && if_args.v13 != null) { if_params.t13 = llvm_type_of(if_args.v13); }
-                        if (if_arg_count > 14 && if_args.v14 != null) { if_params.t14 = llvm_type_of(if_args.v14); }
-                        if (if_arg_count > 15 && if_args.v15 != null) { if_params.t15 = llvm_type_of(if_args.v15); }
-                        if (if_arg_count > 16 && if_args.v16 != null) { if_params.t16 = llvm_type_of(if_args.v16); }
-                        if (if_arg_count > 17 && if_args.v17 != null) { if_params.t17 = llvm_type_of(if_args.v17); }
-                        if (if_arg_count > 18 && if_args.v18 != null) { if_params.t18 = llvm_type_of(if_args.v18); }
-                        if (if_arg_count > 19 && if_args.v19 != null) { if_params.t19 = llvm_type_of(if_args.v19); }
-                        if (if_arg_count > 20 && if_args.v20 != null) { if_params.t20 = llvm_type_of(if_args.v20); }
-                        if (if_arg_count > 21 && if_args.v21 != null) { if_params.t21 = llvm_type_of(if_args.v21); }
-                        if (if_arg_count > 22 && if_args.v22 != null) { if_params.t22 = llvm_type_of(if_args.v22); }
-                        if (if_arg_count > 23 && if_args.v23 != null) { if_params.t23 = llvm_type_of(if_args.v23); }
-                        if (if_arg_count > 24 && if_args.v24 != null) { if_params.t24 = llvm_type_of(if_args.v24); }
-                        if (if_arg_count > 25 && if_args.v25 != null) { if_params.t25 = llvm_type_of(if_args.v25); }
-                        if (if_arg_count > 26 && if_args.v26 != null) { if_params.t26 = llvm_type_of(if_args.v26); }
-                        if (if_arg_count > 27 && if_args.v27 != null) { if_params.t27 = llvm_type_of(if_args.v27); }
-                        if (if_arg_count > 28 && if_args.v28 != null) { if_params.t28 = llvm_type_of(if_args.v28); }
-                        if (if_arg_count > 29 && if_args.v29 != null) { if_params.t29 = llvm_type_of(if_args.v29); }
-                        if (if_arg_count > 30 && if_args.v30 != null) { if_params.t30 = llvm_type_of(if_args.v30); }
-                        if (if_arg_count > 31 && if_args.v31 != null) { if_params.t31 = llvm_type_of(if_args.v31); }
-                        if (if_arg_count > 32 && if_args.v32 != null) { if_params.t32 = llvm_type_of(if_args.v32); }
-                        if (if_arg_count > 33 && if_args.v33 != null) { if_params.t33 = llvm_type_of(if_args.v33); }
-                        if (if_arg_count > 34 && if_args.v34 != null) { if_params.t34 = llvm_type_of(if_args.v34); }
-                        if (if_arg_count > 35 && if_args.v35 != null) { if_params.t35 = llvm_type_of(if_args.v35); }
-                        if (if_arg_count > 36 && if_args.v36 != null) { if_params.t36 = llvm_type_of(if_args.v36); }
-                        if (if_arg_count > 37 && if_args.v37 != null) { if_params.t37 = llvm_type_of(if_args.v37); }
-                        if (if_arg_count > 38 && if_args.v38 != null) { if_params.t38 = llvm_type_of(if_args.v38); }
-                        if (if_arg_count > 39 && if_args.v39 != null) { if_params.t39 = llvm_type_of(if_args.v39); }
-                        if (if_arg_count > 40 && if_args.v40 != null) { if_params.t40 = llvm_type_of(if_args.v40); }
-                        if (if_arg_count > 41 && if_args.v41 != null) { if_params.t41 = llvm_type_of(if_args.v41); }
-                        if (if_arg_count > 42 && if_args.v42 != null) { if_params.t42 = llvm_type_of(if_args.v42); }
-                        if (if_arg_count > 43 && if_args.v43 != null) { if_params.t43 = llvm_type_of(if_args.v43); }
-                        if (if_arg_count > 44 && if_args.v44 != null) { if_params.t44 = llvm_type_of(if_args.v44); }
-                        if (if_arg_count > 45 && if_args.v45 != null) { if_params.t45 = llvm_type_of(if_args.v45); }
-                        if (if_arg_count > 46 && if_args.v46 != null) { if_params.t46 = llvm_type_of(if_args.v46); }
-                        if (if_arg_count > 47 && if_args.v47 != null) { if_params.t47 = llvm_type_of(if_args.v47); }
-                        if (if_arg_count > 48 && if_args.v48 != null) { if_params.t48 = llvm_type_of(if_args.v48); }
-                        if (if_arg_count > 49 && if_args.v49 != null) { if_params.t49 = llvm_type_of(if_args.v49); }
-                        if (if_arg_count > 50 && if_args.v50 != null) { if_params.t50 = llvm_type_of(if_args.v50); }
-                        if (if_arg_count > 51 && if_args.v51 != null) { if_params.t51 = llvm_type_of(if_args.v51); }
-                        if (if_arg_count > 52 && if_args.v52 != null) { if_params.t52 = llvm_type_of(if_args.v52); }
-                        if (if_arg_count > 53 && if_args.v53 != null) { if_params.t53 = llvm_type_of(if_args.v53); }
-                        if (if_arg_count > 54 && if_args.v54 != null) { if_params.t54 = llvm_type_of(if_args.v54); }
-                        if (if_arg_count > 55 && if_args.v55 != null) { if_params.t55 = llvm_type_of(if_args.v55); }
-                        if (if_arg_count > 56 && if_args.v56 != null) { if_params.t56 = llvm_type_of(if_args.v56); }
-                        if (if_arg_count > 57 && if_args.v57 != null) { if_params.t57 = llvm_type_of(if_args.v57); }
-                        if (if_arg_count > 58 && if_args.v58 != null) { if_params.t58 = llvm_type_of(if_args.v58); }
-                        if (if_arg_count > 59 && if_args.v59 != null) { if_params.t59 = llvm_type_of(if_args.v59); }
-                        if (if_arg_count > 60 && if_args.v60 != null) { if_params.t60 = llvm_type_of(if_args.v60); }
-                        if (if_arg_count > 61 && if_args.v61 != null) { if_params.t61 = llvm_type_of(if_args.v61); }
-                        if (if_arg_count > 62 && if_args.v62 != null) { if_params.t62 = llvm_type_of(if_args.v62); }
-                        if (if_arg_count > 63 && if_args.v63 != null) { if_params.t63 = llvm_type_of(if_args.v63); }
+                        let if_ti <int> = 1;
+                        while (if_ti < if_arg_count) {
+                            let if_v <&LLVMValue> = cg_vargs_at(if_args, if_ti);
+                            if (if_v != null) { cg_targs_set(if_params, if_ti, llvm_type_of(if_v)); }
+                            if_ti = if_ti + 1;
+                        }
                         let if_fn_ty <&LLVMType> = llvm_function_type(ret_t, if_params, if_arg_count, 0);
                         delete if_params;
                         let res_v <&LLVMValue> = llvm_build_call2(ctx.builder, if_fn_ty, fn_ptr, if_args, if_arg_count, "if_call");
@@ -10466,71 +10623,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 acount = acount + 1;
                 aw = aw.right;
             }
-            let pcount <int> = 0;
-            if (param_tys.t0 != null) { pcount = pcount + 1; }
-            if (param_tys.t1 != null) { pcount = pcount + 1; }
-            if (param_tys.t2 != null) { pcount = pcount + 1; }
-            if (param_tys.t3 != null) { pcount = pcount + 1; }
-            if (param_tys.t4 != null) { pcount = pcount + 1; }
-            if (param_tys.t5 != null) { pcount = pcount + 1; }
-            if (param_tys.t6 != null) { pcount = pcount + 1; }
-            if (param_tys.t7 != null) { pcount = pcount + 1; }
-            if (param_tys.t8 != null) { pcount = pcount + 1; }
-            if (param_tys.t9 != null) { pcount = pcount + 1; }
-            if (param_tys.t10 != null) { pcount = pcount + 1; }
-            if (param_tys.t11 != null) { pcount = pcount + 1; }
-            if (param_tys.t12 != null) { pcount = pcount + 1; }
-            if (param_tys.t13 != null) { pcount = pcount + 1; }
-            if (param_tys.t14 != null) { pcount = pcount + 1; }
-            if (param_tys.t15 != null) { pcount = pcount + 1; }
-            if (param_tys.t16 != null) { pcount = pcount + 1; }
-            if (param_tys.t17 != null) { pcount = pcount + 1; }
-            if (param_tys.t18 != null) { pcount = pcount + 1; }
-            if (param_tys.t19 != null) { pcount = pcount + 1; }
-            if (param_tys.t20 != null) { pcount = pcount + 1; }
-            if (param_tys.t21 != null) { pcount = pcount + 1; }
-            if (param_tys.t22 != null) { pcount = pcount + 1; }
-            if (param_tys.t23 != null) { pcount = pcount + 1; }
-            if (param_tys.t24 != null) { pcount = pcount + 1; }
-            if (param_tys.t25 != null) { pcount = pcount + 1; }
-            if (param_tys.t26 != null) { pcount = pcount + 1; }
-            if (param_tys.t27 != null) { pcount = pcount + 1; }
-            if (param_tys.t28 != null) { pcount = pcount + 1; }
-            if (param_tys.t29 != null) { pcount = pcount + 1; }
-            if (param_tys.t30 != null) { pcount = pcount + 1; }
-            if (param_tys.t31 != null) { pcount = pcount + 1; }
-            if (param_tys.t32 != null) { pcount = pcount + 1; }
-            if (param_tys.t33 != null) { pcount = pcount + 1; }
-            if (param_tys.t34 != null) { pcount = pcount + 1; }
-            if (param_tys.t35 != null) { pcount = pcount + 1; }
-            if (param_tys.t36 != null) { pcount = pcount + 1; }
-            if (param_tys.t37 != null) { pcount = pcount + 1; }
-            if (param_tys.t38 != null) { pcount = pcount + 1; }
-            if (param_tys.t39 != null) { pcount = pcount + 1; }
-            if (param_tys.t40 != null) { pcount = pcount + 1; }
-            if (param_tys.t41 != null) { pcount = pcount + 1; }
-            if (param_tys.t42 != null) { pcount = pcount + 1; }
-            if (param_tys.t43 != null) { pcount = pcount + 1; }
-            if (param_tys.t44 != null) { pcount = pcount + 1; }
-            if (param_tys.t45 != null) { pcount = pcount + 1; }
-            if (param_tys.t46 != null) { pcount = pcount + 1; }
-            if (param_tys.t47 != null) { pcount = pcount + 1; }
-            if (param_tys.t48 != null) { pcount = pcount + 1; }
-            if (param_tys.t49 != null) { pcount = pcount + 1; }
-            if (param_tys.t50 != null) { pcount = pcount + 1; }
-            if (param_tys.t51 != null) { pcount = pcount + 1; }
-            if (param_tys.t52 != null) { pcount = pcount + 1; }
-            if (param_tys.t53 != null) { pcount = pcount + 1; }
-            if (param_tys.t54 != null) { pcount = pcount + 1; }
-            if (param_tys.t55 != null) { pcount = pcount + 1; }
-            if (param_tys.t56 != null) { pcount = pcount + 1; }
-            if (param_tys.t57 != null) { pcount = pcount + 1; }
-            if (param_tys.t58 != null) { pcount = pcount + 1; }
-            if (param_tys.t59 != null) { pcount = pcount + 1; }
-            if (param_tys.t60 != null) { pcount = pcount + 1; }
-            if (param_tys.t61 != null) { pcount = pcount + 1; }
-            if (param_tys.t62 != null) { pcount = pcount + 1; }
-            if (param_tys.t63 != null) { pcount = pcount + 1; }
+            let pcount <int> = cg_targs_count(param_tys);
             if (acount + 1 == pcount) {
                 args.v0 = llvm_const_null(ctx.ptr_ty);
                 arg_count = 1;
@@ -10589,71 +10682,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             if (av != null) {
                 av = fn_value_to_ptr(ctx, actual_arg, av);
                 let a_ty <&LLVMType> = llvm_type_of(av);
-                let exp_ty <&LLVMType> = null;
-                if (arg_count == 0) { exp_ty = param_tys.t0; }
-                else if (arg_count == 1) { exp_ty = param_tys.t1; }
-                else if (arg_count == 2) { exp_ty = param_tys.t2; }
-                else if (arg_count == 3) { exp_ty = param_tys.t3; }
-                else if (arg_count == 4) { exp_ty = param_tys.t4; }
-                else if (arg_count == 5) { exp_ty = param_tys.t5; }
-                else if (arg_count == 6) { exp_ty = param_tys.t6; }
-                else if (arg_count == 7) { exp_ty = param_tys.t7; }
-                else if (arg_count == 8) { exp_ty = param_tys.t8; }
-                else if (arg_count == 9) { exp_ty = param_tys.t9; }
-                else if (arg_count == 10) { exp_ty = param_tys.t10; }
-                else if (arg_count == 11) { exp_ty = param_tys.t11; }
-                else if (arg_count == 12) { exp_ty = param_tys.t12; }
-                else if (arg_count == 13) { exp_ty = param_tys.t13; }
-                else if (arg_count == 14) { exp_ty = param_tys.t14; }
-                else if (arg_count == 15) { exp_ty = param_tys.t15; }
-                else if (arg_count == 16) { exp_ty = param_tys.t16; }
-                else if (arg_count == 17) { exp_ty = param_tys.t17; }
-                else if (arg_count == 18) { exp_ty = param_tys.t18; }
-                else if (arg_count == 19) { exp_ty = param_tys.t19; }
-                else if (arg_count == 20) { exp_ty = param_tys.t20; }
-                else if (arg_count == 21) { exp_ty = param_tys.t21; }
-                else if (arg_count == 22) { exp_ty = param_tys.t22; }
-                else if (arg_count == 23) { exp_ty = param_tys.t23; }
-                else if (arg_count == 24) { exp_ty = param_tys.t24; }
-                else if (arg_count == 25) { exp_ty = param_tys.t25; }
-                else if (arg_count == 26) { exp_ty = param_tys.t26; }
-                else if (arg_count == 27) { exp_ty = param_tys.t27; }
-                else if (arg_count == 28) { exp_ty = param_tys.t28; }
-                else if (arg_count == 29) { exp_ty = param_tys.t29; }
-                else if (arg_count == 30) { exp_ty = param_tys.t30; }
-                else if (arg_count == 31) { exp_ty = param_tys.t31; }
-                else if (arg_count == 32) { exp_ty = param_tys.t32; }
-                else if (arg_count == 33) { exp_ty = param_tys.t33; }
-                else if (arg_count == 34) { exp_ty = param_tys.t34; }
-                else if (arg_count == 35) { exp_ty = param_tys.t35; }
-                else if (arg_count == 36) { exp_ty = param_tys.t36; }
-                else if (arg_count == 37) { exp_ty = param_tys.t37; }
-                else if (arg_count == 38) { exp_ty = param_tys.t38; }
-                else if (arg_count == 39) { exp_ty = param_tys.t39; }
-                else if (arg_count == 40) { exp_ty = param_tys.t40; }
-                else if (arg_count == 41) { exp_ty = param_tys.t41; }
-                else if (arg_count == 42) { exp_ty = param_tys.t42; }
-                else if (arg_count == 43) { exp_ty = param_tys.t43; }
-                else if (arg_count == 44) { exp_ty = param_tys.t44; }
-                else if (arg_count == 45) { exp_ty = param_tys.t45; }
-                else if (arg_count == 46) { exp_ty = param_tys.t46; }
-                else if (arg_count == 47) { exp_ty = param_tys.t47; }
-                else if (arg_count == 48) { exp_ty = param_tys.t48; }
-                else if (arg_count == 49) { exp_ty = param_tys.t49; }
-                else if (arg_count == 50) { exp_ty = param_tys.t50; }
-                else if (arg_count == 51) { exp_ty = param_tys.t51; }
-                else if (arg_count == 52) { exp_ty = param_tys.t52; }
-                else if (arg_count == 53) { exp_ty = param_tys.t53; }
-                else if (arg_count == 54) { exp_ty = param_tys.t54; }
-                else if (arg_count == 55) { exp_ty = param_tys.t55; }
-                else if (arg_count == 56) { exp_ty = param_tys.t56; }
-                else if (arg_count == 57) { exp_ty = param_tys.t57; }
-                else if (arg_count == 58) { exp_ty = param_tys.t58; }
-                else if (arg_count == 59) { exp_ty = param_tys.t59; }
-                else if (arg_count == 60) { exp_ty = param_tys.t60; }
-                else if (arg_count == 61) { exp_ty = param_tys.t61; }
-                else if (arg_count == 62) { exp_ty = param_tys.t62; }
-                else if (arg_count == 63) { exp_ty = param_tys.t63; }
+                let exp_ty <&LLVMType> = cg_targs_at(param_tys, arg_count);
 
                 if (exp_ty != null && exp_ty != a_ty) {
                     // A value for a nullable pair parameter wraps with its
@@ -10729,71 +10758,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     }
                 }
             } else {
-                let exp_ty <&LLVMType> = null;
-                if (arg_count == 0) { exp_ty = param_tys.t0; }
-                else if (arg_count == 1) { exp_ty = param_tys.t1; }
-                else if (arg_count == 2) { exp_ty = param_tys.t2; }
-                else if (arg_count == 3) { exp_ty = param_tys.t3; }
-                else if (arg_count == 4) { exp_ty = param_tys.t4; }
-                else if (arg_count == 5) { exp_ty = param_tys.t5; }
-                else if (arg_count == 6) { exp_ty = param_tys.t6; }
-                else if (arg_count == 7) { exp_ty = param_tys.t7; }
-                else if (arg_count == 8) { exp_ty = param_tys.t8; }
-                else if (arg_count == 9) { exp_ty = param_tys.t9; }
-                else if (arg_count == 10) { exp_ty = param_tys.t10; }
-                else if (arg_count == 11) { exp_ty = param_tys.t11; }
-                else if (arg_count == 12) { exp_ty = param_tys.t12; }
-                else if (arg_count == 13) { exp_ty = param_tys.t13; }
-                else if (arg_count == 14) { exp_ty = param_tys.t14; }
-                else if (arg_count == 15) { exp_ty = param_tys.t15; }
-                else if (arg_count == 16) { exp_ty = param_tys.t16; }
-                else if (arg_count == 17) { exp_ty = param_tys.t17; }
-                else if (arg_count == 18) { exp_ty = param_tys.t18; }
-                else if (arg_count == 19) { exp_ty = param_tys.t19; }
-                else if (arg_count == 20) { exp_ty = param_tys.t20; }
-                else if (arg_count == 21) { exp_ty = param_tys.t21; }
-                else if (arg_count == 22) { exp_ty = param_tys.t22; }
-                else if (arg_count == 23) { exp_ty = param_tys.t23; }
-                else if (arg_count == 24) { exp_ty = param_tys.t24; }
-                else if (arg_count == 25) { exp_ty = param_tys.t25; }
-                else if (arg_count == 26) { exp_ty = param_tys.t26; }
-                else if (arg_count == 27) { exp_ty = param_tys.t27; }
-                else if (arg_count == 28) { exp_ty = param_tys.t28; }
-                else if (arg_count == 29) { exp_ty = param_tys.t29; }
-                else if (arg_count == 30) { exp_ty = param_tys.t30; }
-                else if (arg_count == 31) { exp_ty = param_tys.t31; }
-                else if (arg_count == 32) { exp_ty = param_tys.t32; }
-                else if (arg_count == 33) { exp_ty = param_tys.t33; }
-                else if (arg_count == 34) { exp_ty = param_tys.t34; }
-                else if (arg_count == 35) { exp_ty = param_tys.t35; }
-                else if (arg_count == 36) { exp_ty = param_tys.t36; }
-                else if (arg_count == 37) { exp_ty = param_tys.t37; }
-                else if (arg_count == 38) { exp_ty = param_tys.t38; }
-                else if (arg_count == 39) { exp_ty = param_tys.t39; }
-                else if (arg_count == 40) { exp_ty = param_tys.t40; }
-                else if (arg_count == 41) { exp_ty = param_tys.t41; }
-                else if (arg_count == 42) { exp_ty = param_tys.t42; }
-                else if (arg_count == 43) { exp_ty = param_tys.t43; }
-                else if (arg_count == 44) { exp_ty = param_tys.t44; }
-                else if (arg_count == 45) { exp_ty = param_tys.t45; }
-                else if (arg_count == 46) { exp_ty = param_tys.t46; }
-                else if (arg_count == 47) { exp_ty = param_tys.t47; }
-                else if (arg_count == 48) { exp_ty = param_tys.t48; }
-                else if (arg_count == 49) { exp_ty = param_tys.t49; }
-                else if (arg_count == 50) { exp_ty = param_tys.t50; }
-                else if (arg_count == 51) { exp_ty = param_tys.t51; }
-                else if (arg_count == 52) { exp_ty = param_tys.t52; }
-                else if (arg_count == 53) { exp_ty = param_tys.t53; }
-                else if (arg_count == 54) { exp_ty = param_tys.t54; }
-                else if (arg_count == 55) { exp_ty = param_tys.t55; }
-                else if (arg_count == 56) { exp_ty = param_tys.t56; }
-                else if (arg_count == 57) { exp_ty = param_tys.t57; }
-                else if (arg_count == 58) { exp_ty = param_tys.t58; }
-                else if (arg_count == 59) { exp_ty = param_tys.t59; }
-                else if (arg_count == 60) { exp_ty = param_tys.t60; }
-                else if (arg_count == 61) { exp_ty = param_tys.t61; }
-                else if (arg_count == 62) { exp_ty = param_tys.t62; }
-                else if (arg_count == 63) { exp_ty = param_tys.t63; }
+                let exp_ty <&LLVMType> = cg_targs_at(param_tys, arg_count);
 
                 if (cg_is_tagged_pair(ctx, exp_ty)) {
                     av = llvm_const_null(exp_ty);
@@ -10809,70 +10774,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     av = llvm_const_null(ctx.ptr_ty);
                 }
             }
-            if (arg_count == 0) { args.v0 = av; }
-            else if (arg_count == 1) { args.v1 = av; }
-            else if (arg_count == 2) { args.v2 = av; }
-            else if (arg_count == 3) { args.v3 = av; }
-            else if (arg_count == 4) { args.v4 = av; }
-            else if (arg_count == 5) { args.v5 = av; }
-            else if (arg_count == 6) { args.v6 = av; }
-            else if (arg_count == 7) { args.v7 = av; }
-            else if (arg_count == 8) { args.v8 = av; }
-            else if (arg_count == 9) { args.v9 = av; }
-            else if (arg_count == 10) { args.v10 = av; }
-            else if (arg_count == 11) { args.v11 = av; }
-            else if (arg_count == 12) { args.v12 = av; }
-            else if (arg_count == 13) { args.v13 = av; }
-            else if (arg_count == 14) { args.v14 = av; }
-            else if (arg_count == 15) { args.v15 = av; }
-            else if (arg_count == 16) { args.v16 = av; }
-            else if (arg_count == 17) { args.v17 = av; }
-            else if (arg_count == 18) { args.v18 = av; }
-            else if (arg_count == 19) { args.v19 = av; }
-            else if (arg_count == 20) { args.v20 = av; }
-            else if (arg_count == 21) { args.v21 = av; }
-            else if (arg_count == 22) { args.v22 = av; }
-            else if (arg_count == 23) { args.v23 = av; }
-            else if (arg_count == 24) { args.v24 = av; }
-            else if (arg_count == 25) { args.v25 = av; }
-            else if (arg_count == 26) { args.v26 = av; }
-            else if (arg_count == 27) { args.v27 = av; }
-            else if (arg_count == 28) { args.v28 = av; }
-            else if (arg_count == 29) { args.v29 = av; }
-            else if (arg_count == 30) { args.v30 = av; }
-            else if (arg_count == 31) { args.v31 = av; }
-            else if (arg_count == 32) { args.v32 = av; }
-            else if (arg_count == 33) { args.v33 = av; }
-            else if (arg_count == 34) { args.v34 = av; }
-            else if (arg_count == 35) { args.v35 = av; }
-            else if (arg_count == 36) { args.v36 = av; }
-            else if (arg_count == 37) { args.v37 = av; }
-            else if (arg_count == 38) { args.v38 = av; }
-            else if (arg_count == 39) { args.v39 = av; }
-            else if (arg_count == 40) { args.v40 = av; }
-            else if (arg_count == 41) { args.v41 = av; }
-            else if (arg_count == 42) { args.v42 = av; }
-            else if (arg_count == 43) { args.v43 = av; }
-            else if (arg_count == 44) { args.v44 = av; }
-            else if (arg_count == 45) { args.v45 = av; }
-            else if (arg_count == 46) { args.v46 = av; }
-            else if (arg_count == 47) { args.v47 = av; }
-            else if (arg_count == 48) { args.v48 = av; }
-            else if (arg_count == 49) { args.v49 = av; }
-            else if (arg_count == 50) { args.v50 = av; }
-            else if (arg_count == 51) { args.v51 = av; }
-            else if (arg_count == 52) { args.v52 = av; }
-            else if (arg_count == 53) { args.v53 = av; }
-            else if (arg_count == 54) { args.v54 = av; }
-            else if (arg_count == 55) { args.v55 = av; }
-            else if (arg_count == 56) { args.v56 = av; }
-            else if (arg_count == 57) { args.v57 = av; }
-            else if (arg_count == 58) { args.v58 = av; }
-            else if (arg_count == 59) { args.v59 = av; }
-            else if (arg_count == 60) { args.v60 = av; }
-            else if (arg_count == 61) { args.v61 = av; }
-            else if (arg_count == 62) { args.v62 = av; }
-            else if (arg_count == 63) { args.v63 = av; }
+            cg_vargs_set(args, arg_count, av);
             arg_count = arg_count + 1;
             cur_wrap = cur_wrap.right;
         }
@@ -10889,137 +10791,9 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         // `n?: int` arrives as null), mirroring nullifier.fin:39
         // `make_A()`. A missing non-nullable parameter is not fillable and
         // refuses instead of emitting a short call.
-        let p_count <int> = 0;
-        if (param_tys.t0 != null) { p_count = 1; }
-        if (param_tys.t1 != null) { p_count = 2; }
-        if (param_tys.t2 != null) { p_count = 3; }
-        if (param_tys.t3 != null) { p_count = 4; }
-        if (param_tys.t4 != null) { p_count = 5; }
-        if (param_tys.t5 != null) { p_count = 6; }
-        if (param_tys.t6 != null) { p_count = 7; }
-        if (param_tys.t7 != null) { p_count = 8; }
-        if (param_tys.t8 != null) { p_count = 9; }
-        if (param_tys.t9 != null) { p_count = 10; }
-        if (param_tys.t10 != null) { p_count = 11; }
-        if (param_tys.t11 != null) { p_count = 12; }
-        if (param_tys.t12 != null) { p_count = 13; }
-        if (param_tys.t13 != null) { p_count = 14; }
-        if (param_tys.t14 != null) { p_count = 15; }
-        if (param_tys.t15 != null) { p_count = 16; }
-        if (param_tys.t16 != null) { p_count = 17; }
-        if (param_tys.t17 != null) { p_count = 18; }
-        if (param_tys.t18 != null) { p_count = 19; }
-        if (param_tys.t19 != null) { p_count = 20; }
-        if (param_tys.t20 != null) { p_count = 21; }
-        if (param_tys.t21 != null) { p_count = 22; }
-        if (param_tys.t22 != null) { p_count = 23; }
-        if (param_tys.t23 != null) { p_count = 24; }
-        if (param_tys.t24 != null) { p_count = 25; }
-        if (param_tys.t25 != null) { p_count = 26; }
-        if (param_tys.t26 != null) { p_count = 27; }
-        if (param_tys.t27 != null) { p_count = 28; }
-        if (param_tys.t28 != null) { p_count = 29; }
-        if (param_tys.t29 != null) { p_count = 30; }
-        if (param_tys.t30 != null) { p_count = 31; }
-        if (param_tys.t31 != null) { p_count = 32; }
-        if (param_tys.t32 != null) { p_count = 33; }
-        if (param_tys.t33 != null) { p_count = 34; }
-        if (param_tys.t34 != null) { p_count = 35; }
-        if (param_tys.t35 != null) { p_count = 36; }
-        if (param_tys.t36 != null) { p_count = 37; }
-        if (param_tys.t37 != null) { p_count = 38; }
-        if (param_tys.t38 != null) { p_count = 39; }
-        if (param_tys.t39 != null) { p_count = 40; }
-        if (param_tys.t40 != null) { p_count = 41; }
-        if (param_tys.t41 != null) { p_count = 42; }
-        if (param_tys.t42 != null) { p_count = 43; }
-        if (param_tys.t43 != null) { p_count = 44; }
-        if (param_tys.t44 != null) { p_count = 45; }
-        if (param_tys.t45 != null) { p_count = 46; }
-        if (param_tys.t46 != null) { p_count = 47; }
-        if (param_tys.t47 != null) { p_count = 48; }
-        if (param_tys.t48 != null) { p_count = 49; }
-        if (param_tys.t49 != null) { p_count = 50; }
-        if (param_tys.t50 != null) { p_count = 51; }
-        if (param_tys.t51 != null) { p_count = 52; }
-        if (param_tys.t52 != null) { p_count = 53; }
-        if (param_tys.t53 != null) { p_count = 54; }
-        if (param_tys.t54 != null) { p_count = 55; }
-        if (param_tys.t55 != null) { p_count = 56; }
-        if (param_tys.t56 != null) { p_count = 57; }
-        if (param_tys.t57 != null) { p_count = 58; }
-        if (param_tys.t58 != null) { p_count = 59; }
-        if (param_tys.t59 != null) { p_count = 60; }
-        if (param_tys.t60 != null) { p_count = 61; }
-        if (param_tys.t61 != null) { p_count = 62; }
-        if (param_tys.t62 != null) { p_count = 63; }
-        if (param_tys.t63 != null) { p_count = 64; }
+        let p_count <int> = cg_targs_span(param_tys);
         while (arg_count < p_count) {
-            let miss_ty <&LLVMType> = null;
-            if (arg_count == 0) { miss_ty = param_tys.t0; }
-            else if (arg_count == 1) { miss_ty = param_tys.t1; }
-            else if (arg_count == 2) { miss_ty = param_tys.t2; }
-            else if (arg_count == 3) { miss_ty = param_tys.t3; }
-            else if (arg_count == 4) { miss_ty = param_tys.t4; }
-            else if (arg_count == 5) { miss_ty = param_tys.t5; }
-            else if (arg_count == 6) { miss_ty = param_tys.t6; }
-            else if (arg_count == 7) { miss_ty = param_tys.t7; }
-            else if (arg_count == 8) { miss_ty = param_tys.t8; }
-            else if (arg_count == 9) { miss_ty = param_tys.t9; }
-            else if (arg_count == 10) { miss_ty = param_tys.t10; }
-            else if (arg_count == 11) { miss_ty = param_tys.t11; }
-            else if (arg_count == 12) { miss_ty = param_tys.t12; }
-            else if (arg_count == 13) { miss_ty = param_tys.t13; }
-            else if (arg_count == 14) { miss_ty = param_tys.t14; }
-            else if (arg_count == 15) { miss_ty = param_tys.t15; }
-            else if (arg_count == 16) { miss_ty = param_tys.t16; }
-            else if (arg_count == 17) { miss_ty = param_tys.t17; }
-            else if (arg_count == 18) { miss_ty = param_tys.t18; }
-            else if (arg_count == 19) { miss_ty = param_tys.t19; }
-            else if (arg_count == 20) { miss_ty = param_tys.t20; }
-            else if (arg_count == 21) { miss_ty = param_tys.t21; }
-            else if (arg_count == 22) { miss_ty = param_tys.t22; }
-            else if (arg_count == 23) { miss_ty = param_tys.t23; }
-            else if (arg_count == 24) { miss_ty = param_tys.t24; }
-            else if (arg_count == 25) { miss_ty = param_tys.t25; }
-            else if (arg_count == 26) { miss_ty = param_tys.t26; }
-            else if (arg_count == 27) { miss_ty = param_tys.t27; }
-            else if (arg_count == 28) { miss_ty = param_tys.t28; }
-            else if (arg_count == 29) { miss_ty = param_tys.t29; }
-            else if (arg_count == 30) { miss_ty = param_tys.t30; }
-            else if (arg_count == 31) { miss_ty = param_tys.t31; }
-            else if (arg_count == 32) { miss_ty = param_tys.t32; }
-            else if (arg_count == 33) { miss_ty = param_tys.t33; }
-            else if (arg_count == 34) { miss_ty = param_tys.t34; }
-            else if (arg_count == 35) { miss_ty = param_tys.t35; }
-            else if (arg_count == 36) { miss_ty = param_tys.t36; }
-            else if (arg_count == 37) { miss_ty = param_tys.t37; }
-            else if (arg_count == 38) { miss_ty = param_tys.t38; }
-            else if (arg_count == 39) { miss_ty = param_tys.t39; }
-            else if (arg_count == 40) { miss_ty = param_tys.t40; }
-            else if (arg_count == 41) { miss_ty = param_tys.t41; }
-            else if (arg_count == 42) { miss_ty = param_tys.t42; }
-            else if (arg_count == 43) { miss_ty = param_tys.t43; }
-            else if (arg_count == 44) { miss_ty = param_tys.t44; }
-            else if (arg_count == 45) { miss_ty = param_tys.t45; }
-            else if (arg_count == 46) { miss_ty = param_tys.t46; }
-            else if (arg_count == 47) { miss_ty = param_tys.t47; }
-            else if (arg_count == 48) { miss_ty = param_tys.t48; }
-            else if (arg_count == 49) { miss_ty = param_tys.t49; }
-            else if (arg_count == 50) { miss_ty = param_tys.t50; }
-            else if (arg_count == 51) { miss_ty = param_tys.t51; }
-            else if (arg_count == 52) { miss_ty = param_tys.t52; }
-            else if (arg_count == 53) { miss_ty = param_tys.t53; }
-            else if (arg_count == 54) { miss_ty = param_tys.t54; }
-            else if (arg_count == 55) { miss_ty = param_tys.t55; }
-            else if (arg_count == 56) { miss_ty = param_tys.t56; }
-            else if (arg_count == 57) { miss_ty = param_tys.t57; }
-            else if (arg_count == 58) { miss_ty = param_tys.t58; }
-            else if (arg_count == 59) { miss_ty = param_tys.t59; }
-            else if (arg_count == 60) { miss_ty = param_tys.t60; }
-            else if (arg_count == 61) { miss_ty = param_tys.t61; }
-            else if (arg_count == 62) { miss_ty = param_tys.t62; }
-            else if (arg_count == 63) { miss_ty = param_tys.t63; }
+            let miss_ty <&LLVMType> = cg_targs_at(param_tys, arg_count);
             let fill <&LLVMValue> = null;
             if (miss_ty != null && cg_is_tagged_pair(ctx, miss_ty)) {
                 fill = llvm_const_null(miss_ty);
@@ -11031,70 +10805,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 llvm_build_unreachable(ctx.builder);
                 return null;
             }
-            if (arg_count == 0) { args.v0 = fill; }
-            else if (arg_count == 1) { args.v1 = fill; }
-            else if (arg_count == 2) { args.v2 = fill; }
-            else if (arg_count == 3) { args.v3 = fill; }
-            else if (arg_count == 4) { args.v4 = fill; }
-            else if (arg_count == 5) { args.v5 = fill; }
-            else if (arg_count == 6) { args.v6 = fill; }
-            else if (arg_count == 7) { args.v7 = fill; }
-            else if (arg_count == 8) { args.v8 = fill; }
-            else if (arg_count == 9) { args.v9 = fill; }
-            else if (arg_count == 10) { args.v10 = fill; }
-            else if (arg_count == 11) { args.v11 = fill; }
-            else if (arg_count == 12) { args.v12 = fill; }
-            else if (arg_count == 13) { args.v13 = fill; }
-            else if (arg_count == 14) { args.v14 = fill; }
-            else if (arg_count == 15) { args.v15 = fill; }
-            else if (arg_count == 16) { args.v16 = fill; }
-            else if (arg_count == 17) { args.v17 = fill; }
-            else if (arg_count == 18) { args.v18 = fill; }
-            else if (arg_count == 19) { args.v19 = fill; }
-            else if (arg_count == 20) { args.v20 = fill; }
-            else if (arg_count == 21) { args.v21 = fill; }
-            else if (arg_count == 22) { args.v22 = fill; }
-            else if (arg_count == 23) { args.v23 = fill; }
-            else if (arg_count == 24) { args.v24 = fill; }
-            else if (arg_count == 25) { args.v25 = fill; }
-            else if (arg_count == 26) { args.v26 = fill; }
-            else if (arg_count == 27) { args.v27 = fill; }
-            else if (arg_count == 28) { args.v28 = fill; }
-            else if (arg_count == 29) { args.v29 = fill; }
-            else if (arg_count == 30) { args.v30 = fill; }
-            else if (arg_count == 31) { args.v31 = fill; }
-            else if (arg_count == 32) { args.v32 = fill; }
-            else if (arg_count == 33) { args.v33 = fill; }
-            else if (arg_count == 34) { args.v34 = fill; }
-            else if (arg_count == 35) { args.v35 = fill; }
-            else if (arg_count == 36) { args.v36 = fill; }
-            else if (arg_count == 37) { args.v37 = fill; }
-            else if (arg_count == 38) { args.v38 = fill; }
-            else if (arg_count == 39) { args.v39 = fill; }
-            else if (arg_count == 40) { args.v40 = fill; }
-            else if (arg_count == 41) { args.v41 = fill; }
-            else if (arg_count == 42) { args.v42 = fill; }
-            else if (arg_count == 43) { args.v43 = fill; }
-            else if (arg_count == 44) { args.v44 = fill; }
-            else if (arg_count == 45) { args.v45 = fill; }
-            else if (arg_count == 46) { args.v46 = fill; }
-            else if (arg_count == 47) { args.v47 = fill; }
-            else if (arg_count == 48) { args.v48 = fill; }
-            else if (arg_count == 49) { args.v49 = fill; }
-            else if (arg_count == 50) { args.v50 = fill; }
-            else if (arg_count == 51) { args.v51 = fill; }
-            else if (arg_count == 52) { args.v52 = fill; }
-            else if (arg_count == 53) { args.v53 = fill; }
-            else if (arg_count == 54) { args.v54 = fill; }
-            else if (arg_count == 55) { args.v55 = fill; }
-            else if (arg_count == 56) { args.v56 = fill; }
-            else if (arg_count == 57) { args.v57 = fill; }
-            else if (arg_count == 58) { args.v58 = fill; }
-            else if (arg_count == 59) { args.v59 = fill; }
-            else if (arg_count == 60) { args.v60 = fill; }
-            else if (arg_count == 61) { args.v61 = fill; }
-            else if (arg_count == 62) { args.v62 = fill; }
-            else if (arg_count == 63) { args.v63 = fill; }
+            cg_vargs_set(args, arg_count, fill);
             arg_count = arg_count + 1;
         }
         delete param_tys;
