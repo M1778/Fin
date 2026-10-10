@@ -160,3 +160,50 @@ TEST_F(ParserTest, MissingSemicolonPointsAtEndOfBrokenLine) {
     EXPECT_NE(d.message.find("';'"), std::string::npos)
         << "the diagnostic must name the missing ';', got: " << d.message;
 }
+
+// Issue #49: three independent bad statements must each get a diagnostic in
+// one run (statement-level recovery, cap 10). Red today: exactly 1 diagnostic.
+TEST_F(ParserTest, ThreeBrokenLinesYieldThreeDiagnostics) {
+    std::string code =
+        "fun main() <noret> {\n"
+        "    let a <int> = ;\n"
+        "    let b <int> = ;\n"
+        "    let c <int> = ;\n"
+        "}\n";
+    fin::reset_lexer_location();
+    fin::Preprocessor pp;
+    const std::string processed = pp.process(code);
+    fin::DiagnosticEngine diag(processed, "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    fin::setLexerDiagnostics(&diag);
+    YY_BUFFER_STATE buffer = yy_scan_string(processed.c_str());
+    fin::parser parser(diag);
+    const int res = parser.parse();
+    yy_delete_buffer(buffer);
+    fin::setLexerDiagnostics(nullptr);
+    EXPECT_NE(res, 0);
+    ASSERT_EQ(diag.getDiagnostics().size(), 3u)
+        << "expected one diagnostic per broken line, got " << diag.getDiagnostics().size();
+    EXPECT_EQ(diag.getDiagnostics()[0].line, 2);
+    EXPECT_EQ(diag.getDiagnostics()[1].line, 3);
+    EXPECT_EQ(diag.getDiagnostics()[2].line, 4);
+}
+
+// Issue #49 cascade guard: one broken line must stay exactly one diagnostic.
+TEST_F(ParserTest, SingleBrokenLineYieldsExactlyOneDiagnostic) {
+    std::string code = "fun main() <noret> {\n    let a <int> = ;\n}\n";
+    fin::reset_lexer_location();
+    fin::Preprocessor pp;
+    const std::string processed = pp.process(code);
+    fin::DiagnosticEngine diag(processed, "<test>");
+    diag.setColorMode(fin::ColorMode::Never);
+    fin::setLexerDiagnostics(&diag);
+    YY_BUFFER_STATE buffer = yy_scan_string(processed.c_str());
+    fin::parser parser(diag);
+    const int res = parser.parse();
+    yy_delete_buffer(buffer);
+    fin::setLexerDiagnostics(nullptr);
+    EXPECT_NE(res, 0);
+    EXPECT_EQ(diag.getDiagnostics().size(), 1u)
+        << "a single bad initializer must not cascade";
+}

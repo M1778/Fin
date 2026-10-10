@@ -28,6 +28,12 @@ struct DiagnosticAttribution {
 
 struct Diagnostic {
     DiagnosticSeverity severity = DiagnosticSeverity::Error;
+    // A stable machine code for this diagnostic (issue #47), so tests, docs,
+    // and IDE integrations can match on a contract instead of free-form message
+    // text. Empty when the message matches no registry row yet, which JSON
+    // renders as `"code":null` exactly as before. Codes are additive: adding a
+    // row never rewords a message and never redefines an existing code.
+    std::string code;
     std::string message;
     std::string file;
     // 0 means "no source location" — a diagnostic about the invocation rather
@@ -93,6 +99,12 @@ public:
     bool usesColor() const { return color; }
 
     void setSource(std::string src, std::string fname);
+
+    // The code registry (issue #47). Maps a diagnostic message to its stable
+    // code, or "" when the message matches no row yet. New diagnostics gain
+    // codes by appending a row here; existing rows are frozen, so a code once
+    // emitted keeps its meaning no matter how message wording evolves.
+    static std::string codeForMessage(const std::string& message);
 
     // The source line for parser error recovery (issue #44): the parser points
     // a missing `;` at the end of the broken line, so it needs the line text to

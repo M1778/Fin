@@ -113,9 +113,43 @@ const char* severityName(DiagnosticSeverity s) {
     return "error";
 }
 
+// The stable code registry (issue #47). One row per diagnostic family, matched
+// on the message's stable shape rather than its interpolated values: every
+// `unsupported()` refusal reads `codegen: <what> is not lowered yet` whatever
+// `<what>` names, and every checkType failure starts `Type mismatch:`. Matching
+// the shape keeps one code per family even when two call sites describe the same
+// gap differently, which is the case message-text matching could never cover.
+//
+// Codes are never redefined and rows are only appended. The human renderer
+// ignores `code` entirely, so this table cannot change a byte of human output.
+struct CodeRow {
+    const char* code;
+    const char* prefix;    // the message starts with this, or "" for none
+    const char* contains;  // the message also contains this, or "" for none
+};
+
+constexpr CodeRow kCodeRegistry[] = {
+    {"E0101", "codegen: ", "is not lowered yet"},  // unlowered-construct refusal
+    {"E0201", "Type mismatch:", ""},               // checkType failure
+};
+
+bool startsWith(const std::string& s, const char* prefix) {
+    const std::string p(prefix);
+    return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
+}
+
 DiagnosticEngine* g_lexerDiagnostics = nullptr;
 
 } // namespace
+
+std::string DiagnosticEngine::codeForMessage(const std::string& message) {
+    for (const auto& row : kCodeRegistry) {
+        if (row.prefix[0] != '\0' && !startsWith(message, row.prefix)) continue;
+        if (row.contains[0] != '\0' && message.find(row.contains) == std::string::npos) continue;
+        return row.code;
+    }
+    return "";
+}
 
 void setLexerDiagnostics(DiagnosticEngine* engine) { g_lexerDiagnostics = engine; }
 DiagnosticEngine* getLexerDiagnostics() { return g_lexerDiagnostics; }
@@ -482,9 +516,14 @@ void DiagnosticEngine::reportNote(const fin::location& loc, const std::string& m
 }
 
 void DiagnosticEngine::emit(const Diagnostic& d) {
-    records.push_back(d);
-    if (format == DiagnosticFormat::Json) emitJson(d);
-    else emitHuman(d);
+    Diagnostic coded = d;
+    // Central, so every report path — present and future — carries the code
+    // without its call site naming one. An explicitly set code always wins; the
+    // registry only fills in what the emitter left blank.
+    if (coded.code.empty()) coded.code = codeForMessage(coded.message);
+    records.push_back(coded);
+    if (format == DiagnosticFormat::Json) emitJson(coded);
+    else emitHuman(coded);
 }
 
 void DiagnosticEngine::emitHuman(const Diagnostic& d) {
@@ -518,10 +557,11 @@ void DiagnosticEngine::emitJson(const Diagnostic& d) {
                                   jsonOptional(d.attribution.event));
     }
     fmt::print(stderr,
-        "{{\"kind\":\"diagnostic\",\"severity\":\"{}\",\"code\":null,\"message\":{},"
+        "{{\"kind\":\"diagnostic\",\"severity\":\"{}\",\"code\":{},\"message\":{},"
         "\"file\":{},\"line\":{},\"column\":{},\"endLine\":{},\"endColumn\":{},"
         "\"help\":{},\"attribution\":{}}}\n",
         severityName(d.severity),
+        jsonOptional(d.code),
         jsonString(d.message),
         jsonOptional(d.file),
         d.line, d.column, d.endLine, d.endColumn,

@@ -55,14 +55,16 @@
 //     AMPERSAND`), so the hash cannot avalanche with xor and the bucket index cannot
 //     be a mask. `%` does both jobs. This is the same gap `operators.fin` records for
 //     `BitAnd`/`BitOr`.
-//   * The old bucket vector is dropped, not freed, in `grow`. `Collection` has no
-//     destructor and `delete` on a `&Collection<int>` is not what frees its buffer;
-//     the only reclaim this library can express is `Collection::allocate`'s `delete`
-//     of its own `[T]`. So a map that grows leaks one `int` vector per growth.
-//   * An erased entry's key and value stay in `keys`/`values` forever. Compaction
-//     needs removal from the middle of a `Collection`, which would move every index
-//     the bucket vector holds; `Collection::remove` exists now, but rewriting the
-//     bucket vector after it is a second pass this file does not do yet.
+//   * `grow` used to drop the old bucket vector instead of freeing it. It reuses the
+//     same `Collection` now -- `clear`, `reserve`, refill -- so the buffer change goes
+//     through `Collection::allocate`, whose `delete` of its own `[T]` is the only
+//     reclaim this library can express. No vector is dropped on growth anymore.
+//   * An erased entry's key and value used to stay in `keys`/`values` forever. `rehash`
+//     packs the live entries down in place now (copy forward, `pop_last` the tail) and
+//     rebuilds the bucket vector, so slots stay proportional to the live count. It does
+//     not use `Collection::remove`: removing each dead slot would shift the tail once
+//     per removal and still need the same bucket rewrite, where one forward pass does
+//     both.
 //   * A struct-typed key type-checks (`cast<int>` of a struct is accepted) and is not
 //     usable: `==` on two structs with no declared `operator ==` is refused in codegen
 //     (`an undeclared operator '==' on struct 'P' is not lowered yet`). `deeptest4.fin`
@@ -121,9 +123,10 @@ pub fun hash_of<T>(key: T) <int> {
 #[export]
 pub struct HashMap<T, U> : <Index, IndexAssign> {
     priv:
-      // Entry storage. A key and its value share an index -- a *slot* -- and a slot is
-      // never reused once written, which is what lets the bucket vector hold slot
-      // numbers rather than keys. `live` says whether a slot's entry is still present.
+      // Entry storage. A key and its value share an index -- a *slot* -- and the bucket
+      // vector holds slot numbers rather than keys. `live` says whether a slot's entry
+      // is still present; `rehash` packs the live ones down so slots stay proportional
+      // to the live count instead of to every insert ever.
       keys <&Collection<T>>,
       values <&Collection<U>>,
       live <&Collection<bool>>,
@@ -212,33 +215,50 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
           return self.cap;
       }
 
-      // Rehash into a bucket vector of twice the size. Tombstones do not survive it,
-      // which is the other half of why they are affordable.
+      // Rehash into a bucket vector of `bigger` entries, packing the live entries down
+      // first so slots stay proportional to the live count. Tombstones do not survive
+      // it, which is the other half of why they are affordable.
       //
-      // The old vector is dropped rather than freed -- see the header's gap list.
-      priv fun grow(self: &Self) <noret> {
-          let bigger <int> = self.cap * 2;
-          let fresh <&Collection<int>> = new Collection::<int>{};
-          for (let i <int> = 0; i < bigger; i++) { fresh.push(-1); }
+      // The packing is one forward pass: live entries move to `0..w`, and the tail comes
+      // off with `pop_last`, so no entry vector is replaced and nothing is dropped.
+      // The bucket vector is reused the same way -- `clear`, `reserve`, refill -- so its
+      // buffer change goes through `Collection::allocate`, which frees the old buffer.
+      priv fun rehash(self: &Self, bigger: int) <noret> {
+          let slots <int> = self.keys.len();
+          let w <int> = 0;
+          for (let r <int> = 0; r < slots; r++) {
+              if (self.live.get(r)) {
+                  if (w != r) {
+                      self.keys.__set(w, self.keys.get(r));
+                      self.values.__set(w, self.values.get(r));
+                      self.live.__set(w, true);
+                    }
+                  w++;
+                }
+            }
+          for (let i <int> = w; i < slots; i++) {
+              self.keys.pop_last();
+              self.values.pop_last();
+              self.live.pop_last();
+            }
 
           self.cap = bigger;
-          self.buckets = fresh;
+          self.buckets.clear();
+          self.buckets.reserve(bigger);
+          for (let i <int> = 0; i < bigger; i++) { self.buckets.push(-1); }
           self.dead = 0;
 
-          let slots <int> = self.keys.len();
-          for (let s <int> = 0; s < slots; s++) {
-              if (self.live.get(s)) {
-                  let start <int> = self.hash_key(self.keys.get(s)) % self.cap;
-                  for (let probe <int> = 0; probe < self.cap; probe++) {
-                      let b <int> = (start + probe) % self.cap;
-                      if (self.buckets.get(b) == -1) {
-                          self.buckets.__set(b, s);
-                          break;
-                      }
-                  }
-              }
-          }
-      }
+          for (let s <int> = 0; s < w; s++) {
+              let start <int> = self.hash_key(self.keys.get(s)) % self.cap;
+              for (let probe <int> = 0; probe < self.cap; probe++) {
+                  let b <int> = (start + probe) % self.cap;
+                  if (self.buckets.get(b) == -1) {
+                      self.buckets.__set(b, s);
+                      break;
+                    }
+                }
+            }
+        }
 
     pub fun __set(self: &Self, key: T, value: U) <noret> {
         self.ensure();
@@ -251,7 +271,16 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
 
         // Load factor 0.75, counting tombstones: a table full of tombstones probes as
         // badly as a table full of entries, so both belong on the same side of the test.
-        if ((self.used + self.dead) * 4 >= self.cap * 3) { self.grow(); }
+        // The second arm catches what the first cannot: reinserting over tombstones
+        // reuses their buckets (so `dead` falls again) while still pushing a fresh slot
+        // per insert, which keeps `(used + dead)` flat while slots grow without bound.
+        // Slots past twice the live count plus slack trigger the same rehash.
+        // A rehash that only clears tombstones keeps the size when the live entries fit;
+        // the table doubles only when they alone break the factor.
+        if ((self.used + self.dead) * 4 >= self.cap * 3 || self.keys.len() > self.used * 2 + 16) {
+            if (self.used * 4 >= self.cap * 3) { self.rehash(self.cap * 2); }
+            else { self.rehash(self.cap); }
+          }
 
         let start <int> = self.hash_key(key) % self.cap;
         for (let probe <int> = 0; probe < self.cap; probe++) {
@@ -298,7 +327,7 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
       }
 
     // Tombstone the bucket and mark the slot dead. Returns whether anything was there.
-    // The key and value stay in their vectors -- see the header's gap list.
+    // The key and value stay in their vectors until the next rehash packs them away.
     pub fun remove(self: &Self, other: T) <bool> {
         self.ensure();
         if (self.used == 0) { return false; }
@@ -342,7 +371,9 @@ pub struct HashMap<T, U> : <Index, IndexAssign> {
     //         if (m.is_live(s)) { ... m.key_at(s) ... m.value_at(s) ... }
     //     }
     //
-    // `slot_count` is not `len`: it counts slots ever written, live and dead alike.
+    // `slot_count` is not `len`: it counts slots currently held, live and dead alike.
+    // A rehash packs the live entries down, so it stays proportional to the live count
+    // plus the erasures since the last one.
     pub fun slot_count(self: &Self) <int> {
         self.ensure();
         return self.keys.len();

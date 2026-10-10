@@ -509,6 +509,40 @@ TEST(JsonDiagnostics, AMessageContainingAQuoteIsEscaped) {
     }
 }
 
+// --- Stable diagnostic codes (issue #47) --------------------------------------
+//
+// The `code` key exists so tests, docs, and IDE integrations can match on a
+// contract instead of free-form message text. A refusal and an analyzer error
+// carry theirs below; every other diagnostic still reports `"code":null.
+
+TEST(JsonDiagnostics, ARefusalCarriesItsStableCode) {
+    TempFin f("fun make<T>() <T> { return 1; }\n"
+              "fun main() <noret> { let x <int> = make(); }\n",
+              "refcode");
+    const std::string obj = uniqueTempPath("fin_refcode", ".o");
+    auto r = runFinc({f.str(), "-c", "-o", obj, "--diagnostics=json"});
+    std::error_code ec;
+    fs::remove(obj, ec);
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    auto lines = jsonLines(r.err);
+    ASSERT_GE(lines.size(), 2u) << r.err;
+    const std::string& d = lines.front();
+    EXPECT_NE(d.find("\"code\":\"E0101\""), std::string::npos) << d;
+    EXPECT_NE(d.find("is not lowered yet"), std::string::npos)
+        << "the code is additive: the message text is unchanged:\n" << d;
+}
+
+TEST(JsonDiagnostics, ATypeMismatchCarriesItsStableCode) {
+    TempFin f("fun main() <noret> { let x <int> = \"s\"; }\n", "typecode");
+    auto r = runFinc({f.str(), "--diagnostics=json"});
+    auto lines = jsonLines(r.err);
+    ASSERT_GE(lines.size(), 2u) << r.err;
+    const std::string& d = lines.front();
+    EXPECT_NE(d.find("\"code\":\"E0201\""), std::string::npos) << d;
+    EXPECT_NE(d.find("Type mismatch:"), std::string::npos)
+        << "the code is additive: the message text is unchanged:\n" << d;
+}
+
 // --- Library search paths ---------------------------------------------------
 //
 // `import "mylib";` gives the compiler no path, so the only way it can resolve

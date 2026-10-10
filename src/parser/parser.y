@@ -30,6 +30,11 @@
     namespace fin {
         std::unique_ptr<fin::Program> root;
     }
+    // Issue #49: at most this many syntax errors are reported per file, then
+    // the parse bails (YYABORT in the `error` action below). The cap bounds
+    // cascades: one broken construct can otherwise drag the rest of the file
+    // through repeated recovery, each step risking another diagnostic.
+    constexpr int kMaxSyntaxErrors = 10;
     // Where a declaration keeps its attributes and its visibility.
     //
     // There is no common base holding either: `attributes` is declared
@@ -373,6 +378,15 @@ program:
         $$ = std::make_unique<fin::Program>(std::move($1)); 
         $$->setLoc(@$);
         fin::root = std::move($$);
+        // Issue #49: recovery above lets the parse accept with errors recorded.
+        // The driver and the module loader both treat a non-zero parse result
+        // as "no AST" (runParser returns false, modules report "failed to
+        // parse"), so discard the partial tree and fail here to keep that
+        // contract: only the diagnostic count changes, not the failure mode.
+        if (diag.getErrorCount() > 0) {
+            fin::root.reset();
+            YYABORT;
+        }
     }
     | %empty {
         $$ = std::make_unique<fin::Program>(std::vector<std::unique_ptr<fin::Statement>>());
@@ -496,6 +510,19 @@ statement:
        pointed at the `let` inside, three lines from the cause. */
     | block                  { $$ = std::move($1); }
     | SEMICOLON              { $$ = nullptr; }
+    // Issue #49: statement-level recovery. A syntax error discards the broken
+    // statement and resumes at the next one, so N independent typos cost one
+    // compile cycle, not N. `error` alone (no trailing SEMICOLON) recovers
+    // without consuming the lookahead, so a missing `;` (error at `}`) leaves
+    // the `}` to close its block, while a bad initializer (error at `;`)
+    // leaves the `;` to reduce as an empty statement. No `yyerrok`: Bison's
+    // built-in three-token suppression stays armed, so garbage inside one
+    // statement is discarded silently instead of cascading, while errors on
+    // separate lines (more than three tokens apart) are each reported.
+    | error {
+        $$ = nullptr;
+        if (diag.getErrorCount() >= kMaxSyntaxErrors) YYABORT;
+    }
     ;
 
 block:
