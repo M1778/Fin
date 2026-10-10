@@ -100,14 +100,26 @@ std::string w10PointDetail(const LoopBackEdgePoint& point);
 //
 // Anything wider than the line is a named diagnostic reporting the
 // interpreter gap precisely — never a silent skip, never a guessed value.
+// A `compiler.diag.error` call in the handler reports (naming handler,
+// event and point) and suppresses that point's injection; `warning`/`note`
+// report through their own reporters and the quote still splices — the W7
+// parity (test_events_w7.cpp, W7Diag).
 //
 // Callable once for a deferred batch; each call fires exactly the points it
 // is given. Points from nested loops share no anchor (each body is its own
 // block), so firing order never shifts another point's insert site.
+//
+// `warnReport` and `noteReport` carry `compiler.diag.warning` and
+// `compiler.diag.note` calls a handler executes; both default to empty, in
+// which case a warning reports through `report` as an error and a note
+// through the warning — a severity the caller did not ask for is still
+// better than a silent one, and the analyzer call site passes all three.
 std::vector<W10FiredHandler> fireW10Events(Program& program, const EventRegistry& registry,
                                            const std::vector<LoopBackEdgePoint>& points,
                                            const std::set<std::string>& refused,
-                                           DiagReporter report);
+                                           DiagReporter report,
+                                           DiagReporter warnReport = DiagReporter(),
+                                           DiagReporter noteReport = DiagReporter());
 
 } // namespace events
 } // namespace fin

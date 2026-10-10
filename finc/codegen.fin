@@ -520,6 +520,39 @@ fun coerce_val(ctx: &FnContext, val: &LLVMValue, target_ty: &LLVMType) <&LLVMVal
     return val;
 }
 
+// The phi type for a `cond : then ? else` join (C++ commonType on LLVM
+// types): a float on either side wins (double over float), a bool arm
+// takes the other arm's type, otherwise the wider integer wins.
+// Anything else (pointers, mismatched kinds) answers null and the
+// caller refuses honestly instead of joining unjoinable values.
+fun cg_tern_common(ctx: &FnContext, a: &LLVMValue, b: &LLVMValue) <&LLVMType> {
+    if (a == null || b == null) { return null; }
+    let ta <&LLVMType> = llvm_type_of(a);
+    let tb <&LLVMType> = llvm_type_of(b);
+    if (ta == tb) { return ta; }
+    let a_fp <bool> = ta == ctx.float_ty || ta == ctx.double_ty;
+    let b_fp <bool> = tb == ctx.float_ty || tb == ctx.double_ty;
+    if (a_fp || b_fp) {
+        if (a_fp && b_fp) {
+            if (ta == ctx.double_ty || tb == ctx.double_ty) { return ctx.double_ty; }
+            return ctx.float_ty;
+        }
+        if (a_fp) { return ta; }
+        return tb;
+    }
+    if (ta == ctx.i1_ty) { return tb; }
+    if (tb == ctx.i1_ty) { return ta; }
+    let a_int <bool> = ta == ctx.i64_ty || ta == ctx.i32_ty || ta == ctx.i16_ty || ta == ctx.i8_ty;
+    let b_int <bool> = tb == ctx.i64_ty || tb == ctx.i32_ty || tb == ctx.i16_ty || tb == ctx.i8_ty;
+    if (a_int && b_int) {
+        if (ta == ctx.i64_ty || tb == ctx.i64_ty) { return ctx.i64_ty; }
+        if (ta == ctx.i32_ty || tb == ctx.i32_ty) { return ctx.i32_ty; }
+        if (ta == ctx.i16_ty || tb == ctx.i16_ty) { return ctx.i16_ty; }
+        return ctx.i8_ty;
+    }
+    return null;
+}
+
 fun get_node_struct_name(ctx: &FnContext, node: &AstNode) <string> {
     if (node == null) { return ""; }
     if (node.kind == ast_ident()) {
@@ -8009,6 +8042,57 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         return null;
     }
     if (n.kind == ast_binary_expr()) {
+        if (cg_str_eq(n.name, ":?")) {
+            // `cond : then ? otherwise` (ADR 0005): only the taken arm
+            // runs, so each arm lowers in its own block under a condbr
+            // and the value joins through a phi over the common type
+            // (the C++ backend's shape exactly).
+            let cond_raw <&LLVMValue> = lower_expr(ctx, n.left);
+            let test <&LLVMValue> = to_condition_i1(ctx, cond_raw);
+            if (test == null) { return null; }
+            let true_node <&AstNode> = null;
+            let false_node <&AstNode> = null;
+            if (n.right != null) {
+                true_node = n.right.left;
+                false_node = n.right.right;
+            }
+            let then_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "tern.then");
+            let else_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "tern.else");
+            let end_bb <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "tern.end");
+            llvm_build_cond_br(ctx.builder, test, then_bb, else_bb);
+            llvm_position_builder(ctx.builder, then_bb);
+            let a_raw <&LLVMValue> = lower_expr(ctx, true_node);
+            let then_exit <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+            llvm_position_builder(ctx.builder, else_bb);
+            let b_raw <&LLVMValue> = lower_expr(ctx, false_node);
+            let else_exit <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+            if (a_raw == null || b_raw == null) { return null; }
+            let common_ty <&LLVMType> = cg_tern_common(ctx, a_raw, b_raw);
+            if (common_ty == null) {
+                cg_dprintf(2, "codegen: a ternary of mismatched types is not lowered yet (at '%s':%d)\n", ctx.src_file, n.line);
+                refuse_and_poison(ctx);
+                llvm_build_unreachable(ctx.builder);
+                return null;
+            }
+            llvm_position_builder(ctx.builder, then_exit);
+            let av <&LLVMValue> = coerce_val(ctx, a_raw, common_ty);
+            llvm_build_br(ctx.builder, end_bb);
+            llvm_position_builder(ctx.builder, else_exit);
+            let bv <&LLVMValue> = coerce_val(ctx, b_raw, common_ty);
+            llvm_build_br(ctx.builder, end_bb);
+            llvm_position_builder(ctx.builder, end_bb);
+            let phi <&LLVMValue> = llvm_build_phi(ctx.builder, common_ty, "tern");
+            let vals <&LLVMValueArgs> = new LLVMValueArgs{};
+            vals.v0 = av;
+            vals.v1 = bv;
+            let blks <&LLVMBlockArgs> = new LLVMBlockArgs{};
+            blks.b0 = then_exit;
+            blks.b1 = else_exit;
+            llvm_add_incoming(phi, vals, blks, 2);
+            delete vals;
+            delete blks;
+            return phi;
+        }
         if (cg_str_eq(n.name, "&&")) {
             let lhs_raw <&LLVMValue> = lower_expr(ctx, n.left);
             let l <&LLVMValue> = to_condition_i1(ctx, lhs_raw);

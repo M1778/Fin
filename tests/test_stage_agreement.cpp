@@ -1,5 +1,5 @@
 // Run agreement between the C++ compiler (build/finc) and the self-hosted
-// stage-2 compiler (build/finc_stage2).
+// stage compilers (build/finc_stage2, build/finc_stage3).
 //
 // The harness gap this closes: `ctest` stayed green while the two compilers
 // DIVERGED at runtime. `tests/samples/const.fin` is the case that bit us --
@@ -174,6 +174,22 @@ Proc spawnCapture(const std::string& bin, const std::vector<std::string>& args) 
 std::string stageBinary() {
 #ifdef FINC_STAGE2_BINARY
     std::string s = FINC_STAGE2_BINARY;
+#ifdef _WIN32
+    if (!s.empty() && !fs::exists(s) && fs::exists(s + ".exe")) s += ".exe";
+#endif
+    return s;
+#else
+    return "";
+#endif
+}
+
+// Issue #35: the stage-3 compiler (the compiler building itself twice over).
+// A stage2 miscompile that reproduces itself is invisible to
+// reference-vs-stage2; comparing stage3 output closes that hole. Resolved the
+// same way as stage2: baked path, loud skip when absent, never silent.
+std::string stage3Binary() {
+#ifdef FINC_STAGE3_BINARY
+    std::string s = FINC_STAGE3_BINARY;
 #ifdef _WIN32
     if (!s.empty() && !fs::exists(s) && fs::exists(s + ".exe")) s += ".exe";
 #endif
@@ -441,21 +457,17 @@ TEST(StageAgreementLogic, BuildVerdictsRouteEveryShape) {
 }
 
 // ---------------------------------------------------------------------------
-// The per-sample run agreement, through both real compilers.
+// The per-sample run agreement, through the reference compiler and one stage
+// compiler. StageAgreement covers stage2; Stage3Agreement (issue #35) mirrors
+// it over stage3. Both share checkAgreementForStage below; only the stage
+// binary differs, so a stage3 divergence fails exactly like a stage2 one.
 // ---------------------------------------------------------------------------
 
 class StageAgreement : public ::testing::TestWithParam<Sample> {};
+class Stage3Agreement : public ::testing::TestWithParam<Sample> {};
 
-TEST_P(StageAgreement, RunAgreesAcrossCompilers) {
-    const std::string path = GetParam().path;
-    const std::string stem = fs::path(path).stem().string();
-
-    const std::string stageBin = stageBinary();
-    if (stageBin.empty() || !fs::exists(stageBin)) {
-        GTEST_SKIP() << "stage compiler not found at FINC_STAGE2_BINARY=" << stageBin
-                     << "; run-agreement needs build/finc_stage2 next to build/finc";
-    }
-
+void checkAgreementForStage(const std::string& path, const std::string& stem,
+                            const std::string& stageBin, const std::string& exeTag) {
     // Held ruling ADR 0036: struct `==` is declared-only, never synthesized.
     // Neither compiler produces a runnable; compile-only, already covered.
     if (stem == "deeptest4") {
@@ -481,7 +493,7 @@ TEST_P(StageAgreement, RunAgreesAcrossCompilers) {
 
     // Stage build, serialized: the stage cross-links concurrent `-o` builds
     // through its fixed /tmp object (see StageBuildLock).
-    const fs::path stageExe = uniqueTempPath("stageagree_stage");
+    const fs::path stageExe = uniqueTempPath(exeTag);
     Proc stageBuild;
     {
         StageBuildLock lock;
@@ -543,8 +555,38 @@ TEST_P(StageAgreement, RunAgreesAcrossCompilers) {
     removeIfExists(stageExe);
 }
 
+TEST_P(StageAgreement, RunAgreesAcrossCompilers) {
+    const std::string path = GetParam().path;
+    const std::string stem = fs::path(path).stem().string();
+
+    const std::string stageBin = stageBinary();
+    if (stageBin.empty() || !fs::exists(stageBin)) {
+        GTEST_SKIP() << "stage compiler not found at FINC_STAGE2_BINARY=" << stageBin
+                     << "; run-agreement needs build/finc_stage2 next to build/finc";
+    }
+    checkAgreementForStage(path, stem, stageBin, "stageagree_stage");
+}
+
+TEST_P(Stage3Agreement, RunAgreesAcrossStage3) {
+    const std::string path = GetParam().path;
+    const std::string stem = fs::path(path).stem().string();
+
+    const std::string stageBin = stage3Binary();
+    if (stageBin.empty() || !fs::exists(stageBin)) {
+        GTEST_SKIP() << "stage3 compiler not found at FINC_STAGE3_BINARY=" << stageBin
+                     << "; stage3-agreement needs build/finc_stage3 next to build/finc";
+    }
+    checkAgreementForStage(path, stem, stageBin, "stageagree_stage3");
+}
+
 INSTANTIATE_TEST_SUITE_P(
     Corpus,
     StageAgreement,
+    ::testing::ValuesIn(agreementSamples()),
+    [](const testing::TestParamInfo<Sample>& info) { return testNameForSample(info.param.path); });
+
+INSTANTIATE_TEST_SUITE_P(
+    Corpus,
+    Stage3Agreement,
     ::testing::ValuesIn(agreementSamples()),
     [](const testing::TestParamInfo<Sample>& info) { return testNameForSample(info.param.path); });

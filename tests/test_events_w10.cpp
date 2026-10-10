@@ -626,3 +626,139 @@ W10_BACKEND_TEST(W10ThreadedProbe, ThreadedMarkerRunsAndBehaviorUnchanged) {
     EXPECT_NE(b.out.find("sum 3"), std::string::npos)
         << "the loop still computed its own answer:\n" << b.out;
 }
+
+// --- compiler.diag.* in loop-back-edge handlers --------------------------------
+// Parity with W7 (test_events_w7.cpp, W7Diag): a handler's own diagnostics
+// execute at fire time instead of refusing as an unevaluable statement.
+// `error` records, suppresses that handler's injection at that point, and
+// fails the build; `warning`/`note` report and the quote still splices. Every
+// one names the handler, the event and the event point.
+
+namespace {
+
+const char* const kW10DiagGrants =
+    "#[use(compiler)]\n#[use(compiler.components.diag)]\n";
+
+} // namespace
+
+TEST(W10Diag, ErrorFromHandlerNamesHandlerEventAndPoint) {
+    auto r = w10compile(
+        std::string("@define printf(fmt: string, ...) <noret>;\n") +
+        kW10DiagGrants +
+        "#[on(loop_back_edge)]\n@special h_diag(depth: int) <quote> {\n"
+        "    compiler.diag.error(\"trace me\");\n"
+        "    return quote { printf(\"unreached\\n\"); };\n"
+        "}\n"
+        "compiler.events.enable(h_diag);\n"
+        "fun main() <noret> {\n"
+        "    let c <bool> = true;\n"
+        "    while (c) {\n"
+        "        c = false;\n"
+        "    }\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = w10messages(stripAnsi(r.err));
+    EXPECT_NE(err.find("h_diag"), std::string::npos) << err;
+    EXPECT_NE(err.find("loop_back_edge"), std::string::npos) << err;
+    EXPECT_NE(err.find("trace me"), std::string::npos) << err;
+    EXPECT_NE(err.find("while"), std::string::npos) << err;
+    // The diag call is executed, not gap-diagnosed: one point, one diagnostic.
+    EXPECT_EQ(w10errorCount(stripAnsi(r.err)), 1u) << r.err;
+}
+
+TEST(W10Diag, DiagMessageMustBeALiteral) {
+    // The line holds no string operations, so a message is a literal or it is
+    // refused by name — never evaluated into something it is not.
+    auto r = w10compile(
+        std::string("@define printf(fmt: string, ...) <noret>;\n") +
+        kW10DiagGrants +
+        "#[on(loop_back_edge)]\n@special h_lit(depth: int) <quote> {\n"
+        "    compiler.diag.error(depth);\n"
+        "    return quote { printf(\"unreached\\n\"); };\n"
+        "}\n"
+        "compiler.events.enable(h_lit);\n"
+        "fun main() <noret> {\n"
+        "    let c <bool> = true;\n"
+        "    while (c) {\n"
+        "        c = false;\n"
+        "    }\n"
+        "}\n");
+    EXPECT_NE(r.exitCode, 0) << r.err;
+    const std::string err = w10messages(stripAnsi(r.err));
+    EXPECT_NE(err.find("h_lit"), std::string::npos) << err;
+    EXPECT_NE(err.find("literal"), std::string::npos) << err;
+}
+
+TEST(W10Diag, NoteFromHandlerReportsWithoutFailing) {
+    auto r = w10compile(
+        std::string("@define printf(fmt: string, ...) <noret>;\n") +
+        kW10DiagGrants +
+        "#[on(loop_back_edge)]\n@special h_note(depth: int) <quote> {\n"
+        "    compiler.diag.note(\"fyi\");\n"
+        "    return quote { printf(\"w10-note\\n\"); };\n"
+        "}\n"
+        "compiler.events.enable(h_note);\n"
+        "fun main() <noret> {\n"
+        "    let c <bool> = true;\n"
+        "    while (c) {\n"
+        "        c = false;\n"
+        "    }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("h_note"), std::string::npos) << err;
+    EXPECT_NE(err.find("fyi"), std::string::npos) << err;
+}
+
+W10_BACKEND_TEST(W10DiagProbe, WarningFromHandlerWarnsAndStillSplices) {
+    W10Built b = w10buildRun(
+        std::string("@define printf(fmt: string, ...) <noret>;\n") +
+        kW10DiagGrants +
+        "#[on(loop_back_edge)]\n@special h_warn(depth: int) <quote> {\n"
+        "    compiler.diag.warning(\"careful\");\n"
+        "    return quote { printf(\"w10-warn-marker\\n\"); };\n"
+        "}\n"
+        "compiler.events.enable(h_warn);\n"
+        "fun main() <noret> {\n"
+        "    let s <int> = 0;\n"
+        "    for (i : int = 0; i < 3; i++) {\n"
+        "        s = s + i;\n"
+        "    }\n"
+        "    printf(\"sum %d\\n\", s);\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.compileErr;
+    ASSERT_TRUE(b.ran) << "compile exit " << b.compileExit << "\n" << b.compileErr;
+    EXPECT_NE(b.compileErr.find("warning"), std::string::npos) << b.compileErr;
+    EXPECT_NE(b.compileErr.find("h_warn"), std::string::npos) << b.compileErr;
+    EXPECT_NE(b.compileErr.find("careful"), std::string::npos) << b.compileErr;
+    EXPECT_NE(b.out.find("w10-warn-marker"), std::string::npos)
+        << "a warning does not suppress the injection:\n" << b.out;
+    EXPECT_NE(b.out.find("sum 3"), std::string::npos) << b.out;
+}
+
+TEST(W10Diag, ErrorSuppressesItsOwnInjection) {
+    // §3.8 row one, back-edge half: a handler that reports suppresses its
+    // own injection at that point, so the bad quote never reaches lowering.
+    // One point, one diagnostic — the suppression made visible.
+    auto r = w10compile(
+        std::string("@define printf(fmt: string, ...) <noret>;\n") +
+        kW10DiagGrants +
+        "#[on(loop_back_edge)]\n@special h_stop(depth: int) <quote> {\n"
+        "    compiler.diag.error(\"stop\");\n"
+        "    return quote { nosuchfn_xyz(); };\n"
+        "}\n"
+        "compiler.events.enable(h_stop);\n"
+        "fun main() <noret> {\n"
+        "    let c <bool> = true;\n"
+        "    while (c) {\n"
+        "        c = false;\n"
+        "    }\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    const std::string stripped = stripAnsi(r.err);
+    EXPECT_EQ(w10errorCount(stripped), 1u) << r.err;
+    const std::string err = w10messages(stripped);
+    EXPECT_NE(err.find("h_stop"), std::string::npos) << err;
+    EXPECT_NE(err.find("stop"), std::string::npos) << err;
+    EXPECT_EQ(err.find("nosuchfn_xyz"), std::string::npos) << err;
+}

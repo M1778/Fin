@@ -78,6 +78,44 @@ priv fun p_str_eq(a: string, b: string) <bool> {
     return p_strcmp(a, b) == 0;
 }
 
+// The 1-based `line`-th line of `src` without its newline, or "" when the
+// source has no such line (the C++ DiagnosticEngine::lineText the missing-
+// `;` span below reads; the parser already holds the whole preprocessed
+// source as source_text, so no file read is needed).
+priv fun p_line_text(src: string, line: int) <string> {
+    if (src == null || line < 1) { return ""; }
+    let total <int> = cast<int>(p_strlen(src));
+    let bytes <[char]> = to_chars(src);
+    let cur <int> = 1;
+    let start <int> = 0;
+    let found <int> = -1;
+    let found_len <int> = 0;
+    let i <int> = 0;
+    while (i <= total) {
+        if (i == total || bytes[i] == cast<char>(10)) {
+            if (cur == line) {
+                found = start;
+                found_len = i - start;
+                if (found_len > 0 && bytes[start + found_len - 1] == cast<char>(13)) {
+                    found_len = found_len - 1;
+                }
+                break;
+            }
+            cur = cur + 1;
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (found < 0 || found_len <= 0) {
+        delete bytes;
+        return "";
+    }
+    let out <string> = p_calloc(cast<ulong>(found_len + 1), cast<ulong>(1));
+    p_memcpy_to_str(out, &bytes[found], cast<ulong>(found_len));
+    delete bytes;
+    return out;
+}
+
 // Records a written `?` nullability mark in a type annotation string. The
 // trailing-`?` encoding (`int?`) is the one the checker (denullify strips
 // it, `fun?` sniffing reads it) and both codegens' type mappers already
@@ -313,6 +351,57 @@ pub struct Parser {
               return true;
           }
           let cur <Token> = self.stream.peek();
+          if (kind == tok_semicolon()) {
+              // Missing `;` is only noticed at the next token (usually `}`
+              // on the following line), so pointing there blames an innocent
+              // brace. Mirror of the C++ report_syntax_error semicolon case:
+              // the message names `';'`, and when the offending token opens
+              // its line while the previous line holds code, the span is the
+              // end of that previous line (where the `;` belongs). Any other
+              // shape keeps the offending token's own span. First-error-wins
+              // still applies via report_error.
+              let at_line <int> = cur.line;
+              let at_col <int> = cur.col;
+              let cur_text <string> = p_line_text(self.source_text, cur.line);
+              let cur_len <int> = cast<int>(p_strlen(cur_text));
+              let first_on_line <bool> = true;
+              if (cur_len > 0 && cur.col > 1) {
+                  let cb <[char]> = to_chars(cur_text);
+                  let c <int> = 0;
+                  while (c < cur.col - 1) {
+                      if (c >= cur_len) { break; }
+                      if (cb[c] != cast<char>(32) && cb[c] != cast<char>(9)) {
+                          first_on_line = false;
+                          break;
+                      }
+                      c = c + 1;
+                  }
+                  delete cb;
+              }
+              if (first_on_line && cur.line > 1) {
+                  let prev <string> = p_line_text(self.source_text, cur.line - 1);
+                  let prev_len <int> = cast<int>(p_strlen(prev));
+                  if (prev_len > 0) {
+                      let pb <[char]> = to_chars(prev);
+                      let prev_has_code <bool> = false;
+                      let j <int> = 0;
+                      while (j < prev_len) {
+                          if (pb[j] != cast<char>(32) && pb[j] != cast<char>(9)) {
+                              prev_has_code = true;
+                              break;
+                          }
+                          j = j + 1;
+                      }
+                      delete pb;
+                      if (prev_has_code) {
+                          at_line = cur.line - 1;
+                          at_col = prev_len + 1;
+                      }
+                  }
+              }
+              self.report_error("expected ';'", at_line, at_col);
+              return false;
+          }
           self.report_error(expected_desc, cur.line, cur.col);
           return false;
       }
@@ -2239,6 +2328,13 @@ pub struct Parser {
                           v_ty = self.parse_type();
                       }
                       let v_node <&AstNode> = make_var_decl(v_tok.text, v_ty, null, v_tok.line, v_tok.col);
+                      // A foreach binding is not a `let` (the C++
+                      // ForeachStatement defines it directly instead of
+                      // visiting a VariableDeclaration), so it never warns
+                      // never-read. The marker rides str_val the way the
+                      // bare-`const` and `#cdef` markers do; the checker
+                      // skips recording it.
+                      v_node.str_val = "foreach";
                       if (v_count == 0) { var1 = v_node; }
                       else if (v_count == 1) { var2 = v_node; }
                       v_count = v_count + 1;

@@ -45,6 +45,10 @@ target_compile_definitions(fin_tests PRIVATE
     # compiles finc/main.fin into it), so there is no target to ask: the path
     # is the build tree's, and the suite skips with a reason when it is absent.
     FINC_STAGE2_BINARY="${CMAKE_BINARY_DIR}/finc_stage2"
+    # Issue #35: the self-hosting triple. Stage3 is bootstrapped the same way
+    # (build/finc_stage2 compiles finc/main.fin into it); the suite skips with
+    # a reason when it is absent, never silently.
+    FINC_STAGE3_BINARY="${CMAKE_BINARY_DIR}/finc_stage3"
 )
 
 # test_codegen.cpp compiles and *runs* what finc produced, which only exists in a

@@ -1375,7 +1375,7 @@ void SemanticAnalyzer::visit(Program& node) {
     // static edge, not per iteration, so an infinite-loop program terminates
     // analysis here exactly as a bounded one does.
     for (auto& fired : events::fireW10Events(node, event_registry_, w10_points_,
-                                            w10_refused_, report))
+                                            w10_refused_, report, warnReport, noteReport))
         w10_fired_.push_back(std::move(fired));
     // Wave-5 slice 0: the protocol claim registry's deferred refusal. A lone
     // well-formed claimant per slot is recognized and recorded, but

@@ -12,9 +12,11 @@
 #include "../ast/decls/Program.hpp"
 #include "../ast/decls/TypeDef.hpp"
 #include "../ast/exprs/BinaryOp.hpp"
+#include "../ast/exprs/FunctionCall.hpp"
 #include "../ast/exprs/Identifier.hpp"
 #include "../ast/exprs/Lambda.hpp"
 #include "../ast/exprs/Literal.hpp"
+#include "../ast/exprs/StructureExpr.hpp"
 #include "../ast/nodes/Parameter.hpp"
 #include "../ast/stmts/ControlFlow.hpp"
 #include "../ast/stmts/ErrorHandling.hpp"
@@ -153,9 +155,42 @@ struct EvalOutcome {
     bool diagnosed = false;
 };
 
+// A `compiler.diag.<op>(...)` call: the object is exactly `compiler.diag`
+// and the method is the operation. Syntactic, like W5's and W7's: whether
+// the operation exists is the declaration walk's answer, and firing executes
+// only the three severities.
+const MethodCall* asDiagCall(const Expression& expr, std::string* op) {
+    const auto* call = dynamic_cast<const MethodCall*>(&expr);
+    if (!call) return nullptr;
+    const auto* obj = dynamic_cast<const MemberAccess*>(call->object.get());
+    if (!obj || obj->member != "diag") return nullptr;
+    const auto* root = dynamic_cast<const Identifier*>(obj->object.get());
+    if (!root || root->name != "compiler") return nullptr;
+    if (op) *op = call->method_name;
+    return call;
+}
+
 EvalOutcome evaluateHandler(SpecialDeclaration& decl, Program& program, const LoopBackEdgePoint& point,
-                            const HandlerRecord& record, DiagReporter& report) {
+                            const HandlerRecord& record, DiagReporter& report,
+                            DiagReporter& warnReport, DiagReporter& noteReport) {
     EvalOutcome out;
+    // A severity the caller did not wire up is still better reported than
+    // dropped: warnings fall back to the error reporter, notes to warnings.
+    // The analyzer call site passes all three, so the fallback only serves a
+    // caller that fires without asking for severities.
+    auto warn = [&](ASTNode& at, const std::string& msg) {
+        if (warnReport) warnReport(at, msg);
+        else report(at, msg);
+    };
+    auto note = [&](ASTNode& at, const std::string& msg) {
+        if (noteReport) noteReport(at, msg);
+        else if (warnReport) warnReport(at, msg);
+        else report(at, msg);
+    };
+    // §3.8 row one: a handler that reports keeps reporting — compilation
+    // continues so a second bad site is also reported — but what it reports
+    // with `error` it does not inject at that point.
+    bool errorSeen = false;
     if (!decl.body) return out;
     // Straight-line threading (ADR 0006, first step): the handler's depth
     // parameter binds to the latch point's depth, so lets may name it and
@@ -168,6 +203,49 @@ EvalOutcome evaluateHandler(SpecialDeclaration& decl, Program& program, const Lo
         env.bind(decl.params[0]->name,
                  comptime::Value::makeInt(std::to_string(point.depth)));
     for (auto& stmt : decl.body->statements) {
+        // A `compiler.diag.*` call executes: the one handler effect the
+        // interpreter gap does not cover, recognised syntactically the way
+        // W5's and W7's firing recognises it. Anything else in the statement
+        // is the gap, as before.
+        if (const auto* exprStmt = dynamic_cast<const ExpressionStatement*>(stmt.get())) {
+            if (exprStmt->expr) {
+                std::string op;
+                if (asDiagCall(*exprStmt->expr, &op)) {
+                    if (op != "error" && op != "warning" && op != "note") {
+                        report(*stmt, "Handler '" + record.handler + "' for event '" +
+                                           w10Payload().event + "' cannot report here: 'compiler.diag." +
+                                           op + "' is not a diagnostic operation (error, warning, note)");
+                        out.diagnosed = true;
+                        return out;
+                    }
+                    const auto* diag =
+                        static_cast<const MethodCall*>(exprStmt->expr.get());
+                    const auto* lit = diag->args.size() == 1
+                                          ? dynamic_cast<const Literal*>(diag->args[0].get())
+                                          : nullptr;
+                    if (!lit || lit->kind != ASTTokenKind::STRING_LITERAL) {
+                        report(*stmt, "Handler '" + record.handler + "' for event '" +
+                                           w10Payload().event + "' cannot report here: 'compiler.diag." +
+                                           op + "' takes a string literal message (the "
+                                           "interpretability line holds: no string operations)");
+                        out.diagnosed = true;
+                        return out;
+                    }
+                    const std::string msg = "Handler '" + record.handler + "' for event '" +
+                                            w10Payload().event + "' at '" + w10PointDetail(point) +
+                                            "': " + lit->value;
+                    if (op == "error") {
+                        report(*stmt, msg);
+                        errorSeen = true;
+                    } else if (op == "warning") {
+                        warn(*stmt, msg);
+                    } else {
+                        note(*stmt, msg);
+                    }
+                    continue;
+                }
+            }
+        }
         if (const auto* blame = dynamic_cast<const BlameStatement*>(stmt.get())) {
             std::string msg = "Handler '" + record.handler + "' for event '" +
                               w10Payload().event + "' at '" + w10PointDetail(point) + "' blamed";
@@ -182,6 +260,11 @@ EvalOutcome evaluateHandler(SpecialDeclaration& decl, Program& program, const Lo
         if (const auto* ret = dynamic_cast<const ReturnStatement*>(stmt.get())) {
             if (!ret->value) return out;
             if (const auto* quote = dynamic_cast<const QuoteExpression*>(ret->value.get())) {
+                if (errorSeen) {
+                    // Reported above; what reported does not inject.
+                    out.diagnosed = true;
+                    return out;
+                }
                 if (quote->block) {
                     CloneVisitor cloner;
                     for (auto& qstmt : quote->block->statements)
@@ -197,6 +280,10 @@ EvalOutcome evaluateHandler(SpecialDeclaration& decl, Program& program, const Lo
                 if (threaded.status == comptime::ExprStatus::Ok &&
                     threaded.value.kind == comptime::ValueKind::Quote &&
                     threaded.value.quote) {
+                    if (errorSeen) {
+                        out.diagnosed = true;
+                        return out;
+                    }
                     if (threaded.value.quote->block) {
                         CloneVisitor cloner;
                         for (auto& qstmt : threaded.value.quote->block->statements)
@@ -225,6 +312,10 @@ EvalOutcome evaluateHandler(SpecialDeclaration& decl, Program& program, const Lo
             if (branch.status == comptime::BodyStatus::Returned &&
                 branch.value.kind == comptime::ValueKind::Quote &&
                 branch.value.quote) {
+                if (errorSeen) {
+                    out.diagnosed = true;
+                    return out;
+                }
                 if (branch.value.quote->block) {
                     CloneVisitor cloner;
                     for (auto& qstmt : branch.value.quote->block->statements)
@@ -305,7 +396,8 @@ EvalOutcome evaluateHandler(SpecialDeclaration& decl, Program& program, const Lo
 std::vector<W10FiredHandler> fireW10Events(Program& program, const EventRegistry& registry,
                                            const std::vector<LoopBackEdgePoint>& points,
                                            const std::set<std::string>& refused,
-                                           DiagReporter report) {
+                                           DiagReporter report, DiagReporter warnReport,
+                                           DiagReporter noteReport) {
     std::vector<W10FiredHandler> fired;
     for (const auto& point : points) {
         if (point.event != w10Payload().event) continue;
@@ -320,7 +412,8 @@ std::vector<W10FiredHandler> fireW10Events(Program& program, const EventRegistry
             // Another module's: its own analyzer fires it. Silence, as in the
             // pre-pass check, or one handler would fire once per importer.
             if (!decl) continue;
-            EvalOutcome outcome = evaluateHandler(*decl, program, point, record, report);
+            EvalOutcome outcome =
+                evaluateHandler(*decl, program, point, record, report, warnReport, noteReport);
             fired.push_back(W10FiredHandler{w10Payload().event, record.handler, detail});
             for (auto& stmt : outcome.quote) batch.push_back(std::move(stmt));
         }

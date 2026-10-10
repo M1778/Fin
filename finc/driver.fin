@@ -136,11 +136,14 @@ priv fun drv_temp_object(out_bin: string) <string> {
 // state all mirror Preprocessor.cpp:16-21,90,113-134 exactly.
 //
 // Two deliberate divergences, both where the parser already owns the half:
-// `#cdef` lines in an enabled block are passed through (the parser absorbs
-// object-likes as globals and function-likes as functions, parser.fin:3385+,
-// instead of the C++ textual expansion), and `#c_ifndef` is stripped with
-// nothing pushed so its body always compiles -- the C++ behavior documented
-// in guide/11:318-321, kept as parity rather than fixed.
+// object-like `#cdef` lines in an enabled block are passed through (the
+// parser absorbs them as globals, parser.fin:3385+, instead of the C++
+// textual expansion), and `#c_ifndef` is stripped with nothing pushed so its
+// body always compiles -- the C++ behavior documented in guide/11:318-321,
+// kept as parity rather than fixed. Function-like `#cdef`s are NOT passed
+// through: they expand textually here (drv_pp_expand_line), because the
+// parser's phantom-fun reading hides the expanded form from later checks
+// (an effectful-looking call where the C++ sees a pure ternary).
 //
 // Any other `#c_` directive (`#c_include`, `#c_undef`, `#c_if`, `#c_elif`,
 // `#c_error`, ...) is refused by name: the backend invariant forbids
@@ -205,6 +208,283 @@ priv fun drv_pp_directive_token(trimmed: string) <string> {
     return tok;
 }
 
+priv fun drv_pp_is_space(c: char) <bool> {
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { return true; }
+    if (c == cast<char>(11) || c == cast<char>(12)) { return true; }
+    return false;
+}
+
+priv fun drv_pp_id_start(c: char) <bool> {
+    if (c >= 'a' && c <= 'z') { return true; }
+    if (c >= 'A' && c <= 'Z') { return true; }
+    if (c == '_') { return true; }
+    return false;
+}
+
+// Index of the `(` opening a function-like `#cdef`'s parameter list, or -1.
+// Like the C++ `#cdef\s+(\w+)(\(...\))?` match the name comes right after
+// the blank following `#cdef`, and the `(` must immediately follow the
+// name (`MAX (a, b)` is an object-like `MAX`, exactly as there).
+priv fun drv_pp_fn_open(trimmed: string, name: string) <int> {
+    let total <int> = cast<int>(drv_strlen(trimmed));
+    let nlen <int> = cast<int>(drv_strlen(name));
+    if (nlen <= 0) { return -1; }
+    let b <[char]> = to_chars(trimmed);
+    let nb <[char]> = to_chars(name);
+    let p <int> = 5;
+    while (p < total && (b[p] == ' ' || b[p] == '\t')) { p++; }
+    let ok <bool> = true;
+    if (p + nlen > total) { ok = false; }
+    else {
+        for (let k <int> = 0; k < nlen; k++) {
+            if (b[p + k] != nb[k]) { ok = false; break; }
+        }
+    }
+    let at <int> = -1;
+    if (ok && p + nlen < total && b[p + nlen] == '(') { at = p + nlen; }
+    delete b;
+    delete nb;
+    return at;
+}
+
+// Index of the first `)` after `open`, or -1 (the C++ `[^)]*` is the first
+// close paren, nesting-blind). -1 means "not function-like": the line keeps
+// today's object-like passthrough to the parser.
+priv fun drv_pp_fn_close(trimmed: string, open: int) <int> {
+    let total <int> = cast<int>(drv_strlen(trimmed));
+    if (open < 0 || open >= total) { return -1; }
+    let b <[char]> = to_chars(trimmed);
+    let at <int> = -1;
+    for (let i <int> = open + 1; i < total; i++) {
+        if (b[i] == ')') { at = i; break; }
+    }
+    delete b;
+    return at;
+}
+
+// Dumb comma split of a parameter inner, mirroring the C++ `getline(ps, p,
+// ',')` + trim: no nesting or string awareness. An empty inner declares no
+// parameters (the C++ empty-stream loop never runs); anything else declares
+// commas+1, even a blank one (`F( )` has one empty-named parameter there,
+// and substitution below no-ops on it rather than matching everywhere).
+priv fun drv_pp_fn_nparam(inner: string) <int> {
+    if (drv_str_eq(inner, "")) { return 0; }
+    let total <int> = cast<int>(drv_strlen(inner));
+    let b <[char]> = to_chars(inner);
+    let n <int> = 1;
+    for (let i <int> = 0; i < total; i++) {
+        if (b[i] == ',') { n = n + 1; }
+    }
+    delete b;
+    return n;
+}
+
+priv fun drv_pp_fn_pjoin(inner: string) <string> {
+    let n <int> = drv_pp_fn_nparam(inner);
+    if (n <= 0) { return ""; }
+    let total <int> = cast<int>(drv_strlen(inner));
+    let b <[char]> = to_chars(inner);
+    let ob <Buffer> = new_buffer(total + 8);
+    let start <int> = 0;
+    let piece <int> = 0;
+    for (let i <int> = 0; i <= total; i++) {
+        if (i >= total || b[i] == ',') {
+            if (piece > 0) { ob.write_char(','); }
+            ob.write_string(trim(substr(inner, start, i - start)));
+            start = i + 1;
+            piece = piece + 1;
+        }
+    }
+    delete b;
+    let res <string> = ob.to_string();
+    free_buffer(ob);
+    return res;
+}
+
+priv fun drv_pp_fn_param(pjoin: string, k: int) <string> {
+    let total <int> = cast<int>(drv_strlen(pjoin));
+    let b <[char]> = to_chars(pjoin);
+    let cur <int> = 0;
+    let start <int> = 0;
+    let i <int> = 0;
+    while (i <= total) {
+        if (i >= total || b[i] == ',') {
+            if (cur == k) {
+                let piece <string> = trim(substr(pjoin, start, i - start));
+                delete b;
+                return piece;
+            }
+            cur = cur + 1;
+            start = i + 1;
+        }
+        i++;
+    }
+    delete b;
+    return "";
+}
+
+// Positional `param` to `arg` substitution with C word boundaries (the C++
+// `\bparam\b` regex), inserted verbatim like C arguments are. Deliberately
+// string-blind like the regex: a quoted parameter name is replaced too.
+// An empty parameter never matches (it would match at every boundary).
+priv fun drv_pp_word_subst(body: string, param: string, arg: string) <string> {
+    if (drv_str_eq(param, "")) { return body; }
+    let total <int> = cast<int>(drv_strlen(body));
+    let plen <int> = cast<int>(drv_strlen(param));
+    let b <[char]> = to_chars(body);
+    let pb <[char]> = to_chars(param);
+    let ob <Buffer> = new_buffer(total + 16);
+    let i <int> = 0;
+    while (i < total) {
+        let hit <bool> = false;
+        if ((i == 0 || !drv_pp_is_word_char(b[i - 1])) && i + plen <= total) {
+            hit = true;
+            for (let k <int> = 0; k < plen; k++) {
+                if (b[i + k] != pb[k]) { hit = false; break; }
+            }
+            if (hit && i + plen < total && drv_pp_is_word_char(b[i + plen])) { hit = false; }
+        }
+        if (hit) {
+            ob.write_string(arg);
+            i = i + plen;
+        } else {
+            ob.write_char(b[i]);
+            i++;
+        }
+    }
+    delete b;
+    delete pb;
+    let res <string> = ob.to_string();
+    free_buffer(ob);
+    return res;
+}
+
+// One directed `#cdef` lookup: the slot of `word` in the function-like
+// table, or -1. Whole identifiers only, so `MAX_FILE_SIZE` never matches
+// a `MAX` entry (the C++ `\b` behaves the same way).
+priv fun drv_pp_fn_lookup(names: [string], count: int, word: string) <int> {
+    for (let i <int> = 0; i < count; i++) {
+        if (drv_str_eq(names[i], word)) { return i; }
+    }
+    return -1;
+}
+
+// Textual expansion of function-like `#cdef`s on one logical code line,
+// mirroring Preprocessor::expandMacros (Preprocessor.cpp:113-215): strings
+// and chars are copied through, a defined name followed by `(` parses dumb
+// arguments (parens counted blind, so a comma inside a string still splits,
+// exactly as there), an unclosed paren or an arity mismatch leaves the name
+// standing, and a match splices the body with positional substitution. Up
+// to 100 fixpoint iterations like the oracle; no newlines are ever
+// introduced, so line numbers never shift.
+priv fun drv_pp_expand_line(line: string, names: [string], nps: [int], pjoins: [string], bodies: [string], count: int) <string> {
+    if (count <= 0) { return line; }
+    let cur <string> = line;
+    for (let iter <int> = 0; iter < 100; iter++) {
+        let total <int> = cast<int>(drv_strlen(cur));
+        let b <[char]> = to_chars(cur);
+        let ob <Buffer> = new_buffer(total + 64);
+        let changed <bool> = false;
+        let i <int> = 0;
+        while (i < total) {
+            let c <char> = b[i];
+            if (c == '"' || c == '\'') {
+                let q <char> = c;
+                ob.write_char(b[i]);
+                i++;
+                while (i < total && b[i] != q) {
+                    if (b[i] == '\\' && i + 1 < total) {
+                        ob.write_char(b[i]);
+                        ob.write_char(b[i + 1]);
+                        i = i + 2;
+                    } else {
+                        ob.write_char(b[i]);
+                        i++;
+                    }
+                }
+                if (i < total) {
+                    ob.write_char(b[i]);
+                    i++;
+                }
+            } else if (drv_pp_id_start(c)) {
+                let j <int> = i + 1;
+                while (j < total && drv_pp_is_word_char(b[j])) { j++; }
+                let word <string> = from_chars(b, i, j - i);
+                let idx <int> = drv_pp_fn_lookup(names, count, word);
+                let done <bool> = false;
+                if (idx >= 0) {
+                    let k <int> = j;
+                    while (k < total && drv_pp_is_space(b[k])) { k++; }
+                    if (k < total && b[k] == '(') {
+                        k++;
+                        let depth <int> = 1;
+                        let args <[string]> = new [string, 256]{};
+                        let nargs <int> = 0;
+                        let ab <Buffer> = new_buffer(32);
+                        let over <bool> = false;
+                        while (k < total && depth > 0) {
+                            if (b[k] == '(') { depth = depth + 1; }
+                            else if (b[k] == ')') { depth = depth - 1; }
+                            if (b[k] == ',' && depth == 1) {
+                                if (nargs >= 256) { over = true; break; }
+                                args[nargs] = trim(ab.to_string());
+                                nargs = nargs + 1;
+                                free_buffer(ab);
+                                ab = new_buffer(32);
+                                k++;
+                                continue;
+                            }
+                            if (depth > 0) { ab.write_char(b[k]); k++; }
+                        }
+                        if (!over && depth == 0) {
+                            if (nargs >= 256) { over = true; }
+                            else {
+                                args[nargs] = trim(ab.to_string());
+                                nargs = nargs + 1;
+                            }
+                        }
+                        free_buffer(ab);
+                        if (!over && depth == 0) {
+                            k++;
+                            if (nargs == nps[idx]) {
+                                let expansion <string> = bodies[idx];
+                                for (let q2 <int> = 0; q2 < nargs; q2++) {
+                                    expansion = drv_pp_word_subst(expansion, drv_pp_fn_param(pjoins[idx], q2), args[q2]);
+                                }
+                                ob.write_string(expansion);
+                                i = k;
+                                changed = true;
+                                done = true;
+                            }
+                        }
+                        delete args;
+                        if (over) {
+                            ob.write_string(word);
+                            i = j;
+                            done = true;
+                        }
+                    }
+                }
+                if (!done) {
+                    ob.write_string(word);
+                    i = j;
+                }
+            } else {
+                ob.write_char(c);
+                i++;
+            }
+        }
+        delete b;
+        if (!changed) {
+            free_buffer(ob);
+            return cur;
+        }
+        cur = ob.to_string();
+        free_buffer(ob);
+    }
+    return cur;
+}
+
 priv fun? drv_preprocess(source: string, filename: string) <string> {
     if (source == null) { return null; }
     if (filename == null) { return null; }
@@ -213,6 +493,14 @@ priv fun? drv_preprocess(source: string, filename: string) <string> {
     let out <Buffer> = new_buffer(total + 64);
     let defines <[string]> = new [string, 256]{};
     let ndef <int> = 0;
+    // Function-like `#cdef` table (parallel arrays, C++ single-map
+    // semantics: a redefinition overwrites in place). Only the name feeds
+    // `defines` above; values live here for drv_pp_expand_line.
+    let fn_names <[string]> = new [string, 256]{};
+    let fn_nps <[int]> = new [int, 256]{};
+    let fn_pjoins <[string]> = new [string, 256]{};
+    let fn_bodies <[string]> = new [string, 256]{};
+    let fn_count <int> = 0;
     let stack <[int]> = new [int, 64]{};
     let depth <int> = 0;
     let pending <string> = "";
@@ -251,6 +539,10 @@ priv fun? drv_preprocess(source: string, filename: string) <string> {
                                 delete bytes;
                                 free_buffer(out);
                                 delete defines;
+                                delete fn_names;
+                                delete fn_nps;
+                                delete fn_pjoins;
+                                delete fn_bodies;
                                 delete stack;
                                 return null;
                             }
@@ -258,8 +550,46 @@ priv fun? drv_preprocess(source: string, filename: string) <string> {
                             ndef++;
                         }
                     }
-                    out.write_string(logical);
-                    out.write_string("\n");
+                    // A function-like `#cdef NAME(params) body` is consumed:
+                    // recorded for expansion and blanked like every other
+                    // directive line. Anything else keeps today's
+                    // object-like passthrough to the parser.
+                    let fn_open <int> = drv_pp_fn_open(trimmed, dname);
+                    let fn_close <int> = drv_pp_fn_close(trimmed, fn_open);
+                    if (fn_open >= 0 && fn_close > fn_open) {
+                        let pin <string> = substr(trimmed, fn_open + 1, fn_close - fn_open - 1);
+                        let fbody <string> = trim(substr(trimmed, fn_close + 1, cast<int>(drv_strlen(trimmed)) - fn_close - 1));
+                        let fnp <int> = drv_pp_fn_nparam(pin);
+                        let fnpj <string> = drv_pp_fn_pjoin(pin);
+                        let slot <int> = -1;
+                        for (let fi <int> = 0; fi < fn_count; fi++) {
+                            if (drv_str_eq(fn_names[fi], dname)) { slot = fi; break; }
+                        }
+                        if (slot < 0) {
+                            if (fn_count >= 256) {
+                                err_dprintf(2, "finc: error: %s:%d: out of preprocessor define slots\n", filename, lineno);
+                                delete bytes;
+                                free_buffer(out);
+                                delete defines;
+                                delete fn_names;
+                                delete fn_nps;
+                                delete fn_pjoins;
+                                delete fn_bodies;
+                                delete stack;
+                                return null;
+                            }
+                            slot = fn_count;
+                            fn_count++;
+                        }
+                        fn_names[slot] = dname;
+                        fn_nps[slot] = fnp;
+                        fn_pjoins[slot] = fnpj;
+                        fn_bodies[slot] = fbody;
+                        out.write_string("\n");
+                    } else {
+                        out.write_string(logical);
+                        out.write_string("\n");
+                    }
                 } else {
                     out.write_string("\n");
                 }
@@ -270,6 +600,10 @@ priv fun? drv_preprocess(source: string, filename: string) <string> {
                     delete bytes;
                     free_buffer(out);
                     delete defines;
+                    delete fn_names;
+                    delete fn_nps;
+                    delete fn_pjoins;
+                    delete fn_bodies;
                     delete stack;
                     return null;
                 }
@@ -313,12 +647,16 @@ priv fun? drv_preprocess(source: string, filename: string) <string> {
                 delete bytes;
                 free_buffer(out);
                 delete defines;
+                delete fn_names;
+                delete fn_nps;
+                delete fn_pjoins;
+                delete fn_bodies;
                 delete stack;
                 return null;
             }
         } else {
             if (drv_pp_should_process(stack, depth)) {
-                out.write_string(logical);
+                out.write_string(drv_pp_expand_line(logical, fn_names, fn_nps, fn_pjoins, fn_bodies, fn_count));
             }
             out.write_string("\n");
         }
@@ -327,6 +665,10 @@ priv fun? drv_preprocess(source: string, filename: string) <string> {
     let res <string> = out.to_string();
     free_buffer(out);
     delete defines;
+    delete fn_names;
+    delete fn_nps;
+    delete fn_pjoins;
+    delete fn_bodies;
     delete stack;
     return res;
 }
@@ -2531,15 +2873,26 @@ pub fun compile_source_file(
     free_file_content(source);
     source = presrc;
 
+    // Snippet source for diagnostics: the preprocessor output, mirroring
+    // C++ `diag.setSource` on it. The macro stage below rewrites invocation
+    // lines, but the C++ expander runs on the AST, so its snippets still
+    // show the unexpanded text (`importing.fin`: `magic_add!(...)`, not
+    // `(10 + 20)`). Borrows `source`'s buffer; freed after checking below
+    // (every path past here frees it exactly once).
+    let pretext <string> = presrc?;
+
     // 1c. Macro expansion: text stage after preprocessing, before scanning
     // (drv_macro_expand mirrors src/macros/** plus the builtin table). A null
     // return is an explicit refusal, already reported with file:line.
     let expsrc? <string> = drv_macro_expand(source?, filename, 0);
     if (expsrc == null) {
+        // `pretext` dangles at the same freed buffer but is never read on
+        // this return path.
         free_file_content(source);
         return 1;
     }
-    free_file_content(source);
+    // `source`'s (preprocessed) buffer stays alive as `pretext`; only the
+    // expanded text moves on.
     source = expsrc;
 
     // 2. Lexical analysis / Scanning
@@ -2582,6 +2935,7 @@ pub fun compile_source_file(
         }
         delete tokens;
         free_file_content(source);
+        free_file_content(pretext);
         return 0;
     }
 
@@ -2595,6 +2949,7 @@ pub fun compile_source_file(
         free_parser(p);
         free_ast(root);
         free_file_content(source);
+        free_file_content(pretext);
         return 1;
     }
 
@@ -2710,6 +3065,7 @@ pub fun compile_source_file(
         free_parser(p);
         free_ast(root);
         free_file_content(source);
+        free_file_content(pretext);
         return 1;
     }
 
@@ -2728,6 +3084,7 @@ pub fun compile_source_file(
         free_parser(p);
         free_ast(root);
         free_file_content(source);
+        free_file_content(pretext);
         return 0;
     }
 
@@ -2739,6 +3096,9 @@ pub fun compile_source_file(
     if (!no_check) {
         let chk <Checker> = new_checker(filename);
         chk.fin_guard_enabled = fin_guard;
+        // Snippet source for diagnostics (mirrors C++ `diag.setSource` on
+        // the preprocessor output). Borrowed: freed with `pretext` below.
+        chk.set_snippet_text(pretext);
         let check_ok <bool> = chk.check_program(root);
         if (!check_ok) {
             // No summary line: the C++ Driver prints none in human mode,
@@ -2748,10 +3108,12 @@ pub fun compile_source_file(
             free_checker(chk);
             free_ast(root);
             free_file_content(source);
+            free_file_content(pretext);
             return 1;
         }
         free_checker(chk);
     }
+    free_file_content(pretext);
 
     // If check-only mode (no -o, no -c), clean up and exit 0.
     // Mirrors C++ Driver::compile's diag.success("Build Successful."):

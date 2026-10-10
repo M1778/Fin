@@ -9,7 +9,7 @@ import {
     ast_member_access, ast_index_expr, ast_ident,
     ast_literal_int, ast_literal_string, ast_literal_bool,
     ast_enum_decl, ast_interface_decl, ast_prototype_literal,
-    ast_quote_expr,
+    ast_quote_expr, ast_macro_invocation,
     ast_type_alias
 } from ast::std;
 
@@ -648,6 +648,18 @@ priv fun chk_big_const_verdict(node: &AstNode, target: string) <int> {
     return chk_mag_verdict(lit.str_val, bits, chk_int_is_signed(target), neg);
 }
 
+// An integer constant fitting a ternary arm's type (C++
+// constantFitsType as the ternary reads it): any integer constant fits
+// a float target, otherwise the target is an integer type the verdict
+// accepts. Anything else (strings, bools, structs) never fits.
+priv fun chk_tern_const_fits(node: &AstNode, target: string) <bool> {
+    if (!chk_is_int_const(node)) { return false; }
+    if (chk_str_eq(target, "float") || chk_str_eq(target, "double") ||
+        chk_str_eq(target, "f32") || chk_str_eq(target, "f64")) { return true; }
+    if (chk_int_bits(target) <= 0) { return false; }
+    return chk_big_const_verdict(node, target) == 0;
+}
+
 // Shift-count refusal (owner decision: refuse constants): a constant count
 // must satisfy 0 <= count < bits of the shifted value's spelling
 // (8->7, 16->15, 32->31, 64->63). Literal plus unary-minus, through
@@ -745,6 +757,26 @@ priv fun chk_shift_text(node: &AstNode) <string> {
     return res3;
 }
 
+// Never-read binding table for the Checker below (issue #46): parallel
+// arrays in walk order plus empty-name sentinels framing each open scope.
+// A struct of its own because the stage lowers at most 64 fields per
+// struct. Bounded 2048; beyond that records drop, which only skips a
+// warning (the arity/dup precedent).
+pub struct UnusedTracker {
+    pub:
+      names <[string]>,
+      lines <[int]>,
+      cols <[int]>,
+      count <int> = 0,
+      // Preprocessor output for the checked file, set by the driver before
+      // checking. Lives here (not on Checker: the stage lowers at most 64
+      // fields per struct and Checker is full). Snippet readers use it
+      // instead of the disk file, mirroring C++ `diag.setSource`, so
+      // expansions render expanded. Borrowed: the driver frees it after
+      // checking. Empty means unset (disk fallback, as before).
+      snippet_text <string> = "",
+}
+
 pub struct Checker {
     pub:
       global_scope <&Scope>,
@@ -828,6 +860,19 @@ pub struct Checker {
       moved_names <[string]>,
       moved_count <int> = 0,
       moved_quiet <int> = 0,
+      // Never-read `let`/`const` tracking (issue #46 mirror of the C++
+      // UnusedLocalFrame stack): one entry per recorded binding, in walk
+      // order, plus one empty-name sentinel per open scope (pushed by
+      // enter_scope alongside the real scope, so shadowing resolves
+      // nearest-first exactly like Scope::resolve). exit_scope warns the
+      // innermost frame's survivors in declaration order, then truncates
+      // through its sentinel. Only the `ast_var_decl` arm records
+      // (parameters, `self`, catch and foreach bindings never warn) and
+      // only scope-resolved identifier reads plus bare calls through
+      // locals mark (by removing the record: survivors warn, so no mark
+      // flags are stored). One field: the stage lowers at most 64 fields
+      // per struct, so the table lives in its own struct beside Checker.
+      unused_trk <&UnusedTracker> = null,
       // 1 while re-evaluating an already-checked call node (a chained
       // receiver or re-walked argument is checked twice: receiver check
       // plus argument re-check). Entry #1 reported; entry #2 recomputes
@@ -907,7 +952,10 @@ pub struct Checker {
           if (self.quiet_recheck > 0) { return; }
           self.had_error = true;
           self.diag.add_error();
-          let snip <string> = format_snippet(self.source_file, line, col, diag_error(), msg, "", 0);
+          // Explicit processed line: the diag renderer must never re-read
+          // disk (it would see unexpanded text). "" falls back as before.
+          let sline <string> = self.source_line_text(self.source_file, line);
+          let snip <string> = format_snippet(self.source_file, line, col, diag_error(), msg, sline, 0);
           chk_dprintf(2, "%s", snip);
           free_diag_str(snip);
       }
@@ -919,7 +967,8 @@ pub struct Checker {
           if (self.quiet_recheck > 0) { return; }
           self.had_error = true;
           self.diag.add_error();
-          let snip <string> = format_snippet(self.source_file, line, col, diag_error(), msg, "", span);
+          let sline2 <string> = self.source_line_text(self.source_file, line);
+          let snip <string> = format_snippet(self.source_file, line, col, diag_error(), msg, sline2, span);
           chk_dprintf(2, "%s", snip);
           free_diag_str(snip);
       }
@@ -943,19 +992,227 @@ pub struct Checker {
       // apart from errors, printed the same way.
       fun report_warning(self: &Self, msg: string, line: int, col: int) <noret> {
           self.diag.add_warning();
-          let snip <string> = format_snippet(self.source_file, line, col, diag_warning(), msg, "", 0);
+          let sline3 <string> = self.source_line_text(self.source_file, line);
+          let snip <string> = format_snippet(self.source_file, line, col, diag_warning(), msg, sline3, 0);
           chk_dprintf(2, "%s", snip);
           free_diag_str(snip);
       }
 
+      // Dead-code warning renderer: the same plain shape as format_snippet
+      // (same header, context line and carets), but with no `did you mean`
+      // pass. The C++ reportWarning computes no suggestions, so the shared
+      // renderer would invent help lines the reference never prints (a dead
+      // `break;` suggests 'break'). span < 1 answers one caret.
+      fun unused_emit(self: &Self, msg: string, line: int, col: int, span: int) <noret> {
+          self.diag.add_warning();
+          let body <string> = self.source_line_text(self.source_file, line);
+          if (body == null) { body = ""; }
+          let sp <int> = span;
+          if (sp < 1) { sp = 1; }
+          let nb <Buffer> = new_buffer(16);
+          nb.write_int(line);
+          let numstr <string> = nb.to_string();
+          free_buffer(nb);
+          let nlen <int> = cast<int>(chk_strlen(numstr));
+          let out <Buffer> = new_buffer(256);
+          out.write_string("warning: ");
+          out.write_string(msg);
+          out.write_string("\n   --> ");
+          out.write_string(self.source_file);
+          out.write_char(':');
+          out.write_int(line);
+          out.write_char(':');
+          out.write_int(col);
+          out.write_string("\n ");
+          let pi <int> = 0;
+          while (pi < nlen) { out.write_char(' '); pi = pi + 1; }
+          out.write_string(" |\n ");
+          out.write_string(numstr);
+          out.write_string(" | ");
+          out.write_string(body);
+          out.write_string("\n ");
+          let qi <int> = 0;
+          while (qi < nlen) { out.write_char(' '); qi = qi + 1; }
+          out.write_string(" | ");
+          let si <int> = 1;
+          while (si < col) { out.write_char(' '); si = si + 1; }
+          let ci <int> = 0;
+          while (ci < sp) { out.write_char('^'); ci = ci + 1; }
+          out.write_string(" here\n");
+          let res <string> = out.to_string();
+          free_buffer(out);
+          chk_dprintf(2, "%s", res);
+      }
+
       fun enter_scope(self: &Self) <noret> {
           self.current_scope = new_scope(self.current_scope);
+          self.unused_push_frame();
       }
 
       fun exit_scope(self: &Self) <noret> {
+          self.unused_pop_frame();
           let old <&Scope> = self.current_scope;
           self.current_scope = old.parent;
           free_scope(old);
+      }
+
+      // One frame per open scope for the never-read tracking above: an
+      // empty-name sentinel. The bottom sentinel (pushed lazily) is the
+      // global frame, which never warns. A dropped push skips its matching
+      // pop's warnings like a dropped record skips its own.
+      fun unused_ensure(self: &Self) <&UnusedTracker> {
+          if (self.unused_trk == null) {
+              let trk <&UnusedTracker> = new UnusedTracker{};
+              trk.names = new [string, 2048]{};
+              trk.lines = new [int, 2048]{};
+              trk.cols = new [int, 2048]{};
+              trk.count = 0;
+              self.unused_trk = trk;
+          }
+          let t <&UnusedTracker> = self.unused_trk;
+          if (t.count == 0) {
+              t.names[0] = "";
+              t.lines[0] = 0;
+              t.cols[0] = 0;
+              t.count = 1;
+          }
+          return t;
+      }
+
+      // Driver handoff for the snippet source above: ensures the tracker
+      // (so reads are safe even before the first scope opens) and records
+      // the borrowed text. One call, before checking.
+      fun set_snippet_text(self: &Self, t: string) <noret> {
+          let trk <&UnusedTracker> = self.unused_ensure();
+          trk.snippet_text = t;
+      }
+
+      fun unused_push_frame(self: &Self) <noret> {
+          let t <&UnusedTracker> = self.unused_ensure();
+          if (t.count >= 2048) { return; }
+          t.names[t.count] = "";
+          t.lines[t.count] = 0;
+          t.cols[t.count] = 0;
+          t.count = t.count + 1;
+      }
+
+      // Record one `let`/`const` binding in the innermost open scope.
+      // Called from the `ast_var_decl` arm only, which is why parameters
+      // and `self` (defined directly) never warn. An effectful
+      // initializer makes the statement an ignored result rather than
+      // dead storage, so it is not recorded either.
+      fun unused_record(self: &Self, name: string, line: int, col: int) <noret> {
+          if (name == null || chk_strlen(name) == cast<ulong>(0)) { return; }
+          let t <&UnusedTracker> = self.unused_ensure();
+          if (t.count >= 2048) { return; }
+          t.names[t.count] = name;
+          t.lines[t.count] = line;
+          t.cols[t.count] = col;
+          t.count = t.count + 1;
+      }
+
+      // Mark the nearest enclosing recorded declaration of `name` read by
+      // blanking its record to `" "` (no identifier spells that, so a later
+      // mark never matches it and the sentinel scan passes through it;
+      // survivors keep their slots, so declaration order and frame
+      // membership are exact), mirroring Scope::resolve (a use before an
+      // inner shadowing declaration still blanks the outer one, because
+      // the inner is not recorded until its declaration is walked).
+      fun unused_mark(self: &Self, name: string) <noret> {
+          if (name == null || self.unused_trk == null) { return; }
+          if (chk_strlen(name) == cast<ulong>(0)) { return; }
+          let t <&UnusedTracker> = self.unused_trk;
+          let i <int> = t.count - 1;
+          while (i >= 0) {
+              if (chk_str_eq(t.names[i], name)) {
+                  t.names[i] = " ";
+                  return;
+              }
+              i = i - 1;
+          }
+      }
+
+      // Whether `let x = <init>` is an ignored result rather than dead
+      // storage (mirror of the C++ isEffectfulInit): any of these may run
+      // code for its effects, so the statement's purpose can be the call
+      // and "remove it" would delete those effects. What stays warned is
+      // a pure-value binding (`= 42`, `= other`, `= a + b`).
+      fun unused_effectful(self: &Self, init: &AstNode) <bool> {
+          if (init == null) { return false; }
+          if (init.kind == ast_macro_invocation()) { return true; }
+          if (init.kind == ast_call_expr()) {
+              if (init.name != null && (chk_str_eq(init.name, "__fin_array_literal") || chk_str_eq(init.name, "__fin_sizeof"))) {
+                  return false;
+              }
+              return true;
+          }
+          return false;
+      }
+
+      // Warn the innermost frame's never-read bindings in declaration
+      // order, then truncate through its sentinel (warned or quiet
+      // alike). The bottom sentinel is the global frame: its entries never
+      // warn and are never truncated. Skipped under quiet_recheck
+      // (re-evaluation never reports); a blanked (read) or `_`-prefixed
+      // name stays silent.
+      fun unused_pop_frame(self: &Self) <noret> {
+          let t <&UnusedTracker> = self.unused_ensure();
+          let top <int> = t.count - 1;
+          while (top >= 0 && !chk_str_eq(t.names[top], "")) { top = top - 1; }
+          if (top > 0) {
+              if (self.quiet_recheck == 0) {
+                  let k <int> = top + 1;
+                  while (k < t.count) {
+                      if (!chk_str_eq(t.names[k], " ") && chk_strlen(t.names[k]) > cast<ulong>(0) && !chk_str_eq(substr(t.names[k], 0, 1), "_")) {
+                          let wb <Buffer> = new_buffer(128);
+                          wb.write_string("unused variable '");
+                          wb.write_string(t.names[k]);
+                          wb.write_string("' is never read; remove it or prefix its name with '_'");
+                          let wm <string> = wb.to_string();
+                          free_buffer(wb);
+                          let wline <int> = t.lines[k];
+                          let wcol <int> = t.cols[k];
+                          let wend <int> = self.unused_scan_end(wline, wcol, 0);
+                          self.unused_emit(wm, wline, wcol, wend - wcol);
+                      }
+                      k = k + 1;
+                  }
+              }
+              t.count = top;
+          }
+      }
+
+      // One dead statement's warning for the block arm below (mirror of
+      // the C++ Block walk): an expression statement warns on its inner
+      // expression (which excludes the `;`), a `return` warns at 1:1
+      // (the C++ ReturnStatement carries the parser's default location),
+      // anything else on its own range (through the `;`, or through the
+      // closing `}` for compound statements).
+      fun unused_warn_dead(self: &Self, s: &AstNode) <noret> {
+          if (s == null) { return; }
+          // Skipped on re-evaluation like the scope-exit warnings: injected
+          // code is not the user's to fix.
+          if (self.quiet_recheck != 0) { return; }
+          let umsg <string> = "unreachable statement after 'return' never runs; remove it";
+          if (s.kind == ast_return_stmt()) {
+              self.unused_emit(umsg, 1, 1, 1);
+              return;
+          }
+          if (s.kind == ast_expr_stmt() && s.left != null) {
+              // The statement starts where its expression starts (the parser
+              // locates some expression nodes at their operator, so the
+              // statement's own site is the exact one); the end scan drops
+              // the `;` like the C++ inner-expression span does.
+              let eend <int> = self.unused_scan_end(s.line, s.col, 2);
+              self.unused_emit(umsg, s.line, s.col, eend - s.col);
+              return;
+          }
+          let smode <int> = 0;
+          if (s.kind == ast_if_stmt() || s.kind == ast_while_stmt() || s.kind == ast_for_stmt() || s.kind == ast_block()) {
+              smode = 1;
+          }
+          let send <int> = self.unused_scan_end(s.line, s.col, smode);
+          self.unused_emit(umsg, s.line, s.col, send - s.col);
       }
 
       fun resolve_type(self: &Self, type_name: string) <string> {
@@ -2227,7 +2484,7 @@ pub struct Checker {
     fun bare_decl_code_line(self: &Self, line: int) <string> {
         if (line < 1) { return ""; }
         if (self.source_file == null || chk_strlen(self.source_file) == cast<ulong>(0)) { return ""; }
-        let text? <string> = read_to_string(self.source_file);
+        let text? <string> = self.source_text_for(self.source_file);
         if (text == null) { return ""; }
         let total <int> = cast<int>(chk_strlen(text?));
         let bytes <[char]> = to_chars(text?);
@@ -5305,10 +5562,58 @@ pub struct Checker {
                   return "error";
               }
               let sym <Symbol> = self.current_scope.lookup(expr.name);
+              // Issue #46: a scope-resolved use reads the binding (a plain
+              // `=` target included: the C++ visit marks it read too, so a
+              // write-only local stays silent there as here).
+              self.unused_mark(expr.name);
               return self.resolve_type(sym.type_name);
           }
 
           if (expr.kind == ast_binary_expr()) {
+              if (chk_str_eq(expr.name, ":?")) {
+                  // `cond : then ? otherwise` (ADR 0005): the condition
+                  // carries no type requirement (C++ visit(TernaryOp)
+                  // checks it but never constrains it: ints use
+                  // truthiness, like `if`). Exactly one arm runs, so the
+                  // arms fork and join like an if/else (C++ installJoin).
+                  // No expected branch: an integer constant takes the
+                  // other arm's type, otherwise the false arm is checked
+                  // against the true arm's and the answer is the true
+                  // arm's type.
+                  self.check_expression(expr.left);
+                  let tern_pre <[string]> = new [string, 64]{};
+                  let tern_pn <int> = self.moved_snapshot(tern_pre);
+                  let true_node <&AstNode> = null;
+                  let false_node <&AstNode> = null;
+                  if (expr.right != null) {
+                      true_node = expr.right.left;
+                      false_node = expr.right.right;
+                  }
+                  let t_tern <string> = "int";
+                  if (true_node != null) { t_tern = self.check_expression(true_node); }
+                  let tern_then <[string]> = new [string, 64]{};
+                  let tern_tn <int> = self.moved_snapshot(tern_then);
+                  self.moved_restore(tern_pre, tern_pn);
+                  let f_tern <string> = "int";
+                  if (false_node != null) { f_tern = self.check_expression(false_node); }
+                  self.moved_intersect(tern_then, tern_tn);
+                  if (false_node != null && chk_tern_const_fits(false_node, t_tern)) {
+                      return t_tern;
+                  }
+                  if (true_node != null && chk_tern_const_fits(true_node, f_tern)) {
+                      return f_tern;
+                  }
+                  if (!self.chk_types_compatible(f_tern, t_tern)) {
+                      let fl <int> = expr.line;
+                      let fc <int> = expr.col;
+                      if (false_node != null) {
+                          fl = false_node.line;
+                          fc = false_node.col;
+                      }
+                      self.report_type_mismatch(t_tern, f_tern, fl, fc);
+                  }
+                  return t_tern;
+              }
               // A plain `x = e` rebinds x rather than reading it, so the
               // target suspends the use check (C++ suspendUses); `x = x + 1`
               // still reports the right-hand read, exactly once. Rebinding
@@ -6011,6 +6316,12 @@ pub struct Checker {
               let orig_name <string> = expr.name;
               let subst_recv <string> = "";
               let subst_base <string> = "";
+              // Whether the receiver path below claims this call. A bare
+              // call takes no receiver processing, so its callee reads
+              // here (issue #46: the closure-variable call path never
+              // walks an Identifier); a claimed call's receiver already
+              // marked itself, and its method name is not a local.
+              let call_bare <bool> = expr.left == null || (self.current_scope.has(expr.name) && !self.method_probe_hit(expr));
               if (expr.left != null && (!self.current_scope.has(expr.name) || self.method_probe_hit(expr))) {
                   let rec_node <&AstNode> = expr.left;
                   if (rec_node.kind == 0 && rec_node.left != null) {
@@ -6340,6 +6651,14 @@ pub struct Checker {
                       b.write_string(expr.name);
                       self.report_error(b.to_string(), expr.line, expr.col);
                       free_buffer(b);
+                  }
+                  // Issue #46: this path never walks an Identifier for the
+                  // callee, so a call through a local (a lambda value, an
+                  // `fn` variable) marks the read here rather than there.
+                  // Only bare calls: a claimed call's receiver already
+                  // marked itself, and its method name is not a local.
+                  if (call_bare && self.current_scope.has(expr.name)) {
+                      self.unused_mark(expr.name);
                   }
                   // Visibility, mirroring C++ method rules: a `priv`
                   // method is callable only from inside the RECEIVER
@@ -7423,6 +7742,14 @@ pub struct Checker {
                       self.report_error("duplicate declaration of variable in current scope", stmt.line, stmt.col);
                   }
               }
+              // Issue #46: this binding warns if it is never read -- unless
+              // its initializer may run code (an ignored result, not dead
+              // storage). Recorded after define, like the C++ visit. A
+              // foreach binding (`str_val` marker from the parser) is not
+              // a `let` and never warns.
+              if (!self.unused_effectful(stmt.left) && !chk_str_eq(stmt.str_val, "foreach")) {
+                  self.unused_record(stmt.name, stmt.line, stmt.col);
+              }
               return;
           }
 
@@ -7571,13 +7898,31 @@ pub struct Checker {
 
           if (stmt.kind == ast_block()) {
               self.enter_scope();
-              let cur <&AstNode> = stmt.left;
-              while (cur != null) {
-                  self.check_statement(cur.left);
-                  cur = cur.right;
-              }
+              self.check_block_chain(stmt.left);
               self.exit_scope();
               return;
+          }
+      }
+
+      // Shared statement-sequence walk for the block arm above and
+      // check_function below (a function body is its block, walked
+      // directly rather than through the arm): statements in order, with
+      // each statement after a `return` in the SAME block warning first
+      // (issue #46: the backend drops it in silence). Still walks dead
+      // statements, so errors inside still report. Warning-level only,
+      // never failing the build.
+      fun check_block_chain(self: &Self, first: &AstNode) <noret> {
+          let dead <bool> = false;
+          let cur <&AstNode> = first;
+          while (cur != null) {
+              if (dead && cur.left != null) {
+                  self.unused_warn_dead(cur.left);
+              }
+              self.check_statement(cur.left);
+              if (!dead && cur.left != null && cur.left.kind == ast_return_stmt()) {
+                  dead = true;
+              }
+              cur = cur.right;
           }
       }
 
@@ -7749,11 +8094,7 @@ pub struct Checker {
 
           // Check body
           if (fn_node.left != null) {
-              let b_cur <&AstNode> = fn_node.left.left;
-              while (b_cur != null) {
-                  self.check_statement(b_cur.left);
-                  b_cur = b_cur.right;
-              }
+              self.check_block_chain(fn_node.left.left);
           }
 
           // Quote uses the statement checker never sees: it does not
@@ -8017,9 +8358,157 @@ pub struct Checker {
       // searching inside the first `<...>` so an enum's own name (before
       // `<`) never wins over a bound word (after `<`). -1 when unreadable
       // or absent; the caller keeps the decl site then (never a bogus col).
+      // endCol-exclusive (1-based) of the statement or expression starting
+      // at (`line`, `col`) in the checker's own source file, or 0 when it
+      // cannot be found (the caller falls back to the token span). Mode 0
+      // ends after a depth-0 `;` (bindings and `;`-terminated statements:
+      // the C++ node range always runs through the terminator, even across
+      // lines, so multi-line bindings measure exactly); mode 1 ends after
+      // the `}` closing an in-scan `{`, or after a depth-0 `;` when no `{`
+      // opened (dead compound statements); mode 2 ends before a depth-0
+      // `;`, closer, comment or line end (dead inner expressions, which
+      // exclude the `;`). The end column may sit on a later line: like the
+      // C++ human renderer, the caller underlines `end - begin` carets on
+      // the begin line. Quote-aware (both quotes, backslash escapes) with
+      // line and nested block comments skipped, so a `;` inside a string
+      // never ends the scan. An expression continued past a depth-0 line
+      // end (after a trailing operator) still ends there: the only known
+      // approximation, and nothing in the corpus shapes that way. Single
+      // `to_chars` scan, like bare_decl_code_line.
+      fun unused_scan_end(self: &Self, line: int, col: int, mode: int) <int> {
+          if (self.source_file == null || line < 1 || col < 1) { return 0; }
+          if (mode != 0 && mode != 1 && mode != 2) { return 0; }
+          let text? <string> = self.source_text_for(self.source_file);
+          if (text == null) { return 0; }
+          let total <int> = cast<int>(chk_strlen(text?));
+          let bytes <[char]> = to_chars(text?);
+          let cur <int> = 1;
+          let off <int> = 0;
+          while (off < total) {
+              if (cur == line) { break; }
+              if (bytes[off] == cast<char>(10)) { cur = cur + 1; }
+              off = off + 1;
+          }
+          if (cur != line) {
+              delete bytes;
+              free_file_content(text?);
+              return 0;
+          }
+          let i <int> = off + col - 1;
+          if (i > total) {
+              delete bytes;
+              free_file_content(text?);
+              return 0;
+          }
+          let start <int> = i;
+          let end_start <int> = off;
+          let depth <int> = 0;
+          let opened <bool> = false;
+          let q <int> = 0;
+          let last_sig <int> = -1;
+          let answer <int> = 0;
+          while (i < total) {
+              let ch <char> = bytes[i];
+              if (q == 1) {
+                  if (ch == cast<char>(92)) { i = i + 1; }
+                  else if (ch == cast<char>(39)) { q = 0; }
+                  if (mode == 2) { last_sig = i; }
+              } else if (q == 2) {
+                  if (ch == cast<char>(92)) { i = i + 1; }
+                  else if (ch == cast<char>(34)) { q = 0; }
+                  if (mode == 2) { last_sig = i; }
+              } else if (ch == cast<char>(34)) {
+                  q = 2;
+                  if (mode == 2) { last_sig = i; }
+              } else if (ch == cast<char>(39)) {
+                  q = 1;
+                  if (mode == 2) { last_sig = i; }
+              } else if (ch == cast<char>(47) && i + 1 < total && bytes[i + 1] == cast<char>(47)) {
+                  // A `//` comment runs to the line end: the scan continues
+                  // past it, except a mode-2 expression at depth 0, which
+                  // ends before it.
+                  if (mode == 2 && depth == 0) { break; }
+                  while (i < total && bytes[i] != cast<char>(10)) { i = i + 1; }
+                  continue;
+              } else if (ch == cast<char>(47) && i + 1 < total && bytes[i + 1] == cast<char>(42)) {
+                  // A nested block comment (the lexer nests them) is skipped
+                  // whole, so a `;` inside one never ends the scan.
+                  let nest <int> = 1;
+                  i = i + 2;
+                  while (i < total && nest > 0) {
+                      if (bytes[i] == cast<char>(47) && i + 1 < total && bytes[i + 1] == cast<char>(42)) {
+                          nest = nest + 1;
+                          i = i + 1;
+                      } else if (bytes[i] == cast<char>(42) && i + 1 < total && bytes[i + 1] == cast<char>(47)) {
+                          nest = nest - 1;
+                          i = i + 1;
+                      }
+                      i = i + 1;
+                  }
+                  // The comment may cross newlines the main loop never sees:
+                  // re-anchor the current line's start.
+                  let rs <int> = i - 1;
+                  while (rs >= 0 && bytes[rs] != cast<char>(10)) { rs = rs - 1; }
+                  end_start = rs + 1;
+                  continue;
+              } else if (ch == cast<char>(10)) {
+                  if (mode == 2 && depth == 0) { break; }
+                  end_start = i + 1;
+              } else if (ch == cast<char>(59)) {
+                  if (depth == 0 && (mode == 0 || (mode == 1 && !opened))) {
+                      answer = (i - end_start) + 2;
+                      break;
+                  }
+                  if (mode == 2 && depth == 0) { break; }
+                  if (mode == 2 && ch != cast<char>(32) && ch != cast<char>(9)) { last_sig = i; }
+              } else if (ch == cast<char>(40) || ch == cast<char>(91) || ch == cast<char>(123)) {
+                  depth = depth + 1;
+                  if (mode == 1 && ch == cast<char>(123)) { opened = true; }
+                  if (mode == 2) { last_sig = i; }
+              } else if (ch == cast<char>(41) || ch == cast<char>(93) || ch == cast<char>(125)) {
+                  if (depth == 0) {
+                      if (mode == 2) { break; }
+                      break;
+                  }
+                  depth = depth - 1;
+                  if (mode == 1 && opened && depth == 0 && ch == cast<char>(125)) {
+                      answer = (i - end_start) + 2;
+                      break;
+                  }
+                  if (mode == 2) { last_sig = i; }
+              } else {
+                  if (mode == 2 && ch != cast<char>(32) && ch != cast<char>(9) && ch != cast<char>(13)) {
+                      last_sig = i;
+                  }
+              }
+              i = i + 1;
+          }
+          delete bytes;
+          free_file_content(text?);
+          if (answer > 0) { return answer; }
+          if (mode == 2 && last_sig >= start) {
+              return (last_sig - end_start) + 2;
+          }
+          return 0;
+      }
+      // Owned file text for `path`: a copy of the processed text when
+      // `path` is the checked file and the driver set it, else the disk
+      // file. Owned either way, so callers free exactly as before; ""
+      // when unreadable, which every caller already treats as missing.
+      fun source_text_for(self: &Self, path: string) <string> {
+          if (path != null && self.unused_trk != null && self.unused_trk.snippet_text != null &&
+              chk_str_eq(path, self.source_file)) {
+              let n <int> = cast<int>(chk_strlen(self.unused_trk.snippet_text));
+              if (n > 0) { return substr(self.unused_trk.snippet_text, 0, n); }
+          }
+          if (path == null) { return ""; }
+          let disk? <string> = read_to_string(path);
+          if (disk == null) { return ""; }
+          return disk?;
+      }
       fun source_line_text(self: &Self, path: string, line_no: int) <string> {
           if (path == null || line_no < 1) { return ""; }
-          let text? <string> = read_to_string(path);
+          let text? <string> = self.source_text_for(path);
           if (text == null) { return ""; }
           let total <int> = cast<int>(chk_strlen(text?));
           let bytes <[char]> = to_chars(text?);
@@ -8062,7 +8551,7 @@ pub struct Checker {
           if (line_no < 1) { return -1; }
           let wlen <int> = cast<int>(chk_strlen(word));
           if (wlen <= 0) { return -1; }
-          let text? <string> = read_to_string(path);
+          let text? <string> = self.source_text_for(path);
           if (text == null) { return -1; }
           let total <int> = cast<int>(chk_strlen(text?));
           let bytes <[char]> = to_chars(text?);
@@ -8739,7 +9228,7 @@ pub struct Checker {
       fun check_implements_blocks(self: &Self, root: &AstNode) <noret> {
           if (self.source_file == null || chk_strlen(self.source_file) == cast<ulong>(0)) { return; }
           if (root == null) { return; }
-          let text? <string> = read_to_string(self.source_file);
+          let text? <string> = self.source_text_for(self.source_file);
           if (text == null) { return; }
           let total <int> = cast<int>(chk_strlen(text?));
           let bytes <[char]> = to_chars(text?);
