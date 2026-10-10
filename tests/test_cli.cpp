@@ -3397,28 +3397,45 @@ namespace {
 // Returns the raw text, suitable for a substring assertion. Uses readelf
 // (always present on the Linux builders) rather than llvm-dwarfdump so the
 // test does not depend on LLVM tooling the compiler itself needs.
+// On Windows there is no readelf: the spawn fails and the caller sees "".
 std::string readelfSections(const std::string& objectPath) {
     const std::string cmd = "readelf -S " + objectPath + " 2>&1";
+#ifdef _WIN32
+    FILE* pipe = _popen(cmd.c_str(), "r");
+#else
     FILE* pipe = popen(cmd.c_str(), "r");
+#endif
     if (!pipe) return "";
     std::string out;
     char buf[4096];
     while (fgets(buf, sizeof(buf), pipe)) out += buf;
+#ifdef _WIN32
+    _pclose(pipe);
+#else
     pclose(pipe);
+#endif
     return out;
 }
 
 // Dumps `.debug_info` contents via `llvm-dwarfdump --debug-info`, which is
 // always present alongside the LLVM the compiler was built against. Returns the
-// raw text.
+// raw text ("" when the tool is absent, as on Windows).
 std::string dwarfdumpInfo(const std::string& objectPath) {
     const std::string cmd = "llvm-dwarfdump --debug-info " + objectPath + " 2>&1";
+#ifdef _WIN32
+    FILE* pipe = _popen(cmd.c_str(), "r");
+#else
     FILE* pipe = popen(cmd.c_str(), "r");
+#endif
     if (!pipe) return "";
     std::string out;
     char buf[4096];
     while (fgets(buf, sizeof(buf), pipe)) out += buf;
+#ifdef _WIN32
+    _pclose(pipe);
+#else
     pclose(pipe);
+#endif
     return out;
 }
 
@@ -3432,7 +3449,7 @@ TEST(DwarfDebugInfo, DashGDumpsDebugInfoWithSourcePathAndMain) {
     // Issue #37: flag plumbed, lowering pending. Parked until DIBuilder
     // emission lands -- delete this skip when it does.
     GTEST_SKIP() << "DWARF lowering not implemented yet (issue #37)";
-    const std::string src = fs::path(samplesDir()) / "debug.fin";
+    const std::string src = (fs::path(samplesDir()) / "debug.fin").string();
     ASSERT_TRUE(fs::exists(src))
         << "tests/samples/debug.fin must exist for the -g test";
     const std::string obj = uniqueTempPath("fin_dbg", ".o");
@@ -3462,7 +3479,7 @@ TEST(DwarfDebugInfo, DashGDumpsDebugInfoWithSourcePathAndMain) {
 // Without -g: no .debug_info section. This is the regression guard that -g is
 // opt-in and that the default build stays debug-info-free.
 TEST(DwarfDebugInfo, WithoutGDumpsNoDebugInfo) {
-    const std::string src = fs::path(samplesDir()) / "debug.fin";
+    const std::string src = (fs::path(samplesDir()) / "debug.fin").string();
     ASSERT_TRUE(fs::exists(src));
     const std::string obj = uniqueTempPath("fin_nodbg", ".o");
     const FincRun r = runFinc({src, "-c", "-o", obj});
@@ -3483,7 +3500,7 @@ TEST(DwarfDebugInfo, WithoutGDumpsNoDebugInfo) {
 TEST(DwarfDebugInfo, DebugSymbolsLongFlagWorksLikeDashG) {
     // Same parking as above: needs DIBuilder emission (issue #37).
     GTEST_SKIP() << "DWARF lowering not implemented yet (issue #37)";
-    const std::string src = fs::path(samplesDir()) / "debug.fin";
+    const std::string src = (fs::path(samplesDir()) / "debug.fin").string();
     const std::string obj = uniqueTempPath("fin_dsym", ".o");
     const FincRun r = runFinc({src, "--debug-symbols", "-c", "-o", obj});
     ASSERT_EQ(r.exitCode, 0) << stripAnsi(r.err);
