@@ -3413,16 +3413,18 @@ static std::string captureCommand(const std::string& cmd) {
 }
 
 // Lists section names via `llvm-readobj --sections` (ships with every LLVM,
-// handles ELF/Mach-O/COFF alike), falling back to `readelf -S`. Returns the
-// raw text, suitable for a substring assertion on `.debug_info`/`.debug_line`
-// spellings both tools print. Uses LLVM tooling rather than readelf alone so
-// the test does not depend on binutils the compiler itself never needs;
-// `readelf` (Linux-only) stays as the fallback.
+// handles ELF/Mach-O/COFF alike), falling back to `readelf -S` and then
+// `otool -l` (always present on macOS, where both LLVM tools live in
+// keg-only directories off PATH). Returns the raw text, suitable for a
+// substring assertion on `debug_info`/`debug_line` spellings all three print
+// (`.debug_*` under readobj/readelf, `__debug_*` under otool).
 std::string readelfSections(const std::string& objectPath) {
     const std::string out = captureCommand("llvm-readobj --sections " + objectPath + " 2>&1");
     if (out.find(".debug_") != std::string::npos || out.find("Format:") != std::string::npos)
         return out;
-    return captureCommand("readelf -S " + objectPath + " 2>&1");
+    const std::string elf = captureCommand("readelf -S " + objectPath + " 2>&1");
+    if (elf.find(".debug_") != std::string::npos) return elf;
+    return captureCommand("otool -l " + objectPath + " 2>&1");
 }
 
 // Dumps `.debug_info` contents via `llvm-dwarfdump --debug-info`, which is
@@ -3450,9 +3452,9 @@ TEST(DwarfDebugInfo, DashGDumpsDebugInfoWithSourcePathAndMain) {
     ASSERT_TRUE(fs::exists(obj)) << "-g -c must produce the object";
 
     const std::string sections = readelfSections(obj);
-    EXPECT_NE(sections.find(".debug_info"), std::string::npos)
+    EXPECT_NE(sections.find("debug_info"), std::string::npos)
         << "-g must produce a .debug_info section:\n" << sections;
-    EXPECT_NE(sections.find(".debug_line"), std::string::npos)
+    EXPECT_NE(sections.find("debug_line"), std::string::npos)
         << "-g must produce a .debug_line section:\n" << sections;
 
     const std::string info = dwarfdumpInfo(obj);
@@ -3479,9 +3481,9 @@ TEST(DwarfDebugInfo, WithoutGDumpsNoDebugInfo) {
     ASSERT_TRUE(fs::exists(obj));
 
     const std::string sections = readelfSections(obj);
-    EXPECT_EQ(sections.find(".debug_info"), std::string::npos)
+    EXPECT_EQ(sections.find("debug_info"), std::string::npos)
         << "without -g there must be no .debug_info section:\n" << sections;
-    EXPECT_EQ(sections.find(".debug_line"), std::string::npos)
+    EXPECT_EQ(sections.find("debug_line"), std::string::npos)
         << "without -g there must be no .debug_line section:\n" << sections;
 
     std::error_code ec;
@@ -3498,7 +3500,7 @@ TEST(DwarfDebugInfo, DebugSymbolsLongFlagWorksLikeDashG) {
     ASSERT_TRUE(fs::exists(obj));
 
     const std::string sections = readelfSections(obj);
-    EXPECT_NE(sections.find(".debug_info"), std::string::npos)
+    EXPECT_NE(sections.find("debug_info"), std::string::npos)
         << "--debug-symbols must produce .debug_info:\n" << sections;
 
     std::error_code ec;
