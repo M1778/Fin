@@ -126,6 +126,21 @@ TEST_F(ParserTest, StructMethods) {
     EXPECT_TRUE(parseString(code));
 }
 
+TEST_F(ParserTest, BareBlockScope) {
+    // Issue #74 (ADR 0011): a bare `{ }` in statement position is a scope
+    // block, so a `let` directly inside the braces parses.
+    const char* code = R"(
+        fun main() <noret> {
+            let a <int> = 1;
+            {
+                let b <int> = 2;
+                blame a + b == 3;
+            }
+        }
+    )";
+    EXPECT_TRUE(parseString(code));
+}
+
 // FileParserTest and GetFinFiles() used to live here. Both are deleted:
 //
 //  * FileParserTest asserted that all fifty samples parse. Authority is

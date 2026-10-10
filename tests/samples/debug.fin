@@ -1,0 +1,10 @@
+//@ normative
+//@ ok
+// A minimal sample for the `-g` / `--debug-symbols` flag (issue #37): a program
+// simple enough that DWARF line info for `main` is trivial to assert on, yet real
+// enough to exercise the one local a debugger is expected to print.
+fun main() <int> {
+    let n <int> = 42;
+    blame n == 42;
+    return n;
+}

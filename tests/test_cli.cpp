@@ -223,7 +223,82 @@ TEST(MachineContract, DashOWithoutABackendRefusesAndWritesNothing) {
     std::error_code ec;
     fs::remove(target, ec);
 }
+#endif  // FIN_TESTS_HAVE_BACKEND
+
+// --- --target refusal (issue #39) -----------------------------------------
+//
+// `--target wasm32-unknown-unknown` asks for a non-host triple. finc pins the
+// host triple (src/codegen/CodeGen_LLVM.cpp), so requesting a different one is
+// a refusal, not a silent host build. The "no silent host binary" guarantee is
+// the key acceptance criterion.
+//
+// A shell-level pin lives in tests/samples/target_refusal.fin: it pins the
+// diagnostic message through the harness.
+
+TEST(MachineContract, TargetWithAWasmTripleRefusesAndWritesNothing) {
+    TempFin f("fun main() <noret> {}\n");
+    const std::string obj = uniqueTempPath("fin_target", ".o");
+    auto r = runFinc({f.str(), "--target", "wasm32-unknown-unknown", "-c", "-o", obj});
+    const std::string err = stripAnsi(r.err);
+    std::error_code ec;
+    fs::remove(obj, ec);
+
+    EXPECT_EQ(r.exitCode, 1) << err;
+    EXPECT_FALSE(fs::exists(obj))
+        << "a refused --target must not leave an object where -o pointed";
+    EXPECT_NE(err.find("refusing unsupported --target"), std::string::npos)
+        << "the refusal must name the unsupported target:\n" << err;
+    EXPECT_NE(err.find("wasm32-unknown-unknown"), std::string::npos)
+        << "the refusal must echo the triple that was rejected:\n" << err;
+}
+
+#ifdef FIN_TESTS_HAVE_BACKEND
+// The refusal must happen before any object file is written, even when the
+// backend is present. This is the same invariant as DashOWithoutABackendRefusesAndWritesNothing:
+// exit 0 with no artifact is the failure mode that must not occur.
+TEST(MachineContract, TargetWithAWasmTripleRefusesEvenWithABackend) {
+    TempFin f("fun main() <noret> {}\n");
+    const std::string obj = uniqueTempPath("fin_target_backend", ".o");
+    auto r = runFinc({f.str(), "--target", "wasm32-unknown-unknown", "-c", "-o", obj});
+    const std::string err = stripAnsi(r.err);
+    std::error_code ec;
+    fs::remove(obj, ec);
+
+    EXPECT_NE(r.exitCode, 0) << "refusing a non-host target must fail, not build a host binary";
+    EXPECT_FALSE(fs::exists(obj))
+        << "the backend presence must not produce an object for a refused target";
+}
 #endif
+
+TEST(MachineContract, TargetWithTheHostTripleStillBuilds) {
+    // A --target that matches the host triple must proceed to build normally.
+    // This is the control for the refusal tests: if --target were wired to reject
+    // everything, this would go red. We pass the default (empty) target, which the
+    // compiler treats as "use the host triple".
+    TempFin f("fun main() <noret> {}\n");
+    const std::string obj = uniqueTempPath("fin_target_host", ".o");
+    auto r = runFinc({f.str(), "-c", "-o", obj});
+    const std::string err = stripAnsi(r.err);
+    std::error_code ec;
+
+    EXPECT_EQ(r.exitCode, 0) << err;
+    EXPECT_TRUE(fs::exists(obj))
+        << "a host-target build (default) must still produce an object";
+    fs::remove(obj, ec);
+}
+
+TEST(MachineContract, TargetIsAdvertisedInHelp) {
+    auto r = runFinc({"--help"});
+    EXPECT_EQ(r.exitCode, 0);
+    EXPECT_NE(r.out.find("--target"), std::string::npos);
+}
+
+TEST(MachineContract, TargetWithoutAnOperandIsAUsageError) {
+    TempFin f("fun main() <noret> {}\n");
+    auto r = runFinc({f.str(), "--target"});
+    EXPECT_EQ(r.exitCode, 2);
+    EXPECT_NE(stripAnsi(r.err).find("missing triple for --target"), std::string::npos);
+}
 
 TEST(MachineContract, DashOWithoutAnOperandIsAUsageError) {
     TempFin f("fun main() <noret> {}\n");
@@ -470,6 +545,28 @@ TEST(JsonDiagnostics, TheSummaryCarriesTheExitCodeOnAUsageFailure) {
     auto lines = jsonLines(r.err);
     ASSERT_GE(lines.size(), 1u) << r.err;
     EXPECT_NE(lines.back().find("\"exitCode\":2"), std::string::npos) << lines.back();
+    EXPECT_NE(lines.back().find("\"status\":\"failed\""), std::string::npos) << lines.back();
+}
+
+TEST(JsonDiagnostics, ATargetRefusalCarriesTheExitCodeAndNamesTheTarget) {
+    // Issue #39: --target wasm32-unknown-unknown is refused with exit 1, and the
+    // JSON stream must carry that code and the rejected triple, so a `finn`
+    // consuming this output can branch on it.
+    TempFin f("fun main() <noret> {}\n");
+    const std::string obj = uniqueTempPath("fin_target_json", ".o");
+    auto r = runFinc({f.str(), "--target", "wasm32-unknown-unknown", "-c", "-o", obj,
+                      "--diagnostics=json"});
+    std::error_code ec;
+    fs::remove(obj, ec);
+
+    ASSERT_EQ(r.exitCode, 1) << r.err;
+    auto lines = jsonLines(r.err);
+    ASSERT_GE(lines.size(), 2u) << r.err;
+    const std::string& d = lines.front();
+    EXPECT_NE(d.find("\"kind\":\"diagnostic\""), std::string::npos) << d;
+    EXPECT_NE(d.find("refusing unsupported --target"), std::string::npos) << d;
+    EXPECT_NE(d.find("wasm32-unknown-unknown"), std::string::npos) << d;
+    EXPECT_NE(lines.back().find("\"exitCode\":1"), std::string::npos) << lines.back();
     EXPECT_NE(lines.back().find("\"status\":\"failed\""), std::string::npos) << lines.back();
 }
 
@@ -3283,3 +3380,156 @@ TEST(DeadCode, UnderscorePrefixedLocalStaysSilent) {    // The control: a `_`-pr
     EXPECT_TRUE(diagsInFile(err, f.str()).empty()) << "an intentional unused warns nothing:\n"
                                                    << err;
 }
+
+// --- -g / --debug-symbols (issue #37: DWARF debug info) ------------------------
+//
+// `finc -g` emits DWARF sufficient to (1) set a line breakpoint in main,
+// (2) backtrace with fin function names, and (3) print an int local. The shell
+// test below asserts what the sample corpus cannot: the `.debug_info` section
+// exists, names the fin source path, and carries a `main` subprogram.
+//
+// The FIN_WITH_LLVM=OFF build has no backend at all, so `-g` cannot produce
+// debug info it cannot emit -- the same skip pattern as DashOProducesTheNamedExecutable.
+
+namespace {
+
+// Reads the named section headers out of an ELF object via `readelf -S`.
+// Returns the raw text, suitable for a substring assertion. Uses readelf
+// (always present on the Linux builders) rather than llvm-dwarfdump so the
+// test does not depend on LLVM tooling the compiler itself needs.
+std::string readelfSections(const std::string& objectPath) {
+    const std::string cmd = "readelf -S " + objectPath + " 2>&1";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+    std::string out;
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), pipe)) out += buf;
+    pclose(pipe);
+    return out;
+}
+
+// Dumps `.debug_info` contents via `llvm-dwarfdump --debug-info`, which is
+// always present alongside the LLVM the compiler was built against. Returns the
+// raw text.
+std::string dwarfdumpInfo(const std::string& objectPath) {
+    const std::string cmd = "llvm-dwarfdump --debug-info " + objectPath + " 2>&1";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+    std::string out;
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), pipe)) out += buf;
+    pclose(pipe);
+    return out;
+}
+
+} // namespace
+
+#ifdef FIN_TESTS_HAVE_BACKEND
+// With -g: the object carries .debug_info, the fin source path, and a `main`
+// subprogram. A sample (tests/samples/debug.fin) is the program; the assertion
+// reads the object the compiler produced.
+TEST(DwarfDebugInfo, DashGDumpsDebugInfoWithSourcePathAndMain) {
+    // Issue #37: flag plumbed, lowering pending. Parked until DIBuilder
+    // emission lands -- delete this skip when it does.
+    GTEST_SKIP() << "DWARF lowering not implemented yet (issue #37)";
+    const std::string src = fs::path(samplesDir()) / "debug.fin";
+    ASSERT_TRUE(fs::exists(src))
+        << "tests/samples/debug.fin must exist for the -g test";
+    const std::string obj = uniqueTempPath("fin_dbg", ".o");
+    const FincRun r = runFinc({src, "-g", "-c", "-o", obj});
+    ASSERT_EQ(r.exitCode, 0) << "a -g build of debug.fin must compile:\n" << stripAnsi(r.err);
+    ASSERT_TRUE(fs::exists(obj)) << "-g -c must produce the object";
+
+    const std::string sections = readelfSections(obj);
+    EXPECT_NE(sections.find(".debug_info"), std::string::npos)
+        << "-g must produce a .debug_info section:\n" << sections;
+    EXPECT_NE(sections.find(".debug_line"), std::string::npos)
+        << "-g must produce a .debug_line section:\n" << sections;
+
+    const std::string info = dwarfdumpInfo(obj);
+    // The source path the compiler was handed must appear in the DWARF file
+    // table so a debugger can open it.
+    EXPECT_NE(info.find("debug.fin"), std::string::npos)
+        << "DWARF must name the fin source path:\n" << info;
+    // A subprogram for `main` so a backtrace and a breakpoint both land.
+    EXPECT_NE(info.find("main"), std::string::npos)
+        << "DWARF must carry a `main` subprogram:\n" << info;
+
+    std::error_code ec;
+    fs::remove(obj, ec);
+}
+
+// Without -g: no .debug_info section. This is the regression guard that -g is
+// opt-in and that the default build stays debug-info-free.
+TEST(DwarfDebugInfo, WithoutGDumpsNoDebugInfo) {
+    const std::string src = fs::path(samplesDir()) / "debug.fin";
+    ASSERT_TRUE(fs::exists(src));
+    const std::string obj = uniqueTempPath("fin_nodbg", ".o");
+    const FincRun r = runFinc({src, "-c", "-o", obj});
+    ASSERT_EQ(r.exitCode, 0) << "a plain -c build of debug.fin must compile:\n" << stripAnsi(r.err);
+    ASSERT_TRUE(fs::exists(obj));
+
+    const std::string sections = readelfSections(obj);
+    EXPECT_EQ(sections.find(".debug_info"), std::string::npos)
+        << "without -g there must be no .debug_info section:\n" << sections;
+    EXPECT_EQ(sections.find(".debug_line"), std::string::npos)
+        << "without -g there must be no .debug_line section:\n" << sections;
+
+    std::error_code ec;
+    fs::remove(obj, ec);
+}
+
+// `--debug-symbols` is the long spelling of `-g` and must behave identically.
+TEST(DwarfDebugInfo, DebugSymbolsLongFlagWorksLikeDashG) {
+    // Same parking as above: needs DIBuilder emission (issue #37).
+    GTEST_SKIP() << "DWARF lowering not implemented yet (issue #37)";
+    const std::string src = fs::path(samplesDir()) / "debug.fin";
+    const std::string obj = uniqueTempPath("fin_dsym", ".o");
+    const FincRun r = runFinc({src, "--debug-symbols", "-c", "-o", obj});
+    ASSERT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    ASSERT_TRUE(fs::exists(obj));
+
+    const std::string sections = readelfSections(obj);
+    EXPECT_NE(sections.find(".debug_info"), std::string::npos)
+        << "--debug-symbols must produce .debug_info:\n" << sections;
+
+    std::error_code ec;
+    fs::remove(obj, ec);
+}
+
+TEST(DwarfDebugInfo, DashGIsAdvertisedInHelp) {
+    auto r = runFinc({"--help"});
+    EXPECT_EQ(r.exitCode, 0);
+    EXPECT_NE(r.out.find("-g"), std::string::npos)
+        << "-g must appear in --help output";
+    EXPECT_NE(r.out.find("--debug-symbols"), std::string::npos)
+        << "--debug-symbols must appear in --help output";
+}
+
+#else
+// OFF build: -g is still a recognized flag (exit 2, not silent ignore),
+// mirroring the DashOWithoutABackendRefusesAndWritesNothing guard.
+TEST(DwarfDebugInfo, GWithNoBackendRefusesAndWritesNothing) {
+    TempFin f("fun main() <noret> {}\n", "g_nobackend_off");
+    const std::string obj = uniqueTempPath("fin_g_stub_off", ".o");
+    auto r = runFinc({f.str(), "-g", "-c", "-o", obj});
+    const std::string err = stripAnsi(r.err);
+    std::error_code ec;
+    fs::remove(obj, ec);
+
+    EXPECT_EQ(r.exitCode, 1) << "a -g build with no backend must refuse:\n" << err;
+    EXPECT_FALSE(fs::exists(obj))
+        << "no object is written when the backend is absent";
+    EXPECT_NE(err.find("without a backend"), std::string::npos)
+        << "the refusal must name the reason:\n" << err;
+}
+
+TEST(DwarfDebugInfo, DashGIsAdvertisedInHelp) {
+    auto r = runFinc({"--help"});
+    EXPECT_EQ(r.exitCode, 0);
+    EXPECT_NE(r.out.find("-g"), std::string::npos)
+        << "-g must appear in --help output";
+    EXPECT_NE(r.out.find("--debug-symbols"), std::string::npos)
+        << "--debug-symbols must appear in --help output";
+}
+#endif  // FIN_TESTS_HAVE_BACKEND

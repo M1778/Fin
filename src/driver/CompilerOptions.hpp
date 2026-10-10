@@ -44,6 +44,12 @@ struct CompilerOptions {
     bool skipSemantics = false;
     bool skipCodegen = false;
 
+    // `-g` / `--debug-symbols`: emit DWARF debug info into the object file.
+    // Mirrors the Unix convention: `-g` is the opt-in flag for debug symbols,
+    // and `--debug-symbols` is the long spelling. Default off: a plain `finc -c`
+    // produces no debug info, keeping binaries lean by default (issue #37).
+    bool debugSymbols = false;
+
     // fin-guard (default on): `let`/`const <name> = ...` with no annotation
     // rewrites to `<name> <auto> = ...` with a warning. `--no-fin-guard` rejects it.
     bool finGuard = true;
@@ -57,6 +63,13 @@ struct CompilerOptions {
     // With `-o` the object goes exactly there; without one it is <stem>.o in the
     // working directory, which is cc's rule.
     bool compileOnly = false;
+
+    // `--target <triple>`: an explicit target triple, e.g. `wasm32-unknown-unknown`.
+    // Empty by default, which means "use the host triple". Non-empty and different
+    // from the host triple is refused at codegen stage (issue #39): finc pins the
+    // host triple, so requesting a different one must not silently produce a host
+    // binary.
+    std::string targetTriple;
 
     int optLevel = 0;
 

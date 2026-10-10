@@ -415,6 +415,11 @@ pub struct Scanner {
         if (c == '#') { return Token { kind: 122, text: "#", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
         if (c == '$') { return Token { kind: 123, text: "$", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
         if (c == '|') { return Token { kind: 124, text: "|", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
+        // Bitwise XOR. Placed among the single-character tokens, and above the
+        // unknown-token fallback: without a rule here `^` fell through to kind
+        // 1 and the parser reported `expected ';'` at the operand, so the C++
+        // compiler and the self-hosted stages disagreed about `a ^ b` (#67).
+        if (c == '^') { return Token { kind: 127, text: "^", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
         if (c == '`') { return Token { kind: tok_ident(), text: "`", line: self.start_line, col: self.start_col, offset: self.start_pos, len: 1 }; }
 
         let len <int> = self.cursor - self.start_pos;

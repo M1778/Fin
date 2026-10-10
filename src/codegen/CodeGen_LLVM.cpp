@@ -1418,9 +1418,10 @@ private:
 
 class Emitter : public Visitor {
 public:
-    Emitter(DiagnosticEngine& diag, bool debug, std::string sourceName)
+    Emitter(DiagnosticEngine& diag, bool debug, std::string sourceName, bool debugSymbols)
         : diag_(diag), debug_(debug), sourceName_(std::move(sourceName)), ctx_(),
           module_("fin", ctx_), builder_(ctx_), types_(ctx_) {
+        (void)debugSymbols;  // phase 2 (issue #37): DIBuilder wiring
         types_.bindStructs(&structs_);
         types_.bindEnums(&enums_);
         types_.bindInterfaces(&interfaces_);
@@ -1459,6 +1460,7 @@ public:
     bool run(Program& program, const std::vector<const Program*>& modules = {}) {
         modules_ = modules;
         rootProgram_ = &program;
+
         // Before any body emits (no cleanup runs during registration): scope
         // cleanup consults the answer from here on.
         computeMoveOrCopyClaimant();
@@ -8343,9 +8345,7 @@ private:
             if (!stored) return;
             builder_.CreateStore(stored, slot);
         } else {
-            // No initialiser: zeroed rather than left as whatever the stack held.
-            // Fin has not ruled on whether an uninitialised local is readable, and
-            // undefined stack contents is the one answer that cannot be tested.
+            // No initialiser: zeroed by policy (ADR 0052).
             builder_.CreateStore(llvm::Constant::getNullValue(type.llvmType), slot);
         }
         scopes_.back()[node.name] = Local{slot, type, nextLocalOrder_++, false, tie, tieMaster, regionDepth_};
@@ -15727,7 +15727,8 @@ bool backendAvailable() { return true; }
 
 bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngine& diag,
                     int optLevel, bool debugCodegen, const std::string& sourceName,
-                    const std::vector<const Program*>& modules) {
+                    const std::vector<const Program*>& modules,
+                    const std::string& targetTriple, bool debugSymbols) {
     // The target comes first, before a single instruction is emitted, because the
     // module's DataLayout is an *input* to emission and not a stamp applied to the
     // result: `sizeof` folds to a number the layout decides, and a module laid out
@@ -15746,6 +15747,25 @@ bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngin
     // form a person recognises.
     const llvm::Triple triple(llvm::sys::getDefaultTargetTriple());
     const std::string tripleName = triple.str();
+
+    // Issue #39: `--target` pins a specific target triple. An empty `targetTriple`
+    // means "use the host triple" (no flag given). A non-empty one that differs
+    // from the host triple is refused by name: finc pins the host triple, so a
+    // non-host target must not silently produce a host binary. This is the backend
+    // invariant (CLAUDE.md): "explicit refusals only, never silently dropped
+    // runtime code."
+    if (!targetTriple.empty()) {
+        const llvm::Triple requestedTriple(targetTriple);
+        if (requestedTriple != triple) {
+            diag.reportError(
+                "refusing unsupported --target " + targetTriple,
+                "finc only supports the host triple (" + tripleName + "); "
+                "passing a different --target would silently produce a host binary, "
+                "which is forbidden. Remove --target to build for the host.");
+            return false;
+        }
+    }
+
     std::string lookupError;
     const llvm::Target* target = llvm::TargetRegistry::lookupTarget(triple, lookupError);
     if (!target) {
@@ -15766,7 +15786,7 @@ bool generateObject(Program& ast, const std::string& objectPath, DiagnosticEngin
         return false;
     }
 
-    Emitter emitter(diag, debugCodegen, sourceName);
+    Emitter emitter(diag, debugCodegen, sourceName, debugSymbols);
     llvm::Module& module = emitter.module();
     module.setTargetTriple(triple);
     module.setDataLayout(machine->createDataLayout());

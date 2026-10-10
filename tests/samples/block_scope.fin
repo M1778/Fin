@@ -1,0 +1,20 @@
+//@ normative
+//@ ok
+// Bare `{ }` in statement position opens a lexical scope (ADR 0011):
+// fresh scope, statements run in order, names bound inside are
+// invisible outside. Shadowing inside the block is legal.
+fun main() <noret> {
+    let a <int> = 1;
+    {
+        let b <int> = 2;
+        blame a + b == 3;
+        let a <int> = 10;
+        blame a == 10;
+        {
+            let c <int> = 3;
+            blame a + c == 13;
+        }
+        blame a == 10;
+    }
+    blame a == 1;
+}

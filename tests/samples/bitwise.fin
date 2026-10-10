@@ -1,0 +1,19 @@
+//@ normative
+//@ ok
+fun main() <noret> {
+    let a <int> = 6 & 3;
+    blame a == 2;
+    let o <int> = 6 | 3;
+    blame o == 7;
+    let x <int> = 6 ^ 3;
+    blame x == 5;
+    // `&` binds tighter than `^`, which binds tighter than `|`; all three sit
+    // below shifts and above `==`, so `6 | 3 ^ 6 & 3 ^ 3` groups as
+    // `6 | (3 ^ (6 & 3) ^ 3)` = `6 | (3 ^ 2 ^ 3)` = `6 | 2` = 6.
+    // Each line is parenthesised at its `==` on purpose: `blame` takes a bool,
+    // and writing the comparison unparenthesised would make `==` bind looser
+    // than the bitwise operators and hand `blame` an int -- a type error that
+    // says nothing about precedence.
+    blame (6 | 3 ^ 6 & 3 ^ 3) == 6;
+    blame (1 << 2 | 1) == 5;
+}

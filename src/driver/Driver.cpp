@@ -373,7 +373,8 @@ bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag,
         // The stub says this too, but saying it here means the message does not
         // depend on having reached a node the emitter refuses.
         return generateObject(ast, objectPath, diag, options.optLevel,
-                              options.debugCodegen, options.inputFile, modules);
+                              options.debugCodegen, options.inputFile, modules,
+                              options.targetTriple, options.debugSymbols);
     }
 
     std::error_code ec;
@@ -385,7 +386,8 @@ bool Driver::runCodeGen(Program& ast, DiagnosticEngine& diag,
     std::filesystem::remove(options.compileOnly ? objectPath : options.outputPath, ec);
 
     if (!generateObject(ast, objectPath, diag, options.optLevel, options.debugCodegen,
-                        options.inputFile, modules)) {
+                        options.inputFile, modules, options.targetTriple,
+                        options.debugSymbols)) {
         std::filesystem::remove(objectPath, ec);
         return false;
     }

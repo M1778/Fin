@@ -2443,6 +2443,15 @@ expression:
     | expression DIVEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::DIVEQUAL, std::move($3)); $$->setLoc(@$); }
     | expression OR expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($3)); $$->setLoc(@$); }
     | expression AND expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($3)); $$->setLoc(@$); }
+    /* Bitwise `|`, `^`, `&` (issue #67): C-like precedence -- `|` loosest,
+       `&` tightest -- sitting below shifts and above `==`, as the `%left`
+       lines for PIPE/CARET/AMPERSAND already declared. The productions were
+       the missing half: the lexer produced all three tokens and the analyzer
+       and codegen already lower integer operands, so a struct declaring
+       `operator &` becomes callable with no edit to lib/std/operators.fin. */
+    | expression PIPE expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::PIPE, std::move($3)); $$->setLoc(@$); }
+    | expression CARET expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::CARET, std::move($3)); $$->setLoc(@$); }
+    | expression AMPERSAND expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AMPERSAND, std::move($3)); $$->setLoc(@$); }
     | expression EQEQ expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::EQEQ, std::move($3)); $$->setLoc(@$); }
     | expression NOTEQ expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::NOTEQ, std::move($3)); $$->setLoc(@$); }
     | expression LT expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::LT, std::move($3)); $$->setLoc(@$); }
@@ -2730,6 +2739,10 @@ no_struct_expression:
     | no_struct_expression DIVEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::DIVEQUAL, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression PIPE PIPE no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($4)); $$->setLoc(@$); }
     | no_struct_expression AMPERSAND AMPERSAND no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($4)); $$->setLoc(@$); }
+    /* Bitwise mirror of the `expression` additions above (issue #67). */
+    | no_struct_expression PIPE no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::PIPE, std::move($3)); $$->setLoc(@$); }
+    | no_struct_expression CARET no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::CARET, std::move($3)); $$->setLoc(@$); }
+    | no_struct_expression AMPERSAND no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AMPERSAND, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression EQEQ no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::EQEQ, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression NOTEQ no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::NOTEQ, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression LT no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::LT, std::move($3)); $$->setLoc(@$); }

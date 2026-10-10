@@ -1,0 +1,8 @@
+//@ normative
+//@ error 7:5 "Undefined variable 'b'"
+fun main() <noret> {
+    {
+        let b <int> = 2;
+    }
+    b = 3;
+}

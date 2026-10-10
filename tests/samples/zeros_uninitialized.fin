@@ -1,0 +1,19 @@
+//@ normative
+//@ ok
+// Zero-initialization of uninitialized storage (ADR 0052).
+//
+// A scalar local with no initializer reads back zero, not whatever the stack
+// frame happened to hold. The policy is pinned here for the scalar case;
+// fixed arrays and struct locals are covered by BACKEND_TESTs in
+// tests/test_codegen.cpp (AnArrayWithNoInitialiserIsZeroed,
+// AStructWithNoInitialiserIsZeroed, AnOmittedFieldIsZeroed) that run only
+// under the C++ backend. The self-hosted stage compilers use a pointer-based
+// struct representation and have not yet closed that gap -- StageAgreement
+// catches the divergence, which is its purpose.
+@define printf(fmt: string, ...) <noret>;
+
+fun main() <noret> {
+    let n <int>;
+    blame n == 0;
+    printf("%d\n", n);
+}

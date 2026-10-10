@@ -352,6 +352,42 @@ fun fn_ctx_add_var(ctx: &FnContext, name: string, val: &LLVMValue, ty: &LLVMType
     }
 }
 
+// Pop a block/`for` scope: bindings declared inside are dropped, so
+// later lookups resolve outer bindings again. Struct-typed entries with
+// deferred `#[slaveof]` destruction (pending in the tied list) survive:
+// they compact down and their tied indices remap, so the function-exit
+// drain still finds them.
+fun cg_tied_find(ctx: &FnContext, vi: int) <int> {
+    let k <int> = 0;
+    while (k < ctx.tied_count) {
+        if (ctx.tied_idx[k] == vi) { return k; }
+        k = k + 1;
+    }
+    return -1;
+}
+
+fun pop_scope_vars(ctx: &FnContext, from_idx: int) <noret> {
+    if (ctx == null) { return; }
+    if (from_idx >= ctx.var_count) { return; }
+    let write <int> = from_idx;
+    let i <int> = from_idx;
+    while (i < ctx.var_count) {
+        let v <&LocalVar> = ctx.vars[i];
+        if (v != null) {
+            let k <int> = cg_tied_find(ctx, i);
+            if (k >= 0) {
+                if (write != i) {
+                    ctx.vars[write] = v;
+                    ctx.tied_idx[k] = write;
+                }
+                write = write + 1;
+            }
+        }
+        i = i + 1;
+    }
+    ctx.var_count = write;
+}
+
 fun to_condition_i1(ctx: &FnContext, val: &LLVMValue) <&LLVMValue> {
     if (val == null) { return null; }
     let ty <&LLVMType> = llvm_type_of(val);
@@ -825,13 +861,15 @@ fun find_field_index(ctx: &FnContext, base_node: &AstNode, field_name: string) <
 }
 
 fun fn_ctx_find_var(ctx: &FnContext, name: string) <&LocalVar> {
-    let i <int> = 0;
-    while (i < ctx.var_count) {
+    // Innermost first (ADR 0011 shadowing): a block-local shadows an
+    // outer binding.
+    let i <int> = ctx.var_count - 1;
+    while (i >= 0) {
         let v <&LocalVar> = ctx.vars[i];
         if (v != null && cg_str_eq(v.name, name)) {
             return v;
         }
-        i = i + 1;
+        i = i - 1;
     }
     return null;
 }
@@ -11033,6 +11071,34 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
             ty_ann = "prototype";
         }
         let init_fn_ty <&LLVMType> = init_fn_type(ctx, stmt.left);
+        // Block-scope shadowing (ADR 0011): an inner `let` for a name bound
+        // in an outer scope gets a fresh slot instead of reusing the outer
+        // one. The initializer lowers BEFORE the fresh binding is added so
+        // it reads the outer scope (`let a = a + 1` sees the outer `a`,
+        // matching the C++ backend). Same-scope redeclare keeps the legacy
+        // reuse path below.
+        let outer_v <&LocalVar> = null;
+        let shadow_init <&LLVMValue> = null;
+        let have_shadow_init <bool> = false;
+        if (v != null && v.scope_depth != ctx.current_scope_depth) {
+            outer_v = v;
+            if (stmt.left != null) {
+                let saved_want0 <string> = ctx.call_want;
+                if (stmt.left.kind == ast_call_expr()) {
+                    ctx.call_want = ty_ann;
+                }
+                shadow_init = lower_expr(ctx, stmt.left);
+                ctx.call_want = saved_want0;
+                have_shadow_init = true;
+                if (shadow_init == null) {
+                    if (!ctx.poisoned) {
+                        cg_dprintf(2, "finc codegen refusal: initializer of '%s' does not lower\n", stmt.name);
+                    }
+                    refuse_and_poison(ctx);
+                }
+            }
+            v = null;
+        }
         if (v != null) {
             alloca = v.val;
             ty = v.ty;
@@ -11074,11 +11140,18 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
             // (`&Vec2<float>` for `= Vec2::zero()`): the static cache reads
             // it to instantiate Self-returning statics no argument binds.
             // Saved and restored like arr_hint_auto, so nesting is exact.
+            // A shadowing initializer already lowered above (against the
+            // outer scope) is reused here instead of lowering twice.
             let saved_want <string> = ctx.call_want;
-            if (stmt.left.kind == ast_call_expr()) {
-                ctx.call_want = ty_ann;
+            let init_val <&LLVMValue> = null;
+            if (have_shadow_init) {
+                init_val = shadow_init;
+            } else {
+                if (stmt.left.kind == ast_call_expr()) {
+                    ctx.call_want = ty_ann;
+                }
+                init_val = lower_expr(ctx, stmt.left);
             }
-            let init_val <&LLVMValue> = lower_expr(ctx, stmt.left);
             ctx.call_want = saved_want;
             if (init_val == null) {
                 // Storing nothing leaves the slot uninitialized and the
@@ -11151,6 +11224,9 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                     }
                 } else if (stmt.left.kind == ast_ident()) {
                     let src_v <&LocalVar> = fn_ctx_find_var(ctx, stmt.left.name);
+                    // A shadowing self-init (`let a = a`) finds the fresh
+                    // binding itself; read the stashed outer instead.
+                    if (src_v == v) { src_v = outer_v; }
                     if (src_v != null) {
                         v.len_val = src_v.len_val;
                         v.elem_ty = src_v.elem_ty;
@@ -11410,6 +11486,13 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         return;
     }
     if (stmt.kind == ast_for_stmt()) {
+        // The `for` init lives in the loop's own scope (the C++ backend
+        // refuses uses past the loop): bindings it declares pop at loop
+        // exit like a block's, so `for (let i ...)` shadows an outer `i`
+        // instead of clobbering it.
+        let for_start <int> = ctx.var_count;
+        let for_prev_scope <int> = ctx.current_scope_depth;
+        ctx.current_scope_depth = for_start;
         if (stmt.left != null) {
             lower_stmt(ctx, stmt.left);
         }
@@ -11477,6 +11560,11 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         ctx.continue_bb = prev_continue;
 
         llvm_position_builder(ctx.builder, exit_bb);
+        ctx.current_scope_depth = for_prev_scope;
+        if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+            emit_scope_cleanups(ctx, for_start);
+        }
+        pop_scope_vars(ctx, for_start);
         return;
     }
     if (stmt.kind == ast_break_stmt()) {
@@ -11641,6 +11729,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         while (cur != null) {
             if (ctx.poisoned || llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) != null) {
                 ctx.current_scope_depth = prev_scope;
+                pop_scope_vars(ctx, start_var);
                 return;
             }
             lower_stmt(ctx, cur.left);
@@ -11650,6 +11739,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
             emit_scope_cleanups(ctx, start_var);
         }
+        pop_scope_vars(ctx, start_var);
         return;
     }
     if (stmt.kind == ast_fun_decl()) {

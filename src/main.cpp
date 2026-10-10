@@ -17,8 +17,12 @@ void printUsage(std::FILE* out) {
     fmt::print(out, "Options:\n");
     fmt::print(out, "  -o <path>              Build an executable at <path>; without it finc only checks\n");
     fmt::print(out, "  -c                     Compile to an object file and do not link\n");
+    fmt::print(out, "  -g, --debug-symbols    Emit DWARF debug info in the object file\n");
     fmt::print(out, "  -O0, -O1, -O2, -O3     Optimisation level for '-o' and '-c' builds (default -O0)\n");
     fmt::print(out, "  -I, --include <path>   Add a module search path\n");
+    fmt::print(out, "  --target <triple>      Target triple (e.g. wasm32-unknown-unknown).\n");
+    fmt::print(out, "                          Currently only the host triple is supported;\n");
+    fmt::print(out, "                          any other target is refused by name (issue #39).\n");
     fmt::print(out, "  --fin-libs <paths>     Library search paths, '{}'-separated;\n", fin::kSearchPathSeparator);
     fmt::print(out, "                         replaces $FIN_LIBS rather than adding to it\n");
     fmt::print(out, "  --diagnostics=<fmt>    Diagnostic format: human (default) or json\n");
@@ -138,6 +142,7 @@ int main(int argc, char** argv) {
             if (arg == "--no-check")   { opts.skipSemantics = true; continue; }
             if (arg == "--no-fin-guard") { opts.finGuard = false; continue; }
             if (arg == "--debug-codegen") { opts.debugCodegen = true; continue; }
+            if (arg == "-g" || arg == "--debug-symbols") { opts.debugSymbols = true; continue; }
 
             if (arg == "-c") { opts.compileOnly = true; continue; }
 
@@ -174,6 +179,12 @@ int main(int argc, char** argv) {
                 for (auto& p : fin::splitSearchPaths(arg.substr(11))) opts.finLibPaths.push_back(p);
                 continue;
             }
+            if (arg == "--target") {
+                if (i + 1 >= args.size()) return fail("missing triple for --target");
+                opts.targetTriple = args[++i];
+                continue;
+            }
+
             if (arg == "-o") {
                 if (i + 1 >= args.size()) return fail("missing path for -o");
                 opts.outputPath = args[++i];

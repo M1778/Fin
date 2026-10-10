@@ -1,0 +1,9 @@
+//@ normative
+//@ ok
+// This sample exists to pin the --target refusal at the CLI/harness level (issue #39).
+// `--target` is a CLI flag, not a per-file construct, so a `//@` error expectation
+// cannot express it here. The program itself compiles; the refusal happens when the
+// compiler is invoked with `--target wasm32-unknown-unknown` (see test_cli.cpp).
+fun main() <noret> {
+    printf("ok\n");
+}

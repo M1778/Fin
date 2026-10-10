@@ -25,55 +25,72 @@ pub const PREC_PRIMARY <int> = 11;
 #[export] pub fun prec_assignment() <int> { return 1; }
 #[export] pub fun prec_or() <int> { return 2; }
 #[export] pub fun prec_and() <int> { return 3; }
-#[export] pub fun prec_equality() <int> { return 4; }
-#[export] pub fun prec_comparison() <int> { return 5; }
-#[export] pub fun prec_shift() <int> { return 6; }
-#[export] pub fun prec_term() <int> { return 7; }
-#[export] pub fun prec_factor() <int> { return 8; }
-#[export] pub fun prec_unary() <int> { return 9; }
-#[export] pub fun prec_call() <int> { return 10; }
-#[export] pub fun prec_primary() <int> { return 11; }
+#[export] pub fun prec_bit_or() <int> { return 4; }
+#[export] pub fun prec_bit_xor() <int> { return 5; }
+#[export] pub fun prec_bit_and() <int> { return 6; }
+#[export] pub fun prec_equality() <int> { return 7; }
+#[export] pub fun prec_comparison() <int> { return 8; }
+#[export] pub fun prec_shift() <int> { return 9; }
+#[export] pub fun prec_term() <int> { return 10; }
+#[export] pub fun prec_factor() <int> { return 11; }
+#[export] pub fun prec_unary() <int> { return 12; }
+#[export] pub fun prec_call() <int> { return 13; }
+#[export] pub fun prec_primary() <int> { return 14; }
 
 // Returns the binary operator precedence for a token kind.
 #[export]
 pub fun binary_precedence(token_kind: int) <int> {
     // Assignment: = (85), +=, -=, *=, /= (98..101)
     if (token_kind == 85 || (token_kind >= 98 && token_kind <= 101)) {
-        return 1;
+        return prec_assignment();
     }
     // Logical OR: || (93)
     if (token_kind == 93) {
-        return 2;
+        return prec_or();
     }
     // Logical AND: && (92)
     if (token_kind == 92) {
-        return 3;
+        return prec_and();
+    }
+    // Bitwise OR: | (124) -- loosest of the three bitwise operators
+    if (token_kind == 124) {
+        return prec_bit_or();
+    }
+    // Bitwise XOR: ^ (127)
+    if (token_kind == 127) {
+        return prec_bit_xor();
+    }
+    // Bitwise AND: & (95) -- tightest of the three bitwise operators. The
+    // kind is shared with unary address-of, which is unambiguous here: unary
+    // is resolved by unary_precedence before a binary operator is consulted.
+    if (token_kind == 95) {
+        return prec_bit_and();
     }
     // Equality: == (86), != (87)
     if (token_kind == 86 || token_kind == 87) {
-        return 4;
+        return prec_equality();
     }
     // Comparison: < (88), > (89), <= (90), >= (91)
     if (token_kind >= 88 && token_kind <= 91) {
-        return 5;
+        return prec_comparison();
     }
     // Shift: << (106), >> (107) — left-associative, looser than `+`
     if (token_kind == 106 || token_kind == 107) {
-        return 6;
+        return prec_shift();
     }
     // Term: + (80), - (81)
     if (token_kind == 80 || token_kind == 81) {
-        return 7;
+        return prec_term();
     }
     // Factor: * (82), / (83), % (84)
     if (token_kind >= 82 && token_kind <= 84) {
-        return 8;
+        return prec_factor();
     }
     // Calls, member access, subscripts: ( (110), [ (114), . (119)
     if (token_kind == 110 || token_kind == 114 || token_kind == 119) {
-        return 10;
+        return prec_call();
     }
-    return 0;
+    return prec_none();
 }
 
 // Returns the unary operator precedence for a token kind.

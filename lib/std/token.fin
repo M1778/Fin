@@ -129,6 +129,15 @@ pub const TOKEN_HASH <int> = 122;
 pub const TOKEN_DOLLAR <int> = 123;
 pub const TOKEN_PIPE <int> = 124;
 
+// Bitwise XOR: `^` (issue #67). Absent until the self-host scanner could emit
+// it, which is why `a ^ b` parsed on the C++ compiler and failed on stage1/2/3
+// -- a StageAgreement divergence rather than a diagnostics difference. 126 is
+// taken by nothing and 125 is TOKEN_ERROR, so the caret sits above the error
+// sentinel deliberately: kinds below TOKEN_ERROR are never renumbered, because
+// src/lexer/tokens.hpp and this table are read side by side and a shifted
+// number would silently repoint one operator at another's lowering.
+pub const TOKEN_CARET <int> = 127;
+
 // Scanner hard-error token: the lexer could not produce source for this span
 // (unterminated literal/comment, bad byte). The diagnostic text rides in
 // Token.text so the parser reports it instead of guessing.
@@ -213,6 +222,7 @@ pub const TOKEN_ERROR <int> = 125;
 #[export] pub fun tok_arrow() <int> { return 102; }
 #[export] pub fun tok_rarrow() <int> { return 103; }
 #[export] pub fun tok_pipe() <int> { return 124; }
+#[export] pub fun tok_caret() <int> { return 127; }
 #[export] pub fun tok_error() <int> { return 125; }
 #[export] pub fun tok_at() <int> { return 121; }
 #[export] pub fun tok_hash() <int> { return 122; }

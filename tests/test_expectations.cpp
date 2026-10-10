@@ -554,7 +554,17 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // 53 -> 52: owner-ordered deletion of tests/samples/stdlib/somelib.fin --
     // the name was the importing.fin sample's invention, never a module, and
     // the empty lib existed only to satisfy it. Ratified decision, not accident.
-    EXPECT_EQ(t.samples, 52)
+    // 52 -> 53: bitwise.fin arrives with the bitwise-operator grammar (issue #67)
+    // already in the working tree before issue #39.
+    // 53 -> 54: addition of tests/samples/target_refusal.fin for issue #39
+    // (issue #39: pin wasm-target behavior to a refusal by name).
+    // 54 -> 56: block_scope.fin + block_scope_use_after.fin pin the bare-brace
+    // statement scope (ADR 0011, issue #74): nesting, shadowing, and the
+    // use-after-scope error. The C++ grammar, analyzer, codegen, and the
+    // finc/ self-host mirror already carried this; the samples were missing.
+    // 56 -> 58: debug.fin (issue #37, DWARF test pin) and zeros_uninitialized.fin
+    // (ADR 0052, zero-init policy pin) join the corpus.
+    EXPECT_EQ(t.samples, 58)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";

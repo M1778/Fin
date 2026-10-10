@@ -29,7 +29,9 @@ bool backendAvailable() { return false; }
 bool generateObject(Program& ast, const std::string& objectPath,
                     DiagnosticEngine& diag, int optLevel, bool debugCodegen,
                     const std::string& sourceName,
-                    const std::vector<const Program*>& modules) {
+                    const std::vector<const Program*>& modules,
+                    const std::string& targetTriple,
+                    bool debugSymbols) {
     (void)ast;
     (void)objectPath;
     (void)optLevel;
@@ -39,6 +41,21 @@ bool generateObject(Program& ast, const std::string& objectPath,
     // because the two definitions of one declaration have to agree.
     (void)sourceName;
     (void)modules;
+    (void)debugSymbols;  // no backend, so nothing to attach DWARF to
+    // Issue #39: this build has no backend at all, so it cannot honour any
+    // --target, host or otherwise. Named here so a caller passing
+    // --target wasm32-unknown-unknown gets the same "refusing unsupported
+    // --target" phrasing the LLVM backend emits, rather than only the generic
+    // "without a backend" message — the two refusals are orthogonal, and the
+    // target refusal must be visible even when the backend is absent.
+    if (!targetTriple.empty()) {
+        diag.reportError(
+            "refusing unsupported --target " + targetTriple,
+            "this finc was built without a backend (FIN_WITH_LLVM=OFF), so it "
+            "cannot emit any target, host or otherwise; reconfigure with "
+            "-DFIN_WITH_LLVM=ON and an LLVM 22 development install to emit code.");
+        return false;
+    }
     diag.reportError(
         "codegen: this finc was built without a backend",
         "configure with -DFIN_WITH_LLVM=ON and an LLVM 22 development install; "

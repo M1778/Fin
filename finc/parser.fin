@@ -13,7 +13,7 @@ import {
     kw_pub, kw_priv, kw_struct, kw_enum, kw_interface, kw_operator, kw_new, kw_delete, kw_null, kw_true, kw_false, kw_cast,
     kw_namespace, kw_define, kw_import, kw_from, kw_macro, kw_quote, kw_extern, kw_as, kw_readonly, kw_type, kw_class, kw_implements, kw_special,
     tok_at, tok_hash, tok_ellipsis, tok_double_colon, tok_question,
-    tok_arrow, tok_rarrow, tok_pipe, tok_dollar, tok_error,
+    tok_arrow, tok_rarrow, tok_pipe, tok_caret, tok_dollar, tok_error,
     token_name
 } from token::std;
 
@@ -221,6 +221,13 @@ priv fun p_token_to_op(kind: int, fallback: string) <string> {
     if (kind == tok_star()) { return "*"; }
     if (kind == tok_slash()) { return "/"; }
     if (kind == tok_percent()) { return "%"; }
+    // Bitwise OR / XOR / AND. `|` and `&` already reached here through their
+    // fallback text, which was the scanner's own spelling and happened to be
+    // right; naming all three keeps the table honest about which operators are
+    // language operators rather than accidents of token text (#67).
+    if (kind == tok_pipe()) { return "|"; }
+    if (kind == tok_caret()) { return "^"; }
+    if (kind == tok_ampersand()) { return "&"; }
     if (kind == tok_equal()) { return "="; }
     if (kind == 98) { return "+="; }
     if (kind == 99) { return "-="; }

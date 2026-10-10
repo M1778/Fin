@@ -1198,8 +1198,9 @@ BACKEND_TEST(Soundness_Codegen, AnAssignmentThroughARunTimeIndexWritesOneElement
 }
 
 BACKEND_TEST(Soundness_Codegen, AnArrayWithNoInitialiserIsZeroed) {
-    // The same answer a scalar local with no initialiser gets, and for the same
-    // reason: undefined stack contents is the one answer that cannot be tested.
+    // Zero-initialised by policy, pinned as ADR 0052 and asserted by the
+    // corpus sample tests/samples/zeros_uninitialized.fin (ok across all
+    // compiler tiers via StageAgreement).
     const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
         "    let a <[int, 3]>;\n"
@@ -1521,7 +1522,8 @@ BACKEND_TEST(Soundness_Codegen, AnArrayAllocationIsAPairAndNotAPointerToAFixedAr
     //
     // The contents are asserted zero, and that is a decision and not an observation:
     // `{}` is the empty initialiser written at every corpus allocation site, and
-    // undefined contents is the one answer no test can pin.
+    // zero-initialised storage is pinned as ADR 0052 and asserted by
+    // tests/samples/zeros_uninitialized.fin.
     const Built b = build(std::string(kPrintf) +
         "fun main() <noret> {\n"
         "    let n <int> = 4;\n"
@@ -1796,9 +1798,11 @@ BACKEND_TEST(Soundness_Codegen, APrototypeWithOneEntryLowers) {
 
 BACKEND_TEST(Soundness_Codegen, ADeclaredPrototypeWithNoInitialiserLowers) {
     // Storage alone: the slot exists and the program compiles. Nothing is read out of
-    // it, because what an uninitialised prototype's halves *contain* is the same open
-    // question an uninitialised `[int]`'s pointer is, and reading one would be asserting
-    // an answer to it.
+    // it -- the prototype is a pair holding a pointer and a length, and reading an
+    // uninitialised prototype's halves would assert an answer to what they contain.
+    // That answer is now pinned by ADR 0052 (zero-init policy) and asserted by
+    // tests/samples/zeros_uninitialized.fin, but this test deliberately covers only
+    // the compile path, not the read.
     const Built b = build(
         "fun main() <noret> {\n"
         "    let p <{int, float}>;\n"
@@ -2448,6 +2452,21 @@ BACKEND_TEST(Soundness_Codegen, AForeachBindingIsScopedToTheLoop) {
         "}\n");
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "5 6 7 | 99\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ABareBlockShadowsWithoutLeaking) {
+    // Issue #74 (ADR 0011): a bare `{ }` is a lexical scope. The inner `a`
+    // shadows the outer one and the shadow does not leak: the last printf
+    // must see 1 again. A block that shared the enclosing scope would print
+    // `2 2` here instead of `2 1`.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <int> = 1;\n"
+        "    { let a <int> = 2; printf(\"%d \", a); }\n"
+        "    printf(\"%d\\n\", a);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "2 1\n") << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AForeachIndexTakesAnyIntegerWidth) {

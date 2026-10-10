@@ -2542,14 +2542,19 @@ TEST(Soundness_Precedence, ACallOnTheRightOfABinaryOperatorIsStillACall) {
     EXPECT_EQ(errorCount(paren), 0u) << paren;
 }
 
-// Eight operators can be declared, required by an interface, and never written.
+// Five COMPOUND-ASSIGN operators can be declared, required by an interface, and never
+// written. (This test used to cover eight, including the three binary spellings; issue
+// #67 landed `&`, `|` and `^` as binary expressions on 2026-10-10, so the binary half
+// moved to Soundness_Operators.EveryDeclarableOperatorHasAnExpressionThatInvokesIt and
+// the rows below are the compound-assign remainder.)
 //
 // The declaration side is nearly complete: `operator &`, `operator |`, `operator ^`,
 // `operator %=`, `operator &=`, `operator |=`, `operator <<=` and `operator >>=` all
 // parse in an interface or a struct, and lib/std/operators.fin declares seven of them
 // because tests/samples/stdlib/operators.fin does -- BitAnd, BitOr, BitAndAssign,
-// BitOrAssign, ModAssign, ShiftLeftAssign, ShiftRightAssign. The expression side has no
-// production for any of them, so an interface that requires `operator &` requires
+// BitOrAssign, ModAssign, ShiftLeftAssign, ShiftRightAssign. For the three binary
+// operators an expression now reaches that declaration; for the five compound-assign
+// operators below none does, so an interface requiring `operator &=` still demands
 // something no program can invoke.
 //
 // Three of the eight are worse than missing, they are half-declared: SHIFTLEFTEQUAL and
@@ -2571,8 +2576,10 @@ TEST(Soundness_Precedence, ACallOnTheRightOfABinaryOperatorIsStillACall) {
 // exist. The asymmetry is the point: the compiler will happily typecheck a program
 // whose interfaces demand operators the grammar cannot spell.
 //
-// When this is fixed, invert it: Soundness_Operators.EveryDeclarableOperatorHasAn-
-// ExpressionThatInvokesIt, asserting zero diagnostics for each row instead.
+// When the compound-assign half is fixed, invert it: Soundness_Operators.EveryDeclarable-
+// OperatorHasAnExpressionThatInvokesIt, asserting zero diagnostics for each row instead.
+// That test already exists and covers the binary three, so adding the compound five to
+// it is the whole of the remaining work here.
 TEST(KnownDefect_Operators, EightOperatorsCanBeDeclaredAndNeverWritten) {
     // Every one of the eight is accepted as a requirement.
     const std::string decls = stripAnsi(compile(
@@ -2595,20 +2602,21 @@ TEST(KnownDefect_Operators, EightOperatorsCanBeDeclaredAndNeverWritten) {
     EXPECT_NE(xoreq.find("syntax error"), std::string::npos)
         << "`^=` does not lex as one operator\n" << xoreq;
 
-    // And none of the eight is writable.
     // And none of the eight is writable. (#44 reworded some of these:
     // where `;` is among the expected tokens the diagnostic is now
     // `expected ';'` instead of `syntax error` -- `&=` et al -- while `%=` in
     // this grammar state keeps `syntax error, unexpected EQUAL`. Either
     // spelling is the intended refusal; the compile still fails either way.)
-    const char* binary[] = {"1 & 2", "1 | 2", "1 ^ 2"};
-    for (const char* e : binary) {
-        const std::string err = stripAnsi(compile(
-            std::string("fun main() <int> { let a <auto> = ") + e + "; return 0; }\n").err);
-        EXPECT_TRUE(err.find("syntax error") != std::string::npos ||
-                    err.find("expected ';'") != std::string::npos)
-            << e << " has no binary production\n" << err;
-    }
+    // ISSUE #67 (2026-10-10): the three BINARY rows that used to sit here are no
+    // longer refused -- `1 & 2`, `1 | 2` and `1 ^ 2` now parse, typecheck and
+    // lower, because the expression grammar gained PIPE/CARET/AMPERSAND
+    // productions (src/parser/parser.y) and the self-host precedence table
+    // gained the same three rungs (lib/std/parse.fin) so both compilers agree.
+    // They moved to Soundness_Operators.EveryDeclarableOperatorHasAn-
+    // ExpressionThatInvokesIt. What remains refused is the COMPOUND-ASSIGN
+    // half: `%=`, `&=`, `|=`, `<<=`, `>>=` still have no expression
+    // production, so those five rows stay -- this test is now about the
+    // compound forms only, not about bitwise in general.
     const char* compound[] = {"%=", "&=", "|=", "<<=", ">>="};
     for (const char* op : compound) {
         const std::string err = stripAnsi(compile(
@@ -2616,6 +2624,16 @@ TEST(KnownDefect_Operators, EightOperatorsCanBeDeclaredAndNeverWritten) {
         EXPECT_TRUE(err.find("syntax error") != std::string::npos ||
                     err.find("expected ';'") != std::string::npos)
             << op << " has no assignment production\n" << err;
+    }
+
+    // The control proving the refusal above is about compound assignment and not
+    // "bitwise does not work": the three binary spellings now lower quietly.
+    // Precedence itself is pinned by tests/samples/bitwise.fin.
+    const char* binary_works[] = {"1 & 2", "1 | 2", "1 ^ 2"};
+    for (const char* e : binary_works) {
+        const std::string err = stripAnsi(compile(
+            std::string("fun main() <int> { let a <auto> = ") + e + "; return 0; }\n").err);
+        EXPECT_EQ(errorCount(err), 0u) << e << " is now a binary expression (issue #67)\n" << err;
     }
 
     // The four that do exist, as the control: whatever is wrong above is not "compound
