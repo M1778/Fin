@@ -12,6 +12,7 @@
 #include "Corpus.hpp"
 #include "driver/SearchPaths.hpp"
 #include "driver/Version.hpp"
+#include "utils/Process.hpp"
 
 #if defined(__unix__) || defined(__APPLE__)
 #  include <cerrno>
@@ -3427,11 +3428,41 @@ std::string readelfSections(const std::string& objectPath) {
     return captureCommand("otool -l " + objectPath + " 2>&1");
 }
 
+// `llvm-dwarfdump` by PATH, or the brew keg bins on macOS (keg-only, off
+// PATH), or "" when absent. Mirrors the objdumpPath fallback in
+// test_codegen.cpp: Homebrew's LLVM is never on PATH by itself.
+static std::string dwarfdumpPath() {
+    const fs::path probeOut = uniqueTempPath("fin_dwarfdump_probe");
+    const bool found =
+        fin::runProcess({"llvm-dwarfdump", "--version"}, probeOut.string(),
+                        probeOut.string()) == 0;
+    std::error_code probeEc;
+    fs::remove(probeOut, probeEc);
+    if (found) return "llvm-dwarfdump";
+#ifdef __APPLE__
+    std::vector<std::string> bins;
+#ifdef FIN_LLVM_MAJOR
+    for (const char* root : {"/opt/homebrew", "/usr/local"})
+        bins.push_back(std::string(root) + "/opt/llvm@" +
+                       std::to_string(FIN_LLVM_MAJOR) + "/bin/llvm-dwarfdump");
+#endif
+    bins.push_back("/opt/homebrew/opt/llvm/bin/llvm-dwarfdump");
+    bins.push_back("/usr/local/opt/llvm/bin/llvm-dwarfdump");
+    for (const auto& bin : bins) {
+        std::error_code ec;
+        if (fs::exists(bin, ec)) return bin;
+    }
+#endif
+    return "";
+}
+
 // Dumps `.debug_info` contents via `llvm-dwarfdump --debug-info`, which is
 // always present alongside the LLVM the compiler was built against. Returns the
 // raw text ("" when the tool is absent, as on Windows).
 std::string dwarfdumpInfo(const std::string& objectPath) {
-    return captureCommand("llvm-dwarfdump --debug-info " + objectPath + " 2>&1");
+    const std::string tool = dwarfdumpPath();
+    if (tool.empty()) return "";
+    return captureCommand(tool + " --debug-info " + objectPath + " 2>&1");
 }
 
 } // namespace
