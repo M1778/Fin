@@ -10,6 +10,10 @@
 
 # Fin sources.
 *.fin text eol=lf
+# Stopgap until Linguist accepts Fin (see #50): render .fin as C++ (closest
+# for struct/enum/extern/operator/namespace/::). `linguist-language=Fin`
+# does NOT work yet -- Linguist doesn't know Fin, so it would render plain.
+*.fin linguist-detectable=true linguist-language=C++
 
 # C/C++ sources and headers.
 *.c    text eol=lf

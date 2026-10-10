@@ -16,6 +16,7 @@
 #include "../utils/IntegerConstant.hpp"
 
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
@@ -24,6 +25,7 @@
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/CodeGen.h>
+#include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
@@ -1420,8 +1422,9 @@ class Emitter : public Visitor {
 public:
     Emitter(DiagnosticEngine& diag, bool debug, std::string sourceName, bool debugSymbols)
         : diag_(diag), debug_(debug), sourceName_(std::move(sourceName)), ctx_(),
-          module_("fin", ctx_), builder_(ctx_), types_(ctx_) {
-        (void)debugSymbols;  // phase 2 (issue #37): DIBuilder wiring
+          module_("fin", ctx_), builder_(ctx_), types_(ctx_),
+          debugSymbols_(debugSymbols) {
+        if (debugSymbols_) initDebugInfo();
         types_.bindStructs(&structs_);
         types_.bindEnums(&enums_);
         types_.bindInterfaces(&interfaces_);
@@ -1436,6 +1439,22 @@ public:
         types_.bindConcreteEnsurer([this](const std::string& name) {
             return ensureConcreteStruct(name);
         });
+    }
+
+    // Issue #37: one compile unit naming the fin source path, split into
+    // directory + filename for createFile so the debugger opens the real path.
+    void initDebugInfo() {
+        dib_ = std::make_unique<llvm::DIBuilder>(module_);
+        std::string dir = ".";
+        std::string file = sourceName_;
+        if (auto slash = sourceName_.rfind('/'); slash != std::string::npos) {
+            dir = sourceName_.substr(0, slash);
+            file = sourceName_.substr(slash + 1);
+            if (dir.empty()) dir = "/";
+        }
+        debugFile_ = dib_->createFile(file, dir);
+        debugCU_ = dib_->createCompileUnit(llvm::dwarf::DW_LANG_C, debugFile_,
+                                            "finc", /*isOptimized=*/false, "", 0);
     }
 
     // Every local is a fixed-size slot, so every one lives in the entry block.
@@ -1557,6 +1576,9 @@ public:
         // After every instantiation the statements asked for: a call site may
         // have materialised a type whose metadata is owed too.
         if (!emitTypeMetadata(program)) return false;
+        // Issue #37: flush deferred debug nodes before verification/emission;
+        // without this the CU never materialises and no .debug_* is written.
+        if (dib_) dib_->finalize();
         return !everFailed_;
     }
 
@@ -7144,6 +7166,25 @@ private:
         pushScope();
         fnScopeBase_ = scopes_.size() - 1;
 
+        // Issue #37: one subprogram per emitted function, scoped to the file,
+        // with the builder located at the function's line so the line table
+        // maps at least the entry. Locals are not described: the contract is
+        // sections, source path and the `main` subprogram, no more.
+        if (dib_) {
+            unsigned line = node.loc.begin.line;
+            if (line == 0) line = 1;
+            auto* intTy =
+                dib_->createBasicType("int", 32, llvm::dwarf::DW_ATE_signed);
+            auto* subTy =
+                dib_->createSubroutineType(dib_->getOrCreateTypeArray({intTy}));
+            auto* subprogram = dib_->createFunction(
+                debugCU_, name, name, debugFile_, line, subTy, line,
+                llvm::DINode::FlagZero, llvm::DISubprogram::SPFlagDefinition);
+            info.fn->setSubprogram(subprogram);
+            builder_.SetCurrentDebugLocation(
+                llvm::DILocation::get(ctx_, line, 0, subprogram));
+        }
+
         // The `$struct` handle rule's context for this body (see
         // structHandleTarget). After the scope push, so the parameter scope
         // it reasons about is the one just made; restored on exit by
@@ -7304,6 +7345,10 @@ private:
 
         popScope();
         currentFn_ = nullptr;
+        // Issue #37: an instantiation emits mid-caller-body via ScopedEmission,
+        // which restores the insert point but not the location -- clear it so the
+        // caller's next instruction is not misattributed to the callee's line.
+        if (dib_) builder_.SetCurrentDebugLocation(llvm::DebugLoc());
 
         // Not verified once anything has been refused. A body that resumed past a
         // refusal is deliberately incomplete -- a statement that produced no value
@@ -15533,6 +15578,14 @@ private:
     llvm::Module module_;
     llvm::IRBuilder<> builder_;
     TypeMapper types_;
+    // Issue #37: DWARF state, live only under `-g`/`--debug-symbols`. `dib_`
+    // owns every debug node; `debugCU_`/`debugFile_` anchor them to the source
+    // path the driver handed over. Null without the flag, which is what keeps
+    // the default object debug-info-free.
+    bool debugSymbols_ = false;
+    std::unique_ptr<llvm::DIBuilder> dib_;
+    llvm::DICompileUnit* debugCU_ = nullptr;
+    llvm::DIFile* debugFile_ = nullptr;
 
     std::unordered_map<std::string, FnInfo> functions_;
     // One wrapper per function ever named as a value (closureWrapForValue):

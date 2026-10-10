@@ -27,6 +27,7 @@ executable. The examples below mark those boundaries.
 | [error](../../lib/std/error.fin) | `Error`, message/code accessors | Error values do not enable catchable exceptions |
 | [stdptr](../../lib/std/stdptr.fin) | `rptr<T>`, `wptr<T>`, `OwnershipError` | Incomplete execution/safety paths; no borrow checker |
 | [networking](../../lib/std/networking.fin) | Placeholder module | No networking implementation |
+| [time](../../lib/std/time.fin) | `now`, `sleep_sec`/`sleep_ms`, `diff_sec`, `Instant`, `Duration`, `format_rfc3339`/`parse_rfc3339` | `Instant` is a monotonic ns clock (Linux id 1, macOS id 6); RFC3339 is UTC `YYYY-MM-DDTHH:MM:SSZ` with caller-owned storage freed by `free_rfc3339`; Windows has no `clock_gettime` |
 
 `strings` and `math` exist in the shipped library. `somelib` never did; it appeared
 only in the sample drafts, whose last lines importing it now import the shipped

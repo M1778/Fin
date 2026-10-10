@@ -37,4 +37,230 @@ pub fun diff_sec(start: long, end: long) <long> {
     return end - start;
 }
 
+// Nanosecond clocks, durations, and RFC3339 timestamps, through libc.
+//
+// Precision: `Instant::now` reads CLOCK_MONOTONIC (id 1 on Linux, 6 on macOS;
+// Linux is tried first), so it never jumps with the wall clock but says nothing
+// about wall time. `format_rfc3339` renders a wall-clock epoch instead, and the
+// two clocks cannot be compared with each other yet. Inside a VM either clock
+// can jump when the host suspends or migrates the guest; a negative `elapsed`
+// after such a jump is reported, not hidden.
+// Windows is unimplemented: it has no libc `clock_gettime`, so the blame in
+// `Instant::now` names the platform rather than failing the link silently.
+
+#[export]
+#[llvm_name="clock_gettime"]
+@define time_clock_gettime(clk_id: int, tp: &long) <int>;
+
+#[llvm_name="calloc"]
+@define time_calloc(count: ulong, size: ulong) <string>;
+
+#[llvm_name="free"]
+@define time_free_buf(p: string) <noret>;
+
+#[llvm_name="strlen"]
+@define time_strlen(s: string) <ulong>;
+
+// The two copy directions carry different names because two externs sharing one
+// `#[llvm_name]` do not both link; see strings.fin for the same split.
+#[llvm_name="memcpy"]
+@define time_bytes_out(dst: string, src: &char, count: ulong) <string>;
+
+#[llvm_name="memmove"]
+@define time_bytes_in(dst: &char, src: string, count: ulong) <&char>;
+
+// A fixed-width span of seconds. `nanos` is normalized to [0, 999999999] by
+// `Instant::elapsed`; a hand-built value outside that range still answers, it
+// just does not mean what the fields say.
+#[export]
+pub struct Duration {
+    pub:
+      secs <long>,
+      nanos <long>,
+
+    pub:
+      fun as_ms(self: &Self) <long> {
+        return self.secs * 1000 + self.nanos / 1000000;
+      }
+
+      fun as_secs_f(self: &Self) <double> {
+        return cast<double>(self.secs) + cast<double>(self.nanos) / cast<double>(1000000000);
+      }
+}
+
+// A monotonic timestamp in nanoseconds. Copyable and comparable only with
+// itself: there is no wall-clock member, so it cannot be rendered, only
+// differenced.
+#[export]
+pub struct Instant {
+    pub:
+      nanos <long>,
+
+    pub:
+      static fun now() <Instant> {
+        // `timespec` is two consecutive longs (sec, nsec) on Linux and macOS,
+        // so it is a `[long, 2]` rather than a declared struct: an extern
+        // cannot take a Fin struct, per networking.fin.
+        let ts <[long]> = new [long, 2]{};
+        let rc <int> = time_clock_gettime(1, &ts[0]);
+        if (rc != 0) {
+            rc = time_clock_gettime(6, &ts[0]);
+        }
+        blame rc == 0, "clock_gettime(MONOTONIC) failed: unimplemented on this platform (Windows has no libc clock_gettime)";
+        let ns <long> = ts[0] * 1000000000 + ts[1];
+        delete ts;
+        return Instant{nanos: ns};
+      }
+
+      static fun deadline_after_ms(ms: long) <Instant> {
+        blame ms >= 0, "a deadline offset is nonnegative";
+        let t <Instant> = Instant::now();
+        return Instant{nanos: t.nanos + ms * 1000000};
+      }
+
+      fun elapsed_ns(self: &Self) <long> {
+        let t <Instant> = Instant::now();
+        return t.nanos - self.nanos;
+      }
+
+      fun elapsed_ms(self: &Self) <long> {
+        return self.elapsed_ns() / 1000000;
+      }
+
+      fun elapsed(self: &Self) <Duration> {
+        let ns <long> = self.elapsed_ns();
+        let s <long> = ns / 1000000000;
+        let r <long> = ns % 1000000000;
+        if (r < 0) {
+            s = s - 1;
+            r = r + 1000000000;
+        }
+        return Duration{secs: s, nanos: r};
+      }
+
+      fun is_expired(self: &Self) <bool> {
+        let t <Instant> = Instant::now();
+        return t.nanos >= self.nanos;
+      }
+}
+
+priv fun time_write2(buf: [char], pos: int, v: int) <noret> {
+    buf[pos] = cast<char>(cast<int>('0') + v / 10);
+    buf[pos + 1] = cast<char>(cast<int>('0') + v % 10);
+}
+
+priv fun time_write4(buf: [char], pos: int, v: int) <noret> {
+    buf[pos] = cast<char>(cast<int>('0') + v / 1000);
+    buf[pos + 1] = cast<char>(cast<int>('0') + (v / 100) % 10);
+    buf[pos + 2] = cast<char>(cast<int>('0') + (v / 10) % 10);
+    buf[pos + 3] = cast<char>(cast<int>('0') + v % 10);
+}
+
+// Renders epoch seconds as `YYYY-MM-DDTHH:MM:SSZ` (always UTC, no fractional
+// part, no offset). The date math is Howard Hinnant's days-from-civil inverse
+// in pure Fin, so no `gmtime` struct crosses the FFI. Returns fresh storage;
+// release it with `free_rfc3339`.
+#[export]
+pub fun format_rfc3339(t: long) <string> {
+    blame t >= 0, "format_rfc3339 needs a nonnegative epoch (pre-1970 is unimplemented)";
+    let days <long> = t / 86400;
+    let rem <long> = t % 86400;
+    let z <long> = days + 719468;
+    let era <long> = z / 146097;
+    let doe <long> = z - era * 146097;
+    let yoe <long> = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y <long> = yoe + era * 400;
+    let doy <long> = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp <long> = (5 * doy + 2) / 153;
+    let d <long> = doy - (153 * mp + 2) / 5 + 1;
+    let m <long> = mp < 10 : mp + 3 ? mp - 9;
+    if (m <= 2) { y = y + 1; }
+    blame y <= 9999, "format_rfc3339 needs a year <= 9999";
+    let hh <long> = rem / 3600;
+    let mi <long> = (rem % 3600) / 60;
+    let ss <long> = rem % 60;
+    let buf <[char]> = new [char, 21]{};
+    time_write4(buf, 0, cast<int>(y));
+    buf[4] = '-';
+    time_write2(buf, 5, cast<int>(m));
+    buf[7] = '-';
+    time_write2(buf, 8, cast<int>(d));
+    buf[10] = 'T';
+    time_write2(buf, 11, cast<int>(hh));
+    buf[13] = ':';
+    time_write2(buf, 14, cast<int>(mi));
+    buf[16] = ':';
+    time_write2(buf, 17, cast<int>(ss));
+    buf[19] = 'Z';
+    buf[20] = cast<char>(0);
+    let out <string> = time_calloc(cast<ulong>(21), cast<ulong>(1));
+    time_bytes_out(out, &buf[0], cast<ulong>(21));
+    delete buf;
+    return out;
+}
+
+#[export]
+pub fun free_rfc3339(s: string) <noret> {
+    time_free_buf(s);
+}
+
+priv fun time_digit(buf: [char], pos: int) <long> {
+    let c <char> = buf[pos];
+    blame c >= '0' && c <= '9', "parse_rfc3339 needs digits in this position";
+    return cast<long>(cast<int>(c) - cast<int>('0'));
+}
+
+priv fun time_parse2(buf: [char], pos: int) <long> {
+    return time_digit(buf, pos) * 10 + time_digit(buf, pos + 1);
+}
+
+priv fun time_parse4(buf: [char], pos: int) <long> {
+    return time_digit(buf, pos) * 1000 + time_digit(buf, pos + 1) * 100
+    + time_digit(buf, pos + 2) * 10 + time_digit(buf, pos + 3);
+}
+
+// Inverse of `format_rfc3339`: exactly `YYYY-MM-DDTHH:MM:SSZ`, years 0000-9999.
+// Shape, digits, and calendar ranges are blamed; a leap second (`:60`) is
+// accepted. A `string` cannot be indexed, so the bytes are copied once through
+// `[char]`, the only indexable byte access; see strings.fin.
+#[export]
+pub fun parse_rfc3339(s: string) <long> {
+    let n <int> = cast<int>(time_strlen(s));
+    blame n == 20, "parse_rfc3339 needs exactly 'YYYY-MM-DDTHH:MM:SSZ'";
+    let buf <[char]> = new [char, 21]{};
+    time_bytes_in(&buf[0], s, cast<ulong>(20));
+    buf[20] = cast<char>(0);
+    blame buf[4] == '-' && buf[7] == '-' && buf[10] == 'T'
+    && buf[13] == ':' && buf[16] == ':' && buf[19] == 'Z',
+      "parse_rfc3339 needs 'YYYY-MM-DDTHH:MM:SSZ' separators";
+    let y <long> = time_parse4(buf, 0);
+    let m <long> = time_parse2(buf, 5);
+    let d <long> = time_parse2(buf, 8);
+    let hh <long> = time_parse2(buf, 11);
+    let mi <long> = time_parse2(buf, 14);
+    let ss <long> = time_parse2(buf, 17);
+    blame m >= 1 && m <= 12, "parse_rfc3339: month out of range";
+    blame hh <= 23, "parse_rfc3339: hour out of range";
+    blame mi <= 59, "parse_rfc3339: minute out of range";
+    blame ss <= 60, "parse_rfc3339: second out of range";
+    let dim <long> = 31;
+    if (m == 4 || m == 6 || m == 9 || m == 11) {
+        dim = 30;
+    } else if (m == 2) {
+        dim = 28;
+        if ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0) { dim = 29; }
+    }
+    blame d >= 1 && d <= dim, "parse_rfc3339: day out of range for month";
+    let y_adj <long> = m <= 2 : y - 1 ? y;
+    let era <long> = y_adj / 400;
+    if (y_adj < 0) { era = era - 1; }
+    let yoe <long> = y_adj - era * 400;
+    let mp <long> = m > 2 : m - 3 ? m + 9;
+    let doy <long> = (153 * mp + 2) / 5 + d - 1;
+    let doe <long> = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days <long> = era * 146097 + doe - 719468;
+    delete buf;
+    return days * 86400 + hh * 3600 + mi * 60 + ss;
+}
+
 }

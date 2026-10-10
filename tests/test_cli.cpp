@@ -3447,8 +3447,7 @@ std::string dwarfdumpInfo(const std::string& objectPath) {
 // reads the object the compiler produced.
 TEST(DwarfDebugInfo, DashGDumpsDebugInfoWithSourcePathAndMain) {
     // Issue #37: flag plumbed, lowering pending. Parked until DIBuilder
-    // emission lands -- delete this skip when it does.
-    GTEST_SKIP() << "DWARF lowering not implemented yet (issue #37)";
+    // emission lands.
     const std::string src = (fs::path(samplesDir()) / "debug.fin").string();
     ASSERT_TRUE(fs::exists(src))
         << "tests/samples/debug.fin must exist for the -g test";
@@ -3499,7 +3498,6 @@ TEST(DwarfDebugInfo, WithoutGDumpsNoDebugInfo) {
 // `--debug-symbols` is the long spelling of `-g` and must behave identically.
 TEST(DwarfDebugInfo, DebugSymbolsLongFlagWorksLikeDashG) {
     // Same parking as above: needs DIBuilder emission (issue #37).
-    GTEST_SKIP() << "DWARF lowering not implemented yet (issue #37)";
     const std::string src = (fs::path(samplesDir()) / "debug.fin").string();
     const std::string obj = uniqueTempPath("fin_dsym", ".o");
     const FincRun r = runFinc({src, "--debug-symbols", "-c", "-o", obj});
