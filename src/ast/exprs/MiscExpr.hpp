@@ -48,9 +48,9 @@ public:
     void accept(Visitor& v) override;
 };
 
-// One arm of a `match`: the pattern plus the body (ADR 0050, stage 1: enum
-// members and the `_` wildcard only; nullable and constant patterns are
-// follow-ups and do not parse yet).
+// One arm of a `match`: the pattern plus the body (ADR 0050, stages 1-2:
+// enum members, the `_` wildcard, and nullable `null`/binder arms; constant
+// patterns are the remaining follow-up and do not parse yet).
 struct MatchArm {
     // Empty for the `_` wildcard; otherwise the enum member name.
     std::string member;
@@ -59,6 +59,8 @@ struct MatchArm {
     // Payload bindings in order (`Ok(v)` binds `v`); `_` entries bind nothing.
     std::vector<std::string> binders;
     bool is_wildcard = false;
+    // `null` in a nullable match: absence. `member`/`binders` stay empty.
+    bool is_null = false;
     std::unique_ptr<Expression> body;
 };
 

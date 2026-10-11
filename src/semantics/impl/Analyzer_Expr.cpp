@@ -3567,6 +3567,73 @@ void SemanticAnalyzer::visit(TernaryOp& node) {
 // mode. All arm bodies must agree on one type, exactly as divergent
 // `if`/`else` bodies do. Like a ternary, exactly one arm runs, so the arms
 // fork and join the moved state.
+void SemanticAnalyzer::checkNullableMatch(MatchExpr& node, const TypePtr& inner) {
+    bool hasNull = false;
+    bool hasBinder = false;
+    bool hasWildcard = false;
+    TypePtr result = nullptr;
+    auto snap = moved_.snapshot();
+    std::vector<events::MovedAnalysis::Snapshot> ends;
+    for (auto& arm : node.arms) {
+        enterScope();
+        bool armOk = true;
+        if (arm.is_wildcard) {
+            if (hasWildcard) {
+                error(*arm.body, "unreachable match arm (an earlier '_' covers everything)");
+                armOk = false;
+            }
+            hasWildcard = true;
+        } else if (hasWildcard) {
+            error(*arm.body, "unreachable match arm after '_'");
+            armOk = false;
+        } else if (arm.is_null) {
+            if (hasNull) {
+                error(*arm.body, "duplicate match arm for 'null'");
+                armOk = false;
+            }
+            hasNull = true;
+        } else if (!arm.qualifier.empty() || !arm.binders.empty()) {
+            error(*arm.body, "match arm '" + arm.member + "' is not a nullable pattern "
+                             "(expected 'null', a binder, or '_')");
+            armOk = false;
+        } else if (hasBinder) {
+            error(*arm.body, "unreachable match arm (an earlier binder covers every present value)");
+            armOk = false;
+        } else {
+            // A bare identifier over a nullable scrutinee is the presence
+            // binder (ADR 0050); over an enum the same spelling is a member,
+            // which is why this meaning lives only on this path.
+            hasBinder = true;
+            currentScope->define({arm.member, inner, false, true});
+        }
+        if (arm.body) arm.body->accept(*this);
+        auto bodyType = lastExprType;
+        if (!injectedWalk_) {
+            ends.push_back(moved_.snapshot());
+            moved_.restore(snap);
+        }
+        exitScope();
+        if (armOk && bodyType && !isErrorType(bodyType)) {
+            if (!result) result = bodyType;
+            else checkType(*arm.body, bodyType, result);
+        }
+    }
+    if (!injectedWalk_ && !ends.empty()) {
+        moved_.restore(ends[0]);
+        for (size_t i = 1; i < ends.size(); ++i) moved_.installJoin(ends[i], moved_.snapshot());
+    }
+    if (!hasWildcard && (!hasNull || !hasBinder)) {
+        std::string missing;
+        if (!hasNull) missing = "'null'";
+        if (!hasBinder) {
+            if (!missing.empty()) missing += ", ";
+            missing += "present value";
+        }
+        error(node, "non-exhaustive match: uncovered " + missing);
+    }
+    lastExprType = result;
+}
+
 void SemanticAnalyzer::visit(MatchExpr& node) {
     node.scrutinee->accept(*this);
     TypePtr scrutType = lastExprType;
@@ -3574,12 +3641,17 @@ void SemanticAnalyzer::visit(MatchExpr& node) {
         lastExprType = nullptr;
         return;
     }
+    if (auto* nullable = scrutType->as<NullableType>()) {
+        checkNullableMatch(node, nullable->inner);
+        return;
+    }
     auto asEnum = std::dynamic_pointer_cast<StructType>(scrutType);
     if (!asEnum || !asEnum->is_enum) {
-        // Stage 1 lowers enum scrutinees only. Nullable and constant patterns
-        // are ADR 0050 steps 4-5, so a non-enum scrutinee is a named refusal
-        // rather than a guess.
-        error(node, "match on a non-enum scrutinee is not implemented yet (nullable and constant matches are follow-ups)");
+        // Stage 2 lowers enum and nullable scrutinees. Constant patterns are
+        // ADR 0050 step 5, so any other scrutinee is a named refusal rather
+        // than a guess.
+        error(node, "match on a '" + scrutType->toString() + "' scrutinee is not "
+                    "implemented yet (only enums and nullables match)");
         lastExprType = nullptr;
         return;
     }
@@ -3599,6 +3671,10 @@ void SemanticAnalyzer::visit(MatchExpr& node) {
             hasWildcard = true;
         } else if (hasWildcard) {
             error(*arm.body, "unreachable match arm after '_'");
+            armOk = false;
+        } else if (arm.is_null) {
+            error(*arm.body, "match arm 'null' does not match scrutinee of type '" +
+                             asEnum->toString() + "' (nullable patterns need a nullable scrutinee)");
             armOk = false;
         } else if (covered.count(arm.member)) {
             error(*arm.body, "duplicate match arm for member '" + arm.member + "'");

@@ -2736,12 +2736,11 @@ expression:
     }
     ;
 
-/* `match (scrutinee) { pattern => body, ... }` (ADR 0050, stage 1).
+/* `match (scrutinee) { pattern => body, ... }` (ADR 0050, stages 1-2).
    The scrutinee parens are mandatory, mirroring `if (expr)`. One arm is a
    pattern plus an expression body; arms are comma-separated with an optional
-   trailing comma. Nullable (`null`/binder) and constant patterns are
-   follow-ups and do not parse yet -- the pattern alternatives below are the
-   whole of stage 1. */
+   trailing comma. Constant patterns are the remaining follow-up and do not
+   parse yet -- the pattern alternatives below are the whole of stages 1-2. */
 match_expression:
     KW_MATCH LPAREN expression RPAREN LBRACE match_arms RBRACE {
         $$ = std::make_unique<fin::MatchExpr>(std::move($3), std::move($6));
@@ -2767,12 +2766,19 @@ match_arm:
 
 /* `_` is already a legal identifier (`let _ <int> = 1;` builds), so the
    wildcard needs no token: a bare `_` pattern is the wildcard, and the
-   checker exempts it from exhaustiveness contribution beyond closure. */
+   checker exempts it from exhaustiveness contribution beyond closure.
+   `null` (KW_NULL) is the absence arm of a nullable match (ADR 0050 step 4);
+   a bare identifier over a nullable scrutinee is the presence binder. */
 match_pattern:
     IDENTIFIER {
         fin::MatchArm arm;
         if ($1 == "_") arm.is_wildcard = true;
         else arm.member = $1;
+        $$ = std::move(arm);
+    }
+    | KW_NULL {
+        fin::MatchArm arm;
+        arm.is_null = true;
         $$ = std::move(arm);
     }
     | IDENTIFIER LPAREN match_binders RPAREN {

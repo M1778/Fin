@@ -3047,6 +3047,26 @@ BACKEND_TEST(Soundness_Codegen, MatchWildcardArmRuns) {
     EXPECT_EQ(b.out, "9\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, MatchOnNullableLowersPresentAndAbsent) {
+    // ADR 0050 step 4: `null` matches absence, a bare binder matches presence
+    // and binds the unwrapped payload. A present zero stays present (tag-only,
+    // ADR 0040 amendment); both arm orders run.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a? <int> = 10;\n"
+        "    let b? <int> = null;\n"
+        "    let z? <int> = 0;\n"
+        "    let x <int> = match (a) { null => -1, v => v };\n"
+        "    let y <int> = match (b) { v => v, null => -1 };\n"
+        "    let w <int> = match (z) { null => -1, v => v + 1 };\n"
+        "    let q <int> = match (b) { null => 7, _ => 8 };\n"
+        "    printf(\"%d %d %d %d\\n\", x, y, w, q);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10 -1 1 7\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnEnumPayloadMemberCanBeMutatedByPosition) {
     const Built b = build(
         "@define printf(fmt: string, ...) <noret>;\n"

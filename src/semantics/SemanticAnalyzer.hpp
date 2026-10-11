@@ -187,6 +187,10 @@ public:
     void visit(SizeofExpression& node) override;
     void visit(TernaryOp& node) override;
     void visit(MatchExpr& node) override;
+    // ADR 0050 step 4: the nullable half of visit(MatchExpr&). Split out so the
+    // enum path above stays exactly as stage 1 left it; `inner` is the
+    // unwrapped payload the presence binder binds.
+    void checkNullableMatch(MatchExpr& node, const std::shared_ptr<Type>& inner);
     void visit(FunctionTypeNode& node) override;
     void visit(LambdaExpression& node) override;
     void visit(QuoteExpression& node) override;

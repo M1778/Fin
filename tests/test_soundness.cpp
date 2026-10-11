@@ -7447,6 +7447,48 @@ TEST(Soundness_Nullability, ANullablePointerIsStillAPointer) {
     EXPECT_EQ(r.exitCode, 0) << "`(&int)?` denullifies to `&int`:\n" << r.err;
 }
 
+TEST(Soundness_Nullability, AMatchOnNullableWithoutANullArmRefuses) {
+    // ADR 0050: a bare binder covers presence only; absence is a different arm.
+    const FincRun r = compile("fun main() <noret> {\n"
+                              "    let a? <int> = 10;\n"
+                              "    let x <int> = match (a) { v => v };\n"
+                              "}\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("null"), std::string::npos)
+        << "the refusal must name the uncovered 'null':\n"
+        << messagesOnly(stripAnsi(r.err));
+}
+
+TEST(Soundness_Nullability, AMatchOnNullableWithoutAPresenceArmRefuses) {
+    // ADR 0050: `null` covers absence only; a present value needs a binder or `_`.
+    const FincRun r = compile("fun main() <noret> {\n"
+                              "    let a? <int> = 10;\n"
+                              "    let x <int> = match (a) { null => 0 };\n"
+                              "}\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Nullability, AMatchOnNullableWithDuplicateNullArmRefuses) {
+    // ADR 0050: a second `null` arm is dead and refuses.
+    const FincRun r = compile("fun main() <noret> {\n"
+                              "    let a? <int> = 10;\n"
+                              "    let x <int> = match (a) { null => 0, null => 1, v => v };\n"
+                              "}\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("duplicate"), std::string::npos)
+        << messagesOnly(stripAnsi(r.err));
+}
+
+TEST(Soundness_Nullability, AMatchOnNullableWithAnEnumArmRefuses) {
+    // ADR 0050: member patterns belong to enum scrutinees; a nullable takes
+    // `null`, one binder, and `_` -- nothing else.
+    const FincRun r = compile("fun main() <noret> {\n"
+                              "    let a? <int> = 10;\n"
+                              "    let x <int> = match (a) { Ok(v) => v, null => 0 };\n"
+                              "}\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+}
+
 // ---------------------------------------------------------------------------
 // Soundness_ParameterDefaults
 //

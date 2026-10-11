@@ -12569,16 +12569,150 @@ private:
     // block with its own scope; the results join through a PHI exactly like a
     // ternary's. Exhaustiveness was proven by the analyzer, so the chain's
     // final `else` is unreachable -- still emitted (never silently dropped).
+    // ADR 0050 step 4: `match` over a nullable scrutinee. One presence test
+    // (the tag for `{T,i1}` pairs per ADR 0040, the null sentinel for nullable
+    // pointers and closures), then a compare chain over the arms. The
+    // analyzer proves exhaustiveness (`null` plus one binder, or `_`), so a
+    // chain that falls off the end is unreachable the same way the enum
+    // chain's is. The presence binder copies the payload out the way an enum
+    // arm's payload bindings do.
+    void lowerNullableMatch(MatchExpr& node, const CgVal& scr) {
+        llvm::Value* held = scr.value;
+        if (!held) {
+            if (!scr.address) { unsupported(node, "this match scrutinee"); return; }
+            held = builder_.CreateLoad(scr.type.llvmType, scr.address, "match.scr");
+        }
+        const bool isPair = scr.type.isNullableValue();
+        CgType payloadTy;
+        if (isPair) {
+            if (!scr.type.nullablePayload) {
+                unsupported(node, "match on a nullable value with no payload");
+                return;
+            }
+            payloadTy = *scr.type.nullablePayload;
+        } else {
+            payloadTy = scr.type;
+            payloadTy.isNullable = false;
+        }
+        llvm::Value* isAbsent = nullptr;
+        if (isPair) {
+            llvm::Value* tag = builder_.CreateExtractValue(held, {1}, "match.tag");
+            isAbsent = builder_.CreateICmpEQ(
+                tag, llvm::ConstantInt::get(llvm::Type::getInt1Ty(ctx_), 0),
+                "match.absent");
+        } else if (scr.type.isFn()) {
+            // A closure pair is absent when its code word is, the same rule
+            // denullify reads.
+            llvm::Value* code = builder_.CreateExtractValue(held, {0}, "match.code");
+            isAbsent = builder_.CreateICmpEQ(
+                code,
+                llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(ctx_)),
+                "match.absent");
+        } else {
+            isAbsent = builder_.CreateICmpEQ(
+                held,
+                llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(ctx_)),
+                "match.absent");
+        }
+        llvm::Value* payload = isPair
+            ? builder_.CreateExtractValue(held, {0}, "match.payload")
+            : held;
+        auto* endBB = llvm::BasicBlock::Create(ctx_, "match.end", currentFn_->fn);
+        std::vector<std::pair<llvm::BasicBlock*, CgVal>> results;
+        bool closed = false;
+        for (size_t ai = 0; ai < node.arms.size(); ++ai) {
+            auto& arm = node.arms[ai];
+            if (closed) {
+                unsupported(*arm.body, "an unreachable match arm after '_'");
+                return;
+            }
+            auto* armBB = llvm::BasicBlock::Create(ctx_, "match.arm", currentFn_->fn);
+            llvm::BasicBlock* nextBB = nullptr;
+            if (arm.is_wildcard) {
+                builder_.CreateBr(armBB);
+                closed = true;
+            } else {
+                if (!arm.is_null && (!arm.binders.empty() || !arm.qualifier.empty())) {
+                    unsupported(*arm.body, "a nullable match arm with a payload pattern");
+                    return;
+                }
+                nextBB = llvm::BasicBlock::Create(ctx_, "match.next", currentFn_->fn);
+                llvm::Value* take = arm.is_null
+                    ? isAbsent
+                    : builder_.CreateNot(isAbsent, "match.present");
+                builder_.CreateCondBr(take, armBB, nextBB);
+            }
+            builder_.SetInsertPoint(armBB);
+            pushScope();
+            if (!arm.is_wildcard && !arm.is_null) {
+                auto* slot = entryAlloca(payloadTy.llvmType, arm.member);
+                builder_.CreateStore(payload, slot);
+                scopes_.back()[arm.member] =
+                    Local{slot, payloadTy, nextLocalOrder_++, false, Local::SlaveofTie::None, 0, regionDepth_};
+            }
+            CgVal r = emit(*arm.body);
+            if (failed_) { popScope(); return; }
+            auto* exitBB = builder_.GetInsertBlock();
+            if (!terminated()) {
+                cleanScopeAt(node, scopes_.size() - 1);
+                if (failed_) { popScope(); return; }
+                builder_.CreateBr(endBB);
+                results.emplace_back(exitBB, r);
+            }
+            popScope();
+            if (nextBB) builder_.SetInsertPoint(nextBB);
+        }
+        if (!closed) {
+            // The analyzer proves exhaustiveness, so this never runs. Emitted
+            // rather than omitted: a chain that silently falls off the end is
+            // the miscompile the backend invariant forbids.
+            builder_.CreateUnreachable();
+        }
+        if (results.empty()) { unsupported(node, "a match with no arms"); return; }
+        bool anyValued = false;
+        bool anyValueless = false;
+        for (auto& res : results) {
+            if (res.second.ok()) anyValued = true;
+            else anyValueless = true;
+        }
+        if (anyValued && anyValueless) {
+            unsupported(node, "match arms with and without values");
+            return;
+        }
+        builder_.SetInsertPoint(endBB);
+        if (!anyValued) {
+            value_ = CgVal{};
+            return;
+        }
+        CgType common = results[0].second.type;
+        for (size_t i = 1; i < results.size(); ++i) common = commonType(common, results[i].second.type);
+        builder_.SetInsertPoint(endBB);
+        auto* phi = builder_.CreatePHI(common.llvmType, (unsigned)results.size());
+        for (auto& res : results) {
+            builder_.SetInsertPoint(res.first->getTerminator());
+            llvm::Value* v = convert(node, res.second, common);
+            if (!v) return;
+            phi->addIncoming(v, res.first);
+        }
+        builder_.SetInsertPoint(endBB);
+        value_ = CgVal{phi, common};
+    }
+
     void visit(MatchExpr& node) override {
         if (!currentFn_) { unsupported(node, "a match outside a function"); return; }
         CgVal scr = emit(*node.scrutinee);
         if (failed_) return;
         if (!scr.ok()) { unsupported(node, "this match scrutinee"); return; }
+        if (scr.type.isNullableValue() ||
+            (scr.type.isNullable && (scr.type.isPointer() || scr.type.isFn()))) {
+            lowerNullableMatch(node, scr);
+            return;
+        }
         const EnumInfo* eInfo = scr.type.enumInfo;
         if (!eInfo || (!scr.type.isPayloadedEnum() && !scr.type.isFieldlessEnum())) {
-            // Nullable and constant scrutinees are ADR 0050 steps 4-5. The
-            // analyzer refuses them first; this is the backend's own refusal.
-            unsupported(node, "match on a non-enum scrutinee (nullable and constant matches are follow-ups)");
+            // Constant scrutinees are ADR 0050 step 5. The analyzer refuses
+            // them first; this is the backend's own refusal.
+            unsupported(node, "match on a non-enum non-nullable scrutinee (constant matches are a follow-up)");
             return;
         }
         const bool fieldless = scr.type.isFieldlessEnum();
