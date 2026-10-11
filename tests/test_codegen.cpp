@@ -601,6 +601,28 @@ BACKEND_TEST(Soundness_Codegen, ACompoundAssignmentUpdatesInPlace) {
     EXPECT_EQ(b.out, "24\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, EveryNewCompoundAssignmentUpdatesInPlace) {
+    // #98: `%=`, `&=`, `|=`, `<<=`, `>>=` each mean `a = a <op> b`, read once
+    // and written once like the four above. One program so a wrong lowering of
+    // any one of them shows up as a wrong number rather than only a refusal.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let m <int> = 7;\n"
+        "    m %= 3;\n"
+        "    let n <int> = 6;\n"
+        "    n &= 3;\n"
+        "    let o <int> = 6;\n"
+        "    o |= 3;\n"
+        "    let p <int> = 3;\n"
+        "    p <<= 2;\n"
+        "    let q <int> = 12;\n"
+        "    q >>= 2;\n"
+        "    printf(\"%d %d %d %d %d\\n\", m, n, o, p, q);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 2 7 12 3\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AFunctionCallReturnsItsValue) {
     const Built b = build(std::string(kPrintf) +
         "fun add(a: int, b: int) <int> { return a + b; }\n"
@@ -2291,12 +2313,11 @@ BACKEND_TEST(Soundness_Codegen, APositionPastAPrototypesTwoHalvesIsRefused) {
 // binding anyway (`Cannot assign to immutable variable 'e'`), so nothing can observe
 // a write through it.
 //
-// The binding's written type has to *be* the element type. Nothing before the backend
-// checks it -- the analyzer defines both bindings from what was written and never asks
-// the iterable what it yields (KnownDefect_Foreach.ABindingTypeIsNeverCheckedAgainst
-// TheIterable) -- so `foreach (e <string> in a)` over an `[int]` arrives here as a
-// well-typed program, and converting it would read four bytes of an integer as a
-// pointer. Refusing is the only answer that does not invent a front-end rule here.
+// The binding's written type has to *be* the element type. The analyzer checks it
+// (Soundness_Foreach.ABindingTypeIsCheckedAgainstTheIterable), and this is the
+// backstop: converting a mistyped binding would read four bytes of an integer as
+// a pointer, so a program that reaches here with the wrong annotation is refused
+// rather than converted.
 
 BACKEND_TEST(Soundness_Codegen, AForeachOverAFixedArrayBindsEveryElementInOrder) {
     // loops.fin:24 verbatim in shape, over the same `[int, 5]` the sample declares.
@@ -2582,10 +2603,10 @@ BACKEND_TEST(Soundness_Codegen, AReturnOutOfAForeachBodyLeavesTheFunction) {
 
 BACKEND_TEST(Soundness_Codegen, AForeachOverSomethingThatIsNotAnArrayIsRefused) {
     // The ruling, not a gap: there is no iteration protocol in Fin
-    // (lib/std/collection.fin:59), so nothing but an array says what it yields. The front
-    // end accepts every one of these -- it never asks the iterable anything, which is
-    // KnownDefect_Foreach.TheIterableIsNeverCheckedForBeingIterable -- so each arrives
-    // here as a well-typed program and the backend is where it stops.
+    // (lib/std/collection.fin:59), so nothing but an array says what it yields. The
+    // front end refuses every one of these first
+    // (Soundness_Foreach.TheIterableMustBeIterable), naming the type; the backend's
+    // "not an array" below that is the backstop for what reaches it unchecked.
     //
     // A prototype is the one worth naming: it *has* two arrays inside it, so walking one
     // half or the other would be a choice this file is not entitled to make. `p.0` is how
@@ -2604,7 +2625,7 @@ BACKEND_TEST(Soundness_Codegen, AForeachOverSomethingThatIsNotAnArrayIsRefused) 
              " foreach (e <int> in p) { } }\n"}) {
         const Built b = build(code);
         EXPECT_NE(b.compileExit, 0) << code << "\n" << b.why();
-        EXPECT_NE(b.compileErr.find("not an array"), std::string::npos)
+        EXPECT_NE(b.compileErr.find("Cannot iterate over type"), std::string::npos)
             << code << "\n" << b.why();
     }
 }
@@ -2636,11 +2657,13 @@ BACKEND_TEST(Soundness_Codegen, AForeachOverAnArrayWithNoHomeIsRefused) {
 }
 
 BACKEND_TEST(Soundness_Codegen, AForeachBindingOfAnotherTypeThanTheElementIsRefused) {
-    // Nothing before the backend checks this, so refusing it here is what stands between
-    // `foreach (e <string> in a)` over an `[int]` and a program that reads four bytes of
-    // an integer as a pointer. Not converted, even where a conversion exists: `int` into
-    // `long` widens fine as an assignment, but a binding that silently widened would make
-    // `e` a different value from `a[i]` and loops.fin:20 asserts they are the same.
+    // The front end refuses this first
+    // (Soundness_Foreach.ABindingTypeIsCheckedAgainstTheIterable), as a type
+    // mismatch naming both types; the backend's "elements of another type" below
+    // that is the backstop. Refused either way, never converted, even where a
+    // conversion exists: `int` into `long` widens fine as an assignment, but a
+    // binding that silently widened would make `e` a different value from `a[i]`
+    // and loops.fin:20 asserts they are the same.
     for (const char* code : {
              "fun main() <noret> { let a <[int, 3]> = [1, 2, 3];"
              " foreach (e <string> in a) { } }\n",
@@ -2654,7 +2677,7 @@ BACKEND_TEST(Soundness_Codegen, AForeachBindingOfAnotherTypeThanTheElementIsRefu
              " foreach (e <B> in xs) { } }\n"}) {
         const Built b = build(code);
         EXPECT_NE(b.compileExit, 0) << code << "\n" << b.why();
-        EXPECT_NE(b.compileErr.find("elements of another type"), std::string::npos)
+        EXPECT_NE(b.compileErr.find("Type mismatch"), std::string::npos)
             << code << "\n" << b.why();
     }
 }
@@ -2663,19 +2686,23 @@ BACKEND_TEST(Soundness_Codegen, AForeachBindingOfATypeWithNoRepresentationIsRefu
     // A binding whose written type this file cannot map at all is refused by its type
     // rather than by the comparison above it, so the message names the type. `<auto>` is
     // the reachable case and it is a real one: a `let` infers from its initialiser and a
-    // binding has none, so there is nothing to infer from -- inferring the element type
-    // would be a front-end rule, and the front end has not made it.
+    // binding has none, so there is nothing to infer from. The front end now refuses it
+    // first as a mismatch against the element type, which is the same verdict one layer
+    // earlier -- inferring the element type would be a front-end rule, and the front
+    // end has not made it.
     const Built b = build(
         "fun main() <noret> { let a <[int, 3]> = [1, 2, 3];"
         " foreach (e <auto> in a) { } }\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("a 'foreach' binding of type 'auto'"), std::string::npos)
+    EXPECT_NE(b.compileErr.find("Type mismatch"), std::string::npos)
         << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AForeachIndexBindingThatIsNotAnIntegerIsRefused) {
     // What the index is handed is a position, and only an integer holds one as the number
-    // the body compares against an index (`a[idx]`, loops.fin:20). A `float` would arrive
+    // the body compares against an index (`a[idx]`, loops.fin:20). The front end refuses
+    // a non-integer first (Soundness_Foreach.ABindingTypeIsCheckedAgainstTheIterable);
+    // the backend's "index binding" below that is the backstop. A `float` would arrive
     // as 0.0, 1.0, ... and compare equal against an `int` index by conversion, which is a
     // rule this file would have invented; a `bool` would be true for every element but
     // the first. Refused rather than converted, and paired with the widths that do work
@@ -2689,7 +2716,13 @@ BACKEND_TEST(Soundness_Codegen, AForeachIndexBindingThatIsNotAnIntegerIsRefused)
             "    foreach (i <" + std::string(type) + ">, e <int> in a) { }\n"
             "}\n");
         EXPECT_NE(b.compileExit, 0) << type << "\n" << b.why();
-        EXPECT_NE(b.compileErr.find("index binding"), std::string::npos)
+        // `int{7}` is an integer the front end accepts and the backend cannot
+        // represent, so it alone still stops at the backstop below; the rest
+        // never get past the front end.
+        const bool backendOnly = std::string(type) == "int{7}";
+        EXPECT_NE(b.compileErr.find(backendOnly ? "index binding"
+                                                : "An index must be an integer"),
+                  std::string::npos)
             << type << "\n" << b.why();
     }
 }

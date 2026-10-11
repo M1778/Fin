@@ -55,6 +55,29 @@ struct Symbol {
     // Defaulted, so the twenty-two aggregate initialisations of Symbol elsewhere mean
     // what they meant: a symbol is not ambient unless something says it is.
     bool is_ambient = false;
+
+    // Whether this binding was pre-registered by the file-scope hoist
+    // (Analyzer_Core.cpp passes 3-4) rather than by the in-order walk. The hoist
+    // runs before any statement is analysed so forward references resolve; the
+    // in-order declaration then re-registers the same name in the same scope,
+    // which is not a redeclaration. The re-registration overwrites this entry
+    // with a fresh Symbol, so the flag consumes itself: a second textual
+    // declaration finds it cleared and is refused.
+    //
+    // Defaulted, so the aggregate initialisations of Symbol elsewhere mean
+    // what they meant: a symbol is walked unless the hoist says otherwise.
+    bool is_hoisted = false;
+
+    // Whether this binding is a prototype (`@define`) rather than a definition.
+    // A `fun` of the same name in the same scope is then the definition the
+    // prototype declared, not a redeclaration -- `@define` is the corpus's
+    // forward declaration (eight samples open with one) -- and a second
+    // identical `@define` states one fact twice, not a conflict (fourteen
+    // samples repeat the bundled module's `printf` line verbatim). Anything
+    // else after a prototype is a duplicate like anywhere else.
+    //
+    // Defaulted: a symbol defines unless an `@define` says it prototypes.
+    bool is_prototype = false;
 };
 
 class Scope {

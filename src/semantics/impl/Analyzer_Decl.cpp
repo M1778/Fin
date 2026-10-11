@@ -30,6 +30,50 @@ bool isEffectfulInit(const Expression* e) {
            dynamic_cast<const StructInstantiation*>(e) != nullptr;
 }
 
+bool SemanticAnalyzer::checkDuplicateDeclaration(
+        Scope* scope, ASTNode& node, const std::string& name,
+        const std::vector<std::unique_ptr<Attribute>>& attrs,
+        const std::shared_ptr<Type>& newType, bool newIsFunction, bool newIsPrototype) {
+    if (!scope) return false;
+    // `_` is the blank: a discard, not a binding, so it never collides with itself.
+    if (name == "_") return false;
+    auto it = scope->symbols.find(name);
+    if (it == scope->symbols.end()) return false;
+    const Symbol& existing = it->second;
+    // Pre-registered by the file-scope hoist for this very declaration;
+    // the define below overwrites it and consumes the exemption.
+    if (existing.is_hoisted) return false;
+    if (importedOwner_.find(name) != importedOwner_.end()) return false;
+    // A definition after its prototype, and a second `@define` stating one fact
+    // twice. Anything else after a prototype is a duplicate like anywhere else.
+    if (existing.is_prototype) {
+        if (!newIsPrototype) return false;
+        if (newType && existing.type && newType->equals(*existing.type)) return false;
+    }
+    for (const auto& a : attrs) {
+        if (a && a->name == "overwrite" &&
+            (a->is_flag || a->value_str.empty() || a->value_str == name))
+            return false;
+    }
+    const bool nested = scope != globalScope.get();
+    bool newIsGenericLambda = false;
+    if (const auto* vd = dynamic_cast<const VariableDeclaration*>(&node)) {
+        if (const auto* lam = dynamic_cast<const LambdaExpression*>(vd->initializer.get()))
+            newIsGenericLambda = !lam->generic_params.empty();
+    }
+    if (newIsFunction && existing.is_function && nested)
+        error(node, fmt::format("a second nested function '{}' in one scope", name));
+    else if (newIsFunction && !existing.is_function && nested)
+        error(node, fmt::format("a nested function '{}' whose name a variable in the same "
+                                "scope already has", name));
+    else if (newIsGenericLambda)
+        error(node, fmt::format("a second declaration of '{}' in one scope", name));
+    else
+        error(node, "'" + name + "' is already declared in this scope " +
+                      "(a second declaration needs '#[overwrite(" + name + ")]')");
+    return true;
+}
+
 void SemanticAnalyzer::visit(VariableDeclaration& node) {
     // fin-guard: `let <name> = ...` with no annotation. The parser already
     // spelled the type as `<auto>` so later passes need no new shape; this
@@ -167,6 +211,7 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
     if (auto* lam = dynamic_cast<LambdaExpression*>(node.initializer.get())) {
         if (!lam->generic_params.empty()) sym.is_template = true;
     }
+    checkDuplicateDeclaration(currentScope.get(), node, node.name, node.attributes, type, false, false);
     currentScope->define(sym);
     // Issue #46: this binding warns if it is never read -- unless its
     // initializer may run code (see isEffectfulInit above), which makes the
@@ -477,6 +522,7 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
         // capture analysis from snapshotting a slot that does not exist.
         Symbol funSym{node.name, funcType, false, true};
         funSym.is_function = true;
+        checkDuplicateDeclaration(currentScope->parent, node, node.name, node.attributes, funcType, true, false);
         currentScope->parent->define(funSym);
         // The file's own declaration takes the name back from any import that
         // bound it (the define above overwrote the import's symbol): erase the
@@ -1353,8 +1399,12 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
     // no frame slot.
     Symbol defineSym{node.name, funcType, false, true};
     defineSym.is_function = true;
+    defineSym.is_prototype = true;
+    checkDuplicateDeclaration(currentScope.get(), node, node.name, node.attributes, funcType,
+                              false, true);
     currentScope->define(defineSym);
     if (globalScope && currentScope != globalScope) {
+        checkDuplicateDeclaration(globalScope.get(), node, node.name, node.attributes, funcType, false, true);
         globalScope->define({node.name, funcType, false, true});
     }
     if (publishIfGlobal(node, node.attributes, node.name, funcType) && loader) {
@@ -1378,6 +1428,7 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
             // `is_ambient` to whichever flag the struct grows next.
             Symbol retained{node.name, funcType, false, true};
             retained.is_function = true;
+            retained.is_prototype = true;
             retained.is_ambient = true;
             currentScope->define(retained);
         }
@@ -1739,6 +1790,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
     if (currentScope->parent) {
         auto funcType = std::make_shared<FunctionType>(
             paramTypes, retType ? retType : errorType(), false, paramDefaults);
+        checkDuplicateDeclaration(currentScope->parent, node, node.name, node.attributes, funcType, true, false);
         currentScope->parent->define({node.name, funcType, false, true});
         debugLog(fg(fmt::color::gray), "      [Register] Registered special '{}' in parent scope\n", node.name);
     }

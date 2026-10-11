@@ -2420,40 +2420,82 @@ TEST(Soundness_IndexOperator, TheImplementsCastFormChecksItsSubscript) {
     EXPECT_EQ(errorCount(err), 1u) << err;
 }
 
-TEST(KnownDefect_IndexOperator, AnAssignmentThroughASubscriptNeverConsultsOperatorBracketEquals) {
-    // Known defect: #98 (tracked; see issue for inversion target).
-    // `a[k] = v` types its target through `operator []` -- the *read* -- and checks the
-    // value against that operator's return type. `operator []=` is registered and never
-    // looked up. lib/std/hashmap.fin:23's own note says so ("an index expression never
-    // consults `operator []=`").
+TEST(Soundness_IndexOperator, AnAssignmentThroughASubscriptIsCheckedAgainstOperatorBracketEquals) {
+    // Was KnownDefect_IndexOperator.AnAssignmentThroughASubscriptNeverConsults-
+    // OperatorBracketEquals (#98): `a[k] = v` used to type through `operator []`,
+    // which `[]=`-only structs could never satisfy. The assignment now consults
+    // `operator []=`: the subscript against its first parameter, the value
+    // against its second. lib/std/collection.fin:92/96 and lib/std/hashmap.fin:84/88
+    // declare both operators with matching types, so the corpus cannot tell the
+    // two apart -- the cases below are structs it never writes.
     //
-    // This is benign wherever both are declared with matching types, which is every
-    // corpus site: lib/std/collection.fin:92 and :96, lib/std/hashmap.fin:84 and :88.
-    // It is not benign in two cases, and neither is in the corpus yet: a struct that
-    // declares `[]=` and no `[]` cannot be assigned into at all, and a struct whose two
-    // operators disagree about the value type is checked against the wrong one.
-    //
-    // Left booked rather than fixed because the ruling it needs is not in the samples:
-    // whether `a[k] = v` requires `operator []=`, or whether `operator []` alone is
-    // enough to make a subscript assignable. stdlib/operators.fin declares `Index` and
-    // `IndexAssign` as two interfaces, which hints at the first, and lib/std's note at
-    // collection.fin:29-33 says nothing checks an operator's arity against the
-    // interface that requires it either.
-    const FincRun r = compile(
+    // The other half, decided: `operator []` alone still makes a subscript
+    // assignable (last case). Refusing it would be a new ruling with no corpus
+    // site asking for it; the read path types the assignment as before.
+    const FincRun ok = compile(
         "struct Only {\n"
         "    v <int>,\n"
         "    operator []=(i: <int>, value: <int>) <noret> { }\n"
         "}\n"
         "fun main() <int> { let o <Only> = Only{v: 1}; o[0] = 5; return 0; }\n");
-    EXPECT_NE(stripAnsi(r.err).find("Type 'Only' is not an array or pointer"),
-              std::string::npos)
-        << "GOOD NEWS: a subscript assignment consults operator []=. Invert this test --\n"
-           "the program should compile clean, the subscript should be checked against\n"
-           "[]='s first parameter and the value against its second -- and rename it\n"
-           "Soundness_IndexOperator.AnAssignmentThroughASubscriptIsCheckedAgainstOperator-\n"
-           "BracketEquals. Then decide the other half: whether `operator []` alone still\n"
-           "makes a subscript assignable, and say so here either way.\n"
-        << stripAnsi(r.err);
+    EXPECT_EQ(ok.exitCode, 0) << "a struct declaring only `[]=` is assignable into:\n" << ok.err;
+
+    // The subscript is checked against `[]=`'s first parameter.
+    const std::string badKey = messagesOnly(stripAnsi(compile(
+        "struct Only {\n"
+        "    v <int>,\n"
+        "    operator []=(i: <int>, value: <int>) <noret> { }\n"
+        "}\n"
+        "fun main() <int> { let o <Only> = Only{v: 1}; o[\"k\"] = 5; return 0; }\n").err));
+    EXPECT_EQ(errorCount(badKey), 1u) << badKey;
+    EXPECT_NE(badKey.find("expected 'int', got 'string'"), std::string::npos) << badKey;
+
+    // The value is checked against `[]=`'s second parameter.
+    const std::string badValue = messagesOnly(stripAnsi(compile(
+        "struct Only {\n"
+        "    v <int>,\n"
+        "    operator []=(i: <int>, value: <int>) <noret> { }\n"
+        "}\n"
+        "fun main() <int> { let o <Only> = Only{v: 1}; o[0] = \"s\"; return 0; }\n").err));
+    EXPECT_EQ(errorCount(badValue), 1u) << badValue;
+    EXPECT_NE(badValue.find("expected 'int', got 'string'"), std::string::npos) << badValue;
+
+    // When the two operators disagree, the write follows `[]=` and the read
+    // follows `[]`: `s[0] = 5` is clean against the `int` parameter even though
+    // the read yields a `string`.
+    const FincRun split = compile(
+        "struct Split {\n"
+        "    v <int>,\n"
+        "    operator [](i: <int>) <string> { return \"x\"; }\n"
+        "    operator []=(i: <int>, value: <int>) <noret> { }\n"
+        "}\n"
+        "fun main() <int> {\n"
+        "    let s <Split> = Split{v: 1};\n"
+        "    s[0] = 5;\n"
+        "    let r <string> = s[0];\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(split.exitCode, 0) << "writes follow `[]=`, reads follow `[]`:\n" << split.err;
+    const std::string splitBad = messagesOnly(stripAnsi(compile(
+        "struct Split {\n"
+        "    v <int>,\n"
+        "    operator [](i: <int>) <string> { return \"x\"; }\n"
+        "    operator []=(i: <int>, value: <int>) <noret> { }\n"
+        "}\n"
+        "fun main() <int> { let s <Split> = Split{v: 1}; s[0] = \"s\"; return 0; }\n").err));
+    EXPECT_EQ(errorCount(splitBad), 1u) << splitBad;
+    EXPECT_NE(splitBad.find("expected 'int', got 'string'"), std::string::npos) << splitBad;
+
+    // And `operator []` alone still assigns: the struct below declares no `[]=`
+    // and the write is typed through the read as it always was.
+    const FincRun readOnly = compile(
+        "struct Reads {\n"
+        "    v <int>,\n"
+        "    operator [](i: <int>) <int> { return self.v; }\n"
+        "}\n"
+        "fun main() <int> { let r <Reads> = Reads{v: 1}; r[0] = 5; return 0; }\n");
+    EXPECT_EQ(readOnly.exitCode, 0) << "`[]` alone still makes a subscript assignable:\n"
+                                    << readOnly.err;
 }
 
 // `a + f()` is not a call.
@@ -2493,11 +2535,12 @@ TEST(Soundness_Precedence, ACallOnTheRightOfABinaryOperatorIsStillACall) {
         {"1 < g()", "bool"},  {"1 > g()", "bool"},  {"1 <= g()", "bool"},
         {"1 >= g()", "bool"}, {"1 == g()", "bool"}, {"1 != g()", "bool"},
         {"1 << g()", "int"},  {"1 >> g()", "int"},
+        {"1 & g()", "int"},   {"1 | g()", "int"},   {"1 ^ g()", "int"},
         {"true && g0()", "bool"}, {"true || g0()", "bool"},
-        // `1 & g()`, `1 | g()` and `1 ^ g()` are absent from this table because those
-        // three have no binary production at all -- see
-        // KnownDefect_Operators.EightOperatorsCanBeDeclaredAndNeverWritten. This test
-        // is about precedence, and a token with no production has none to get wrong.
+        // `1 %= g()` and friends are absent for the opposite reason: a compound
+        // assignment is a statement, not an operand, so none of them can appear
+        // on either side of another operator. Their spellings are pinned by
+        // Soundness_Operators.EveryDeclarableOperatorHasAnExpressionThatInvokesIt.
     };
     for (const auto& r : rows) {
         const std::string err = stripAnsi(compile(
@@ -2551,47 +2594,24 @@ TEST(Soundness_Precedence, ACallOnTheRightOfABinaryOperatorIsStillACall) {
     EXPECT_EQ(errorCount(paren), 0u) << paren;
 }
 
-// Five COMPOUND-ASSIGN operators can be declared, required by an interface, and never
-// written. (This test used to cover eight, including the three binary spellings; issue
-// #67 landed `&`, `|` and `^` as binary expressions on 2026-10-10, so the binary half
-// moved to Soundness_Operators.EveryDeclarableOperatorHasAnExpressionThatInvokesIt and
-// the rows below are the compound-assign remainder.)
+// Every declarable operator has an expression that invokes it.
 //
-// The declaration side is nearly complete: `operator &`, `operator |`, `operator ^`,
-// `operator %=`, `operator &=`, `operator |=`, `operator <<=` and `operator >>=` all
-// parse in an interface or a struct, and lib/std/operators.fin declares seven of them
-// because tests/samples/stdlib/operators.fin does -- BitAnd, BitOr, BitAndAssign,
-// BitOrAssign, ModAssign, ShiftLeftAssign, ShiftRightAssign. For the three binary
-// operators an expression now reaches that declaration; for the five compound-assign
-// operators below none does, so an interface requiring `operator &=` still demands
-// something no program can invoke.
+// Was KnownDefect_Operators.EightOperatorsCanBeDeclaredAndNeverWritten (#98): the
+// five compound assignments below could be declared (and required by an
+// interface) but never spelled in an expression -- `a %= 2` was a syntax error.
+// (The binary three `&`, `|`, `^` were fixed by #67.) Each now parses in both
+// expression grammars, checks as `a = a <op> b`, and lowers through the same
+// path the four older compound assignments take. `^=` is still nothing at all:
+// no token spells it, so the declaration itself is refused and there are eight
+// declarable operators, not nine.
 //
-// Three of the eight are worse than missing, they are half-declared: SHIFTLEFTEQUAL and
-// SHIFTRIGHTEQUAL sit in the assignment precedence group at parser.y:189 and CARET has
-// its own `%left CARET` line, so the precedence table ranks three tokens against
-// operators they can never meet.
-//
-// `^` is in neither the spec nor any sample -- the lexer produces CARET (lexer.l:265)
-// and `ASTTokenKind::CARET` exists for the declaration form, and that is the whole of
-// it. `^=` is the one spelling that exists nowhere at all: no token spells it, so
-// `operator ^=` does not even declare, which is why the count is eight and not nine.
-//
-// `&` and `|` are the two with a reason to be careful rather than just absent: `&` is
-// also address-of and the reference marker, `|` is also the union-type separator. `^`
-// has no second meaning at all.
-//
-// Found while fixing Soundness_Precedence.ACallOnTheRightOfABinaryOperatorIsStillACall,
-// whose first draft asserted sixteen operators and discovered three of them do not
-// exist. The asymmetry is the point: the compiler will happily typecheck a program
-// whose interfaces demand operators the grammar cannot spell.
-//
-// When the compound-assign half is fixed, invert it: Soundness_Operators.EveryDeclarable-
-// OperatorHasAnExpressionThatInvokesIt, asserting zero diagnostics for each row instead.
-// That test already exists and covers the binary three, so adding the compound five to
-// it is the whole of the remaining work here.
-TEST(KnownDefect_Operators, EightOperatorsCanBeDeclaredAndNeverWritten) {
-    // Known defect: #98 (tracked; see issue for inversion target).
-    // Every one of the eight is accepted as a requirement.
+// Out of scope on purpose: dispatching a compound assignment to a struct's
+// operator (`s += 1` checks `1` against `S` and never reaches `operator +=`).
+// That is what the four older forms do too, so the five match them exactly;
+// changing it would redefine `+=` as well.
+TEST(Soundness_Operators, EveryDeclarableOperatorHasAnExpressionThatInvokesIt) {
+    // The declaration half still holds: every one of the eight is accepted as
+    // a requirement.
     const std::string decls = stripAnsi(compile(
         "interface BitAnd { pub operator &(rhs: any) <int>; }\n"
         "interface BitOr { pub operator |(rhs: any) <int>; }\n"
@@ -2604,50 +2624,40 @@ TEST(KnownDefect_Operators, EightOperatorsCanBeDeclaredAndNeverWritten) {
         "fun main() <int> { return 0; }\n").err);
     EXPECT_EQ(errorCount(decls), 0u) << "all eight are declarable\n" << decls;
 
-    // `^=` is not among them: no token spells it, so the declaration itself is a syntax
-    // error and there is nothing to require.
+    // And the ninth spelling still does not exist: `^=` is a syntax error in a
+    // declaration, so there is nothing to require.
     const std::string xoreq = stripAnsi(compile(
         "interface XorAssign { pub operator ^=(rhs: any) <int>; }\n"
         "fun main() <int> { return 0; }\n").err);
     EXPECT_NE(xoreq.find("syntax error"), std::string::npos)
         << "`^=` does not lex as one operator\n" << xoreq;
 
-    // And none of the eight is writable. (#44 reworded some of these:
-    // where `;` is among the expected tokens the diagnostic is now
-    // `expected ';'` instead of `syntax error` -- `&=` et al -- while `%=` in
-    // this grammar state keeps `syntax error, unexpected EQUAL`. Either
-    // spelling is the intended refusal; the compile still fails either way.)
-    // ISSUE #67 (2026-10-10): the three BINARY rows that used to sit here are no
-    // longer refused -- `1 & 2`, `1 | 2` and `1 ^ 2` now parse, typecheck and
-    // lower, because the expression grammar gained PIPE/CARET/AMPERSAND
-    // productions (src/parser/parser.y) and the self-host precedence table
-    // gained the same three rungs (lib/std/parse.fin) so both compilers agree.
-    // They moved to Soundness_Operators.EveryDeclarableOperatorHasAn-
-    // ExpressionThatInvokesIt. What remains refused is the COMPOUND-ASSIGN
-    // half: `%=`, `&=`, `|=`, `<<=`, `>>=` still have no expression
-    // production, so those five rows stay -- this test is now about the
-    // compound forms only, not about bitwise in general.
+    // The binary three invoke (since #67), one row each.
+    const char* binary[] = {"&", "|", "^"};
+    for (const char* op : binary) {
+        const std::string err = stripAnsi(compile(
+            std::string("fun main() <int> { let a <auto> = 6 ") + op + " 3; return 0; }\n").err);
+        EXPECT_EQ(errorCount(err), 0u) << op << " is a binary expression\n" << err;
+    }
+
+    // The compound five invoke: each checks clean, which is what "no expression
+    // production" used to refuse with `syntax error` / `expected ';'`.
     const char* compound[] = {"%=", "&=", "|=", "<<=", ">>="};
     for (const char* op : compound) {
         const std::string err = stripAnsi(compile(
-            std::string("fun main() <int> { let a <int> = 1; a ") + op + " 2; return 0; }\n").err);
-        EXPECT_TRUE(err.find("syntax error") != std::string::npos ||
-                    err.find("expected ';'") != std::string::npos)
-            << op << " has no assignment production\n" << err;
+            std::string("fun main() <int> { let a <int> = 7; a ") + op + " 3; return 0; }\n").err);
+        EXPECT_EQ(errorCount(err), 0u) << op << " is a compound assignment\n" << err;
     }
 
-    // The control proving the refusal above is about compound assignment and not
-    // "bitwise does not work": the three binary spellings now lower quietly.
-    // Precedence itself is pinned by tests/samples/bitwise.fin.
-    const char* binary_works[] = {"1 & 2", "1 | 2", "1 ^ 2"};
-    for (const char* e : binary_works) {
-        const std::string err = stripAnsi(compile(
-            std::string("fun main() <int> { let a <auto> = ") + e + "; return 0; }\n").err);
-        EXPECT_EQ(errorCount(err), 0u) << e << " is now a binary expression (issue #67)\n" << err;
-    }
+    // Each means `a = a <op> b`: the operand is checked against the target, so a
+    // wrong-typed right-hand side reports exactly once.
+    const std::string bad = messagesOnly(stripAnsi(compile(
+        "fun main() <int> { let a <int> = 7; a %= \"s\"; return 0; }\n").err));
+    EXPECT_EQ(errorCount(bad), 1u) << bad;
+    EXPECT_NE(bad.find("expected 'int', got 'string'"), std::string::npos) << bad;
 
-    // The four that do exist, as the control: whatever is wrong above is not "compound
-    // assignment does not work".
+    // The four that already worked, as the control: whatever is new above joins
+    // them rather than replacing them.
     const char* works[] = {"+=", "-=", "*=", "/="};
     for (const char* op : works) {
         const std::string err = stripAnsi(compile(
@@ -4471,34 +4481,30 @@ TEST(KnownDefect_UnaryOperators, NegationPassesAStringStraightThrough) {
 }
 
 // ---------------------------------------------------------------------------
-// Redeclaring a name in one scope silently replaces the first declaration.
+// A redeclaration in one scope is refused; `#[overwrite(<name>)]` permits one.
 //
-// Scope.hpp:30 is the whole of it:
+// Scope.hpp's `define` assigns over an existing key, so a second declaration
+// used to overwrite the first with no diagnostic and the later one won. Both
+// `let` and `fun` reached it: variables at Analyzer_Decl.cpp, functions a few
+// lines down, registering into the parent scope through the same check. One
+// check, both symptoms.
 //
-//     void define(Symbol sym) { symbols[sym.name] = sym; }
-//
-// `operator[]` on an unordered_map assigns over an existing key, so a second
-// declaration overwrites the first with no diagnostic and the later one wins.
-// Both `let` and `fun` reach it: variables at Analyzer_Decl.cpp:27, functions at
-// Analyzer_Decl.cpp:86, which register into the parent scope through the same
-// call. One line, one fix, both symptoms.
-//
-// Unlike the conditions defect, this one does not need an owner ruling — the
+// Unlike the conditions defect, this one needed no owner ruling — the
 // corpus already answered it in writing. stdlib/stdio.fin:33 declares a second
 // `printf` under `#[overwrite(printf)]`, commented in the sample itself as
 // "this tells the compiler we are overwriting printf and it will ignore the
 // current definition of it and doesn't raise an error". An attribute whose stated
 // job is to suppress the error presupposes the error, and stdio.fin is normative.
-// So a bare duplicate must be rejected, and silently taking the second is exactly
-// the behaviour `#[overwrite]` exists to have to ask for.
+// So a bare duplicate is rejected, and `#[overwrite]` is what a deliberate
+// second declaration carries.
 //
-// Two defects currently cancel in that sample. Attributes are parsed and carried
-// but nothing interprets one (docs/plan.md, wave 4), so `#[overwrite]` does
-// nothing today — and the duplicate it guards is accepted anyway, because no
-// duplicate is ever refused. Whoever fixes this line must therefore land it with
-// the attribute, or stdio.fin starts failing on a construct it was written to
-// demonstrate. That ordering constraint is the reason this is recorded here
-// rather than filed as a one-line fix.
+// Two defects cancelled in that sample. Attributes are parsed and carried but
+// wave-4 work owns their meanings (docs/plan.md), so `#[overwrite]` on anything
+// else stays reader-owned silence -- this check is its only reader. The hoist
+// (Analyzer_Core.cpp passes 3-4) pre-registers file-scope names for forward
+// references, which is the same name in the same scope by design and not a
+// duplicate: hoisted symbols carry the flag that exempts exactly one
+// re-registration, and the in-order walk consumes it.
 //
 // Not asserted as defects, because they are ordinary: shadowing in a nested
 // scope, and a `let` shadowing a parameter. Both were probed, both are accepted,
@@ -4519,26 +4525,43 @@ TEST(Soundness_Duplicates, ShadowingInANestedScopeStillWorks) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Duplicates, ARedeclarationSilentlyChangesTheType) {
-    // Known defect: #93 (tracked; see issue for inversion target).
+TEST(Soundness_Duplicates, ARedeclarationInOneScopeIsRefused) {
+    // Was KnownDefect_Duplicates.ARedeclarationSilentlyChangesTheType (#93): a
+    // second `let` for one name overwrote the first with no diagnostic, so the
+    // later type won. Refused now; `#[overwrite(<name>)]` on the new declaration
+    // permits it deliberately (stdlib/stdio.fin:33, normative).
     auto r = compile("fun main() <void> { let a <int> = 1; let a <string> = \"s\";\n"
                      "                    let b <string> = a; }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a duplicate declaration in one scope is now refused. Check it "
-           "was landed together with #[overwrite] support, or stdlib/stdio.fin "
-           "breaks; then invert this and the one below into Soundness_Duplicates "
-           "and strike the entry from docs/plan.md.\n"
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("'a' is already declared in this scope"),
+              std::string::npos)
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Duplicates, ARedeclaredFunctionSilentlyReplacesTheFirst) {
-    // Known defect: #93 (tracked; see issue for inversion target).
-    // Binding `<string>` is what proves the second definition won: the call sees
-    // the later signature, so the first `f` became unreachable without a word.
+TEST(Soundness_Duplicates, AnOverwriteAttributePermitsARedeclaration) {
+    // The other half of the fix above: stdlib/stdio.fin:33 declares its second
+    // `printf` under `#[overwrite(printf)]`, commented as telling the compiler to
+    // ignore the current definition. That sample is normative, so the attribute
+    // has to mean it -- a bare duplicate is refused, this one compiles.
     auto r = compile("fun f() <int> { return 1; }\n"
+                     "#[overwrite(f)]\n"
                      "fun f() <string> { return \"s\"; }\n"
                      "fun main() <void> { let x <string> = f(); }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Duplicates, ARedeclaredFunctionIsRefused) {
+    // Was KnownDefect_Duplicates.ARedeclaredFunctionSilentlyReplacesTheFirst (#93):
+    // a second `fun f` won and the first became unreachable without a word.
+    // Binding `<string>` is what proved the second definition won: the call saw
+    // the later signature. Refused now, like the variable above.
+    auto r = compile("fun f() <int> { return 1; }\n"
+                     "fun f() <string> { return \"s\"; }\n"
+                     "fun main() <void> { let x <string> = f(); }\n");
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("'f' is already declared in this scope"),
+              std::string::npos)
+        << stripAnsi(r.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -4588,30 +4611,33 @@ TEST(Soundness_Declarations, MutualRecursionWorksThroughADefine) {
 }
 
 // ---------------------------------------------------------------------------
-// `cast` admits any primitive to any other, and refuses both casts the corpus
-// actually writes. One rule, wrong in both directions.
+// `cast` used to admit any primitive to any other, and refused both casts the
+// corpus actually writes. One rule, wrong in both directions. Since fixed,
+// except for the string-to-integer direction, which stays open (see below).
 //
-// Analyzer_Expr.cpp:361 is the too-broad half:
+// Analyzer_Expr.cpp was the too-broad half:
 //
 //     else if (dynamic_cast<const PrimitiveType*>(sourceType.get()) &&
 //              dynamic_cast<const PrimitiveType*>(targetType.get())) valid = true;
 //
 // and Analyzer_Core.cpp:21 registers `string` as a `PrimitiveType`. So `string`
-// is lumped in with the numerics and `cast<int>("s")`, `cast<string>(1)` and
-// `cast<bool>("s")` are all accepted. Turning a string into an int is not a
-// conversion, it is parsing; the other direction is formatting. Neither is a
-// reinterpretation of a value, which is what a cast is for.
+// was lumped in with the numerics and `cast<int>("s")`, `cast<string>(1)` and
+// `cast<bool>("s")` were all accepted. The rule now: numerics interchange,
+// booleans read as 0/1 against the integers, and a string converts to an
+// integer (the address as a number, which lib/std/hashmap.fin:91 hashes by).
+// `cast<string>(1)` stays refused -- formatting is not a cast -- as do
+// `cast<float>("s")`, `cast<bool>("s")` and either direction between `string`
+// and an enum.
 //
-// The same rule is too narrow, and this is the half that matters more, because
-// the corpus depends on it. Both casts written in the fifty samples are rejected
-// today: `cast<[char]>("SomeData for testing")` (stdio.fin:156) fails with
-// "Invalid cast from 'string' to '[char]'" because `[char]` is an ArrayType and
-// so the pair is not two primitives, and `cast<&auto>(base_val)`
-// (deeptest2.fin:26) fails the same way for a PointerType. A permissive rule
-// that still refuses the only two real uses is not erring on the side of
-// permissive — it is not looking at the question.
+// The same rule was too narrow, and this is the half that mattered more,
+// because the corpus depends on it. Both casts written in the fifty samples
+// were rejected: `cast<[char]>("SomeData for testing")` (stdio.fin:156) failed
+// with "Invalid cast from 'string' to '[char]'" because `[char]` is an
+// ArrayType and so the pair is not two primitives (since fixed, and its test
+// inverted), and `cast<&auto>(base_val)` (deeptest2.fin:26) failed the same way
+// for a PointerType (since fixed, and its test inverted).
 //
-// Both are masked. stdio.fin and deeptest2.fin are `//@ unimplemented` for
+// Both were masked. stdio.fin and deeptest2.fin are `//@ unimplemented` for
 // unrelated reasons, so neither cast is reached and no test goes red for either.
 // Whoever repairs this should expect those two samples to be the acceptance
 // criteria and not to find them in the failing list first.
@@ -4685,7 +4711,15 @@ TEST(Soundness_Casts, ACastToOrFromADynamicTypeIsAllowed) {
 }
 
 TEST(KnownDefect_Casts, AStringToAnIntegerIsAccepted) {
-    // Known defect: #93 (tracked; see issue for inversion target).
+    // Known defect: #93 (tracked; see issue for inversion target). LEFT OPEN:
+    // inverting this breaks the corpus. `cast<int>(s)` for a `string` s is
+    // lib/std/hashmap.fin:91's hash (the address as an integer), pinned at
+    // runtime by Soundness_Codegen.ACastFromAPointerReadsItsAddressBits -- a
+    // literal `"s"` and a variable `s` share the type `string`, so no rule can
+    // refuse one and accept the other. Either the issue's refusal wins (and
+    // hashmap re-spells its hash) or the pointer-bits reading wins (and this
+    // test inverts into "a string converts to an integer address"). Owner ruling
+    // needed; do not invert unilaterally.
     auto r = compile("fun main() <void> { let a <int> = cast<int>(\"s\"); }\n");
     EXPECT_EQ(r.exitCode, 0)
         << "FIXED: `cast` no longer treats `string` as interchangeable with the "
@@ -4694,12 +4728,16 @@ TEST(KnownDefect_Casts, AStringToAnIntegerIsAccepted) {
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Casts, AnIntegerToAStringIsAccepted) {
-    // Known defect: #93 (tracked; see issue for inversion target).
-    // Separate direction, separate fix: a repair that adds a string-to-number
-    // parse would leave this one accepted, and formatting is not a cast either.
+TEST(Soundness_Casts, AnIntegerToAStringIsRefused) {
+    // Was KnownDefect_Casts.AnIntegerToAStringIsAccepted (#93): the separate
+    // direction, fixed separately. A repair that adds a string-to-number parse
+    // leaves this accepted, and formatting is not a cast either -- so this test
+    // stays while that one inverts, and vice versa.
     auto r = compile("fun main() <void> { let a <string> = cast<string>(1); }\n");
-    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Invalid cast from 'int' to 'string'"),
+              std::string::npos)
+        << stripAnsi(r.err);
 }
 
 TEST(Soundness_Casts, TheCorpusOwnStringToCharArrayCastConverts) {
@@ -4726,15 +4764,17 @@ TEST(Soundness_Casts, CastToAutoInfersSourceType) {
     EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Casts, TheCorpusOwnPointerCastIsRejected) {
-    // Known defect: #93 (tracked; see issue for inversion target).
+TEST(Soundness_Casts, TheCorpusOwnPointerCastConverts) {
+    // Was KnownDefect_Casts.TheCorpusOwnPointerCastIsRejected (#93):
     // deeptest2.fin:26 writes `cast<&auto>(base_val)`. Written with `&auto`
     // rather than `&int` on purpose: `cast<&int>(p)` does not parse at all, so
-    // `&auto` is the only spelling in which this defect is reachable today.
+    // `&auto` is the only spelling in which this cast is reachable today. It
+    // compiled only while the source stayed generic; a monomorphised integer
+    // source is the same cast -- the address as a number -- and converts.
+    // Integers only, and only into pointers: the reverse stays refused.
     auto r = compile("fun main() <void> { let n <int> = 1; let a <&auto> = cast<&auto>(n); }\n");
-    EXPECT_NE(r.exitCode, 0)
-        << "FIXED: a pointer cast is accepted, which deeptest2.fin:26 needs.";
-    EXPECT_NE(stripAnsi(r.err).find("Invalid cast"), std::string::npos)
+    EXPECT_EQ(r.exitCode, 0)
+        << "an integer converts to a pointer, which deeptest2.fin:26 needs:\n"
         << stripAnsi(r.err);
 }
 
@@ -5972,24 +6012,20 @@ TEST(Soundness_IntegerConstants, AConstantAtTheEdgeOfItsTargetFits) {
 // What the constant rule does not reach, booked rather than built.
 // ---------------------------------------------------------------------------
 
-TEST(KnownDefect_IntegerConstants, AnIntTypedExpressionIsNotUnsigned) {
-    // Known defect: #93 (tracked; see issue for inversion target).
-    // Not a defect in the same sense as the above: whether `let u <uint> = i;` for an
-    // `int` i is legal is a language decision, and the corpus needs an answer because
-    // stdlib/stdio.fin does mixed arithmetic on `int` counters and `ulong` fields at
-    // :110, :112, :115, :124 and :126 -- seven sites in one file, reported three times
-    // over because three samples import it.
-    //
-    // C converts silently, Rust and Zig refuse without a cast. Fin has `cast<T>` and a
-    // `Castable` interface, which is an argument for refusing. This test asserts the
-    // refusal that exists today so that whichever way it is ruled, the change is
-    // deliberate; if the ruling is "convert", invert this and widen
-    // PrimitiveType::isAssignableTo, which is a one-line change and would then also
-    // subsume the constant rule.
+TEST(Soundness_IntegerConstants, AnIntTypedExpressionIsNotImplicitlyUnsigned) {
+    // Was KnownDefect_IntegerConstants.AnIntTypedExpressionIsNotUnsigned (#93).
+    // Ruled, not fixed: Fin refuses, Rust- and Zig-like, and an explicit
+    // `cast<uint>` reinterprets. The corpus needs no answer but this one --
+    // stdlib/stdio.fin's mixed arithmetic (:110-:126) is `int` against `ulong`,
+    // which implicit widening already converts (a wider target loses nothing but
+    // a negative, and constants still pass through the negativity check first),
+    // and every `uint` in the tree arrives by constant or by explicit cast. C's
+    // silent conversion is what this test refuses to grant.
     const FincRun r = compile("fun main() <noret> { let i <int> = 1; let u <uint> = i; }\n");
     EXPECT_NE(r.exitCode, 0)
-        << "FIXED or RULED: an int-typed expression now converts to unsigned. If that "
-           "was the ruling, record it and invert this test.";
+        << "an int-typed expression does not convert to unsigned implicitly; "
+           "write cast<uint>(i).\n"
+        << stripAnsi(r.err);
     EXPECT_NE(stripAnsi(r.err).find("expected 'uint', got 'int'"), std::string::npos) << r.err;
 }
 
@@ -8189,49 +8225,69 @@ TEST(Soundness_Foreach, TheElementBindingIsDefinedInEveryForm) {
     }
 }
 
-TEST(KnownDefect_Foreach, ABindingTypeIsNeverCheckedAgainstTheIterable) {
-    // Known defect: #98 (tracked; see issue for inversion target).
-    // `foreach (e <string> in a)` over a `[int]` is accepted, and so is an index bound
-    // as anything at all. visit(ForeachLoop&) resolves each written type and defines a
-    // variable of it; it never asks the iterable what its elements are, so the
-    // annotation is taken on trust and the body then type-checks against a lie.
+TEST(Soundness_Foreach, ABindingTypeIsCheckedAgainstTheIterable) {
+    // Was KnownDefect_Foreach.ABindingTypeIsNeverCheckedAgainstTheIterable (#98):
+    // `visit(ForeachLoop&)` defined both bindings from their written types and never
+    // asked the iterable what it yields. What is iterable is an array and nothing
+    // else -- the backend lowers only arrays, and the library says there is no
+    // iteration protocol (lib/std/collection.fin:59, lib/std/hashmap.fin:365-367)
+    // -- so an array yields its elements and an `int`-family index, and the
+    // bindings must be those types. (A string plausibly yields `char` one day;
+    // that ruling is open and strings are refused until it lands.)
     //
-    // Not fixed here because it is not one check but a definition Fin has not written
-    // down: what is iterable. An array yields its elements and an index that is an
-    // `int` (arrays are indexed by `int` and nothing else -- Soundness_Arrays), a string
-    // plausibly yields `char`, and a prototype has two candidate answers. The corpus
-    // writes `foreach` twice, both over an array, both correctly annotated, so it
-    // settles the array case and says nothing about the rest. Ruling first, then this
-    // inverts into Soundness_Foreach.ABindingTypeIsCheckedAgainstTheIterable.
+    // A mistyped element binding is one diagnostic naming both types; the binding
+    // keeps its written type, so the body reports nothing further.
     for (const char* code : {
              "fun main() <noret> { let a <[int]> = [1]; foreach (e <string> in a) { let z <string> = e; } }\n",
              "fun main() <noret> { let a <[int]> = [1]; foreach (i <string>, e <int> in a) { let z <string> = i; } }\n"}) {
         const FincRun r = compile(code);
-        EXPECT_EQ(r.exitCode, 0)
-            << "FIXED: a foreach binding is now checked against the iterable. Invert this "
-               "and record which types are iterable and what each one yields.\n"
-            << code << r.err;
+        EXPECT_EQ(r.exitCode, 1) << "a foreach binding is checked against the iterable:\n"
+                                 << code << r.err;
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << code << r.err;
+    }
+    const std::string element = messagesOnly(stripAnsi(compile(
+        "fun main() <noret> { let a <[int]> = [1]; foreach (e <string> in a) { let z <string> = e; } }\n").err));
+    EXPECT_NE(element.find("expected 'string', got 'int'"), std::string::npos) << element;
+    const std::string index = messagesOnly(stripAnsi(compile(
+        "fun main() <noret> { let a <[int]> = [1]; foreach (i <string>, e <int> in a) { let z <string> = i; } }\n").err));
+    EXPECT_NE(index.find("An index must be an integer, not 'string'"), std::string::npos)
+        << index;
+
+    // The control: exact bindings over either array kind, both spellings, are clean.
+    for (const char* code : {
+             "fun main() <noret> { let a <[int]> = [1]; foreach (e <int> in a) { let z <int> = e; } }\n",
+             "fun main() <noret> { let a <[int, 1]> = [1]; foreach (e <int> in a) { let z <int> = e; } }\n",
+             "fun main() <noret> { let a <[int]> = [1]; foreach (i <int>, e <int> in a) { let z <int> = e + i; } }\n",
+             "fun main() <noret> { let a <[int]> = [1]; foreach (i <uint>, e <int> in a) { let z <uint> = i; } }\n"}) {
+        EXPECT_EQ(compile(code).exitCode, 0) << "an exact binding stays clean:\n" << code;
     }
 }
 
-TEST(KnownDefect_Foreach, TheIterableIsNeverCheckedForBeingIterable) {
-    // Known defect: #98 (tracked; see issue for inversion target).
-    // `foreach (e <int> in 5)` compiles clean. The iterable is walked -- so an undefined
-    // name in it is still reported -- and then discarded without being asked whether it
-    // can be iterated at all. Same blocked ruling as above and the same inversion; kept
-    // separate because it is the cheaper half: refusing a non-container needs only the
-    // list of container kinds, while checking the binding needs each kind's yield.
-    const FincRun r = compile("fun main() <noret> { foreach (e <int> in 5) { let z <int> = e; } }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a non-iterable is now refused. Invert this into "
-           "Soundness_Foreach.TheIterableMustBeIterable.\n"
-        << r.err;
-    // The walk itself must keep happening, or the fix above would be building on a
+TEST(Soundness_Foreach, TheIterableMustBeIterable) {
+    // Was KnownDefect_Foreach.TheIterableIsNeverCheckedForBeingIterable (#98): the
+    // iterable was walked and then discarded without being asked whether it can be
+    // iterated at all, so `foreach (e <int> in 5)` compiled clean. Only arrays (and
+    // a pointer to one, which walks the array) are iterable -- see the test above
+    // for why -- and anything else is one diagnostic naming the type.
+    for (const char* code : {
+             "fun main() <noret> { foreach (e <int> in 5) { let z <int> = e; } }\n",
+             "fun main() <noret> { foreach (e <int> in \"hi\") { let z <int> = e; } }\n",
+             "struct S { v <int>, }\nfun main() <noret> { let s <S> = S{v: 1}; foreach (e <int> in s) { let z <int> = e; } }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(r.exitCode, 1) << "a non-iterable is refused:\n" << code << r.err;
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << code << r.err;
+    }
+    const std::string overInt = messagesOnly(stripAnsi(compile(
+        "fun main() <noret> { foreach (e <int> in 5) { let z <int> = e; } }\n").err));
+    EXPECT_NE(overInt.find("Cannot iterate over type 'int'"), std::string::npos) << overInt;
+    // The walk itself still happens, or the check above would be building on a
     // silence rather than on a type.
     const FincRun q = compile("fun main() <noret> { foreach (e <int> in nosuchthing) { } }\n");
     EXPECT_EQ(q.exitCode, 1) << "the iterable expression must still be walked:\n" << q.err;
     EXPECT_NE(messagesOnly(stripAnsi(q.err)).find("nosuchthing"), std::string::npos)
         << stripAnsi(q.err);
+    // The control: an array, and a pointer to one, stay clean.
+    EXPECT_EQ(compile("fun main() <noret> { let a <[int]> = [1]; foreach (e <int> in a) { let z <int> = e; } }\n").exitCode, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -11454,8 +11510,8 @@ TEST(Soundness_DeletingAnArray, AnAddressOfIsStillDeletable) {
 // kind it was written as, and only the *requirement* accepts both.
 //
 // Narrow on purpose. It does not make `operator=` mean plain assignment, it does not
-// touch what `a[i] = v` consults (still nothing --
-// KnownDefect_IndexOperator.AnAssignmentThroughASubscriptNeverConsultsOperatorBracketEquals),
+// touch what `a[i] = v` consults (`operator []=`, checked against its two parameters --
+// Soundness_IndexOperator.AnAssignmentThroughASubscriptIsCheckedAgainstOperatorBracketEquals),
 // and it is cheap for the owner to overturn: delete the second half of one
 // condition in StructType::implements.
 // ---------------------------------------------------------------------------

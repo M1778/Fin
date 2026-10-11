@@ -33,6 +33,7 @@ class PrototypeType; // checkPrototypeMethod reads its key and value types
 class NamespaceType; // lowerModuleCall names the qualifier it resolved through
 class SpecialDeclaration; // collectProvider reads the bearer's contract
 class MemberAccess; // tryLayoutMember reads the member-access site
+class ArrayAccess; // subscriptAssignTarget_ names the assignment's own subscript
 
 namespace comptime {
 class Interpreter; // installComptimeHooks installs the fold hooks on one
@@ -412,6 +413,24 @@ private:
     void validateAttributes(const std::vector<std::unique_ptr<Attribute>>& attrs,
                             bool withUse = true, bool isSpecialBearer = false);
 
+    // A second declaration of a name in one scope is refused; `#[overwrite(<name>)]`
+    // on the new declaration permits it (stdlib/stdio.fin:33, normative: the sample's
+    // own comment says the attribute tells the compiler to ignore the current
+    // definition, which presupposes the refusal). Own-scope only: shadowing in a
+    // nested scope stays legal. Four legal repeats are exempt: the blank `_`, the
+    // file-scope hoist's pre-registration (consumed by the in-order walk), a name bound by an import
+    // (the file's own declaration takes it back), a definition after an `@define`
+    // prototype, and a second `@define` identical to the first. Reports and returns
+    // true on a duplicate; the caller still defines, so uses do not cascade.
+    //
+    // The diagnostic reuses the backend's wording where the backend already refused
+    // the case (nested functions, generic lambdas), so the refusal reads the same
+    // wherever the build stops; file-scope cases use the checker's own wording.
+    bool checkDuplicateDeclaration(Scope* scope, ASTNode& node, const std::string& name,
+                                   const std::vector<std::unique_ptr<Attribute>>& attrs,
+                                   const std::shared_ptr<Type>& newType, bool newIsFunction,
+                                   bool newIsPrototype);
+
     // The operations-layer gate (ADR 0012): reaching *through* a component
     // needs its grant. Shared by the component-call path and the hybrid
     // member-read path so the two cannot disagree about what "granted" means.
@@ -781,6 +800,13 @@ private:
     // Soundness_GenericInference.AnAnnotationDoesNotReachASubexpression.
     const ASTNode* typeHintFor = nullptr;
     std::shared_ptr<Type> typeHint = nullptr;
+
+    // The subscript this plain `=` assigns through, if its left is one. Set by
+    // visit(BinaryOp&) around the target's walk and read by visit(ArrayAccess&):
+    // a struct declaring `operator []=` is then checked against that operator's
+    // two parameters rather than against the read operator's return. Compared by
+    // address so a subscript nested inside the base or index still reads.
+    const ArrayAccess* subscriptAssignTarget_ = nullptr;
 
     // The hint if it belongs to this node, else null.
     std::shared_ptr<Type> hintFor(const ASTNode& node) const {

@@ -10723,11 +10723,14 @@ private:
         builder_.CreateStore(stored, target->ptr);
         // Slice 1: rebinding revives. A plain or compound store to a bare
         // identifier makes it live again on this path, mirroring the
-        // analyzer (Analyzer_Expr: only these five rebind, and only a bare
+        // analyzer (Analyzer_Expr: every assignment rebinds, and only a bare
         // identifier -- a member or index write never marked the base moved).
         if (node.op == ASTTokenKind::EQUAL || node.op == ASTTokenKind::PLUSEQUAL ||
             node.op == ASTTokenKind::MINUSEQUAL || node.op == ASTTokenKind::MULTEQUAL ||
-            node.op == ASTTokenKind::DIVEQUAL) {
+            node.op == ASTTokenKind::DIVEQUAL || node.op == ASTTokenKind::MODEQUAL ||
+            node.op == ASTTokenKind::AMPERSANDEQUAL || node.op == ASTTokenKind::PIPEEQUAL ||
+            node.op == ASTTokenKind::SHIFTLEFTEQUAL ||
+            node.op == ASTTokenKind::SHIFTRIGHTEQUAL) {
             if (auto* id = dynamic_cast<const Identifier*>(node.left.get())) {
                 if (Local* local = findLocalNoPoison(id->name))
                     local->movedFrom = false;

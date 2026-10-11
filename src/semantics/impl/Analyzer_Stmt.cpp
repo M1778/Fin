@@ -419,18 +419,59 @@ void SemanticAnalyzer::visit(ForeachLoop& node) {
     // (KnownDefect_Declarations), and making the index the one place it bites would be a
     // rule invented here rather than one the corpus asked for.
     //
-    // The written type is trusted, exactly as the element's is --
-    // KnownDefect_Foreach.ABindingTypeIsNeverCheckedAgainstTheIterable holds that, and it
-    // is one defect for both bindings rather than a new one introduced here.
+    // The written type is checked below, exactly as the element's is: the
+    // iterable is walked first and each binding is compared against what it
+    // yields (Soundness_Foreach.ABindingTypeIsCheckedAgainstTheIterable).
+    // The written index type, kept for the iterable check below rather than
+    // resolved twice: resolving reports, so a second call would double the
+    // diagnostic on an unresolvable annotation.
+    std::shared_ptr<Type> indexWritten;
     if (!node.index_name.empty()) {
-        auto indexType = resolveTypeFromAST(node.index_type.get());
-        if (indexType) currentScope->define({node.index_name, indexType, false, true});
-        if (track && indexType) moved_.declare(node.index_name, indexType->toString());
+        indexWritten = resolveTypeFromAST(node.index_type.get());
+        if (indexWritten) currentScope->define({node.index_name, indexWritten, false, true});
+        if (track && indexWritten) moved_.declare(node.index_name, indexWritten->toString());
     }
 
     events::MovedAnalysis::Snapshot pre;
     if (track) pre = moved_.snapshot();
     if(node.iterable) node.iterable->accept(*this);
+    // #98: the iterable is asked what it is, and the bindings what they claim.
+    // Iterable is an array and nothing else -- the backend lowers only arrays
+    // ("a 'foreach' over something that is not an array"), and the library says
+    // there is no iteration protocol (lib/std/collection.fin:59,
+    // lib/std/hashmap.fin:365-367), so the front end refuses the rest rather
+    // than checking a program the backend cannot lower. A pointer to an array
+    // walks the array, the way a subscript does.
+    //
+    // An array yields its elements and an index that is an `int`-family count:
+    // the element binding must *be* the element type (converting it would read
+    // one type's bytes as another's), and the index binding must be an integer
+    // (checkIntegerIndex carries that rule; `char` counts, `bool` does not).
+    // The bindings keep their written types either way, so the body reports
+    // nothing further about a mismatch announced here.
+    if (auto iterableType = lastExprType; iterableType && !isErrorType(iterableType)) {
+        const ArrayType* walked = nullptr;
+        if (auto* arr = dynamic_cast<const ArrayType*>(iterableType.get())) {
+            walked = arr;
+        } else if (auto* ptr = dynamic_cast<const PointerType*>(iterableType.get())) {
+            walked = dynamic_cast<const ArrayType*>(ptr->pointee.get());
+        }
+        if (!walked) {
+            error(*node.iterable,
+                  fmt::format("Cannot iterate over type '{}'", iterableType->toString()));
+        } else {
+            if (type && !isErrorType(type) && walked->element_type &&
+                !isErrorType(walked->element_type) &&
+                !walked->element_type->equals(*type)) {
+                error(*node.var_type,
+                      fmt::format("Type mismatch: expected '{}', got '{}'", type->toString(),
+                                  walked->element_type->toString()));
+            }
+            if (!node.index_name.empty()) {
+                checkIntegerIndex(*node.index_type, indexWritten);
+            }
+        }
+    }
     if(node.body) node.body->accept(*this);
     if (track) {
         moved_.installJoin(pre, moved_.snapshot());

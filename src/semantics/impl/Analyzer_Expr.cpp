@@ -275,6 +275,47 @@ static bool isEnumType(const TypePtr& type) {
     return asStruct && asStruct->is_enum;
 }
 
+// A primitive with an integer or floating-point reading (`int`, `char`, `float`
+// and every widthed or aliased spelling). `string` is a pointer for size
+// purposes, `bool` its own kind, and the meta-types no scalar at all, so none
+// of them answers true: a cast treats the numerics as interchangeable and
+// nothing else.
+static bool isNumericPrimitive(const TypePtr& type) {
+    if (const auto* prim = dynamic_cast<const PrimitiveType*>(type.get())) {
+        if (const auto info = scalarOf(*prim))
+            return info->kind == ScalarKind::Int || info->kind == ScalarKind::Float;
+    }
+    return false;
+}
+
+// `bool` beside the integers: `cast<int>(flag)` reads 0/1, the way C does.
+// Load-bearing (two generic-struct lowering tests hash booleans through it),
+// and a cast is the explicit place for it, so this is an arm and not an
+// implicit conversion.
+static bool isBoolPrimitive(const TypePtr& type) {
+    if (const auto* prim = dynamic_cast<const PrimitiveType*>(type.get())) {
+        if (const auto info = scalarOf(*prim)) return info->kind == ScalarKind::Bool;
+    }
+    return false;
+}
+
+// `string` spells a pointer (NUL-terminated bytes), which is what makes the
+// address-bits arm below read it. Never a numeric, so `cast<string>(1)` and
+// `cast<float>("s")` stay refused while `cast<int>(s)` converts.
+static bool isStringPrimitive(const TypePtr& type) {
+    if (const auto* prim = dynamic_cast<const PrimitiveType*>(type.get()))
+        return prim->name == "string";
+    return false;
+}
+
+// The integer half of the above: an address as a number.
+static bool isIntegerPrimitive(const TypePtr& type) {
+    if (const auto* prim = dynamic_cast<const PrimitiveType*>(type.get())) {
+        if (const auto info = scalarOf(*prim)) return info->kind == ScalarKind::Int;
+    }
+    return false;
+}
+
 void SemanticAnalyzer::visit(PrototypeLiteral& node) {
     // The key and value types this literal is about to be checked against, when
     // something said them. `let a <{uint, int}> = { 7 : 1 };` reported
@@ -756,7 +797,16 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
     const bool w7Rebind = !injectedWalk_ && node.op == ASTTokenKind::EQUAL &&
                           dynamic_cast<Identifier*>(node.left.get()) != nullptr;
     if (w7Rebind) moved_.suspendUses();
+    // A plain `=` through a subscript assigns through `operator []=`, not through
+    // the read: the target records itself so visit(ArrayAccess&) checks the index
+    // against `[]=`'s first parameter and types the assignment as its second (which
+    // the value is then checked against below). Saved and restored, because the
+    // value may itself contain an assignment through another subscript.
+    const ArrayAccess* prevAssignTarget = subscriptAssignTarget_;
+    if (node.op == ASTTokenKind::EQUAL)
+        subscriptAssignTarget_ = dynamic_cast<ArrayAccess*>(node.left.get());
     node.left->accept(*this);
+    subscriptAssignTarget_ = prevAssignTarget;
     if (w7Rebind) moved_.resumeUses();
     auto leftType = lastExprType;
 
@@ -766,7 +816,12 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
         node.op == ASTTokenKind::PLUSEQUAL ||
         node.op == ASTTokenKind::MINUSEQUAL ||
         node.op == ASTTokenKind::MULTEQUAL ||
-        node.op == ASTTokenKind::DIVEQUAL
+        node.op == ASTTokenKind::DIVEQUAL ||
+        node.op == ASTTokenKind::MODEQUAL ||
+        node.op == ASTTokenKind::AMPERSANDEQUAL ||
+        node.op == ASTTokenKind::PIPEEQUAL ||
+        node.op == ASTTokenKind::SHIFTLEFTEQUAL ||
+        node.op == ASTTokenKind::SHIFTRIGHTEQUAL
     );
     // The target's type is a hint for the value, which is what a declaration's
     // annotation is: `r = Err("Blame ME!");` (tests/samples/enums.fin:47) is the same
@@ -2572,6 +2627,27 @@ void SemanticAnalyzer::visit(ArrayAccess& node) {
     // rather than being read as an offset into an array of Maps -- a struct that
     // declares a subscript means the subscript.
     if (auto structType = getStructType(arrExprType, currentScope)) {
+        // A subscript being assigned to is written through `operator []=`, so it
+        // is checked against that operator: the index against its first parameter
+        // and -- by the caller, which types this assignment as the second -- the
+        // value against its second. A struct with no `[]=` keeps the read below,
+        // so `operator []` alone still makes a subscript assignable; a `[]=`
+        // of any other shape is not a subscript assignment and falls through too.
+        if (subscriptAssignTarget_ == &node) {
+            const int assignOp = static_cast<int>(ASTTokenKind::INDEX_ASSIGN);
+            if (auto assignType = structType->getOperatorType(assignOp)) {
+                if (auto* asig = assignType->as<FunctionType>()) {
+                    if (asig->param_types.size() >= 2) {
+                        checkType(*node.index, idxType, asig->param_types[0]);
+                        lastExprType = asig->param_types[1];
+                        return;
+                    }
+                } else {
+                    lastExprType = assignType;
+                    return;
+                }
+            }
+        }
         const int indexOp = static_cast<int>(ASTTokenKind::INDEX);
         if (auto opType = structType->getOperatorType(indexOp)) {
             if (auto* sig = opType->as<FunctionType>()) {
@@ -2805,8 +2881,36 @@ void SemanticAnalyzer::visit(CastExpression& node) {
 
     bool valid = false;
     if (sourceType->equals(*targetType)) valid = true;
-    else if (dynamic_cast<const PrimitiveType*>(sourceType.get()) && 
-             dynamic_cast<const PrimitiveType*>(targetType.get())) valid = true;
+    // Numerics interchange, and only numerics. `cast<string>(1)` is refused --
+    // formatting is not a cast -- while the corpus casts ints to floats, chars
+    // to ints and back, and narrows `ulong` to `int` explicitly, all of which
+    // stay valid. `cast<int>("s")` is accepted, but not by this arm: a string
+    // spells a pointer, so that cast is the address-bits arm below, and the
+    // KnownDefect test asserting it stays open until the owner rules between
+    // that reading and this issue.
+    //
+    // A guard, not a gate: both sides must be numeric for this arm to answer, so a
+    // primitive aimed at a generic, dynamic, enum or array target falls through to
+    // the arms below.
+    else if (isNumericPrimitive(sourceType) && isNumericPrimitive(targetType)) valid = true;
+    // Booleans read as 0/1 against the integers, in either direction.
+    else if ((isBoolPrimitive(sourceType) && isIntegerPrimitive(targetType)) ||
+             (isIntegerPrimitive(sourceType) && isBoolPrimitive(targetType)))
+        valid = true;
+    // An integer converts to a pointer explicitly: the address as a number.
+    // deeptest2.fin:26 writes `cast<&auto>(base_val)`, which only compiled while
+    // the source stayed generic; a monomorphised integer source is the same cast
+    // and must not be refused for being concrete. Integers only -- a float, bool
+    // or string is not an address -- and only into pointers, never out.
+    else if (isIntegerPrimitive(sourceType) &&
+             dynamic_cast<const PointerType*>(targetType.get())) valid = true;
+    // A string converts to an integer explicitly: the address as a number,
+    // truncated to the target width. lib/std/hashmap.fin:91 hashes a key this
+    // way, and Soundness_Codegen.ACastFromAPointerReadsItsAddressBits pins the
+    // runtime reading -- so this direction stays accepted while `cast<string>(1)`
+    // above is refused. Integers only: rendering digits is formatting, and a
+    // float of address bits is nothing at all.
+    else if (isStringPrimitive(sourceType) && isIntegerPrimitive(targetType)) valid = true;
     else if (dynamic_cast<const PointerType*>(sourceType.get()) && 
              dynamic_cast<const PointerType*>(targetType.get())) valid = true;
     else if (dynamic_cast<const GenericType*>(sourceType.get()) || 
@@ -2847,8 +2951,18 @@ void SemanticAnalyzer::visit(CastExpression& node) {
     // commented-out line marked "Should fail", and
     // Soundness_Enums.ACastFromAnArrayToAnEnumIsRefused is the guard that keeps it
     // failing now that an enum is a cast target.
-    else if (isEnumType(sourceType) && dynamic_cast<const PrimitiveType*>(targetType.get())) valid = true;
-    else if (dynamic_cast<const PrimitiveType*>(sourceType.get()) && isEnumType(targetType)) valid = true;
+    //
+    // Nor a `string` on either side: an enum is an integer, not text, so
+    // `cast<string>(state)` formats nothing and `cast<State>("1")` parses nothing.
+    // The numeric arm above already refuses `string` against the numerics; these two
+    // conditions refuse it against the type that reads as one.
+    else if (isEnumType(sourceType)) {
+        if (const auto* tgt = dynamic_cast<const PrimitiveType*>(targetType.get()))
+            if (tgt->name != "string") valid = true;
+    } else if (isEnumType(targetType)) {
+        if (const auto* src = dynamic_cast<const PrimitiveType*>(sourceType.get()))
+            if (src->name != "string") valid = true;
+    }
     // A cast into a nullable. `null` casts to every `T?` -- consulted as the
     // predicate (NullType::isCastableTo) rather than restated as a spelling --
     // and a value casts to the nullable of anything it could cast or assign to,

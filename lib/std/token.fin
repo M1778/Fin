@@ -236,7 +236,6 @@ pub const TOKEN_ERROR <int> = 125;
 #[export] pub fun kw_readonly() <int> { return 17; }
 #[export] pub fun kw_type() <int> { return 52; }
 #[export] pub fun kw_class() <int> { return 53; }
-#[export] pub fun kw_implements() <int> { return 54; }
 #[export] pub fun kw_special() <int> { return 56; }
 
 #[export]

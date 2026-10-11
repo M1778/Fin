@@ -211,6 +211,10 @@
 
 /* Operators */
 %token EQUAL PLUSEQUAL MINUSEQUAL MULTEQUAL DIVEQUAL
+/* Expression spellings of the remaining compound assignments. `<<=` and `>>=`
+   already lex as one token; these three were two (`MOD EQUAL` et al), which is
+   why no expression could spell them. operator_symbol below takes both. */
+%token MODEQUAL AMPERSANDEQUAL PIPEEQUAL
 %token EQEQ NOTEQ LT GT LTEQ GTEQ
 %token AND OR NOT
 %token PLUS MINUS MULT DIV MOD
@@ -247,7 +251,7 @@
    to shift-by-default so the choice is recorded and the conflict count stays 0. */
 %precedence STATIC_VALUE_PREC
 %right ARROW
-%right EQUAL PLUSEQUAL MINUSEQUAL MULTEQUAL DIVEQUAL SHIFTLEFTEQUAL SHIFTRIGHTEQUAL
+%right EQUAL PLUSEQUAL MINUSEQUAL MULTEQUAL DIVEQUAL MODEQUAL AMPERSANDEQUAL PIPEEQUAL SHIFTLEFTEQUAL SHIFTRIGHTEQUAL
 %right KW_NEW KW_CAST KW_SIZEOF
 %right QUESTION COLON
 %left OR
@@ -1198,6 +1202,11 @@ operator_symbol:
     | MOD EQUAL { $$ = fin::ASTTokenKind::MODEQUAL; }
     | AMPERSAND EQUAL { $$ = fin::ASTTokenKind::AMPERSANDEQUAL; }
     | PIPE EQUAL { $$ = fin::ASTTokenKind::PIPEEQUAL; }
+    /* The same three as one token, since the lexer now returns them that way
+       (see the %token note above): `operator %=` must keep parsing. */
+    | MODEQUAL { $$ = fin::ASTTokenKind::MODEQUAL; }
+    | AMPERSANDEQUAL { $$ = fin::ASTTokenKind::AMPERSANDEQUAL; }
+    | PIPEEQUAL { $$ = fin::ASTTokenKind::PIPEEQUAL; }
     | BACKTICK MULT { $$ = fin::ASTTokenKind::DEREF; }
     | BACKTICK MINUS { $$ = fin::ASTTokenKind::UNARY_MINUS; }
     | LPAREN ELLIPSIS IDENTIFIER RPAREN { $$ = fin::ASTTokenKind::VARIADIC_CALL; }
@@ -2469,6 +2478,14 @@ expression:
     | expression MINUSEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MINUSEQUAL, std::move($3)); $$->setLoc(@$); }
     | expression MULTEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MULTEQUAL, std::move($3)); $$->setLoc(@$); }
     | expression DIVEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::DIVEQUAL, std::move($3)); $$->setLoc(@$); }
+    /* The other five compound assignments (#98): `x += e` is `x = x + e`, and
+       these are the same with their own operator. Right-associative with the
+       rest of the assignment group, like the four above. */
+    | expression MODEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MODEQUAL, std::move($3)); $$->setLoc(@$); }
+    | expression AMPERSANDEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AMPERSANDEQUAL, std::move($3)); $$->setLoc(@$); }
+    | expression PIPEEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::PIPEEQUAL, std::move($3)); $$->setLoc(@$); }
+    | expression SHIFTLEFTEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTLEFTEQUAL, std::move($3)); $$->setLoc(@$); }
+    | expression SHIFTRIGHTEQUAL expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTRIGHTEQUAL, std::move($3)); $$->setLoc(@$); }
     | expression OR expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($3)); $$->setLoc(@$); }
     | expression AND expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($3)); $$->setLoc(@$); }
     /* Bitwise `|`, `^`, `&` (issue #67): C-like precedence -- `|` loosest,
@@ -2884,6 +2901,12 @@ match_binder_list:
     | no_struct_expression MINUSEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MINUSEQUAL, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression MULTEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MULTEQUAL, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression DIVEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::DIVEQUAL, std::move($3)); $$->setLoc(@$); }
+    /* Compound-assign mirror of the `expression` additions above (#98). */
+    | no_struct_expression MODEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MODEQUAL, std::move($3)); $$->setLoc(@$); }
+    | no_struct_expression AMPERSANDEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AMPERSANDEQUAL, std::move($3)); $$->setLoc(@$); }
+    | no_struct_expression PIPEEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::PIPEEQUAL, std::move($3)); $$->setLoc(@$); }
+    | no_struct_expression SHIFTLEFTEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTLEFTEQUAL, std::move($3)); $$->setLoc(@$); }
+    | no_struct_expression SHIFTRIGHTEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTRIGHTEQUAL, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression PIPE PIPE no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($4)); $$->setLoc(@$); }
     | no_struct_expression AMPERSAND AMPERSAND no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($4)); $$->setLoc(@$); }
     /* Bitwise mirror of the `expression` additions above (issue #67). */

@@ -1228,7 +1228,10 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
             if (var->type && !currentScope->symbols.count(var->name)) {
                 auto type = resolveTypeFromAST(var->type.get());
                 if (type && !isErrorType(type) && type->toString() != "auto") {
-                    currentScope->define({var->name, type, var->is_mutable, var->initializer != nullptr});
+                    Symbol hoisted{var->name, type, var->is_mutable,
+                                   var->initializer != nullptr};
+                    hoisted.is_hoisted = true;
+                    currentScope->define(hoisted);
                     debugLog(fg(fmt::color::gray), "      [Hoist] Registered global '{}' at file scope\n", var->name);
                 }
             }
@@ -1297,9 +1300,11 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
         // that was already there.
         if (currentScope->symbols.count(name)) continue;
 
-        currentScope->define({name, std::make_shared<FunctionType>(paramTypes, retType,
-                                                                   false, paramDefaults),
-                              false, true});
+        Symbol hoisted{name, std::make_shared<FunctionType>(paramTypes, retType, false,
+                                                             paramDefaults),
+                         false, true};
+        hoisted.is_hoisted = true;
+        currentScope->define(hoisted);
         if (generics) recordFunctionGenerics(name, *generics);
         debugLog(fg(fmt::color::gray), "      [Hoist] Registered '{}' at file scope\n", name);
     }

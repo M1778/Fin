@@ -233,6 +233,9 @@ UTF8_CHAR   {UTF8_2}|{UTF8_3}|{UTF8_4}
 "-="        { MAKE(MINUSEQUAL); }
 "*="        { MAKE(MULTEQUAL); }
 "/="        { MAKE(DIVEQUAL); }
+"%="        { MAKE(MODEQUAL); }
+"&="        { MAKE(AMPERSANDEQUAL); }
+"|="        { MAKE(PIPEEQUAL); }
 
 "=="        { MAKE(EQEQ); }
 "!="        { MAKE(NOTEQ); }
