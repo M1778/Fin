@@ -119,6 +119,7 @@ file — a bad flag, a file that could not be read. Check for null; do not print
 -c                     Emit an object file without linking
 -O0, -O1, -O2, -O3     Optimisation level for '-o' and '-c' builds (default -O0)
 -I, --include <path>   Add a module search path
+--target <triple>      Target triple, host by default; non-host triples are refused
 --fin-libs <paths>     Library search paths, platform-separated
 --diagnostics=<fmt>    human (default) or json
 --color=<when>         auto (default), always or never
@@ -139,6 +140,13 @@ success means the executable was linked at the requested path. With `-c`, succes
 means the object was written; the default name is `<input stem>.o` in the working
 directory. Supplying `-o` alongside `-c` overrides that object path. An executable
 needs `main`; a library object does not. Unsupported lowering produces a diagnostic.
+
+`--target <triple>` names the target triple; omitting it builds for the host triple. A triple
+other than the host's is refused by name (exit `1`) for `-o` and `-c` builds, and no artifact
+is written: emitting a host object while naming another target would silently miscompile. A
+frontend-only check (without `-o` or `-c`) never reaches lowering and accepts the flag without
+effect. A missing triple is a command-line error (exit `2`). Adding this flag is additive, so
+the contract stays at 2 (see Changing this document).
 
 `--diagnostics=` and `--color=` are honoured for command-line errors too, and **may be written after the
 mistake they render** — `finn` does not need to order argv to get parseable errors.
