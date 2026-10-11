@@ -204,6 +204,23 @@ TEST_F(ParserTest, ThreeBrokenLinesYieldThreeDiagnostics) {
     EXPECT_EQ(diag.getDiagnostics()[2].line, 4);
 }
 
+// `<T?>` normalizes to the same type the `?`-on-name forms produce
+// (`is_nullable` on the TypeNode), so every position taking a `type`
+// accepts it: let, cast, and generic arguments alike. Each failed before
+// with "unexpected QUESTION, expecting GT".
+TEST_F(ParserTest, NullableTypeSuffixOnLet) {
+    EXPECT_TRUE(parseString("fun main() <void> { let x <string?> = null; }"));
+}
+
+TEST_F(ParserTest, NullableTypeSuffixOnCast) {
+    EXPECT_TRUE(parseString("fun unbox(v: any) <string?> { return cast<string?>(v); }"));
+}
+
+TEST_F(ParserTest, NullableTypeSuffixOnGenericArg) {
+    EXPECT_TRUE(parseString("struct Box<T> { v <T> }\n"
+                            "fun main() <void> { let b <Box<string?>> = new Box::<string?>{v: null}; }"));
+}
+
 // Issue #49 cascade guard: one broken line must stay exactly one diagnostic.
 TEST_F(ParserTest, SingleBrokenLineYieldsExactlyOneDiagnostic) {
     std::string code = "fun main() <noret> {\n    let a <int> = ;\n}\n";

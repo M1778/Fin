@@ -2004,6 +2004,30 @@ variable_declaration:
 
 type:
     type_no_annot { $$ = std::move($1); }
+    /* Nullable applied to a type, `let x <string?>` -- the same annotation the
+       `?`-on-name forms produce (`is_nullable` on the TypeNode), so semantics
+       and codegen need no new path. Covers let/cast/generic args at once
+       because all three take `type`. On `type`, not `type_no_annot`, so the
+       marker wraps the whole written type: `<&int?>` is `(&int)?`, the way
+       `p? <&int>` and the stage's trailing-`?` fold read it. (A `type_no_annot`
+       suffix lands the flag on the pointee instead -- `&(int?)` refuses
+       `&x` where `p? <&int>` accepts it.) The composite reductions all carry
+       a real precedence above QUESTION, so bison reduces first and the outer
+       reading wins silently there; the two remaining conflicts are the
+       `fn(...) -> T?` return positions, where no precedence applies and the
+       default shift reads a nullable return, the `fun?` analogy. Both warnings
+       stay as the record. A width annotation keeps its braces closed
+       (`<int{64}?>` stays refused, held by
+       Soundness_IntegerWidths.AWidthMustBeWrittenInsideTheType). */
+    | type QUESTION {
+        if (!$1->annotations.empty()) {
+            error(@$, "syntax error, unexpected '?' after width annotation");
+            $$ = std::move($1);
+        } else {
+            $1->is_nullable = true;
+            $$ = std::move($1);
+        }
+    }
     | base_type LBRACE expression_list RBRACE %prec LBRACE {
         $$ = std::move($1);
         $$->annotations = std::move($3);

@@ -7447,6 +7447,39 @@ TEST(Soundness_Nullability, ANullablePointerIsStillAPointer) {
     EXPECT_EQ(r.exitCode, 0) << "`(&int)?` denullifies to `&int`:\n" << r.err;
 }
 
+TEST(Soundness_Nullability, ATypeSuffixQuestionMarkAcceptsNullAndPlainValues) {
+    // `<T?>` is the same annotation the `?`-on-name forms produce
+    // (`is_nullable` on the TypeNode), so a `<T?>` slot takes null, takes a
+    // plain `T`, and is reassignable to null -- nullifier.fin:4, :7, :34 read
+    // through the other spelling.
+    auto r = compile("fun main() <int> { let x <int?> = null; x = 1; let y <int?> = 2; return 0; }\n");
+    EXPECT_EQ(r.exitCode, 0) << "`<int?>` behaves like `? <int>`:\n" << r.err;
+}
+
+TEST(Soundness_Nullability, ATypeSuffixQuestionMarkMismatchTextMatchesNameSuffix) {
+    // Both spellings normalize before the checker, so the refusal names the
+    // same type.
+    auto qname = compile("fun main() <int> { let x? <int> = 1; let y <int> = x; return 0; }\n");
+    auto qtype = compile("fun main() <int> { let x <int?> = 1; let y <int> = x; return 0; }\n");
+    EXPECT_EQ(qname.exitCode, 1) << qname.err;
+    EXPECT_EQ(qtype.exitCode, 1) << qtype.err;
+    EXPECT_NE(stripAnsi(qtype.err).find("expected 'int', got 'int?'"), std::string::npos)
+        << stripAnsi(qtype.err);
+    EXPECT_NE(stripAnsi(qname.err).find("expected 'int', got 'int?'"), std::string::npos)
+        << stripAnsi(qname.err);
+}
+
+TEST(Soundness_Nullability, ATypeSuffixQuestionMarkWrapsTheWholePointer) {
+    // `<&int?>` is `(&int)?`, the way `p? <&int>` and the stage's
+    // trailing-`?` fold read it -- not `&(int?)`, which would refuse `&x`.
+    auto r = compile("fun main() <noret> {\n"
+                     "    let x <int> = 5;\n"
+                     "    let p <&int?> = &x;\n"
+                     "    let q <&int?> = null;\n"
+                     "}\n");
+    EXPECT_EQ(r.exitCode, 0) << "`<&int?>` takes `&x` and null:\n" << r.err;
+}
+
 TEST(Soundness_Nullability, AMatchOnNullableWithoutANullArmRefuses) {
     // ADR 0050: a bare binder covers presence only; absence is a different arm.
     const FincRun r = compile("fun main() <noret> {\n"

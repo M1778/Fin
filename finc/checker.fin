@@ -773,6 +773,59 @@ priv fun chk_shift_text(node: &AstNode) <string> {
     return res3;
 }
 
+// Normalize an integer constant-pattern text the way the C++ duplicate
+// check does (stoll then to_string): `01` and `1` collide, `-0` reads
+// `0`. A literal outside int64 keeps its raw text and still collides
+// with itself.
+priv fun chk_match_norm_int(text: string) <string> {
+    if (text == null) { return ""; }
+    let neg <bool> = false;
+    let s <string> = text;
+    let slen <int> = cast<int>(chk_strlen(s));
+    if (slen > 0 && chk_str_eq(substr(s, 0, 1), "-")) {
+        neg = true;
+        s = substr(s, 1, slen - 1);
+        slen = slen - 1;
+    }
+    if (slen <= 0 || !chk_is_digits(s)) { return text; }
+    if (neg) {
+        if (chk_digits_gt(s, "9223372036854775808")) { return text; }
+    } else {
+        if (chk_digits_gt(s, "9223372036854775807")) { return text; }
+    }
+    let m <string> = chk_strip_leading_zeros(s);
+    if (chk_str_eq(m, "0")) { return "0"; }
+    if (neg) {
+        let b <Buffer> = new_buffer(24);
+        b.write_char('-');
+        b.write_string(m);
+        let res <string> = b.to_string();
+        free_buffer(b);
+        return res;
+    }
+    return m;
+}
+
+// Insertion sort for exhaustiveness messages (the C++ checker sorts
+// the missing members before naming them).
+priv fun chk_match_sort(names: [string], n: int) <noret> {
+    let i <int> = 1;
+    while (i < n) {
+        let v <string> = names[i];
+        let j <int> = i - 1;
+        while (j >= 0 && chk_strcmp(names[j], v) > 0) {
+            names[j + 1] = names[j];
+            j = j - 1;
+        }
+        names[j + 1] = v;
+        i = i + 1;
+    }
+}
+
+// Stage-internal `match` AST kinds (parser.fin p_ast_match/p_ast_match_arm).
+priv fun chk_ast_match() <int> { return 34; }
+priv fun chk_ast_match_arm() <int> { return 35; }
+
 // Never-read binding table for the Checker below (issue #46): parallel
 // arrays in walk order plus empty-name sentinels framing each open scope.
 // A struct of its own because the stage lowers at most 64 fields per
@@ -5779,8 +5832,597 @@ pub struct Checker {
         expr.resolved_spelling = spelling;
       }
 
+      // Payload count of `member` in `decl` (-1 when no such member): 0
+      // for a fieldless member, else the top-level comma segments of its
+      // payload spelling (an empty `Ok()` counts 0, like the C++ zero
+      // parameter list).
+      fun match_member_arity(self: &Self, decl: &AstNode, member: string) <int> {
+        if (decl == null) { return -1; }
+        let m <&AstNode> = decl.left;
+        while (m != null) {
+            if (m.kind == ast_var_decl() && chk_str_eq(m.name, member)) {
+                if (m.int_val != 1) { return 0; }
+                let segs <[string]> = new [string, 64]{};
+                let n <int> = self.split_generic_segs(m.type_annotation, segs);
+                delete segs;
+                return n;
+            }
+            m = m.right;
+        }
+        return -1;
+      }
+
+      // Payload spelling of `member` at `idx` ("" when none): the
+      // member's segment, with the scrutinee instance's arguments
+      // substituted for the enum's parameter names (a bare spelling
+      // keeps what is written).
+      fun match_member_seg(self: &Self, decl: &AstNode, member: string, idx: int, scrut: string) <string> {
+        if (decl == null) { return ""; }
+        let m <&AstNode> = decl.left;
+        while (m != null) {
+            if (m.kind == ast_var_decl() && chk_str_eq(m.name, member)) {
+                if (m.int_val != 1) { return ""; }
+                let segs <[string]> = new [string, 64]{};
+                let n <int> = self.split_generic_segs(m.type_annotation, segs);
+                let seg <string> = "";
+                if (idx >= 0 && idx < n) { seg = chk_trim(segs[idx]); }
+                delete segs;
+                if (chk_strlen(seg) == cast<ulong>(0)) { return ""; }
+                let pnames <[string]> = new [string, 64]{};
+                let pnn <int> = self.lookup_generic_pnames(decl.name, pnames);
+                let slen <int> = cast<int>(chk_strlen(scrut));
+                let lt <int> = -1;
+                let si <int> = 0;
+                while (si < slen) {
+                    if (chk_str_eq(substr(scrut, si, 1), "<")) { lt = si; break; }
+                    si = si + 1;
+                }
+                if (lt > 0 && slen > lt + 2) {
+                    let args <string> = substr(scrut, lt + 1, slen - lt - 2);
+                    let pvals <[string]> = new [string, 64]{};
+                    let pvn <int> = self.split_generic_segs(args, pvals);
+                    if (pnn > 0 && pnn == pvn) {
+                        seg = self.subst_generic_words(seg, pnames, pvals, pnn);
+                    }
+                    delete pvals;
+                }
+                delete pnames;
+                return seg;
+            }
+            m = m.right;
+        }
+        return "";
+      }
+
+      // Join one arm body's type into the match result (the C++
+      // checkType at the arm body): the first good arm sets it, later
+      // ones must agree. An integer constant takes the other side's
+      // type when it fits (the ternary's const rule, both directions);
+      // anything else agreeing keeps the first type. rc_box carries the
+      // body node while the result still rides a constant (so a later
+      // non-constant can claim it, like the ternary's true arm).
+      fun match_join_type(self: &Self, result: string, rc_box: [&AstNode], body: &AstNode, body_type: string) <string> {
+        if (chk_strlen(result) == cast<ulong>(0)) {
+            if (rc_box != null) {
+                if (chk_is_int_const(body)) { rc_box[0] = body; } else { rc_box[0] = null; }
+            }
+            if (chk_str_eq(body_type, "error")) { return ""; }
+            return body_type;
+        }
+        if (!chk_str_eq(body_type, "error")) {
+            if (chk_tern_const_fits(body, result)) { return result; }
+            if (rc_box != null && rc_box[0] != null && chk_tern_const_fits(rc_box[0], body_type)) {
+                rc_box[0] = null;
+                return body_type;
+            }
+            if (!self.chk_types_compatible(body_type, result)) {
+                self.report_value_mismatch(result, body_type, body.line, body.col);
+            }
+        }
+        return result;
+      }
+
+      // `match` over a nullable scrutinee (C++ checkNullableMatch): `null`
+      // matches absence, a bare identifier binds the payload, `_` closes.
+      fun check_nullable_match(self: &Self, expr: &AstNode, inner: string) <string> {
+        let result <string> = "";
+        let match_rc <[&AstNode]> = new [&AstNode, 1]{};
+        let has_null <bool> = false;
+        let has_binder <bool> = false;
+        let has_wild <bool> = false;
+        let pre <[string]> = new [string, 64]{};
+        let pn <int> = self.moved_snapshot(pre);
+        let acc <[string]> = new [string, 64]{};
+        let accn <int> = 0;
+        let first <bool> = true;
+        let arm <&AstNode> = expr.right;
+        while (arm != null) {
+            self.enter_scope();
+            if (arm.left == null) {
+                self.exit_scope();
+                arm = arm.right;
+                continue;
+            }
+            let arm_ok <bool> = true;
+            if (arm.int_val == 1) {
+                if (has_wild) {
+                    self.report_error("unreachable match arm (an earlier '_' covers everything)", arm.left.line, arm.left.col);
+                    arm_ok = false;
+                }
+                has_wild = true;
+            } else if (has_wild) {
+                self.report_error("unreachable match arm after '_'", arm.left.line, arm.left.col);
+                arm_ok = false;
+            } else if (arm.int_val == 2) {
+                if (has_null) {
+                    self.report_error("duplicate match arm for 'null'", arm.left.line, arm.left.col);
+                    arm_ok = false;
+                }
+                has_null = true;
+            } else if (chk_strlen(arm.type_annotation) > cast<ulong>(0) || arm.extra != null || arm.int_val == 4 ||
+              arm.int_val == 8 || arm.int_val == 16) {
+                let nb <Buffer> = new_buffer(96);
+                nb.write_string("match arm '");
+                if (arm.int_val == 4 || arm.int_val == 8 || arm.int_val == 16) {
+                    nb.write_string(arm.str_val);
+                } else {
+                    nb.write_string(arm.name);
+                }
+                nb.write_string("' is not a nullable pattern (expected 'null', a binder, or '_')");
+                self.report_error(nb.to_string(), arm.left.line, arm.left.col);
+                free_buffer(nb);
+                arm_ok = false;
+              } else if (has_binder) {
+                self.report_error("unreachable match arm (an earlier binder covers every present value)", arm.left.line, arm.left.col);
+                arm_ok = false;
+              } else {
+                has_binder = true;
+                self.current_scope.insert_symbol(make_var_sym(arm.name, inner, false));
+              }
+            let bt <string> = self.check_expression(arm.left);
+            if (first) {
+                accn = self.moved_snapshot(acc);
+                first = false;
+            } else {
+                self.moved_intersect(acc, accn);
+                accn = self.moved_snapshot(acc);
+            }
+            self.moved_restore(pre, pn);
+            self.exit_scope();
+            if (arm_ok) { result = self.match_join_type(result, match_rc, arm.left, bt); }
+            arm = arm.right;
+        }
+        delete pre;
+        delete acc;
+        delete match_rc;
+        if (!has_wild && (!has_null || !has_binder)) {
+            let mb <Buffer> = new_buffer(64);
+            mb.write_string("non-exhaustive match: uncovered ");
+            let need_comma <bool> = false;
+            if (!has_null) {
+                mb.write_string("'null'");
+                need_comma = true;
+            }
+            if (!has_binder) {
+                if (need_comma) { mb.write_string(", "); }
+                mb.write_string("present value");
+            }
+            self.report_match_exhaustive(mb.to_string(), expr);
+            free_buffer(mb);
+        }
+        if (chk_strlen(result) == cast<ulong>(0)) { return "error"; }
+        return result;
+      }
+
+      // `match` over an integer, string, or boolean scrutinee (C++
+      // checkConstantMatch): literal arms of the scrutinee's kind plus
+      // `_`, which alone closes the match.
+      fun check_constant_match(self: &Self, expr: &AstNode, scrut: string) <string> {
+        let want <int> = 4;
+        let want_name <string> = "integer";
+        if (chk_str_eq(scrut, "string")) {
+            want = 8;
+            want_name = "string";
+        } else if (chk_str_eq(scrut, "bool")) {
+            want = 16;
+            want_name = "boolean";
+        }
+        let covered <[string]> = new [string, 64]{};
+        let covered_n <int> = 0;
+        let result <string> = "";
+        let match_rc <[&AstNode]> = new [&AstNode, 1]{};
+        let has_wild <bool> = false;
+        let pre <[string]> = new [string, 64]{};
+        let pn <int> = self.moved_snapshot(pre);
+        let acc <[string]> = new [string, 64]{};
+        let accn <int> = 0;
+        let first <bool> = true;
+        let arm <&AstNode> = expr.right;
+        while (arm != null) {
+            self.enter_scope();
+            if (arm.left == null) {
+                self.exit_scope();
+                arm = arm.right;
+                continue;
+            }
+            let arm_ok <bool> = true;
+            if (arm.int_val == 1) {
+                if (has_wild) {
+                    self.report_error("unreachable match arm (an earlier '_' covers everything)", arm.left.line, arm.left.col);
+                    arm_ok = false;
+                }
+                has_wild = true;
+            } else if (has_wild) {
+                self.report_error("unreachable match arm after '_'", arm.left.line, arm.left.col);
+                arm_ok = false;
+            } else if (arm.int_val == 2) {
+                let nb <Buffer> = new_buffer(128);
+                nb.write_string("match arm 'null' does not match scrutinee of type '");
+                nb.write_string(scrut);
+                nb.write_string("' (nullable patterns need a nullable scrutinee)");
+                self.report_error(nb.to_string(), arm.left.line, arm.left.col);
+                free_buffer(nb);
+                arm_ok = false;
+            } else if (arm.int_val != 4 && arm.int_val != 8 && arm.int_val != 16) {
+                let nb2 <Buffer> = new_buffer(128);
+                nb2.write_string("match arm '");
+                nb2.write_string(arm.name);
+                nb2.write_string("' is not a constant pattern (expected an integer, string, or boolean literal, or '_')");
+                self.report_error(nb2.to_string(), arm.left.line, arm.left.col);
+                free_buffer(nb2);
+                arm_ok = false;
+            } else if (arm.int_val != want) {
+                let nb3 <Buffer> = new_buffer(128);
+                nb3.write_string("match arm '");
+                nb3.write_string(arm.str_val);
+                nb3.write_string("' does not match scrutinee of type '");
+                nb3.write_string(scrut);
+                nb3.write_string("' (expected a ");
+                nb3.write_string(want_name);
+                nb3.write_string(" literal)");
+                self.report_error(nb3.to_string(), arm.left.line, arm.left.col);
+                free_buffer(nb3);
+                arm_ok = false;
+            } else {
+                let key <string> = arm.str_val;
+                if (want == 4) { key = chk_match_norm_int(arm.str_val); }
+                let dup <bool> = false;
+                let ci <int> = 0;
+                while (ci < covered_n) {
+                    if (chk_str_eq(covered[ci], key)) { dup = true; }
+                    ci = ci + 1;
+                }
+                if (dup) {
+                    let nb4 <Buffer> = new_buffer(96);
+                    nb4.write_string("duplicate match arm for constant '");
+                    nb4.write_string(arm.str_val);
+                    nb4.write_string("'");
+                    self.report_error(nb4.to_string(), arm.left.line, arm.left.col);
+                    free_buffer(nb4);
+                    arm_ok = false;
+                } else if (covered_n < 64) {
+                    covered[covered_n] = key;
+                    covered_n = covered_n + 1;
+                }
+            }
+            let bt <string> = self.check_expression(arm.left);
+            if (first) {
+                accn = self.moved_snapshot(acc);
+                first = false;
+            } else {
+                self.moved_intersect(acc, accn);
+                accn = self.moved_snapshot(acc);
+            }
+            self.moved_restore(pre, pn);
+            self.exit_scope();
+            if (arm_ok) { result = self.match_join_type(result, match_rc, arm.left, bt); }
+            arm = arm.right;
+        }
+        delete pre;
+        delete acc;
+        delete covered;
+        delete match_rc;
+        if (!has_wild) {
+            let mb <Buffer> = new_buffer(128);
+            mb.write_string("non-exhaustive match: constant patterns need a '_' arm (literals never cover every '");
+            mb.write_string(scrut);
+            mb.write_string("' value)");
+            self.report_match_exhaustive(mb.to_string(), expr);
+            free_buffer(mb);
+        }
+        if (chk_strlen(result) == cast<ulong>(0)) { return "error"; }
+        return result;
+      }
+
+      // `match` over an enum scrutinee (C++ visit(MatchExpr&) enum path):
+      // member patterns with payload binders, `_` closing.
+      fun check_enum_match(self: &Self, expr: &AstNode, scrut: string, base: string, decl: &AstNode) <string> {
+        let covered <[string]> = new [string, 64]{};
+        let covered_n <int> = 0;
+        let result <string> = "";
+        let match_rc <[&AstNode]> = new [&AstNode, 1]{};
+        let has_wild <bool> = false;
+        let pre <[string]> = new [string, 64]{};
+        let pn <int> = self.moved_snapshot(pre);
+        let acc <[string]> = new [string, 64]{};
+        let accn <int> = 0;
+        let first <bool> = true;
+        let arm <&AstNode> = expr.right;
+        while (arm != null) {
+            self.enter_scope();
+            if (arm.left == null) {
+                self.exit_scope();
+                arm = arm.right;
+                continue;
+            }
+            let arm_ok <bool> = true;
+            if (arm.int_val == 1) {
+                if (has_wild) {
+                    self.report_error("unreachable match arm (an earlier '_' covers everything)", arm.left.line, arm.left.col);
+                    arm_ok = false;
+                }
+                has_wild = true;
+            } else if (has_wild) {
+                self.report_error("unreachable match arm after '_'", arm.left.line, arm.left.col);
+                arm_ok = false;
+            } else if (arm.int_val == 2) {
+                let nb <Buffer> = new_buffer(128);
+                nb.write_string("match arm 'null' does not match scrutinee of type '");
+                nb.write_string(scrut);
+                nb.write_string("' (nullable patterns need a nullable scrutinee)");
+                self.report_error(nb.to_string(), arm.left.line, arm.left.col);
+                free_buffer(nb);
+                arm_ok = false;
+            } else if (arm.int_val == 4 || arm.int_val == 8 || arm.int_val == 16) {
+                let nb2 <Buffer> = new_buffer(128);
+                nb2.write_string("match arm '");
+                nb2.write_string(arm.str_val);
+                nb2.write_string("' does not match scrutinee of type '");
+                nb2.write_string(scrut);
+                nb2.write_string("' (constant patterns need an integer, string, or boolean scrutinee)");
+                self.report_error(nb2.to_string(), arm.left.line, arm.left.col);
+                free_buffer(nb2);
+                arm_ok = false;
+            } else {
+                let dup <bool> = false;
+                let ci <int> = 0;
+                while (ci < covered_n) {
+                    if (chk_str_eq(covered[ci], arm.name)) { dup = true; }
+                    ci = ci + 1;
+                }
+                if (dup) {
+                    let nb3 <Buffer> = new_buffer(96);
+                    nb3.write_string("duplicate match arm for member '");
+                    nb3.write_string(arm.name);
+                    nb3.write_string("'");
+                    self.report_error(nb3.to_string(), arm.left.line, arm.left.col);
+                    free_buffer(nb3);
+                    arm_ok = false;
+                } else if (chk_strlen(arm.type_annotation) > cast<ulong>(0) && !chk_str_eq(arm.type_annotation, base)) {
+                    let nb4 <Buffer> = new_buffer(128);
+                    nb4.write_string("match arm '");
+                    nb4.write_string(arm.type_annotation);
+                    nb4.write_string("::");
+                    nb4.write_string(arm.name);
+                    nb4.write_string("' does not match scrutinee of type '");
+                    nb4.write_string(scrut);
+                    nb4.write_string("'");
+                    self.report_error(nb4.to_string(), arm.left.line, arm.left.col);
+                    free_buffer(nb4);
+                    arm_ok = false;
+                } else {
+                    let arity <int> = self.match_member_arity(decl, arm.name);
+                    if (arity < 0) {
+                        let nb5 <Buffer> = new_buffer(96);
+                        nb5.write_string("enum '");
+                        nb5.write_string(base);
+                        nb5.write_string("' has no member '");
+                        nb5.write_string(arm.name);
+                        nb5.write_string("'");
+                        self.report_error(nb5.to_string(), arm.left.line, arm.left.col);
+                        free_buffer(nb5);
+                        arm_ok = false;
+                    } else {
+                        if (covered_n < 64) {
+                            covered[covered_n] = arm.name;
+                            covered_n = covered_n + 1;
+                        }
+                        let nb <int> = 0;
+                        let bc <&AstNode> = arm.extra;
+                        while (bc != null) {
+                            nb = nb + 1;
+                            bc = bc.right;
+                        }
+                        if (nb != arity) {
+                            let nb6 <Buffer> = new_buffer(96);
+                            nb6.write_string("member '");
+                            nb6.write_string(arm.name);
+                            nb6.write_string("' carries ");
+                            nb6.write_int(arity);
+                            nb6.write_string(" payload(s), but the pattern binds ");
+                            nb6.write_int(nb);
+                            self.report_error(nb6.to_string(), arm.left.line, arm.left.col);
+                            free_buffer(nb6);
+                            arm_ok = false;
+                        } else {
+                            let bi <int> = 0;
+                            let bd <&AstNode> = arm.extra;
+                            let bbad <bool> = false;
+                            while (bd != null && !bbad) {
+                                if (!chk_str_eq(bd.name, "_")) {
+                                    let seen <bool> = false;
+                                    let bk <&AstNode> = arm.extra;
+                                    while (bk != null && bk != bd) {
+                                        if (chk_str_eq(bk.name, bd.name)) { seen = true; }
+                                        bk = bk.right;
+                                    }
+                                    if (seen) {
+                                        let nb7 <Buffer> = new_buffer(96);
+                                        nb7.write_string("duplicate binding '");
+                                        nb7.write_string(bd.name);
+                                        nb7.write_string("' in match pattern");
+                                        self.report_error(nb7.to_string(), arm.left.line, arm.left.col);
+                                        free_buffer(nb7);
+                                        arm_ok = false;
+                                        bbad = true;
+                                    } else {
+                                        let pty <string> = self.match_member_seg(decl, arm.name, bi, scrut);
+                                        self.current_scope.insert_symbol(make_var_sym(bd.name, pty, false));
+                                    }
+                                }
+                                bi = bi + 1;
+                                bd = bd.right;
+                            }
+                        }
+                    }
+                }
+            }
+            let bt <string> = self.check_expression(arm.left);
+            if (first) {
+                accn = self.moved_snapshot(acc);
+                first = false;
+            } else {
+                self.moved_intersect(acc, accn);
+                accn = self.moved_snapshot(acc);
+            }
+            self.moved_restore(pre, pn);
+            self.exit_scope();
+            if (arm_ok) { result = self.match_join_type(result, match_rc, arm.left, bt); }
+            arm = arm.right;
+        }
+        delete pre;
+        delete acc;
+        delete match_rc;
+        if (!has_wild) {
+            let missing <[string]> = new [string, 64]{};
+            let missing_n <int> = 0;
+            let m <&AstNode> = decl.left;
+            while (m != null && missing_n < 64) {
+                if (m.kind == ast_var_decl()) {
+                    let hit <bool> = false;
+                    let ci <int> = 0;
+                    while (ci < covered_n) {
+                        if (chk_str_eq(covered[ci], m.name)) { hit = true; }
+                        ci = ci + 1;
+                    }
+                    if (!hit) {
+                        missing[missing_n] = m.name;
+                        missing_n = missing_n + 1;
+                    }
+                }
+                m = m.right;
+            }
+            if (missing_n > 0) {
+                chk_match_sort(missing, missing_n);
+                let mb <Buffer> = new_buffer(128);
+                mb.write_string("non-exhaustive match: uncovered member(s) ");
+                let mi <int> = 0;
+                while (mi < missing_n) {
+                    if (mi > 0) { mb.write_string(", "); }
+                    mb.write_char('\'');
+                    mb.write_string(missing[mi]);
+                    mb.write_char('\'');
+                    mi = mi + 1;
+                }
+                self.report_match_exhaustive(mb.to_string(), expr);
+                free_buffer(mb);
+            }
+            delete missing;
+        }
+        delete covered;
+        if (chk_strlen(result) == cast<ulong>(0)) { return "error"; }
+        return result;
+      }
+
+      // `match (scrutinee) { arms }` (ADR 0050): dispatch on the already
+      // typed scrutinee (never on annotation spellings) exactly like the
+      // C++ visit: nullable, integer/string/bool constant, enum, else a
+      // named refusal. Mixed enum/constant arms stay refused per path.
+      // The joined result is stamped on the node for the backend (the
+      // ENGA resolved_spelling channel): codegen sizes the arm-value
+      // join from it, the way `let` reads a stamped annotation.
+      fun check_match(self: &Self, expr: &AstNode) <string> {
+        let scrut <string> = self.resolve_type(self.check_expression(expr.left));
+        if (chk_str_eq(scrut, "error")) { return "error"; }
+        let inner <string> = self.chk_strip_qmark(scrut);
+        if (!chk_str_eq(inner, scrut)) {
+            let nr <string> = self.check_nullable_match(expr, inner);
+            if (!chk_str_eq(nr, "error")) { expr.resolved_spelling = nr; }
+            return nr;
+        }
+        if (chk_eff_bits(scrut) > 0 || chk_str_eq(scrut, "string") || chk_str_eq(scrut, "bool")) {
+            let cr <string> = self.check_constant_match(expr, scrut);
+            if (!chk_str_eq(cr, "error")) { expr.resolved_spelling = cr; }
+            return cr;
+        }
+        let slen <int> = cast<int>(chk_strlen(scrut));
+        let base <string> = scrut;
+        let si <int> = 0;
+        while (si < slen) {
+            if (chk_str_eq(substr(scrut, si, 1), "<")) {
+                base = substr(scrut, 0, si);
+                break;
+            }
+            si = si + 1;
+        }
+        if (self.global_scope.has(base)) {
+            let bsym <Symbol> = self.global_scope.lookup(base);
+            if (bsym.kind == sym_enum()) {
+                let decl <&AstNode> = self.match_enum_decl(base);
+                if (decl != null) {
+                    let er <string> = self.check_enum_match(expr, scrut, base, decl);
+                    if (!chk_str_eq(er, "error")) { expr.resolved_spelling = er; }
+                    return er;
+                }
+            }
+        }
+        let mb <Buffer> = new_buffer(128);
+        mb.write_string("match on a '");
+        // The null literal types as `void*` in the stage checker but the
+        // reference names it `null` here; a genuine `void*` binding keeps
+        // its spelling (the C++ pointer type prints the same).
+        if (chk_str_eq(scrut, "void*") && expr.left != null && expr.left.kind == ast_ident() &&
+          (chk_str_eq(expr.left.name, "null") || chk_str_eq(expr.left.name, "NULL"))) {
+            mb.write_string("null");
+          } else {
+            mb.write_string(scrut);
+          }
+        mb.write_string("' scrutinee is not implemented yet (only enums, nullables, and integers/strings/bools match)");
+        self.report_match_exhaustive(mb.to_string(), expr);
+        free_buffer(mb);
+        return "error";
+      }
+
+      // A static refusal at the whole match site (C++ error(node, ...)):
+      // the span is the match expression's own range, like the C++
+      // node range the reference underlines.
+      fun report_match_exhaustive(self: &Self, msg: string, expr: &AstNode) <noret> {
+        if (expr.close_col > expr.col) {
+            self.report_error_spanned(msg, expr.line, expr.col, expr.close_col - expr.col);
+        } else {
+            self.report_error(msg, expr.line, expr.col);
+        }
+      }
+
+      // First enum declaration named `base` in the program (first wins:
+      // imports append after the file's own declarations, like
+      // enum_variant_payload), null when none.
+      fun match_enum_decl(self: &Self, base: string) <&AstNode> {
+        if (base == null || self.prog_root == null) { return null; }
+        let d <&AstNode> = self.prog_root.left;
+        while (d != null) {
+            if (d.kind == ast_enum_decl() && chk_str_eq(d.name, base)) { return d; }
+            d = d.right;
+        }
+        return null;
+      }
+
       fun check_expression(self: &Self, expr: &AstNode) <string> {
         if (expr == null) { return "void"; }
+
+        if (expr.kind == chk_ast_match()) {
+            return self.check_match(expr);
+        }
 
         if (expr.kind == ast_literal_int()) {
             // Float literals share the int kind (parser.fin tags them

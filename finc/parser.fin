@@ -128,6 +128,20 @@ priv fun p_nullable_ann(base: string) <string> {
     return out;
 }
 
+// ADR 0050 `match`: stage-internal AST kinds. `match` lexes as an
+// ordinary identifier (token::std has no keyword for it) and the
+// shared AST kinds stop at 33, so the match expression (34) and its
+// arms (35) live above the shared range. Structural walkers
+// (free_ast, p_clone_node) recurse left/right/extra without
+// consulting kind, so no shared code needs to know them. An arm
+// carries the pattern in its own fields (name = member, "" for
+// wildcard/null/constant; type_annotation = qualifier;
+// str_val = constant text; int_val = 1 wildcard, 2 null, 4/8/16
+// integer/string/boolean constant), the body in left, the next arm
+// in right, and the payload binders (identifier chain) in extra.
+priv fun p_ast_match() <int> { return 34; }
+priv fun p_ast_match_arm() <int> { return 35; }
+
 priv fun p_parse_int_safe(s: string) <int> {
     if (s == null) { return 0; }
     let len <int> = cast<int>(p_strlen(s));
@@ -575,8 +589,185 @@ pub struct Parser {
         return "void";
       }
 
+      // True when the `(` at lookahead 1 closes and a `{` opens right
+      // after: the `match (expr) {` shape. Bounded: the scrutinee is one
+      // expression, so 300 tokens of lookahead never clips it; past that
+      // the identifier path owns the tokens (same as before).
+      fun match_shape_follows(self: &Self) <bool> {
+        let depth <int> = 0;
+        let pos <int> = 1;
+        while (pos < 300) {
+            let tk <Token> = self.stream.peek_at(pos);
+            if (tk.kind == tok_eof()) { return false; }
+            if (tk.kind == tok_lparen()) { depth = depth + 1; }
+            else if (tk.kind == tok_rparen()) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return self.stream.peek_at(pos + 1).kind == tok_lbrace();
+                }
+            }
+            pos = pos + 1;
+        }
+        return false;
+      }
+
+      // `match (scrutinee) { pattern => body, ... }` (ADR 0050). One arm
+      // is a pattern plus an expression body; arms are comma-separated
+      // with an optional trailing comma, mirroring the C++ grammar (which
+      // also requires at least one arm: an empty body errors here).
+      fun parse_match(self: &Self, mline: int, mcol: int) <&AstNode> {
+        self.stream.advance();
+        self.expect(tok_lparen(), "expected '(' after 'match'");
+        let scr <&AstNode> = self.parse_expression(0);
+        self.expect(tok_rparen(), "expected ')' after match scrutinee");
+        self.expect(tok_lbrace(), "expected '{' after match scrutinee");
+        let arm_head <&AstNode> = null;
+        let arm_tail <&AstNode> = null;
+        while (!self.stream.check(tok_rbrace()) && !self.stream.is_at_end()) {
+            let arm <&AstNode> = self.parse_match_arm();
+            if (arm != null) {
+                if (arm_head == null) {
+                    arm_head = arm;
+                    arm_tail = arm;
+                } else {
+                    arm_tail.right = arm;
+                    arm_tail = arm;
+                }
+            }
+            if (!self.match_token(tok_comma())) { break; }
+        }
+        if (arm_head == null) {
+            let rb <Token> = self.stream.peek();
+            self.report_error("expected match pattern", rb.line, rb.col);
+        }
+        let close_col <int> = mcol + 5;
+        if (self.stream.check(tok_rbrace())) {
+            let rb_tok <Token> = self.stream.advance();
+            close_col = rb_tok.col + rb_tok.len;
+        } else {
+            self.expect(tok_rbrace(), "expected '}' after match arms");
+        }
+        let m_node <&AstNode> = new AstNode{};
+        m_node.kind = p_ast_match();
+        m_node.left = scr;
+        m_node.right = arm_head;
+        m_node.line = mline;
+        m_node.col = mcol;
+        m_node.close_col = close_col;
+        return m_node;
+      }
+
+      // One `pattern => body` arm (C++ match_pattern plus the ARROW body).
+      // `_` is the wildcard, `null` the absence arm, integer/string/bool
+      // literals the constant arms, and `Member`, `Qual::Member`, each
+      // with optional `(binders)`, the enum arms. A bare identifier stays
+      // a member here: the checker reads it as a binder over a nullable
+      // scrutinee and as a member otherwise (C++ keeps the same field).
+      fun parse_match_arm(self: &Self) <&AstNode> {
+        let t <Token> = self.stream.peek();
+        let arm <&AstNode> = new AstNode{};
+        arm.kind = p_ast_match_arm();
+        arm.line = t.line;
+        arm.col = t.col;
+        if (t.kind == tok_ident() && p_str_eq(t.text, "_")) {
+            self.stream.advance();
+            arm.int_val = 1;
+        } else if (t.kind == kw_null()) {
+            self.stream.advance();
+            arm.int_val = 2;
+        } else if (t.kind == tok_int_lit() ||
+          (t.kind == tok_minus() && self.stream.peek_at(1).kind == tok_int_lit())) {
+            // A negative folds the sign into the stored text (C++
+            // `MINUS INTEGER` does the same), so the checker and the
+            // backend each see one literal rather than an expression.
+            let neg <bool> = false;
+            if (t.kind == tok_minus()) {
+                neg = true;
+                self.stream.advance();
+                t = self.stream.peek();
+            }
+            self.stream.advance();
+            arm.int_val = 4;
+            if (neg) {
+                let nb <Buffer> = new_buffer(32);
+                nb.write_char('-');
+                nb.write_string(t.text);
+                arm.str_val = nb.to_string();
+                free_buffer(nb);
+            } else {
+                arm.str_val = t.text;
+            }
+          } else if (t.kind == tok_string_lit()) {
+            self.stream.advance();
+            arm.int_val = 8;
+            arm.str_val = t.text;
+          } else if (t.kind == tok_bool_lit() || t.kind == kw_true() || t.kind == kw_false()) {
+            self.stream.advance();
+            arm.int_val = 16;
+            if (t.kind == kw_false()) { arm.str_val = "false"; }
+            else if (t.kind == kw_true()) { arm.str_val = "true"; }
+            else { arm.str_val = t.text; }
+          } else if (t.kind == tok_ident()) {
+            self.stream.advance();
+            arm.name = t.text;
+            if (self.match_token(tok_double_colon())) {
+                arm.type_annotation = arm.name;
+                let mem_tok <Token> = self.stream.peek();
+                if (self.expect(tok_ident(), "expected member name after '::' in match pattern")) {
+                    arm.name = mem_tok.text;
+                }
+            }
+            if (self.stream.check(tok_lparen())) {
+                self.stream.advance();
+                let b_head <&AstNode> = null;
+                let b_tail <&AstNode> = null;
+                while (!self.stream.check(tok_rparen()) && !self.stream.is_at_end()) {
+                    let b_tok <Token> = self.stream.peek();
+                    if (self.expect(tok_ident(), "expected binder name in match pattern")) {
+                        let bn <&AstNode> = make_ident(b_tok.text, b_tok.line, b_tok.col);
+                        if (b_head == null) {
+                            b_head = bn;
+                            b_tail = bn;
+                        } else {
+                            b_tail.right = bn;
+                            b_tail = bn;
+                        }
+                    } else if (!self.stream.is_at_end()) {
+                        self.stream.advance();
+                    }
+                    if (self.stream.check(tok_comma())) {
+                        self.stream.advance();
+                    }
+                }
+                self.expect(tok_rparen(), "expected ')' after match binders");
+                arm.extra = b_head;
+            }
+          } else {
+            self.report_error("expected match pattern", t.line, t.col);
+            if (!self.stream.is_at_end()) { self.stream.advance(); }
+          }
+        // `=>` scans as kind 102 (the lambda arm reads it the same way).
+        if (self.stream.check(102) || (self.stream.peek().text != null && p_str_eq(self.stream.peek().text, "=>"))) {
+            self.stream.advance();
+        } else {
+            let at <Token> = self.stream.peek();
+            self.report_error("expected '=>' after match pattern", at.line, at.col);
+        }
+        arm.left = self.parse_expression(0);
+        return arm;
+      }
+
       fun parse_primary(self: &Self) <&AstNode> {
         let cur <Token> = self.stream.peek();
+
+        // `match (scrutinee) { arms }` (ADR 0050): recognized by spelling
+        // plus shape since `match` is an identifier to the scanner. Only a
+        // `(` whose matching `)` is followed by `{` takes this path; a
+        // variable or call named `match` keeps the identifier path below.
+        if (cur.kind == tok_ident() && p_str_eq(cur.text, "match") &&
+          self.stream.peek_at(1).kind == tok_lparen() && self.match_shape_follows()) {
+            return self.parse_match(cur.line, cur.col);
+          }
 
         // 1. Integer/Float literal
         if (cur.kind == tok_int_lit() || cur.kind == tok_float_lit()) {

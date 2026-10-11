@@ -56,7 +56,7 @@ import {
       llvm_get_return_type, llvm_get_param_types, llvm_build_ptr_to_int, llvm_build_int_to_ptr
 } from finc.llvm;
 
-import { substr } from strings::std;
+import { substr, to_chars } from strings::std;
 import { Buffer, new_buffer, free_buffer } from buffer::std;
 
 #[llvm_name="strcmp"]
@@ -7627,6 +7627,222 @@ fun cg_implements_conforms(ctx: &FnContext, s_name: string, i_name: string) <boo
     return true;
 }
 
+// Stage-internal `match` AST kinds (parser.fin p_ast_match/p_ast_match_arm).
+fun cg_ast_match() <int> { return 34; }
+fun cg_ast_match_arm() <int> { return 35; }
+
+// Magnitude of an integer constant pattern (the caller folds a leading
+// `-` into unary neg, the way the language lowers negatives): parsed
+// digits, valid only when the caller already proved plain digits.
+fun cg_match_parse_mag(mag: string) <int> {
+    let v <int> = 0;
+    let chars <[char]> = to_chars(mag);
+    let len <int> = cast<int>(cg_strlen(mag));
+    let i <int> = 0;
+    while (i < len) {
+        let c <char> = chars[i];
+        if (c >= '0' && c <= '9') {
+            v = v * 10 + (cast<int>(c) - cast<int>('0'));
+        }
+        i = i + 1;
+    }
+    delete chars;
+    return v;
+}
+
+// True when a magnitude needs the 64-bit literal path (the parser's
+// big-int rule: more than 10 digits, or 10 digits above 2147483647).
+fun cg_match_mag_is_big(mag: string) <bool> {
+    if (mag == null) { return true; }
+    let len <int> = cast<int>(cg_strlen(mag));
+    if (len > 10) { return true; }
+    if (len < 10) { return false; }
+    let i <int> = 0;
+    let lim <string> = "2147483647";
+    while (i < 10) {
+        let d <string> = substr(mag, i, 1);
+        let l <string> = substr(lim, i, 1);
+        if (cg_strcmp(d, l) > 0) { return true; }
+        if (cg_strcmp(d, l) < 0) { return false; }
+        i = i + 1;
+    }
+    return false;
+}
+
+// The value of a constant-pattern arm, built exactly like the literal
+// the program wrote (big integers take the 64-bit constant, strings go
+// through the interner): pure IR, so take computation needs no callers.
+fun cg_match_const_val(ctx: &FnContext, arm: &AstNode) <&LLVMValue> {
+    if (arm.int_val == 16) {
+        if (cg_str_eq(arm.str_val, "true")) {
+            return llvm_const_int(ctx.i1_ty, 1, 0);
+        }
+        return llvm_const_int(ctx.i1_ty, 0, 0);
+    }
+    if (arm.int_val == 8) {
+        let unesc <string> = unescape_string_literal(arm.str_val);
+        return llvm_build_global_string_ptr(ctx.builder, unesc, "str");
+    }
+    let text <string> = arm.str_val;
+    let neg <bool> = false;
+    if (text != null && cg_strlen(text) > cast<ulong>(0) && cg_str_eq(substr(text, 0, 1), "-")) {
+        neg = true;
+        text = substr(text, 1, cast<int>(cg_strlen(text)) - 1);
+    }
+    let v <&LLVMValue> = null;
+    if (cg_match_mag_is_big(text)) {
+        v = llvm_const_int_of_string(ctx.i64_ty, text, 10);
+    } else {
+        v = llvm_const_int(ctx.i32_ty, cg_match_parse_mag(text), 0);
+    }
+    if (neg) {
+        let v_ty <&LLVMType> = llvm_type_of(v);
+        let zero <&LLVMValue> = llvm_const_int(v_ty, 0, 0);
+        return llvm_build_sub(ctx.builder, zero, v, "match.neg");
+    }
+    return v;
+}
+
+// Spelling of the match scrutinee for dispatch (the checker's stamped
+// types: `let` annotations, resolved call spellings, field types).
+fun cg_match_scrut_ann(ctx: &FnContext, node: &AstNode) <string> {
+    if (node == null || ctx == null) { return ""; }
+    if (node.kind == ast_ident()) {
+        let v <&LocalVar> = fn_ctx_find_var(ctx, node.name);
+        if (v != null && v.type_annotation != null) { return v.type_annotation; }
+        return "";
+    }
+    if (node.kind == ast_member_access()) {
+        return cg_member_field_ann(ctx, node.left, node.name);
+    }
+    if (node.kind == ast_call_expr()) {
+        if (node.resolved_spelling != null && cg_strlen(node.resolved_spelling) > cast<ulong>(0)) {
+            return node.resolved_spelling;
+        }
+        return "";
+    }
+    return "";
+}
+
+// Whether `take` may run: the arm's test over the already-lowered
+// scrutinee (null when the arm shape cannot run here, refused by name).
+fun cg_match_arm_take(ctx: &FnContext, mnode: &AstNode, arm: &AstNode, mode: int, scr: &LLVMValue, tag: &LLVMValue, absent: &LLVMValue, einfo: &EnumInfo, const_kind: int) <&LLVMValue> {
+    if (mode == 1) {
+        let want <int> = 0;
+        let found <bool> = false;
+        if (einfo != null) {
+            let j <int> = 0;
+            while (j < einfo.member_count) {
+                let m <&EnumMemberInfo> = einfo.members[j];
+                if (m != null && cg_str_eq(m.name, arm.name)) {
+                    want = m.tag;
+                    found = true;
+                }
+                j = j + 1;
+            }
+        }
+        if (!found) {
+            cg_dprintf(2, "finc codegen refusal: match on unknown member '%s' is not lowered\n", arm.name);
+            refuse_and_poison(ctx);
+            llvm_build_unreachable(ctx.builder);
+            return null;
+        }
+        return llvm_build_icmp(ctx.builder, llvm_int_eq(), tag, llvm_const_int(ctx.i32_ty, want, 0), "match.tag");
+    }
+    if (mode == 2) {
+        if (arm.int_val == 2) { return absent; }
+        if (cg_strlen(arm.name) > cast<ulong>(0) && arm.extra == null &&
+          cg_strlen(arm.type_annotation) == cast<ulong>(0)) {
+            return llvm_build_not(ctx.builder, absent, "match.present");
+          }
+        cg_dprintf(2, "finc codegen refusal: a nullable match arm with a payload pattern is not lowered\n");
+        refuse_and_poison(ctx);
+        llvm_build_unreachable(ctx.builder);
+        return null;
+    }
+    if (arm.int_val != const_kind) {
+        cg_dprintf(2, "finc codegen refusal: a constant match arm with a non-constant pattern is not lowered\n");
+        refuse_and_poison(ctx);
+        llvm_build_unreachable(ctx.builder);
+        return null;
+    }
+    let pv <&LLVMValue> = cg_match_const_val(ctx, arm);
+    if (pv == null) { return null; }
+    if (const_kind == 8) {
+        return cg_lower_string_eq(ctx, scr, pv, false);
+    }
+    let sty <&LLVMType> = llvm_type_of(scr);
+    let want_v <&LLVMValue> = coerce_val(ctx, pv, sty);
+    return llvm_build_icmp(ctx.builder, llvm_int_eq(), scr, want_v, "match.const");
+}
+
+// Bind an arm's payloads in its own scope (the checker's fresh
+// `let`-style bindings): enum payloads load out of the spilled
+// scrutinee, nullable binders copy the payload. Anything past the
+// first enum payload is refused: construction stores only the first,
+// so deeper slots hold nothing to bind.
+fun cg_match_bind(ctx: &FnContext, mnode: &AstNode, arm: &AstNode, mode: int, base: &LLVMValue, payload: &LLVMValue, einfo: &EnumInfo, inner_ann: string) <noret> {
+    if (ctx.poisoned) { return; }
+    if (mode == 2 && arm.int_val != 1 && arm.int_val != 2 && cg_strlen(arm.name) > cast<ulong>(0)) {
+        if (payload == null) { return; }
+        let sty <&LLVMType> = llvm_type_of(payload);
+        let slot <&LLVMValue> = llvm_build_alloca(ctx.builder, sty, arm.name);
+        llvm_build_store(ctx.builder, payload, slot);
+        fn_ctx_add_var(ctx, arm.name, slot, sty, inner_ann);
+        let bv <&LocalVar> = fn_ctx_find_var(ctx, arm.name);
+        if (bv != null) {
+            bv.scope_depth = ctx.current_scope_depth;
+            bv.tie_region = ctx.region_depth;
+        }
+        return;
+    }
+    if (mode != 1 || arm.int_val == 1) { return; }
+    if (einfo == null || base == null) { return; }
+    let mem <&EnumMemberInfo> = null;
+    let j <int> = 0;
+    while (j < einfo.member_count) {
+        let m <&EnumMemberInfo> = einfo.members[j];
+        if (m != null && cg_str_eq(m.name, arm.name)) { mem = m; }
+        j = j + 1;
+    }
+    if (mem == null || !mem.has_payload) { return; }
+    let bi <int> = 0;
+    let bd <&AstNode> = arm.extra;
+    while (bd != null) {
+        if (!cg_str_eq(bd.name, "_")) {
+            if (bi > 0) {
+                cg_dprintf(2, "finc codegen refusal: match payload binding past the first payload is not lowered (only the first payload is stored)\n");
+                refuse_and_poison(ctx);
+                return;
+            }
+            let segs <[string]> = new [string, 64]{};
+            let nseg <int> = cg_split_top(mem.payload_type, segs, 64);
+            let seg <string> = mem.payload_type;
+            if (nseg > 0) { seg = segs[0]; }
+            delete segs;
+            if (cg_is_generic_ann(ctx, seg)) {
+                cg_dprintf(2, "finc codegen refusal: match on a generic enum payload is not lowered yet (needs an explicit instantiation)\n");
+                refuse_and_poison(ctx);
+                return;
+            }
+            let pty <&LLVMType> = map_type(ctx, seg);
+            let pay_gep <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, einfo.llvm_type, base, 1, "match.pay");
+            let pay_cast <&LLVMValue> = llvm_build_bitcast(ctx.builder, pay_gep, llvm_pointer_type(pty, 0), "match.pcast");
+            let loaded <&LLVMValue> = llvm_build_load2(ctx.builder, pty, pay_cast, bd.name);
+            let bslot <&LLVMValue> = llvm_build_alloca(ctx.builder, pty, bd.name);
+            llvm_build_store(ctx.builder, loaded, bslot);
+            fn_ctx_add_var(ctx, bd.name, bslot, pty, seg);
+            let bv2 <&LocalVar> = fn_ctx_find_var(ctx, bd.name);
+            if (bv2 != null) {
+                bv2.scope_depth = ctx.current_scope_depth;
+                bv2.tie_region = ctx.region_depth;
+            }
+        }
+        bi = bi + 1;
+        bd = bd.right;
+    }
+}
+
 pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
     if (n == null) { return null; }
 
@@ -11203,6 +11419,176 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, count, 0), p_vlen_ptr);
 
         return proto_hdr;
+    }
+    // `match (scrutinee) { arms }` (ADR 0050): one tag read, then an
+    // ordered test chain (never nested source ifs). Valued matches join
+    // through a result slot typed by the checker's stamped result (the
+    // same join the C++ backend's PHI answers); statement matches lower
+    // each arm for effect. Exhaustiveness was proven by the checker, so
+    // a chain that falls off the end traps rather than dropping
+    // silently. Dispatch mirrors the C++ backend: nullable, enum,
+    // integer/string/bool constant, else a named refusal.
+    if (n.kind == cg_ast_match()) {
+        if (ctx.fn_val == null) {
+            cg_dprintf(2, "finc codegen refusal: a match outside a function is not lowered\n");
+            refuse_and_poison(ctx);
+            return null;
+        }
+        let m_scr <&LLVMValue> = lower_expr(ctx, n.left);
+        if (m_scr == null || ctx.poisoned) { return null; }
+        let m_sty <&LLVMType> = llvm_type_of(m_scr);
+        let m_ann <string> = cg_match_scrut_ann(ctx, n.left);
+        let m_mode <int> = 0;
+        let m_base <&LLVMValue> = null;
+        let m_tag <&LLVMValue> = null;
+        let m_absent <&LLVMValue> = null;
+        let m_pay <&LLVMValue> = null;
+        let m_einfo <&EnumInfo> = null;
+        let m_inner <string> = "";
+        let m_ckind <int> = 0;
+        let m_alen <int> = cast<int>(cg_strlen(m_ann));
+        if (m_alen > 1 && cg_str_eq(substr(m_ann, m_alen - 1, 1), "?")) {
+            m_inner = substr(m_ann, 0, m_alen - 1);
+        }
+        // A nullable enum carries no absence encoding on the stage (the
+        // C++ grammar cannot even spell `E?`): refuse by name before any
+        // representation dispatch guesses at it. Nullable structs,
+        // interfaces, and other pointer shapes keep the null-sentinel
+        // path below, like nullable strings do.
+        if (cg_strlen(m_inner) > cast<ulong>(0) && find_enum(ctx, m_inner) != null) {
+            cg_dprintf(2, "finc codegen refusal: match on a nullable '%s' is not lowered yet (no absence encoding is laid out)\n", m_inner);
+            refuse_and_poison(ctx);
+            llvm_build_unreachable(ctx.builder);
+            return null;
+        }
+        if (is_nullable_type(m_ann)) {
+            if (cg_is_tagged_pair(ctx, m_sty) || (m_sty == ctx.ptr_ty && is_nullable_type(m_ann))) {
+                let m_has <&LLVMValue> = llvm_build_extract_value(ctx.builder, m_scr, 1, "match.has");
+                m_absent = llvm_build_icmp(ctx.builder, llvm_int_eq(), m_has, llvm_const_int(ctx.i1_ty, 0, 0), "match.absent");
+                m_pay = llvm_build_extract_value(ctx.builder, m_scr, 0, "match.pay");
+            } else {
+                m_absent = llvm_build_icmp(ctx.builder, llvm_int_eq(), m_scr, llvm_const_null(ctx.ptr_ty), "match.absent");
+                m_pay = m_scr;
+            }
+            m_mode = 2;
+        } else {
+            if (cg_ann_names_enum(ctx, m_ann)) {
+                m_einfo = cg_ensure_enum_instance(ctx, m_ann);
+            }
+            if (m_einfo == null) {
+                m_einfo = find_enum_by_llvm_type(ctx, m_sty);
+            }
+            if (m_einfo != null) {
+                if (m_einfo.has_payload) {
+                    m_base = llvm_build_alloca(ctx.builder, m_einfo.llvm_type, "match.scr");
+                    llvm_build_store(ctx.builder, m_scr, m_base);
+                    let m_tagptr <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, m_einfo.llvm_type, m_base, 0, "match.tagp");
+                    m_tag = llvm_build_load2(ctx.builder, ctx.i32_ty, m_tagptr, "match.tag");
+                } else {
+                    m_tag = coerce_val(ctx, m_scr, ctx.i32_ty);
+                }
+                m_mode = 1;
+            } else {
+                if (cg_str_eq(cg_trim_spaces(m_ann), "string") || n.left.kind == ast_literal_string()) {
+                    m_ckind = 8;
+                } else if (cg_str_eq(cg_trim_spaces(m_ann), "bool") || m_sty == ctx.i1_ty || n.left.kind == ast_literal_bool()) {
+                    m_ckind = 16;
+                } else if (cg_is_int_llvm(ctx, m_sty) || n.left.kind == ast_literal_int()) {
+                    m_ckind = 4;
+                }
+                if (m_ckind == 0) {
+                    cg_dprintf(2, "finc codegen refusal: match on a non-enum non-nullable non-scalar scrutinee is not lowered (constant matches cover integers, strings, and bools)\n");
+                    refuse_and_poison(ctx);
+                    llvm_build_unreachable(ctx.builder);
+                    return null;
+                }
+                m_mode = 3;
+            }
+        }
+        let m_want <string> = "";
+        if (n.resolved_spelling != null) { m_want = n.resolved_spelling; }
+        let m_void <bool> = cg_str_eq(m_want, "void") || cg_str_eq(m_want, "noret");
+        if (!m_void && cg_strlen(m_want) == cast<ulong>(0)) {
+            cg_dprintf(2, "finc codegen refusal: match result type is unknown (checking stamps it; '--no-check' skips that)\n");
+            refuse_and_poison(ctx);
+            llvm_build_unreachable(ctx.builder);
+            return null;
+        }
+        let m_ty <&LLVMType> = null;
+        let m_slot <&LLVMValue> = null;
+        if (!m_void) {
+            m_ty = map_type(ctx, m_want);
+            m_slot = llvm_build_alloca(ctx.builder, m_ty, "match.res");
+        }
+        let m_end <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "match.end");
+        let m_arm <&AstNode> = n.right;
+        let m_closed <bool> = false;
+        while (m_arm != null && !ctx.poisoned) {
+            if (m_arm.int_val == 1) {
+                if (m_arm.right != null) {
+                    cg_dprintf(2, "finc codegen refusal: an unreachable match arm after '_' is not lowered\n");
+                    refuse_and_poison(ctx);
+                    break;
+                }
+                let w_start <int> = ctx.var_count;
+                let w_prev <int> = ctx.current_scope_depth;
+                ctx.current_scope_depth = w_start;
+                let m_wv <&LLVMValue> = lower_expr(ctx, m_arm.left);
+                ctx.current_scope_depth = w_prev;
+                if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+                    emit_scope_cleanups(ctx, w_start);
+                }
+                pop_scope_vars(ctx, w_start);
+                m_closed = true;
+                if (!ctx.poisoned && m_wv != null && !m_void) {
+                    let m_cw <&LLVMValue> = coerce_val(ctx, m_wv, m_ty);
+                    llvm_build_store(ctx.builder, m_cw, m_slot);
+                }
+                if (!ctx.poisoned && llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+                    llvm_build_br(ctx.builder, m_end);
+                }
+                break;
+            }
+            let m_take <&LLVMValue> = cg_match_arm_take(ctx, n, m_arm, m_mode, m_scr, m_tag, m_absent, m_einfo, m_ckind);
+            if (m_take == null) { break; }
+            let m_then <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "match.arm");
+            let m_next <&LLVMBasicBlock> = llvm_append_basic_block(ctx.fn_val, "match.next");
+            llvm_build_cond_br(ctx.builder, m_take, m_then, m_next);
+            llvm_position_builder(ctx.builder, m_then);
+            let a_start <int> = ctx.var_count;
+            let a_prev <int> = ctx.current_scope_depth;
+            ctx.current_scope_depth = a_start;
+            cg_match_bind(ctx, n, m_arm, m_mode, m_base, m_pay, m_einfo, m_inner);
+            let m_v <&LLVMValue> = null;
+            if (!ctx.poisoned) {
+                m_v = lower_expr(ctx, m_arm.left);
+            }
+            let m_exit <&LLVMBasicBlock> = llvm_get_insert_block(ctx.builder);
+            ctx.current_scope_depth = a_prev;
+            if (llvm_get_basic_block_terminator(m_exit) == null) {
+                emit_scope_cleanups(ctx, a_start);
+            }
+            pop_scope_vars(ctx, a_start);
+            if (!ctx.poisoned && m_v != null && !m_void) {
+                llvm_position_builder(ctx.builder, m_exit);
+                let m_cv <&LLVMValue> = coerce_val(ctx, m_v, m_ty);
+                llvm_build_store(ctx.builder, m_cv, m_slot);
+            }
+            if (!ctx.poisoned && llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+                llvm_build_br(ctx.builder, m_end);
+            }
+            llvm_position_builder(ctx.builder, m_next);
+            m_arm = m_arm.right;
+        }
+        if (ctx.poisoned) { return null; }
+        if (!m_closed) {
+            if (llvm_get_basic_block_terminator(llvm_get_insert_block(ctx.builder)) == null) {
+                llvm_build_unreachable(ctx.builder);
+            }
+        }
+        llvm_position_builder(ctx.builder, m_end);
+        if (m_void) { return null; }
+        return llvm_build_load2(ctx.builder, m_ty, m_slot, "match.res");
     }
     // Macro invocations and quote expressions have no LLVM lowering: the
     // expander owns them, and by codegen they must already be gone. Refuse

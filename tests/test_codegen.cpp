@@ -8051,6 +8051,33 @@ BACKEND_TEST(Soundness_Codegen, ANullableMixedStructReadsBack) {
     EXPECT_EQ(b.out, "an=1 bn=0 cn=1\na=0 c=0 an=0 cn=0\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, ANullableTypeSuffixRunsLikeANameSuffixOne) {
+    // `<T?>` lowers through the same NullableType the `?`-forms build: equal
+    // payloads compare equal, null arms read absent, and the spelling works in
+    // let, cast (from `any`), and generic-argument positions alike.
+    const Built b = build(std::string(kPrintf) +
+        "fun mk(s: string) <string> { return s; }\n"
+        "fun unbox(v: any) <string?> { return cast<string?>(v); }\n"
+        "struct Box<T> {\n"
+        "    pub v <T>,\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let a <string?> = mk(\"hi\");\n"
+        "    printf(\"%d %d\\n\", a == mk(\"hi\"), a == null);\n"
+        "    let c <string?> = null;\n"
+        "    printf(\"%d %d\\n\", c == null, a == c);\n"
+        "    let y <string?> = unbox(mk(\"yo\"));\n"
+        "    printf(\"%d %s\\n\", y == null, y?);\n"
+        "    let bx <Box<string?>> = new Box::<string?>{v: null};\n"
+        "    printf(\"%d\\n\", bx.v == null);\n"
+        "    bx.v = \"yo\";\n"
+        "    printf(\"%d %s\\n\", bx.v == null, bx.v?);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 0\n1 0\n0 yo\n1\n0 yo\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnImportedConcreteStructServesAsABase) {
     // ADR 0032's concrete half: a non-generic struct from a loaded module
     // registers its layout (never its methods or bodies) so a root struct can
