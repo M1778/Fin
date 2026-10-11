@@ -2849,6 +2849,17 @@ void SemanticAnalyzer::visit(CastExpression& node) {
     // failing now that an enum is a cast target.
     else if (isEnumType(sourceType) && dynamic_cast<const PrimitiveType*>(targetType.get())) valid = true;
     else if (dynamic_cast<const PrimitiveType*>(sourceType.get()) && isEnumType(targetType)) valid = true;
+    // A cast into a nullable. `null` casts to every `T?` -- consulted as the
+    // predicate (NullType::isCastableTo) rather than restated as a spelling --
+    // and a value casts to the nullable of anything it could cast or assign to,
+    // so `cast<string?>("hi")` and `cast<int?>(42)` are the explicit form of the
+    // widening Type::isAssignableTo already grants an assignment. Anything else
+    // (e.g. `cast<string?>(1)`) falls through to the refusal below, unchanged.
+    else if (auto* nullableTarget = targetType->as<NullableType>()) {
+        valid = sourceType->isCastableTo(*targetType) ||
+                sourceType->isCastableTo(*nullableTarget->inner) ||
+                sourceType->isAssignableTo(*nullableTarget->inner);
+    }
     // A string casts to a dynamic `[char]`: the NUL-terminated bytes with the
     // length measured at run time (strlen in codegen). Narrow on both sides --
     // bytes are chars, and a fixed extent has no static length to give -- so

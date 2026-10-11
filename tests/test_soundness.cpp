@@ -4616,6 +4616,23 @@ TEST(Soundness_Casts, AStructToAnIntIsStillRejected) {
         << stripAnsi(r.err);
 }
 
+TEST(Soundness_Casts, AValueCastsToItsNullable) {
+    // `null` casts to every `T?` (NullType::isCastableTo), and a value casts
+    // to the nullable of anything it could cast or assign to -- so the
+    // explicit `cast<T?>` form of an already-granted widening.
+    for (const char* code : {"fun main() <noret> { let s <string?> = cast<string?>(\"hi\"); }\n",
+                             "fun main() <noret> { let s <string?> = cast<string?>(null); }\n",
+                             "fun main() <noret> { let i <int?> = cast<int?>(42); }\n"}) {
+        const FincRun r = compile(code);
+        EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << code << stripAnsi(r.err);
+    }
+    // And mismatches still refuse: `int` is neither `string` nor nullable-string.
+    const FincRun bad = compile("fun main() <noret> { let s <string?> = cast<string?>(1); }\n");
+    EXPECT_NE(bad.exitCode, 0);
+    EXPECT_NE(stripAnsi(bad.err).find("Invalid cast"), std::string::npos)
+        << stripAnsi(bad.err);
+}
+
 TEST(Soundness_Casts, ACastToOrFromADynamicTypeIsAllowed) {
     // Casting out of a dynamic type is what a dynamic type is for, and the corpus
     // writes it twice. nullifier.fin:12 declares `pub static fun unpack(v: any) <T>`

@@ -16969,3 +16969,16 @@ BACKEND_TEST(Soundness_Codegen, IntMapLookupStillWorks) {
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "70 80\n") << b.why();
 }
+
+BACKEND_TEST(Soundness_Codegen, ANullableCastRunsItsValue) {
+    // `cast<string?>` lowers the value like the plain cast; the nullable
+    // wrapper is a check-time spelling, not a runtime conversion.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let s <string?> = cast<string?>(\"hi\");\n"
+        "    printf(\"%s\\n\", s);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "hi\n") << b.why();
+}
