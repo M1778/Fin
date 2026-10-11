@@ -8629,6 +8629,31 @@ TEST(Soundness_Enums, AnEnumeratorReadThroughItsTypeIsTypedAsTheEnum) {
         << stripAnsi(wrong.err);
 }
 
+TEST(Soundness_Enums, MatchWithoutWildcardRefusesNamingUncoveredMembers) {
+    // ADR 0050: exhaustiveness is a static refusal naming the uncovered member(s).
+    const FincRun r = compile("enum E { A, B }\n"
+                              "fun main() <noret> {\n"
+                              "    let x <E> = A;\n"
+                              "    let y <int> = match (x) { A => 1 };\n"
+                              "}\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("B"), std::string::npos)
+        << "the refusal must name the uncovered member:\n" << err;
+}
+
+TEST(Soundness_Enums, MatchWithDuplicateMemberArmRefuses) {
+    // ADR 0050: a second arm for an already-covered member is dead and refuses.
+    const FincRun r = compile("enum E { A, B }\n"
+                              "fun main() <noret> {\n"
+                              "    let x <E> = A;\n"
+                              "    let y <int> = match (x) { A => 1, A => 2, _ => 3 };\n"
+                              "}\n");
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    const std::string err = messagesOnly(stripAnsi(r.err));
+    EXPECT_NE(err.find("duplicate"), std::string::npos) << err;
+}
+
 TEST(Soundness_Enums, AnUnknownEnumeratorIsReported) {
     // The lookup has to be a lookup. Reading a member the enum does not declare is
     // the mistake this whole path exists to catch.

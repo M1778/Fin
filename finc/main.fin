@@ -113,15 +113,15 @@ pub fun run_finc(args: [string], count: int) <int> {
     }
 
     let res <int> = compile_source_file(
-        input_file,
-        out_file,
-        is_compile_only,
-        dump_tokens,
-        dump_ast,
-        emit_c,
-        no_check,
-        fin_guard,
-        opt_level
+      input_file,
+      out_file,
+      is_compile_only,
+      dump_tokens,
+      dump_ast,
+      emit_c,
+      no_check,
+      fin_guard,
+      opt_level
     );
 
     free_arg_parser(p);

@@ -11,7 +11,7 @@ type Number = int | uint | float | short | long | ushort | ulong | double;
 fun sort<T: Number>(array: &[T]) <noret> { // sorts an array of numbers (passed by reference so array is not copied)
     if (array.length <= 1) {
         return;
-      }
+    }
 
     let temp <T>;
     for (i:int = 0; i < array.length - 1; i++) {
@@ -20,17 +20,16 @@ fun sort<T: Number>(array: &[T]) <noret> { // sorts an array of numbers (passed 
                 temp = array[i];
                 array[i] = array[j];
                 array[j] = temp;
-              }
-          }
-      }
-  }
+            }
+        }
+    }
+}
 
 fun main() <noret> {
     let myarr <[uint]> = [7,3,4,7,12,4,6,9,0];
-
 
     sort(&myarr); // if i don't pass by reference compiler will give an error and help me fix this
 
     blame myarr[0] == 0; // assertion: ensure array is sorted
 
-  }
+}

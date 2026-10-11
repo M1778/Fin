@@ -193,6 +193,9 @@ void ASTPrinter::dispatch(const ASTNode* node, std::string currentPrefix, std::s
     else if (auto* n = dynamic_cast<const TernaryOp*>(node)) {
         printTernary(n, currentPrefix, false);
     }
+    else if (auto* n = dynamic_cast<const MatchExpr*>(node)) {
+        printMatch(n, currentPrefix, false);
+    }
     else if (auto* n = dynamic_cast<const FunctionTypeNode*>(node)) {
         printFunctionType(n, currentPrefix, false);
     }
@@ -600,6 +603,16 @@ void ASTPrinter::printTernary(const TernaryOp* node, std::string prefix, bool is
     printNode(node->condition.get(), prefix + "    ", false);
     printNode(node->true_expr.get(), prefix + "    ", false);
     printNode(node->false_expr.get(), prefix + "    ", true);
+}
+
+void ASTPrinter::printMatch(const MatchExpr* node, std::string prefix, bool isLast) {
+    fmt::print("{}Match\n", prefix);
+    printNode(node->scrutinee.get(), prefix + "    ", node->arms.empty());
+    for (size_t i = 0; i < node->arms.size(); ++i) {
+        const auto& arm = node->arms[i];
+        fmt::print("{}    Arm {}\n", prefix, arm.is_wildcard ? "_" : arm.member);
+        printNode(arm.body.get(), prefix + "        ", true);
+    }
 }
 
 void ASTPrinter::printFunctionType(const FunctionTypeNode* node, std::string prefix, bool isLast) {

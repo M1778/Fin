@@ -3,57 +3,57 @@
 
 import {
     AstNode,
-    ast_program, ast_fun_decl, ast_struct_decl, ast_var_decl, ast_param,
-    ast_block, ast_if_stmt, ast_while_stmt, ast_for_stmt, ast_return_stmt, ast_blame_stmt,
-    ast_expr_stmt, ast_break_stmt, ast_continue_stmt,
-    ast_binary_expr, ast_unary_expr, ast_call_expr,
-    ast_index_expr, ast_member_access,
-    ast_ident, ast_literal_int, ast_literal_string, ast_literal_bool,
-    ast_enum_decl, ast_interface_decl, ast_prototype_literal, ast_quote_expr
+      ast_program, ast_fun_decl, ast_struct_decl, ast_var_decl, ast_param,
+      ast_block, ast_if_stmt, ast_while_stmt, ast_for_stmt, ast_return_stmt, ast_blame_stmt,
+      ast_expr_stmt, ast_break_stmt, ast_continue_stmt,
+      ast_binary_expr, ast_unary_expr, ast_call_expr,
+      ast_index_expr, ast_member_access,
+      ast_ident, ast_literal_int, ast_literal_string, ast_literal_bool,
+      ast_enum_decl, ast_interface_decl, ast_prototype_literal, ast_quote_expr
 } from ast::std;
 
 import {
     LLVMModule, LLVMBuilder, LLVMValue, LLVMType, LLVMBasicBlock,
-    LLVMTarget, LLVMTargetMachine, LLVMTargetSlot, LLVMErrSlot,
-    LLVMTypeArgs, LLVMValueArgs, LLVMIndices, LLVMBlockArgs,
-    LLVMContext,
-    llvm_module_create, llvm_dispose_module, llvm_dump_module, llvm_write_bitcode_to_file,
-    llvm_get_module_context, llvm_get_global_context,
-    llvm_struct_create_named, llvm_struct_set_body, llvm_struct_type, llvm_array_type, llvm_array_type2,
-    llvm_add_global, llvm_get_named_global, llvm_set_initializer, llvm_set_global_constant,
-    llvm_const_array, llvm_const_pointer_null, llvm_const_bitcast, llvm_const_int_to_ptr,
-    llvm_count_struct_element_types, llvm_struct_get_type_at_index,
-    llvm_i32_type, llvm_i64_type, llvm_i8_type, llvm_i1_type, llvm_i16_type, llvm_void_type, llvm_pointer_type,
-    llvm_float_type, llvm_double_type, llvm_const_real_of_string,
-    llvm_build_fadd, llvm_build_fsub, llvm_build_fmul, llvm_build_fdiv, llvm_build_frem,
-    llvm_build_fneg, llvm_build_fcmp,
-    llvm_build_si_to_fp, llvm_build_fp_to_si, llvm_build_fp_ext, llvm_build_fp_trunc,
-    llvm_size_of,
-    llvm_function_type, llvm_add_function, llvm_get_named_function, llvm_append_basic_block,
-    llvm_get_param, llvm_create_builder, llvm_dispose_builder, llvm_position_builder,
-    llvm_get_insert_block, llvm_get_basic_block_terminator,
-    llvm_const_int, llvm_const_string, llvm_const_null, llvm_get_undef, llvm_build_global_string_ptr,
-    llvm_const_int_of_string,
-    llvm_build_ret, llvm_build_ret_void,
-    llvm_build_add, llvm_build_sub, llvm_build_mul, llvm_build_sdiv, llvm_build_srem,
-    llvm_build_udiv, llvm_build_urem,
-    llvm_build_and, llvm_build_or, llvm_build_xor, llvm_build_not, llvm_build_neg,
-    llvm_build_shl, llvm_build_ashr, llvm_build_lshr,
-    llvm_build_icmp, llvm_build_alloca, llvm_build_load2, llvm_build_store,
-    llvm_build_br, llvm_build_cond_br, llvm_build_unreachable, llvm_build_call2,
-    llvm_build_phi, llvm_add_incoming, llvm_build_select,
-    llvm_build_gep2, llvm_build_struct_gep2,
-    llvm_build_sext, llvm_build_zext,
-    llvm_build_malloc, llvm_build_array_malloc, llvm_build_free, llvm_build_trunc, llvm_build_bitcast,
-    llvm_build_switch, llvm_add_case,
-    llvm_build_extract_value, llvm_build_insert_value,
-    llvm_build_is_null, llvm_build_is_not_null,
-    llvm_int_eq, llvm_int_ne, llvm_int_ugt, llvm_int_uge, llvm_int_ult, llvm_int_ule,
-    llvm_int_sgt, llvm_int_sge, llvm_int_slt, llvm_int_sle,
-    llvm_real_oeq, llvm_real_one, llvm_real_ogt, llvm_real_oge, llvm_real_olt, llvm_real_ole,
-    llvm_global_get_value_type, llvm_type_of,
-    init_native_target, emit_module_to_object, llvm_verify_module, llvm_verify_function,
-    llvm_get_return_type, llvm_get_param_types, llvm_build_ptr_to_int, llvm_build_int_to_ptr
+      LLVMTarget, LLVMTargetMachine, LLVMTargetSlot, LLVMErrSlot,
+      LLVMTypeArgs, LLVMValueArgs, LLVMIndices, LLVMBlockArgs,
+      LLVMContext,
+      llvm_module_create, llvm_dispose_module, llvm_dump_module, llvm_write_bitcode_to_file,
+      llvm_get_module_context, llvm_get_global_context,
+      llvm_struct_create_named, llvm_struct_set_body, llvm_struct_type, llvm_array_type, llvm_array_type2,
+      llvm_add_global, llvm_get_named_global, llvm_set_initializer, llvm_set_global_constant,
+      llvm_const_array, llvm_const_pointer_null, llvm_const_bitcast, llvm_const_int_to_ptr,
+      llvm_count_struct_element_types, llvm_struct_get_type_at_index,
+      llvm_i32_type, llvm_i64_type, llvm_i8_type, llvm_i1_type, llvm_i16_type, llvm_void_type, llvm_pointer_type,
+      llvm_float_type, llvm_double_type, llvm_const_real_of_string,
+      llvm_build_fadd, llvm_build_fsub, llvm_build_fmul, llvm_build_fdiv, llvm_build_frem,
+      llvm_build_fneg, llvm_build_fcmp,
+      llvm_build_si_to_fp, llvm_build_fp_to_si, llvm_build_fp_ext, llvm_build_fp_trunc,
+      llvm_size_of,
+      llvm_function_type, llvm_add_function, llvm_get_named_function, llvm_append_basic_block,
+      llvm_get_param, llvm_create_builder, llvm_dispose_builder, llvm_position_builder,
+      llvm_get_insert_block, llvm_get_basic_block_terminator,
+      llvm_const_int, llvm_const_string, llvm_const_null, llvm_get_undef, llvm_build_global_string_ptr,
+      llvm_const_int_of_string,
+      llvm_build_ret, llvm_build_ret_void,
+      llvm_build_add, llvm_build_sub, llvm_build_mul, llvm_build_sdiv, llvm_build_srem,
+      llvm_build_udiv, llvm_build_urem,
+      llvm_build_and, llvm_build_or, llvm_build_xor, llvm_build_not, llvm_build_neg,
+      llvm_build_shl, llvm_build_ashr, llvm_build_lshr,
+      llvm_build_icmp, llvm_build_alloca, llvm_build_load2, llvm_build_store,
+      llvm_build_br, llvm_build_cond_br, llvm_build_unreachable, llvm_build_call2,
+      llvm_build_phi, llvm_add_incoming, llvm_build_select,
+      llvm_build_gep2, llvm_build_struct_gep2,
+      llvm_build_sext, llvm_build_zext,
+      llvm_build_malloc, llvm_build_array_malloc, llvm_build_free, llvm_build_trunc, llvm_build_bitcast,
+      llvm_build_switch, llvm_add_case,
+      llvm_build_extract_value, llvm_build_insert_value,
+      llvm_build_is_null, llvm_build_is_not_null,
+      llvm_int_eq, llvm_int_ne, llvm_int_ugt, llvm_int_uge, llvm_int_ult, llvm_int_ule,
+      llvm_int_sgt, llvm_int_sge, llvm_int_slt, llvm_int_sle,
+      llvm_real_oeq, llvm_real_one, llvm_real_ogt, llvm_real_oge, llvm_real_olt, llvm_real_ole,
+      llvm_global_get_value_type, llvm_type_of,
+      init_native_target, emit_module_to_object, llvm_verify_module, llvm_verify_function,
+      llvm_get_return_type, llvm_get_param_types, llvm_build_ptr_to_int, llvm_build_int_to_ptr
 } from finc.llvm;
 
 import { substr } from strings::std;
@@ -944,9 +944,9 @@ fun is_generic_method(m: &AstNode) <bool> {
 // rather than a type. Shared by the body scan below.
 fun cg_is_type_param(s: string) <bool> {
     if (cg_str_eq(s, "T") || cg_str_eq(s, "E") || cg_str_eq(s, "U") ||
-        cg_str_eq(s, "K") || cg_str_eq(s, "V") || cg_str_eq(s, "X")) {
+      cg_str_eq(s, "K") || cg_str_eq(s, "V") || cg_str_eq(s, "X")) {
         return true;
-    }
+      }
     return false;
 }
 
@@ -964,10 +964,10 @@ fun cg_gen_text_contains(gen_text: string, want: string) <bool> {
     while (ti < tlen) {
         let ch <string> = substr(t, ti, 1);
         if (cg_str_eq(ch, "<") || cg_str_eq(ch, ">") || cg_str_eq(ch, "[") || cg_str_eq(ch, "]") ||
-            cg_str_eq(ch, "&") || cg_str_eq(ch, "*") || cg_str_eq(ch, "?") || cg_str_eq(ch, ":") ||
-            cg_str_eq(ch, ",") || cg_str_eq(ch, " ") || cg_str_eq(ch, "(") || cg_str_eq(ch, ")")) {
+          cg_str_eq(ch, "&") || cg_str_eq(ch, "*") || cg_str_eq(ch, "?") || cg_str_eq(ch, ":") ||
+          cg_str_eq(ch, ",") || cg_str_eq(ch, " ") || cg_str_eq(ch, "(") || cg_str_eq(ch, ")")) {
             return false;
-        }
+          }
         ti = ti + 1;
     }
     let pnames <[string]> = new [string, 64]{};
@@ -1068,19 +1068,19 @@ fun cg_ann_is_erased_param(ctx: &FnContext, s: string) <bool> {
     }
     if (cg_strlen(t) == cast<ulong>(0)) { return false; }
     if (cg_str_contains(t, "&") || cg_str_contains(t, "*") || cg_str_contains(t, "?") ||
-        cg_str_contains(t, "[") || cg_str_contains(t, "]") || cg_str_contains(t, "<") ||
-        cg_str_contains(t, ">") || cg_str_contains(t, "(") || cg_str_contains(t, ")") ||
-        cg_str_contains(t, ",") || cg_str_contains(t, " ") || cg_str_contains(t, ".") ||
-        cg_str_contains(t, "@") || cg_str_contains(t, "$")) {
+      cg_str_contains(t, "[") || cg_str_contains(t, "]") || cg_str_contains(t, "<") ||
+      cg_str_contains(t, ">") || cg_str_contains(t, "(") || cg_str_contains(t, ")") ||
+      cg_str_contains(t, ",") || cg_str_contains(t, " ") || cg_str_contains(t, ".") ||
+      cg_str_contains(t, "@") || cg_str_contains(t, "$")) {
         return false;
-    }
+      }
     if (cg_str_contains("0123456789", substr(t, 0, 1))) { return false; }
     if (cg_is_prim_spelling(t)) { return false; }
     if (cg_str_eq(t, "auto") || cg_str_eq(t, "void") || cg_str_eq(t, "noret") ||
-        cg_str_eq(t, "Self") || cg_str_eq(t, "self") || cg_str_eq(t, "null") ||
-        cg_str_eq(t, "true") || cg_str_eq(t, "false")) {
+      cg_str_eq(t, "Self") || cg_str_eq(t, "self") || cg_str_eq(t, "null") ||
+      cg_str_eq(t, "true") || cg_str_eq(t, "false")) {
         return false;
-    }
+      }
     if (find_struct(ctx, t) != null) { return false; }
     if (find_enum(ctx, t) != null) { return false; }
     if (find_interface(ctx, t) != null) { return false; }
@@ -1840,556 +1840,556 @@ fun cg_is_int_llvm(ctx: &FnContext, ty: &LLVMType) <bool> {
     return false;
 }
 
- // Wave-5 slices 1-2: whether `attr_text` carries `protocol(slot)`.
- // Same segment parse as the checker's claim registry (`;`-separated, name
- // up to `(`/`=`, argument inside parens or after `=`), so the gate agrees
- // with the checker about what a claimant is. Only well-formed programs
- // reach codegen, so a match is the checker's single valid claimant.
- fun cg_attr_has_protocol_slot(attr: string, slot: string) <bool> {
-     if (attr == null || cg_strlen(attr) == cast<ulong>(0)) { return false; }
-     let len <int> = cast<int>(cg_strlen(attr));
-     let start <int> = 0;
-     let i <int> = 0;
-     while (i <= len) {
-         if (i == len || cg_str_eq(substr(attr, i, 1), ";")) {
-             let seg <string> = substr(attr, start, i - start);
-             let slen <int> = cast<int>(cg_strlen(seg));
-             let ni <int> = 0;
-             while (ni < slen) {
-                 let nc <string> = substr(seg, ni, 1);
-                 if (cg_str_eq(nc, "(") || cg_str_eq(nc, "=")) { break; }
-                 ni = ni + 1;
-             }
-             if (cg_str_eq(substr(seg, 0, ni), "protocol") && ni < slen) {
-                 let arg <string> = "";
-                 if (cg_str_eq(substr(seg, ni, 1), "=")) {
-                     arg = substr(seg, ni + 1, slen - ni - 1);
-                     let alen <int> = cast<int>(cg_strlen(arg));
-                     if (alen >= 2 && cg_str_eq(substr(arg, 0, 1), "\"") &&
-                         cg_str_eq(substr(arg, alen - 1, 1), "\"")) {
-                         arg = substr(arg, 1, alen - 2);
-                     }
-                 } else {
-                     let ai <int> = ni + 1;
-                     let depth <int> = 1;
-                     let astart <int> = ai;
-                     while (ai < slen && depth > 0) {
-                         if (cg_str_eq(substr(seg, ai, 1), "(")) { depth = depth + 1; }
-                         else if (cg_str_eq(substr(seg, ai, 1), ")")) { depth = depth - 1; }
-                         ai = ai + 1;
-                     }
-                     arg = substr(seg, astart, ai - astart - 1);
-                 }
-                 if (cg_str_eq(arg, slot)) { return true; }
-             }
-             start = i + 1;
-         }
-         i = i + 1;
-     }
-     return false;
- }
+// Wave-5 slices 1-2: whether `attr_text` carries `protocol(slot)`.
+// Same segment parse as the checker's claim registry (`;`-separated, name
+// up to `(`/`=`, argument inside parens or after `=`), so the gate agrees
+// with the checker about what a claimant is. Only well-formed programs
+// reach codegen, so a match is the checker's single valid claimant.
+fun cg_attr_has_protocol_slot(attr: string, slot: string) <bool> {
+    if (attr == null || cg_strlen(attr) == cast<ulong>(0)) { return false; }
+    let len <int> = cast<int>(cg_strlen(attr));
+    let start <int> = 0;
+    let i <int> = 0;
+    while (i <= len) {
+        if (i == len || cg_str_eq(substr(attr, i, 1), ";")) {
+            let seg <string> = substr(attr, start, i - start);
+            let slen <int> = cast<int>(cg_strlen(seg));
+            let ni <int> = 0;
+            while (ni < slen) {
+                let nc <string> = substr(seg, ni, 1);
+                if (cg_str_eq(nc, "(") || cg_str_eq(nc, "=")) { break; }
+                ni = ni + 1;
+            }
+            if (cg_str_eq(substr(seg, 0, ni), "protocol") && ni < slen) {
+                let arg <string> = "";
+                if (cg_str_eq(substr(seg, ni, 1), "=")) {
+                    arg = substr(seg, ni + 1, slen - ni - 1);
+                    let alen <int> = cast<int>(cg_strlen(arg));
+                    if (alen >= 2 && cg_str_eq(substr(arg, 0, 1), "\"") &&
+                      cg_str_eq(substr(arg, alen - 1, 1), "\"")) {
+                        arg = substr(arg, 1, alen - 2);
+                      }
+                } else {
+                    let ai <int> = ni + 1;
+                    let depth <int> = 1;
+                    let astart <int> = ai;
+                    while (ai < slen && depth > 0) {
+                        if (cg_str_eq(substr(seg, ai, 1), "(")) { depth = depth + 1; }
+                        else if (cg_str_eq(substr(seg, ai, 1), ")")) { depth = depth - 1; }
+                        ai = ai + 1;
+                    }
+                    arg = substr(seg, astart, ai - astart - 1);
+                }
+                if (cg_str_eq(arg, slot)) { return true; }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return false;
+}
 
- fun cg_attr_has_move_protocol(attr: string) <bool> {
-     return cg_attr_has_protocol_slot(attr, "move_or_copy");
- }
+fun cg_attr_has_move_protocol(attr: string) <bool> {
+    return cg_attr_has_protocol_slot(attr, "move_or_copy");
+}
 
- // Wave-5 slice 4: `#[slaveof]` segment readers. Attribute text is
- // `;`-joined `name(args)` segments (parser.fin), the same shape the
- // checker's api_attr_* triple parses; only what the tie needs.
- fun cg_attr_seg_count(attr: string, cap: int) <int> {
-     if (attr == null || cg_strlen(attr) == cast<ulong>(0)) { return 0; }
-     let n <int> = 1;
-     let len <int> = cast<int>(cg_strlen(attr));
-     let i <int> = 0;
-     while (i < len) {
-         if (cg_str_eq(substr(attr, i, 1), ";")) { n = n + 1; }
-         i = i + 1;
-     }
-     if (n > cap) { n = cap; }
-     return n;
- }
+// Wave-5 slice 4: `#[slaveof]` segment readers. Attribute text is
+// `;`-joined `name(args)` segments (parser.fin), the same shape the
+// checker's api_attr_* triple parses; only what the tie needs.
+fun cg_attr_seg_count(attr: string, cap: int) <int> {
+    if (attr == null || cg_strlen(attr) == cast<ulong>(0)) { return 0; }
+    let n <int> = 1;
+    let len <int> = cast<int>(cg_strlen(attr));
+    let i <int> = 0;
+    while (i < len) {
+        if (cg_str_eq(substr(attr, i, 1), ";")) { n = n + 1; }
+        i = i + 1;
+    }
+    if (n > cap) { n = cap; }
+    return n;
+}
 
- fun cg_attr_seg(attr: string, idx: int) <string> {
-     if (attr == null) { return ""; }
-     let len <int> = cast<int>(cg_strlen(attr));
-     let cur <int> = 0;
-     let start <int> = 0;
-     let i <int> = 0;
-     while (i <= len) {
-         if (i == len || cg_str_eq(substr(attr, i, 1), ";")) {
-             if (cur == idx) { return substr(attr, start, i - start); }
-             cur = cur + 1;
-             start = i + 1;
-         }
-         i = i + 1;
-     }
-     return "";
- }
+fun cg_attr_seg(attr: string, idx: int) <string> {
+    if (attr == null) { return ""; }
+    let len <int> = cast<int>(cg_strlen(attr));
+    let cur <int> = 0;
+    let start <int> = 0;
+    let i <int> = 0;
+    while (i <= len) {
+        if (i == len || cg_str_eq(substr(attr, i, 1), ";")) {
+            if (cur == idx) { return substr(attr, start, i - start); }
+            cur = cur + 1;
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return "";
+}
 
- fun cg_attr_seg_name(seg: string) <string> {
-     if (seg == null) { return ""; }
-     let len <int> = cast<int>(cg_strlen(seg));
-     let i <int> = 0;
-     while (i < len) {
-         let c <string> = substr(seg, i, 1);
-         if (cg_str_eq(c, "(") || cg_str_eq(c, "=")) { return substr(seg, 0, i); }
-         i = i + 1;
-     }
-     return seg;
- }
+fun cg_attr_seg_name(seg: string) <string> {
+    if (seg == null) { return ""; }
+    let len <int> = cast<int>(cg_strlen(seg));
+    let i <int> = 0;
+    while (i < len) {
+        let c <string> = substr(seg, i, 1);
+        if (cg_str_eq(c, "(") || cg_str_eq(c, "=")) { return substr(seg, 0, i); }
+        i = i + 1;
+    }
+    return seg;
+}
 
- fun cg_attr_seg_arg(seg: string) <string> {
-     if (seg == null) { return ""; }
-     let len <int> = cast<int>(cg_strlen(seg));
-     let i <int> = 0;
-     while (i < len) {
-         if (cg_str_eq(substr(seg, i, 1), "(")) {
-             let start <int> = i + 1;
-             let depth <int> = 1;
-             let j <int> = start;
-             while (j < len && depth > 0) {
-                 if (cg_str_eq(substr(seg, j, 1), "(")) { depth = depth + 1; }
-                 else if (cg_str_eq(substr(seg, j, 1), ")")) { depth = depth - 1; }
-                 j = j + 1;
-             }
-             return substr(seg, start, j - start - 1);
-         }
-         i = i + 1;
-     }
-     return "";
- }
+fun cg_attr_seg_arg(seg: string) <string> {
+    if (seg == null) { return ""; }
+    let len <int> = cast<int>(cg_strlen(seg));
+    let i <int> = 0;
+    while (i < len) {
+        if (cg_str_eq(substr(seg, i, 1), "(")) {
+            let start <int> = i + 1;
+            let depth <int> = 1;
+            let j <int> = start;
+            while (j < len && depth > 0) {
+                if (cg_str_eq(substr(seg, j, 1), "(")) { depth = depth + 1; }
+                else if (cg_str_eq(substr(seg, j, 1), ")")) { depth = depth - 1; }
+                j = j + 1;
+            }
+            return substr(seg, start, j - start - 1);
+        }
+        i = i + 1;
+    }
+    return "";
+}
 
- // Wave-5 slice 4: the `#[slaveof]` tie off a local declaration -- how this
- // binding's storage lifetime ends (C++ resolveSlaveof). Returns 0 (none;
- // no tie, or a same-scope tie, which dies with its own scope anyway), 1
- // (pinned: `#[slaveof($Fin)]`, or tied to a global, which outlives every
- // frame), or 2 (deferred to the master's scope exit), writing the master's
- // block-start var index into master_out[0] for 2 only. Returns -1 having
- // poisoned when the tie cannot be lowered. The checker validated the
- // shape and the referent, so with semantics on this only recognises the
- // two spellings; what cannot be lowered here is refused rather than
- // dropped (backend invariant).
- fun cg_resolve_slaveof(ctx: &FnContext, var_name: string, attr_text: string, cur_scope: int, master_out: [int]) <int> {
-     master_out[0] = 0;
-     let n <int> = cg_attr_seg_count(attr_text, 16);
-     let ties <int> = 0;
-     let arg <string> = "";
-     let si <int> = 0;
-     while (si < n) {
-         let seg <string> = cg_attr_seg(attr_text, si);
-         if (cg_str_eq(cg_attr_seg_name(seg), "slaveof")) {
-             ties = ties + 1;
-             if (ties == 1) { arg = cg_attr_seg_arg(seg); }
-         }
-         si = si + 1;
-     }
-     if (ties == 0) { return 0; }
-     if (ties > 1) {
-         cg_dprintf(2, "finc codegen refusal: two '#[slaveof]' attributes on the variable '%s' are not lowered\n", var_name);
-         refuse_and_poison(ctx);
-         return -1;
-     }
-     if (arg == null || cg_strlen(arg) == cast<ulong>(0)) {
-         cg_dprintf(2, "finc codegen refusal: the attribute 'slaveof' on the variable '%s' names no referent\n", var_name);
-         refuse_and_poison(ctx);
-         return -1;
-     }
-     if (cg_str_eq(arg, "$Fin")) { return 1; }
-     if (cg_str_eq(substr(arg, 0, 1), "$")) {
-         cg_dprintf(2, "finc codegen refusal: the unknown lifetime '%s' in '#[slaveof]' on the variable '%s' is not lowered\n", arg, var_name);
-         refuse_and_poison(ctx);
-         return -1;
-     }
-     // Innermost out, like the C++ scope chain: the binding itself is not
-     // there yet (the checker resolves before defining, so the name cannot
-     // meet itself), and names are unique in this table.
-     let i <int> = ctx.var_count - 1;
-     while (i >= 0) {
-         let v <&LocalVar> = ctx.vars[i];
-         if (v != null && !cg_str_eq(v.name, var_name) && cg_str_eq(v.name, arg)) {
-             if (v.scope_depth == cur_scope) { return 0; }
-             // A tie across a loop body or branch arm would drain where the
-             // declaration's block does not dominate: across a back-edge or
-             // a join the slot may never have been constructed. Refused
-             // naming the tie rather than lowered into invalid IR.
-             if (v.tie_region != ctx.region_depth) {
-                 cg_dprintf(2, "finc codegen refusal: the '#[slaveof(%s)]' on the variable '%s', declared inside a loop body or branch arm the tie cannot cross, is not lowered\n", arg, var_name);
-                 refuse_and_poison(ctx);
-                 return -1;
-             }
-             master_out[0] = v.scope_depth;
-             return 2;
-         }
-         i = i - 1;
-     }
-     // A global outlives every frame, so a tie to one pins like `$Fin`.
-     if (llvm_get_named_global(ctx.module, arg) != null) { return 1; }
-     cg_dprintf(2, "finc codegen refusal: the '#[slaveof(%s)]' on the variable '%s', which has no home here, is not lowered\n", arg, var_name);
-     refuse_and_poison(ctx);
-     return -1;
- }
+// Wave-5 slice 4: the `#[slaveof]` tie off a local declaration -- how this
+// binding's storage lifetime ends (C++ resolveSlaveof). Returns 0 (none;
+// no tie, or a same-scope tie, which dies with its own scope anyway), 1
+// (pinned: `#[slaveof($Fin)]`, or tied to a global, which outlives every
+// frame), or 2 (deferred to the master's scope exit), writing the master's
+// block-start var index into master_out[0] for 2 only. Returns -1 having
+// poisoned when the tie cannot be lowered. The checker validated the
+// shape and the referent, so with semantics on this only recognises the
+// two spellings; what cannot be lowered here is refused rather than
+// dropped (backend invariant).
+fun cg_resolve_slaveof(ctx: &FnContext, var_name: string, attr_text: string, cur_scope: int, master_out: [int]) <int> {
+    master_out[0] = 0;
+    let n <int> = cg_attr_seg_count(attr_text, 16);
+    let ties <int> = 0;
+    let arg <string> = "";
+    let si <int> = 0;
+    while (si < n) {
+        let seg <string> = cg_attr_seg(attr_text, si);
+        if (cg_str_eq(cg_attr_seg_name(seg), "slaveof")) {
+            ties = ties + 1;
+            if (ties == 1) { arg = cg_attr_seg_arg(seg); }
+        }
+        si = si + 1;
+    }
+    if (ties == 0) { return 0; }
+    if (ties > 1) {
+        cg_dprintf(2, "finc codegen refusal: two '#[slaveof]' attributes on the variable '%s' are not lowered\n", var_name);
+        refuse_and_poison(ctx);
+        return -1;
+    }
+    if (arg == null || cg_strlen(arg) == cast<ulong>(0)) {
+        cg_dprintf(2, "finc codegen refusal: the attribute 'slaveof' on the variable '%s' names no referent\n", var_name);
+        refuse_and_poison(ctx);
+        return -1;
+    }
+    if (cg_str_eq(arg, "$Fin")) { return 1; }
+    if (cg_str_eq(substr(arg, 0, 1), "$")) {
+        cg_dprintf(2, "finc codegen refusal: the unknown lifetime '%s' in '#[slaveof]' on the variable '%s' is not lowered\n", arg, var_name);
+        refuse_and_poison(ctx);
+        return -1;
+    }
+    // Innermost out, like the C++ scope chain: the binding itself is not
+    // there yet (the checker resolves before defining, so the name cannot
+    // meet itself), and names are unique in this table.
+    let i <int> = ctx.var_count - 1;
+    while (i >= 0) {
+        let v <&LocalVar> = ctx.vars[i];
+        if (v != null && !cg_str_eq(v.name, var_name) && cg_str_eq(v.name, arg)) {
+            if (v.scope_depth == cur_scope) { return 0; }
+            // A tie across a loop body or branch arm would drain where the
+            // declaration's block does not dominate: across a back-edge or
+            // a join the slot may never have been constructed. Refused
+            // naming the tie rather than lowered into invalid IR.
+            if (v.tie_region != ctx.region_depth) {
+                cg_dprintf(2, "finc codegen refusal: the '#[slaveof(%s)]' on the variable '%s', declared inside a loop body or branch arm the tie cannot cross, is not lowered\n", arg, var_name);
+                refuse_and_poison(ctx);
+                return -1;
+            }
+            master_out[0] = v.scope_depth;
+            return 2;
+        }
+        i = i - 1;
+    }
+    // A global outlives every frame, so a tie to one pins like `$Fin`.
+    if (llvm_get_named_global(ctx.module, arg) != null) { return 1; }
+    cg_dprintf(2, "finc codegen refusal: the '#[slaveof(%s)]' on the variable '%s', which has no home here, is not lowered\n", arg, var_name);
+    refuse_and_poison(ctx);
+    return -1;
+}
 
- // Wave-5 slice 2: the top-level `@special` claiming `destructor`, if
- // any. Top level only, mirroring the C++ backend's scan (root and loaded
- // modules, no members, no nested bodies). Only well-formed programs reach
- // codegen, so a match is the checker's single valid claimant.
- fun cg_find_dtor_claimant(root: &AstNode) <&AstNode> {
-     if (root == null) { return null; }
-     let decl <&AstNode> = root.left;
-     while (decl != null) {
-         if (decl.kind == ast_fun_decl() && decl.int_val == 2) {
-             if (cg_attr_has_protocol_slot(decl.attr_text, "destructor")) { return decl; }
-         }
-         decl = decl.right;
-     }
-     return null;
- }
+// Wave-5 slice 2: the top-level `@special` claiming `destructor`, if
+// any. Top level only, mirroring the C++ backend's scan (root and loaded
+// modules, no members, no nested bodies). Only well-formed programs reach
+// codegen, so a match is the checker's single valid claimant.
+fun cg_find_dtor_claimant(root: &AstNode) <&AstNode> {
+    if (root == null) { return null; }
+    let decl <&AstNode> = root.left;
+    while (decl != null) {
+        if (decl.kind == ast_fun_decl() && decl.int_val == 2) {
+            if (cg_attr_has_protocol_slot(decl.attr_text, "destructor")) { return decl; }
+        }
+        decl = decl.right;
+    }
+    return null;
+}
 
- // Wave-5 slice 3: the top-level `@special` claiming `deallocate`, if
- // any. Top level only, mirroring the C++ backend's scan (root and loaded
- // modules, no members, no nested bodies). Only well-formed programs reach
- // codegen, so a match is the checker's single valid claimant.
- fun cg_find_dealloc_claimant(root: &AstNode) <&AstNode> {
-     if (root == null) { return null; }
-     let decl <&AstNode> = root.left;
-     while (decl != null) {
-         if (decl.kind == ast_fun_decl() && decl.int_val == 2) {
-             if (cg_attr_has_protocol_slot(decl.attr_text, "deallocate")) { return decl; }
-         }
-         decl = decl.right;
-     }
-     return null;
- }
+// Wave-5 slice 3: the top-level `@special` claiming `deallocate`, if
+// any. Top level only, mirroring the C++ backend's scan (root and loaded
+// modules, no members, no nested bodies). Only well-formed programs reach
+// codegen, so a match is the checker's single valid claimant.
+fun cg_find_dealloc_claimant(root: &AstNode) <&AstNode> {
+    if (root == null) { return null; }
+    let decl <&AstNode> = root.left;
+    while (decl != null) {
+        if (decl.kind == ast_fun_decl() && decl.int_val == 2) {
+            if (cg_attr_has_protocol_slot(decl.attr_text, "deallocate")) { return decl; }
+        }
+        decl = decl.right;
+    }
+    return null;
+}
 
- // The generation the claimant supplies: the quote block of a lone
- // `return quote { ... };`, or null for an empty claim (no custom cleanup;
- // composition still runs). Anything else cannot arrive: the checker
- // refused it first.
- fun cg_claim_quote_block(claim: &AstNode) <&AstNode> {
-     if (claim == null || claim.left == null) { return null; }
-     let first <&AstNode> = claim.left.left;
-     if (first == null || first.right != null) { return null; }
-     let stmt <&AstNode> = first.left;
-     if (stmt == null) { stmt = first; }
-     if (stmt.kind != ast_return_stmt()) { return null; }
-     if (stmt.left == null || stmt.left.kind != ast_quote_expr()) { return null; }
-     return stmt.left.left;
- }
+// The generation the claimant supplies: the quote block of a lone
+// `return quote { ... };`, or null for an empty claim (no custom cleanup;
+// composition still runs). Anything else cannot arrive: the checker
+// refused it first.
+fun cg_claim_quote_block(claim: &AstNode) <&AstNode> {
+    if (claim == null || claim.left == null) { return null; }
+    let first <&AstNode> = claim.left.left;
+    if (first == null || first.right != null) { return null; }
+    let stmt <&AstNode> = first.left;
+    if (stmt == null) { stmt = first; }
+    if (stmt.kind != ast_return_stmt()) { return null; }
+    if (stmt.left == null || stmt.left.kind != ast_quote_expr()) { return null; }
+    return stmt.left.left;
+}
 
- // Wave follow-up (CD2, Fin mirror of CD1 threadedClaimantGeneration):
- // straight-line threading to the generation quote. Mirrors the C++
- // backend's interpreter subset (lets, bare calls, subject param bound,
- // final quote) without an interpreter: only literals, idents, quotes, and
- // calls to known top-level helpers thread; wider shapes refuse below.
- fun cg_find_top_fun(root: &AstNode, name: string) <&AstNode> {
-     if (root == null || name == null) { return null; }
-     let decl <&AstNode> = root.left;
-     while (decl != null) {
-         if (decl.kind == ast_fun_decl() && cg_str_eq(decl.name, name)) { return decl; }
-         decl = decl.right;
-     }
-     return null;
- }
+// Wave follow-up (CD2, Fin mirror of CD1 threadedClaimantGeneration):
+// straight-line threading to the generation quote. Mirrors the C++
+// backend's interpreter subset (lets, bare calls, subject param bound,
+// final quote) without an interpreter: only literals, idents, quotes, and
+// calls to known top-level helpers thread; wider shapes refuse below.
+fun cg_find_top_fun(root: &AstNode, name: string) <&AstNode> {
+    if (root == null || name == null) { return null; }
+    let decl <&AstNode> = root.left;
+    while (decl != null) {
+        if (decl.kind == ast_fun_decl() && cg_str_eq(decl.name, name)) { return decl; }
+        decl = decl.right;
+    }
+    return null;
+}
 
- fun cg_claim_subject_name(claim: &AstNode) <string> {
-     if (claim == null || claim.extra == null) { return ""; }
-     if (claim.extra.name == null) { return ""; }
-     return claim.extra.name;
- }
+fun cg_claim_subject_name(claim: &AstNode) <string> {
+    if (claim == null || claim.extra == null) { return ""; }
+    if (claim.extra.name == null) { return ""; }
+    return claim.extra.name;
+}
 
- fun cg_body_stmt_count(body: &AstNode) <int> {
-     if (body == null) { return 0; }
-     let n <int> = 0;
-     let cur <&AstNode> = body.left;
-     while (cur != null) {
-         n = n + 1;
-         cur = cur.right;
-     }
-     return n;
- }
+fun cg_body_stmt_count(body: &AstNode) <int> {
+    if (body == null) { return 0; }
+    let n <int> = 0;
+    let cur <&AstNode> = body.left;
+    while (cur != null) {
+        n = n + 1;
+        cur = cur.right;
+    }
+    return n;
+}
 
- fun cg_body_wrapper_at(body: &AstNode, idx: int) <&AstNode> {
-     if (body == null || idx < 0) { return null; }
-     let cur <&AstNode> = body.left;
-     let i <int> = 0;
-     while (cur != null && i < idx) {
-         cur = cur.right;
-         i = i + 1;
-     }
-     return cur;
- }
+fun cg_body_wrapper_at(body: &AstNode, idx: int) <&AstNode> {
+    if (body == null || idx < 0) { return null; }
+    let cur <&AstNode> = body.left;
+    let i <int> = 0;
+    while (cur != null && i < idx) {
+        cur = cur.right;
+        i = i + 1;
+    }
+    return cur;
+}
 
- fun cg_unwrap_stmt(wrapper: &AstNode) <&AstNode> {
-     if (wrapper == null) { return null; }
-     if (wrapper.left != null) { return wrapper.left; }
-     return wrapper;
- }
+fun cg_unwrap_stmt(wrapper: &AstNode) <&AstNode> {
+    if (wrapper == null) { return null; }
+    if (wrapper.left != null) { return wrapper.left; }
+    return wrapper;
+}
 
- fun cg_ident_is_helper_param(helper: &AstNode, key: string) <bool> {
-     if (helper == null || key == null) { return false; }
-     let p <&AstNode> = helper.extra;
-     while (p != null) {
-         if (cg_str_eq(p.name, key)) { return true; }
-         p = p.right;
-     }
-     return false;
- }
+fun cg_ident_is_helper_param(helper: &AstNode, key: string) <bool> {
+    if (helper == null || key == null) { return false; }
+    let p <&AstNode> = helper.extra;
+    while (p != null) {
+        if (cg_str_eq(p.name, key)) { return true; }
+        p = p.right;
+    }
+    return false;
+}
 
- fun cg_name_bound_before_idx(body: &AstNode, upto: int, key: string, subject: string) <bool> {
-     if (key == null) { return false; }
-     if (subject != null && cg_str_eq(key, subject)) { return true; }
-     if (body == null || upto <= 0) { return false; }
-     let i <int> = 0;
-     while (i < upto) {
-         let w <&AstNode> = cg_body_wrapper_at(body, i);
-         let s <&AstNode> = cg_unwrap_stmt(w);
-         if (s != null && s.kind == ast_var_decl() && cg_str_eq(s.name, key)) { return true; }
-         i = i + 1;
-     }
-     return false;
- }
+fun cg_name_bound_before_idx(body: &AstNode, upto: int, key: string, subject: string) <bool> {
+    if (key == null) { return false; }
+    if (subject != null && cg_str_eq(key, subject)) { return true; }
+    if (body == null || upto <= 0) { return false; }
+    let i <int> = 0;
+    while (i < upto) {
+        let w <&AstNode> = cg_body_wrapper_at(body, i);
+        let s <&AstNode> = cg_unwrap_stmt(w);
+        if (s != null && s.kind == ast_var_decl() && cg_str_eq(s.name, key)) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
 
- fun cg_body_has_flow(body: &AstNode) <bool> {
-     if (body == null) { return false; }
-     let cur <&AstNode> = body.left;
-     while (cur != null) {
-         let s <&AstNode> = cg_unwrap_stmt(cur);
-         if (s != null) {
-             if (s.kind == ast_if_stmt() || s.kind == ast_while_stmt() || s.kind == ast_for_stmt() || s.kind == ast_blame_stmt()) { return true; }
-             if (s.kind == ast_block()) { return true; }
-         }
-         cur = cur.right;
-     }
-     return false;
- }
+fun cg_body_has_flow(body: &AstNode) <bool> {
+    if (body == null) { return false; }
+    let cur <&AstNode> = body.left;
+    while (cur != null) {
+        let s <&AstNode> = cg_unwrap_stmt(cur);
+        if (s != null) {
+            if (s.kind == ast_if_stmt() || s.kind == ast_while_stmt() || s.kind == ast_for_stmt() || s.kind == ast_blame_stmt()) { return true; }
+            if (s.kind == ast_block()) { return true; }
+        }
+        cur = cur.right;
+    }
+    return false;
+}
 
- fun cg_thread_expr_ok(expr: &AstNode, subject: string, body: &AstNode, upto: int, root: &AstNode, helper: &AstNode, depth: int) <bool> {
-     if (expr == null) { return false; }
-     if (depth > 4) { return false; }
-     if (expr.kind == ast_literal_int() || expr.kind == ast_literal_string() || expr.kind == ast_literal_bool()) { return true; }
-     if (expr.kind == ast_ident()) {
-         if (subject != null && cg_str_eq(expr.name, subject)) { return true; }
-         if (helper != null && cg_ident_is_helper_param(helper, expr.name)) { return true; }
-         if (cg_name_bound_before_idx(body, upto, expr.name, subject)) { return true; }
-         return false;
-     }
-     if (expr.kind == ast_quote_expr()) { return true; }
-     if (expr.kind == ast_call_expr()) {
-         if (expr.name == null) { return false; }
-         let hd <&AstNode> = cg_find_top_fun(root, expr.name);
-         if (hd == null) { return false; }
-         if (hd.left != null && cg_body_has_flow(hd.left)) { return false; }
-         let cur <&AstNode> = expr.left;
-         while (cur != null) {
-             let a <&AstNode> = cur.left;
-             if (a == null) { a = cur; }
-             if (!cg_thread_expr_ok(a, subject, body, upto, root, helper, depth + 1)) { return false; }
-             cur = cur.right;
-         }
-         return true;
-     }
-     return false;
- }
+fun cg_thread_expr_ok(expr: &AstNode, subject: string, body: &AstNode, upto: int, root: &AstNode, helper: &AstNode, depth: int) <bool> {
+    if (expr == null) { return false; }
+    if (depth > 4) { return false; }
+    if (expr.kind == ast_literal_int() || expr.kind == ast_literal_string() || expr.kind == ast_literal_bool()) { return true; }
+    if (expr.kind == ast_ident()) {
+        if (subject != null && cg_str_eq(expr.name, subject)) { return true; }
+        if (helper != null && cg_ident_is_helper_param(helper, expr.name)) { return true; }
+        if (cg_name_bound_before_idx(body, upto, expr.name, subject)) { return true; }
+        return false;
+    }
+    if (expr.kind == ast_quote_expr()) { return true; }
+    if (expr.kind == ast_call_expr()) {
+        if (expr.name == null) { return false; }
+        let hd <&AstNode> = cg_find_top_fun(root, expr.name);
+        if (hd == null) { return false; }
+        if (hd.left != null && cg_body_has_flow(hd.left)) { return false; }
+        let cur <&AstNode> = expr.left;
+        while (cur != null) {
+            let a <&AstNode> = cur.left;
+            if (a == null) { a = cur; }
+            if (!cg_thread_expr_ok(a, subject, body, upto, root, helper, depth + 1)) { return false; }
+            cur = cur.right;
+        }
+        return true;
+    }
+    return false;
+}
 
- fun cg_thread_body_to_quote(body: &AstNode, root: &AstNode, subject: string, helper: &AstNode, depth: int) <&AstNode> {
-     if (body == null) { return null; }
-     if (depth > 4) { return null; }
-     let n <int> = cg_body_stmt_count(body);
-     if (n == 0) { return null; }
-     if (n == 1) {
-         let w0 <&AstNode> = cg_body_wrapper_at(body, 0);
-         let s0 <&AstNode> = cg_unwrap_stmt(w0);
-         if (s0 != null && s0.kind == ast_return_stmt() && s0.left != null) {
-             let e <&AstNode> = s0.left;
-             if (e.kind == ast_quote_expr()) { return e.left; }
-             if (e.kind == ast_ident()) {
-                 let key <string> = e.name;
-                 let d <int> = depth + 1;
-                 while (d <= 4 && key != null) {
-                     let found <bool> = false;
-                     let bi <int> = n - 1;
-                     while (bi >= 0) {
-                         let bw <&AstNode> = cg_body_wrapper_at(body, bi);
-                         let bs <&AstNode> = cg_unwrap_stmt(bw);
-                         if (bs != null && bs.kind == ast_var_decl() && cg_str_eq(bs.name, key)) {
-                             found = true;
-                             let init <&AstNode> = bs.left;
-                             if (init == null) { return null; }
-                             if (init.kind == ast_quote_expr()) { return init.left; }
-                             if (init.kind == ast_ident()) {
-                                 key = init.name;
-                                 d = d + 1;
-                                 break;
-                             }
-                             if (init.kind == ast_call_expr()) {
-                                 if (init.name == null) { return null; }
-                                 let hd <&AstNode> = cg_find_top_fun(root, init.name);
-                                 if (hd == null || hd.left == null) { return null; }
-                                 return cg_thread_body_to_quote(hd.left, root, "", hd, d + 1);
-                             }
-                             return null;
-                         }
-                         bi = bi - 1;
-                     }
-                     if (!found) { return null; }
-                 }
-                 return null;
-             }
-             if (e.kind == ast_call_expr()) {
-                 if (e.name == null) { return null; }
-                 let hd2 <&AstNode> = cg_find_top_fun(root, e.name);
-                 if (hd2 == null || hd2.left == null) { return null; }
-                 return cg_thread_body_to_quote(hd2.left, root, "", hd2, depth + 1);
-             }
-             return null;
-         }
-         return null;
-     }
-     let i <int> = 0;
-     while (i < n) {
-         let w <&AstNode> = cg_body_wrapper_at(body, i);
-         let s <&AstNode> = cg_unwrap_stmt(w);
-         let last <bool> = (i == n - 1);
-         if (s == null) { return null; }
-         if (s.kind == ast_var_decl()) {
-             if (last) { return null; }
-             let init <&AstNode> = s.left;
-             if (init == null) { return null; }
-             if (!cg_thread_expr_ok(init, subject, body, i, root, helper, depth + 1)) { return null; }
-             i = i + 1;
-             continue;
-         }
-         if (s.kind == ast_return_stmt()) {
-             if (!last) { return null; }
-             let e2 <&AstNode> = s.left;
-             if (e2 == null) { return null; }
-             if (e2.kind == ast_quote_expr()) { return e2.left; }
-             if (e2.kind == ast_ident()) {
-                 let key2 <string> = e2.name;
-                 let d2 <int> = depth + 1;
-                 while (d2 <= 4 && key2 != null) {
-                     let found2 <bool> = false;
-                     let bj <int> = n - 1;
-                     while (bj >= 0) {
-                         let bw2 <&AstNode> = cg_body_wrapper_at(body, bj);
-                         let bs2 <&AstNode> = cg_unwrap_stmt(bw2);
-                         if (bs2 != null && bs2.kind == ast_var_decl() && cg_str_eq(bs2.name, key2)) {
-                             found2 = true;
-                             let init2 <&AstNode> = bs2.left;
-                             if (init2 == null) { return null; }
-                             if (init2.kind == ast_quote_expr()) { return init2.left; }
-                             if (init2.kind == ast_ident()) {
-                                 key2 = init2.name;
-                                 d2 = d2 + 1;
-                                 break;
-                             }
-                             if (init2.kind == ast_call_expr()) {
-                                 if (init2.name == null) { return null; }
-                                 let hd3 <&AstNode> = cg_find_top_fun(root, init2.name);
-                                 if (hd3 == null || hd3.left == null) { return null; }
-                                 return cg_thread_body_to_quote(hd3.left, root, "", hd3, d2 + 1);
-                             }
-                             return null;
-                         }
-                         bj = bj - 1;
-                     }
-                     if (!found2) { return null; }
-                 }
-                 return null;
-             }
-             if (e2.kind == ast_call_expr()) {
-                 if (e2.name == null) { return null; }
-                 let hd4 <&AstNode> = cg_find_top_fun(root, e2.name);
-                 if (hd4 == null || hd4.left == null) { return null; }
-                 return cg_thread_body_to_quote(hd4.left, root, "", hd4, depth + 1);
-             }
-             return null;
-         }
-         if (s.kind == ast_expr_stmt()) {
-             if (last) { return null; }
-             let ex <&AstNode> = s.left;
-             if (ex == null) { return null; }
-             if (!cg_thread_expr_ok(ex, subject, body, i, root, helper, depth + 1)) { return null; }
-             i = i + 1;
-             continue;
-         }
-         return null;
-     }
-     return null;
- }
+fun cg_thread_body_to_quote(body: &AstNode, root: &AstNode, subject: string, helper: &AstNode, depth: int) <&AstNode> {
+    if (body == null) { return null; }
+    if (depth > 4) { return null; }
+    let n <int> = cg_body_stmt_count(body);
+    if (n == 0) { return null; }
+    if (n == 1) {
+        let w0 <&AstNode> = cg_body_wrapper_at(body, 0);
+        let s0 <&AstNode> = cg_unwrap_stmt(w0);
+        if (s0 != null && s0.kind == ast_return_stmt() && s0.left != null) {
+            let e <&AstNode> = s0.left;
+            if (e.kind == ast_quote_expr()) { return e.left; }
+            if (e.kind == ast_ident()) {
+                let key <string> = e.name;
+                let d <int> = depth + 1;
+                while (d <= 4 && key != null) {
+                    let found <bool> = false;
+                    let bi <int> = n - 1;
+                    while (bi >= 0) {
+                        let bw <&AstNode> = cg_body_wrapper_at(body, bi);
+                        let bs <&AstNode> = cg_unwrap_stmt(bw);
+                        if (bs != null && bs.kind == ast_var_decl() && cg_str_eq(bs.name, key)) {
+                            found = true;
+                            let init <&AstNode> = bs.left;
+                            if (init == null) { return null; }
+                            if (init.kind == ast_quote_expr()) { return init.left; }
+                            if (init.kind == ast_ident()) {
+                                key = init.name;
+                                d = d + 1;
+                                break;
+                            }
+                            if (init.kind == ast_call_expr()) {
+                                if (init.name == null) { return null; }
+                                let hd <&AstNode> = cg_find_top_fun(root, init.name);
+                                if (hd == null || hd.left == null) { return null; }
+                                return cg_thread_body_to_quote(hd.left, root, "", hd, d + 1);
+                            }
+                            return null;
+                        }
+                        bi = bi - 1;
+                    }
+                    if (!found) { return null; }
+                }
+                return null;
+            }
+            if (e.kind == ast_call_expr()) {
+                if (e.name == null) { return null; }
+                let hd2 <&AstNode> = cg_find_top_fun(root, e.name);
+                if (hd2 == null || hd2.left == null) { return null; }
+                return cg_thread_body_to_quote(hd2.left, root, "", hd2, depth + 1);
+            }
+            return null;
+        }
+        return null;
+    }
+    let i <int> = 0;
+    while (i < n) {
+        let w <&AstNode> = cg_body_wrapper_at(body, i);
+        let s <&AstNode> = cg_unwrap_stmt(w);
+        let last <bool> = (i == n - 1);
+        if (s == null) { return null; }
+        if (s.kind == ast_var_decl()) {
+            if (last) { return null; }
+            let init <&AstNode> = s.left;
+            if (init == null) { return null; }
+            if (!cg_thread_expr_ok(init, subject, body, i, root, helper, depth + 1)) { return null; }
+            i = i + 1;
+            continue;
+        }
+        if (s.kind == ast_return_stmt()) {
+            if (!last) { return null; }
+            let e2 <&AstNode> = s.left;
+            if (e2 == null) { return null; }
+            if (e2.kind == ast_quote_expr()) { return e2.left; }
+            if (e2.kind == ast_ident()) {
+                let key2 <string> = e2.name;
+                let d2 <int> = depth + 1;
+                while (d2 <= 4 && key2 != null) {
+                    let found2 <bool> = false;
+                    let bj <int> = n - 1;
+                    while (bj >= 0) {
+                        let bw2 <&AstNode> = cg_body_wrapper_at(body, bj);
+                        let bs2 <&AstNode> = cg_unwrap_stmt(bw2);
+                        if (bs2 != null && bs2.kind == ast_var_decl() && cg_str_eq(bs2.name, key2)) {
+                            found2 = true;
+                            let init2 <&AstNode> = bs2.left;
+                            if (init2 == null) { return null; }
+                            if (init2.kind == ast_quote_expr()) { return init2.left; }
+                            if (init2.kind == ast_ident()) {
+                                key2 = init2.name;
+                                d2 = d2 + 1;
+                                break;
+                            }
+                            if (init2.kind == ast_call_expr()) {
+                                if (init2.name == null) { return null; }
+                                let hd3 <&AstNode> = cg_find_top_fun(root, init2.name);
+                                if (hd3 == null || hd3.left == null) { return null; }
+                                return cg_thread_body_to_quote(hd3.left, root, "", hd3, d2 + 1);
+                            }
+                            return null;
+                        }
+                        bj = bj - 1;
+                    }
+                    if (!found2) { return null; }
+                }
+                return null;
+            }
+            if (e2.kind == ast_call_expr()) {
+                if (e2.name == null) { return null; }
+                let hd4 <&AstNode> = cg_find_top_fun(root, e2.name);
+                if (hd4 == null || hd4.left == null) { return null; }
+                return cg_thread_body_to_quote(hd4.left, root, "", hd4, depth + 1);
+            }
+            return null;
+        }
+        if (s.kind == ast_expr_stmt()) {
+            if (last) { return null; }
+            let ex <&AstNode> = s.left;
+            if (ex == null) { return null; }
+            if (!cg_thread_expr_ok(ex, subject, body, i, root, helper, depth + 1)) { return null; }
+            i = i + 1;
+            continue;
+        }
+        return null;
+    }
+    return null;
+}
 
- // The threaded entry: empty and single-quote keep their existing answers;
- // straight-line threading resolves to the same quote block; wider shapes
- // refuse naming the gap rather than silently dropping (backend invariant).
- fun cg_claim_quote_block_threaded(claim: &AstNode, root: &AstNode, slot: string, refused: [int]) <&AstNode> {
-     if (claim == null || claim.left == null) { return null; }
-     let body <&AstNode> = claim.left;
-     let n <int> = cg_body_stmt_count(body);
-     if (n == 0) { return null; }
-     let subj <string> = cg_claim_subject_name(claim);
-     let q <&AstNode> = cg_thread_body_to_quote(body, root, subj, null, 0);
-     if (q != null) { return q; }
-     if (refused != null) { refused[0] = 1; }
-     let cname <string> = claim.name;
-     if (cname == null) { cname = ""; }
-     let sslot <string> = slot;
-     if (sslot == null) { sslot = "destructor"; }
-     cg_dprintf(2, "finc codegen refusal: the '%s' claimant '@%s', whose body is outside the evaluable subset (an empty body, one 'return quote { ... };', or straight-line threading to one) is not lowered\n", sslot, cname);
-     return null;
- }
+// The threaded entry: empty and single-quote keep their existing answers;
+// straight-line threading resolves to the same quote block; wider shapes
+// refuse naming the gap rather than silently dropping (backend invariant).
+fun cg_claim_quote_block_threaded(claim: &AstNode, root: &AstNode, slot: string, refused: [int]) <&AstNode> {
+    if (claim == null || claim.left == null) { return null; }
+    let body <&AstNode> = claim.left;
+    let n <int> = cg_body_stmt_count(body);
+    if (n == 0) { return null; }
+    let subj <string> = cg_claim_subject_name(claim);
+    let q <&AstNode> = cg_thread_body_to_quote(body, root, subj, null, 0);
+    if (q != null) { return q; }
+    if (refused != null) { refused[0] = 1; }
+    let cname <string> = claim.name;
+    if (cname == null) { cname = ""; }
+    let sslot <string> = slot;
+    if (sslot == null) { sslot = "destructor"; }
+    cg_dprintf(2, "finc codegen refusal: the '%s' claimant '@%s', whose body is outside the evaluable subset (an empty body, one 'return quote { ... };', or straight-line threading to one) is not lowered\n", sslot, cname);
+    return null;
+}
 
- // Wave-5 slice 1 claimant gate: true when a top-level `@special` claims
- // `move_or_copy`. Top level only, mirroring the C++ backend's scan (root
- // and loaded modules, no members, no nested bodies). Shape errors never
- // arrive: the checker refused them first.
- fun cg_program_has_move_claim(root: &AstNode) <bool> {
-     if (root == null) { return false; }
-     let decl <&AstNode> = root.left;
-     while (decl != null) {
-         if (decl.kind == ast_fun_decl() && decl.int_val == 2) {
-             if (cg_attr_has_move_protocol(decl.attr_text)) { return true; }
-         }
-         decl = decl.right;
-     }
-     return false;
- }
+// Wave-5 slice 1 claimant gate: true when a top-level `@special` claims
+// `move_or_copy`. Top level only, mirroring the C++ backend's scan (root
+// and loaded modules, no members, no nested bodies). Shape errors never
+// arrive: the checker refused them first.
+fun cg_program_has_move_claim(root: &AstNode) <bool> {
+    if (root == null) { return false; }
+    let decl <&AstNode> = root.left;
+    while (decl != null) {
+        if (decl.kind == ast_fun_decl() && decl.int_val == 2) {
+            if (cg_attr_has_move_protocol(decl.attr_text)) { return true; }
+        }
+        decl = decl.right;
+    }
+    return false;
+}
 
- // Wave-5 slice 1 moved-state snapshots: one int per local (moved = 1),
- // over vars[0..n). Bindings past n are branch-locals whose own block-end
- // cleanup already ran inline, so joins leave them alone.
- fun cg_moved_snapshot(ctx: &FnContext, buf: [int], n: int) <noret> {
-     if (ctx == null || buf == null) { return; }
-     let i <int> = 0;
-     while (i < n && i < ctx.var_count) {
-         let v <&LocalVar> = ctx.vars[i];
-         if (v != null && v.moved) { buf[i] = 1; } else { buf[i] = 0; }
-         i = i + 1;
-     }
- }
+// Wave-5 slice 1 moved-state snapshots: one int per local (moved = 1),
+// over vars[0..n). Bindings past n are branch-locals whose own block-end
+// cleanup already ran inline, so joins leave them alone.
+fun cg_moved_snapshot(ctx: &FnContext, buf: [int], n: int) <noret> {
+    if (ctx == null || buf == null) { return; }
+    let i <int> = 0;
+    while (i < n && i < ctx.var_count) {
+        let v <&LocalVar> = ctx.vars[i];
+        if (v != null && v.moved) { buf[i] = 1; } else { buf[i] = 0; }
+        i = i + 1;
+    }
+}
 
- fun cg_moved_restore(ctx: &FnContext, buf: [int], n: int) <noret> {
-     if (ctx == null || buf == null) { return; }
-     let i <int> = 0;
-     while (i < n && i < ctx.var_count) {
-         let v <&LocalVar> = ctx.vars[i];
-         if (v != null) {
-             if (buf[i] != 0) { v.moved = true; } else { v.moved = false; }
-         }
-         i = i + 1;
-     }
- }
+fun cg_moved_restore(ctx: &FnContext, buf: [int], n: int) <noret> {
+    if (ctx == null || buf == null) { return; }
+    let i <int> = 0;
+    while (i < n && i < ctx.var_count) {
+        let v <&LocalVar> = ctx.vars[i];
+        if (v != null) {
+            if (buf[i] != 0) { v.moved = true; } else { v.moved = false; }
+        }
+        i = i + 1;
+    }
+}
 
- // Union one surviving path's state into the current one: moved on any path
- // reaching the merge stays skipped (C++ MovedMaybe skips).
- fun cg_moved_union_saved(ctx: &FnContext, buf: [int], n: int) <noret> {
-     if (ctx == null || buf == null) { return; }
-     let i <int> = 0;
-     while (i < n && i < ctx.var_count) {
-         let v <&LocalVar> = ctx.vars[i];
-         if (v != null && buf[i] != 0) { v.moved = true; }
-         i = i + 1;
-     }
- }
+// Union one surviving path's state into the current one: moved on any path
+// reaching the merge stays skipped (C++ MovedMaybe skips).
+fun cg_moved_union_saved(ctx: &FnContext, buf: [int], n: int) <noret> {
+    if (ctx == null || buf == null) { return; }
+    let i <int> = 0;
+    while (i < n && i < ctx.var_count) {
+        let v <&LocalVar> = ctx.vars[i];
+        if (v != null && buf[i] != 0) { v.moved = true; }
+        i = i + 1;
+    }
+}
 
 // Wave-5 slice 2: whether a type spelling holds no owned struct value, so
 // destructor composition walks past it. Only a plain struct value composes:
@@ -2591,9 +2591,9 @@ fun map_type(ctx: &FnContext, fin_type: string) <&LLVMType> {
     // carried identity, so no working program observes the change except
     // through `@implements`, which is what needs it.
     if (cg_str_eq(fin_type, "$struct") || cg_str_eq(fin_type, "$interface") ||
-        cg_str_eq(fin_type, "$type") || cg_str_eq(fin_type, "$enum_member")) {
+      cg_str_eq(fin_type, "$type") || cg_str_eq(fin_type, "$enum_member")) {
         return ctx.i64_ty;
-    }
+      }
     if (cg_str_eq(fin_type, "char") || cg_str_eq(fin_type, "u8") || cg_str_eq(fin_type, "i8")) {
         return ctx.i8_ty;
     }
@@ -2613,11 +2613,11 @@ fun map_type(ctx: &FnContext, fin_type: string) <&LLVMType> {
         return ctx.double_ty;
     }
     if (cg_str_eq(fin_type, "ulong") || cg_str_eq(fin_type, "long") || cg_str_eq(fin_type, "i64") || cg_str_eq(fin_type, "u64") ||
-        cg_str_eq(fin_type, "size_t") || cg_str_eq(fin_type, "usize") || cg_str_eq(fin_type, "isize") ||
-        cg_str_eq(fin_type, "uint{64}") || cg_str_eq(fin_type, "int{64}") ||
-        cg_str_eq(fin_type, "uint64") || cg_str_eq(fin_type, "int64")) {
+      cg_str_eq(fin_type, "size_t") || cg_str_eq(fin_type, "usize") || cg_str_eq(fin_type, "isize") ||
+      cg_str_eq(fin_type, "uint{64}") || cg_str_eq(fin_type, "int{64}") ||
+      cg_str_eq(fin_type, "uint64") || cg_str_eq(fin_type, "int64")) {
         return ctx.i64_ty;
-    }
+      }
     if (cg_str_eq(fin_type, "int{8}") || cg_str_eq(fin_type, "uint{8}")) {
         return ctx.i8_ty;
     }
@@ -2710,9 +2710,9 @@ fun map_type(ctx: &FnContext, fin_type: string) <&LLVMType> {
         return ctx.ptr_ty;
     }
     if (!cg_str_eq(fin_type, "int") && !cg_str_eq(fin_type, "uint") && !cg_str_eq(fin_type, "auto") &&
-        !cg_str_eq(fin_type, "i32") && !cg_str_eq(fin_type, "u32")) {
+      !cg_str_eq(fin_type, "i32") && !cg_str_eq(fin_type, "u32")) {
         return ctx.ptr_ty;
-    }
+      }
     return ctx.i32_ty;
 }
 
@@ -3315,11 +3315,11 @@ fun cg_fn_type_from_ann(ctx: &FnContext, ann: string) <&LLVMType> {
             let seg <string> = cg_trim_spaces(substr(plist, seg_start, pi - seg_start));
             if (cg_strlen(seg) == cast<ulong>(0)) { seg_start = pi + 1; }
             else {
-            let pt <&LLVMType> = map_type(ctx, seg);
-            if (p_count > 63) { delete params; return null; }
-            cg_targs_set(params, p_count, pt);
-            p_count = p_count + 1;
-            seg_start = pi + 1;
+                let pt <&LLVMType> = map_type(ctx, seg);
+                if (p_count > 63) { delete params; return null; }
+                cg_targs_set(params, p_count, pt);
+                p_count = p_count + 1;
+                seg_start = pi + 1;
             }
         } else if (at_end || (cg_str_eq(ch, ",") && depth2 == 0)) {
             seg_start = pi + 1;
@@ -3462,7 +3462,7 @@ fun get_struct_field_type(ctx: &FnContext, base_node: &AstNode, field_name: stri
                         // single-`T` rule and the direct map below when
                         // the receiver names no instantiation.
                         if (st.gen_params != null && cg_strlen(st.gen_params) > cast<ulong>(0) &&
-                            base_node != null && base_node.kind == ast_ident()) {
+                          base_node != null && base_node.kind == ast_ident()) {
                             let v_sub <&LocalVar> = fn_ctx_find_var(ctx, base_node.name);
                             if (v_sub != null && v_sub.type_annotation != null) {
                                 let rfull <string> = cg_trim_spaces(v_sub.type_annotation);
@@ -3514,7 +3514,7 @@ fun get_struct_field_type(ctx: &FnContext, base_node: &AstNode, field_name: stri
                                     }
                                 }
                             }
-                        }
+                          }
                         if (cg_str_eq(ft, "T") || cg_str_eq(ft, "&T")) {
                             if (base_node != null && base_node.kind == ast_ident()) {
                                 let v_base <&LocalVar> = fn_ctx_find_var(ctx, base_node.name);
@@ -3695,21 +3695,21 @@ fun cg_body_writes_param(node: &AstNode, pname: string) <bool> {
     if (node == null || pname == null) { return false; }
     if (node.kind == ast_binary_expr() && node.name != null) {
         if (cg_str_eq(node.name, "=") || cg_str_eq(node.name, "+=") || cg_str_eq(node.name, "-=") ||
-            cg_str_eq(node.name, "*=") || cg_str_eq(node.name, "/=") || cg_str_eq(node.name, "%=") ||
-            cg_str_eq(node.name, "&=") || cg_str_eq(node.name, "|=") || cg_str_eq(node.name, "^=") ||
-            cg_str_eq(node.name, "<<=") || cg_str_eq(node.name, ">>=")) {
+          cg_str_eq(node.name, "*=") || cg_str_eq(node.name, "/=") || cg_str_eq(node.name, "%=") ||
+          cg_str_eq(node.name, "&=") || cg_str_eq(node.name, "|=") || cg_str_eq(node.name, "^=") ||
+          cg_str_eq(node.name, "<<=") || cg_str_eq(node.name, ">>=")) {
             if (node.left != null && node.left.kind == ast_member_access() &&
-                cg_store_roots_param(node.left, pname)) {
+              cg_store_roots_param(node.left, pname)) {
                 return true;
-            }
-        }
+              }
+          }
     }
     if (node.kind == ast_unary_expr() && node.name != null) {
         if (cg_str_eq(node.name, "++") || cg_str_eq(node.name, "--")) {
             if (node.left != null && node.left.kind == ast_member_access() &&
-                cg_store_roots_param(node.left, pname)) {
+              cg_store_roots_param(node.left, pname)) {
                 return true;
-            }
+              }
         }
         if (cg_str_eq(node.name, "&")) {
             if (node.left != null && node.left.kind == ast_ident() && cg_str_eq(node.left.name, pname)) {
@@ -3842,9 +3842,9 @@ fun cg_member_inst_arr_ann(ctx: &FnContext, base_node: &AstNode, field_name: str
         let ff <&StructFieldInfo> = inst.fields[ii];
         if (ff != null && cg_str_eq(ff.name, field_name)) {
             if (ff.type_annotation != null && cg_strlen(ff.type_annotation) > cast<ulong>(2) &&
-                cg_str_eq(substr(ff.type_annotation, 0, 2), "&[")) {
+              cg_str_eq(substr(ff.type_annotation, 0, 2), "&[")) {
                 return ff.type_annotation;
-            }
+              }
             return "";
         }
         ii = ii + 1;
@@ -4431,25 +4431,25 @@ fun get_index_elem_type(ctx: &FnContext, base_node: &AstNode) <&LLVMType> {
             }
         }
         if (!scoped) {
-        let si <int> = 0;
-        while (si < ctx.struct_count) {
-            let st <&StructInfo> = ctx.structs[si];
-            if (st != null) {
-                let fi <int> = 0;
-                while (fi < st.field_count) {
-                    let f <&StructFieldInfo> = st.fields[fi];
-                    if (f != null && cg_str_eq(f.name, f_name)) {
-                        ty_ann = f.type_annotation;
-                        break;
+            let si <int> = 0;
+            while (si < ctx.struct_count) {
+                let st <&StructInfo> = ctx.structs[si];
+                if (st != null) {
+                    let fi <int> = 0;
+                    while (fi < st.field_count) {
+                        let f <&StructFieldInfo> = st.fields[fi];
+                        if (f != null && cg_str_eq(f.name, f_name)) {
+                            ty_ann = f.type_annotation;
+                            break;
+                        }
+                        fi = fi + 1;
                     }
-                    fi = fi + 1;
                 }
+                if (cg_strlen(ty_ann) > cast<ulong>(0)) {
+                    break;
+                }
+                si = si + 1;
             }
-            if (cg_strlen(ty_ann) > cast<ulong>(0)) {
-                break;
-            }
-            si = si + 1;
-        }
         }
     } else if (base_node.kind == ast_call_expr() && cg_str_eq(base_node.name, "__fin_array_literal")) {
         return ctx.i32_ty;
@@ -4638,11 +4638,11 @@ fun cg_ann_is_param_array(ann: string) <bool> {
     if (e <= s) { return false; }
     let core <string> = substr(elem, s, e - s);
     if (cg_str_eq(core, "int") || cg_str_eq(core, "uint") || cg_str_eq(core, "bool") ||
-        cg_str_eq(core, "char") || cg_str_eq(core, "u8") || cg_str_eq(core, "i8") ||
-        cg_str_eq(core, "string") || cg_str_eq(core, "float") || cg_str_eq(core, "f32") ||
-        cg_str_eq(core, "double") || cg_str_eq(core, "f64")) {
+      cg_str_eq(core, "char") || cg_str_eq(core, "u8") || cg_str_eq(core, "i8") ||
+      cg_str_eq(core, "string") || cg_str_eq(core, "float") || cg_str_eq(core, "f32") ||
+      cg_str_eq(core, "double") || cg_str_eq(core, "f64")) {
         return false;
-    }
+      }
     if (cg_str_eq(substr(core, 0, 1), "[")) { return false; }
     return true;
 }
@@ -4802,9 +4802,9 @@ fun sizeof_of_spelling(ctx: &FnContext, tname: string) <&LLVMType> {
     if (cg_str_eq(tname, "float") || cg_str_eq(tname, "f32")) { return ctx.float_ty; }
     if (cg_str_eq(tname, "double") || cg_str_eq(tname, "f64")) { return ctx.double_ty; }
     if (cg_str_eq(tname, "long") || cg_str_eq(tname, "ulong") || cg_str_eq(tname, "i64") || cg_str_eq(tname, "u64") ||
-        cg_str_eq(tname, "size_t") || cg_str_eq(tname, "usize") || cg_str_eq(tname, "isize") ||
-        cg_str_eq(tname, "uint64") || cg_str_eq(tname, "int64") ||
-        cg_str_eq(tname, "uint{64}") || cg_str_eq(tname, "int{64}")) { return ctx.i64_ty; }
+      cg_str_eq(tname, "size_t") || cg_str_eq(tname, "usize") || cg_str_eq(tname, "isize") ||
+      cg_str_eq(tname, "uint64") || cg_str_eq(tname, "int64") ||
+      cg_str_eq(tname, "uint{64}") || cg_str_eq(tname, "int{64}")) { return ctx.i64_ty; }
     if (cg_str_eq(tname, "string")) { return ctx.ptr_ty; }
     let tlen <int> = cast<int>(cg_strlen(tname));
     if (tlen > 0) {
@@ -5193,12 +5193,12 @@ fun cg_hash_word_string(ctx: &FnContext, data: &LLVMValue) <&LLVMValue> {
 // lower_expr would report `Undefined function`. Pure move, no logic change.
 
 pub fun declare_function(
-    module: &LLVMModule,
-    fn_node: &AstNode,
-    fn_syms: [&FnSymbol],
-    sym_count: int,
-    interfaces: [&InterfaceInfo],
-    interface_count: int
+  module: &LLVMModule,
+  fn_node: &AstNode,
+  fn_syms: [&FnSymbol],
+  sym_count: int,
+  interfaces: [&InterfaceInfo],
+  interface_count: int
 ) <int> {
     if (fn_node == null) { return sym_count; }
 
@@ -5251,9 +5251,9 @@ pub fun declare_function(
         // invariant: never silently drop runtime code or emit guessed IR).
         let ret_ok <bool> = false;
         if (cg_str_eq(fn_node.type_annotation, "void") || cg_str_eq(fn_node.type_annotation, "noret") ||
-            cg_str_eq(fn_node.type_annotation, "int") || cg_str_eq(fn_node.type_annotation, "uint")) {
+          cg_str_eq(fn_node.type_annotation, "int") || cg_str_eq(fn_node.type_annotation, "uint")) {
             ret_ok = true;
-        }
+          }
         if (!ret_ok) {
             return sym_count;
         }
@@ -5297,47 +5297,47 @@ pub fun declare_function(
     } else if (cg_str_eq(ret_ann, "bool")) {
         ret_ty = i1_t;
     } else if (cg_str_eq(ret_ann, "$struct") || cg_str_eq(ret_ann, "$interface") ||
-        cg_str_eq(ret_ann, "$type") || cg_str_eq(ret_ann, "$enum_member")) {
+      cg_str_eq(ret_ann, "$type") || cg_str_eq(ret_ann, "$enum_member")) {
         ret_ty = i64_t;
-    } else if (cg_str_eq(ret_ann, "char") || cg_str_eq(ret_ann, "u8") || cg_str_eq(ret_ann, "i8")) {
+      } else if (cg_str_eq(ret_ann, "char") || cg_str_eq(ret_ann, "u8") || cg_str_eq(ret_ann, "i8")) {
         ret_ty = i8_t;
-    } else if (cg_str_eq(ret_ann, "short") || cg_str_eq(ret_ann, "ushort") ||
-               cg_str_eq(ret_ann, "i16") || cg_str_eq(ret_ann, "u16")) {
+      } else if (cg_str_eq(ret_ann, "short") || cg_str_eq(ret_ann, "ushort") ||
+      cg_str_eq(ret_ann, "i16") || cg_str_eq(ret_ann, "u16")) {
         ret_ty = i16_t;
-    } else if (cg_str_eq(ret_ann, "int{8}") || cg_str_eq(ret_ann, "uint{8}")) {
+      } else if (cg_str_eq(ret_ann, "int{8}") || cg_str_eq(ret_ann, "uint{8}")) {
         ret_ty = i8_t;
-    } else if (cg_str_eq(ret_ann, "int{16}") || cg_str_eq(ret_ann, "uint{16}")) {
+      } else if (cg_str_eq(ret_ann, "int{16}") || cg_str_eq(ret_ann, "uint{16}")) {
         ret_ty = i16_t;
-    } else if (cg_str_eq(ret_ann, "int{32}") || cg_str_eq(ret_ann, "uint{32}")) {
+      } else if (cg_str_eq(ret_ann, "int{32}") || cg_str_eq(ret_ann, "uint{32}")) {
         ret_ty = i32_t;
-    } else if (cg_str_eq(ret_ann, "string")) {
+      } else if (cg_str_eq(ret_ann, "string")) {
         ret_ty = ptr_t;
-    } else if (cg_str_eq(ret_ann, "float") || cg_str_eq(ret_ann, "f32")) {
+      } else if (cg_str_eq(ret_ann, "float") || cg_str_eq(ret_ann, "f32")) {
         ret_ty = llvm_float_type();
-    } else if (cg_str_eq(ret_ann, "double") || cg_str_eq(ret_ann, "f64")) {
+      } else if (cg_str_eq(ret_ann, "double") || cg_str_eq(ret_ann, "f64")) {
         ret_ty = llvm_double_type();
-    } else if (cg_str_eq(ret_ann, "ulong") || cg_str_eq(ret_ann, "long") || cg_str_eq(ret_ann, "i64") || cg_str_eq(ret_ann, "u64") ||
-               cg_str_eq(ret_ann, "size_t") || cg_str_eq(ret_ann, "usize") || cg_str_eq(ret_ann, "isize") ||
-               cg_str_eq(ret_ann, "uint{64}") || cg_str_eq(ret_ann, "int{64}")) {
+      } else if (cg_str_eq(ret_ann, "ulong") || cg_str_eq(ret_ann, "long") || cg_str_eq(ret_ann, "i64") || cg_str_eq(ret_ann, "u64") ||
+      cg_str_eq(ret_ann, "size_t") || cg_str_eq(ret_ann, "usize") || cg_str_eq(ret_ann, "isize") ||
+      cg_str_eq(ret_ann, "uint{64}") || cg_str_eq(ret_ann, "int{64}")) {
         ret_ty = i64_t;
-    } else if (cg_str_eq(ret_ann, "int") || cg_str_eq(ret_ann, "uint") ||
-                cg_str_eq(ret_ann, "i32") || cg_str_eq(ret_ann, "u32")) {
+      } else if (cg_str_eq(ret_ann, "int") || cg_str_eq(ret_ann, "uint") ||
+      cg_str_eq(ret_ann, "i32") || cg_str_eq(ret_ann, "u32")) {
         ret_ty = i32_t;
-    } else {
+      } else {
         ret_ty = ptr_t;
-    }
+      }
     // A nullable scalar return lowers as the tagged pair `{T, i1}`; a
     // nullable pointer, string, interface or struct stays one word (absent
     // is the null word). `string?` is 8 bytes either way.
     if ((ret_qmark || fn_node.int_val == 1) &&
-        (ret_ty == i32_t || ret_ty == i64_t || ret_ty == i1_t || ret_ty == i8_t ||
-         ret_ty == llvm_float_type() || ret_ty == llvm_double_type())) {
+      (ret_ty == i32_t || ret_ty == i64_t || ret_ty == i1_t || ret_ty == i8_t ||
+      ret_ty == llvm_float_type() || ret_ty == llvm_double_type())) {
         let r_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
         r_args.t0 = ret_ty;
         r_args.t1 = i1_t;
         ret_ty = llvm_struct_type(r_args, 2, 0);
         delete r_args;
-    }
+      }
 
     let param_types <&LLVMTypeArgs> = new LLVMTypeArgs{};
     let p_count <int> = 0;
@@ -5348,95 +5348,95 @@ pub fun declare_function(
         param_types.t1 = ptr_t;
         p_count = 2;
     } else {
-    while (p_cur != null && p_count < 64) {
-        if (cg_str_eq(p_cur.name, "...") || cg_str_eq(p_cur.type_annotation, "...")) {
-            is_var_arg = 1;
-            p_cur = p_cur.right;
-            continue;
-        }
-        let pt <&LLVMType> = i32_t;
-        let is_iface_p <bool> = false;
-        let param_iface <&InterfaceInfo> = null;
-        // A `?` on the parameter spelling (`n?: int`) rides in the
-        // annotation; the base maps first and the pair wraps after.
-        let p_qmark <bool> = is_nullable_type(p_cur.type_annotation);
-        let p_ann <string> = p_cur.type_annotation;
-        if (p_qmark) {
-            let plen_q <int> = cast<int>(cg_strlen(p_ann));
-            p_ann = substr(p_ann, 0, plen_q - 1);
-        }
-        let ii_p <int> = 0;
-        while (ii_p < interface_count) {
-            if (interfaces[ii_p] != null && cg_str_eq(interfaces[ii_p].name, p_ann)) {
-                is_iface_p = true;
-                param_iface = interfaces[ii_p];
-                break;
+        while (p_cur != null && p_count < 64) {
+            if (cg_str_eq(p_cur.name, "...") || cg_str_eq(p_cur.type_annotation, "...")) {
+                is_var_arg = 1;
+                p_cur = p_cur.right;
+                continue;
             }
-            ii_p = ii_p + 1;
-        }
+            let pt <&LLVMType> = i32_t;
+            let is_iface_p <bool> = false;
+            let param_iface <&InterfaceInfo> = null;
+            // A `?` on the parameter spelling (`n?: int`) rides in the
+            // annotation; the base maps first and the pair wraps after.
+            let p_qmark <bool> = is_nullable_type(p_cur.type_annotation);
+            let p_ann <string> = p_cur.type_annotation;
+            if (p_qmark) {
+                let plen_q <int> = cast<int>(cg_strlen(p_ann));
+                p_ann = substr(p_ann, 0, plen_q - 1);
+            }
+            let ii_p <int> = 0;
+            while (ii_p < interface_count) {
+                if (interfaces[ii_p] != null && cg_str_eq(interfaces[ii_p].name, p_ann)) {
+                    is_iface_p = true;
+                    param_iface = interfaces[ii_p];
+                    break;
+                }
+                ii_p = ii_p + 1;
+            }
 
-        if (is_iface_p) {
-            if (param_iface != null && param_iface.fat_ptr_ty != null) {
-                pt = param_iface.fat_ptr_ty;
-            } else {
-                let f_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-                f_args.t0 = ptr_t;
-                f_args.t1 = ptr_t;
-                pt = llvm_struct_type(f_args, 2, 0);
-                delete f_args;
-            }
-        } else if (cg_str_eq(p_ann, "$struct") || cg_str_eq(p_ann, "$interface") ||
-            cg_str_eq(p_ann, "$type") || cg_str_eq(p_ann, "$enum_member")) {
-            pt = i64_t;
-        } else if (cg_str_eq(p_ann, "bool")) { pt = i1_t; }
-        else if (cg_str_eq(p_ann, "char") || cg_str_eq(p_ann, "u8") || cg_str_eq(p_ann, "i8") || cg_str_eq(p_ann, "int{8}") || cg_str_eq(p_ann, "uint{8}")) { pt = i8_t; }
-        else if (cg_str_eq(p_ann, "short") || cg_str_eq(p_ann, "ushort") || cg_str_eq(p_ann, "i16") || cg_str_eq(p_ann, "u16") || cg_str_eq(p_ann, "int{16}") || cg_str_eq(p_ann, "uint{16}")) { pt = i16_t; }
-        else if (cg_str_eq(p_ann, "int{32}") || cg_str_eq(p_ann, "uint{32}") || cg_str_eq(p_ann, "i32") || cg_str_eq(p_ann, "u32")) { pt = i32_t; }
-        else if (cg_str_eq(p_ann, "string")) { pt = ptr_t; }
-        else if (cg_str_eq(p_ann, "float") || cg_str_eq(p_ann, "f32")) { pt = llvm_float_type(); }
-        else if (cg_str_eq(p_ann, "double") || cg_str_eq(p_ann, "f64")) { pt = llvm_double_type(); }
-        else if (cg_str_eq(p_ann, "ulong") || cg_str_eq(p_ann, "long") || cg_str_eq(p_ann, "i64") || cg_str_eq(p_ann, "u64") ||
-                 cg_str_eq(p_ann, "size_t") || cg_str_eq(p_ann, "usize") || cg_str_eq(p_ann, "isize") ||
-                 cg_str_eq(p_ann, "uint{64}") || cg_str_eq(p_ann, "int{64}")) { pt = i64_t; }
-        else {
-            let plen <int> = cast<int>(cg_strlen(p_ann));
-            if (plen > 0) {
-                let p_first <string> = substr(p_ann, 0, 1);
-                let p_last <string> = substr(p_ann, plen - 1, 1);
-                if (cg_str_eq(p_first, "&") || cg_str_eq(p_first, "[") || cg_str_eq(p_last, "*")) {
-                    pt = ptr_t;
-                } else if (plen == 1) {
-                    // A bare type parameter (`T`) carries pointer-width
-                    // values: a 64-bit value (string, pointer, long) through
-                    // an i32 param truncates at the call boundary
-                    // (`mov %eax,%esi`), while an int widens losslessly
-                    // (zext) and narrows back (trunc) at each use. So both
-                    // spellings agree with the representative model, and a
-                    // constraint changes nothing about the width.
-                    pt = ptr_t;
-                } else if (!cg_str_eq(p_ann, "int") && !cg_str_eq(p_ann, "uint") && !cg_str_eq(p_ann, "auto") &&
-                             !cg_str_eq(p_ann, "i32") && !cg_str_eq(p_ann, "u32")) {
-                    pt = ptr_t;
+            if (is_iface_p) {
+                if (param_iface != null && param_iface.fat_ptr_ty != null) {
+                    pt = param_iface.fat_ptr_ty;
+                } else {
+                    let f_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
+                    f_args.t0 = ptr_t;
+                    f_args.t1 = ptr_t;
+                    pt = llvm_struct_type(f_args, 2, 0);
+                    delete f_args;
+                }
+            } else if (cg_str_eq(p_ann, "$struct") || cg_str_eq(p_ann, "$interface") ||
+              cg_str_eq(p_ann, "$type") || cg_str_eq(p_ann, "$enum_member")) {
+                pt = i64_t;
+              } else if (cg_str_eq(p_ann, "bool")) { pt = i1_t; }
+            else if (cg_str_eq(p_ann, "char") || cg_str_eq(p_ann, "u8") || cg_str_eq(p_ann, "i8") || cg_str_eq(p_ann, "int{8}") || cg_str_eq(p_ann, "uint{8}")) { pt = i8_t; }
+            else if (cg_str_eq(p_ann, "short") || cg_str_eq(p_ann, "ushort") || cg_str_eq(p_ann, "i16") || cg_str_eq(p_ann, "u16") || cg_str_eq(p_ann, "int{16}") || cg_str_eq(p_ann, "uint{16}")) { pt = i16_t; }
+            else if (cg_str_eq(p_ann, "int{32}") || cg_str_eq(p_ann, "uint{32}") || cg_str_eq(p_ann, "i32") || cg_str_eq(p_ann, "u32")) { pt = i32_t; }
+            else if (cg_str_eq(p_ann, "string")) { pt = ptr_t; }
+            else if (cg_str_eq(p_ann, "float") || cg_str_eq(p_ann, "f32")) { pt = llvm_float_type(); }
+            else if (cg_str_eq(p_ann, "double") || cg_str_eq(p_ann, "f64")) { pt = llvm_double_type(); }
+            else if (cg_str_eq(p_ann, "ulong") || cg_str_eq(p_ann, "long") || cg_str_eq(p_ann, "i64") || cg_str_eq(p_ann, "u64") ||
+              cg_str_eq(p_ann, "size_t") || cg_str_eq(p_ann, "usize") || cg_str_eq(p_ann, "isize") ||
+              cg_str_eq(p_ann, "uint{64}") || cg_str_eq(p_ann, "int{64}")) { pt = i64_t; }
+            else {
+                let plen <int> = cast<int>(cg_strlen(p_ann));
+                if (plen > 0) {
+                    let p_first <string> = substr(p_ann, 0, 1);
+                    let p_last <string> = substr(p_ann, plen - 1, 1);
+                    if (cg_str_eq(p_first, "&") || cg_str_eq(p_first, "[") || cg_str_eq(p_last, "*")) {
+                        pt = ptr_t;
+                    } else if (plen == 1) {
+                        // A bare type parameter (`T`) carries pointer-width
+                        // values: a 64-bit value (string, pointer, long) through
+                        // an i32 param truncates at the call boundary
+                        // (`mov %eax,%esi`), while an int widens losslessly
+                        // (zext) and narrows back (trunc) at each use. So both
+                        // spellings agree with the representative model, and a
+                        // constraint changes nothing about the width.
+                        pt = ptr_t;
+                    } else if (!cg_str_eq(p_ann, "int") && !cg_str_eq(p_ann, "uint") && !cg_str_eq(p_ann, "auto") &&
+                      !cg_str_eq(p_ann, "i32") && !cg_str_eq(p_ann, "u32")) {
+                        pt = ptr_t;
+                      }
                 }
             }
-        }
-        // A nullable scalar parameter lowers as the tagged pair `{T, i1}`;
-        // nullable pointers, strings, interfaces and structs stay one word.
-        if (p_qmark &&
-            (pt == i32_t || pt == i64_t || pt == i1_t || pt == i8_t ||
-             pt == llvm_float_type() || pt == llvm_double_type())) {
-            let p_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-            p_args.t0 = pt;
-            p_args.t1 = i1_t;
-            pt = llvm_struct_type(p_args, 2, 0);
-            delete p_args;
-        }
+            // A nullable scalar parameter lowers as the tagged pair `{T, i1}`;
+            // nullable pointers, strings, interfaces and structs stay one word.
+            if (p_qmark &&
+              (pt == i32_t || pt == i64_t || pt == i1_t || pt == i8_t ||
+              pt == llvm_float_type() || pt == llvm_double_type())) {
+                let p_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
+                p_args.t0 = pt;
+                p_args.t1 = i1_t;
+                pt = llvm_struct_type(p_args, 2, 0);
+                delete p_args;
+              }
 
-        cg_targs_set(param_types, p_count, pt);
+            cg_targs_set(param_types, p_count, pt);
 
-        p_count = p_count + 1;
-        p_cur = p_cur.right;
-    }
+            p_count = p_count + 1;
+            p_cur = p_cur.right;
+        }
     }
     if (!is_main_args_decl && p_cur != null) {
         // More parameters than the LLVMTypeArgs carrier holds (64): leave the
@@ -5880,9 +5880,9 @@ fun cg_method_cache_sym(ctx: &FnContext, n: &AstNode) <&FnSymbol> {
         if (pw.type_annotation != null) { pann = pw.type_annotation; }
         let stripped <string> = cg_strip_markers(cg_trim_spaces(pann));
         if (cg_strlen(stripped) > cast<ulong>(0) && cg_param_index(s_params, scount, stripped) < 0 &&
-            !cg_is_prim_spelling(stripped) && !cg_str_eq(stripped, "Self") &&
-            !cg_str_eq(stripped, "void") && !cg_str_eq(stripped, "noret") &&
-            find_struct(ctx, stripped) == null && find_interface(ctx, stripped) == null && find_enum(ctx, stripped) == null) {
+          !cg_is_prim_spelling(stripped) && !cg_str_eq(stripped, "Self") &&
+          !cg_str_eq(stripped, "void") && !cg_str_eq(stripped, "noret") &&
+          find_struct(ctx, stripped) == null && find_interface(ctx, stripped) == null && find_enum(ctx, stripped) == null) {
             let inf <string> = cg_infer_arg_spelling(ctx, aa);
             if (cg_strlen(inf) == cast<ulong>(0)) { paired = false; break; }
             let mi <int> = cg_param_index(m_names, mcount, stripped);
@@ -5894,7 +5894,7 @@ fun cg_method_cache_sym(ctx: &FnContext, n: &AstNode) <&FnSymbol> {
                 m_spell[mcount] = inf;
                 mcount = mcount + 1;
             }
-        }
+          }
         pw = pw.right;
         cw = cw.right;
         steps = steps + 1;
@@ -6164,12 +6164,12 @@ fun cg_decl_is_free_bare_generic(decl: &AstNode, structs: [&StructInfo], struct_
             let ann <string> = "";
             if (pw.type_annotation != null) { ann = pw.type_annotation; }
             if (cg_strlen(ann) > cast<ulong>(0) && !cg_str_eq(cg_trim_spaces(ann), "void*") &&
-                !cg_str_contains(ann, "[") && !cg_str_contains(ann, "]") && !cg_str_contains(ann, "$")) {
+              !cg_str_contains(ann, "[") && !cg_str_contains(ann, "]") && !cg_str_contains(ann, "$")) {
                 let one <[string]> = new [string, 1]{};
                 one[0] = pn[gi];
                 if (cg_free_mentions_param(ann, one, 1)) { seen = true; delete one; break; }
                 delete one;
-            }
+              }
             pw = pw.right;
         }
         if (!seen) { delete pn; return false; }
@@ -6527,9 +6527,9 @@ fun cg_free_spelling_of(ctx: &FnContext, node: &AstNode, depth: int) <string> {
     // monomorphization keys on. Anything else prototypal stays exotic.
     if (node.kind == ast_prototype_literal()) {
         if (node.type_annotation != null && cg_str_eq(node.type_annotation, "$struct") &&
-            node.str_val != null && cg_strlen(node.str_val) > cast<ulong>(0)) {
+          node.str_val != null && cg_strlen(node.str_val) > cast<ulong>(0)) {
             return node.str_val;
-        }
+          }
         return "";
     }
     return "";
@@ -6736,9 +6736,9 @@ fun cg_free_cache_sym(ctx: &FnContext, n: &AstNode) <&FnSymbol> {
     let tpi <int> = 0;
     while (tp != null && tpi < acount) {
         if (tp.type_annotation != null && cg_str_eq(cg_trim_spaces(tp.type_annotation), "$struct") &&
-            tp.name != null && cg_strlen(tp.name) > cast<ulong>(0)) {
+          tp.name != null && cg_strlen(tp.name) > cast<ulong>(0)) {
             cg_rewrite_handle_inits(clone, tp.name, actuals[tpi]);
-        }
+          }
         tp = tp.right;
         tpi = tpi + 1;
     }
@@ -7380,10 +7380,10 @@ priv fun cg_spelling_unsigned(spelling: string) <bool> {
         bi = bi + 1;
     }
     if (cg_str_eq(b, "uint") || cg_str_eq(b, "ushort") || cg_str_eq(b, "ulong") ||
-        cg_str_eq(b, "u8") || cg_str_eq(b, "u16") || cg_str_eq(b, "u32") ||
-        cg_str_eq(b, "u64") || cg_str_eq(b, "usize") || cg_str_eq(b, "size_t")) {
+      cg_str_eq(b, "u8") || cg_str_eq(b, "u16") || cg_str_eq(b, "u32") ||
+      cg_str_eq(b, "u64") || cg_str_eq(b, "usize") || cg_str_eq(b, "size_t")) {
         return true;
-    }
+      }
     return false;
 }
 
@@ -7416,12 +7416,12 @@ priv fun cg_value_is_unsigned(ctx: &FnContext, node: &AstNode) <bool> {
     if (node.kind == ast_literal_int()) { return false; }
     if (node.kind == ast_binary_expr() && node.name != null) {
         if (cg_str_eq(node.name, "<<") || cg_str_eq(node.name, ">>") ||
-            cg_str_eq(node.name, "+") || cg_str_eq(node.name, "-") ||
-            cg_str_eq(node.name, "*") || cg_str_eq(node.name, "/") ||
-            cg_str_eq(node.name, "%") || cg_str_eq(node.name, "&") ||
-            cg_str_eq(node.name, "|") || cg_str_eq(node.name, "^")) {
+          cg_str_eq(node.name, "+") || cg_str_eq(node.name, "-") ||
+          cg_str_eq(node.name, "*") || cg_str_eq(node.name, "/") ||
+          cg_str_eq(node.name, "%") || cg_str_eq(node.name, "&") ||
+          cg_str_eq(node.name, "|") || cg_str_eq(node.name, "^")) {
             return cg_value_is_unsigned(ctx, node.left);
-        }
+          }
         return false;
     }
     return false;
@@ -8255,7 +8255,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 // and read its header word. Direct `&[...]` fields keep
                 // the header read on the field value below.
                 if (base_node.kind == ast_member_access() &&
-                    cg_strlen(cg_member_inst_arr_ann(ctx, base_node, base_node.name)) > cast<ulong>(0)) {
+                  cg_strlen(cg_member_inst_arr_ann(ctx, base_node, base_node.name)) > cast<ulong>(0)) {
                     if (base_val != null) {
                         let buf_r <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, base_val, "ref_arr");
                         let ind_r <&LLVMIndices> = new LLVMIndices{};
@@ -8266,7 +8266,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                         return llvm_build_trunc(ctx.builder, len64_r, ctx.i32_ty, "arr_len32");
                     }
                     return llvm_const_int(ctx.i32_ty, 0, 0);
-                }
+                  }
                 if (base_val != null) {
                     // The header word before element 0: a full-width -1 the
                     // int-carrying const cannot spell (it arrives zero
@@ -8596,17 +8596,17 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                                 let rb64 <&LLVMValue> = coerce_val(ctx, rhs, ctx.i64_ty);
                                 llvm_build_store(ctx.builder, rb64, bs_gep);
                             } else {
-                            let idx_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "idx64");
-                            let ind <&LLVMIndices> = new LLVMIndices{};
-                            ind.i0 = idx_i64;
-                            let elem_ty <&LLVMType> = get_index_elem_type(ctx, n.left.left);
-                            let stride_ty <&LLVMType> = elem_ty;
-                            if (cg_member_array_wide(ctx, n.left.left, elem_ty)) { stride_ty = ctx.i64_ty; }
-                            let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, stride_ty, arr_val, ind, 1, "arr_gep");
-                            delete ind;
-                            rhs = fn_value_to_ptr(ctx, n.right, rhs);
-                            rhs = coerce_val(ctx, rhs, stride_ty);
-                            llvm_build_store(ctx.builder, rhs, gep);
+                                let idx_i64 <&LLVMValue> = llvm_build_sext(ctx.builder, idx_val, ctx.i64_ty, "idx64");
+                                let ind <&LLVMIndices> = new LLVMIndices{};
+                                ind.i0 = idx_i64;
+                                let elem_ty <&LLVMType> = get_index_elem_type(ctx, n.left.left);
+                                let stride_ty <&LLVMType> = elem_ty;
+                                if (cg_member_array_wide(ctx, n.left.left, elem_ty)) { stride_ty = ctx.i64_ty; }
+                                let gep <&LLVMValue> = llvm_build_gep2(ctx.builder, stride_ty, arr_val, ind, 1, "arr_gep");
+                                delete ind;
+                                rhs = fn_value_to_ptr(ctx, n.right, rhs);
+                                rhs = coerce_val(ctx, rhs, stride_ty);
+                                llvm_build_store(ctx.builder, rhs, gep);
                             }
                         }
                     }
@@ -8697,8 +8697,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             return rhs;
         }
         if (cg_str_eq(n.name, "+=") || cg_str_eq(n.name, "-=") || cg_str_eq(n.name, "*=") || cg_str_eq(n.name, "/=") ||
-            cg_str_eq(n.name, "%=") || cg_str_eq(n.name, "&=") || cg_str_eq(n.name, "|=") || cg_str_eq(n.name, "^=") ||
-            cg_str_eq(n.name, "<<=") || cg_str_eq(n.name, ">>=")) {
+          cg_str_eq(n.name, "%=") || cg_str_eq(n.name, "&=") || cg_str_eq(n.name, "|=") || cg_str_eq(n.name, "^=") ||
+          cg_str_eq(n.name, "<<=") || cg_str_eq(n.name, ">>=")) {
             let rhs <&LLVMValue> = lower_expr(ctx, n.right);
             if (rhs == null) { return null; }
             if (n.left != null) {
@@ -8712,9 +8712,9 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                         // rebind a bare identifier (mirroring the five the
                         // C++ backend revives); the rest never marked moved.
                         if (ctx.has_move_claim && (cg_str_eq(n.name, "+=") || cg_str_eq(n.name, "-=") ||
-                            cg_str_eq(n.name, "*=") || cg_str_eq(n.name, "/="))) {
+                          cg_str_eq(n.name, "*=") || cg_str_eq(n.name, "/="))) {
                             v.moved = false;
-                        }
+                          }
                         return res;
                     }
                 } else if (n.left.kind == ast_index_expr()) {
@@ -8762,7 +8762,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 }
             }
             return rhs;
-        }
+          }
         // ADR 0037 member-denoting operand (`r == Ok(T)`): the argument
         // spells the payload type as written in the member's declaration --
         // disambiguation, not a value -- so the operand is the member's
@@ -8810,10 +8810,10 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         // Anything without a declared operator symbol keeps today's
         // lowering (the verifier refusal it already ends in).
         if (n.left != null && n.right != null &&
-            n.left.kind == ast_ident() && n.right.kind == ast_ident() &&
-            !cg_str_eq(n.left.name, "self") &&
-            (cg_str_eq(n.name, "+") || cg_str_eq(n.name, "-") || cg_str_eq(n.name, "*") ||
-             cg_str_eq(n.name, "/") || cg_str_eq(n.name, "%"))) {
+          n.left.kind == ast_ident() && n.right.kind == ast_ident() &&
+          !cg_str_eq(n.left.name, "self") &&
+          (cg_str_eq(n.name, "+") || cg_str_eq(n.name, "-") || cg_str_eq(n.name, "*") ||
+          cg_str_eq(n.name, "/") || cg_str_eq(n.name, "%"))) {
             let op_sym <string> = "";
             let op_ann <string> = cg_eq_operand_ann(ctx, n.left);
             let op_o <int> = 0;
@@ -8831,7 +8831,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 free_buffer(op_b);
             }
             if (cg_strlen(op_sym) > cast<ulong>(0) &&
-                (fn_ctx_find_fn(ctx, op_sym) != null || llvm_get_named_function(ctx.module, op_sym) != null)) {
+              (fn_ctx_find_fn(ctx, op_sym) != null || llvm_get_named_function(ctx.module, op_sym) != null)) {
                 let m_call <&AstNode> = new AstNode{};
                 m_call.kind = ast_call_expr();
                 m_call.name = op_sym;
@@ -8842,8 +8842,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 w0.right = w1;
                 m_call.left = w0;
                 return lower_expr(ctx, m_call);
-            }
-        }
+              }
+          }
         // Arithmetic over a representative-carried generic value: a bare
         // type parameter (`T`) lowers at pointer width, so `T + T` in an
         // erased body arrives as `add ptr, ptr`, which LLVM rejects. Read
@@ -8854,7 +8854,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         // genuine pointer (or names a parameter too): pointer differences
         // keep today's lowering.
         if (cg_str_eq(n.name, "+") || cg_str_eq(n.name, "-") || cg_str_eq(n.name, "*") || cg_str_eq(n.name, "/") || cg_str_eq(n.name, "%") ||
-            cg_str_eq(n.name, "<<") || cg_str_eq(n.name, ">>") || cg_str_eq(n.name, "&") || cg_str_eq(n.name, "|") || cg_str_eq(n.name, "^")) {
+          cg_str_eq(n.name, "<<") || cg_str_eq(n.name, ">>") || cg_str_eq(n.name, "&") || cg_str_eq(n.name, "|") || cg_str_eq(n.name, "^")) {
             let l_ann <string> = cg_strip_markers(cg_trim_spaces(cg_eq_operand_ann(ctx, n.left)));
             let r_ann <string> = cg_strip_markers(cg_trim_spaces(cg_eq_operand_ann(ctx, n.right)));
             let l_is_param <bool> = cg_is_generic_ann(ctx, l_ann);
@@ -8869,7 +8869,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 rhs = llvm_build_ptr_to_int(ctx.builder, rhs, ctx.i64_ty, "p2i");
                 r_ty = ctx.i64_ty;
             }
-        }
+          }
         // Nullable pairs dispatch on the operator, mirroring the C++
         // backend's tagged-pair arms (ADR 0040): `== null` reads the tag
         // only, `==` between two pairs reads tag and payload, a bare scalar
@@ -9223,11 +9223,11 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let l_ann <string> = cg_eq_operand_ann(ctx, n.left);
             let r_ann <string> = cg_eq_operand_ann(ctx, n.right);
             if (l_ty == ctx.ptr_ty && r_ty == ctx.ptr_ty &&
-                !cg_is_null_lit(ctx, lhs) && !cg_is_null_lit(ctx, rhs) &&
-                !cg_is_generic_ann(ctx, l_ann) && !cg_is_generic_ann(ctx, r_ann) &&
-                (cg_operand_is_string(ctx, n.left) || cg_operand_is_string(ctx, n.right))) {
+              !cg_is_null_lit(ctx, lhs) && !cg_is_null_lit(ctx, rhs) &&
+              !cg_is_generic_ann(ctx, l_ann) && !cg_is_generic_ann(ctx, r_ann) &&
+              (cg_operand_is_string(ctx, n.left) || cg_operand_is_string(ctx, n.right))) {
                 return cg_lower_string_eq(ctx, lhs, rhs, !is_eq);
-            }
+              }
             if (n.right != null && n.right.kind == ast_call_expr() && cg_str_eq(n.right.name, "__fin_array_literal")) {
                 // lhs already holds the buffer: a plain array lowers to its
                 // data pointer and a member access to the loaded field value.
@@ -9294,13 +9294,13 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             // member-denoting pair is decided above, so address equality
             // would read the boxes, not the tags.
             if (l_ty == ctx.ptr_ty && r_ty == ctx.ptr_ty &&
-                cg_ann_names_enum(ctx, cg_eq_operand_ann(ctx, n.left)) &&
-                cg_ann_names_enum(ctx, cg_eq_operand_ann(ctx, n.right))) {
+              cg_ann_names_enum(ctx, cg_eq_operand_ann(ctx, n.left)) &&
+              cg_ann_names_enum(ctx, cg_eq_operand_ann(ctx, n.right))) {
                 cg_dprintf(2, "finc codegen refusal: operator '%s' on two erased enum values is not lowered (discriminant comparison needs a member beside the value)\n", n.name);
                 refuse_and_poison(ctx);
                 llvm_build_unreachable(ctx.builder);
                 return null;
-            }
+              }
             if (l_en != null || r_en != null) {
                 // Structs extract their discriminant, fieldless tags pass
                 // through; anything else (notably an erased address, which
@@ -9869,11 +9869,11 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 }
             }
             if (imp_a0 != null && imp_a1 != null &&
-                imp_a0.kind == ast_ident() && imp_a1.kind == ast_ident()) {
+              imp_a0.kind == ast_ident() && imp_a1.kind == ast_ident()) {
                 let s_nm <string> = imp_a0.name;
                 let i_nm <string> = imp_a1.name;
                 if (s_nm != null && i_nm != null &&
-                    !cg_str_contains(s_nm, "<") && !cg_str_contains(i_nm, "<")) {
+                  !cg_str_contains(s_nm, "<") && !cg_str_contains(i_nm, "<")) {
                     let s_info <&StructInfo> = find_struct(ctx, s_nm);
                     let i_info <&InterfaceInfo> = find_interface(ctx, i_nm);
                     if (s_info != null && i_info != null) {
@@ -9884,8 +9884,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                             return llvm_const_int(ctx.i1_ty, 0, 0);
                         }
                     }
-                }
-            }
+                  }
+              }
             // Dynamic `$struct`/`$interface` values (Stage C tid-pair chain):
             // both sides lower to i64 tids; the answer is the OR over every
             // conforming (struct, interface) pair known here. A side that is
@@ -10700,9 +10700,9 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 // shifts the rest (e.g. `new_scope(null)` became a 0-arg
                 // call: LLVM "Incorrect number of arguments").
                 if (!cg_str_eq(rn, "null") && !cg_str_eq(rn, "NULL") && !cg_str_eq(rn, "true") && !cg_str_eq(rn, "false")) {
-                if (fn_ctx_find_var(ctx, rn) == null && find_struct(ctx, rn) == null && find_interface(ctx, rn) == null && find_enum(ctx, rn) == null && fn_ctx_find_fn(ctx, rn) == null && llvm_get_named_function(ctx.module, rn) == null && llvm_get_named_global(ctx.module, rn) == null) {
-                    skip_first = true;
-                }
+                    if (fn_ctx_find_var(ctx, rn) == null && find_struct(ctx, rn) == null && find_interface(ctx, rn) == null && find_enum(ctx, rn) == null && fn_ctx_find_fn(ctx, rn) == null && llvm_get_named_function(ctx.module, rn) == null && llvm_get_named_global(ctx.module, rn) == null) {
+                        skip_first = true;
+                    }
                 }
             }
         }
@@ -10738,41 +10738,41 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                         llvm_build_unreachable(ctx.builder);
                         return null;
                     } else {
-                    // The expected fat type identifies the target interface by
-                    // identity: conversion builds that interface's vtable, so a
-                    // reader with the same static type finds its own slots.
-                    let tgt_iface <&InterfaceInfo> = null;
-                    let ti <int> = 0;
-                    while (ti < ctx.interface_count) {
-                        let cand <&InterfaceInfo> = ctx.interfaces[ti];
-                        if (cand != null && cand.fat_ptr_ty != null && exp_ty == cand.fat_ptr_ty) {
-                            tgt_iface = cand;
-                            break;
-                        }
-                        ti = ti + 1;
-                    }
-                    if (tgt_iface != null) {
-                        let actual_rec_st <string> = get_node_struct_name(ctx, actual_arg);
-                        if (cg_strlen(actual_rec_st) == cast<ulong>(0)) {
-                            if (actual_arg.kind == ast_ident()) {
-                                let v_arg <&LocalVar> = fn_ctx_find_var(ctx, actual_arg.name);
-                                if (v_arg != null) { actual_rec_st = v_arg.type_annotation; }
+                        // The expected fat type identifies the target interface by
+                        // identity: conversion builds that interface's vtable, so a
+                        // reader with the same static type finds its own slots.
+                        let tgt_iface <&InterfaceInfo> = null;
+                        let ti <int> = 0;
+                        while (ti < ctx.interface_count) {
+                            let cand <&InterfaceInfo> = ctx.interfaces[ti];
+                            if (cand != null && cand.fat_ptr_ty != null && exp_ty == cand.fat_ptr_ty) {
+                                tgt_iface = cand;
+                                break;
                             }
+                            ti = ti + 1;
                         }
-                        av = struct_to_interface(ctx, av, actual_rec_st, tgt_iface);
-                    } else if (exp_ty == ctx.ptr_ty && find_enum_by_llvm_type(ctx, a_ty) != null) {
-                        // A concrete enum struct for an erased
-                        // (generic-spelling) parameter: generics carry
-                        // aggregates by address (struct locals are already
-                        // boxes), so box the value struct and pass its
-                        // address. Scalars keep the representative-bits path
-                        // in coerce_val below.
-                        let box <&LLVMValue> = llvm_build_alloca(ctx.builder, a_ty, "enum.box");
-                        llvm_build_store(ctx.builder, av, box);
-                        av = box;
-                    } else {
-                        av = coerce_val(ctx, av, exp_ty);
-                    }
+                        if (tgt_iface != null) {
+                            let actual_rec_st <string> = get_node_struct_name(ctx, actual_arg);
+                            if (cg_strlen(actual_rec_st) == cast<ulong>(0)) {
+                                if (actual_arg.kind == ast_ident()) {
+                                    let v_arg <&LocalVar> = fn_ctx_find_var(ctx, actual_arg.name);
+                                    if (v_arg != null) { actual_rec_st = v_arg.type_annotation; }
+                                }
+                            }
+                            av = struct_to_interface(ctx, av, actual_rec_st, tgt_iface);
+                        } else if (exp_ty == ctx.ptr_ty && find_enum_by_llvm_type(ctx, a_ty) != null) {
+                            // A concrete enum struct for an erased
+                            // (generic-spelling) parameter: generics carry
+                            // aggregates by address (struct locals are already
+                            // boxes), so box the value struct and pass its
+                            // address. Scalars keep the representative-bits path
+                            // in coerce_val below.
+                            let box <&LLVMValue> = llvm_build_alloca(ctx.builder, a_ty, "enum.box");
+                            llvm_build_store(ctx.builder, av, box);
+                            av = box;
+                        } else {
+                            av = coerce_val(ctx, av, exp_ty);
+                        }
                     }
                 }
                 // Beyond the declared parameters (C varargs) a float passes
@@ -10884,10 +10884,10 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             if (!cg_str_eq(want_ann, "auto")) {
                 let want_ty <&LLVMType> = map_type(ctx, want_ann);
                 if (want_ty != null && want_ty != ctx.void_ty &&
-                    (want_ty == ctx.i32_ty || want_ty == ctx.i64_ty || want_ty == ctx.i8_ty || want_ty == ctx.i1_ty || want_ty == ctx.float_ty || want_ty == ctx.double_ty) &&
-                    llvm_type_of(call_res) != want_ty) {
+                  (want_ty == ctx.i32_ty || want_ty == ctx.i64_ty || want_ty == ctx.i8_ty || want_ty == ctx.i1_ty || want_ty == ctx.float_ty || want_ty == ctx.double_ty) &&
+                  llvm_type_of(call_res) != want_ty) {
                     call_res = coerce_val(ctx, call_res, want_ty);
-                }
+                  }
             }
         }
         return call_res;
@@ -11319,12 +11319,12 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                     llvm_build_unreachable(ctx.builder);
                     return;
                 } else if (!cg_is_tagged_pair(ctx, fn_ret_ty) && fn_ret_ty != v_ty && cg_is_null_lit(ctx, val) &&
-                    (fn_ret_ty == ctx.i32_ty || fn_ret_ty == ctx.i64_ty || fn_ret_ty == ctx.i8_ty || fn_ret_ty == ctx.i1_ty || fn_ret_ty == ctx.float_ty || fn_ret_ty == ctx.double_ty)) {
+                  (fn_ret_ty == ctx.i32_ty || fn_ret_ty == ctx.i64_ty || fn_ret_ty == ctx.i8_ty || fn_ret_ty == ctx.i1_ty || fn_ret_ty == ctx.float_ty || fn_ret_ty == ctx.double_ty)) {
                     cg_dprintf(2, "finc codegen refusal: returning 'null' for a non-nullable value return (declare the return nullable or return a value) at '%s':%d\n", ctx.src_file, stmt.line);
                     refuse_and_poison(ctx);
                     llvm_build_unreachable(ctx.builder);
                     return;
-                } else if (fn_ret_ty != v_ty) {
+                  } else if (fn_ret_ty != v_ty) {
                     if (fn_ret_ty == ctx.i8_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i64_ty)) {
                         val = llvm_build_trunc(ctx.builder, val, ctx.i8_ty, "ret_tr8");
                     } else if (fn_ret_ty == ctx.i16_ty && (v_ty == ctx.i32_ty || v_ty == ctx.i64_ty)) {
@@ -11349,7 +11349,7 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
                     } else if ((v_ty == ctx.float_ty || v_ty == ctx.double_ty) && fn_ret_ty != v_ty) {
                         val = coerce_val(ctx, val, fn_ret_ty);
                     }
-                }
+                  }
                 emit_scope_cleanups(ctx, 0);
                 llvm_build_ret(ctx.builder, val);
             } else if (!ctx.poisoned) {
@@ -11746,14 +11746,14 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
         return;
     }
     if (stmt.kind != ast_var_decl() && stmt.kind != ast_return_stmt() &&
-        stmt.kind != ast_expr_stmt() && stmt.kind != ast_if_stmt() &&
-        stmt.kind != ast_while_stmt() && stmt.kind != ast_for_stmt() &&
-        stmt.kind != ast_block() && stmt.kind != ast_break_stmt() &&
-        stmt.kind != ast_continue_stmt() && stmt.kind != ast_blame_stmt() &&
-        stmt.kind != ast_fun_decl()) {
+      stmt.kind != ast_expr_stmt() && stmt.kind != ast_if_stmt() &&
+      stmt.kind != ast_while_stmt() && stmt.kind != ast_for_stmt() &&
+      stmt.kind != ast_block() && stmt.kind != ast_break_stmt() &&
+      stmt.kind != ast_continue_stmt() && stmt.kind != ast_blame_stmt() &&
+      stmt.kind != ast_fun_decl()) {
         cg_dprintf(2, "finc codegen refusal: unhandled statement kind %d at '%s':%d\n", stmt.kind, ctx.src_file, stmt.line);
         llvm_build_unreachable(ctx.builder);
-    }
+      }
 }
 
 // A refusal poisons the function: lowering stops (every loop checks the
@@ -11775,7 +11775,6 @@ pub fun lower_block(ctx: &FnContext, block: &AstNode) <noret> {
         cur = cur.right;
     }
 }
-
 
 // The generic arguments of a receiver spelling (`Box<float>` -> `float`;
 // `&Collection<int>` -> `int`; multi-arg kept whole: `string,Data`). ""
@@ -12057,16 +12056,16 @@ fun cg_param_index(params: [string], pcount: int, want: string) <int> {
 // rather than mis-substitutes.
 fun cg_is_type_delim(ch: string) <bool> {
     if (cg_str_eq(ch, " ") || cg_str_eq(ch, "<") || cg_str_eq(ch, ">") ||
-        cg_str_eq(ch, ",") || cg_str_eq(ch, "&") || cg_str_eq(ch, "[") ||
-        cg_str_eq(ch, "]") || cg_str_eq(ch, "?") || cg_str_eq(ch, "*") ||
-        cg_str_eq(ch, "(") || cg_str_eq(ch, ")") || cg_str_eq(ch, "{") ||
-        cg_str_eq(ch, "}") || cg_str_eq(ch, ":") || cg_str_eq(ch, ";") ||
-        cg_str_eq(ch, "=") || cg_str_eq(ch, "!") || cg_str_eq(ch, "+") ||
-        cg_str_eq(ch, "-") || cg_str_eq(ch, "/") || cg_str_eq(ch, "%") ||
-        cg_str_eq(ch, "|") || cg_str_eq(ch, ".") || cg_str_eq(ch, "\"") ||
-        cg_str_eq(ch, "'") || cg_str_eq(ch, "$")) {
+      cg_str_eq(ch, ",") || cg_str_eq(ch, "&") || cg_str_eq(ch, "[") ||
+      cg_str_eq(ch, "]") || cg_str_eq(ch, "?") || cg_str_eq(ch, "*") ||
+      cg_str_eq(ch, "(") || cg_str_eq(ch, ")") || cg_str_eq(ch, "{") ||
+      cg_str_eq(ch, "}") || cg_str_eq(ch, ":") || cg_str_eq(ch, ";") ||
+      cg_str_eq(ch, "=") || cg_str_eq(ch, "!") || cg_str_eq(ch, "+") ||
+      cg_str_eq(ch, "-") || cg_str_eq(ch, "/") || cg_str_eq(ch, "%") ||
+      cg_str_eq(ch, "|") || cg_str_eq(ch, ".") || cg_str_eq(ch, "\"") ||
+      cg_str_eq(ch, "'") || cg_str_eq(ch, "$")) {
         return true;
-    }
+      }
     return false;
 }
 
@@ -12183,12 +12182,12 @@ fun cg_scan_eq_use(node: &AstNode, vnames: [string], vanns: [string], vcount: in
             let pi <int> = 0;
             while (pi < pcount) {
                 if ((cg_strlen(s0) > cast<ulong>(0) && cg_str_eq(s0, params[pi])) ||
-                    (cg_strlen(s1) > cast<ulong>(0) && cg_str_eq(s1, params[pi]))) {
+                  (cg_strlen(s1) > cast<ulong>(0) && cg_str_eq(s1, params[pi]))) {
                     if (ocount < 64 && !cg_name_in_list(out, ocount, params[pi])) {
                         out[ocount] = params[pi];
                         ocount = ocount + 1;
                     }
-                }
+                  }
                 pi = pi + 1;
             }
         }
@@ -12513,14 +12512,14 @@ fun cg_cache_short(n_name: string, base: string) <string> {
 
 fun cg_is_prim_spelling(s: string) <bool> {
     if (cg_str_eq(s, "int") || cg_str_eq(s, "uint") || cg_str_eq(s, "bool") ||
-        cg_str_eq(s, "char") || cg_str_eq(s, "u8") || cg_str_eq(s, "i8") ||
-        cg_str_eq(s, "string") || cg_str_eq(s, "float") || cg_str_eq(s, "f32") ||
-        cg_str_eq(s, "double") || cg_str_eq(s, "f64") || cg_str_eq(s, "long") ||
-        cg_str_eq(s, "ulong") || cg_str_eq(s, "i64") || cg_str_eq(s, "u64") ||
-        cg_str_eq(s, "size_t") || cg_str_eq(s, "usize") || cg_str_eq(s, "isize") ||
-        cg_str_eq(s, "uint64") || cg_str_eq(s, "int64")) {
+      cg_str_eq(s, "char") || cg_str_eq(s, "u8") || cg_str_eq(s, "i8") ||
+      cg_str_eq(s, "string") || cg_str_eq(s, "float") || cg_str_eq(s, "f32") ||
+      cg_str_eq(s, "double") || cg_str_eq(s, "f64") || cg_str_eq(s, "long") ||
+      cg_str_eq(s, "ulong") || cg_str_eq(s, "i64") || cg_str_eq(s, "u64") ||
+      cg_str_eq(s, "size_t") || cg_str_eq(s, "usize") || cg_str_eq(s, "isize") ||
+      cg_str_eq(s, "uint64") || cg_str_eq(s, "int64")) {
         return true;
-    }
+      }
     return false;
 }
 
@@ -12560,7 +12559,6 @@ fun cg_modellable_seg(ctx: &FnContext, seg: string) <bool> {
     if (find_enum(ctx, s) != null) { return true; }
     return false;
 }
-
 
 fun collect_var_allocas(ctx: &FnContext, node: &AstNode) <noret> {
     if (node == null) { return; }
@@ -12605,19 +12603,19 @@ fun collect_var_allocas(ctx: &FnContext, node: &AstNode) <noret> {
 }
 
 pub fun lower_fun_decl(
-    module: &LLVMModule,
-    builder: &LLVMBuilder,
-    fn_node: &AstNode,
-    fn_syms: [&FnSymbol],
-    fn_sym_count: int,
-    structs: [&StructInfo],
-    struct_count: int,
-    enums: [&EnumInfo],
-    enum_count: int,
-    interfaces: [&InterfaceInfo],
-    interface_count: int,
-    move_claim: bool,
-    src_file: string
+  module: &LLVMModule,
+  builder: &LLVMBuilder,
+  fn_node: &AstNode,
+  fn_syms: [&FnSymbol],
+  fn_sym_count: int,
+  structs: [&StructInfo],
+  struct_count: int,
+  enums: [&EnumInfo],
+  enum_count: int,
+  interfaces: [&InterfaceInfo],
+  interface_count: int,
+  move_claim: bool,
+  src_file: string
 ) <bool> {
     if (fn_node == null || fn_node.left == null) { return false; }
 
@@ -12634,9 +12632,9 @@ pub fun lower_fun_decl(
     if (cg_str_eq(fn_name, "main")) {
         let ret_ok_main <bool> = false;
         if (cg_str_eq(fn_node.type_annotation, "void") || cg_str_eq(fn_node.type_annotation, "noret") ||
-            cg_str_eq(fn_node.type_annotation, "int") || cg_str_eq(fn_node.type_annotation, "uint")) {
+          cg_str_eq(fn_node.type_annotation, "int") || cg_str_eq(fn_node.type_annotation, "uint")) {
             ret_ok_main = true;
-        }
+          }
         if (!ret_ok_main) {
             cg_dprintf(2, "finc codegen refusal: a 'main' returning '%s' is not lowered (only void, noret, int, uint lower)\n", fn_node.type_annotation);
             return true;
@@ -12786,54 +12784,54 @@ pub fun lower_fun_decl(
             pv_main.elem_ty = ptr_t;
         }
     } else {
-    while (p_cur != null) {
-        let p_val <&LLVMValue> = llvm_get_param(fn_val, p_idx);
-        if (p_val == null) {
-            // Unreachable when the declaration above agrees with the carrier
-            // (over-cap functions refuse before any body lowers), but a null
-            // parameter must refuse, never flow into llvm_type_of.
-            cg_dprintf(2, "finc codegen refusal: function '%s' has more parameters than are lowered (at most 64)\n", fn_name);
-            refuse_and_poison(ctx);
-            break;
-        }
-        let pt <&LLVMType> = llvm_type_of(p_val);
-        let alloca <&LLVMValue> = llvm_build_alloca(builder, pt, p_cur.name);
-        llvm_build_store(builder, p_val, alloca);
-        fn_ctx_add_var(ctx, p_cur.name, alloca, pt, p_cur.type_annotation);
-        if (cg_param_needs_value_copy(ctx, p_cur.type_annotation, fn_node.left, p_cur.name)) {
-            // By-value struct parameters arrive as the caller's heap-box
-            // pointer; copy the box on entry so member stores stay
-            // function-local (d01/d03: `p.a = 50` must not reach the
-            // caller, while `&`-parameters keep aliasing). Same fixed
-            // heap-struct buffer as struct_alloc (1024).
-            let bc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
-            let bc_ty <&LLVMType> = llvm_global_get_value_type(bc_fn);
-            let bc_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            bc_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
-            bc_args.v1 = llvm_const_int(ctx.i64_ty, 1024, 0);
-            let fresh <&LLVMValue> = llvm_build_call2(builder, bc_ty, bc_fn, bc_args, 2, "byval_copy");
-            delete bc_args;
-            let mc_fn <&LLVMValue> = get_or_declare_memcpy(ctx);
-            let mc_ty <&LLVMType> = llvm_global_get_value_type(mc_fn);
-            let mc_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            mc_args.v0 = fresh;
-            mc_args.v1 = p_val;
-            mc_args.v2 = llvm_const_int(ctx.i64_ty, 1024, 0);
-            llvm_build_call2(builder, mc_ty, mc_fn, mc_args, 3, "");
-            delete mc_args;
-            llvm_build_store(builder, fresh, alloca);
-        }
-        let pv <&LocalVar> = fn_ctx_find_var(ctx, p_cur.name);
-        if (pv != null && p_cur.type_annotation != null) {
-            let p_ext <int> = get_fixed_array_extent(p_cur.type_annotation);
-            if (p_ext >= 0) {
-                pv.len_val = llvm_const_int(ctx.i32_ty, p_ext, 0);
+        while (p_cur != null) {
+            let p_val <&LLVMValue> = llvm_get_param(fn_val, p_idx);
+            if (p_val == null) {
+                // Unreachable when the declaration above agrees with the carrier
+                // (over-cap functions refuse before any body lowers), but a null
+                // parameter must refuse, never flow into llvm_type_of.
+                cg_dprintf(2, "finc codegen refusal: function '%s' has more parameters than are lowered (at most 64)\n", fn_name);
+                refuse_and_poison(ctx);
+                break;
             }
-        }
+            let pt <&LLVMType> = llvm_type_of(p_val);
+            let alloca <&LLVMValue> = llvm_build_alloca(builder, pt, p_cur.name);
+            llvm_build_store(builder, p_val, alloca);
+            fn_ctx_add_var(ctx, p_cur.name, alloca, pt, p_cur.type_annotation);
+            if (cg_param_needs_value_copy(ctx, p_cur.type_annotation, fn_node.left, p_cur.name)) {
+                // By-value struct parameters arrive as the caller's heap-box
+                // pointer; copy the box on entry so member stores stay
+                // function-local (d01/d03: `p.a = 50` must not reach the
+                // caller, while `&`-parameters keep aliasing). Same fixed
+                // heap-struct buffer as struct_alloc (1024).
+                let bc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
+                let bc_ty <&LLVMType> = llvm_global_get_value_type(bc_fn);
+                let bc_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                bc_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
+                bc_args.v1 = llvm_const_int(ctx.i64_ty, 1024, 0);
+                let fresh <&LLVMValue> = llvm_build_call2(builder, bc_ty, bc_fn, bc_args, 2, "byval_copy");
+                delete bc_args;
+                let mc_fn <&LLVMValue> = get_or_declare_memcpy(ctx);
+                let mc_ty <&LLVMType> = llvm_global_get_value_type(mc_fn);
+                let mc_args <&LLVMValueArgs> = new LLVMValueArgs{};
+                mc_args.v0 = fresh;
+                mc_args.v1 = p_val;
+                mc_args.v2 = llvm_const_int(ctx.i64_ty, 1024, 0);
+                llvm_build_call2(builder, mc_ty, mc_fn, mc_args, 3, "");
+                delete mc_args;
+                llvm_build_store(builder, fresh, alloca);
+            }
+            let pv <&LocalVar> = fn_ctx_find_var(ctx, p_cur.name);
+            if (pv != null && p_cur.type_annotation != null) {
+                let p_ext <int> = get_fixed_array_extent(p_cur.type_annotation);
+                if (p_ext >= 0) {
+                    pv.len_val = llvm_const_int(ctx.i32_ty, p_ext, 0);
+                }
+            }
 
-        p_idx = p_idx + 1;
-        p_cur = p_cur.right;
-    }
+            p_idx = p_idx + 1;
+            p_cur = p_cur.right;
+        }
     }
 
     if (fn_node.left != null) {
@@ -12953,37 +12951,37 @@ pub fun lower_fun_decl(
 }
 
 pub fun lower_function_body(
-    module: &LLVMModule,
-    builder: &LLVMBuilder,
-    fn_node: &AstNode,
-    fn_syms: [&FnSymbol],
-    fn_sym_count: int,
-    structs: [&StructInfo],
-    struct_count: int,
-    enums: [&EnumInfo],
-    enum_count: int,
-    interfaces: [&InterfaceInfo],
-    interface_count: int,
-    move_claim: bool,
-    src_file: string
+  module: &LLVMModule,
+  builder: &LLVMBuilder,
+  fn_node: &AstNode,
+  fn_syms: [&FnSymbol],
+  fn_sym_count: int,
+  structs: [&StructInfo],
+  struct_count: int,
+  enums: [&EnumInfo],
+  enum_count: int,
+  interfaces: [&InterfaceInfo],
+  interface_count: int,
+  move_claim: bool,
+  src_file: string
 ) <bool> {
     return lower_fun_decl(module, builder, fn_node, fn_syms, fn_sym_count, structs, struct_count, enums, enum_count, interfaces, interface_count, move_claim, src_file);
 }
 
 pub fun lower_decl(
-    module: &LLVMModule,
-    builder: &LLVMBuilder,
-    decl: &AstNode,
-    fn_syms: [&FnSymbol],
-    fn_sym_count: int,
-    structs: [&StructInfo],
-    struct_count: int,
-    enums: [&EnumInfo],
-    enum_count: int,
-    interfaces: [&InterfaceInfo],
-    interface_count: int,
-    move_claim: bool,
-    src_file: string
+  module: &LLVMModule,
+  builder: &LLVMBuilder,
+  decl: &AstNode,
+  fn_syms: [&FnSymbol],
+  fn_sym_count: int,
+  structs: [&StructInfo],
+  struct_count: int,
+  enums: [&EnumInfo],
+  enum_count: int,
+  interfaces: [&InterfaceInfo],
+  interface_count: int,
+  move_claim: bool,
+  src_file: string
 ) <bool> {
     if (decl == null) { return false; }
     // A `@special` runs inside the compiler: its body has no runtime
@@ -13328,11 +13326,11 @@ fun lower_global_var(module: &LLVMModule, decl: &AstNode, structs: [&StructInfo]
                     }
                     let f_trim <string> = cg_trim_spaces(f_ann);
                     if (!cg_str_eq(f_trim, "int") && !cg_str_eq(f_trim, "uint") &&
-                        !cg_str_eq(f_trim, "bool") && !cg_str_eq(f_trim, "char") &&
-                        !cg_str_eq(f_trim, "u8") && !cg_str_eq(f_trim, "i8")) {
+                      !cg_str_eq(f_trim, "bool") && !cg_str_eq(f_trim, "char") &&
+                      !cg_str_eq(f_trim, "u8") && !cg_str_eq(f_trim, "i8")) {
                         g_ok = false;
                         break;
-                    }
+                      }
                     let f_init <&AstNode> = init.left;
                     let f_val <int> = 0;
                     let f_found <bool> = false;
@@ -13399,19 +13397,19 @@ fun lower_global_var(module: &LLVMModule, decl: &AstNode, structs: [&StructInfo]
 // (null block) supplies nothing. True on refusal: like a poisoned function,
 // the module must not link.
 fun lower_dtor_claim(
-    module: &LLVMModule,
-    builder: &LLVMBuilder,
-    qblk: &AstNode,
-    fn_syms: [&FnSymbol],
-    fn_sym_count: int,
-    structs: [&StructInfo],
-    struct_count: int,
-    enums: [&EnumInfo],
-    enum_count: int,
-    interfaces: [&InterfaceInfo],
-    interface_count: int,
-    move_claim: bool,
-    src_file: string
+  module: &LLVMModule,
+  builder: &LLVMBuilder,
+  qblk: &AstNode,
+  fn_syms: [&FnSymbol],
+  fn_sym_count: int,
+  structs: [&StructInfo],
+  struct_count: int,
+  enums: [&EnumInfo],
+  enum_count: int,
+  interfaces: [&InterfaceInfo],
+  interface_count: int,
+  move_claim: bool,
+  src_file: string
 ) <bool> {
     if (qblk == null) { return false; }
     let i32_t <&LLVMType> = llvm_i32_type();
@@ -13489,19 +13487,19 @@ fun lower_dtor_claim(
 // Mirrors lower_dtor_claim above: recognition, the generation subset, and
 // the shared lowering are the same shape, only the slot differs.
 fun lower_dealloc_claim(
-    module: &LLVMModule,
-    builder: &LLVMBuilder,
-    qblk: &AstNode,
-    fn_syms: [&FnSymbol],
-    fn_sym_count: int,
-    structs: [&StructInfo],
-    struct_count: int,
-    enums: [&EnumInfo],
-    enum_count: int,
-    interfaces: [&InterfaceInfo],
-    interface_count: int,
-    move_claim: bool,
-    src_file: string
+  module: &LLVMModule,
+  builder: &LLVMBuilder,
+  qblk: &AstNode,
+  fn_syms: [&FnSymbol],
+  fn_sym_count: int,
+  structs: [&StructInfo],
+  struct_count: int,
+  enums: [&EnumInfo],
+  enum_count: int,
+  interfaces: [&InterfaceInfo],
+  interface_count: int,
+  move_claim: bool,
+  src_file: string
 ) <bool> {
     if (qblk == null) { return false; }
     let i32_t <&LLVMType> = llvm_i32_type();

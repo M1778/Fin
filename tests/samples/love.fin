@@ -56,36 +56,35 @@
 interface Loser {}
 interface Beautiful {}
 interface Person {
-	readonly name <string>,
+    readonly name <string>,
 }
 
-
 struct Fin: <Person,Beautiful> {
-	readonly hate <Person>,
-	name <string>,
+    readonly hate <Person>,
+      name <string>,
 
-	fun hate(someone: Person) <noret> {
-		self.hate = someone;
-		printf("Fin started hating %s\n", self.hate.name);
-	}
+      fun hate(someone: Person) <noret> {
+        self.hate = someone;
+        printf("Fin started hating %s\n", self.hate.name);
+      }
 }
 
 struct M1778: <Person,Loser> {
-pub:
-	readonly love <Person>,
-	name <string>,
+    pub:
+      readonly love <Person>,
+      name <string>,
 
-	fun love(a: Person) <noret> {
-		self.love = a;
-		printf("N1778 started loving %s\n", a.name);
-	}
+      fun love(a: Person) <noret> {
+        self.love = a;
+        printf("N1778 started loving %s\n", a.name);
+      }
 
 }
 
 fun main() <noret> {
-	const I <auto> = M1778{name:"M1778"};
-	const F <auto> = Fin{name:"Fin"};
+    const I <auto> = M1778{name:"M1778"};
+    const F <auto> = Fin{name:"Fin"};
 
-	I.love(F);
-	F.hate(I);
+    I.love(F);
+    F.hate(I);
 }

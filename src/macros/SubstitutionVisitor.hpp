@@ -47,6 +47,7 @@ public:
     void visit(ArrayLiteral& node) override;
     void visit(ArrayAccess& node) override;
     void visit(TernaryOp& node) override;
+    void visit(MatchExpr& node) override;
     void visit(LambdaExpression& node) override;
     void visit(Identifier& node) override;
     

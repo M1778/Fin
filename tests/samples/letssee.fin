@@ -13,51 +13,51 @@
 
 #[llvm_name="vec2_f32"]
 struct Vec2<T> {
-priv:
-    x <T> = 0,
-    y <T> = 0,
+    priv:
+      x <T> = 0,
+      y <T> = 0,
 
-pub:
-    fun length(self: &Self) <float> {
+    pub:
+      fun length(self: &Self) <float> {
         return sqrt(cast<float>(self.x * self.x + self.y * self.y));
-    }
+      }
 
-    fun add(self: &Self, other: Self) <&Self> {
+      fun add(self: &Self, other: Self) <&Self> {
         return new Self{
             x: self.x + other.x,
-            y: self.y + other.y
+              y: self.y + other.y
         };
-    }
+      }
 
-    fun scale(self: &Self, factor: float) <&Self> {
+      fun scale(self: &Self, factor: float) <&Self> {
         return new Self{
             x: cast<T>(cast<float>(self.x) * factor),
-            y: cast<T>(cast<float>(self.y) * factor)
+              y: cast<T>(cast<float>(self.y) * factor)
         };
-    }
+      }
 
-    fun print(self: &Self) <noret> {
+      fun print(self: &Self) <noret> {
         printf("Vec2(x: %f, y: %f)\n", cast<float>(self.x), cast<float>(self.y));
-    }
+      }
 
-    static fun normalize(ptr: &Self) <noret> {
+      static fun normalize(ptr: &Self) <noret> {
         let len <float> = (*ptr).length();
         if (len > cast<float>(0)) {
             ptr.x = cast<T>(cast<float>(ptr.x) / len);
             ptr.y = cast<T>(cast<float>(ptr.y) / len);
         }
-    }
+      }
 
-    static fun zero() <&Self> {
+      static fun zero() <&Self> {
         return new Self{};
-    }
+      }
 
-    static fun from_angle(angle: float) <&Self> {
+      static fun from_angle(angle: float) <&Self> {
         return new Self{
             x: cast<T>(cos(angle)),
-            y: cast<T>(sin(angle))
+              y: cast<T>(sin(angle))
         };
-    }
+      }
 }
 
 fun main() <noret> {

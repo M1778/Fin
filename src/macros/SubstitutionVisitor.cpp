@@ -192,6 +192,14 @@ void SubstitutionVisitor::visit(TernaryOp& node) {
     node.false_expr->accept(*this);
     if(replacementExpr) { node.false_expr = std::move(replacementExpr); replacementExpr = nullptr; }
 }
+void SubstitutionVisitor::visit(MatchExpr& node) {
+    node.scrutinee->accept(*this);
+    if(replacementExpr) { node.scrutinee = std::move(replacementExpr); replacementExpr = nullptr; }
+    for (auto& arm : node.arms) {
+        arm.body->accept(*this);
+        if(replacementExpr) { arm.body = std::move(replacementExpr); replacementExpr = nullptr; }
+    }
+}
 void SubstitutionVisitor::visit(LambdaExpression& node) {
     if(node.body) node.body->accept(*this);
     if(node.expression_body) {

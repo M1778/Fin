@@ -5,22 +5,22 @@
 #cdef MAX(a, b) ((a) > (b) : a ? b)
 
 #c_ifndef PREPROCESSORS
-	#cdef PREPROCESSORS
+#cdef PREPROCESSORS
 #c_endif
 
 #cdef DEBUG
 #c_ifdef DEBUG
-    #cdef LOG_MSG "Debug Mode"
+#cdef LOG_MSG "Debug Mode"
 #c_else
-    #cdef LOG_MSG "Release Mode"
+#cdef LOG_MSG "Release Mode"
 #c_endif
 
 fun main() <noret> {
     let x <int> = CONST_NUM;
     let y <int> = 50;
-    
+
     // This should expand to: ((x) > (y) : x ? y)
-    let m <int> = MAX(x, y); 
-    
+    let m <int> = MAX(x, y);
+
     printf(LOG_MSG);
 }

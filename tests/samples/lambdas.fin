@@ -64,7 +64,6 @@ fun main() <noret> {
     let adder <auto> = get_adder();
     printf("Adder: %d\n", adder(10, 20));
 
-
     // Case 8: Lambda with generics
     let case_8 <fn<T: Castable>(m: T) -> T> = <T: Castable>(m: T) <T> => m;
 

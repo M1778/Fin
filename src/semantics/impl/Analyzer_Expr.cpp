@@ -7,6 +7,8 @@
 #include "../BuiltinMacros.hpp"
 #include <fmt/core.h>
 #include <fmt/color.h>
+#include <algorithm>
+#include <set>
 
 namespace fin {
 
@@ -3554,6 +3556,118 @@ void SemanticAnalyzer::visit(TernaryOp& node) {
             lastExprType = t;
         }
     }
+}
+
+// `match (scrutinee) { arms }` (ADR 0050, stage 1: enum members and `_`).
+//
+// The checker proves every tag reachable: a match that leaves a member
+// uncovered without a `_` arm is a static refusal naming the uncovered
+// member(s), never a runtime fallthrough. Payload bindings are fresh
+// `let`-style immutable bindings scoped to the arm body -- the only binding
+// mode. All arm bodies must agree on one type, exactly as divergent
+// `if`/`else` bodies do. Like a ternary, exactly one arm runs, so the arms
+// fork and join the moved state.
+void SemanticAnalyzer::visit(MatchExpr& node) {
+    node.scrutinee->accept(*this);
+    TypePtr scrutType = lastExprType;
+    if (!scrutType || isErrorType(scrutType)) {
+        lastExprType = nullptr;
+        return;
+    }
+    auto asEnum = std::dynamic_pointer_cast<StructType>(scrutType);
+    if (!asEnum || !asEnum->is_enum) {
+        // Stage 1 lowers enum scrutinees only. Nullable and constant patterns
+        // are ADR 0050 steps 4-5, so a non-enum scrutinee is a named refusal
+        // rather than a guess.
+        error(node, "match on a non-enum scrutinee is not implemented yet (nullable and constant matches are follow-ups)");
+        lastExprType = nullptr;
+        return;
+    }
+    std::set<std::string> covered;
+    bool hasWildcard = false;
+    TypePtr result = nullptr;
+    auto snap = moved_.snapshot();
+    std::vector<events::MovedAnalysis::Snapshot> ends;
+    for (auto& arm : node.arms) {
+        enterScope();
+        bool armOk = true;
+        if (arm.is_wildcard) {
+            if (hasWildcard) {
+                error(*arm.body, "unreachable match arm (an earlier '_' covers everything)");
+                armOk = false;
+            }
+            hasWildcard = true;
+        } else if (hasWildcard) {
+            error(*arm.body, "unreachable match arm after '_'");
+            armOk = false;
+        } else if (covered.count(arm.member)) {
+            error(*arm.body, "duplicate match arm for member '" + arm.member + "'");
+            armOk = false;
+        } else if (!arm.qualifier.empty() && arm.qualifier != asEnum->name) {
+            error(*arm.body, "match arm '" + arm.qualifier + "::" + arm.member +
+                             "' does not match scrutinee of type '" + asEnum->toString() + "'");
+            armOk = false;
+        } else {
+            auto ctor = asEnum->getEnumerator(arm.member);
+            if (!ctor) {
+                error(*arm.body, "enum '" + asEnum->name + "' has no member '" + arm.member + "'");
+                armOk = false;
+            } else {
+                covered.insert(arm.member);
+                auto* sig = ctor ? ctor->as<FunctionType>() : nullptr;
+                const size_t arity = sig ? sig->param_types.size() : 0;
+                if (arm.binders.size() != arity) {
+                    error(*arm.body, "member '" + arm.member + "' carries " +
+                                     std::to_string(arity) + " payload(s), but the pattern binds " +
+                                     std::to_string(arm.binders.size()));
+                    armOk = false;
+                } else if (sig) {
+                    std::set<std::string> bound;
+                    for (size_t i = 0; i < arm.binders.size(); ++i) {
+                        const std::string& b = arm.binders[i];
+                        if (b == "_") continue;
+                        if (!bound.insert(b).second) {
+                            error(*arm.body, "duplicate binding '" + b + "' in match pattern");
+                            armOk = false;
+                            break;
+                        }
+                        currentScope->define({b, sig->param_types[i], false, true});
+                    }
+                }
+            }
+        }
+        if (arm.body) arm.body->accept(*this);
+        auto bodyType = lastExprType;
+        if (!injectedWalk_) {
+            ends.push_back(moved_.snapshot());
+            moved_.restore(snap);
+        }
+        exitScope();
+        if (armOk && bodyType && !isErrorType(bodyType)) {
+            if (!result) result = bodyType;
+            else checkType(*arm.body, bodyType, result);
+        }
+    }
+    if (!injectedWalk_ && !ends.empty()) {
+        moved_.restore(ends[0]);
+        for (size_t i = 1; i < ends.size(); ++i) moved_.installJoin(ends[i], moved_.snapshot());
+    }
+    if (!hasWildcard) {
+        std::vector<std::string> missing;
+        for (const auto& kv : asEnum->enumerators) {
+            if (!covered.count(kv.first)) missing.push_back(kv.first);
+        }
+        if (!missing.empty()) {
+            std::sort(missing.begin(), missing.end());
+            std::string names;
+            for (size_t i = 0; i < missing.size(); ++i) {
+                if (i) names += ", ";
+                names += "'" + missing[i] + "'";
+            }
+            error(node, "non-exhaustive match: uncovered member(s) " + names);
+        }
+    }
+    lastExprType = result;
 }
 
 // The rewrite half of a `::` call on a generic struct (HANDOFF section 6, item 6).

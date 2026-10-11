@@ -3,15 +3,15 @@
 struct A {
     pub b? <int>, // using '?' makes its default value null and it might not exists (equavelant to `b <int> = null,`)
 
-    pub fun? get_b(self: &Self) <int> { // using `fun?` is telling the compiler this function can return either the specified return type OR null which null needs to be handled
+      pub fun? get_b(self: &Self) <int> { // using `fun?` is telling the compiler this function can return either the specified return type OR null which null needs to be handled
         return self.b; // self.b is either null (default value) or an integer so our function is correct
       }
 }
 struct maybe<T: Castable> {
     value? <T>,
-    pub static fun unpack(v: any) <T> {
+      pub static fun unpack(v: any) <T> {
         return cast<T>(v); // raises a panic if cast fails
-    }
+      }
 }
 fun? make_A(n?: int) <A> { // using '?' in types tells us that it might return that type OR null (equavelant to <Maybe<A>>)
     if (n == null) {
@@ -40,6 +40,5 @@ fun main() <noret> {
     blame _? == null; // :-> `assert @unpacked(_) == null;`
 
     blame make_A(10)?.get_b()? == 10; // this statement is correct first it denullifies make_A and then calls get_b and denullifies that too and compares it with 10 and asserts it using blame
-
 
 }

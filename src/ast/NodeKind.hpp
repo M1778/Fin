@@ -88,6 +88,7 @@ class ASTNode;
     V(BinaryOp)               \
     V(UnaryOp)                \
     V(TernaryOp)              \
+    V(MatchExpr)              \
     V(FunctionCall)           \
     V(MethodCall)             \
     V(StaticMethodCall)       \

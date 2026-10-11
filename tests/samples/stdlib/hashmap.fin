@@ -11,47 +11,46 @@ namespace std {
 
 struct HashMapError: <Error> {} // HashMap-specific error type
 
-
 struct HashMap<T, U> : <Index, IndexAssign> {
     priv keys <Collection<T>>,
-    priv values <Collection<U>>,
+      priv values <Collection<U>>,
 
-    pub fun get_index(self: &Self, other: T) <int> {
+      pub fun get_index(self: &Self, other: T) <int> {
         for (let i <int> = 0; i < self.values.len();i++) {
-          if (self.keys.get(i) == other){
-              return i;
+            if (self.keys.get(i) == other){
+                return i;
             }
-          }
+        }
         return -1;
       }
     pub fun exists(self: &Self, other: T) <bool> {
         for (let i <int> = 0; i < self.values.len();i++) {
             if (self.keys.get(i) == other){
-              return true;
+                return true;
             }
-          }
+        }
         return false;
-      }
+    }
     pub fun __set(self: &Self, key: T, value: U) <noret> {
         if (!self.exists(key)){
             self.keys.push(key);
-          }
+        }
         self.values[self.get_index(key)] = value;
-      }
+    }
 
     pub fun __get(self: &Self, other: T) <U> {
         for (let i <int> = 0; i < self.values.len();i++) {
             if (self.keys.get(i) == other) {
                 return self.values.get(i);
-              }
-          }
+            }
+        }
         return -1;
-      }
+    }
     pub operator[] implements cast<fn(Self, T)>(__get); // See stdlib/collection.fin for more information about this implementation
     pub operator= implements cast<fn(Self, T, U)>(__set);
 
     HashMap(){
         return new HashMap{keys: new Collection::<T>{}, values: new Collection::<U>{}};
-      }
-  }
+    }
+}
 }

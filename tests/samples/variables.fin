@@ -15,8 +15,8 @@ fun main() <noret> {
     let a <int> = 100; // a will have no meaning outside of function scope and cannot be accessed outside the defined scope
 
     { // Custom Scope
-      // variable `a` is accessible here
-      let b <int>; // b won't be accessible outside of Custom Scope
+        // variable `a` is accessible here
+        let b <int>; // b won't be accessible outside of Custom Scope
     }
     // b = 10; // this will result in an error
 
@@ -24,9 +24,9 @@ fun main() <noret> {
     // We use something called fin-lifetimes
     let z <&int>;
     { // fin-lifetime example
-      #[slaveof(z)] // `slaveof` attribute takes another variable and makes the lifetime of variable declaration statement to the variable passed to slaveof
-      let m <&int> = new int(5); // in this example the `slaveof` attribute makes the lifetime of `m` to be the exact lifetime as `z` lifetime so m will live long enough
-      z = m;
+        #[slaveof(z)] // `slaveof` attribute takes another variable and makes the lifetime of variable declaration statement to the variable passed to slaveof
+        let m <&int> = new int(5); // in this example the `slaveof` attribute makes the lifetime of `m` to be the exact lifetime as `z` lifetime so m will live long enough
+        z = m;
     }
     blame *z == 5; // this assertion won't happen because `m` will live long enough to keep the pointer
 
@@ -38,4 +38,4 @@ fun main() <noret> {
     // Special variables (no type annotation needed):
     let kilo <auto> = 19; // m1778 keyword will determine the type of the variable AT COMPILE TIME and if it cannot determine the type it will raise an error cursing at you
     // m1778 keyword has different weird usages which tells us how weird the creator is
-  }
+}

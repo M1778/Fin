@@ -6,26 +6,26 @@
 // The constructor member-initialiser list on line 40 parses, and did before this.
 // Case 1: Interfaces
 interface Printable { // A simple printable interface which only needs to declare a to_string
-                      // function that returns a string
+    // function that returns a string
     pub fun to_string() <string>;
 }
 
 interface Addable<T: Castable> { // A more complicated interface uses Generics (Specially Castable FatPointer type)
-                                 // It only requires you to have an operator overload
+    // It only requires you to have an operator overload
     operator +(self: &Self, other : T) <T>;
 }
 
 struct MyStruct <T> : <Printable, Addable> {// The first section which is stick to the name of the
-                                            // struct is where generics are introduced like <T>
-                                            // but by using the ":" we can specify other structs
-                                            // for inheritance OR use interfaces for forcing that
-                                            // struct to act a certain way
+    // struct is where generics are introduced like <T>
+    // but by using the ":" we can specify other structs
+    // for inheritance OR use interfaces for forcing that
+    // struct to act a certain way
     base_val <T>,
-    base_size <int> = 16,
-    pub fun to_string() <string> { // Defining required function
+      base_size <int> = 16,
+      pub fun to_string() <string> { // Defining required function
         return format!("base_val = {}, base_size = {}", cast<&auto>(base_val), base_size);
-    }
-    
+      }
+
     operator +(self: &Self, other : Self) <Self> { // type should be `<Self>` instead of `<&Self>` even tho its using `new` to allocate memory on heap but its using the dereference operator to dereference that reference and pass its raw value `<Self>`
         return *new Self{base_val: self.base_val + other.base_val, base_size: self.base_size + other.base_size}; // Deref happens here so we're safe
     }
@@ -35,13 +35,13 @@ struct MyStruct <T> : <Printable, Addable> {// The first section which is stick 
 
 struct Person { // a normal popular example
     name <string>,
-    age <int>,
+      age <int>,
 
-    Person():age(10), name("Hello") { // this is a constructor
-               // we're using c++-like variable assignment in constructor (this works best with const declared variables
-               // constructors with no parameters intake
-	       // we could just assign them like `self.age = 10;` but this is easier
-    }
+      Person():age(10), name("Hello") { // this is a constructor
+        // we're using c++-like variable assignment in constructor (this works best with const declared variables
+        // constructors with no parameters intake
+        // we could just assign them like `self.age = 10;` but this is easier
+      }
 
     // showcasing destructor too:
     // still the compiler does automatically free the instance itself most of the time (Person)
@@ -54,7 +54,7 @@ struct Person { // a normal popular example
     pub fun get_name() <string> {
         return self.name;
     }
-    
+
     pub fun get_age() <int> {
         return self.age;
     }
@@ -66,14 +66,14 @@ struct Person { // a normal popular example
 
 struct Student : <Person> { // inherits from its parent (Person) [NOTE: Also can inherit from multiple parents]
     grade <int>,
-    Student(name: string, age: int, grade: int) { // Constructor (even if not specified compiler automatically injects self and super)
+      Student(name: string, age: int, grade: int) { // Constructor (even if not specified compiler automatically injects self and super)
         // Initialize parent member using the super
-	super::<Person>::name = name; // this is how we access fields and functions of parent class using `super::<ParentClass>::Member`
-	super::<Person>::age = age;
+        super::<Person>::name = name; // this is how we access fields and functions of parent class using `super::<ParentClass>::Member`
+        super::<Person>::age = age;
         self.age = super::<Person>::get_age();
         self.grade = grade;
 
-    }
+      }
 
     fun to_string() <string> { // we can also override parents methods
         return format!("Student (name: {}, age: {}, grade: {})", self.name, self.age, self.grade);
@@ -82,11 +82,10 @@ struct Student : <Person> { // inherits from its parent (Person) [NOTE: Also can
 
 struct MultiInherit: <Person, Student> { // but let's say we have multiple parents we wanna inherit from
     save_st <Student>,
-    save_person <Person>,
-    MultiInherit() { // but what if we have multiple parents? We can access them using super `super::<Parent>::...`.
-	// If we do not initialize parents members by assigning values to them nothing will generally happen but there's a research going on currently on how to handle such behavior
-    }
-
+      save_person <Person>,
+      MultiInherit() { // but what if we have multiple parents? We can access them using super `super::<Parent>::...`.
+        // If we do not initialize parents members by assigning values to them nothing will generally happen but there's a research going on currently on how to handle such behavior
+      }
 
     static fun NewMI() <Self> { // a static function for Self
         return Self(); // uses the constructor of MultiInherit
@@ -103,19 +102,19 @@ fun test_case2() <noret> {
 
 interface HasConstructor { // A simple interface to force having a constructor and destructor
     Self();  // We can use the Self keyword here too, to tell the compiler we are doing some
-             // special operations, this forces a constructor 
+    // special operations, this forces a constructor
     ~Self(); // We use the same method for Destructor
 }
 
 struct MyStr {
     string_arr <[char]>,
-    length <long>,
-    MyStr() {}
+      length <long>,
+      MyStr() {}
 }
 
 //struct IncludeBoth: <HasConstructor, MyStr> {// This should throw an error since it doesn't
-                                             // actually respect the rules defined for it from
-                                             // interface
+// actually respect the rules defined for it from
+// interface
 //}
 
 fun main() <noret> {

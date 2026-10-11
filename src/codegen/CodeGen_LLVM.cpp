@@ -12561,6 +12561,176 @@ private:
         value_ = CgVal{phi, common};
     }
 
+    // `match (scrutinee) { arms }` (ADR 0050, stage 1: enum members and `_`).
+    //
+    // One tag read, then a compare chain over the member tags with payload GEP
+    // binds per taken arm (the ADR's lowering sketch: arm counts in user code
+    // are small, where a jump table buys nothing). Each arm runs in its own
+    // block with its own scope; the results join through a PHI exactly like a
+    // ternary's. Exhaustiveness was proven by the analyzer, so the chain's
+    // final `else` is unreachable -- still emitted (never silently dropped).
+    void visit(MatchExpr& node) override {
+        if (!currentFn_) { unsupported(node, "a match outside a function"); return; }
+        CgVal scr = emit(*node.scrutinee);
+        if (failed_) return;
+        if (!scr.ok()) { unsupported(node, "this match scrutinee"); return; }
+        const EnumInfo* eInfo = scr.type.enumInfo;
+        if (!eInfo || (!scr.type.isPayloadedEnum() && !scr.type.isFieldlessEnum())) {
+            // Nullable and constant scrutinees are ADR 0050 steps 4-5. The
+            // analyzer refuses them first; this is the backend's own refusal.
+            unsupported(node, "match on a non-enum scrutinee (nullable and constant matches are follow-ups)");
+            return;
+        }
+        const bool fieldless = scr.type.isFieldlessEnum();
+        // A home for payload GEPs: the scrutinee's own slot when it has one,
+        // otherwise a spill of the value. Unregistered (no Local), so no scope
+        // exit destroys it -- the payload bindings below copy out of it the way
+        // a `let x <T> = <payload>` would.
+        llvm::Value* base = scr.address;
+        if (!fieldless && !base) {
+            base = entryAlloca(scr.type.llvmType, "match.scr");
+            builder_.CreateStore(scr.value, base);
+        }
+        llvm::Value* tag = nullptr;
+        if (fieldless) {
+            tag = scr.value;
+        } else {
+            llvm::Value* tagPtr = builder_.CreateStructGEP(scr.type.llvmType, base, 0, "match.tag");
+            tag = builder_.CreateLoad(builder_.getInt32Ty(), tagPtr, "match.tagv");
+        }
+        if (tag->getType() != builder_.getInt32Ty()) {
+            tag = builder_.CreateIntCast(tag, builder_.getInt32Ty(), /*isSigned=*/true);
+        }
+
+        auto* endBB = llvm::BasicBlock::Create(ctx_, "match.end", currentFn_->fn);
+        std::vector<std::pair<llvm::BasicBlock*, CgVal>> results;
+        bool closed = false;
+        for (size_t ai = 0; ai < node.arms.size(); ++ai) {
+            auto& arm = node.arms[ai];
+            if (closed) {
+                unsupported(*arm.body, "an unreachable match arm after '_'");
+                return;
+            }
+            auto* armBB = llvm::BasicBlock::Create(ctx_, "match.arm", currentFn_->fn);
+            llvm::BasicBlock* nextBB = nullptr;
+            if (arm.is_wildcard) {
+                builder_.CreateBr(armBB);
+                closed = true;
+            } else {
+                // The tag table is `members`: it holds every member in order,
+                // while `memberInfoByName` exists only for payloaded enums
+                // (fillEnumLayout runs for those alone).
+                int64_t memberTag = 0;
+                bool haveTag = false;
+                for (const auto& m : eInfo->members) {
+                    if (m.first == arm.member) { memberTag = m.second; haveTag = true; break; }
+                }
+                if (!haveTag) {
+                    unsupported(*arm.body, fmt::format("match on unknown member '{}'", arm.member));
+                    return;
+                }
+                nextBB = llvm::BasicBlock::Create(ctx_, "match.next", currentFn_->fn);
+                llvm::Value* cmp = builder_.CreateICmpEQ(
+                    tag, builder_.getInt32(static_cast<uint32_t>(memberTag)), "match.tagcmp");
+                builder_.CreateCondBr(cmp, armBB, nextBB);
+            }
+            builder_.SetInsertPoint(armBB);
+            pushScope();
+            if (!arm.is_wildcard) {
+                // Payload layout is per member of a payloaded enum; a fieldless
+                // member carries nothing, so any binder there is an analyzer
+                // error this re-checks rather than assumes.
+                const EnumMemberInfo* mem = nullptr;
+                if (!fieldless) {
+                    auto mit = eInfo->memberInfoByName.find(arm.member);
+                    if (mit == eInfo->memberInfoByName.end()) {
+                        popScope();
+                        unsupported(*arm.body, fmt::format("match on unknown member '{}'", arm.member));
+                        return;
+                    }
+                    mem = &mit->second;
+                }
+                const size_t nPayload = mem ? mem->payloadTypes.size() : 0;
+                if (arm.binders.size() != nPayload) {
+                    popScope();
+                    unsupported(*arm.body, fmt::format("match arm for '{}' binds {} payload(s), but the member carries {}",
+                                                       arm.member, arm.binders.size(), nPayload));
+                    return;
+                }
+                for (size_t i = 0; i < arm.binders.size(); ++i) {
+                    if (arm.binders[i] == "_") continue;
+                    uint64_t offset = eInfo->payloadStart + mem->payloadOffsets[i];
+                    llvm::Value* ptr = builder_.CreateConstInBoundsGEP1_32(
+                        builder_.getInt8Ty(), base, static_cast<unsigned>(offset), "match.payload");
+                    const CgType& ptype = mem->payloadTypes[i];
+                    llvm::Value* loaded = builder_.CreateLoad(ptype.llvmType, ptr, arm.binders[i]);
+                    auto* slot = entryAlloca(ptype.llvmType, arm.binders[i]);
+                    builder_.CreateStore(loaded, slot);
+                    scopes_.back()[arm.binders[i]] =
+                        Local{slot, ptype, nextLocalOrder_++, false, Local::SlaveofTie::None, 0, regionDepth_};
+                }
+            }
+            CgVal r = emit(*arm.body);
+            if (failed_) { popScope(); return; }
+            auto* exitBB = builder_.GetInsertBlock();
+            // An expression body never terminates its block; the guard is what
+            // keeps a PHI incoming edge and a predecessor in agreement if one
+            // ever does.
+            if (!terminated()) {
+                cleanScopeAt(node, scopes_.size() - 1);
+                if (failed_) { popScope(); return; }
+                builder_.CreateBr(endBB);
+                results.emplace_back(exitBB, r);
+            }
+            popScope();
+            // Back to the chain: the next test (or the trailing unreachable)
+            // belongs in this arm's `next` block, not after its branch out.
+            if (nextBB) builder_.SetInsertPoint(nextBB);
+        }
+        if (!closed) {
+            // The analyzer proves exhaustiveness, so this never runs. Emitted
+            // rather than omitted: a chain that silently falls off the end is
+            // the miscompile the backend invariant forbids.
+            builder_.CreateUnreachable();
+        }
+        if (results.empty()) { unsupported(node, "a match with no arms"); return; }
+        // Valueless arms (a `<noret>` call): the match is a statement, the way
+        // an `if` without `else` is. All arms must agree -- all valueless or
+        // all valued -- exactly as arm types must agree; mixing the two is a
+        // refusal, not a default. `value_` stays unset, which is the same
+        // state a void call leaves behind.
+        bool anyValued = false;
+        bool anyValueless = false;
+        for (auto& res : results) {
+            if (res.second.ok()) anyValued = true;
+            else anyValueless = true;
+        }
+        if (anyValued && anyValueless) {
+            unsupported(node, "match arms with and without values");
+            return;
+        }
+        builder_.SetInsertPoint(endBB);
+        if (!anyValued) {
+            value_ = CgVal{};
+            return;
+        }
+        CgType common = results[0].second.type;
+        for (size_t i = 1; i < results.size(); ++i) common = commonType(common, results[i].second.type);
+        builder_.SetInsertPoint(endBB);
+        auto* phi = builder_.CreatePHI(common.llvmType, (unsigned)results.size());
+        for (auto& res : results) {
+            // Before the arm's branch to the join: the value converts where it
+            // is computed, the way a ternary converts each side in its own
+            // block rather than at the PHI.
+            builder_.SetInsertPoint(res.first->getTerminator());
+            llvm::Value* v = convert(node, res.second, common);
+            if (!v) return;
+            phi->addIncoming(v, res.first);
+        }
+        builder_.SetInsertPoint(endBB);
+        value_ = CgVal{phi, common};
+    }
+
     // ---- everything this slice refuses -----------------------------------
     //
     // One line each, and each one names what it is. `Visitor` being exhaustive is

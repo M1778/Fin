@@ -168,6 +168,7 @@ UTF8_CHAR   {UTF8_2}|{UTF8_3}|{UTF8_4}
 
 "if"        { MAKE(KW_IF); }
 "else"      { MAKE(KW_ELSE); }
+"match"     { MAKE(KW_MATCH); }
 "in"        { MAKE(KW_IN); }
 
 "extern"    { MAKE(KW_EXTERN); }

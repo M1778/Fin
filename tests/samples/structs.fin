@@ -2,8 +2,8 @@
 //@ ok
 struct Vector3 {
     x <float>,
-    y <float>,
-    z <float>
+      y <float>,
+      z <float>
 }
 
 fun test() <noret> {

@@ -8,7 +8,7 @@ import { Error } from error::std;
 struct MyStruct {
     pub readonly v1 <int>, // v1 is public but its value cannot be changed outside of struct declaration scope
 
-    pub fun change_v1(new_val: int) <noret> {
+      pub fun change_v1(new_val: int) <noret> {
         self.v1 = new_val; // this works, v1 is only readonly to outsiders
       }
 }
@@ -20,15 +20,15 @@ class MyClass {
       readonly v1 <int>,
 
       fun change_v1(new_val: int) <noret> {
-          self.v1 = new_val;
-        }
+        self.v1 = new_val;
+      }
 }
 
 // Readonly definitions in interfaces
 interface UnchanableString {
     pub readonly value <string>;
     pub fun force_change_string(self: &Self, new_str: string) <noret>;
-  }
+}
 
 // A struct using `UnchanableString` interface:
 struct ChangableSomehow: <UnchanableString> {
@@ -36,9 +36,9 @@ struct ChangableSomehow: <UnchanableString> {
       readonly value <string>,
 
       fun force_change_string(new_str: string) <noret> {
-          self.value = new_str;
-        }
-  }
+        self.value = new_str;
+      }
+}
 
 fun main() <noret> {
     let a <MyStruct> = MyStruct{v1: 10}; // first initializations of readonly members are allowed

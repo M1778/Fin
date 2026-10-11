@@ -56,6 +56,7 @@ class ArrayLiteral;
 class ArrayAccess;
 class SizeofExpression;
 class TernaryOp;
+class MatchExpr;
 class FunctionTypeNode;
 class LambdaExpression;
 class TypeNode;
@@ -144,6 +145,7 @@ public:
     virtual void visit(ArrayAccess& node) = 0;
     virtual void visit(SizeofExpression& node) = 0;
     virtual void visit(TernaryOp& node) = 0;
+    virtual void visit(MatchExpr& node) = 0;
     virtual void visit(FunctionTypeNode& node) = 0;
     virtual void visit(LambdaExpression& node) = 0;
     virtual void visit(TypeNode& node) = 0;

@@ -78,6 +78,7 @@ NodeCategory nodeCategory(NodeKind kind) noexcept {
         case NodeKind::BinaryOp:
         case NodeKind::UnaryOp:
         case NodeKind::TernaryOp:
+        case NodeKind::MatchExpr:
         case NodeKind::FunctionCall:
         case NodeKind::MethodCall:
         case NodeKind::StaticMethodCall:

@@ -316,6 +316,13 @@ void forEachChild(ASTNode& node, const ChildCallback& out) {
             return;
         }
 
+        case NodeKind::MatchExpr: {
+            auto& n = static_cast<MatchExpr&>(node);
+            emit(out, n.scrutinee.get());
+            for (auto& arm : n.arms) emit(out, arm.body.get());
+            return;
+        }
+
         case NodeKind::FunctionCall: {
             auto& n = static_cast<FunctionCall&>(node);
             emitAll(out, n.generic_args);

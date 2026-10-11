@@ -22,7 +22,7 @@ interface Addable<T> {
 
 struct Point {
     x <int>,
-    y <int>
+      y <int>
 }
 
 Point implements <Addable<Point>> {
@@ -34,7 +34,7 @@ Point implements <Addable<Point>> {
 fun main() <void> {
     let s <MyStruct> = MyStruct { val: 42 };
     let v <int> = s.get_val();
-    
+
     let p1 <Point> = Point { x: 1, y: 2 };
     let p2 <Point> = Point { x: 3, y: 4 };
     let p3 <Point> = p1 + p2;

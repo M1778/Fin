@@ -66,6 +66,7 @@ private:
     void printArrayAccess(const ArrayAccess* node, std::string prefix, bool isLast);
     void printSizeof(const SizeofExpression* node, std::string prefix, bool isLast);
     void printTernary(const TernaryOp* node, std::string prefix, bool isLast);
+    void printMatch(const MatchExpr* node, std::string prefix, bool isLast);
     void printFunctionType(const FunctionTypeNode* node, std::string prefix, bool isLast);
     void printLambda(const LambdaExpression* node, std::string prefix, bool isLast);
     void printQuote(const QuoteExpression* node, std::string prefix, bool isLast);

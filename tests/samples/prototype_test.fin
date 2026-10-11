@@ -6,7 +6,7 @@ import { Collection } from collection::std;
 struct CustomDT {}
 
 struct CustomDT2 {
-  CustomDT2() {} // constructor
+    CustomDT2() {} // constructor
 }
 
 fun main() <void> {
@@ -39,11 +39,10 @@ fun main() <void> {
 
     let obj <{object, object}> = { 1: 1.0, "a":CustomDT{} }; // object type is an expensive type but can fit any datatype in it at the cost of memory and speed
 
-     // arrays in prototypes (weird example):
-     let sss <{[int], [{int, string}]}> = {
+    // arrays in prototypes (weird example):
+    let sss <{[int], [{int, string}]}> = {
         [1,2,3] : [{1 : "Hello"}, {100: "Some"}],
-        [5,5,5] : [] // empty array
-     }; // this example is weird, having the key as a array `[int]` and values as arrays containing another prototype type `[{int, string}]`
-
+          [5,5,5] : [] // empty array
+    }; // this example is weird, having the key as a array `[int]` and values as arrays containing another prototype type `[{int, string}]`
 
 }

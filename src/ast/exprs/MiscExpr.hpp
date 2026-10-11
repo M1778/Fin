@@ -48,6 +48,28 @@ public:
     void accept(Visitor& v) override;
 };
 
+// One arm of a `match`: the pattern plus the body (ADR 0050, stage 1: enum
+// members and the `_` wildcard only; nullable and constant patterns are
+// follow-ups and do not parse yet).
+struct MatchArm {
+    // Empty for the `_` wildcard; otherwise the enum member name.
+    std::string member;
+    // `Color` in `Color::RGB(..)`; empty for a bare member.
+    std::string qualifier;
+    // Payload bindings in order (`Ok(v)` binds `v`); `_` entries bind nothing.
+    std::vector<std::string> binders;
+    bool is_wildcard = false;
+    std::unique_ptr<Expression> body;
+};
+
+class MatchExpr : public Expression {
+public:
+    std::unique_ptr<Expression> scrutinee;
+    std::vector<MatchArm> arms;
+    MatchExpr(std::unique_ptr<Expression> s, std::vector<MatchArm> a);
+    void accept(Visitor& v) override;
+};
+
 class SuperExpression : public Expression {
 public:
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> init_fields;

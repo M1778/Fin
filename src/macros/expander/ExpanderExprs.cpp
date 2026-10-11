@@ -285,6 +285,14 @@ void MacroExpander::visit(TernaryOp& node) {
     node.false_expr->accept(*this);
     if (expandedExpression) { node.false_expr = std::move(expandedExpression); expandedExpression = nullptr; }
 }
+void MacroExpander::visit(MatchExpr& node) {
+    node.scrutinee->accept(*this);
+    if (expandedExpression) { node.scrutinee = std::move(expandedExpression); expandedExpression = nullptr; }
+    for (auto& arm : node.arms) {
+        arm.body->accept(*this);
+        if (expandedExpression) { arm.body = std::move(expandedExpression); expandedExpression = nullptr; }
+    }
+}
 void MacroExpander::visit(LambdaExpression& node) {
     if (node.body) node.body->accept(*this);
     if (node.expression_body) {

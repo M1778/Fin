@@ -3016,6 +3016,37 @@ BACKEND_TEST(Soundness_Codegen, AnEnumPayloadMemberIsReadByPosition) {
     EXPECT_EQ(b.out, "OK\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, MatchOnEnumBindsPayloadsAndRuns) {
+    // ADR 0050 canonical shape: member patterns with payload bindings lower to
+    // a discriminant compare chain and run each taken arm.
+    const Built b = build(std::string(kPrintf) +
+        "enum R { Ok(int), Err(int) }\n"
+        "fun main() <noret> {\n"
+        "    let a <R> = Ok(10);\n"
+        "    let b <R> = Err(3);\n"
+        "    let x <int> = match (a) { Ok(v) => v, Err(e) => 0 };\n"
+        "    let y <int> = match (b) { Ok(v) => v, Err(e) => e };\n"
+        "    printf(\"%d %d\\n\", x, y);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10 3\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, MatchWildcardArmRuns) {
+    // ADR 0050: `_` closes any match; bare members bind nothing.
+    const Built b = build(std::string(kPrintf) +
+        "enum E { A, B, C }\n"
+        "fun main() <noret> {\n"
+        "    let x <E> = B;\n"
+        "    let n <int> = match (x) { A => 1, _ => 9 };\n"
+        "    printf(\"%d\\n\", n);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "9\n") << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnEnumPayloadMemberCanBeMutatedByPosition) {
     const Built b = build(
         "@define printf(fmt: string, ...) <noret>;\n"

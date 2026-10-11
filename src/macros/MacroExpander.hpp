@@ -75,6 +75,7 @@ public:
     void visit(ArrayAccess& node) override;
     void visit(SizeofExpression& node) override;
     void visit(TernaryOp& node) override;
+    void visit(MatchExpr& node) override;
     void visit(FunctionTypeNode& node) override;
     void visit(LambdaExpression& node) override;
     void visit(QuoteExpression& node) override;

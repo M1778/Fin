@@ -13,12 +13,10 @@ import * from networking; // this will import ALL symbols from the networking li
 //since namespaces exists we also allow a way to import stuff from namespaces explicitly:
 import { HashMap } from hashmap::std; // this means there is a namespace in hashmap library and we explicitly import the `HashMap` symbol from that namespace using COLONCOLON
 
-
-
 fun main() <noret> {
     let x <auto> = Vector3{x: 10, y: 10, z: 10};
 
     printf("Hello i am imported from stdio");
 
     let y <auto> = macros.magic_add!(10, 20);
-  }
+}

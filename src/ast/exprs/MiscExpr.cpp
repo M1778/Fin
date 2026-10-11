@@ -19,6 +19,10 @@ TernaryOp::TernaryOp(std::unique_ptr<Expression> c, std::unique_ptr<Expression> 
     : condition(std::move(c)), true_expr(std::move(t)), false_expr(std::move(f)) {}
 void TernaryOp::accept(Visitor& v) { v.visit(*this); }
 
+MatchExpr::MatchExpr(std::unique_ptr<Expression> s, std::vector<MatchArm> a)
+    : scrutinee(std::move(s)), arms(std::move(a)) {}
+void MatchExpr::accept(Visitor& v) { v.visit(*this); }
+
 // Case 1: super { ... }
 SuperExpression::SuperExpression(std::vector<std::pair<std::string, std::unique_ptr<Expression>>> f)
     : init_fields(std::move(f)) {}

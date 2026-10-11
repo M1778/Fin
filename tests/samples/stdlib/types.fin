@@ -15,7 +15,7 @@ class TypeInfo {
       _typeid <uint>, // TypeId that compiler uses to identify types
 
     pub:
-    	fun prototype() <noret> { blame m1778;} // using blame and m1778 keyword is like using `unimplemented!()` anyways gets optimized and eliminated by optimizer (DeadCode eliminator)
+      fun prototype() <noret> { blame m1778;} // using blame and m1778 keyword is like using `unimplemented!()` anyways gets optimized and eliminated by optimizer (DeadCode eliminator)
 }
 
 #[llvm_name="typeid"]
@@ -24,7 +24,7 @@ class TypeInfo {
 #[use(compiler.components.structs)]
 @special(pub) typeid(T: $type) <int> {
     return compiler.structs.select_field::<int>(compiler.types.gettype::<T>(), "TypeID")?; // A compiler API function that returns type information AS value. uses select_field to select a field from struct returned by gettype and we use denullifier `?`
-  }
+}
 
 // cast function overlook:
 /*
@@ -33,10 +33,10 @@ class TypeInfo {
 #[uncastable]
 pub fun cast<_Type: $type>(value: Any<...>) <_Type> // $type == literal type (not needed to specify by default compiler uses monomorphism), value is type of ANY<ANY> (we take care of it in runtime but hint the compiler in compile time for catching expected errors before they break the program)
 {
-  // ... (Some checks for type conversion compatibility like type shape reformation status, check inheritance, parents, compatibility conversion)
+// ... (Some checks for type conversion compatibility like type shape reformation status, check inheritance, parents, compatibility conversion)
 
-  // return casted:
-  return _casted;
+// return casted:
+return _casted;
 }
 */
 
@@ -84,19 +84,19 @@ type nullptr = any implements <&void>;
 @special(pub) tftid(tid: uint) <$type> { // returns a type from typeid
     let _type <$type> = compiler.types.typefrom_typeid(tid);
     return _type;
-  }
+}
 
 #[use(compiler)]
 #[use(compiler.components.types)]
 @special _resolve_type(v: any) <$type> { // if v is of type `Any` or `Any<...>` or any other types that are defined to be RunetimeType, compiler raises an error
     let _type <$type> = compiler.types.ct_any(v); // resolves the type of v using a compiler api function (only in compile time)
     return _type;
-  }
+}
 
 // Type Resolver (Compile time)
 #[export]
 pub fun resolve_type(v: any) <$type> { // any = any type that is visible in compile time (can be identified in compile time)
-  return @_resolve_type(v);
+    return @_resolve_type(v);
 }
 
 #[export]
@@ -104,11 +104,10 @@ pub fun resolve_arr_type(const &arr: [any]) <$type> { // Usually we can resolve 
     return resolve_type(arr[0]); // for now we'll just assume it has atleast one element and return the type of that
 }
 
-
 #[export]
 pub fun number2str<T: Number>(number: T) <string> {
 
-  return "10"; // placeholder
+    return "10"; // placeholder
 }
 
 }

@@ -4,20 +4,18 @@
 
 struct Result<T> {
     value <T>,
-    is_error <bool>
+      is_error <bool>
 }
 
 // Example:
 // A function that takes a callback.
 // The callback takes a Result<int> and returns a Result<Result<int>>
 fun process(
-    input: Result<int>,
-    callback: fn(Result<int>) -> Result<Result<int>>
-) <noret> {
+  input: Result<int>,
+  callback: fn(Result<int>) -> Result<Result<int>>
+  ) <noret> {
     let res <Result<Result<int>>> = callback(input);
-}
-
-
+  }
 
 // Get function as parameter
 fun compute(a: int, b: int, operation: fn(int, int) => int) <int> { // operation gets a function that takes two integer in arguments and returns an integer
@@ -63,6 +61,5 @@ fun main() <noret> {
     // Special Case: one liner (expression)
     // -----------------------------------------------
     compute(20, 10, (a: int, b: int) <int> => a + b); // or can also do `(a: int, b: int) <int> => add(a,b)` as long as it's expression
-
 
 }

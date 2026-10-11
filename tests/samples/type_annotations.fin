@@ -3,13 +3,13 @@
 fun main() <void> {
     // Type with expression-based annotation
     let x <int{64}> = 10;
-    
+
     // Type with complex expressions in annotations
     let z <int{8}> = 42;
-    
+
     // Pointer to annotated type
     let p <*int{64}> = &x;
-    
+
     // Prototype type with annotations (if applicable, though usually not needed)
     let prot <{int{64}, float}> = { 10: 123244.2 };
 }

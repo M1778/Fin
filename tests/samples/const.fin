@@ -14,7 +14,7 @@ fun test(const a: int) <noret> {
     // a is only readable and can be copied too
     let scope_a <int> = a;
     scope_a = 5; // this is allowed since the value is copied
-  }
+}
 
 // a more complex usage (what about pointers?)
 fun test_2(const a: &int) <noret> { // now `a` is a pointer to an integer
@@ -22,29 +22,29 @@ fun test_2(const a: &int) <noret> { // now `a` is a pointer to an integer
 
     // however we can change the content of the value `a` is pointing to
     *a = 20; // this will work
-  }
+}
 
 // a more safe pointer example (restricting the function from changing the value of integer pointer is pointing to)
 fun test_3(const a: rptr<int>) <noret> { // we can use smart pointers just like in c++
     if (a.owned == false) {// this means we don't own the value so we can't change it
-      // a.set(10) // this will cause an error because we do not have ownership of the value
+        // a.set(10) // this will cause an error because we do not have ownership of the value
     } else {
-      a.set(10); // this works fine (if we have ownership)
+        a.set(10); // this works fine (if we have ownership)
     }
-  }
+}
 
 // a way to borrow ownership to change the value and give ownership back:
 fun test_4(const a: &rptr<int>) <noret> {
     if (a.borrowed == false ){ // this means they didn't borrow us the ownership so we can't do fun things
 
     } else {
-      // We got ownership let's use it
-      a.set(2026); // this works
+        // We got ownership let's use it
+        a.set(2026); // this works
 
-      // at the end we shouldn't forget to give ownership back (by default this will be called when compiler goes out of scope of the function)
-      a.giveback(); // we manually give back what we borrowed (this is automatically handled with scope measures)
+        // at the end we shouldn't forget to give ownership back (by default this will be called when compiler goes out of scope of the function)
+        a.giveback(); // we manually give back what we borrowed (this is automatically handled with scope measures)
     }
-  }
+}
 
 // complete ownership
 fun test_5(const a: &rptr<int>) <noret> {
@@ -55,58 +55,58 @@ fun test_5(const a: &rptr<int>) <noret> {
         // remain: release decrements the shared count and frees only at zero, so
         // the handles still out there keep reading what was written (ADR 0039).
         a.release();
-      }
-  }
+    }
+}
 
 // const arrays: we cannot reassign the array but we can change the value of its elements
 fun test_6(const a: [int]) <noret> {
     a[0] = 10; // this is allowed (but this won't do anything since we are not using a pointer like `&[int]`) everything will happen in function scope
-  }
+}
 
 // readonly arrays:
 fun test_7(const a: rptr<[int]>) <noret> {
     for (i: int = 0; i < a.value.length; i++){
         printf("%d: %d, ", i, a.value[i]);
-      }
-  }
+    }
+}
 
 fun main() <noret> {
-  let ta1 <int> = 10;
+    let ta1 <int> = 10;
 
-  test_2(&ta1); // this will change the value of `ta1` to 20
+    test_2(&ta1); // this will change the value of `ta1` to 20
 
-  blame ta1 == 20; // assertion
+    blame ta1 == 20; // assertion
 
-  // using smart pointers
-  let ta2 <rptr<int>> = rptr(5);
+    // using smart pointers
+    let ta2 <rptr<int>> = rptr(5);
 
-  test_3(ta2.restrict); // this property of rptr is a a copy of itself but in readonly mode (restrict)
+    test_3(ta2.restrict); // this property of rptr is a a copy of itself but in readonly mode (restrict)
 
-  blame ta2.value == 5; // this ensures the value of our pointer didn't change
+    blame ta2.value == 5; // this ensures the value of our pointer didn't change
 
-  // however if we want to we can borrow the ownership
-  test_4(ta2.borrow());
+    // however if we want to we can borrow the ownership
+    test_4(ta2.borrow());
 
-  blame ta2.value == 2026; // assert value has changed
+    blame ta2.value == 2026; // assert value has changed
 
-  // we can also give full ownership away: `own()` hands a fresh owning handle
-  // to `test_5`, and this one stops being the owner while keeping its reference.
+    // we can also give full ownership away: `own()` hands a fresh owning handle
+    // to `test_5`, and this one stops being the owner while keeping its reference.
 
-  test_5(ta2.own()); // ownership moved to the heir; `ta2` keeps reading the value
+    test_5(ta2.own()); // ownership moved to the heir; `ta2` keeps reading the value
 
-  // `test_5` set 1010 through the heir and then released the heir's reference,
-  // which drops the shared count from 4 to 3 (this handle, the `restrict`
-  // snapshot from construction, and the borrow from `test_4` that nothing
-  // released). The value outlives the release, so it
-  // still reads what was written -- release drops a reference, it does not
-  // dispose the value (ADR 0039).
-  blame ta2.refs() == 3; // heir gone, lender, snapshot, and borrow outstanding
-  blame ta2.owned == false; // ownership went with the heir
-  blame *ta2.value == 1010; // the shared cell, intact
+    // `test_5` set 1010 through the heir and then released the heir's reference,
+    // which drops the shared count from 4 to 3 (this handle, the `restrict`
+    // snapshot from construction, and the borrow from `test_4` that nothing
+    // released). The value outlives the release, so it
+    // still reads what was written -- release drops a reference, it does not
+    // dispose the value (ADR 0039).
+    blame ta2.refs() == 3; // heir gone, lender, snapshot, and borrow outstanding
+    blame ta2.owned == false; // ownership went with the heir
+    blame *ta2.value == 1010; // the shared cell, intact
 
-  let arr <rptr<[int]>> = rptr([1,2,3,4]);
+    let arr <rptr<[int]>> = rptr([1,2,3,4]);
 
-  test_7(arr);
+    test_7(arr);
 
-  blame arr.value == [1,2,3,4];
+    blame arr.value == [1,2,3,4];
 }

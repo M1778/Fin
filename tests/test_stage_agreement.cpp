@@ -15,9 +15,13 @@
 // Anything else is a divergence and fails, unless the sample is named in the
 // allowlist below with an owner and a reason.
 //
+// And for each normative error / unimplemented sample (issue #76) this suite
+// compares the compile refusal compile-only: same exit code, plus the pinned
+// location and message for `//@ error`, or byte-identical refusal text for
+// `//@ unimplemented`. A stage that compiles clean what the reference refuses
+// -- or refuses at a different place -- is red exactly like a run divergence.
+//
 // Scope (deliberate, all three are covered elsewhere):
-// - Expected-error / unimplemented samples: compile-only, owned by the
-//   expectation runner. They never reach the run comparison here.
 // - `deeptest4` (struct `==`): held ruling ADR 0036, declared-only and never
 //   synthesized, so neither compiler produces a runnable. Explicit skip.
 // - Aspirational samples (e.g. `deeptest2`): not normative; out of scope.
@@ -29,6 +33,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -67,6 +72,12 @@ struct AllowEntry {
 // went the same way (the stage lowers the $struct-seeded return now).
 // Each remaining entry must go away with a one-line deletion.
 const AllowEntry kAllowlist[] = {
+    // block_scope_use_after's 7:5 diagnostic: C++ pins `Undefined variable
+    // 'b'`, the stage reports `use of undeclared identifier`. Same place, same
+    // exit code, different wording -- the message-text half of the error check
+    // below is waived for this stem, the position half is not.
+    {"block_scope_use_after", "stderr-wording", "EC1/#76",
+     "stage words the 7:5 refusal `use of undeclared identifier`, C++ pins `Undefined variable 'b'`"},
     // Sentinel: a deduced-size array with `= {}` has size 0, which is
     // ill-formed (MSVC rejects it with C2466; GCC/Clang accept it as an
     // extension). The empty-string entry never matches a real (stem, kind)
@@ -335,6 +346,54 @@ std::string procFate(const Proc& p) {
     return "unlaunched";
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostic agreement (issue #76). Pure: the per-sample tests below only feed
+// it compile-only exit codes and stripped stderrs.
+// ---------------------------------------------------------------------------
+
+enum class DiagVerdict {
+    Agree,             // same fate, pinned diagnostic / refusal text agrees
+    FateDivergence,    // different compile exit codes
+    MessageDivergence, // same fate, diagnostic disagrees (or pin unmet)
+    ToleratedWording,  // allowlisted stderr-wording divergence
+    StaleAllowlist,    // allowlisted but now identical -- delete the line
+};
+
+// The expectation runner's `-->` shape (`--> path:line:col`); duplicated here
+// because that parser lives in test_expectations.cpp's anonymous namespace.
+bool stderrHasPosition(const std::string& err, int line, int column) {
+    static const std::regex re(R"(-->\s+\S*?:(\d+):(\d+))");
+    auto begin = std::sregex_iterator(err.begin(), err.end(), re);
+    for (auto it = begin; it != std::sregex_iterator(); ++it) {
+        if (std::stoi((*it)[1].str()) == line && std::stoi((*it)[2].str()) == column) return true;
+    }
+    return false;
+}
+
+DiagVerdict checkDiagAgreement(const std::string& stem, ExpectationKind kind, const Expectation* pin,
+                               int cppExit, const std::string& cppErr, int stageExit,
+                               const std::string& stageErr) {
+    const bool allow = lookupAllow(stem, "stderr-wording") != nullptr;
+    if (cppExit != stageExit) return DiagVerdict::FateDivergence;
+    if (kind == ExpectationKind::Error) {
+        // Both accept: nothing to compare; the pin is the expectation suite's.
+        if (cppExit == 0) return DiagVerdict::Agree;
+        const bool pos = pin != nullptr && stderrHasPosition(cppErr, pin->line, pin->column) &&
+                         stderrHasPosition(stageErr, pin->line, pin->column);
+        const bool msg = pin != nullptr && cppErr.find(pin->text) != std::string::npos &&
+                         stageErr.find(pin->text) != std::string::npos;
+        if (pos && msg) return allow ? DiagVerdict::StaleAllowlist : DiagVerdict::Agree;
+        if (pos && allow) return DiagVerdict::ToleratedWording;
+        return DiagVerdict::MessageDivergence;
+    }
+    // Unimplemented: a deliberate refusal, so the refusal *text* is compared,
+    // not just the exit code. importing.fin proves the both-accept shape: from
+    // the repo root both compilers exit 0 with identical stderr, which agrees.
+    const bool same = normalizedStderr(stem, cppErr) == normalizedStderr(stem, stageErr);
+    if (same) return allow ? DiagVerdict::StaleAllowlist : DiagVerdict::Agree;
+    return allow ? DiagVerdict::ToleratedWording : DiagVerdict::MessageDivergence;
+}
+
 void removeIfExists(const fs::path& p) {
     std::error_code ec;
     fs::remove(p, ec);
@@ -358,6 +417,30 @@ std::vector<Sample> agreementSamples() {
         if (ann.expectations.size() != 1) continue;
         if (ann.expectations.front().kind != ExpectationKind::Ok) continue;
         out.push_back(Sample{p});
+    }
+    return out;
+}
+
+// Every normative `//@ error` / `//@ unimplemented` sample: the diagnostic
+// candidates. Aspirational samples stay out (same authority rule as above),
+// and malformed annotations belong to the expectation suite, not this one.
+struct DiagSample {
+    std::string path;
+    ExpectationKind kind = ExpectationKind::Error;
+    Expectation pin;  // the single expectation; message+position for Error
+};
+void PrintTo(const DiagSample& s, std::ostream* os) { *os << s.path; }
+
+std::vector<DiagSample> diagnosticSamples() {
+    std::vector<DiagSample> out;
+    for (const auto& p : sampleFiles()) {
+        SampleAnnotation ann = parseAnnotation(p, readWholeFile(p));
+        if (!ann.error.empty()) continue;
+        if (ann.authority != Authority::Normative) continue;
+        if (ann.expectations.size() != 1) continue;
+        const Expectation& e = ann.expectations.front();
+        if (e.kind != ExpectationKind::Error && e.kind != ExpectationKind::Unimplemented) continue;
+        out.push_back(DiagSample{p, e.kind, e});
     }
     return out;
 }
@@ -454,6 +537,127 @@ TEST(StageAgreementLogic, BuildVerdictsRouteEveryShape) {
     EXPECT_EQ(checkBuildAgreement("complex", true, true), BuildVerdict::BothBuild);
     EXPECT_EQ(checkBuildAgreement("interfaces", true, true), BuildVerdict::BothBuild);
     EXPECT_EQ(checkBuildAgreement("loops", true, true), BuildVerdict::BothBuild);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic agreement, pinned without either compiler. The first two are the
+// issue-#76 catch-proof: a stage that drops a pinned diagnostic (exits 0, or
+// exits 1 without the message) must be a divergence, and refusing at a
+// different place must be one too.
+// ---------------------------------------------------------------------------
+
+TEST(StageAgreementLogic, StageDroppingAPinnedDiagnosticDiverges) {
+    // undefined_behavior.fin's pin. Reference refuses; stage compiles clean.
+    Expectation pin;
+    pin.kind = ExpectationKind::Error;
+    pin.line = 3;
+    pin.column = 1;
+    pin.text = "Function 'add' is missing a return statement on some paths";
+    const std::string err =
+        "error: Function 'add' is missing a return statement on some paths\n"
+        "   --> undefined_behavior.fin:3:1\n";
+    EXPECT_EQ(checkDiagAgreement("undefined_behavior", ExpectationKind::Error, &pin, 1, err, 0, ""),
+              DiagVerdict::FateDivergence);
+    // Same fate, but the stage diagnostic names something else entirely.
+    const std::string other =
+        "error: something else went wrong\n"
+        "   --> undefined_behavior.fin:9:4\n";
+    EXPECT_EQ(checkDiagAgreement("undefined_behavior", ExpectationKind::Error, &pin, 1, err, 1, other),
+              DiagVerdict::MessageDivergence);
+}
+
+TEST(StageAgreementLogic, StageRefusingAtADifferentPlaceDiverges) {
+    // Message matches, position does not: still red.
+    Expectation pin;
+    pin.kind = ExpectationKind::Error;
+    pin.line = 11;
+    pin.column = 16;
+    pin.text = "field 'v' has union type 'Number'";
+    const std::string cpp =
+        "error: field 'v' has union type 'Number'\n"
+        "   --> union_pointer_map.fin:11:16\n";
+    const std::string stage =
+        "error: field 'v' has union type 'Number'\n"
+        "   --> union_pointer_map.fin:11:20\n";
+    EXPECT_EQ(checkDiagAgreement("union_pointer_map", ExpectationKind::Error, &pin, 1, cpp, 1, stage),
+              DiagVerdict::MessageDivergence);
+}
+
+TEST(StageAgreementLogic, MatchingErrorRefusalsAgreeWithoutByteExactStderr) {
+    // union_pointer_map's live shape: same message and position, but the caret
+    // span differs (`^^^ here` vs `^ here`), so agreement must NOT be
+    // byte-exact here.
+    Expectation pin;
+    pin.kind = ExpectationKind::Error;
+    pin.line = 11;
+    pin.column = 16;
+    pin.text = "field 'v' has union type 'Number'";
+    const std::string cpp =
+        "error: field 'v' has union type 'Number'\n"
+        "   --> union_pointer_map.fin:11:16\n"
+        "    |                ^^^^^^^^^^^ here\n";
+    const std::string stage =
+        "error: field 'v' has union type 'Number'\n"
+        "   --> union_pointer_map.fin:11:16\n"
+        "    |                ^ here\n";
+    EXPECT_EQ(checkDiagAgreement("union_pointer_map", ExpectationKind::Error, &pin, 1, cpp, 1, stage),
+              DiagVerdict::Agree);
+}
+
+TEST(StageAgreementLogic, AllowlistedWordingWaivesMessageButNotPosition) {
+    // block_scope_use_after's live shape: same 7:5, different message.
+    Expectation pin;
+    pin.kind = ExpectationKind::Error;
+    pin.line = 7;
+    pin.column = 5;
+    pin.text = "Undefined variable 'b'";
+    const std::string cpp =
+        "error: Undefined variable 'b'\n"
+        "   --> block_scope_use_after.fin:7:5\n";
+    const std::string stage =
+        "error: use of undeclared identifier\n"
+        "   --> block_scope_use_after.fin:7:5\n";
+    EXPECT_EQ(checkDiagAgreement("block_scope_use_after", ExpectationKind::Error, &pin, 1, cpp, 1,
+                                 stage),
+              DiagVerdict::ToleratedWording);
+    // A different place is red even allowlisted: the waiver covers wording.
+    const std::string elsewhere =
+        "error: use of undeclared identifier\n"
+        "   --> block_scope_use_after.fin:7:9\n";
+    EXPECT_EQ(checkDiagAgreement("block_scope_use_after", ExpectationKind::Error, &pin, 1, cpp, 1,
+                                 elsewhere),
+              DiagVerdict::MessageDivergence);
+    // And an allowlist that stops matching is stale, like any other entry.
+    EXPECT_EQ(checkDiagAgreement("block_scope_use_after", ExpectationKind::Error, &pin, 1, cpp, 1,
+                                 cpp),
+              DiagVerdict::StaleAllowlist);
+}
+
+TEST(StageAgreementLogic, UnimplementedComparesRefusalText) {
+    const std::string refusal =
+        "error: Undefined type 'Strict'\n"
+        "   --> stdlib/stdio.fin:49:22\n";
+    EXPECT_EQ(checkDiagAgreement("stdio", ExpectationKind::Unimplemented, nullptr, 1, refusal, 1,
+                                 refusal),
+              DiagVerdict::Agree);
+    const std::string other =
+        "error: Undefined type 'SomethingElse'\n"
+        "   --> stdlib/stdio.fin:49:22\n";
+    EXPECT_EQ(checkDiagAgreement("stdio", ExpectationKind::Unimplemented, nullptr, 1, refusal, 1,
+                                 other),
+              DiagVerdict::MessageDivergence);
+    // importing.fin's live shape: from the repo root both compilers accept, so
+    // both-accept with identical stderr agrees; the pin stays the expectation
+    // suite's business.
+    const std::string warning =
+        "warning: unused variable 'y' is never read\n"
+        "   --> importing.fin:23:5\n";
+    EXPECT_EQ(checkDiagAgreement("importing", ExpectationKind::Unimplemented, nullptr, 0, warning, 0,
+                                 warning),
+              DiagVerdict::Agree);
+    EXPECT_EQ(checkDiagAgreement("importing", ExpectationKind::Unimplemented, nullptr, 0, warning, 1,
+                                 refusal),
+              DiagVerdict::FateDivergence);
 }
 
 // ---------------------------------------------------------------------------
@@ -590,3 +794,94 @@ INSTANTIATE_TEST_SUITE_P(
     Stage3Agreement,
     ::testing::ValuesIn(agreementSamples()),
     [](const testing::TestParamInfo<Sample>& info) { return testNameForSample(info.param.path); });
+
+// ---------------------------------------------------------------------------
+// The per-sample diagnostic agreement (issue #76): compile-only, both
+// compilers from the repo root, exit code plus pinned diagnostic or refusal
+// text. StageDiagAgreement covers stage2; Stage3DiagAgreement mirrors it over
+// stage3. GTEST_SKIP only for absent binaries: a refusal on either side is the
+// expected shape here, never a skip.
+// ---------------------------------------------------------------------------
+
+class StageDiagAgreement : public ::testing::TestWithParam<DiagSample> {};
+class Stage3DiagAgreement : public ::testing::TestWithParam<DiagSample> {};
+
+// One exit-code encoding for both compilers: a crash is 128+signal (the shell
+// convention the expectation runner documents), so two sides dying the same
+// way agree and different deaths disagree. -1 is unlaunched, never a fate.
+int diagExitCode(const Proc& p) {
+    if (p.exited) return p.exitCode;
+    if (p.signaled) return 128 + p.termSig;
+    return -1;
+}
+
+void checkDiagAgreementForStage(const DiagSample& sample, const std::string& stageBin) {
+    const std::string stem = fs::path(sample.path).stem().string();
+
+    // Same tree for both compilers (stage resolves packages via CWD).
+    ScopedRepoRoot repoRoot;
+    if (!repoRoot.ok()) FAIL() << "cannot chdir to the repo root; stage imports would misresolve";
+
+    // Compile-only on both sides; serialized like the `-o` builds above.
+    const Proc cpp = spawnCapture(fincBinary(), {sample.path, "--color=never"});
+    Proc stageBuild;
+    {
+        StageBuildLock lock;
+        stageBuild = spawnCapture(stageBin, {sample.path, "--color=never"});
+    }
+    const Expectation* pin = sample.kind == ExpectationKind::Error ? &sample.pin : nullptr;
+    switch (checkDiagAgreement(stem, sample.kind, pin, diagExitCode(cpp), stripAnsi(cpp.err),
+                               diagExitCode(stageBuild), stripAnsi(stageBuild.err))) {
+        case DiagVerdict::Agree:
+            break;
+        case DiagVerdict::FateDivergence:
+            FAIL() << stem << ": compile fate diverges: C++ " << procFate(cpp) << " vs stage "
+                   << procFate(stageBuild) << "\nC++ stderr:\n"
+                   << cpp.err << "stage stderr:\n"
+                   << stageBuild.err;
+            break;
+        case DiagVerdict::MessageDivergence:
+            FAIL() << stem << ": diagnostic diverges (both " << procFate(cpp) << ")\nC++ stderr:\n"
+                   << cpp.err << "stage stderr:\n"
+                   << stageBuild.err;
+            break;
+        case DiagVerdict::ToleratedWording: {
+            const AllowEntry* e = lookupAllow(stem, "stderr-wording");
+            ::testing::Test::RecordProperty("allowlisted", e->reason);
+            break;
+        }
+        case DiagVerdict::StaleAllowlist:
+            FAIL() << stem << ": diagnostics now agree -- delete the one allowlist line";
+            break;
+    }
+}
+
+TEST_P(StageDiagAgreement, DiagAgreesAcrossCompilers) {
+    const std::string stageBin = stageBinary();
+    if (stageBin.empty() || !fs::exists(stageBin)) {
+        GTEST_SKIP() << "stage compiler not found at FINC_STAGE2_BINARY=" << stageBin
+                     << "; diag-agreement needs build/finc_stage2 next to build/finc";
+    }
+    checkDiagAgreementForStage(GetParam(), stageBin);
+}
+
+TEST_P(Stage3DiagAgreement, DiagAgreesAcrossStage3) {
+    const std::string stageBin = stage3Binary();
+    if (stageBin.empty() || !fs::exists(stageBin)) {
+        GTEST_SKIP() << "stage3 compiler not found at FINC_STAGE3_BINARY=" << stageBin
+                     << "; stage3 diag-agreement needs build/finc_stage3 next to build/finc";
+    }
+    checkDiagAgreementForStage(GetParam(), stageBin);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Corpus,
+    StageDiagAgreement,
+    ::testing::ValuesIn(diagnosticSamples()),
+    [](const testing::TestParamInfo<DiagSample>& info) { return testNameForSample(info.param.path); });
+
+INSTANTIATE_TEST_SUITE_P(
+    Corpus,
+    Stage3DiagAgreement,
+    ::testing::ValuesIn(diagnosticSamples()),
+    [](const testing::TestParamInfo<DiagSample>& info) { return testNameForSample(info.param.path); });

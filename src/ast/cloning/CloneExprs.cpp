@@ -205,6 +205,23 @@ void CloneVisitor::visit(TernaryOp& node) {
     result = std::move(res);
 }
 
+void CloneVisitor::visit(MatchExpr& node) {
+    std::vector<MatchArm> arms;
+    arms.reserve(node.arms.size());
+    for (auto& arm : node.arms) {
+        MatchArm out;
+        out.member = arm.member;
+        out.qualifier = arm.qualifier;
+        out.binders = arm.binders;
+        out.is_wildcard = arm.is_wildcard;
+        out.body = clone(arm.body.get());
+        arms.push_back(std::move(out));
+    }
+    auto res = std::make_unique<MatchExpr>(clone(node.scrutinee.get()), std::move(arms));
+    res->setLoc(node.loc);
+    result = std::move(res);
+}
+
 void CloneVisitor::visit(SizeofExpression& node) {
     if (node.type_target) {
         auto res = std::make_unique<SizeofExpression>(clone(node.type_target.get()));

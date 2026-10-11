@@ -7,24 +7,24 @@ namespace std {
 #[class] // turns structs into classes (for stronger inheritance support)
 pub struct Error {
     pub message <string>,
-    pub error_id <int>,
-    Error(msg: string, err_code: int = null) {
+      pub error_id <int>,
+      Error(msg: string, err_code: int = null) {
         if (err_code == null) {
             err_code = -1;
-          }
+        }
         return new Error{message: msg, error_id: err_code};
       }
     // Promoted, ADR 0023 step 6: `format!("Error: {}", self.message)` on 19 was this file's one diagnostic and `format!` is now a macro the compiler implements, so it resolves with no import -- which this file needs, because it writes none. Every other rule the withdrawn note recorded is cited from src/ and stays there: the default parameter value on 11 (Analyzer_Core.cpp:685), the mutable parameter on 13 (SemanticAnalyzer.hpp:176), and `cmp_types(t, Error)` on 27 reading a type name as a `$type` (Analyzer_Expr.cpp:523).
     pub fun format() <string> {
         return format!("Error: {}", self.message);
-      }
-  }
+    }
+}
 
 #[export]
 #[use(compiler)]
 #[use(compiler.components.types)]
 @special(pub) is_error_type( t: $type ) <bool> {
-   const result <int> = compiler.types.cmp_types(t, Error);
-   return result == -1 : false ? true;
+    const result <int> = compiler.types.cmp_types(t, Error);
+    return result == -1 : false ? true;
 }
 }

@@ -580,7 +580,6 @@ pub struct LLVMBlockArgs {
 #[llvm_name="LLVMBuildFree"]
 @define llvm_build_free(builder: &LLVMBuilder, ptr: &LLVMValue) <&LLVMValue>;
 
-
 // ICmp Predicates
 #[export] pub fun llvm_int_eq() <int> { return 32; }
 #[export] pub fun llvm_int_ne() <int> { return 33; }

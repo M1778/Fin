@@ -33,18 +33,16 @@ extern * from a_namespace; // using `*` and `from` keyword we extract all names 
 
 // let's see an enum example:
 enum MyEnum {
-   A, B, C
+    A, B, C
 }
 
 extern * from MyEnum;
 
 // now we can use A, B, C without writing `MyEnum::`
 fun test() <void> {
-   let a <MyEnum> = A; // this now works
-   let b <MyEnum> = MyEnum::B; // this also works but why do this when we have externed it at the first place?
+    let a <MyEnum> = A; // this now works
+    let b <MyEnum> = MyEnum::B; // this also works but why do this when we have externed it at the first place?
 }
-
-
 
 // IMPORTANT NOTE: while `extern as` and `extern from` is designed for this task we usually don't use them because mostly we are using this kind of method for libraries we externally import, which we can just use a simple import statement to import specific symbols or even extract from namespaces using the import statements since they are so powerful
 // here is an example: `import * from a_random_library::a_namespace_in_that_library` this will import and extract all symbols in that specific namespace in that random library which completely removes the need to use `extern as` or `exterm from` however they will still be useful and supported

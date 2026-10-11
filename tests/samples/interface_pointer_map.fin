@@ -14,7 +14,7 @@ struct S { pub h <I>, pub x <int>, }
 #[use(compiler.components.layout)]
 #[provides(type_metadata)]
 @special(pub) meta(s: $struct) <quote> {
-  return compiler.layout.pointer_map_quote(s);
+    return compiler.layout.pointer_map_quote(s);
 }
 
 fun main() <int> { return 0; }

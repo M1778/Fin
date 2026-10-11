@@ -10,13 +10,13 @@ pub type EnumType = any implements <Enum>;
 #[use(compiler)]
 #[use(compiler.components.enums)]
 @special(priv) getenumkeyid(value: EnumType) <int> {
-   return compiler.enums.resolve_id(value);
- }
+    return compiler.enums.resolve_id(value);
+}
 
 #[llvm_name="enums_getkeyid"]
 pub fun getkeyid(value: EnumType) <int> {
-   return @getenumkeyid(value);
- }
+    return @getenumkeyid(value);
+}
 
 #[llvm_name="enums_keyidof"]
 pub fun keyidof(enum_member: $enum_member) <int> { // example: `keyidof(Ok)`

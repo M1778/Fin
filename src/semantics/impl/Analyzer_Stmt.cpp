@@ -45,6 +45,13 @@ bool mentionsDefined(const Expression* e) {
                (t->true_expr && mentionsDefined(t->true_expr.get())) ||
                (t->false_expr && mentionsDefined(t->false_expr.get()));
     }
+    if (const auto* m = dynamic_cast<const MatchExpr*>(e)) {
+        if (m->scrutinee && mentionsDefined(m->scrutinee.get())) return true;
+        for (const auto& arm : m->arms) {
+            if (arm.body && mentionsDefined(arm.body.get())) return true;
+        }
+        return false;
+    }
     if (const auto* mem = dynamic_cast<const MemberAccess*>(e)) {
         return mem->object && mentionsDefined(mem->object.get());
     }
@@ -85,6 +92,13 @@ bool mentionsImplements(const Expression* e) {
         return (t->condition && mentionsImplements(t->condition.get())) ||
                 (t->true_expr && mentionsImplements(t->true_expr.get())) ||
                 (t->false_expr && mentionsImplements(t->false_expr.get()));
+    }
+    if (const auto* m = dynamic_cast<const MatchExpr*>(e)) {
+        if (m->scrutinee && mentionsImplements(m->scrutinee.get())) return true;
+        for (const auto& arm : m->arms) {
+            if (arm.body && mentionsImplements(arm.body.get())) return true;
+        }
+        return false;
     }
     if (const auto* mem = dynamic_cast<const MemberAccess*>(e)) {
         return mem->object && mentionsImplements(mem->object.get());

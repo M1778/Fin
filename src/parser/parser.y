@@ -185,7 +185,7 @@
 %token KW_TRUE KW_FALSE
 %token KW_NAMESPACE
 %token KW_WHILE KW_DO KW_FOR KW_FOREACH KW_BREAK KW_CONTINUE
-%token KW_IF KW_ELSE KW_IN
+%token KW_IF KW_ELSE KW_IN KW_MATCH
 %token KW_TRY KW_CATCH KW_BLAME KW_SUPER KW_SELF_TYPE
 %token KW_IMPORT KW_AS KW_FROM
 /* `extern X as Y;` -- tests/samples/extern_as.fin, whose whole subject it is, and
@@ -344,6 +344,10 @@
 %type <std::unique_ptr<fin::Expression>> expression primary_no_struct
 %type <std::unique_ptr<fin::Expression>> literal lambda_expression overwrite_body
 %type <std::unique_ptr<fin::Expression>> super_expression prototype_literal no_struct_expression static_method_call
+%type <std::unique_ptr<fin::Expression>> match_expression
+%type <fin::MatchArm> match_arm match_pattern
+%type <std::vector<fin::MatchArm>> match_arms
+%type <std::vector<std::string>> match_binders match_binder_list
 %type <std::vector<std::unique_ptr<fin::Expression>>> expression_list arguments
 %type <std::vector<std::pair<std::string, std::unique_ptr<fin::Expression>>>> field_assignments
 %type <std::vector<std::pair<std::unique_ptr<fin::Expression>, std::unique_ptr<fin::Expression>>>> prototype_elements
@@ -2626,6 +2630,12 @@ expression:
 
     | lambda_expression { $$ = std::move($1); }
 
+    /* `match (expr) { arms }` (ADR 0050, stage 1: enum members and `_` only).
+       A keyword head, so no struct-instantiation ambiguity: the brace that opens
+       the arms follows RPAREN, a position where `expression` never has a bare
+       `{` (that spelling is `IDENTIFIER LBRACE`, two rules down). */
+    | match_expression { $$ = std::move($1); }
+
     /* Struct Instantiations - simple identifier */
     | IDENTIFIER LBRACE field_assignments RBRACE {
         std::vector<std::unique_ptr<fin::TypeNode>> empty_generics;
@@ -2726,11 +2736,80 @@ expression:
     }
     ;
 
-/* 
-   Restricted expression that does NOT allow top-level struct instantiation 
+/* `match (scrutinee) { pattern => body, ... }` (ADR 0050, stage 1).
+   The scrutinee parens are mandatory, mirroring `if (expr)`. One arm is a
+   pattern plus an expression body; arms are comma-separated with an optional
+   trailing comma. Nullable (`null`/binder) and constant patterns are
+   follow-ups and do not parse yet -- the pattern alternatives below are the
+   whole of stage 1. */
+match_expression:
+    KW_MATCH LPAREN expression RPAREN LBRACE match_arms RBRACE {
+        $$ = std::make_unique<fin::MatchExpr>(std::move($3), std::move($6));
+        $$->setLoc(@$);
+    }
+    | KW_MATCH LPAREN expression RPAREN LBRACE match_arms COMMA RBRACE {
+        $$ = std::make_unique<fin::MatchExpr>(std::move($3), std::move($6));
+        $$->setLoc(@$);
+    }
+    ;
+
+match_arms:
+    match_arm { std::vector<fin::MatchArm> v; v.push_back(std::move($1)); $$ = std::move(v); }
+    | match_arms COMMA match_arm { $1.push_back(std::move($3)); $$ = std::move($1); }
+    ;
+
+match_arm:
+    match_pattern ARROW expression {
+        $$ = std::move($1);
+        $$.body = std::move($3);
+    }
+    ;
+
+/* `_` is already a legal identifier (`let _ <int> = 1;` builds), so the
+   wildcard needs no token: a bare `_` pattern is the wildcard, and the
+   checker exempts it from exhaustiveness contribution beyond closure. */
+match_pattern:
+    IDENTIFIER {
+        fin::MatchArm arm;
+        if ($1 == "_") arm.is_wildcard = true;
+        else arm.member = $1;
+        $$ = std::move(arm);
+    }
+    | IDENTIFIER LPAREN match_binders RPAREN {
+        fin::MatchArm arm;
+        arm.member = $1;
+        arm.binders = std::move($3);
+        $$ = std::move(arm);
+    }
+    | IDENTIFIER DOUBLE_COLON IDENTIFIER {
+        fin::MatchArm arm;
+        arm.qualifier = $1;
+        arm.member = $3;
+        $$ = std::move(arm);
+    }
+    | IDENTIFIER DOUBLE_COLON IDENTIFIER LPAREN match_binders RPAREN {
+        fin::MatchArm arm;
+        arm.qualifier = $1;
+        arm.member = $3;
+        arm.binders = std::move($5);
+        $$ = std::move(arm);
+    }
+    ;
+
+match_binders:
+    %empty { $$ = std::vector<std::string>(); }
+    | match_binder_list { $$ = std::move($1); }
+    ;
+
+match_binder_list:
+    IDENTIFIER { std::vector<std::string> v; v.push_back($1); $$ = std::move(v); }
+    | match_binder_list COMMA IDENTIFIER { $1.push_back($3); $$ = std::move($1); }
+    ;
+
+/*
+   Restricted expression that does NOT allow top-level struct instantiation
    starting with IDENTIFIER LBRACE. This resolves the foreach ambiguity.
-*/
-no_struct_expression:
+*/no_struct_expression:
     /* Binary Ops */
     no_struct_expression EQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::EQUAL, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression PLUSEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::PLUSEQUAL, std::move($3)); $$->setLoc(@$); }

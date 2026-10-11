@@ -3,14 +3,14 @@
 fun check(val: int) <void> {
     // Assert-like blame with message
     blame val > 0, "Value must be positive";
-    
+
     // Assert-like blame without message
     blame val < 100;
-    
-    // Traditional throw-like blame (if condition is omitted or implicitly true? 
+
+    // Traditional throw-like blame (if condition is omitted or implicitly true?
     // Wait, the syntax was: `blame` isn't just for throwing errors, it also can act like assert.
     // Example in deeptest4.fin: `blame a["Hi"].integer == 10;`
-    
+
     if (val == 42) {
         // blame Error("The answer is forbidden");
     }
@@ -18,7 +18,7 @@ fun check(val: int) <void> {
 
 struct M <T> {}
 
-pub fun pp(m: M<M<int>>) <noret>{} // TODO: This should be allowed 
+pub fun pp(m: M<M<int>>) <noret>{} // TODO: This should be allowed
 
 fun main() <void> {
     let x <int> = 10;

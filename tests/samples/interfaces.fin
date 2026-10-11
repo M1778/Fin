@@ -8,11 +8,11 @@ interface Printable {
 // 2. Define a Struct that "should" implement it (we don't check impl yet, just syntax)
 struct User: <Printable> {
     name <string>,
-    age <int>,
+      age <int>,
 
-    pub fun to_string() <string> {
+      pub fun to_string() <string> {
         return "User";
-    }
+      }
 }
 
 // 3. Function with Generic Constraint

@@ -12,6 +12,18 @@ file(GLOB FINFMT_LIBSTD_FILES "${CMAKE_SOURCE_DIR}/lib/std/*.fin")
 add_test(NAME "finfmt:check-libstd"
     COMMAND $<TARGET_FILE:finfmt> --check ${FINFMT_LIBSTD_FILES})
 
+# Issue #77: the same gate over the self-host compiler sources and the sample
+# corpus. Separate named tests so a failure names which corpus drifted.
+file(GLOB FINFMT_SELFHOST_FILES "${CMAKE_SOURCE_DIR}/finc/*.fin")
+add_test(NAME "finfmt:check-selfhost"
+    COMMAND $<TARGET_FILE:finfmt> --check ${FINFMT_SELFHOST_FILES})
+
+file(GLOB FINFMT_SAMPLE_FILES
+    "${CMAKE_SOURCE_DIR}/tests/samples/*.fin"
+    "${CMAKE_SOURCE_DIR}/tests/samples/stdlib/*.fin")
+add_test(NAME "finfmt:check-samples"
+    COMMAND $<TARGET_FILE:finfmt> --check ${FINFMT_SAMPLE_FILES})
+
 # Fixed ugly-input fixture. The ugly file must drift (WILL_FAIL: a clean
 # --check would mean the fixture lost its teeth); the expected rendering must
 # be --check clean, which is the idempotence half (fmt(fmt(x)) == fmt(x)).
