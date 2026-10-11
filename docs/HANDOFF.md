@@ -1,16 +1,20 @@
 # Handoff — Fin compiler completion
 
-Updated 2026-09-12 at commit `2e4065f` on branch `wave3-semantics`.
+Updated 2026-10-11 at commit `b9dfb66` on branch `master`.
 
 This is the **current, short handoff**. `docs/plan.md` and the older commit history contain
 historical design notes; do not use their old sample counts as current measurements. Start here,
-then inspect the current tree and rerun the measurements below.
+then inspect the current tree and rerun the measurements below. The same warning applies to
+this file: every number below was true on the date and commit above; do not quote one without
+rerunning its command.
 
 ## Goal
 
 Finish the standing goal: all runnable normative samples compile and run, and `lib/std/` is
-complete. The 51 files under `tests/samples/` are the language specification (ADR 0008), with
-expectations in their `//@` headers. `//@ ok` describes frontend diagnostics; it does not promise
+complete. The files under `tests/samples/` are the language specification (ADR 0008), with
+expectations in their `//@` headers. Count them, don't quote a number:
+`find tests/samples -name '*.fin' | wc -l` (58 on 2026-10-11: 46 top-level + 12 stdlib).
+`//@ ok` describes frontend diagnostics; it does not promise
 that LLVM object generation already works.
 
 Backend invariant:
@@ -34,7 +38,7 @@ Backend invariant:
 
 ## Current verified state
 
-Recent work (21 commits since `bd606c1`, all pushed):
+Recent work (166 commits since `bd606c1`, HEAD `b9dfb66` on `master`):
 
 - Diamond multiple inheritance shares one ancestor (ADR 0029, layout + codegen).
 - `deeptest2.fin` tail: implicit-`self` fields, `super::` access, `Self()` calls,
@@ -45,18 +49,26 @@ Recent work (21 commits since `bd606c1`, all pushed):
   lowers; null compares, null scalar defaults, pointer→int casts, denullify.
 - Meta-types map distinctly; `resolve_type*` evaluate to per-compile typeids (ADR 0035).
 - `stdlib/hashmap.fin` and `stdlib/prototypes.fin` compile with `finc -c`.
-- CI runs on branch pushes and is green on Linux/macOS/build-script; Windows rows
-  are experimental (`continue-on-error`) pending two known issues below.
+- CI runs on pushes to `master`/`wave3-semantics`/`wave4-selfhost` and on pull requests
+  (`.github/workflows/ci.yml` `on:`); six required matrix rows (linux-x86_64, linux-arm64,
+  macos-arm64, macos-x86_64, windows-x86_64, windows-arm64) with `fail-fast: false` and no
+  `continue-on-error` anywhere — Windows rows are required, not experimental. The self-host
+  bootstrap fixed-point step (`finc_stage2 == finc_stage3`) is Linux-only; other rows keep the
+  stage-agreement skip until the stage driver learns platform linking.
 
 Verification already completed:
 
-- Full CTest suite: **1866/1866 passed** (local Debug build).
-- All 37 standard library modules (`lib/std/*.fin`) check clean standalone with zero diagnostics.
-- Linux x86_64/arm64, macOS arm64/x86_64, build-script jobs green on CI Release builds.
+- Full CTest suite: **2731/2731 passed** (local build, measured 2026-10-11 at `b9dfb66`;
+  rerun with `ctest --test-dir build`, count with `ctest --test-dir build -N | tail -1`).
+- All 37 standard library modules (`ls -1 lib/std/*.fin | wc -l`) check clean standalone with zero diagnostics
+  (guaranteed by `Soundness_BundledStdlib.EveryModuleChecksCleanStandalone`, `tests/test_stdlib.cpp:1282`).
+- Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64/arm64 CI rows all required (no `continue-on-error`
+  in `.github/workflows/ci.yml`); Release builds with the pinned backend enforced (`FIN_WITH_LLVM=ON`).
 - Fixed along the way: generic interface value lowering (`Box<int>`), type alias lowering (`type size_t`),
   temporary rvalue struct receiver addressability, struct memberwise equality in codegen.
 - Complete documentation web application in `docs/site/` and GitHub Pages workflow `.github/workflows/deploy-pages.yml`.
-- `finc -c` corpus remeasure: **41 of 51 samples compile to valid object code**.
+- `finc -c` corpus remeasure: **48 of 58 samples compile to valid object code**
+  (measured 2026-10-11 at `b9dfb66`; rerun with the measurement script below).
 - Architecture Decisions settled: ADR 0040 (nullable tagged aggregates), ADR 0041 (enums as tagged unions),
   ADR 0042 (compiler API builtins and comptime intrinsics), ADR 0043 (self-hosting LLVM IR lowering).
 - Scope-exit destruction verified: destructors run via `delete` and automatically at block/function scope
@@ -84,13 +96,19 @@ rm -f *.o tests/samples/*.o tests/samples/stdlib/*.o
 ## Remaining object/codegen blockers
 
 Run each sample with `build/finc -c <sample>` and fix the first refusal, then remeasure.
-41 of 51 samples compile.
+48 of 58 samples compile (measured 2026-10-11 at `b9dfb66`). The 10 that refuse:
+
+- 3 negative `//@ error` samples, correctly refusing: `block_scope_use_after.fin`,
+  `undefined_behavior.fin`, `union_pointer_map.fin`.
+- 1 held ruling: `deeptest4.fin` (struct `==` declared-only, ADR 0036).
+- 6 `unimplemented` stdlib drafts: `stdlib/collection.fin`, `stdlib/enums.fin`,
+  `stdlib/operators.fin`, `stdlib/stdio.fin`, `stdlib/stdptr.fin`, `stdlib/types.fin`.
 
 1. **Resolved since previous handoff**:
    - `useful_macros.fin` compiles (zero diagnostics, exit code 0).
    - `stdlib/networking.fin` compiles.
    - `stdlib/typing.fin` compiles.
-   - `deeptest4.fin` compiles.
+   - `enums.fin`, `importing.fin`, `literal_struct.fin` compile.
    - `nullifier.fin` compiles (nullable tagged discriminant layout, ADR 0040).
    - `prototype_test.fin` compiles (struct memberwise equality).
    - `literal_interface.fin` compiles (compile-time `@implements` builtin, ADR 0042).
@@ -98,18 +116,17 @@ Run each sample with `build/finc -c <sample>` and fix the first refusal, then re
    - `stdlib/error.fin` compiles.
 
 2. **Frontend blockers still visible in the corpus** (not codegen failures; do not
-   turn a documented sample typo into a compiler feature):
-   - `enums.fin` — `Offer` (booked: declared nowhere, must not be invented) and `Ok(T)`
-     designator (ADR 0037).
+   turn a documented sample typo into a compiler feature). Rerun the measurement script
+   rather than copying this list; it names the 2026-10-11 state:
+   - `deeptest4.fin` — held ruling, struct `==` declared-only (ADR 0036).
    - `stdlib/operators.fin` — owes `Any` import.
-   - `importing.fin` — intentionally missing `somelib` module.
-   - `literal_struct.fin` — undefined `st`.
    - `stdlib/collection.fin` — function variance/signature mismatch.
    - `stdlib/enums.fin` — `Enum`.
    - `stdlib/stdio.fin` — generic `X` method lookup.
    - `stdlib/stdptr.fin` — `pointer_type`.
    - `stdlib/types.fin` — `_static_string`.
-   - `undefined_behavior.fin` — expected missing-return diagnostic; negative sample.
+   - `block_scope_use_after.fin`, `undefined_behavior.fin`, `union_pointer_map.fin` —
+     negative `//@ error` samples; their diagnostics are the expected result.
 
    Regenerate first diagnostics rather than copying this list.
 
@@ -118,10 +135,10 @@ Run each sample with `build/finc -c <sample>` and fix the first refusal, then re
 - **`delete &field` vs automatic field cleanup**: an explicit deallocation of a
   field with a destructor will run twice once scope exits clean it too (ADR 0016
   names this decision as the one to revisit). No corpus program hits it yet.
-- **Windows full green**: MSVC component-link ruling implemented (ADR 0031) and
-  `__acrt_iob_func` stderr handled, but Windows jobs now fail compiling the bison
-  parser (`parser.hpp` copies move-only AST nodes; MSVC C2280, GCC/Clang move).
-  A portability workstream of its own — do not fix inside language work.
+- **Windows full green**: achieved — all six CI matrix rows are required (no `continue-on-error`)
+  and recent `master` runs are green (`gh run list --workflow=ci.yml`). The MSVC component-link
+  ruling (ADR 0031) and `__acrt_iob_func` stderr handling hold; the bison `parser.hpp` MSVC C2280
+  failure named here previously no longer blocks the matrix.
 - **Stale pointers**: `CMakeLists.txt` and ADRs 0025/0026 cite `docs/HANDOFF.md §8`,
   which the rewrite deleted. Point them somewhere real when touching those lines.
 

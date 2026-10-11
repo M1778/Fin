@@ -9402,6 +9402,7 @@ BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
 }
 
 BACKEND_TEST(KnownDefect_Codegen, ConstructorOverloadsAreRefusedRatherThanResolved) {
+    // Known defect: #95 (tracked; see issue for inversion target).
     // The booked defect (docs/HANDOFF.md §7): the analyzer resolves `constructors[0]`
     // and no more. One symbol per struct is what this file declares to match it, so a
     // second `constructor` is refused *by name* at its declaration rather than silently
@@ -12368,6 +12369,7 @@ BACKEND_TEST(Soundness_Codegen, AGenericInterfaceAsAValueTypeLowers) {
 }
 
 BACKEND_TEST(KnownDefect_Codegen, AnEscapingInterfaceReferenceIsAcceptedLikeAnyEscapingAddress) {
+    // Known defect: #99 (tracked; see issue for inversion target).
     // A reference whose implementor died is a dangling `data` word, and this backend
     // accepts it: `make` converts a local and returns the pair, and the caller reads
     // through it. Measured, it prints garbage -- the disassembly is `lea -0x8(%rsp)`,

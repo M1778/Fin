@@ -1258,6 +1258,7 @@ TEST(Soundness_ModuleDiagnostics, TheFailureNamesASearchPathThatDoesExist) {
 // the location into `loadModule` touches `src/macros/`, which this wave does
 // not own -- then this inverts to assert `line >= 1`.
 TEST(KnownDefect_ModuleDiagnostics, ALocationlessErrorStillNamesAFile) {
+    // Known defect: #91 (tracked; see issue for inversion target).
     TempFin f(kImportsMyLib, "shape");
     auto r = runFinc({f.str(), "--diagnostics=json", "--fin-libs=/nonexistent/only"},
                      noFinLibs());
@@ -1504,6 +1505,7 @@ TEST(Soundness_ModuleDiagnostics, AnImportCycleIsReportedOnceAndTerminates) {
 //
 // The inversion is Soundness_LibraryPaths.APinnedLibraryIsNotShadowedByASiblingFile.
 TEST(KnownDefect_LibraryPaths, AFileBesideTheSourceShadowsAPinnedLibrary) {
+    // Known defect: #92 (tracked; see issue for inversion target).
     // The library the build pins, and a decoy of the same name beside the source. The
     // two differ in a way the diagnostic can see: only the decoy has an error in it.
     TempLib lib;  // writes <dir>/mylib.fin, empty and valid
@@ -1660,6 +1662,7 @@ TEST(Soundness_PinnedLibraries, AQuotedImportReachesAPinnedLibraryWhenNothingSha
 // Soundness_PinnedLibraries.AQuotedImportIsNotShadowedByASiblingFile. Do not
 // relax it, and do not delete it: the two spellings agreeing is the property.
 TEST(KnownDefect_PinnedLibraries, AQuotedImportIsShadowedByASiblingFile) {
+    // Known defect: #92 (tracked; see issue for inversion target).
     TempPinnedProject p(kAppQuotedImport, kPinnedReturnsInt, kSiblingReturnsFloat);
     auto r = runFinc({p.app(), "--fin-libs=" + p.libs()}, noFinLibs());
     const std::string err = stripAnsi(r.err);
@@ -1915,6 +1918,7 @@ TEST(Soundness_Imports, ANameNoMapHasIsStillReportedAsUnexported) {
 }
 
 TEST(KnownDefect_Imports, ImportStarDoesNotBindAMacro) {
+    // Known defect: #89 (tracked; see issue for inversion target).
     // The other half of plan.md's question, and it is booked rather than fixed because
     // the two passes agree here: the expander's star case does not carry macros either
     // (its named-import loop looks up a target literally named `*`), so both passes say
@@ -1960,6 +1964,7 @@ TEST(KnownDefect_Imports, ImportStarDoesNotBindAMacro) {
 // and eleven corpus imports name `::std`, so the answer is load-bearing for the
 // standard library and should be settled before it is written, not after.
 TEST(KnownDefect_Imports, AnImportIgnoresTheNamespaceItNames) {
+    // Known defect: #90 (tracked; see issue for inversion target).
     for (const char* ns : {"m::nonexistent", "m::a::b::c"}) {
         const auto r = runStar("import { m_fn } from " + std::string(ns) + ";\n"
                                "fun main() <noret> { let x <int> = m_fn(); }\n");
@@ -1985,6 +1990,7 @@ TEST(KnownDefect_Imports, AnImportIgnoresTheNamespaceItNames) {
 // ADR 0008 the first of those changes sample code and needs a ratified decision;
 // the other two change the compiler. Nothing here picks one.
 TEST(KnownDefect_Imports, ANonPublicSymbolCanBeImportedByName) {
+    // Known defect: #89 (tracked; see issue for inversion target).
     const auto r = runStar("import { m_private } from m;\n"
                            "fun main() <noret> { let x <int> = m_private(); }\n");
     EXPECT_EQ(r.exitCode, 0)
@@ -2212,6 +2218,7 @@ TEST(Soundness_Diagnostics, TheTypoHintStillWorksWhenTheLocationIsInRange) {
 }
 
 TEST(KnownDefect_Diagnostics, ADiagnosticFromAnImportedMacroBodyIsRenderedAgainstTheCaller) {
+    // Known defect: #91 (tracked; see issue for inversion target).
     // What the guard does not fix, asserted so that fixing it cannot pass unnoticed.
     // The diagnostic is right about the program and wrong about where to look: the
     // `-->` names the caller, the line number is the caller's, and the snippet under

@@ -230,3 +230,10 @@ build-*/
 *~
 .DS_Store
 Thumbs.db
+
+# Agent-session artifacts (issue #83): IDE transcripts, scratch checkpoints,
+# and notes an agent run dropped at the root. Never source.
+*-command-message*.txt
+/CHECKPOINT.md
+/TODOs.okt
+/Fin_Discovery.md

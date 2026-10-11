@@ -282,6 +282,7 @@ TEST(Soundness_BundledStdlib, TheWholeModuleImportFormsResolve) {
 // spelling the corpus's own drafts use -- and it would be easy to conclude from a
 // green suite that the selector was doing work.
 TEST(KnownDefect_BundledStdlib, TheNamespaceSelectorInAnImportIsNotChecked) {
+    // Known defect: #90 (tracked; see issue for inversion target).
     const std::string err = stripAnsi(compileBundled(
         "import { Error } from error::nosuchnamespace;\n"
         "fun main() <int> { return 0; }\n").err);
@@ -350,6 +351,7 @@ TEST(Soundness_Modules, AnUnknownModuleMemberIsReportedWhetherReadOrCalled) {
 }
 
 TEST(KnownDefect_Modules, AModuleStructIsNotConstructibleThroughADot) {
+    // Known defect: #100 (tracked; see issue for inversion target).
     // `stdio.IOError("x")` resolves the name -- lib/std/stdio.fin exports the struct --
     // and then finds no FunctionType behind it, because a struct's constructors live on
     // its StructType and the namespace branch only looks in the value table.
@@ -485,6 +487,7 @@ TEST(Soundness_Modules, AnAmbientMemberCalledThroughAQualifierIsStillCheckedForA
 }
 
 TEST(KnownDefect_Modules, AnImportedExternThatIsNotAmbientIsNotLoweredThroughADot) {
+    // Known defect: #100 (tracked; see issue for inversion target).
     // `io_fflush` is one of lib/std/stdio.fin's own externs and is deliberately not
     // `#[global]` (:113: "the marked set is two names and minting a third would be a hole
     // in the module system rather than a convenience"). No prototype for it is spliced
@@ -571,6 +574,7 @@ TEST(Soundness_Modules, AnImportedGenericStructInstantiatesOnDemand) {
 }
 
 TEST(KnownDefect_Modules, AnImportedFinFunctionIsNotLoweredThroughADot) {
+    // Known defect: #100 (tracked; see issue for inversion target).
     // The other half of the same gap, and the larger one: a Fin function with a body in a
     // loaded module is not lowered under any spelling. Its definition stays in the
     // loader's `astStorage`, where the backend never looks, so the root object has no copy
@@ -687,6 +691,7 @@ TEST(Soundness_Modules, AModuleBodyKeepsItsOwnFunctionWhenTheRootCallsTheOtherOn
 }
 
 TEST(KnownDefect_Modules, RenamingAnAmbientNameInTheRootFileBreaksBothSpellingsAlike) {
+    // Known defect: #100 (tracked; see issue for inversion target).
     // The residual hazard, booked rather than repaired, and bookable because the two
     // spellings now agree. A file that redeclares an ambient name wins in
     // `declareFunction` -- first declaration wins, and the splice is appended -- so the

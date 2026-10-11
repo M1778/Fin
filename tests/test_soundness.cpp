@@ -696,6 +696,7 @@ TEST(Soundness_Generics, AnOperatorsRegisteredReturnTypeIsWhatItsCallIsTyped) {
 }
 
 TEST(KnownDefect_Generics, AnOperatorsGenericParameterIsNotInferredFromItsOperand) {
+    // Known defect: #95 (tracked; see issue for inversion target).
     // `s + 1` calls `operator + : <T>(other: <T>) <T>` with an int, so T is int and the
     // call is an int. The analyser reports the mismatch against the *unsubstituted*
     // parameter instead, printing a type name that exists only inside the operator's own
@@ -1174,6 +1175,7 @@ TEST(Soundness_ContainerVariance, AStructDoesNotConvertToAnInterfaceThroughACont
 }
 
 TEST(KnownDefect_ContainerVariance, ADynamicElementTypeStillAcceptsAConcreteOne) {
+    // Known defect: #96 (tracked; see issue for inversion target).
     // The one hole `isAssignableThrough` keeps open, and it is open on the corpus's
     // authority rather than by oversight. `[int] -> [any]` is a representation change
     // by the same argument as everything the predicate refuses -- docs/plan.md fixes
@@ -1289,6 +1291,7 @@ TEST(Soundness_DynamicTypes, AnyDoesNotAcceptNull) {
 }
 
 TEST(KnownDefect_Nullability, DenullifyingANullableAnyIsNotAnError) {
+    // Known defect: #96 (tracked; see issue for inversion target).
     // The other half of nullifier.fin:34-36, which the Soundness test above
     // deliberately does not claim:
     //
@@ -1384,6 +1387,7 @@ TEST(Soundness_DynamicTypes, ABoundIsRenderedInTheDiagnosticThatQuotesTheType) {
 }
 
 TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnADynamicTypeIsNotEnforced) {
+    // Known defect: #96 (tracked; see issue for inversion target).
     // `type EnumType = any implements <Enum>;` (stdlib/enums.fin:6) reads as "any
     // type that implements Enum". Only the first half is enforced: the bound is
     // resolved and recorded on the DynamicType, and nothing consults it, so a struct
@@ -1426,6 +1430,7 @@ TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnADynamicTypeIsNotEnforced) {
 }
 
 TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnANonDynamicAliasIsDropped) {
+    // Known defect: #96 (tracked; see issue for inversion target).
     // The bound is attached only when the alias target is dynamic (`any`, `object`,
     // or `Struct`), because that is the only shape the corpus writes it on --
     // including literal_struct.fin:15, `type PlayerStructLike = Struct implements
@@ -1579,6 +1584,7 @@ TEST(Soundness_DynamicTypes, AnyInsideAGenericSurvivesInstantiation) {
 }
 
 TEST(KnownDefect_DynamicTypes, GenericArgumentsOnADynamicTypeAreNotConstraints) {
+    // Known defect: #96 (tracked; see issue for inversion target).
     // Having kept `any<int>` dynamic, the open question is whether the `<int>` means
     // anything. Today it does not: `any<int>` accepts a string.
     //
@@ -1597,6 +1603,7 @@ TEST(KnownDefect_DynamicTypes, GenericArgumentsOnADynamicTypeAreNotConstraints) 
 }
 
 TEST(KnownDefect_DynamicTypes, ObjectAndAnyAreMutuallyAssignable) {
+    // Known defect: #96 (tracked; see issue for inversion target).
     // Both directions compile, and one of them probably should not.
     //
     // The corpus draws a distinction between the two names. stdlib/types.fin:97 says
@@ -1724,6 +1731,7 @@ TEST(Soundness_Prototypes, APrototypeWithAnUnassignableKeyOrValueIsStillRejected
 }
 
 TEST(KnownDefect_TypeAliases, AGenericTypeAliasIsNeverDeclared) {
+    // Known defect: #95 (tracked; see issue for inversion target).
     // Not the drop-the-entity rule -- worse. visit(TypeDefinition&) returns early for any
     // alias with generic parameters, resolving the target for its diagnostics and never
     // calling defineType at all, so `type ArrayType<T> = [T];` leaves `ArrayType`
@@ -2413,6 +2421,7 @@ TEST(Soundness_IndexOperator, TheImplementsCastFormChecksItsSubscript) {
 }
 
 TEST(KnownDefect_IndexOperator, AnAssignmentThroughASubscriptNeverConsultsOperatorBracketEquals) {
+    // Known defect: #98 (tracked; see issue for inversion target).
     // `a[k] = v` types its target through `operator []` -- the *read* -- and checks the
     // value against that operator's return type. `operator []=` is registered and never
     // looked up. lib/std/hashmap.fin:23's own note says so ("an index expression never
@@ -2581,6 +2590,7 @@ TEST(Soundness_Precedence, ACallOnTheRightOfABinaryOperatorIsStillACall) {
 // That test already exists and covers the binary three, so adding the compound five to
 // it is the whole of the remaining work here.
 TEST(KnownDefect_Operators, EightOperatorsCanBeDeclaredAndNeverWritten) {
+    // Known defect: #98 (tracked; see issue for inversion target).
     // Every one of the eight is accepted as a requirement.
     const std::string decls = stripAnsi(compile(
         "interface BitAnd { pub operator &(rhs: any) <int>; }\n"
@@ -3762,6 +3772,7 @@ TEST(Soundness_Blame, AMessageIsStillCheckedInTheRaiseForm) {
 }
 
 TEST(KnownDefect_Blame, RaisingAStringIsRejected) {
+    // Known defect: #97 (tracked; see issue for inversion target).
     // Pinned, not fixed. lib/std/typing.fin's `ErrorLike = string | any implements
     // <Error>` reads a string as error-like, so `blame "boom"` has a defensible
     // meaning -- but so does reading it as the assert form's message written in the
@@ -3776,6 +3787,7 @@ TEST(KnownDefect_Blame, RaisingAStringIsRejected) {
 }
 
 TEST(KnownDefect_Blame, RaisingAValueIsNotCheckedForBeingAnError) {
+    // Known defect: #97 (tracked; see issue for inversion target).
     // The other half of the same ruling, and the looser one: any StructType is
     // raisable, including one with no relation to `Error` at all. Narrowing it means
     // the analyzer knowing what `Error` is -- either by hardcoding the library's name
@@ -4272,6 +4284,7 @@ TEST(Soundness_Conditions, BlameStillRejectsAnInteger) {
 }
 
 TEST(KnownDefect_Conditions, AnIfAcceptsAnInteger) {
+    // Known defect: #94 (tracked; see issue for inversion target).
     auto r = compile("fun main() <void> { if (1) { } }\n");
     EXPECT_EQ(r.exitCode, 0)
         << "FIXED: conditions are checked now. Invert these and rule on "
@@ -4280,6 +4293,7 @@ TEST(KnownDefect_Conditions, AnIfAcceptsAnInteger) {
 }
 
 TEST(KnownDefect_Conditions, AnIfAcceptsAString) {
+    // Known defect: #94 (tracked; see issue for inversion target).
     // A separate test from the integer because "C allows int" is at least an
     // argument, and there is none at all for a string. If a ruling ever does
     // admit truthiness, it has to say what this line means.
@@ -4288,12 +4302,14 @@ TEST(KnownDefect_Conditions, AnIfAcceptsAString) {
 }
 
 TEST(KnownDefect_Conditions, AnIfAcceptsANonBoolVariable) {
+    // Known defect: #94 (tracked; see issue for inversion target).
     // Not a literal, so this cannot be dismissed as constant folding.
     auto r = compile("fun main() <void> { let n <int> = 3; if (n) { } }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
 TEST(KnownDefect_Conditions, AWhileAcceptsAnInteger) {
+    // Known defect: #94 (tracked; see issue for inversion target).
     // Separate from `if` because the fix is separate: WhileLoop has no
     // commented-out check to uncomment, so a fix that only edits line 34
     // leaves this one passing.
@@ -4302,6 +4318,7 @@ TEST(KnownDefect_Conditions, AWhileAcceptsAnInteger) {
 }
 
 TEST(KnownDefect_Conditions, AForHeaderAcceptsAnInteger) {
+    // Known defect: #94 (tracked; see issue for inversion target).
     auto r = compile("fun main() <void> { for (let i <int> = 0; 1; i = i + 1) { } }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
@@ -4368,6 +4385,7 @@ TEST(Soundness_BinaryOperators, LogicalAndStillRequiresBooleanOperands) {
 }
 
 TEST(KnownDefect_BinaryOperators, SubtractionAcceptsTwoStrings) {
+    // Known defect: #94 (tracked; see issue for inversion target).
     // Asserting the *result type*, not merely that it compiles: this passes only
     // if `"a" - "b"` was typed `string`, which is the pass-through at :176 rather
     // than some unrelated leniency.
@@ -4380,6 +4398,7 @@ TEST(KnownDefect_BinaryOperators, SubtractionAcceptsTwoStrings) {
 }
 
 TEST(KnownDefect_BinaryOperators, ModuloAcceptsTwoStrings) {
+    // Known defect: #94 (tracked; see issue for inversion target).
     // Separate from subtraction because `%` is the case with no reading at all:
     // a fix that whitelists `+` and `-` for strings on the way to concatenation
     // would leave this one accepted, and it should not.
@@ -4388,6 +4407,7 @@ TEST(KnownDefect_BinaryOperators, ModuloAcceptsTwoStrings) {
 }
 
 TEST(KnownDefect_BinaryOperators, ArithmeticAcceptsTwoBooleans) {
+    // Known defect: #94 (tracked; see issue for inversion target).
     // A different operand kind, so a numeric whitelist that admits `bool` by way
     // of integer promotion would leave this green while the string cases go red.
     auto r = compile("fun main() <void> { let a <bool> = true / false; }\n");
@@ -4431,6 +4451,7 @@ TEST(Soundness_UnaryOperators, DereferencingANonPointerIsStillRejected) {
 }
 
 TEST(KnownDefect_UnaryOperators, NotPassesAnIntegerStraightThrough) {
+    // Known defect: #94 (tracked; see issue for inversion target).
     // `<int>`, not `<bool>`: this compiling is the proof that `!1` is typed
     // `int`. With `<bool>` the file already rejects it, for the wrong reason.
     auto r = compile("fun main() <void> { let a <int> = !1; }\n");
@@ -4442,6 +4463,7 @@ TEST(KnownDefect_UnaryOperators, NotPassesAnIntegerStraightThrough) {
 }
 
 TEST(KnownDefect_UnaryOperators, NegationPassesAStringStraightThrough) {
+    // Known defect: #94 (tracked; see issue for inversion target).
     // Separate operator, separate case in the fix: `!` wants `bool` and `-`
     // wants a number, so a repair that only learns about `!` leaves this green.
     auto r = compile("fun main() <void> { let a <string> = -\"s\"; }\n");
@@ -4498,6 +4520,7 @@ TEST(Soundness_Duplicates, ShadowingInANestedScopeStillWorks) {
 }
 
 TEST(KnownDefect_Duplicates, ARedeclarationSilentlyChangesTheType) {
+    // Known defect: #93 (tracked; see issue for inversion target).
     auto r = compile("fun main() <void> { let a <int> = 1; let a <string> = \"s\";\n"
                      "                    let b <string> = a; }\n");
     EXPECT_EQ(r.exitCode, 0)
@@ -4509,6 +4532,7 @@ TEST(KnownDefect_Duplicates, ARedeclarationSilentlyChangesTheType) {
 }
 
 TEST(KnownDefect_Duplicates, ARedeclaredFunctionSilentlyReplacesTheFirst) {
+    // Known defect: #93 (tracked; see issue for inversion target).
     // Binding `<string>` is what proves the second definition won: the call sees
     // the later signature, so the first `f` became unreachable without a word.
     auto r = compile("fun f() <int> { return 1; }\n"
@@ -4661,6 +4685,7 @@ TEST(Soundness_Casts, ACastToOrFromADynamicTypeIsAllowed) {
 }
 
 TEST(KnownDefect_Casts, AStringToAnIntegerIsAccepted) {
+    // Known defect: #93 (tracked; see issue for inversion target).
     auto r = compile("fun main() <void> { let a <int> = cast<int>(\"s\"); }\n");
     EXPECT_EQ(r.exitCode, 0)
         << "FIXED: `cast` no longer treats `string` as interchangeable with the "
@@ -4670,6 +4695,7 @@ TEST(KnownDefect_Casts, AStringToAnIntegerIsAccepted) {
 }
 
 TEST(KnownDefect_Casts, AnIntegerToAStringIsAccepted) {
+    // Known defect: #93 (tracked; see issue for inversion target).
     // Separate direction, separate fix: a repair that adds a string-to-number
     // parse would leave this one accepted, and formatting is not a cast either.
     auto r = compile("fun main() <void> { let a <string> = cast<string>(1); }\n");
@@ -4701,6 +4727,7 @@ TEST(Soundness_Casts, CastToAutoInfersSourceType) {
 }
 
 TEST(KnownDefect_Casts, TheCorpusOwnPointerCastIsRejected) {
+    // Known defect: #93 (tracked; see issue for inversion target).
     // deeptest2.fin:26 writes `cast<&auto>(base_val)`. Written with `&auto`
     // rather than `&int` on purpose: `cast<&int>(p)` does not parse at all, so
     // `&auto` is the only spelling in which this defect is reachable today.
@@ -4929,6 +4956,7 @@ TEST(Soundness_GenericBounds, ABogusInlineImplementsBoundIsRejected) {
 }
 
 TEST(KnownDefect_GenericBounds, AnArgumentViolatingAFunctionBoundIsAccepted) {
+    // Known defect: #96 (tracked; see issue for inversion target).
     // `int` does not implement `I`, and `f` says it requires it. The bound is
     // resolved and stored now (see the Soundness tests above), so what is missing
     // here is the call site: nothing on the path through visit(FunctionCall&) looks
@@ -4943,6 +4971,7 @@ TEST(KnownDefect_GenericBounds, AnArgumentViolatingAFunctionBoundIsAccepted) {
 }
 
 TEST(KnownDefect_GenericBounds, AStructInstantiationViolatingItsBoundIsAccepted) {
+    // Known defect: #96 (tracked; see issue for inversion target).
     // Still accepted, but no longer for the reason it was written for. The bound is
     // stored now and checkConstraint does run on it; it returns true because the
     // argument `int` is a PrimitiveType and checkConstraint only reports on a
@@ -5944,6 +5973,7 @@ TEST(Soundness_IntegerConstants, AConstantAtTheEdgeOfItsTargetFits) {
 // ---------------------------------------------------------------------------
 
 TEST(KnownDefect_IntegerConstants, AnIntTypedExpressionIsNotUnsigned) {
+    // Known defect: #93 (tracked; see issue for inversion target).
     // Not a defect in the same sense as the above: whether `let u <uint> = i;` for an
     // `int` i is legal is a language decision, and the corpus needs an answer because
     // stdlib/stdio.fin does mixed arithmetic on `int` counters and `ulong` fields at
@@ -8160,6 +8190,7 @@ TEST(Soundness_Foreach, TheElementBindingIsDefinedInEveryForm) {
 }
 
 TEST(KnownDefect_Foreach, ABindingTypeIsNeverCheckedAgainstTheIterable) {
+    // Known defect: #98 (tracked; see issue for inversion target).
     // `foreach (e <string> in a)` over a `[int]` is accepted, and so is an index bound
     // as anything at all. visit(ForeachLoop&) resolves each written type and defines a
     // variable of it; it never asks the iterable what its elements are, so the
@@ -8184,6 +8215,7 @@ TEST(KnownDefect_Foreach, ABindingTypeIsNeverCheckedAgainstTheIterable) {
 }
 
 TEST(KnownDefect_Foreach, TheIterableIsNeverCheckedForBeingIterable) {
+    // Known defect: #98 (tracked; see issue for inversion target).
     // `foreach (e <int> in 5)` compiles clean. The iterable is walked -- so an undefined
     // name in it is still reported -- and then discarded without being asked whether it
     // can be iterated at all. Same blocked ruling as above and the same inversion; kept
@@ -8474,6 +8506,7 @@ TEST(Soundness_FieldVisibility, APrivFieldIsStillTypeChecked) {
 }
 
 TEST(KnownDefect_FieldVisibility, AStructLiteralInitialisesAPrivateFieldFromOutside) {
+    // Known defect: #89 (tracked; see issue for inversion target).
     // StructInstantiation never consults isFieldPublic, so a body can be filled in from
     // anywhere regardless of what its members say. Every test above relies on this to
     // build its subject, which is why it is asserted here rather than left implicit.
@@ -9148,6 +9181,7 @@ TEST(Soundness_ExternAlias, ASymbolResolutionBindsASymbol) {
 }
 
 TEST(KnownDefect_ExternAlias, ANamespaceQualifierOnAnExternPathIsNotChecked) {
+    // Known defect: #90 (tracked; see issue for inversion target).
     // `extern myns::myfunc as myfunc;` (extern_as.fin:19) resolves, and it resolves by
     // ignoring `myns`: a namespace block's contents are spliced into the enclosing
     // statement list and its name is discarded (parser.y, namespace_block), so there is
@@ -9420,6 +9454,7 @@ TEST(Soundness_ErrorRecovery, AnImplementsBlockConstructorParameterIsReportedOnc
 }
 
 TEST(KnownDefect_ImplementsConstructors, ABlocksConstructorIsNotAnOverloadOfTheTargetsOwn) {
+    // Known defect: #95 (tracked; see issue for inversion target).
     // Booked, not fixed: constructor lookup reads constructors[0] and nothing else,
     // which is the same limit the struct body has had all along -- two constructors
     // written on one struct are not resolved between either. The block's is second in
@@ -9561,6 +9596,7 @@ TEST(Soundness_SelfGenerics, ABareSelfIsUnaffected) {
 }
 
 TEST(KnownDefect_SelfGenerics, SelfWithConcreteArgumentsInAStructIsAFabricatedType) {
+    // Known defect: #95 (tracked; see issue for inversion target).
     // Booked: `Self<int>` inside `Box<T>` names the instantiation `Box<int>`, and in a
     // struct it still reaches the fabrication arm -- a struct literally named `Self`
     // with one argument -- because `Self` is a SelfType there and only a StructType can
@@ -10113,6 +10149,7 @@ TEST(Soundness_EnumInference, AReturnDoesNotSeedASubexpression) {
 }
 
 TEST(KnownDefect_EnumInference, APayloadlessEnumeratorIgnoresTheHint) {
+    // Known defect: #95 (tracked; see issue for inversion target).
     // `Nothing` carries no payload, so nothing about the written value says what `T` is
     // and the hint is the only thing that does. It is not read: a payload-less
     // enumerator named on its own yields the enum still holding its own parameter, and
@@ -10221,6 +10258,7 @@ TEST(Soundness_EnumInference, AnAssignmentToANonGenericTargetIsUnaffected) {
 }
 
 TEST(KnownDefect_EnumInference, APayloadlessMemberOfAGenericEnumIsTypedAsTheTemplate) {
+    // Known defect: #95 (tracked; see issue for inversion target).
     // `let q <Opt<int>> = Nothing;` reports `expected 'Opt<int>', got 'Opt<T>'`. A
     // payloadless member read as a value is not a call, so there are no arguments to
     // infer from and nothing walks it against the annotation -- the hint channel is
@@ -11717,6 +11755,7 @@ TEST(Soundness_PositionalMembers, APrototypeHasNoThirdPosition) {
 }
 
 TEST(KnownDefect_PositionalMembers, ADisagreeingPayloadSlotIsNeverNarrowed) {
+    // Known defect: #95 (tracked; see issue for inversion target).
     // The corpus always guards a positional read -- `if (getkeyid(enum_) ==
     // keyidof(Ok)) { return enum_.0; }` (stdlib/typing.fin:29-30) -- and the erasure
     // ignores the guard entirely, which costs a real check in the direction that
