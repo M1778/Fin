@@ -31,7 +31,7 @@ import {
       free_ast, ast_program, ast_fun_decl, ast_struct_decl, ast_var_decl, ast_block, ast_expr_stmt, ast_while_stmt,
       ast_for_stmt, ast_return_stmt, ast_literal_int, ast_literal_string, ast_index_expr, ast_member_access,
       ast_binary_expr, ast_call_expr, ast_param, ast_unary_expr, ast_break_stmt, ast_continue_stmt,
-      ast_enum_decl, ast_interface_decl, ast_lambda_expr, ast_prototype_literal,
+      ast_enum_decl, ast_interface_decl, ast_lambda_expr, ast_prototype_literal, ast_ident,
       ast_macro_decl, ast_macro_invocation, ast_quote_expr, ast_type_alias,
       make_lambda, make_prototype, make_enum_decl, make_interface_decl, make_import_decl
 } from ast::std;
@@ -1754,6 +1754,30 @@ pub struct Parser {
       }
 
       fun parse_unary(self: &Self) <&AstNode> {          let cur <Token> = self.stream.peek();
+        // Prefix `++a` / `--a` (C++ runs them): on a plain identifier
+        // desugar to `a = a + 1`, the same single read plus write whose
+        // assignment answers the new value like C++; any other operand
+        // keeps the unary node the backend lowers (statement-correct).
+        if (cur.kind == tok_increment() || cur.kind == tok_decrement()) {
+            self.stream.advance();
+            let pre_op <string> = cur.text;
+            let target <&AstNode> = self.parse_unary();
+            if (target != null) {
+                target = self.parse_postfix(target);
+            }
+            if (target == null) { return null; }
+            if (target.kind == ast_ident()) {
+                let plus <string> = "+";
+                if (cur.kind == tok_decrement()) { plus = "-"; }
+                let lhs <&AstNode> = make_ident(target.name, cur.line, cur.col);
+                let rhs_l <&AstNode> = make_ident(target.name, target.line, target.col);
+                let one <&AstNode> = make_literal_int(1, cur.line, cur.col);
+                let add <&AstNode> = make_binary(plus, rhs_l, one, cur.line, cur.col);
+                free_ast(target);
+                return make_binary("=", lhs, add, cur.line, cur.col);
+            }
+            return make_unary(pre_op, target, cur.line, cur.col);
+        }
         if (cur.kind == tok_minus() || cur.kind == tok_not() || cur.kind == tok_ampersand() || cur.kind == tok_star() || cur.kind == tok_ellipsis()) {
             self.stream.advance();
             let op <string> = cur.text;
@@ -2304,16 +2328,28 @@ pub struct Parser {
             return self.parse_while();
         }
         if (cur.kind == 28 || (cur.kind == tok_ident() && p_str_eq(cur.text, "do"))) {
+            // A flag on the while node rather than a new node kind (C++
+            // WhileLoop.is_do_while): the body runs at least once, so the
+            // entry edge goes to the body, not the condition. Everything
+            // else -- checking, break/continue contexts, move joins -- is
+            // shared with `while` exactly. `str_val` carries the marker the
+            // way "foreach" markers desugared bindings (a plain while leaves
+            // it empty); nothing else reads str_val on a while node.
             self.stream.advance();
-            let body <&AstNode> = self.parse_statement();
-            if (self.stream.check(kw_while()) || (self.stream.check(tok_ident()) && p_str_eq(self.stream.peek().text, "while"))) {
-                self.stream.advance();
-                self.expect(tok_lparen(), "expected '(' after 'while'");
-                let cond <&AstNode> = self.parse_expression(0);
-                self.expect(tok_rparen(), "expected ')' after while condition");
-                self.expect(tok_semicolon(), "expected ';' after do-while statement");
-            }
-            return body;
+            let do_body <&AstNode> = self.parse_block();
+            self.expect(kw_while(), "expected 'while' after do body");
+            self.expect(tok_lparen(), "expected '(' after while");
+            let do_cond <&AstNode> = self.parse_expression(0);
+            self.expect(tok_rparen(), "expected ')' after while condition");
+            self.expect(tok_semicolon(), "expected ';' after do-while statement");
+            let do_node <&AstNode> = new AstNode{};
+            do_node.kind = ast_while_stmt();
+            do_node.left = do_cond;
+            do_node.right = do_body;
+            do_node.str_val = "do";
+            do_node.line = cur.line;
+            do_node.col = cur.col;
+            return do_node;
         }
         if (cur.kind == kw_fun()) {
             return self.parse_function("");
@@ -2424,22 +2460,6 @@ pub struct Parser {
             for_node.line = cur.line;
             for_node.col = cur.col;
             return for_node;
-        }
-        if (cur.kind == 28 || (cur.kind == tok_ident() && p_str_eq(cur.text, "do"))) {
-            self.stream.advance();
-            let body <&AstNode> = self.parse_block();
-            self.expect(kw_while(), "expected 'while' after do block");
-            self.expect(tok_lparen(), "expected '(' after while");
-            let cond <&AstNode> = self.parse_expression(0);
-            self.expect(tok_rparen(), "expected ')' after while condition");
-            self.expect(tok_semicolon(), "expected ';' after do-while statement");
-            let w_node <&AstNode> = new AstNode{};
-            w_node.kind = ast_while_stmt();
-            w_node.left = cond;
-            w_node.right = body;
-            w_node.line = cur.line;
-            w_node.col = cur.col;
-            return w_node;
         }
         if (cur.kind == kw_fun()) {
             return self.parse_function("");
@@ -4634,7 +4654,21 @@ pub struct Parser {
                     self.top_attr_col = 0;
                     continue;
                 } else if (next_at.kind == 22 || (next_at.kind == tok_ident() && p_str_eq(next_at.text, "macro"))) {
-                    self.stream.advance();
+                    // A `@macro name(params) {...}` declaration: the body
+                    // still skips like before (the expander works off
+                    // source text), but the name is recorded as a marker:
+                    // the checker's export check counts macros as
+                    // exported like C++ (ADR 0023). Every other pass
+                    // ignores the kind.
+                    let mac_tok <Token> = self.stream.advance();
+                    let mac_name <string> = "";
+                    while (!self.stream.check(tok_lbrace()) && !self.stream.check(tok_lparen()) && !self.stream.is_at_end()) {
+                        let m_tok <Token> = self.stream.peek();
+                        if (m_tok.kind == tok_ident() && p_strlen(mac_name) == cast<ulong>(0)) {
+                            mac_name = m_tok.text;
+                        }
+                        self.stream.advance();
+                    }
                     while (!self.stream.check(tok_lbrace()) && !self.stream.is_at_end()) {
                         self.stream.advance();
                     }
@@ -4648,10 +4682,17 @@ pub struct Parser {
                             self.stream.advance();
                         }
                     }
+                    if (p_strlen(mac_name) > cast<ulong>(0)) {
+                        let mac_decl <&AstNode> = new AstNode{};
+                        mac_decl.kind = ast_macro_decl();
+                        mac_decl.name = mac_name;
+                        mac_decl.line = mac_tok.line;
+                        mac_decl.col = mac_tok.col;
+                        decl = mac_decl;
+                    }
                     current_attr_val = "";
                     self.top_attr_line = 0;
                     self.top_attr_col = 0;
-                    continue;
                 } else if (next_at.kind == tok_ident() && !p_str_eq(next_at.text, "define") &&
                   !p_str_eq(next_at.text, "special") && !p_str_eq(next_at.text, "implements") &&
                   !p_str_eq(next_at.text, "macro")) {
@@ -4950,6 +4991,28 @@ pub struct Parser {
                 let imp_tok <Token> = self.stream.advance();
                 let from_spec <string> = "";
                 let alias_name <string> = "";
+                // Named member list (`import { A, B } from m`): captured
+                // for the checker's export check (C++ `does not export`).
+                // The tokens never reach the checker otherwise: the
+                // skip loop below drops them.
+                let imp_members <string> = "";
+                if (self.stream.check(tok_lbrace())) {
+                    self.stream.advance();
+                    let mfirst <bool> = true;
+                    let mbuf <Buffer> = new_buffer(64);
+                    while (!self.stream.check(tok_rbrace()) && !self.stream.check(tok_semicolon()) && !self.stream.is_at_end()) {
+                        let m_tok <Token> = self.stream.peek();
+                        if (m_tok.kind == tok_ident()) {
+                            if (!mfirst) { mbuf.write_char(','); }
+                            mbuf.write_string(m_tok.text);
+                            mfirst = false;
+                        }
+                        self.stream.advance();
+                    }
+                    self.match_token(tok_rbrace());
+                    imp_members = mbuf.to_string();
+                    free_buffer(mbuf);
+                }
                 if (self.stream.check(tok_ident()) && !self.stream.check(kw_from())) {
                     let s_tok <Token> = self.stream.advance();
                     from_spec = s_tok.text;
@@ -5003,6 +5066,9 @@ pub struct Parser {
                     decl = make_import_decl(from_spec, imp_tok.line, imp_tok.col);
                     if (p_strlen(alias_name) > cast<ulong>(0)) {
                         decl.str_val = alias_name;
+                    }
+                    if (p_strlen(imp_members) > cast<ulong>(0)) {
+                        decl.type_annotation = imp_members;
                     }
                 }
                 current_attr_val = "";

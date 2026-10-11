@@ -35,6 +35,15 @@ fun main() <noret> {
         printf("I was ran once too\n");
     } while (false);
 
+    // do while with a true condition runs until it fails: the body executes
+    // first and the condition is checked after each pass (unlike `while`,
+    // which checks first).
+    let count <int> = 0;
+    do {
+        count = count + 1;
+    } while (count < 3);
+    printf("counted to %d\n", count);
+
     // recursion like
     fun recursive(a: int) <int> {
         if (a == 0) {
