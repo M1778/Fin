@@ -610,7 +610,10 @@ void ASTPrinter::printMatch(const MatchExpr* node, std::string prefix, bool isLa
     printNode(node->scrutinee.get(), prefix + "    ", node->arms.empty());
     for (size_t i = 0; i < node->arms.size(); ++i) {
         const auto& arm = node->arms[i];
-        const std::string label = arm.is_wildcard ? "_" : (arm.is_null ? "null" : arm.member);
+        const std::string label = arm.is_wildcard ? "_"
+            : arm.is_null                         ? "null"
+            : arm.is_const                        ? arm.const_text
+                                                  : arm.member;
         fmt::print("{}    Arm {}\n", prefix, label);
         printNode(arm.body.get(), prefix + "        ", true);
     }

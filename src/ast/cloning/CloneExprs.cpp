@@ -215,6 +215,9 @@ void CloneVisitor::visit(MatchExpr& node) {
         out.binders = arm.binders;
         out.is_wildcard = arm.is_wildcard;
         out.is_null = arm.is_null;
+        out.is_const = arm.is_const;
+        out.const_text = arm.const_text;
+        out.const_kind = arm.const_kind;
         out.body = clone(arm.body.get());
         arms.push_back(std::move(out));
     }

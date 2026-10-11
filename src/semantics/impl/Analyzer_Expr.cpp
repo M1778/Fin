@@ -3592,8 +3592,9 @@ void SemanticAnalyzer::checkNullableMatch(MatchExpr& node, const TypePtr& inner)
                 armOk = false;
             }
             hasNull = true;
-        } else if (!arm.qualifier.empty() || !arm.binders.empty()) {
-            error(*arm.body, "match arm '" + arm.member + "' is not a nullable pattern "
+        } else if (!arm.qualifier.empty() || !arm.binders.empty() || arm.is_const) {
+            const std::string spelled = arm.is_const ? arm.const_text : arm.member;
+            error(*arm.body, "match arm '" + spelled + "' is not a nullable pattern "
                              "(expected 'null', a binder, or '_')");
             armOk = false;
         } else if (hasBinder) {
@@ -3634,6 +3635,97 @@ void SemanticAnalyzer::checkNullableMatch(MatchExpr& node, const TypePtr& inner)
     lastExprType = result;
 }
 
+void SemanticAnalyzer::checkConstantMatch(MatchExpr& node, const TypePtr& scrutType) {
+    // ADR 0050 step 5: the literal kind this scrutinee answers. An arm of any
+    // other kind is refused rather than converted: `1` on a string is not a
+    // falsy arm, it is a category error, the same way `==` refuses it.
+    ASTTokenKind want = ASTTokenKind::INTEGER;
+    const char* wantName = "integer";
+    if (auto* prim = dynamic_cast<const PrimitiveType*>(scrutType.get())) {
+        if (prim->name == "string") {
+            want = ASTTokenKind::STRING_LITERAL;
+            wantName = "string";
+        } else if (prim->name == "bool") {
+            want = ASTTokenKind::BOOL;
+            wantName = "boolean";
+        }
+    }
+    auto dupKey = [](const MatchArm& arm) {
+        // Integers normalize through stoll so `01` and `1` collide; a literal
+        // outside int64 keeps its raw text and still collides with itself.
+        // Strings compare textually: two spellings of one content
+        // (`"a"` vs `"\x61"`) are two arms and the first wins, the same way
+        // two overlapping guards would -- noted, not solved, in v1.
+        if (arm.const_kind == ASTTokenKind::INTEGER) {
+            try {
+                return std::to_string(std::stoll(arm.const_text));
+            } catch (const std::exception&) {
+                return arm.const_text;
+            }
+        }
+        return arm.const_text;
+    };
+    std::set<std::string> covered;
+    bool hasWildcard = false;
+    TypePtr result = nullptr;
+    auto snap = moved_.snapshot();
+    std::vector<events::MovedAnalysis::Snapshot> ends;
+    for (auto& arm : node.arms) {
+        enterScope();
+        bool armOk = true;
+        if (arm.is_wildcard) {
+            if (hasWildcard) {
+                error(*arm.body, "unreachable match arm (an earlier '_' covers everything)");
+                armOk = false;
+            }
+            hasWildcard = true;
+        } else if (hasWildcard) {
+            error(*arm.body, "unreachable match arm after '_'");
+            armOk = false;
+        } else if (arm.is_null) {
+            error(*arm.body, "match arm 'null' does not match scrutinee of type '" +
+                             scrutType->toString() + "' (nullable patterns need a nullable scrutinee)");
+            armOk = false;
+        } else if (!arm.is_const) {
+            error(*arm.body, "match arm '" + arm.member + "' is not a constant pattern "
+                             "(expected an integer, string, or boolean literal, or '_')");
+            armOk = false;
+        } else if (arm.const_kind != want) {
+            error(*arm.body, "match arm '" + arm.const_text + "' does not match scrutinee of type '" +
+                             scrutType->toString() + "' (expected a " + wantName + " literal)");
+            armOk = false;
+        } else if (!covered.insert(dupKey(arm)).second) {
+            // ADR 0050: one arm is dead, and dead arms are silent drops.
+            error(*arm.body, "duplicate match arm for constant '" + arm.const_text + "'");
+            armOk = false;
+        }
+        if (arm.body) arm.body->accept(*this);
+        auto bodyType = lastExprType;
+        if (!injectedWalk_) {
+            ends.push_back(moved_.snapshot());
+            moved_.restore(snap);
+        }
+        exitScope();
+        if (armOk && bodyType && !isErrorType(bodyType)) {
+            if (!result) result = bodyType;
+            else checkType(*arm.body, bodyType, result);
+        }
+    }
+    if (!injectedWalk_ && !ends.empty()) {
+        moved_.restore(ends[0]);
+        for (size_t i = 1; i < ends.size(); ++i) moved_.installJoin(ends[i], moved_.snapshot());
+    }
+    if (!hasWildcard) {
+        // Literals never prove exhaustiveness in v1 -- not even `true`/`false`
+        // on a bool, which would cover it. One rule for every scalar domain
+        // (int and string are infinite, so no constant set closes them) beats
+        // a bool special case nobody asked for; `_` closes the match instead.
+        error(node, "non-exhaustive match: constant patterns need a '_' arm "
+                    "(literals never cover every '" + scrutType->toString() + "' value)");
+    }
+    lastExprType = result;
+}
+
 void SemanticAnalyzer::visit(MatchExpr& node) {
     node.scrutinee->accept(*this);
     TypePtr scrutType = lastExprType;
@@ -3645,13 +3737,23 @@ void SemanticAnalyzer::visit(MatchExpr& node) {
         checkNullableMatch(node, nullable->inner);
         return;
     }
+    if (isAnyIntegerType(scrutType)) {
+        checkConstantMatch(node, scrutType);
+        return;
+    }
+    if (auto* prim = dynamic_cast<const PrimitiveType*>(scrutType.get())) {
+        if (prim->name == "string" || prim->name == "bool") {
+            checkConstantMatch(node, scrutType);
+            return;
+        }
+    }
     auto asEnum = std::dynamic_pointer_cast<StructType>(scrutType);
     if (!asEnum || !asEnum->is_enum) {
-        // Stage 2 lowers enum and nullable scrutinees. Constant patterns are
-        // ADR 0050 step 5, so any other scrutinee is a named refusal rather
-        // than a guess.
+        // Constant patterns are ADR 0050 step 5, answered above for integer,
+        // string, and bool scrutinees. Anything else is a named refusal
+        // rather than a guess.
         error(node, "match on a '" + scrutType->toString() + "' scrutinee is not "
-                    "implemented yet (only enums and nullables match)");
+                    "implemented yet (only enums, nullables, and integers/strings/bools match)");
         lastExprType = nullptr;
         return;
     }
@@ -3675,6 +3777,10 @@ void SemanticAnalyzer::visit(MatchExpr& node) {
         } else if (arm.is_null) {
             error(*arm.body, "match arm 'null' does not match scrutinee of type '" +
                              asEnum->toString() + "' (nullable patterns need a nullable scrutinee)");
+            armOk = false;
+        } else if (arm.is_const) {
+            error(*arm.body, "match arm '" + arm.const_text + "' does not match scrutinee of type '" +
+                             asEnum->toString() + "' (constant patterns need an integer, string, or boolean scrutinee)");
             armOk = false;
         } else if (covered.count(arm.member)) {
             error(*arm.body, "duplicate match arm for member '" + arm.member + "'");

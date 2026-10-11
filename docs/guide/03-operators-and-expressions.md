@@ -23,8 +23,24 @@ fun main() <noret> {
 
 Assignment forms include `=`, `+=`, `-=`, `*=`, and `/=`. Prefix and postfix
 `++`/`--` work on integers. `<<` and `>>` shift integers. Binary bitwise
-`&`, `|`, and `^` are absent from the expression grammar; unary `&` still takes
-an address, and `|` separates types in a constraint set.
+`&`, `|`, and `^` work on integer operands: `|` binds loosest, `&` tightest,
+below shifts and above `==`. Unary `&` still takes an address, and `|` still
+separates types in a constraint set. The compound-assign forms (`&=`, `|=`,
+`^=`, `%=`, `<<=`, `>>=`) are not in the grammar; write `a = a & b` instead.
+
+```fin
+fun main() <noret> {
+    blame (6 & 3) == 2;
+    blame (6 | 3) == 7;
+    blame (6 ^ 3) == 5;
+    blame (1 << 2 | 1) == 5;
+    printf("%d %d %d\n", 6 & 3, 6 | 3, 6 ^ 3);
+}
+```
+
+```output
+2 7 5
+```
 
 ## Conditional expressions
 

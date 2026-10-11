@@ -12698,6 +12698,136 @@ private:
         value_ = CgVal{phi, common};
     }
 
+    void lowerConstantMatch(MatchExpr& node, const CgVal& scr) {
+        // ADR 0050 step 5: one ordered compare per arm over the scrutinee
+        // value -- the IR-level nested-ifs the ADR sketches for v1, no jump
+        // table. Integers and bools compare by value, strings by content
+        // (ADR 0049, the same helper `==` uses). The analyzer proves every
+        // arm's kind matches the scrutinee and a `_` closes the chain; this
+        // re-checks the kind rather than assuming it.
+        llvm::Value* held = scr.value;
+        if (!held) {
+            if (!scr.address) { unsupported(node, "this match scrutinee"); return; }
+            held = builder_.CreateLoad(scr.type.llvmType, scr.address, "match.scr");
+        }
+        auto stringTy = types_.byName("string");
+        const bool isStr = stringTy && sameType(scr.type, *stringTy);
+        // A fieldless enum rides the Int kind but is dispatched on its own
+        // path above; reaching here with one would compare tags as integers.
+        const bool isInt = scr.type.kind == CgType::Kind::Int && !scr.type.enumInfo;
+        if (!isStr && !isInt) {
+            unsupported(node, "match on a non-enum non-nullable non-scalar scrutinee "
+                              "(constant matches cover integers, strings, and bools)");
+            return;
+        }
+        auto* endBB = llvm::BasicBlock::Create(ctx_, "match.end", currentFn_->fn);
+        std::vector<std::pair<llvm::BasicBlock*, CgVal>> results;
+        bool closed = false;
+        for (size_t ai = 0; ai < node.arms.size(); ++ai) {
+            auto& arm = node.arms[ai];
+            if (closed) {
+                unsupported(*arm.body, "an unreachable match arm after '_'");
+                return;
+            }
+            auto* armBB = llvm::BasicBlock::Create(ctx_, "match.arm", currentFn_->fn);
+            llvm::BasicBlock* nextBB = nullptr;
+            if (arm.is_wildcard) {
+                builder_.CreateBr(armBB);
+                closed = true;
+            } else {
+                if (!arm.is_const || !arm.body) {
+                    unsupported(*arm.body, "a constant match arm with a non-constant pattern");
+                    return;
+                }
+                if (isStr && arm.const_kind != ASTTokenKind::STRING_LITERAL) {
+                    unsupported(*arm.body, "a non-string pattern in a string match");
+                    return;
+                }
+                if (!isStr && scr.type.isBool && arm.const_kind != ASTTokenKind::BOOL) {
+                    unsupported(*arm.body, "a non-boolean pattern in a bool match");
+                    return;
+                }
+                if (!isStr && !scr.type.isBool && arm.const_kind != ASTTokenKind::INTEGER) {
+                    unsupported(*arm.body, "a non-integer pattern in an integer match");
+                    return;
+                }
+                // The pattern as the literal the program wrote, so its
+                // lowering (interning, width selection) is exactly a literal's.
+                Literal pat(arm.const_text, arm.const_kind);
+                pat.setLoc(arm.body->loc);
+                CgVal pv = emit(pat);
+                if (failed_) return;
+                if (!pv.ok()) { unsupported(*arm.body, "this constant pattern"); return; }
+                nextBB = llvm::BasicBlock::Create(ctx_, "match.next", currentFn_->fn);
+                llvm::Value* take = nullptr;
+                if (isStr) {
+                    take = emitStringContentEquality(node, held, pv.value);
+                    if (!take) return;
+                } else {
+                    llvm::Value* want = convert(node, pv, scr.type);
+                    if (!want) return;
+                    take = builder_.CreateICmpEQ(held, want, "match.const");
+                }
+                builder_.CreateCondBr(take, armBB, nextBB);
+            }
+            builder_.SetInsertPoint(armBB);
+            pushScope();
+            CgVal r = emit(*arm.body);
+            if (failed_) { popScope(); return; }
+            auto* exitBB = builder_.GetInsertBlock();
+            if (!terminated()) {
+                cleanScopeAt(node, scopes_.size() - 1);
+                if (failed_) { popScope(); return; }
+                builder_.CreateBr(endBB);
+                results.emplace_back(exitBB, r);
+            }
+            popScope();
+            if (nextBB) builder_.SetInsertPoint(nextBB);
+        }
+        if (!closed) {
+            // The analyzer proves exhaustiveness, so this never runs. Emitted
+            // rather than omitted: a chain that silently falls off the end is
+            // the miscompile the backend invariant forbids.
+            builder_.CreateUnreachable();
+        }
+        if (results.empty()) { unsupported(node, "a match with no arms"); return; }
+        joinMatchResults(node, results, endBB);
+    }
+
+    // The shared tail of every match lowering: all arms valued (a PHI over
+    // the common type) or all valueless (a statement match), never mixed.
+    void joinMatchResults(MatchExpr& node,
+                          std::vector<std::pair<llvm::BasicBlock*, CgVal>>& results,
+                          llvm::BasicBlock* endBB) {
+        bool anyValued = false;
+        bool anyValueless = false;
+        for (auto& res : results) {
+            if (res.second.ok()) anyValued = true;
+            else anyValueless = true;
+        }
+        if (anyValued && anyValueless) {
+            unsupported(node, "match arms with and without values");
+            return;
+        }
+        builder_.SetInsertPoint(endBB);
+        if (!anyValued) {
+            value_ = CgVal{};
+            return;
+        }
+        CgType common = results[0].second.type;
+        for (size_t i = 1; i < results.size(); ++i) common = commonType(common, results[i].second.type);
+        builder_.SetInsertPoint(endBB);
+        auto* phi = builder_.CreatePHI(common.llvmType, (unsigned)results.size());
+        for (auto& res : results) {
+            builder_.SetInsertPoint(res.first->getTerminator());
+            llvm::Value* v = convert(node, res.second, common);
+            if (!v) return;
+            phi->addIncoming(v, res.first);
+        }
+        builder_.SetInsertPoint(endBB);
+        value_ = CgVal{phi, common};
+    }
+
     void visit(MatchExpr& node) override {
         if (!currentFn_) { unsupported(node, "a match outside a function"); return; }
         CgVal scr = emit(*node.scrutinee);
@@ -12710,8 +12840,16 @@ private:
         }
         const EnumInfo* eInfo = scr.type.enumInfo;
         if (!eInfo || (!scr.type.isPayloadedEnum() && !scr.type.isFieldlessEnum())) {
-            // Constant scrutinees are ADR 0050 step 5. The analyzer refuses
-            // them first; this is the backend's own refusal.
+            // Not an enum: maybe a constant scrutinee (ADR 0050 step 5). The
+            // analyzer refuses scalar mismatches first; this is the backend's
+            // own dispatch.
+            auto stringTy = types_.byName("string");
+            const bool isStr = stringTy && sameType(scr.type, *stringTy);
+            const bool isInt = scr.type.kind == CgType::Kind::Int && !scr.type.enumInfo;
+            if (isStr || isInt) {
+                lowerConstantMatch(node, scr);
+                return;
+            }
             unsupported(node, "match on a non-enum non-nullable scrutinee (constant matches are a follow-up)");
             return;
         }

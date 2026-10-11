@@ -2630,7 +2630,7 @@ expression:
 
     | lambda_expression { $$ = std::move($1); }
 
-    /* `match (expr) { arms }` (ADR 0050, stage 1: enum members and `_` only).
+    /* `match (expr) { arms }` (ADR 0050).
        A keyword head, so no struct-instantiation ambiguity: the brace that opens
        the arms follows RPAREN, a position where `expression` never has a bare
        `{` (that spelling is `IDENTIFIER LBRACE`, two rules down). */
@@ -2736,11 +2736,10 @@ expression:
     }
     ;
 
-/* `match (scrutinee) { pattern => body, ... }` (ADR 0050, stages 1-2).
+/* `match (scrutinee) { pattern => body, ... }` (ADR 0050).
    The scrutinee parens are mandatory, mirroring `if (expr)`. One arm is a
    pattern plus an expression body; arms are comma-separated with an optional
-   trailing comma. Constant patterns are the remaining follow-up and do not
-   parse yet -- the pattern alternatives below are the whole of stages 1-2. */
+   trailing comma. */
 match_expression:
     KW_MATCH LPAREN expression RPAREN LBRACE match_arms RBRACE {
         $$ = std::make_unique<fin::MatchExpr>(std::move($3), std::move($6));
@@ -2798,6 +2797,45 @@ match_pattern:
         arm.qualifier = $1;
         arm.member = $3;
         arm.binders = std::move($5);
+        $$ = std::move(arm);
+    }
+    /* Constant patterns (ADR 0050 step 5): integer, string, and boolean
+       literals, compared with the existing `==` of that type. A negative
+       integer folds the sign into the stored text, so the checker and the
+       backend each see one literal rather than an expression to fold. */
+    | INTEGER {
+        fin::MatchArm arm;
+        arm.is_const = true;
+        arm.const_text = $1;
+        arm.const_kind = fin::ASTTokenKind::INTEGER;
+        $$ = std::move(arm);
+    }
+    | MINUS INTEGER {
+        fin::MatchArm arm;
+        arm.is_const = true;
+        arm.const_text = "-" + $2;
+        arm.const_kind = fin::ASTTokenKind::INTEGER;
+        $$ = std::move(arm);
+    }
+    | STRING_LITERAL {
+        fin::MatchArm arm;
+        arm.is_const = true;
+        arm.const_text = $1;
+        arm.const_kind = fin::ASTTokenKind::STRING_LITERAL;
+        $$ = std::move(arm);
+    }
+    | KW_TRUE {
+        fin::MatchArm arm;
+        arm.is_const = true;
+        arm.const_text = "true";
+        arm.const_kind = fin::ASTTokenKind::BOOL;
+        $$ = std::move(arm);
+    }
+    | KW_FALSE {
+        fin::MatchArm arm;
+        arm.is_const = true;
+        arm.const_text = "false";
+        arm.const_kind = fin::ASTTokenKind::BOOL;
         $$ = std::move(arm);
     }
     ;

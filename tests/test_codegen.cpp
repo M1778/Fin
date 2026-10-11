@@ -3067,6 +3067,77 @@ BACKEND_TEST(Soundness_Codegen, MatchOnNullableLowersPresentAndAbsent) {
     EXPECT_EQ(b.out, "10 -1 1 7\n") << b.why();
 }
 
+BACKEND_TEST(Soundness_Codegen, MatchOnIntConstantsRuns) {
+    // ADR 0050 step 5: integer literal arms compare with `==` and run each
+    // taken arm; `_` closes the match.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <int> = 1;\n"
+        "    let x <int> = match (a) { 1 => 10, 2 => 20, _ => 0 };\n"
+        "    let y <int> = match (a) { 2 => 20, 1 => 10, _ => 0 };\n"
+        "    let z <int> = match (a) { 2 => 20, _ => 0 };\n"
+        "    printf(\"%d %d %d\\n\", x, y, z);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "10 10 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, MatchOnStringConstantsRuns) {
+    // ADR 0050 step 5: string arms get content equality (ADR 0049), not
+    // pointer identity.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let s <string> = \"hi\";\n"
+        "    let x <int> = match (s) { \"hi\" => 1, \"bye\" => 2, _ => 0 };\n"
+        "    let y <int> = match (s) { \"bye\" => 2, _ => 0 };\n"
+        "    printf(\"%d %d\\n\", x, y);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, MatchOnBoolConstantsRuns) {
+    // ADR 0050 step 5: boolean literal arms.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let b <bool> = true;\n"
+        "    let x <int> = match (b) { true => 1, _ => 0 };\n"
+        "    let y <int> = match (b) { false => 1, _ => 0 };\n"
+        "    printf(\"%d %d\\n\", x, y);\n"
+        "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1 0\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMatchWithDuplicateConstantsIsRefused) {
+    // ADR 0050: a duplicate literal arm is dead, and dead arms are silent
+    // drops -- refused at check time, naming the value.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <int> = 1;\n"
+        "    let x <int> = match (a) { 1 => 10, 1 => 20, _ => 0 };\n"
+        "    printf(\"%d\\n\", x);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("duplicate match arm"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, AMatchOnConstantsWithoutWildcardIsRefused) {
+    // ADR 0050: constants are never exhaustive without `_` -- an int match
+    // names no finite tag set, so a missing wildcard is a static refusal.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let a <int> = 1;\n"
+        "    let x <int> = match (a) { 1 => 10, 2 => 20 };\n"
+        "    printf(\"%d\\n\", x);\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("non-exhaustive match"), std::string::npos) << b.why();
+}
+
 BACKEND_TEST(Soundness_Codegen, AnEnumPayloadMemberCanBeMutatedByPosition) {
     const Built b = build(
         "@define printf(fmt: string, ...) <noret>;\n"

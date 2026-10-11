@@ -118,7 +118,7 @@ Keep that order when translating code from another language.
 | `any` / `object` values | Opaque storage is not working boxing or dynamic dispatch. Prefer concrete types. |
 | General nullable values | Parse/type-check support is broader than runtime support. Check the exact form before using it. |
 | Dynamic array indexing | Runtime bounds checks are not automatic. Check the index or use a library method that asserts bounds. |
-| Bitwise `&`, `\|`, `^` | Binary expression forms are absent; `&` still takes an address and `\|` forms a constraint set. |
+| Bitwise `&`, `\|`, `^` | Binary expression forms lower on int operands; `&` still takes an address and `\|` forms a constraint set. |
 | `format!` | Works for literal format strings with `{}` and scalar arguments; no aggregate formatting or format specifiers. Returned storage needs ownership. |
 | `File`, `Result`, smart pointers | Declarations exist in the library. That does not prove all methods can build through an import. Consult the library chapter. |
 | Compiler components / events / GC | The API design includes unimplemented execution behavior. Do not assume a collector or compile-time event handler runs. |

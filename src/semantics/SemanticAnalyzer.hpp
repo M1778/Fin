@@ -191,6 +191,9 @@ public:
     // enum path above stays exactly as stage 1 left it; `inner` is the
     // unwrapped payload the presence binder binds.
     void checkNullableMatch(MatchExpr& node, const std::shared_ptr<Type>& inner);
+    // ADR 0050 step 5: the constant-pattern half. Split out for the same
+    // reason; `scrutType` is the integer, string, or bool being compared.
+    void checkConstantMatch(MatchExpr& node, const std::shared_ptr<Type>& scrutType);
     void visit(FunctionTypeNode& node) override;
     void visit(LambdaExpression& node) override;
     void visit(QuoteExpression& node) override;

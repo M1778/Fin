@@ -48,9 +48,9 @@ public:
     void accept(Visitor& v) override;
 };
 
-// One arm of a `match`: the pattern plus the body (ADR 0050, stages 1-2:
-// enum members, the `_` wildcard, and nullable `null`/binder arms; constant
-// patterns are the remaining follow-up and do not parse yet).
+// One arm of a `match`: the pattern plus the body (ADR 0050: enum members,
+// the `_` wildcard, nullable `null`/binder arms, and constant int/string/bool
+// literal arms).
 struct MatchArm {
     // Empty for the `_` wildcard; otherwise the enum member name.
     std::string member;
@@ -61,6 +61,12 @@ struct MatchArm {
     bool is_wildcard = false;
     // `null` in a nullable match: absence. `member`/`binders` stay empty.
     bool is_null = false;
+    // A constant pattern (`1`, `"hi"`, `true`): the literal as written
+    // (`const_text`, with quotes for strings and a leading `-` for negative
+    // ints) and its literal kind. `member`/`binders` stay empty.
+    bool is_const = false;
+    std::string const_text;
+    ASTTokenKind const_kind = ASTTokenKind::INTEGER;
     std::unique_ptr<Expression> body;
 };
 
