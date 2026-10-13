@@ -11,6 +11,7 @@
 #include "../../ast/stmts/ControlFlow.hpp"
 #include "../../ast/stmts/VariableDecl.hpp"
 #include "../../types/TypeImpl.hpp"
+#include <optional>
 #include <unordered_set>
 #include <vector>
 namespace fin {
@@ -108,6 +109,48 @@ bool mentionsImplements(const Expression* e) {
     return false;
 }
 
+// A `getkeyid(v) == keyidof(M)` guard, in either operand order: the variable
+// whose payloads narrow, and the member they narrow to. `==` only -- `!=`
+// narrows the else arm, which is a second ruling and not this one. Bare
+// identifiers only: a member read through anything else is not a name this
+// can key on, and a qualified `R::M` is not admittable as a `$enum_member`
+// argument (Soundness_EnumMemberValue), so there is nothing to narrow to.
+std::optional<std::pair<std::string, std::string>> matchKeyidGuard(const Expression* cond) {
+    const auto* cmp = dynamic_cast<const BinaryOp*>(cond);
+    if (!cmp || cmp->op != ASTTokenKind::EQEQ) return std::nullopt;
+    const Expression* sides[2][2] = {{cmp->left.get(), cmp->right.get()},
+                                     {cmp->right.get(), cmp->left.get()}};
+    for (const auto& side : sides) {
+        const auto* get = dynamic_cast<const FunctionCall*>(side[0]);
+        const auto* key = dynamic_cast<const FunctionCall*>(side[1]);
+        if (!get || get->name != "getkeyid" || get->args.size() != 1) continue;
+        if (!key || key->name != "keyidof" || key->args.size() != 1) continue;
+        const auto* var = dynamic_cast<const Identifier*>(get->args[0].get());
+        const auto* member = dynamic_cast<const Identifier*>(key->args[0].get());
+        if (!var || !member) continue;
+        return std::make_pair(var->name, member->name);
+    }
+    return std::nullopt;
+}
+
+// Holds one narrowing for exactly one taken-arm walk. Balanced by
+// construction: every then-block walk below goes through one of these.
+class ScopedKeyidNarrowing {
+public:
+    ScopedKeyidNarrowing(SemanticAnalyzer& analyzer,
+                         const std::optional<std::pair<std::string, std::string>>& guard)
+        : analyzer_(analyzer), active_(guard.has_value()) {
+        if (active_) analyzer_.pushKeyidNarrowing(guard->first, guard->second);
+    }
+    ~ScopedKeyidNarrowing() {
+        if (active_) analyzer_.popKeyidNarrowing();
+    }
+
+private:
+    SemanticAnalyzer& analyzer_;
+    bool active_;
+};
+
 // Whether a raised struct counts as error-like: the `Error` it names, inherits,
 // or implements (ADR 0053). `parents` holds base structs and implemented
 // interfaces alike, so one transitive walk covers both halves of the ruling;
@@ -131,6 +174,20 @@ bool isErrorRelated(const StructType* raised, const StructType* error) {
     return false;
 }
 }  // namespace
+
+void SemanticAnalyzer::pushKeyidNarrowing(std::string var, std::string member) {
+    keyidNarrowings_.emplace_back(std::move(var), std::move(member));
+}
+
+void SemanticAnalyzer::popKeyidNarrowing() {
+    if (!keyidNarrowings_.empty()) keyidNarrowings_.pop_back();
+}
+
+const std::string* SemanticAnalyzer::narrowedMemberFor(const std::string& var) const {
+    for (auto it = keyidNarrowings_.rbegin(); it != keyidNarrowings_.rend(); ++it)
+        if (it->first == var) return &it->second;
+    return nullptr;
+}
 
 void SemanticAnalyzer::warnOnAssignmentInCondition(Expression& cond) {
     const auto* bin = dynamic_cast<const BinaryOp*>(&cond);
@@ -232,6 +289,11 @@ void SemanticAnalyzer::visit(ExpressionStatement& node) {
 void SemanticAnalyzer::visit(IfStatement& node) {
     node.condition->accept(*this);
     if (node.condition) warnOnAssignmentInCondition(*node.condition);
+    // A `getkeyid(v) == keyidof(M)` guard narrows `v`'s payload slots to M's
+    // in the taken arm. Matched after the condition's own walk, which is what
+    // type-checks the two calls; the use site re-validates the member against
+    // the value's enum, so this stays syntactic.
+    const auto keyidGuard = matchKeyidGuard(node.condition.get());
     // B4 (ADR 0042): a `@defined`-mentioned guard that folds decides the
     // arm through ComptimeInterp (never around it). The untaken arm is
     // eliminated — its `@define`s never elaborate — and a taken `@define`
@@ -273,11 +335,15 @@ void SemanticAnalyzer::visit(IfStatement& node) {
                     node.else_stmt = std::move(pruned);
                 }
                 if (injectedWalk_) {
+                    ScopedKeyidNarrowing narrow(*this, keyidGuard);
                     node.then_block->accept(*this);
                     return;
                 }
                 auto snap = moved_.snapshot();
-                node.then_block->accept(*this);
+                {
+                    ScopedKeyidNarrowing narrow(*this, keyidGuard);
+                    node.then_block->accept(*this);
+                }
                 auto thenEnd = moved_.snapshot();
                 moved_.installJoin(thenEnd, snap);
                 return;
@@ -308,12 +374,16 @@ void SemanticAnalyzer::visit(IfStatement& node) {
     // after. A move on one side only is MovedMaybe past the join; agreement
     // holds. The walk order is unchanged: only the state forks.
     if (injectedWalk_) {
+        ScopedKeyidNarrowing narrow(*this, keyidGuard);
         node.then_block->accept(*this);
         if (node.else_stmt) node.else_stmt->accept(*this);
         return;
     }
     auto snap = moved_.snapshot();
-    node.then_block->accept(*this);
+    {
+        ScopedKeyidNarrowing narrow(*this, keyidGuard);
+        node.then_block->accept(*this);
+    }
     auto thenEnd = moved_.snapshot();
     if (node.else_stmt) {
         moved_.restore(snap);

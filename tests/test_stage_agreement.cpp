@@ -875,6 +875,36 @@ TEST(StageAgreementZeroInit, UninitShapesReadZeroOnBothCompilers) {
 }
 
 // ---------------------------------------------------------------------------
+// ADR 0054 overflow pins (issue #45): signed `int` overflow wraps
+// two's-complement under BOTH compilers. `checkZeroInitShape` above is a
+// generic build-both-run-both-compare helper despite its name (it pins the
+// C++ stdout to `expected` AND requires byte-identical stage fate/stdout),
+// so the wrap contract rides on it with no new harness.
+// ---------------------------------------------------------------------------
+
+TEST(StageAgreementOverflow, SignedOverflowWrapsOnBothCompilers) {
+    const std::string stageBin = stageBinary();
+    if (stageBin.empty() || !fs::exists(stageBin)) {
+        GTEST_SKIP() << "stage compiler not found at FINC_STAGE2_BINARY=" << stageBin
+                     << "; overflow pins need build/finc_stage2 next to build/finc";
+    }
+    const std::string head = "@define printf(fmt: string, ...) <noret>;\n"
+                             "fun add(a: int, b: int) <int> { return a + b; }\n"
+                             "fun neg(x: int) <int> { return 0 - x; }\n"
+                             "fun main() <noret> {\n";
+    const std::string tail = "}\n";
+    checkZeroInitShape("const-wrap", stageBin,
+                       head + "    let x <int> = 2147483647 + 1;\n    printf(\"%d\\n\", x);\n" + tail,
+                       "-2147483648\n");
+    checkZeroInitShape("runtime-wrap", stageBin,
+                       head + "    let top <int> = 2147483647;\n"
+                              "    let one <int> = 1;\n"
+                              "    let bot <int> = -2147483647 - 1;\n"
+                              "    printf(\"%d %d\\n\", add(top, one), neg(bot));\n" + tail,
+                       "-2147483648 -2147483648\n");
+}
+
+// ---------------------------------------------------------------------------
 // The per-sample diagnostic agreement (issue #76): compile-only, both
 // compilers from the repo root, exit code plus pinned diagnostic or refusal
 // text. StageDiagAgreement covers stage2; Stage3DiagAgreement mirrors it over

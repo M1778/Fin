@@ -17,6 +17,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <fmt/core.h>
 #include <fmt/color.h>
 
@@ -55,6 +56,12 @@ public:
     void setExternalGlobalScope(const std::shared_ptr<Scope>& scope);
     // fin-guard, threaded from CompilerOptions by the driver (default on).
     void setFinGuard(bool enabled) { finGuardEnabled = enabled; }
+    // One `getkeyid(v) == keyidof(M)` narrowing, pushed by visit(IfStatement&)
+    // around the taken arm's walk and read by visit(MemberAccess&). Public for
+    // the RAII holder in Analyzer_Stmt.cpp; balanced by construction.
+    void pushKeyidNarrowing(std::string var, std::string member);
+    void popKeyidNarrowing();
+    const std::string* narrowedMemberFor(const std::string& var) const;
     
     std::shared_ptr<Scope> getGlobalScope() { return globalScope; }
 
@@ -807,6 +814,27 @@ private:
     // two parameters rather than against the read operator's return. Compared by
     // address so a subscript nested inside the base or index still reads.
     const ArrayAccess* subscriptAssignTarget_ = nullptr;
+
+    // Active `getkeyid(v) == keyidof(M)` narrowings, innermost last. Pushed by
+    // visit(IfStatement&) around the taken arm's walk when the condition has
+    // that shape, and read by visit(MemberAccess&) where a positional read
+    // would otherwise erase to `any`: when the object names a narrowed
+    // variable and the member belongs to its enum, the slot takes that
+    // member's payload type at the position.
+    // Active `getkeyid(v) == keyidof(M)` narrowings, innermost last. Pushed by
+    // visit(IfStatement&) around the taken arm's walk when the condition has
+    // that shape, and read by visit(MemberAccess&) where a positional read
+    // would otherwise erase to `any`: when the object names a narrowed
+    // variable and the member belongs to its enum, the member's payload type
+    // at the position is recorded in narrowedSlots_ for checkType. The slot's
+    // own type stays erased, which is what keeps `blame enum_.0` a raise.
+    std::vector<std::pair<std::string, std::string>> keyidNarrowings_;
+    // A guarded positional read's recorded payload type, by read site. The
+    // check names the use, not the erasure: a slot the guard proves is an
+    // `int` answers for an `int`, and answers as its own type where it is not
+    // one. Keyed by address; each read records at most once per walk.
+    std::unordered_map<const MemberAccess*, std::shared_ptr<Type>> narrowedSlots_;
+
 
     // The hint if it belongs to this node, else null.
     std::shared_ptr<Type> hintFor(const ASTNode& node) const {

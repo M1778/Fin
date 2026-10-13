@@ -1,6 +1,7 @@
 #include "../SemanticAnalyzer.hpp"
 #include "../EventPayloads.hpp"
 #include "../../ast/StructuralWalk.hpp"
+#include "../../ast/exprs/StructureExpr.hpp"
 #include "../../ast/types/Attribute.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../../utils/IntegerConstant.hpp"
@@ -892,6 +893,20 @@ bool SemanticAnalyzer::checkType(ASTNode& node, std::shared_ptr<Type> actual, st
 
     if (!assignable) {
         if (constantFitsType(node, *expected)) return true;
+        // A payload slot read under a `getkeyid(v) == keyidof(M)` guard: the
+        // slot's static type is the erasure (`any`), and the guard records
+        // what the member holds at the position (visit(MemberAccess&)). Where
+        // the use wants that type the check passes, and where it wants another
+        // the diagnostic names the member's type rather than the erasure.
+        if (auto* mem = dynamic_cast<const MemberAccess*>(&node)) {
+            auto it = narrowedSlots_.find(mem);
+            if (it != narrowedSlots_.end() && it->second) {
+                if (it->second->isAssignableTo(*expected)) return true;
+                error(node, fmt::format("Type mismatch: expected '{}', got '{}'",
+                                        expected->toString(), it->second->toString()));
+                return false;
+            }
+        }
         error(node, fmt::format("Type mismatch: expected '{}', got '{}'", expected->toString(), actual->toString()));
         return false;
     }

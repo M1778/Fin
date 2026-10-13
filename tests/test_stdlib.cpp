@@ -486,22 +486,36 @@ TEST(Soundness_Modules, AnAmbientMemberCalledThroughAQualifierIsStillCheckedForA
         << err;
 }
 
-TEST(KnownDefect_Modules, AnImportedExternThatIsNotAmbientIsNotLoweredThroughADot) {
-    // Known defect: #100 (tracked; see issue for inversion target).
+TEST(Soundness_Modules, ANonAmbientImportedExternIsRefusedThroughADot) {
+    // Inverted from KnownDefect_Modules.AnImportedExternThatIsNotAmbientIsNotLoweredThroughADot
+    // (issue #100): owner ruling keeps the front-end refusal by design. Only a #[global]
+    // extern is spliced into the root program, so only a #[global] extern lowers through
+    // a module dot; anything else must be re-declared in the file or marked #[global] in
+    // its module. A rewrite here would trade a clean refusal for a link failure after a
+    // compile that exited 0, which is the worse failure.
+    //
     // `io_fflush` is one of lib/std/stdio.fin's own externs and is deliberately not
-    // `#[global]` (:113: "the marked set is two names and minting a third would be a hole
-    // in the module system rather than a convenience"). No prototype for it is spliced
-    // into the root program, so there is nothing for a plain `io_fflush(...)` to be a call
-    // *to*, and it keeps the refusal it had.
+    // `#[global]`. No prototype for it is spliced into the root program, so there is
+    // nothing for a plain `io_fflush(...)` to be a call *to*, and the qualified call
+    // keeps the backend's no-address refusal.
     const std::string plain = buildErr(
         "import stdio;\n"
         "fun main() <noret> { let r <int> = stdio.io_fflush(null); }\n");
+    {
+        Src src("import stdio;\n"
+                "fun main() <noret> { let r <int> = stdio.io_fflush(null); }\n");
+        const fs::path exe = uniqueTempPath("fin_stdlib_exe");
+        const FincRun c = runFinc({src.str(), "-o", exe.string()}, {{"FIN_LIBS", ""}});
+        std::error_code ec;
+        fs::remove(exe, ec);
+        EXPECT_NE(c.exitCode, 0)
+            << "a non-ambient imported extern must not lower through a module dot:\n"
+            << stripAnsi(c.err);
+    }
     EXPECT_NE(plain.find("the receiver of a call to the method 'io_fflush' on a value "
                          "with no address"), std::string::npos)
-        << "GOOD NEWS: a non-ambient imported extern lowers through a qualifier. Check\n"
-           "first that it reached the *module's* declaration and that the symbol it asks\n"
-           "the linker for is the one lib/std/stdio.fin names, then invert this into\n"
-           "Soundness_Modules.AnImportedExternIsLoweredThroughADot.\n"
+        << "a non-ambient imported extern keeps the no-address refusal; only #[global]\n"
+           "externs are rewritten to a plain call the backend lowers:\n"
         << plain;
 
     // The half that makes this discriminating rather than decorative: the file declares
@@ -516,10 +530,23 @@ TEST(KnownDefect_Modules, AnImportedExternThatIsNotAmbientIsNotLoweredThroughADo
         "import stdio;\n"
         "@define io_fflush(handle: &void) <int>;\n"
         "fun main() <noret> { let r <int> = stdio.io_fflush(null); }\n");
+    {
+        Src src("import stdio;\n"
+                "@define io_fflush(handle: &void) <int>;\n"
+                "fun main() <noret> { let r <int> = stdio.io_fflush(null); }\n");
+        const fs::path exe = uniqueTempPath("fin_stdlib_exe");
+        const FincRun c = runFinc({src.str(), "-o", exe.string()}, {{"FIN_LIBS", ""}});
+        std::error_code ec;
+        fs::remove(exe, ec);
+        EXPECT_NE(c.exitCode, 0)
+            << "a file declaring the name itself must not make the module's member\n"
+               "lowerable through a dot:\n"
+            << stripAnsi(c.err);
+    }
     EXPECT_NE(declared.find("the receiver of a call to the method 'io_fflush' on a value "
                             "with no address"), std::string::npos)
         << "a file declaring the name itself must not make the module's member\n"
-           "lowerable: the two are different declarations, and only the ambient one is\n"
+           "lowerable: the two are different declarations, and only a #[global] one is\n"
            "put into the root program by anything other than this file.\n"
         << declared;
 }

@@ -11668,10 +11668,9 @@ TEST(Soundness_IndexAssignInterface, AnIndexRequirementIsUnaffected) {
 //
 // Which member a value holds is not statically known, so a slot the members disagree
 // on is typed `any` -- static erasure, which is what DynamicType.hpp says `any` is for.
-// The alternative would be narrowing the type by the guard the corpus writes
-// (`getkeyid(enum_) == keyidof(Ok)`), and that is blocked on what `keyidof` of a
-// payloaded member even is -- stdlib/typing.fin's own note records it as undecided.
-// KnownDefect_PositionalMembers.ADisagreeingPayloadSlotIsNeverNarrowed books it.
+// A `getkeyid(v) == keyidof(M)` guard narrows the slot back to M's payload for reads
+// of `v` in the taken arm (AKeyidGuardNarrowsADisagreeingSlot below); an unguarded
+// read stays erased.
 //
 // Where the members *agree* there is nothing to erase and the slot keeps its type:
 // `Color { RGB(uint{8}, uint{8}, uint{8}), RGBA(uint{8}, ...) }` has a `uint{8}` at
@@ -11843,30 +11842,49 @@ TEST(Soundness_PositionalMembers, APrototypeHasNoThirdPosition) {
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_PositionalMembers, ADisagreeingPayloadSlotIsNeverNarrowed) {
-    // Known defect: #95 (tracked; see issue for inversion target).
-    // The corpus always guards a positional read -- `if (getkeyid(enum_) ==
-    // keyidof(Ok)) { return enum_.0; }` (stdlib/typing.fin:29-30) -- and the erasure
-    // ignores the guard entirely, which costs a real check in the direction that
-    // matters: a slot read where the member *is* known statically is still an `any`,
-    // so a use of it at its true type is rejected. The corpus does not pay for this,
-    // because both of its enums are generic and a `T` accepts an `any`; a concrete
-    // one does pay, which is what this asserts.
-    //
-    // Narrowing needs `keyidof` of a payloaded member to mean something first, and
-    // stdlib/typing.fin's own note records that as undecided.
-    const FincRun r = compile(
+TEST(Soundness_PositionalMembers, AKeyidGuardNarrowsADisagreeingSlot) {
+    // This was KnownDefect_PositionalMembers.ADisagreeingPayloadSlotIsNeverNarrowed,
+    // inverted: a `getkeyid(r) == keyidof(Ok)` guard narrows `r.0` to `Ok`'s payload
+    // at that position for reads of `r` in the taken arm. The corpus always guards
+    // a positional read this way -- `if (getkeyid(enum_) == keyidof(Ok)) { return
+    // enum_.0; }` (stdlib/typing.fin:29-30) -- and the erasure used to ignore the
+    // guard entirely, so a use of the slot at its true type was rejected.
+    const std::string prelude =
         "enum R { Ok(int), Err(string) }\n"
-        "fun f(r: R, isOk: bool) <int> {\n"
-        "  if (isOk) { return r.0; }\n"
+        "fun getkeyid(value: any) <int>;\n"
+        "fun keyidof(enum_member: $enum_member) <int>;\n";
+    const FincRun ok = compile(
+        prelude +
+        "fun f(r: R) <int> {\n"
+        "  if (getkeyid(r) == keyidof(Ok)) { return r.0; }\n"
         "  return 0;\n"
-        "}\n");
-    EXPECT_NE(r.exitCode, 0)
-        << "FIXED: a payload slot is narrowed now. Say what narrows it, invert this "
-           "test and rename it -- and check that `return r.0` under an `Err` guard is "
-           "the error it should then be.";
-    EXPECT_NE(stripAnsi(r.err).find("expected 'int', got 'any'"), std::string::npos)
-        << stripAnsi(r.err);
+        "}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_EQ(ok.exitCode, 0) << stripAnsi(ok.err);
+
+    // And the guard names the member, not the position: under an `Err` guard the
+    // same slot is a `string`, so returning it as an `int` is the error it should be.
+    const FincRun err = compile(
+        prelude +
+        "fun f(r: R) <int> {\n"
+        "  if (getkeyid(r) == keyidof(Err)) { return r.0; }\n"
+        "  return 0;\n"
+        "}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(err.exitCode, 0) << "an Err-guarded slot is a string, not an int";
+    EXPECT_NE(stripAnsi(err.err).find("expected 'int', got 'string'"), std::string::npos)
+        << stripAnsi(err.err);
+
+    // Unguarded, nothing narrows and the slot stays erased: that half of the old
+    // defect is still the rule (ASlotTheMembersDisagreeOnIsErased pins it).
+    const FincRun unguarded = compile(
+        prelude +
+        "fun f(r: R) <int> {\n"
+        "  return r.0;\n"
+        "}\n"
+        "fun main() <noret> {}\n");
+    EXPECT_NE(stripAnsi(unguarded.err).find("expected 'int', got 'any'"), std::string::npos)
+        << stripAnsi(unguarded.err);
 }
 
 // ---------------------------------------------------------------------------

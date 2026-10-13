@@ -17021,3 +17021,45 @@ BACKEND_TEST(Soundness_Codegen, ANullableCastRunsItsValue) {
     ASSERT_TRUE(b.ran) << b.why();
     EXPECT_EQ(b.out, "hi\n") << b.why();
 }
+
+BACKEND_TEST(Soundness_Codegen, SignedOverflowWrapsToIntMin) {
+    // ADR 0054 (issue #45): signed `int` overflow wraps two's-complement.
+    // The issue's probe, constant-folded: builds clean, prints the wrap.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let x <int> = 2147483647 + 1;\n"
+        "    printf(\"%d\\n\", x);\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "-2147483648\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, SignedOverflowWrapsAtRuntime) {
+    // Same rule, un-foldable: the operands arrive through calls, so the wrap
+    // happens in the emitted add/sub/neg, not in the folder. Negation of
+    // INT_MIN and INT_MIN - 1 ride along: same instruction family, same wrap.
+    const Built b = build(std::string(kPrintf) +
+        "fun add(a: int, b: int) <int> { return a + b; }\n"
+        "fun neg(x: int) <int> { return 0 - x; }\n"
+        "fun sub(a: int, b: int) <int> { return a - b; }\n"
+        "fun main() <noret> {\n"
+        "    let top <int> = 2147483647;\n"
+        "    let one <int> = 1;\n"
+        "    let bot <int> = -2147483647 - 1;\n"
+        "    printf(\"%d %d %d\\n\", add(top, one), neg(bot), sub(bot, one));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "-2147483648 -2147483648 2147483647\n") << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, UnsignedOverflowWrapsToZero) {
+    // `uint` agrees on wrap semantics: max + 1 is 0. Pinned beside the signed
+    // rule so a future width change cannot split them silently.
+    const Built b = build(std::string(kPrintf) +
+        "fun main() <noret> {\n"
+        "    let u <uint> = cast<uint>(4294967295);\n"
+        "    printf(\"%d\\n\", u + cast<uint>(1));\n"
+        "}\n");
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "0\n") << b.why();
+}

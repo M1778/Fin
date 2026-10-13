@@ -3203,10 +3203,11 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
     // disagree at is an `any`: static erasure, which is what DynamicType.hpp says
     // `any` is. Where they agree there is nothing to erase and the slot keeps its
     // type, which is what makes `color1.0 == 100` (enums.fin:38) a real check --
-    // `Color`'s two members are `uint{8}` at position 0 either way. Narrowing the
-    // erased case by the guard the corpus writes needs `keyidof` of a payloaded member
-    // to mean something first; KnownDefect_PositionalMembers
-    // .ADisagreeingPayloadSlotIsNeverNarrowed books it.
+    // `Color`'s two members are `uint{8}` at position 0 either way. A
+    // `getkeyid(v) == keyidof(M)` guard records M's payload at the position for
+    // the check against the use's expected type (checkType), while the slot
+    // itself stays erased -- `blame enum_.0` raises because it is an `any`
+    // (Soundness_PositionalMembers.AKeyidGuardNarrowsADisagreeingSlot).
     //
     // Anything else falls through, and the diagnostic it gets is still the right one:
     // a struct's fields are named, and reading `.0` as "the first field" is a ruling
@@ -3238,6 +3239,25 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
                 if (!c || !candidates[0] || !c->equals(*candidates[0])) { agree = false; break; }
             }
             if (agree) { lastExprType = candidates[0]; return; }
+            // A `getkeyid(v) == keyidof(M)` guard around this read records M's
+            // payload at this position for the check against the use's expected
+            // type (checkType). The static type stays erased: `blame enum_.0`
+            // raises exactly because the slot is an `any`
+            // (Soundness_Blame.RaisingAnErasedEnumPayloadIsTheCorpusSpelling),
+            // and retyping the slot here would turn that raise into a failed
+            // `bool` assert. A member with no payload at this position records
+            // nothing -- there is nothing of its to read.
+            if (auto* objId = dynamic_cast<Identifier*>(node.object.get())) {
+                if (const std::string* member = narrowedMemberFor(objId->name)) {
+                    if (auto ctor = asEnum->getEnumerator(*member)) {
+                        if (auto* sig = ctor->as<FunctionType>();
+                            sig && position < sig->param_types.size() &&
+                            sig->param_types[position]) {
+                            narrowedSlots_[&node] = sig->param_types[position];
+                        }
+                    }
+                }
+            }
             auto anyType = currentScope->resolveType("any");
             lastExprType = anyType ? anyType : std::make_shared<DynamicType>("any");
             return;

@@ -34,6 +34,12 @@ fun main() <noret> { io.printf("module call\n"); }
 module call
 ```
 
+Only `#[global]` externs lower through a module dot. A qualified call such as
+`io.printf(...)` builds because `printf` is ambient; a non-ambient imported
+extern (for example `stdio.io_fflush`) is refused in the front end instead of
+lowered. To use such an extern, re-declare it in the file that calls it or
+mark it `#[global]` in its module.
+
 ## What crosses the backend boundary
 
 Imported generic structs can instantiate in the root program. Whether an ordinary
