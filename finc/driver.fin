@@ -2511,43 +2511,43 @@ priv struct Mx {
         return true;
       }
 
-    // Internal constructor: struct literals cannot initialise `priv`
-    // fields from outside (the member-access rule), so the struct builds
-    // itself. Called as `Mx::new_mx(...)` below.
-    pub static fun new_mx(bytes: [char], n: int, filename: string, modidx: int) <Mx> {
+      // Internal constructor: struct literals cannot initialise `priv`
+      // fields from outside (the member-access rule), so the struct builds
+      // itself. Called as `Mx::new_mx(...)` below.
+      pub static fun new_mx(bytes: [char], n: int, filename: string, modidx: int) <Mx> {
         return Mx{
             bytes: bytes,
-            n: n,
-            pos: 0,
-            line: 1,
-            filename: filename,
-            modidx: modidx,
-            names: new [string, 64]{},
-            nparams: new [int, 64]{},
-            vargs: new [int, 64]{},
-            params: new [string, 64]{},
-            bodies: new [string, 64]{},
-            starts: new [int, 64]{},
-            ends: new [int, 64]{},
-            origins: new [string, 64]{},
-            count: 0,
-            anames: new [string, 16]{},
-            afiles: new [string, 16]{},
-            acount: 0,
-            iowner: new [string, 256]{},
-            inames: new [string, 256]{},
-            ifiles: new [string, 256]{},
-            ialias: new [int, 256]{},
-            icount: 0,
-            visited: new [string, 32]{},
-            vcount: 0,
-            out: new_buffer(n + 64),
-            helpers: "",
-            prelude: false,
-            sn_name: "",
-            m_name: ""
+              n: n,
+              pos: 0,
+              line: 1,
+              filename: filename,
+              modidx: modidx,
+              names: new [string, 64]{},
+              nparams: new [int, 64]{},
+              vargs: new [int, 64]{},
+              params: new [string, 64]{},
+              bodies: new [string, 64]{},
+              starts: new [int, 64]{},
+              ends: new [int, 64]{},
+              origins: new [string, 64]{},
+              count: 0,
+              anames: new [string, 16]{},
+              afiles: new [string, 16]{},
+              acount: 0,
+              iowner: new [string, 256]{},
+              inames: new [string, 256]{},
+              ifiles: new [string, 256]{},
+              ialias: new [int, 256]{},
+              icount: 0,
+              visited: new [string, 32]{},
+              vcount: 0,
+              out: new_buffer(n + 64),
+              helpers: "",
+              prelude: false,
+              sn_name: "",
+              m_name: ""
         };
-    }
+      }
 }
 
 priv fun? drv_macro_expand(source: string, filename: string, mod_idx: int) <string> {
