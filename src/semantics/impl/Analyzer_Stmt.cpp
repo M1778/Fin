@@ -11,6 +11,8 @@
 #include "../../ast/stmts/ControlFlow.hpp"
 #include "../../ast/stmts/VariableDecl.hpp"
 #include "../../types/TypeImpl.hpp"
+#include <unordered_set>
+#include <vector>
 namespace fin {
 
 namespace {
@@ -102,6 +104,29 @@ bool mentionsImplements(const Expression* e) {
     }
     if (const auto* mem = dynamic_cast<const MemberAccess*>(e)) {
         return mem->object && mentionsImplements(mem->object.get());
+    }
+    return false;
+}
+
+// Whether a raised struct counts as error-like: the `Error` it names, inherits,
+// or implements (ADR 0053). `parents` holds base structs and implemented
+// interfaces alike, so one transitive walk covers both halves of the ruling;
+// matched by name as well as identity because the parent entry and the scope's
+// `Error` can be distinct objects for the same declaration across modules.
+bool isErrorRelated(const StructType* raised, const StructType* error) {
+    if (!raised || !error) return false;
+    std::vector<const StructType*> stack{raised};
+    std::unordered_set<const StructType*> seen;
+    while (!stack.empty()) {
+        const StructType* cur = stack.back();
+        stack.pop_back();
+        if (!seen.insert(cur).second) continue;
+        if (cur == error || cur->name == error->name) return true;
+        for (const auto& p : cur->parents) {
+            if (p) {
+                if (auto* ps = p->as<StructType>()) stack.push_back(ps);
+            }
+        }
     }
     return false;
 }
@@ -567,33 +592,52 @@ void SemanticAnalyzer::visit(BlameStatement& node) {
         // against bool reported `expected 'bool', got 'CollectionError'` about a
         // statement the language has. Soundness_Blame carries the whole rule.
         //
-        // A StructType is a raise: a struct, a class, an enum, or a value of interface
-        // type. Everything else keeps the bool comparison, which is what leaves
-        // `blame 1;` an error with the message it always had
-        // (Soundness_Conditions.BlameStillRejectsAnInteger is a control for a separate
-        // argument and reads that message).
+        // What raises is `string | Error-subtype-or-implements | any/object`
+        // (ADR 0053, the owner's ruling on #97). A `string`, because `ErrorLike`
+        // reads one as error-like -- and it is the raise form, not the assert
+        // form's message in the wrong position, by ruling rather than by type. A
+        // struct, when it is `Error`, inherits it, or implements it; any other
+        // struct is refused as not error-like rather than compared against bool,
+        // which would misreport a raise as a failed assert. Everything else keeps
+        // the bool comparison, which is what leaves `blame 1;` an error with the
+        // message it always had (Soundness_Conditions.BlameStillRejectsAnInteger
+        // is a control for a separate argument and reads that message).
         //
         // No unwrapping, as in isEnumType: a `&CollectionError` is a pointer and this
         // asks about a value. Nothing in the corpus raises through one, and a reader
         // that needs it should say so at its own call site.
         //
-        // What is *not* checked is whether the raised value is error-like at all --
-        // KnownDefect_Blame.RaisingAValueIsNotCheckedForBeingAnError records why: the
-        // narrowing needs either the library's `Error` hardcoded here or the union
-        // machinery behind `ErrorLike`, and `blame enum_.0` raises a bare `T`.
         // A value whose static type is erased is a raise too. `any` is the type of a
         // payload slot an enum's members disagree at (visit(MemberAccess&)), and the
         // corpus raises exactly that four times -- `blame enum_.0` at
         // stdlib/typing.fin:32 and :38, stdlib/stdio.fin:60 and :66. The reason it is
         // the raise form and not the assert form: an assert's operand is a comparison,
         // whose type is `bool`, and nothing erases a `bool`.
-        const bool isRaise = lastExprType &&
-                             (lastExprType->as<StructType>() || lastExprType->as<DynamicType>());
-        raises = isRaise;
-        auto boolType = currentScope->resolveType("bool");
-        if (lastExprType && !isRaise) {
-            checkType(*node.condition, lastExprType, boolType);
+        bool isRaise = false;
+        if (lastExprType) {
+            if (lastExprType->as<DynamicType>()) {
+                isRaise = true;
+            } else if (auto* raised = lastExprType->as<StructType>()) {
+                auto errorType = currentScope->resolveType("Error");
+                const StructType* errorStruct =
+                    errorType ? errorType->as<StructType>() : nullptr;
+                if (isErrorRelated(raised, errorStruct)) {
+                    isRaise = true;
+                } else {
+                    error(*node.condition,
+                          "blame raises an error-like value ('string', a subtype of "
+                          "'Error', 'any'/'object'); got '" +
+                              lastExprType->toString() + "'");
+                }
+            } else if (auto stringType = currentScope->resolveType("string");
+                       stringType && typesEqual(lastExprType, stringType)) {
+                isRaise = true;
+            } else {
+                auto boolType = currentScope->resolveType("bool");
+                checkType(*node.condition, lastExprType, boolType);
+            }
         }
+        raises = isRaise;
     }
 
     if (node.message) {

@@ -302,15 +302,6 @@ static bool isBoolPrimitive(const TypePtr& type) {
     return false;
 }
 
-// `string` spells a pointer (NUL-terminated bytes), which is what makes the
-// address-bits arm below read it. Never a numeric, so `cast<string>(1)` and
-// `cast<float>("s")` stay refused while `cast<int>(s)` converts.
-static bool isStringPrimitive(const TypePtr& type) {
-    if (const auto* prim = dynamic_cast<const PrimitiveType*>(type.get()))
-        return prim->name == "string";
-    return false;
-}
-
 // The integer half of the above: an address as a number.
 static bool isIntegerPrimitive(const TypePtr& type) {
     if (const auto* prim = dynamic_cast<const PrimitiveType*>(type.get())) {
@@ -2931,10 +2922,8 @@ void SemanticAnalyzer::visit(CastExpression& node) {
     // Numerics interchange, and only numerics. `cast<string>(1)` is refused --
     // formatting is not a cast -- while the corpus casts ints to floats, chars
     // to ints and back, and narrows `ulong` to `int` explicitly, all of which
-    // stay valid. `cast<int>("s")` is accepted, but not by this arm: a string
-    // spells a pointer, so that cast is the address-bits arm below, and the
-    // KnownDefect test asserting it stays open until the owner rules between
-    // that reading and this issue.
+    // stay valid. `cast<int>("s")` and `cast<string>(1)` are both refused:
+    // strings are neither integers nor addresses (#93).
     //
     // A guard, not a gate: both sides must be numeric for this arm to answer, so a
     // primitive aimed at a generic, dynamic, enum or array target falls through to
@@ -2951,13 +2940,9 @@ void SemanticAnalyzer::visit(CastExpression& node) {
     // or string is not an address -- and only into pointers, never out.
     else if (isIntegerPrimitive(sourceType) &&
              dynamic_cast<const PointerType*>(targetType.get())) valid = true;
-    // A string converts to an integer explicitly: the address as a number,
-    // truncated to the target width. lib/std/hashmap.fin:91 hashes a key this
-    // way, and Soundness_Codegen.ACastFromAPointerReadsItsAddressBits pins the
-    // runtime reading -- so this direction stays accepted while `cast<string>(1)`
-    // above is refused. Integers only: rendering digits is formatting, and a
-    // float of address bits is nothing at all.
-    else if (isStringPrimitive(sourceType) && isIntegerPrimitive(targetType)) valid = true;
+    // A string never converts to an integer: strings are not integers (#93).
+    // `hash_of` hashes string keys by content (FNV-1a via `hash_word`), never
+    // via the address, so nothing in the stdlib needs this direction.
     else if (dynamic_cast<const PointerType*>(sourceType.get()) && 
              dynamic_cast<const PointerType*>(targetType.get())) valid = true;
     else if (dynamic_cast<const GenericType*>(sourceType.get()) || 

@@ -3708,17 +3708,18 @@ TEST(Soundness_DynamicTypes, AnyIsRegistered) {
 // `expected 'bool', got 'CollectionError'` about a statement the language has.
 //
 // The operand's type is what tells them apart, and it has to be, because the two
-// forms are written identically. A StructType -- struct, class, enum, or a value of
-// interface type -- is a raise; anything else is still compared against bool, which
-// is what keeps `blame 1;` an error (Soundness_Conditions.BlameStillRejectsAnInteger
-// owns that case, and is a control for a different argument).
-//
-// Not the widest rule available, deliberately. `blame "boom"` stays an error even
-// though lib/std's `ErrorLike = string | any implements <Error>` reads a string as
-// error-like, because the second operand of the assert form is a string and the two
-// readings of `blame "..."` cannot both be right; and nothing narrower than "a
-// StructType" is checkable without the analyzer hardcoding the library's `Error`,
-// which is the owner's ruling and not this unit's. Both are pinned below.
+// forms are written identically. What raises is `string |
+// Error-subtype-or-implements | any/object` (ADR 0053, the owner's ruling on #97,
+// which closed the two KnownDefect_Blame tests below by inverting them). A `string`
+// because `ErrorLike = string | any implements <Error>` (lib/std/typing.fin) reads
+// one as error-like -- and it is the raise form, not the assert form's message in
+// the wrong position, by ruling rather than by type. A struct, class, enum, or
+// interface value when it is `Error`, inherits it, or implements it; anything else
+// is refused as not error-like rather than compared against bool, which would
+// misreport a raise as a failed assert. Anything else is still compared against
+// bool, which is what keeps `blame 1;` an error
+// (Soundness_Conditions.BlameStillRejectsAnInteger owns that case, and is a control
+// for a different argument).
 // ---------------------------------------------------------------------------
 
 TEST(Soundness_Blame, TheAssertHalfWorks) {
@@ -3733,12 +3734,40 @@ TEST(Soundness_Blame, TheAssertHalfWorks) {
 }
 
 TEST(Soundness_Blame, RaisingAStructValueIsAccepted) {
+    // An error-like struct raises: `E` inherits `Error`, which is what makes it
+    // raisable rather than merely being a struct.
     auto r = compile(
-        "struct E { pub m <string>, }\n"
+        "struct Error { pub message <string>, }\n"
+        "struct E : <Error> {}\n"
         "fun main() <void> {\n"
         "  let e <E>;\n"
         "  blame e;\n"
         "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Blame, RaisingErrorItselfIsAccepted) {
+    // The base of the same rule: `Error` is trivially error-like.
+    auto r = compile(
+        "struct Error { pub message <string>, Error(msg: string) { self.message = msg; } }\n"
+        "fun main() <void> {\n"
+        "  blame Error(\"boom\");\n"
+        "}\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Blame, RaisingAStringIsAccepted) {
+    // Issue #97, first half (inverted from
+    // KnownDefect_Blame.RaisingAStringIsRejected): `ErrorLike = string | any
+    // implements <Error>` reads a string as error-like, so `blame "boom"`
+    // raises rather than asserting against bool.
+    auto r = compile("fun main() <void> { blame \"boom\"; }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Blame, RaisingAStringWithAMessageIsAccepted) {
+    // The message rule is unchanged and applies to the string raise too.
+    auto r = compile("fun main() <void> { blame \"boom\", \"why\"; }\n");
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
@@ -3779,36 +3808,29 @@ TEST(Soundness_Blame, AMessageIsStillCheckedInTheRaiseForm) {
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Blame, RaisingAStringIsRejected) {
-    // Known defect: #97 (tracked; see issue for inversion target).
-    // Pinned, not fixed. lib/std/typing.fin's `ErrorLike = string | any implements
-    // <Error>` reads a string as error-like, so `blame "boom"` has a defensible
-    // meaning -- but so does reading it as the assert form's message written in the
-    // wrong position, and `blame "msg"` cannot be both. The corpus writes neither, so
-    // there is nothing to settle it with and the narrow rule stands.
-    auto r = compile("fun main() <void> { blame \"boom\"; }\n");
-    EXPECT_NE(r.exitCode, 0)
-        << "FIXED: a string is raisable now. That is an owner ruling on ErrorLike -- "
-           "invert this test, rename it, and say in it which reading won.";
-    EXPECT_NE(stripAnsi(r.err).find("expected 'bool', got 'string'"), std::string::npos)
-        << stripAnsi(r.err);
-}
-
-TEST(KnownDefect_Blame, RaisingAValueIsNotCheckedForBeingAnError) {
-    // Known defect: #97 (tracked; see issue for inversion target).
-    // The other half of the same ruling, and the looser one: any StructType is
-    // raisable, including one with no relation to `Error` at all. Narrowing it means
-    // the analyzer knowing what `Error` is -- either by hardcoding the library's name
-    // or by growing the union machinery `ErrorLike` needs -- and `blame enum_.0`
-    // (stdlib/typing.fin:32) raises a bare `T`, which no narrowing short of a bound
-    // on the enum's parameter would admit. Recorded so the looseness is a decision
-    // and not an oversight.
+TEST(Soundness_Blame, RaisingAValueThatIsNotAnErrorIsRejected) {
+    // Issue #97, second half (inverted from
+    // KnownDefect_Blame.RaisingAValueIsNotCheckedForBeingAnError): a struct
+    // with no relation to `Error` is not raisable. Refused as not error-like
+    // rather than compared against bool, which would misreport a raise as a
+    // failed assert.
     auto r = compile(
         "struct NotAnError { pub v <int>, }\n"
         "fun main() <void> { let n <NotAnError>; blame n; }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a raised value is checked for being error-like. Invert this test "
-           "and record what the rule turned out to be.";
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("error-like"), std::string::npos)
+        << stripAnsi(r.err);
+}
+
+TEST(Soundness_Blame, ARejectedRaiseStillChecksItsMessage) {
+    // The refusal does not swallow the message check: a bad message beside a
+    // non-error raise reports both.
+    auto r = compile(
+        "struct NotAnError { pub v <int>, }\n"
+        "fun main() <void> { let n <NotAnError>; blame n, 5; }\n");
+    EXPECT_NE(r.exitCode, 0) << "5 is not a message";
+    EXPECT_NE(stripAnsi(r.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -4610,8 +4632,8 @@ TEST(Soundness_Declarations, MutualRecursionWorksThroughADefine) {
 
 // ---------------------------------------------------------------------------
 // `cast` used to admit any primitive to any other, and refused both casts the
-// corpus actually writes. One rule, wrong in both directions. Since fixed,
-// except for the string-to-integer direction, which stays open (see below).
+// corpus actually writes. One rule, wrong in both directions. Since fixed in
+// both directions, including string-to-integer (#93).
 //
 // Analyzer_Expr.cpp was the too-broad half:
 //
@@ -4621,11 +4643,10 @@ TEST(Soundness_Declarations, MutualRecursionWorksThroughADefine) {
 // and Analyzer_Core.cpp:21 registers `string` as a `PrimitiveType`. So `string`
 // was lumped in with the numerics and `cast<int>("s")`, `cast<string>(1)` and
 // `cast<bool>("s")` were all accepted. The rule now: numerics interchange,
-// booleans read as 0/1 against the integers, and a string converts to an
-// integer (the address as a number, which lib/std/hashmap.fin:91 hashes by).
-// `cast<string>(1)` stays refused -- formatting is not a cast -- as do
-// `cast<float>("s")`, `cast<bool>("s")` and either direction between `string`
-// and an enum.
+// booleans read as 0/1 against the integers, and a string converts to
+// neither -- strings are not integers and rendering digits is formatting.
+// `cast<string>(1)` stays refused as do `cast<int>("s")`, `cast<float>("s")`,
+// `cast<bool>("s")` and either direction between `string` and an enum.
 //
 // The same rule was too narrow, and this is the half that mattered more,
 // because the corpus depends on it. Both casts written in the fifty samples
@@ -4708,21 +4729,15 @@ TEST(Soundness_Casts, ACastToOrFromADynamicTypeIsAllowed) {
     // the cast for dynamic types must not widen it for everything.
 }
 
-TEST(KnownDefect_Casts, AStringToAnIntegerIsAccepted) {
-    // Known defect: #93 (tracked; see issue for inversion target). LEFT OPEN:
-    // inverting this breaks the corpus. `cast<int>(s)` for a `string` s is
-    // lib/std/hashmap.fin:91's hash (the address as an integer), pinned at
-    // runtime by Soundness_Codegen.ACastFromAPointerReadsItsAddressBits -- a
-    // literal `"s"` and a variable `s` share the type `string`, so no rule can
-    // refuse one and accept the other. Either the issue's refusal wins (and
-    // hashmap re-spells its hash) or the pointer-bits reading wins (and this
-    // test inverts into "a string converts to an integer address"). Owner ruling
-    // needed; do not invert unilaterally.
+TEST(Soundness_Casts, AStringToAnIntegerIsRefused) {
+    // Was KnownDefect_Casts.AStringToAnIntegerIsAccepted (#93): strings are
+    // not integers, and `hash_of` hashes string keys by content (FNV-1a via
+    // `hash_word`), never via the address -- so the old address-bits reading
+    // had no remaining consumer and the refusal wins.
     auto r = compile("fun main() <void> { let a <int> = cast<int>(\"s\"); }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: `cast` no longer treats `string` as interchangeable with the "
-           "numerics. Invert this and the one below into Soundness_Casts, and "
-           "check the two too-narrow tests below now pass.\n"
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Invalid cast from 'string' to 'int'"),
+              std::string::npos)
         << stripAnsi(r.err);
 }
 
@@ -11868,11 +11883,10 @@ TEST(KnownDefect_PositionalMembers, ADisagreeingPayloadSlotIsNeverNarrowed) {
 // operand is a comparison, whose type is `bool`, and nothing erases a `bool`. A value
 // whose static type is `any` cannot have come from one.
 //
-// Still narrow. `blame "boom"` is still an error (KnownDefect_Blame
-// .RaisingAStringIsRejected) and `blame 1;` is still an error
-// (Soundness_Conditions.BlameStillRejectsAnInteger); whether a raised value has to be
-// error-like at all is still nobody's ruling here
-// (KnownDefect_Blame.RaisingAValueIsNotCheckedForBeingAnError).
+// Still narrow. `blame 1;` is still an error
+// (Soundness_Conditions.BlameStillRejectsAnInteger); a struct unrelated to `Error`
+// is still refused (Soundness_Blame.RaisingAValueThatIsNotAnErrorIsRejected); a
+// `string` raises by ruling (Soundness_Blame.RaisingAStringIsAccepted, ADR 0053).
 // ---------------------------------------------------------------------------
 
 TEST(Soundness_Blame, RaisingAValueOfErasedTypeIsAccepted) {

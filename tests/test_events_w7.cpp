@@ -447,13 +447,13 @@ TEST(W7Fire, BreakFiresTheLoopBodyScope) {
 
 TEST(W7Fire, BlameRaiseFiresBlamed) {
     auto a = analyzeW7(
-        "struct E { m <string> }\n"
+        "struct Error { m <string> }\n"
         "#[on(variable_scope_exit)]\n"
         "@special h_exit(name: string, t: $type, exit_kind: int, moved: int) <quote> {}\n"
         "compiler.events.enable(h_exit);\n"
         "fun f() <noret> {\n"
         "    let x <int> = 1;\n"
-        "    blame E{m: \"boom\"};\n"
+        "    blame Error{m: \"boom\"};\n"
         "}\n"
         "fun main() <noret> {}\n");
     ASSERT_TRUE(a.parsed);

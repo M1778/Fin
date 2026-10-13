@@ -775,7 +775,11 @@ pub struct Parser {
             let txt <string> = cur.text;
             let dot_pos <string> = p_strchr(txt, 46);
             if (dot_pos != null) {
-                let int_len <int> = cast<int>(cast<ulong>(dot_pos) - cast<ulong>(txt));
+                // Offset of the dot: both spellings point into the same
+                // buffer, so the length difference is the distance (pointer
+                // arithmetic through casts is refused: strings are not
+                // integers even when they hold addresses).
+                let int_len <int> = cast<int>(p_strlen(txt) - p_strlen(dot_pos));
                 if (int_len > 0) {
                     txt = substr(txt, 0, int_len);
                 } else {

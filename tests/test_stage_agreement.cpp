@@ -796,6 +796,85 @@ INSTANTIATE_TEST_SUITE_P(
     [](const testing::TestParamInfo<Sample>& info) { return testNameForSample(info.param.path); });
 
 // ---------------------------------------------------------------------------
+// ADR 0052 zero-init pins (issue #34): an uninitialized local reads back
+// zero in every storage shape, under BOTH compilers. The corpus sample
+// zeros_uninitialized.fin pins the scalar through the agreement suite
+// above; these inline sources pin the shapes no sample covers. Before the
+// finc/codegen.fin zeroed-buffer fix, the stage segfaulted on all three
+// (fixed/dynamic arrays, structs, prototype halves) while the C++ backend
+// read zero -- exactly the divergence this suite exists to catch.
+// ---------------------------------------------------------------------------
+
+void checkZeroInitShape(const std::string& stem, const std::string& stageBin,
+                        const std::string& src, const std::string& expected) {
+    ScopedRepoRoot repoRoot;
+    ASSERT_TRUE(repoRoot.ok()) << "cannot chdir to the repo root; stage imports would misresolve";
+
+    const fs::path srcPath = uniqueTempPath("zeroinit_" + stem, ".fin");
+    {
+        std::ofstream out(srcPath);
+        ASSERT_TRUE(out.good()) << "cannot write " << srcPath;
+        out << src;
+    }
+
+    const fs::path cppExe = uniqueTempPath("zeroinit_" + stem + "_cpp");
+    const FincRun cppBuild = runFinc({srcPath.string(), "--color=never", "-o", cppExe.string()});
+    ASSERT_EQ(cppBuild.exitCode, 0) << stem << ": reference (C++) build failed:\n" << cppBuild.err;
+    ASSERT_TRUE(fs::exists(cppExe)) << stem << ": reference build produced no exe";
+
+    const fs::path stageExe = uniqueTempPath("zeroinit_" + stem + "_stage");
+    Proc stageBuild;
+    {
+        StageBuildLock lock;
+        stageBuild = spawnCapture(stageBin, {srcPath.string(), "-o", stageExe.string()});
+    }
+    ASSERT_TRUE(stageBuild.exited && stageBuild.exitCode == 0)
+        << stem << ": stage build " << procFate(stageBuild) << ":\n" << stageBuild.err;
+    ASSERT_TRUE(fs::exists(stageExe)) << stem << ": stage build produced no exe";
+
+    const Proc cpp = spawnCapture(cppExe.string(), {});
+    const Proc stg = spawnCapture(stageExe.string(), {});
+    EXPECT_TRUE(cpp.exited && cpp.exitCode == 0) << stem << ": C++ run " << procFate(cpp);
+    EXPECT_EQ(cpp.out, expected) << stem << ": C++ stdout is not the pinned zero";
+    const RunAgreement a = checkRunAgreement("zeroinit_" + stem, cpp, stg);
+    EXPECT_TRUE(a.fateMatch) << stem << ": run fate diverges: C++ " << procFate(cpp) << " vs stage "
+                             << procFate(stg);
+    EXPECT_TRUE(a.stdoutMatch) << stem << ": run stdout diverges\nC++ stdout:\n"
+                               << cpp.out << "stage stdout:\n" << stg.out;
+    EXPECT_TRUE(a.stderrMatch) << stem << ": run stderr diverges\nC++ stderr:\n"
+                               << cpp.err << "stage stderr:\n" << stg.err;
+    removeIfExists(srcPath);
+    removeIfExists(cppExe);
+    removeIfExists(stageExe);
+}
+
+TEST(StageAgreementZeroInit, UninitShapesReadZeroOnBothCompilers) {
+    const std::string stageBin = stageBinary();
+    if (stageBin.empty() || !fs::exists(stageBin)) {
+        GTEST_SKIP() << "stage compiler not found at FINC_STAGE2_BINARY=" << stageBin
+                     << "; zero-init pins need build/finc_stage2 next to build/finc";
+    }
+    const std::string head = "@define printf(fmt: string, ...) <noret>;\nfun main() <noret> {\n";
+    const std::string tail = "}\n";
+    checkZeroInitShape("scalar", stageBin,
+                       head + "    let n <int>;\n    blame n == 0;\n    printf(\"%d\\n\", n);\n" + tail,
+                       "0\n");
+    checkZeroInitShape("array", stageBin,
+                       head + "    let a <[int, 3]>;\n    printf(\"%d %d %d\\n\", a[0], a[1], a[2]);\n" +
+                           "    let d <[int]>;\n    printf(\"len %d\\n\", d.length);\n" + tail,
+                       "0 0 0\nlen 0\n");
+    checkZeroInitShape("struct", stageBin,
+                       std::string("struct Pt {\n  x <int>\n  y <int>\n}\n") +
+                           "struct Box<T> {\n  v <T>\n  w <int>\n}\n" + head +
+                           "    let p <Pt>;\n    printf(\"%d %d\\n\", p.x, p.y);\n" +
+                           "    let b <Box<int>>;\n    printf(\"%d %d\\n\", b.v, b.w);\n" + tail,
+                       "0 0\n0 0\n");
+    checkZeroInitShape("prototype", stageBin,
+                       head + "    let pr <{int, float}>;\n    printf(\"%d %d\\n\", pr.0.length, pr.1.length);\n" + tail,
+                       "0 0\n");
+}
+
+// ---------------------------------------------------------------------------
 // The per-sample diagnostic agreement (issue #76): compile-only, both
 // compilers from the repo root, exit code plus pinned diagnostic or refusal
 // text. StageDiagAgreement covers stage2; Stage3DiagAgreement mirrors it over

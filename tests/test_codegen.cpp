@@ -1822,9 +1822,9 @@ BACKEND_TEST(Soundness_Codegen, ADeclaredPrototypeWithNoInitialiserLowers) {
     // Storage alone: the slot exists and the program compiles. Nothing is read out of
     // it -- the prototype is a pair holding a pointer and a length, and reading an
     // uninitialised prototype's halves would assert an answer to what they contain.
-    // That answer is now pinned by ADR 0052 (zero-init policy) and asserted by
-    // tests/samples/zeros_uninitialized.fin, but this test deliberately covers only
-    // the compile path, not the read.
+    // That answer is now pinned by ADR 0052 (zero-init policy) and asserted on both
+    // compilers by StageAgreementZeroInit.UninitShapesReadZeroOnBothCompilers, but
+    // this test deliberately covers only the compile path, not the read.
     const Built b = build(
         "fun main() <noret> {\n"
         "    let p <{int, float}>;\n"
@@ -7819,20 +7819,21 @@ BACKEND_TEST(Soundness_Codegen, ABareLiteralOfTheEnclosingTemplateUsesThatInstan
     EXPECT_EQ(b.out, "3\n") << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, ACastFromAPointerReadsItsAddressBits) {
-    // What `cast<int>(key)` in lib/std/hashmap.fin:91 means: the address as an
-    // integer, truncated to the target width. Asserted as self-equality rather
-    // than a value, because addresses vary run to run and only equal pointers
-    // must hash equal -- which is also the invariant `==` on strings keeps.
+BACKEND_TEST(Soundness_Codegen, ACastFromAStringToAnIntegerIsRefused) {
+    // Was ACastFromAPointerReadsItsAddressBits: `cast<int>(s)` for a `string`
+    // s read the address as a number. That reading is refused now (#93) --
+    // `hash_of` hashes string keys by content (FNV-1a via `hash_word`), so no
+    // consumer remains. A string is neither an integer nor an address.
     const Built b = build(std::string(kPrintf) +
         "fun id_hash(s: string) <int> { return cast<int>(s); }\n"
         "fun main() <noret> {\n"
         "    let key <string> = \"abc\";\n"
         "    printf(\"%d %d\\n\", id_hash(key) == id_hash(key), cast<int>(7));\n"
         "}\n");
-    ASSERT_EQ(b.compileExit, 0) << b.why();
-    ASSERT_TRUE(b.ran) << b.why();
-    EXPECT_EQ(b.out, "1 7\n") << b.why();
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("Invalid cast from 'string' to 'int'"),
+              std::string::npos)
+        << b.why();
 }
 
 // ---------------------------------------------------------------------------
@@ -14622,9 +14623,12 @@ BACKEND_TEST(Soundness_Codegen, ABlameRaisingAValueIsRefused) {
     // The other half of the keyword, and still refused: a raised value needs a runtime
     // shape nobody has ruled on. Refused *as a raise* and not as "this condition",
     // because the two forms are written identically and a reader told "condition" would
-    // go looking for a comparison they never wrote.
+    // go looking for a comparison they never wrote. Error-like on purpose, so the
+    // refusal here is the backend's and not the analyzer's
+    // (Soundness_Blame.RaisingAValueThatIsNotAnErrorIsRejected owns that half).
     const Built b = build(
-        "struct MyError { code <int> }\n"
+        "struct Error { code <int> }\n"
+        "struct MyError : <Error> {}\n"
         "fun main() <void> {\n"
         "    blame MyError { code: 1 };\n"
         "}\n");

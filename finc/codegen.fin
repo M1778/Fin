@@ -11626,6 +11626,102 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
     return null;
 }
 
+// ADR 0052 (zero-init) for the stage's pointer-based shapes: a null word is
+// not a zero value here. Fixed/dynamic arrays, structs and prototypes are
+// read through the pointer the slot holds, so the no-initializer path
+// allocates a zeroed buffer (calloc, mirroring __fin_alloc_array /
+// __fin_alloc_struct / the prototype literal header) instead of storing
+// null. Scalars, pointers, nullables and enums keep the null store: for
+// those the null word already reads back as zero/absent on both backends.
+// Returns true when it stored, false when the caller should store null.
+fun cg_zero_uninit_buffer(ctx: &FnContext, ty_ann: string, ty: &LLVMType, alloca: &LLVMValue) <bool> {
+    if (ctx == null || alloca == null || ty == null) { return false; }
+    if (ty_ann == null || cg_strlen(ty_ann) == cast<ulong>(0)) { return false; }
+    let first <string> = substr(ty_ann, 0, 1);
+    // Array (`[T, N]` / `[T]`): a zeroed element buffer with the extent in
+    // the header word, the shape __fin_alloc_array builds (one extra word;
+    // dynamic arrays get an empty one). The slot keeps the fat convention
+    // (buffer at word 0, length at word 1 via the len store below); every
+    // index stride reads zeros, and .length reads the header.
+    if (cg_str_eq(first, "[") && ty == ctx.fat_ptr_ty) {
+        let ext <int> = get_fixed_array_extent(ty_ann);
+        let slots <int> = ext + 1;
+        let hdr_n <int> = ext;
+        if (ext < 0) {
+            slots = 2;
+            hdr_n = 0;
+        }
+        let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
+        let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
+        let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
+        c_args.v0 = llvm_const_int(ctx.i64_ty, slots, 0);
+        c_args.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+        let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "arr_zero");
+        delete c_args;
+        let ind_h <&LLVMIndices> = new LLVMIndices{};
+        ind_h.i0 = llvm_const_int(ctx.i64_ty, 0, 0);
+        let h_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, raw, ind_h, 1, "arr_len_p");
+        delete ind_h;
+        llvm_build_store(ctx.builder, llvm_const_int(ctx.i64_ty, hdr_n, 0), h_ptr);
+        let ind_e <&LLVMIndices> = new LLVMIndices{};
+        ind_e.i0 = llvm_const_int(ctx.i64_ty, 1, 0);
+        let elem_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, raw, ind_e, 1, "arr_elems");
+        delete ind_e;
+        let p0 <&LLVMValue> = llvm_build_struct_gep2(ctx.builder, ctx.fat_ptr_ty, alloca, 0, "slice_buf");
+        llvm_build_store(ctx.builder, elem_ptr, p0);
+        return true;
+    }
+    // Prototype (`{K, V}` / `prototype...`): a zeroed 32-byte header, the
+    // shape the prototype literal builds. Both half-lengths read 0,
+    // matching the C++ backend's null pair.
+    let tlen <int> = cast<int>(cg_strlen(ty_ann));
+    if (cg_str_eq(first, "{") || cg_str_eq(ty_ann, "prototype") ||
+      (tlen >= 9 && cg_str_eq(substr(ty_ann, 0, 9), "prototype"))) {
+        let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
+        let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
+        let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
+        c_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
+        c_args.v1 = llvm_const_int(ctx.i64_ty, 32, 0);
+        let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "proto_zero");
+        delete c_args;
+        llvm_build_store(ctx.builder, raw, alloca);
+        return true;
+      }
+    // Struct value: a zeroed heap box, the shape __fin_alloc_struct
+    // builds (one fixed buffer, the same 1024 the initialized path uses),
+    // so field reads land on zeros. Pointers (`&S`, `S*`), enums,
+    // nullables and scalars are not struct values and keep null.
+    let last <string> = substr(ty_ann, tlen - 1, 1);
+    if (!cg_str_eq(first, "&") && !cg_str_eq(last, "*")) {
+        let st <&StructInfo> = find_struct(ctx, ty_ann);
+        if (st == null) {
+            // A generic instantiation (`Box<int>`) registers under its
+            // full spelling only on first use; the template answers the
+            // shape question either way, and the buffer is layout-free.
+            let oi <int> = 0;
+            while (oi < tlen) {
+                if (cg_str_eq(substr(ty_ann, oi, 1), "<")) { break; }
+                oi = oi + 1;
+            }
+            if (oi > 0 && oi < tlen) {
+                st = find_struct(ctx, cg_trim_spaces(substr(ty_ann, 0, oi)));
+            }
+        }
+        if (st != null) {
+            let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
+            let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
+            let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
+            c_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
+            c_args.v1 = llvm_const_int(ctx.i64_ty, 1024, 0);
+            let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "struct_zero");
+            delete c_args;
+            llvm_build_store(ctx.builder, raw, alloca);
+            return true;
+        }
+    }
+    return false;
+}
+
 pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
     if (stmt == null) { return; }
 
@@ -11838,8 +11934,13 @@ pub fun lower_stmt(ctx: &FnContext, stmt: &AstNode) <noret> {
             // No initializer: zero the slot rather than leaving whatever the
             // stack held. The C++ backend stores a null for the same reason;
             // an absent nullable and a zero scalar both read back as such.
+            // Pointer-based shapes (arrays, structs, prototypes) read through
+            // the pointer, where a null word segfaults and the C++ value
+            // representation reads zero (ADR 0052): they get a zeroed buffer.
             if (alloca != null && ty != null) {
-                llvm_build_store(ctx.builder, llvm_const_null(ty), alloca);
+                if (!cg_zero_uninit_buffer(ctx, ty_ann, ty, alloca)) {
+                    llvm_build_store(ctx.builder, llvm_const_null(ty), alloca);
+                }
             }
         }
         if (v != null && v.len_val == null && stmt.type_annotation != null) {
