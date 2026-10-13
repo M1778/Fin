@@ -2423,6 +2423,116 @@ pub struct Checker {
         return false;
       }
 
+      // Visibility of `field` on struct `base` for literal initialisation
+      // (C++ StructType::isFieldPublic): 1 public, 0 private, -1 unknown
+      // (no such field anywhere). Direct symbols first (`S_f`, `S::f`),
+      // then the parents quietly: the literal site owns the single
+      // refusal, so nothing reports here.
+      fun chk_literal_field_pub(self: &Self, base: string, field: string, depth: int) <int> {
+        if (base == null || field == null) { return -1; }
+        if (depth > 8) { return -1; }
+        if (chk_strlen(base) == cast<ulong>(0) || chk_strlen(field) == cast<ulong>(0)) { return -1; }
+        let qb <Buffer> = new_buffer(64);
+        qb.write_string(base);
+        qb.write_char('_');
+        qb.write_string(field);
+        let qn <string> = qb.to_string();
+        free_buffer(qb);
+        if (self.global_scope.has(qn)) {
+            let fsym <Symbol> = self.global_scope.lookup(qn);
+            if (fsym.is_pub) { return 1; }
+            return 0;
+        }
+        let qb2 <Buffer> = new_buffer(64);
+        qb2.write_string(base);
+        qb2.write_string("::");
+        qb2.write_string(field);
+        let qn2 <string> = qb2.to_string();
+        free_buffer(qb2);
+        if (self.global_scope.has(qn2)) {
+            let fsym2 <Symbol> = self.global_scope.lookup(qn2);
+            if (fsym2.is_pub) { return 1; }
+            return 0;
+        }
+        let pb <Buffer> = new_buffer(64);
+        pb.write_string(base);
+        pb.write_string("_parents");
+        let pkey <string> = pb.to_string();
+        free_buffer(pb);
+        if (!self.global_scope.has(pkey)) { return -1; }
+        let psym <Symbol> = self.global_scope.lookup(pkey);
+        let plist <string> = psym.type_name;
+        if (plist == null) { return -1; }
+        let plen <int> = cast<int>(chk_strlen(plist));
+        let pchars <[char]> = to_chars(plist);
+        let wi <int> = 0;
+        while (wi < plen) {
+            let wc <char> = pchars[wi];
+            if ((wc >= 'a' && wc <= 'z') || (wc >= 'A' && wc <= 'Z') || wc == '_') {
+                let wstart <int> = wi;
+                while (wi < plen) {
+                    let wc2 <char> = pchars[wi];
+                    if ((wc2 >= 'a' && wc2 <= 'z') || (wc2 >= 'A' && wc2 <= 'Z') ||
+                      (wc2 >= '0' && wc2 <= '9') || wc2 == '_') {
+                        wi = wi + 1;
+                      } else {
+                        break;
+                      }
+                }
+                let parent <string> = substr(plist, wstart, wi - wstart);
+                if (self.global_scope.has(parent)) {
+                    let ps <Symbol> = self.global_scope.lookup(parent);
+                    if (ps.kind == sym_struct()) {
+                        let r <int> = self.chk_literal_field_pub(parent, field, depth + 1);
+                        if (r >= 0) {
+                            delete pchars;
+                            return r;
+                        }
+                    }
+                }
+            } else {
+                wi = wi + 1;
+            }
+        }
+        delete pchars;
+        return -1;
+      }
+
+      // True when a `__fin_struct_init` site was written as `new S{...}`
+      // (a C++ NewExpression, which skips the literal visibility rule).
+      // The parser lowers both forms to one node, so the source word at
+      // the site tells them apart: the allocation form sits on `new`,
+      // the literal form on the struct name.
+      fun chk_struct_init_is_new(self: &Self, expr: &AstNode) <bool> {
+        if (expr == null) { return false; }
+        let lt <string> = self.source_line_text(self.source_file, expr.line);
+        if (lt == null || chk_strlen(lt) == cast<ulong>(0)) { return false; }
+        let idx <int> = expr.col - 1;
+        if (idx < 0 || idx + 3 > cast<int>(chk_strlen(lt))) { return false; }
+        if (!chk_str_eq(substr(lt, idx, 3), "new")) { return false; }
+        let after <int> = idx + 3;
+        if (after >= cast<int>(chk_strlen(lt))) { return true; }
+        let c <string> = substr(lt, after, 1);
+        if (chk_str_eq(c, " ") || chk_str_eq(c, "\t")) { return true; }
+        return false;
+      }
+
+      // Target struct of a `__fin_struct_init` annotation for the literal
+      // visibility rule: trimmed, alias-resolved, pointer markers and
+      // generic arguments stripped (C++ reports `name`, not the
+      // instantiation), `Self` read against the current struct. "" when
+      // there is nothing spellable.
+      fun chk_struct_init_base(self: &Self, ann: string) <string> {
+        if (ann == null || chk_strlen(ann) == cast<ulong>(0)) { return ""; }
+        let r <string> = self.resolve_type(chk_trim(ann));
+        let b <string> = self.chk_generic_base(self.chk_strip_ptr(r));
+        b = chk_trim(b);
+        if (chk_str_eq(b, "Self") && chk_strlen(self.current_struct) > cast<ulong>(0)) {
+            return self.current_struct;
+        }
+        return b;
+      }
+
       // Pure method probe (no evaluation): true when a dot-call-shaped
       // callee would resolve to a struct method. A call node no longer
       // records whether it was written with a dot (`b.m(x)` and `m(b, x)`
@@ -6960,6 +7070,43 @@ pub struct Checker {
                         let si_sym <Symbol> = self.current_scope.lookup(si_ann);
                         if (chk_str_eq(si_sym.type_name, "$struct")) {
                             return "any";
+                        }
+                    }
+                }
+                // Private-field literal rule (C++ visit(StructInstantiation)):
+                // a literal initialises each written field, so a `priv` one
+                // is fillable only from inside the struct itself
+                // (`Cannot initialise private field 'x' of struct 'S'`).
+                // Internal `static fun make()` is the sanctioned pattern
+                // (current_struct equals the target). Unknown structs and
+                // fields stay quiet, as before.
+                if (!self.chk_struct_init_is_new(expr)) {
+                    let lit_base <string> = self.chk_struct_init_base(expr.type_annotation);
+                    if (!chk_str_eq(lit_base, "") && self.global_scope.has(lit_base)) {
+                        let lsym <Symbol> = self.global_scope.lookup(lit_base);
+                        if (lsym.kind == sym_struct()) {
+                            let lspan <int> = self.chk_value_span(expr.line, expr.col);
+                            let vf <&AstNode> = expr.left;
+                            while (vf != null) {
+                                if (vf.name != null && chk_strlen(vf.name) > cast<ulong>(0)) {
+                                    if (self.chk_literal_field_pub(lit_base, vf.name, 0) == 0 &&
+                                      !chk_str_eq(self.current_struct, lit_base)) {
+                                        let mb <Buffer> = new_buffer(96);
+                                        mb.write_string("Cannot initialise private field '");
+                                        mb.write_string(vf.name);
+                                        mb.write_string("' of struct '");
+                                        mb.write_string(lit_base);
+                                        mb.write_string("'");
+                                        if (lspan > 0) {
+                                            self.report_error_spanned(mb.to_string(), expr.line, expr.col, lspan);
+                                        } else {
+                                            self.report_error(mb.to_string(), expr.line, expr.col);
+                                        }
+                                        free_buffer(mb);
+                                      }
+                                }
+                                vf = vf.right;
+                            }
                         }
                     }
                 }
