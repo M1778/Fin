@@ -3373,6 +3373,14 @@ void SemanticAnalyzer::visit(StructInstantiation& node) {
                 error(node, fmt::format("Struct '{}' has no field '{}'",
                                         target->toString(), node.fields[i].first));
             } else {
+                // A literal initialises the field, so it is a write through the
+                // same boundary MemberAccess reads through (visit(MemberAccess&)):
+                // private unless filled in from inside the struct's own scope.
+                if (!target->isFieldPublic(node.fields[i].first) &&
+                    !(currentStructContext && currentStructContext->equals(*target))) {
+                    error(node, fmt::format("Cannot initialise private field '{}' of struct '{}'",
+                                            node.fields[i].first, target->name));
+                }
                 checkType(*node.fields[i].second, valueTypes[i], fieldType);
             }
         }
@@ -3391,6 +3399,14 @@ void SemanticAnalyzer::visit(StructInstantiation& node) {
         if (!fieldType) {
             error(node, fmt::format("Struct '{}' has no field '{}'", concreteType->toString(), f.first));
         } else {
+            // Same boundary as the generic path above and as MemberAccess: a
+            // literal initialises the field, so a private one is fillable only
+            // from inside the struct's own scope.
+            if (!concreteType->isFieldPublic(f.first) &&
+                !(currentStructContext && currentStructContext->equals(*concreteType))) {
+                error(node, fmt::format("Cannot initialise private field '{}' of struct '{}'",
+                                        f.first, concreteType->name));
+            }
             checkType(*f.second, exprType, fieldType);
         }
     }

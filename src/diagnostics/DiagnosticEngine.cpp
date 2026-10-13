@@ -475,7 +475,11 @@ void DiagnosticEngine::reportError(const std::string& msg) {
     Diagnostic d;
     d.severity = DiagnosticSeverity::Error;
     d.message = msg;
-    d.file = filename;
+    // No `d.file`: a diagnostic with no source location is about the invocation,
+    // not about a place in a file (ADR 0009), so JSON renders `"file":null`.
+    // Setting it to this engine's file produced a third shape -- `file` set with
+    // `line` 0, rendered as `mylib.fin:0:0` -- that claims a file without naming
+    // a place in it.
     errorCount++;
     emit(d);
 }
@@ -484,7 +488,7 @@ void DiagnosticEngine::reportError(const std::string& msg, const std::string& he
     Diagnostic d;
     d.severity = DiagnosticSeverity::Error;
     d.message = msg;
-    d.file = filename;
+    // Same as above: locationless means no file, not this engine's file.
     d.help = help;
     errorCount++;
     emit(d);

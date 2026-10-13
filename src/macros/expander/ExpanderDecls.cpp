@@ -126,6 +126,20 @@ void MacroExpander::visit(ImportModule& node) {
     auto moduleScope = loader->loadModule(node.source, node.is_package);
     if (!moduleScope) return; 
 
+    // Case 0: `import * from m;` -- every macro the module declares. The
+    // analyzer's star branch (Analyzer_Decl.cpp) carries values, types and now
+    // macros together; carrying them here too keeps the two passes in agreement
+    // (ADR 0023). Same explicit-beats-wildcard rule: a macro the importer
+    // declares itself is not overwritten.
+    if (node.targets.size() == 1 && node.targets[0] == "*") {
+        for (auto& kv : moduleScope->macros) {
+            if (kv.second) kv.second->declaringScope = moduleScope.get();
+            if (kv.second && !currentScope->resolveMacro(kv.first))
+                currentScope->defineMacro(kv.first, kv.second);
+        }
+        return;
+    }
+
     // Case 1: Specific Imports
     if (!node.targets.empty()) {
         for (const auto& target : node.targets) {

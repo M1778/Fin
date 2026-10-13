@@ -213,6 +213,12 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
     }
     checkDuplicateDeclaration(currentScope.get(), node, node.name, node.attributes, type, false, false);
     currentScope->define(sym);
+    // Import visibility: a name declared without `pub` is not part of a
+    // package import's public interface (visit(ImportModule&)). Recorded on
+    // whatever scope receives the binding -- only module scopes are ever read
+    // back, so locals cost one set entry and nothing else.
+    if (node.is_public) currentScope->privateSymbols.erase(node.name);
+    else currentScope->privateSymbols.insert(node.name);
     // Issue #46: this binding warns if it is never read -- unless its
     // initializer may run code (see isEffectfulInit above), which makes the
     // statement an ignored result rather than dead storage.
@@ -524,6 +530,11 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
         funSym.is_function = true;
         checkDuplicateDeclaration(currentScope->parent, node, node.name, node.attributes, funcType, true, false);
         currentScope->parent->define(funSym);
+        // Import visibility (see visit(VariableDeclaration&)): without `pub`
+        // this name is not package-importable. Methods register here too, into
+        // a struct-body scope no import ever reads, so the entry dies with it.
+        if (node.is_public) currentScope->parent->privateSymbols.erase(node.name);
+        else currentScope->parent->privateSymbols.insert(node.name);
         // The file's own declaration takes the name back from any import that
         // bound it (the define above overwrote the import's symbol): erase the
         // import's provenance with it, so a call to the file's own generic
@@ -650,6 +661,10 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         structType = std::make_shared<StructType>(node.name);
         currentScope->defineType(node.name, structType);
     }
+    // Import visibility, outside the hoist branch: a hoisted struct skips the
+    // define above but is still the same declaration with the same `pub`.
+    if (node.is_public) currentScope->privateTypes.erase(node.name);
+    else currentScope->privateTypes.insert(node.name);
 
     enterScope();
     // The scope method bodies register their names in (visit(Function-
@@ -1061,6 +1076,9 @@ void SemanticAnalyzer::visit(InterfaceDeclaration& node) {
         ifaceType->is_interface = true;
         currentScope->defineType(node.name, ifaceType);
     }
+    // Import visibility (see visit(StructDeclaration&)).
+    if (node.is_public) currentScope->privateTypes.erase(node.name);
+    else currentScope->privateTypes.insert(node.name);
     
     enterScope();
     // Collected onto the interface's own type, as visit(StructDeclaration&) and
@@ -1195,6 +1213,9 @@ void SemanticAnalyzer::visit(EnumDeclaration& node) {
         enumType->is_enum = true;
         currentScope->defineType(node.name, enumType);
     }
+    // Import visibility (see visit(StructDeclaration&)).
+    if (node.is_public) currentScope->privateTypes.erase(node.name);
+    else currentScope->privateTypes.insert(node.name);
 
     // The enumerators are collected here and defined below, after the generic scope
     // has been left: arrays_enums.fin:17 reads one by its bare name (`let s <Status>
@@ -1287,14 +1308,27 @@ void SemanticAnalyzer::visit(ImportModule& node) {
         const std::optional<size_t> starOwner = loader->indexOfModule(moduleScope);
         for (const auto& kv : moduleScope->symbols) {
             if (!currentScope->resolve(kv.first)) {
+                // Visibility (see the named branch below): a star package-import
+                // binds the module's public interface, not its privates.
+                if (node.is_package && moduleScope->privateSymbols.count(kv.first)) continue;
                 currentScope->define(kv.second);
                 // Bound only what the scope lacked, like the define above, so
                 // an earlier explicit binding keeps its provenance with its name.
                 if (starOwner) importedOwner_[kv.first] = *starOwner;
             }
         }
-        for (const auto& kv : moduleScope->types)
+        for (const auto& kv : moduleScope->types) {
+            if (node.is_package && moduleScope->privateTypes.count(kv.first)) continue;
             if (!currentScope->resolveType(kv.first)) currentScope->defineType(kv.first, kv.second);
+        }
+        // And the third map. A star that carried values and types but not macros
+        // would accept the import and then refuse the call, disagreeing with the
+        // expander below (ExpanderDecls.cpp star case) the way the named form did
+        // before ADR 0023. Same explicit-beats-wildcard rule as the two maps
+        // above: an importer that declares its own macro keeps it.
+        for (const auto& kv : moduleScope->macros)
+            if (kv.second && !currentScope->resolveMacro(kv.first))
+                currentScope->defineMacro(kv.first, kv.second);
         node.consumed = true;
         return;
     }
@@ -1303,19 +1337,43 @@ void SemanticAnalyzer::visit(ImportModule& node) {
     if (!node.targets.empty()) {
         bool allBound = true;
         const std::optional<size_t> targetOwner = loader->indexOfModule(moduleScope);
+        // Visibility: a package import (`import { X } from m`) binds only the
+        // module's public interface -- a name the module declared without `pub`
+        // is not exported to it, and the refusal reads the same as a missing
+        // name because that is what it is to the importer. A quoted file import
+        // (`import { X } from "m.fin"`) is exempt: it names the file, not the
+        // interface (tests/samples/importing.fin:3 imports the unmarked
+        // `Vector3` of structs.fin:3, both normative). Macros are exempt by
+        // construction: `pub @macro` is a syntax error, so declaration is the
+        // only export rule one can express (ADR 0023).
         for (const auto& target : node.targets) {
             bool found = false;
             if (auto* sym = moduleScope->resolve(target)) {
-                currentScope->define(*sym); // Copy symbol
-                // Which module the name came from, for the backend's generic
-                // instantiation (see importedOwner_): overwritten like the
-                // binding itself, so the last import wins here as in the scope.
-                if (targetOwner) importedOwner_[target] = *targetOwner;
-                found = true;
+                if (node.is_package && moduleScope->privateSymbols.count(target)) {
+                    error(node, "Module '" + node.source + "' does not export '" + target + "'");
+                } else {
+                    currentScope->define(*sym); // Copy symbol
+                    // Which module the name came from, for the backend's generic
+                    // instantiation (see importedOwner_): overwritten like the
+                    // binding itself, so the last import wins here as in the scope.
+                    if (targetOwner) importedOwner_[target] = *targetOwner;
+                    // The privacy travels with the binding, so a module that
+                    // re-exports through a quoted import still gates downstream
+                    // package imports of the name.
+                    if (moduleScope->privateSymbols.count(target))
+                        currentScope->privateSymbols.insert(target);
+                    found = true;
+                }
             }
             if (auto type = moduleScope->resolveType(target)) {
-                currentScope->defineType(target, type); // Copy type
-                found = true;
+                if (node.is_package && moduleScope->privateTypes.count(target)) {
+                    error(node, "Module '" + node.source + "' does not export '" + target + "'");
+                } else {
+                    currentScope->defineType(target, type); // Copy type
+                    if (moduleScope->privateTypes.count(target))
+                        currentScope->privateTypes.insert(target);
+                    found = true;
+                }
             }
             // And the third table. A `Scope` has three maps -- `symbols`, `types`,
             // `macros` -- and this check read two of them, so `import { magic_add } from
@@ -1336,10 +1394,10 @@ void SemanticAnalyzer::visit(ImportModule& node) {
             // runs -- but a scope that answered `resolveMacro` differently from the one
             // the expander built is the disagreement above with the sides swapped.
             //
-            // `import * from m` is not covered here and is not an oversight: the expander
-            // does not carry macros through a star either (its named-import case looks up
-            // a target literally named `*`), and ADR 0023 rules only on the named form.
-            // Whoever rules the star changes both passes together.
+            // `import * from m` is covered in the star branch above, which carries
+            // macros under the same explicit-beats-wildcard rule; the expander
+            // carries them through a star too (ExpanderDecls.cpp star case), so
+            // the two passes agree on both forms.
             if (auto* macro = moduleScope->resolveMacro(target)) {
                 currentScope->defineMacro(target, macro);
                 found = true;
@@ -1596,6 +1654,8 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
         const std::string& path = node.aliased_type->name;
         if (auto symType = resolveExternPathAsSymbol(path)) {
             currentScope->define({node.name, symType, false, true});
+            if (node.is_public) currentScope->privateSymbols.erase(node.name);
+            else currentScope->privateSymbols.insert(node.name);
             debugLog(fg(fmt::color::gray), "      [Extern] Symbol '{}' -> '{}'\n",
                      node.name, symType->toString());
             return;
@@ -1608,6 +1668,8 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
         // Soundness_ExternAlias.AnExternAliasOfAnUnknownNameStillDeclaresTheNewName.
         auto asType = resolveTypeOrError(node.aliased_type.get());
         currentScope->defineType(node.name, asType);
+        if (node.is_public) currentScope->privateTypes.erase(node.name);
+        else currentScope->privateTypes.insert(node.name);
         // And as a symbol too, holding the sentinel, when the path resolved to nothing
         // at all: `x` in `extern nosuchthing as x;` may be used in either position and
         // the sentinel is quiet in both.
@@ -1653,6 +1715,8 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
             auto aliasType = std::make_shared<UnionType>(node.name, std::move(alternatives));
             aliasType->generic_args = std::move(genArgs);
             currentScope->defineType(node.name, aliasType);
+            if (node.is_public) currentScope->privateTypes.erase(node.name);
+            else currentScope->privateTypes.insert(node.name);
             debugLog(fg(fmt::color::gray), "      [Type] Defined generic union alias '{}' -> '{}'\n",
                      node.name, aliasType->toString());
             return;
@@ -1685,6 +1749,8 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
             alternatives.push_back(resolveTypeOrError(member.get()));
         type = std::make_shared<UnionType>(node.name, std::move(alternatives));
         currentScope->defineType(node.name, type);
+        if (node.is_public) currentScope->privateTypes.erase(node.name);
+        else currentScope->privateTypes.insert(node.name);
         debugLog(fg(fmt::color::gray), "      [Type] Defined union alias '{}' -> '{}'\n",
                  node.name, type->toString());
         return;
@@ -1732,6 +1798,8 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
     // An alias is a declaration like any other: the name was written, so the name
     // exists. What it names is the sentinel, and that is what ends the cascade.
     currentScope->defineType(node.name, type);
+    if (node.is_public) currentScope->privateTypes.erase(node.name);
+    else currentScope->privateTypes.insert(node.name);
     debugLog(fg(fmt::color::gray), "      [Type] Defined alias '{}' -> '{}'\n", node.name, type->toString());
 }
 
@@ -1792,6 +1860,10 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
             paramTypes, retType ? retType : errorType(), false, paramDefaults);
         checkDuplicateDeclaration(currentScope->parent, node, node.name, node.attributes, funcType, true, false);
         currentScope->parent->define({node.name, funcType, false, true});
+        // Import visibility (see visit(FunctionDeclaration&)): `@special(priv)`
+        // stays in its module.
+        if (node.is_public) currentScope->parent->privateSymbols.erase(node.name);
+        else currentScope->parent->privateSymbols.insert(node.name);
         debugLog(fg(fmt::color::gray), "      [Register] Registered special '{}' in parent scope\n", node.name);
     }
 
@@ -1848,6 +1920,9 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
         structType = std::make_shared<StructType>(node.name);
         currentScope->defineType(node.name, structType);
     }
+    // Import visibility (see visit(StructDeclaration&)).
+    if (node.is_public) currentScope->privateTypes.erase(node.name);
+    else currentScope->privateTypes.insert(node.name);
 
     enterScope();
     // The class half of the struct body's rule above: same scope, same

@@ -1242,41 +1242,37 @@ TEST(Soundness_ModuleDiagnostics, TheFailureNamesASearchPathThatDoesExist) {
         << stripAnsi(r.err);
 }
 
-// Pins a shape rather than a bug, because which way it should go is the owner's
-// call. ADR 0009:86 documents two shapes: a located diagnostic (`file` set,
-// `line` >= 1) and an argv diagnostic (`file` null, `line` 0, "about the
-// invocation, not about a place in a file"). The loader's is a third -- `file`
-// set and `line` 0 -- a diagnostic that claims a file and names no place in it,
-// which renders as `mylib.fin:0:0` in any consumer that formats what it is
-// given. `reportError(const std::string&)` (DiagnosticEngine.cpp:333) sets
-// `d.file = filename` and leaves `d.line` at its default; the loader has no
-// location to give it, because `loadModule` takes the import as a string and
-// the `ImportModule` node that carries the location stays with the caller.
-//
-// If the ruling is that the shape is legal, ADR 0009 gains a sentence and this
-// test is renamed into Soundness_. If the ruling is that it is not, threading
-// the location into `loadModule` touches `src/macros/`, which this wave does
-// not own -- then this inverts to assert `line >= 1`.
-TEST(KnownDefect_ModuleDiagnostics, ALocationlessErrorStillNamesAFile) {
-    // Known defect: #91 (tracked; see issue for inversion target).
+// A loader failure is an argv diagnostic, not a located one. ADR 0009:86 documents
+// two shapes: a located diagnostic (`file` set, `line` >= 1) and an argv diagnostic
+// (`file` null, `line` 0, "about the invocation, not about a place in a file").
+// The loader used to emit a third -- `file` set and `line` 0, rendered as
+// `mylib.fin:0:0` -- because `reportError(const std::string&)` stamped the engine's
+// own file onto a diagnostic the loader has no location for (`loadModule` takes the
+// import as a string; the `ImportModule` node carrying the location stays with the
+// caller). The ruling is that the shape was not legal: the failed search is one fact
+// about the invocation, explained once in `help`, while each import site keeps its
+// own located "Failed to load module" (see EveryImportSiteKeepsItsOwnLocatedError
+// below). Threading the location into `loadModule` so the search itself could be
+// located remains open, but it is not needed to stop claiming a place that is not one.
+// (Was KnownDefect_ModuleDiagnostics.ALocationlessErrorStillNamesAFile, #91.)
+TEST(Soundness_ModuleDiagnostics, ALocationlessErrorNamesNoFile) {
     TempFin f(kImportsMyLib, "shape");
     auto r = runFinc({f.str(), "--diagnostics=json", "--fin-libs=/nonexistent/only"},
                      noFinLibs());
     ASSERT_EQ(r.exitCode, 1) << r.err;
 
-    bool sawFileWithoutAPlace = false;
+    bool sawModuleNotFound = false;
     for (const auto& d : jsonDiagnostics(r.err)) {
         if (d.find("module not found") == std::string::npos) continue;
-        if (d.find("\"file\":null") == std::string::npos &&
-            d.find("\"line\":0") != std::string::npos) {
-            sawFileWithoutAPlace = true;
-        }
+        sawModuleNotFound = true;
+        EXPECT_NE(d.find("\"file\":null"), std::string::npos)
+            << "a locationless diagnostic must not claim a file it names no place "
+               "in; the old shape rendered as `<file>:0:0`.\n"
+            << d;
+        EXPECT_NE(d.find("\"line\":0"), std::string::npos)
+            << "a locationless diagnostic names no line.\n" << d;
     }
-    EXPECT_TRUE(sawFileWithoutAPlace)
-        << "good news if this fails: the loader's diagnostic now names a place "
-           "in the file it blames, or stopped naming the file. Invert this test "
-           "into Soundness_ModuleDiagnostics asserting whichever it is.\n"
-        << r.err;
+    EXPECT_TRUE(sawModuleNotFound) << "the loader reported nothing?\n" << r.err;
 }
 
 // The deduplication above must not swallow a location. Two import sites naming
@@ -1571,10 +1567,12 @@ TEST(KnownDefect_LibraryPaths, AFileBesideTheSourceShadowsAPinnedLibrary) {
 namespace {
 
 // One module name, two definitions that differ in return type, so the type
-// checker reports which file won rather than us having to guess.
-const char* kPinnedReturnsInt   = "fun libfn() <int> { return 7; }\n";
-const char* kPinnedReturnsFloat = "fun libfn() <float> { return 7.0; }\n";
-const char* kSiblingReturnsFloat = "fun libfn() <float> { return 0.5; }\n";
+// checker reports which file won rather than us having to guess. `pub`
+// because a package import binds only a library's public interface (#89) --
+// an unmarked fixture would be refused before any pinning question arose.
+const char* kPinnedReturnsInt   = "pub fun libfn() <int> { return 7; }\n";
+const char* kPinnedReturnsFloat = "pub fun libfn() <float> { return 7.0; }\n";
+const char* kSiblingReturnsFloat = "pub fun libfn() <float> { return 0.5; }\n";
 
 // A project directory holding one source file, optionally beside a same-named
 // module that would shadow the pinned library, plus a separate library directory
@@ -1917,31 +1915,26 @@ TEST(Soundness_Imports, ANameNoMapHasIsStillReportedAsUnexported) {
     EXPECT_NE(err.find("Module 'm' does not export 'm_nope'"), std::string::npos) << err;
 }
 
-TEST(KnownDefect_Imports, ImportStarDoesNotBindAMacro) {
-    // Known defect: #89 (tracked; see issue for inversion target).
-    // The other half of plan.md's question, and it is booked rather than fixed because
-    // the two passes agree here: the expander's star case does not carry macros either
-    // (its named-import loop looks up a target literally named `*`), so both passes say
-    // no and nothing disagrees. ADR 0023 rules on the named form only.
+TEST(Soundness_Imports, ImportStarBindsEveryMacroTheModuleDeclares) {
+    // Was KnownDefect_Imports.ImportStarDoesNotBindAMacro (#89): `import *`
+    // copied names but not macros, and the expander's star case did not carry
+    // them either (its named-import loop looked up a target literally named
+    // `*`), so both passes said no and nothing disagreed. Both star branches
+    // now carry every macro the module declares, under the same
+    // explicit-beats-wildcard rule as values and types; ADR 0023 rules the
+    // named form, this the star half of plan.md's question.
     //
-    // Not a one-line change, which is why it is not made here. The analyzer's star
-    // branch copies a name only when this scope does not already have one -- explicit
-    // beats wildcard, ImportStarDoesNotShadowTheImportersOwnDeclaration -- and `Scope`
-    // has no `resolveMacro`-shaped guard to write the same rule against a macro without
-    // ruling what happens when a file declares a macro the star would bring in. And
-    // whoever rules it has to move the expander in the same commit: a star that bound
-    // macros in the analyzer alone would report `Undefined macro` from the expander on
-    // a program the analyzer had just accepted, which is the defect this file's
-    // Soundness_Imports block was written about, with the sides swapped.
+    // Both macros are called because `Scope` keeps values, types and macros in
+    // three maps and copying two of the three is a complete-looking fix that
+    // leaves the third broken -- the argument the star tests above were written
+    // against, now running three ways.
     const auto r = runStar("import * from m;\n"
-                           "fun main() <noret> { let x <int> = m_twice!(4); }\n");
+                           "fun main() <noret> { let x <int> = m_twice!(4); "
+                           "let y <int> = m_thrice!(4); }\n");
     const std::string err = stripAnsi(r.err);
-    EXPECT_NE(err.find("Undefined macro 'm_twice!'"), std::string::npos)
-        << "GOOD NEWS: `import *` now carries macros. Check that the *expander* carries\n"
-           "them too -- if only the analyzer does, a call still fails to expand and the\n"
-           "two passes disagree again. Then invert this into\n"
-           "Soundness_Imports.ImportStarBindsEveryMacroTheModuleDeclares.\n"
-        << err;
+    EXPECT_EQ(r.exitCode, 0) << err;
+    EXPECT_EQ(err.find("Undefined macro"), std::string::npos)
+        << "the star import bound the values but not the macros\n" << err;
 }
 
 // Two holes in the same function, both real, neither fixable without a ruling.
@@ -1989,14 +1982,49 @@ TEST(KnownDefect_Imports, AnImportIgnoresTheNamespaceItNames) {
 // import is exempt and only library imports are gated, or `pub` is advisory. Under
 // ADR 0008 the first of those changes sample code and needs a ratified decision;
 // the other two change the compiler. Nothing here picks one.
-TEST(KnownDefect_Imports, ANonPublicSymbolCanBeImportedByName) {
-    // Known defect: #89 (tracked; see issue for inversion target).
+TEST(Soundness_Imports, ANonPublicSymbolIsRefusedByName) {
+    // Was KnownDefect_Imports.ANonPublicSymbolCanBeImportedByName (#89): `pub`
+    // was not enforced on import -- `is_public` lived on the declaration node
+    // and `Scope::symbols` had nowhere to put it, so it was dropped when the
+    // module's scope was built, and `Scope::types` had no visibility at all.
+    //
+    // The rule: a package import (`import { X } from m`) binds only the
+    // module's public interface. A quoted file import is exempt -- it names
+    // the file, not the interface (AQuotedFileImportIsExemptFromVisibility) --
+    // and a bare `import m;` namespace still checks nothing, which is the
+    // pre-existing boundary this does not move.
     const auto r = runStar("import { m_private } from m;\n"
                            "fun main() <noret> { let x <int> = m_private(); }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "a non-public symbol was refused. If visibility now has a meaning, this test "
-           "is the record of when it did not -- invert it, do not delete it.\n"
-        << stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Module 'm' does not export 'm_private'"), std::string::npos)
+        << "a private symbol is unexported to a package import\n" << stripAnsi(r.err);
+}
+
+TEST(Soundness_Imports, AQuotedFileImportIsExemptFromVisibility) {
+    // The other half of the rule above: quoting the path names the file, so
+    // the import sees what the file declares. tests/samples/importing.fin:3
+    // imports the unmarked `Vector3` of structs.fin:3 this way, both
+    // normative -- a rule without this exemption would make that sample
+    // unwritable.
+    //
+    // Resolved through the same search paths as the bare form
+    // (ModuleLoader.cpp CASE B step 3 treats a quoted name as a library
+    // lookup), so the only thing this form changes is the package flag.
+    const auto r = runStar("import { m_private } from \"m\";\n"
+                           "fun main() <noret> { let x <int> = m_private(); }\n");
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+}
+
+TEST(Soundness_Imports, ImportStarDoesNotBindANonPublicSymbol) {
+    // The star half of the same gate: `import *` binds the module's public
+    // interface, so the private stays undefined rather than bound. Asserts the
+    // use, not just the exit code, so a fix that bound the name under a
+    // different spelling would still fail here.
+    const auto r = runStar("import * from m;\n"
+                           "fun main() <noret> { let x <int> = m_private(); }\n");
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << err;
+    EXPECT_NE(err.find("Undefined function or type 'm_private'"), std::string::npos) << err;
 }
 
 // --- A location from one file, rendered against another ----------------------

@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include "../types/Type.hpp"
 
@@ -87,6 +88,15 @@ public:
     std::unordered_map<std::string, std::shared_ptr<Type>> types;
     
     std::unordered_map<std::string, MacroDeclaration*> macros;
+
+    // Names this scope declares without `pub` (or `@special(pub)`). A package
+    // import (`import { X } from m`, `import * from m`) binds only public
+    // names; a quoted file import is exempt. Absent means public: builtins and
+    // externs predate the record, and `pub @macro` is a syntax error so macros
+    // need none. Populated where declarations register, propagated where
+    // imports copy -- never consulted for anything but import gating.
+    std::unordered_set<std::string> privateSymbols;
+    std::unordered_set<std::string> privateTypes;
 
     Scope(Scope* p = nullptr) : parent(p) {}
 

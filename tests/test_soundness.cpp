@@ -8461,9 +8461,18 @@ TEST(Soundness_FieldVisibility, AnUnprefixedFieldOnAGenericStructIsReadableFromO
 TEST(Soundness_FieldVisibility, APrivFieldIsNotReadableFromOutside) {
     // The other side, and the reason the change is a default and not a removal.
     // Without this test "make everything public" passes the whole block.
+    //
+    // Built by the struct's own constructor: a literal in `main` is refused on
+    // its own account now (AStructLiteralCannotInitialiseAPrivateFieldFromOutside),
+    // so the subject has to arrive through the internal path for this to stay a
+    // test of the read.
     const FincRun r = compile(
-        "struct S { priv secret <int>, open <int> }\n"
-        "fun main() <noret> { let s <S> = S{secret: 1, open: 2}; let a <int> = s.secret; }\n");
+        "struct S {\n"
+        "  priv secret <int>,\n"
+        "  open <int>,\n"
+        "  pub static fun make() <Self> { return S{secret: 1, open: 2}; }\n"
+        "}\n"
+        "fun main() <noret> { let s <S> = S::make(); let a <int> = s.secret; }\n");
     EXPECT_EQ(r.exitCode, 1) << "`priv` must still mean private:\n" << r.err;
     const std::string err = messagesOnly(stripAnsi(r.err));
     EXPECT_NE(err.find("Cannot access private field 'secret' of struct 'S'"), std::string::npos)
@@ -8483,8 +8492,10 @@ TEST(Soundness_FieldVisibility, APrivLabelSectionIsNotReadableFromOutside) {
         "  priv:\n"
         "  a <int>,\n"
         "  b <int>,\n"
+        "  pub:\n"
+        "  static fun make() <Self> { return S{a: 1, b: 2}; }\n"
         "}\n"
-        "fun main() <noret> { let s <S> = S{a: 1, b: 2}; let x <int> = s.a; let y <int> = s.b; }\n");
+        "fun main() <noret> { let s <S> = S::make(); let x <int> = s.a; let y <int> = s.b; }\n");
     EXPECT_EQ(r.exitCode, 1) << r.err;
     const std::string err = messagesOnly(stripAnsi(r.err));
     EXPECT_NE(err.find("Cannot access private field 'a'"), std::string::npos) << err;
@@ -8503,9 +8514,10 @@ TEST(Soundness_FieldVisibility, APubLabelAfterAPrivLabelRestoresPublicAccess) {
         "  hidden <int>,\n"
         "  pub:\n"
         "  shown <int>,\n"
+        "  static fun make() <Self> { return S{hidden: 1, shown: 2}; }\n"
         "}\n"
         "fun main() <noret> {\n"
-        "  let s <S> = S{hidden: 1, shown: 2};\n"
+        "  let s <S> = S::make();\n"
         "  let a <int> = s.hidden;\n"
         "  let b <int> = s.shown;\n"
         "}\n");
@@ -8527,8 +8539,10 @@ TEST(Soundness_FieldVisibility, AnUnprefixedFieldAfterAPrivLabelIsStillPrivate) 
         "  pub visible <int>,\n"
         "  priv:\n"
         "  after <int>,\n"
+        "  pub:\n"
+        "  static fun make() <Self> { return S{visible: 1, after: 2}; }\n"
         "}\n"
-        "fun main() <noret> { let s <S> = S{visible: 1, after: 2}; let a <int> = s.after; }\n");
+        "fun main() <noret> { let s <S> = S::make(); let a <int> = s.after; }\n");
     EXPECT_EQ(r.exitCode, 1) << r.err;
     EXPECT_NE(messagesOnly(stripAnsi(r.err)).find("Cannot access private field 'after'"),
               std::string::npos)
@@ -8541,9 +8555,10 @@ TEST(Soundness_FieldVisibility, APrivFieldIsReadableFromInsideItsOwnStruct) {
     const FincRun r = compile(
         "struct S {\n"
         "  priv secret <int>,\n"
+        "  pub static fun make() <Self> { return S{secret: 1}; }\n"
         "  pub fun get() <int> { return self.secret; }\n"
         "}\n"
-        "fun main() <noret> { let s <S> = S{secret: 1}; let a <int> = s.get(); }\n");
+        "fun main() <noret> { let s <S> = S::make(); let a <int> = s.get(); }\n");
     EXPECT_EQ(r.exitCode, 0) << "a struct can read its own private field:\n" << r.err;
 }
 
@@ -8551,8 +8566,11 @@ TEST(Soundness_FieldVisibility, APrivFieldIsStillTypeChecked) {
     // A refused read must not also lose the field's type, or one mistake becomes two
     // diagnostics and the second one is noise. Asserts the count, not just the message.
     const FincRun r = compile(
-        "struct S { priv secret <int> }\n"
-        "fun main() <noret> { let s <S> = S{secret: 1}; let a <string> = s.secret; }\n");
+        "struct S {\n"
+        "  priv secret <int>,\n"
+        "  pub static fun make() <Self> { return S{secret: 1}; }\n"
+        "}\n"
+        "fun main() <noret> { let s <S> = S::make(); let a <string> = s.secret; }\n");
     EXPECT_EQ(r.exitCode, 1) << r.err;
     const std::string err = messagesOnly(stripAnsi(r.err));
     EXPECT_NE(err.find("Cannot access private field 'secret'"), std::string::npos) << err;
@@ -8561,26 +8579,21 @@ TEST(Soundness_FieldVisibility, APrivFieldIsStillTypeChecked) {
         << err;
 }
 
-TEST(KnownDefect_FieldVisibility, AStructLiteralInitialisesAPrivateFieldFromOutside) {
-    // Known defect: #89 (tracked; see issue for inversion target).
-    // StructInstantiation never consults isFieldPublic, so a body can be filled in from
-    // anywhere regardless of what its members say. Every test above relies on this to
-    // build its subject, which is why it is asserted here rather than left implicit.
-    //
-    // Not obviously a defect: readonly.fin:20 and stdlib/collection.fin both construct
-    // types whose fields are private, and no corpus sample constructs one from outside
-    // and expects a refusal. Recorded as a KnownDefect because the compiler cannot both
-    // refuse `s.secret` and permit `S{secret: 1}` on a principle it can state.
+TEST(Soundness_FieldVisibility, AStructLiteralCannotInitialiseAPrivateFieldFromOutside) {
+    // Was KnownDefect_FieldVisibility.AStructLiteralInitialisesAPrivateFieldFromOutside
+    // (#89): StructInstantiation never consulted isFieldPublic, so a body could be
+    // filled in from anywhere regardless of what its members said. A literal
+    // initialises the field, so it goes through the same boundary a read does
+    // (visit(MemberAccess&)): private unless filled in from inside the struct's
+    // own scope, which the static-constructor programs above exercise.
     const FincRun r = compile(
         "struct S { priv secret <int> }\n"
         "fun main() <noret> { let s <S> = S{secret: 1}; }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "TODAY: a struct literal ignores field visibility. If this fails, the "
-           "instantiation path grew a visibility check -- decide whether construction "
-           "from outside is legal (readonly.fin:20 and the stdlib both do it, so it "
-           "probably is inside the declaring module) and either move this to Soundness_ "
-           "inverted, or keep it and say where the boundary is.\n"
-        << r.err;
+    EXPECT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_NE(messagesOnly(stripAnsi(r.err)).find(
+                  "Cannot initialise private field 'secret' of struct 'S'"),
+              std::string::npos)
+        << messagesOnly(stripAnsi(r.err));
 }
 
 TEST(Soundness_FieldVisibility, AnInheritedUnprefixedFieldIsReadableFromOutside) {
