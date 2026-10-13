@@ -1582,6 +1582,29 @@ pub struct Checker {
       // (C++ isReceiverOf: pointer markers stripped, nominal type compared),
       // so the struct-only prefix would keep the receiver counted and every
       // `r.unwrap()` would report one argument too many.
+      // The struct behind a flattened `Target_method` name: `Collection`
+      // for `Collection_Collection`, "" when the prefix names no declared
+      // struct. Same prefix rule as fn_has_struct_prefix, returning the name
+      // so callers can compare it: implements-block bodies flatten to top
+      // level, but they are still the struct's own members (C++ checks them
+      // in struct context), so member-only rules consult this where they
+      // consult current_struct.
+      fun fn_owner_struct(self: &Self, name: string) <string> {
+        if (name == null) { return ""; }
+        let len <int> = cast<int>(chk_strlen(name));
+        let i <int> = 0;
+        while (i < len) {
+            if (chk_str_eq(substr(name, i, 1), "_")) { break; }
+            i = i + 1;
+        }
+        if (i <= 0 || i >= len) { return ""; }
+        let prefix <string> = substr(name, 0, i);
+        if (!self.global_scope.has(prefix)) { return ""; }
+        let sym <Symbol> = self.global_scope.lookup(prefix);
+        if (sym.kind != sym_struct()) { return ""; }
+        return prefix;
+      }
+
       fun fn_enum_prefix(self: &Self, name: string) <string> {
         if (name == null) { return ""; }
         let len <int> = cast<int>(chk_strlen(name));
@@ -7089,8 +7112,21 @@ pub struct Checker {
                             let vf <&AstNode> = expr.left;
                             while (vf != null) {
                                 if (vf.name != null && chk_strlen(vf.name) > cast<ulong>(0)) {
+                                    // Allowed from the struct itself: a body
+                                    // checked with the target as current
+                                    // struct (its own declaration or methods),
+                                    // or a flattened implements-block member
+                                    // (`Collection_Collection` builds
+                                    // `Collection`, which the parser
+                                    // flattened to top level but C++ still
+                                    // checks in struct context).
+                                    let in_own <bool> = chk_str_eq(self.current_struct, lit_base);
+                                    if (!in_own) {
+                                        let owner <string> = self.fn_owner_struct(self.current_fn);
+                                        in_own = !chk_str_eq(owner, "") && chk_str_eq(owner, lit_base);
+                                    }
                                     if (self.chk_literal_field_pub(lit_base, vf.name, 0) == 0 &&
-                                      !chk_str_eq(self.current_struct, lit_base)) {
+                                      !in_own) {
                                         let mb <Buffer> = new_buffer(96);
                                         mb.write_string("Cannot initialise private field '");
                                         mb.write_string(vf.name);
