@@ -5502,7 +5502,7 @@ TEST(Soundness_IntegerConstants, AConstantIsAlsoAFloatOrADouble) {
     // not, so `let x <double> = 1;` failed while `let x <float> = 1;` passed. Same
     // rule, and it is asserted here so that narrowing the constant rule to integers
     // alone shows up as a failure rather than as a silent regression.
-    for (const std::string& t : {"float", "double"}) {
+    for (const std::string t : {"float", "double"}) {
         const FincRun r = compile("fun main() <noret> { let x <" + t + "> = 1; }\n");
         EXPECT_EQ(r.exitCode, 0) << "`let x <" << t << "> = 1;`\n" << r.err;
     }
@@ -5525,14 +5525,14 @@ TEST(Soundness_IntegerConstants, ANegativeConstantIsNotUnsigned) {
     // this test and delete the `!negative` in constantFitsType; if it is that unsigned
     // maxima are spelled explicitly, stdio.fin needs a ratified edit. Either way the
     // sample is currently rejected either way, so nothing depends on the answer today.
-    for (const std::string& t : {"uint", "ulong", "ushort"}) {
+    for (const std::string t : {"uint", "ulong", "ushort"}) {
         const FincRun r = compile("fun main() <noret> { let x <" + t + "> = -1; }\n");
         EXPECT_NE(r.exitCode, 0)
             << "`let x <" << t << "> = -1;` must be rejected -- -1 is not representable "
                "in an unsigned type, and accepting it is worse than rejecting `= 1` was.";
     }
     // And it stays legal where it is representable.
-    for (const std::string& t : {"int", "long", "short", "float", "double"}) {
+    for (const std::string t : {"int", "long", "short", "float", "double"}) {
         const FincRun r = compile("fun main() <noret> { let x <" + t + "> = -1; }\n");
         EXPECT_EQ(r.exitCode, 0) << "`let x <" << t << "> = -1;`\n" << r.err;
     }
@@ -5904,7 +5904,7 @@ TEST(Soundness_IntegerIndex, AConstantIndexIsStillBoundsChecked) {
 TEST(Soundness_IntegerConstants, AConstantIsStillNotABoolOrAString) {
     // The rule is about integer and floating targets and nothing else. Without this,
     // "the context decides" is indistinguishable from "the check was deleted".
-    for (const std::string& t : {"bool", "string"}) {
+    for (const std::string t : {"bool", "string"}) {
         const FincRun r = compile("fun main() <noret> { let x <" + t + "> = 1; }\n");
         EXPECT_NE(r.exitCode, 0)
             << "`let x <" << t << "> = 1;` must still be a type error.";

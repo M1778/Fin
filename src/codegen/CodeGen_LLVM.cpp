@@ -1131,7 +1131,7 @@ public:
             // `take(a)` and on `return a`. The interface pair above is built the same
             // way for the same reason. A name buys nothing here: nothing reads it, and
             // two `[T]`s of one element type must be assignable.
-            t.llvmType = llvm::StructType::get(ctx_, {element->llvmType->getPointerTo(),
+            t.llvmType = llvm::StructType::get(ctx_, {llvm::PointerType::get(element->llvmType, 0),
                                                      llvm::Type::getInt32Ty(ctx_)});
             return t;
         }
@@ -1202,7 +1202,7 @@ public:
             // structs, so every `[int]` in the program is one llvm::StructType and two
             // prototypes of one key and value type are assignable to each other.
             arr.llvmType = llvm::StructType::get(ctx_,
-                {inner->llvmType->getPointerTo(), llvm::Type::getInt32Ty(ctx_)});
+                {llvm::PointerType::get(inner->llvmType, 0), llvm::Type::getInt32Ty(ctx_)});
             return arr;
         };
 
@@ -9112,7 +9112,7 @@ private:
         llvm::Value* raw = builder_.CreateCall(
             mallocFn, {llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx_), bytes)},
             "closure.raw");
-        llvm::Value* env = builder_.CreateBitCast(raw, envType->getPointerTo(),
+        llvm::Value* env = builder_.CreateBitCast(raw, llvm::PointerType::get(envType, 0),
                                                   "closure.env");
         for (size_t i = 0; i < fields.size(); ++i) {
             std::optional<CaptureSource> src = captureSource(fields[i].first);
@@ -14865,7 +14865,7 @@ private:
             auto* bytePtr = builder_.CreateInBoundsGEP(llvm::Type::getInt8Ty(ctx_), data,
                                                        builder_.CreatePtrToInt(offset, llvm::Type::getInt64Ty(ctx_)));
             auto& field = object.type.interfaceInfo->fields[slot];
-            auto* typed = builder_.CreateBitCast(bytePtr, field.type.llvmType->getPointerTo());
+            auto* typed = builder_.CreateBitCast(bytePtr, llvm::PointerType::get(field.type.llvmType, 0));
             value_ = CgVal{builder_.CreateLoad(field.type.llvmType, typed, node.member), field.type};
             return;
         }
@@ -15264,7 +15264,7 @@ private:
             "a dynamic array allocation");
         if (!mallocFn) return nullptr;
         llvm::Value* raw = builder_.CreateCall(mallocFn, {builder_.CreateZExt(byteCount, llvm::Type::getInt64Ty(ctx_))});
-        llvm::Value* data = builder_.CreateBitCast(raw, elemTy->getPointerTo());
+        llvm::Value* data = builder_.CreateBitCast(raw, llvm::PointerType::get(elemTy, 0));
         for (size_t i = 0; i < elements.size(); ++i) {
             if (!elements[i]) { unsupported(node, "an array element with no value");         return nullptr;
     }

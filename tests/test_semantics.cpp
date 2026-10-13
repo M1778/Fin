@@ -34,9 +34,7 @@ struct Analysis {
 // Runs the real SemanticAnalyzer. Nothing in the old suite ever constructed one.
 Analysis analyze(const std::string& code) {
     Analysis a;
-    static fin::DiagnosticEngine* keep = nullptr;
     auto diag = std::make_unique<fin::DiagnosticEngine>("", "<test>");
-    keep = diag.get();
     diag->setColorMode(fin::ColorMode::Never);
 
     auto parsed = parseSource(code, *diag);
@@ -149,7 +147,7 @@ TEST(SemanticAnalyzer, RejectsDuplicateStructFields) {
     // must be diagnosed by semantics, not surface downstream as a codegen
     // "not lowered yet" refusal. The diagnostic names the field and the struct
     // and points at the second declaration.
-    for (const std::string& structDecl :
+    for (const std::string structDecl :
          {"struct P { x <int>, x <int> }\n", "struct Q { x <int>, x <string> }\n"}) {
         auto a = analyze(structDecl + "fun main() <noret> {}\n");
         ASSERT_TRUE(a.parsed) << structDecl;

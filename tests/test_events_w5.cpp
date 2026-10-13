@@ -105,16 +105,6 @@ W5Analysis analyzeW5(const std::string& code) {
     return a;
 }
 
-bool firedInOrder(const std::vector<fin::events::FiredHandler>& log,
-                  const std::string& first, const std::string& second) {
-    int fi = -1, si = -1;
-    for (size_t i = 0; i < log.size(); ++i) {
-        if (log[i].handler == first && fi < 0) fi = (int)i;
-        if (log[i].handler == second && si < 0) si = (int)i;
-    }
-    return fi >= 0 && si >= 0 && fi < si;
-}
-
 } // namespace
 
 // --- Slice 1: the W5 payload table ------------------------------------------
@@ -677,8 +667,9 @@ TEST(W5AttributionSurvival, TwoPointsTwoDiagnosticsEachAttributed) {
     for (size_t i = 0; i < err.size();) {
         size_t eol = err.find('\n', i);
         if (eol == std::string::npos) eol = err.size();
-        if (err.compare(i, 7, "error: ") == 0)
+        if (err.compare(i, 7, "error: ") == 0) {
             EXPECT_NE(err.find("h_two", i), std::string::npos) << err.substr(i, eol - i);
+        }
         i = eol + 1;
     }
 }
