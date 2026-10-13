@@ -1,0 +1,46 @@
+// Quicksort benchmark in Fin.
+// Computes the same workload as qsort.c/qsort.cpp/qsort.rs.
+// N = 50000 (reduced from C's 1M because Fin's static arrays need compile-time sizes
+// and stack allocation of 1M ints may overflow).
+
+fun partition(arr: &[int], lo: int, hi: int) <int> {
+    let pivot <int> = arr[hi];
+    let i <int> = lo - 1;
+    let j <int> = lo;
+    while (j < hi) {
+        if (arr[j] < pivot) {
+            i = i + 1;
+            let t <int> = arr[i];
+            arr[i] = arr[j];
+            arr[j] = t;
+        }
+        j = j + 1;
+    }
+    let t2 <int> = arr[i + 1];
+    arr[i + 1] = arr[hi];
+    arr[hi] = t2;
+    return i + 1;
+  }
+
+fun quicksort(arr: &[int], lo: int, hi: int) <noret> {
+    if (lo < hi) {
+        let p <int> = partition(arr, lo, hi);
+        quicksort(arr, lo, p - 1);
+        quicksort(arr, p + 1, hi);
+    }
+  }
+
+fun main() <int> {
+    let n <int> = 1000000;
+    let arr <[int]> = new [int, 1000000]{};
+    let seed <ulong> = 12345;
+    let i <int> = 0;
+    while (i < n) {
+        seed = seed * cast<ulong>(1103515245) + cast<ulong>(12345);
+        arr[i] = cast<int>(seed / cast<ulong>(65536) % cast<ulong>(1000000));
+        i = i + 1;
+    }
+    quicksort(&arr, 0, n - 1);
+    printf("%d\n", arr[n / 2]);
+    return 0;
+  }

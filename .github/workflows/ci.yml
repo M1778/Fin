@@ -368,6 +368,77 @@ jobs:
             build/Testing/Temporary/LastTest.log
             build/CMakeCache.txt
 
+  # Perf signal (issue #65). Clearly-marked OPTIONAL: continue-on-error, so
+  # timing noise on shared runners -- not a compiler change -- can never turn
+  # the matrix red. This job uploads numbers as an artifact (signal, not
+  # gate): a blocking perf gate is an explicit non-goal until variance is
+  # characterized, and deltas under ~5% are machine noise (see
+  # docs/PERFORMANCE_NOTES.md section 1). It DOES fail (red) if a bench
+  # source stops compiling: run_bench.py exits 1 when a Fin source fails to
+  # build or run. Promote to blocking by deleting continue-on-error only
+  # after variance is characterized. Linux only: the harness needs a finc
+  # binary and gcc; rustc is optional (SKIP, not failure, when absent).
+  perf:
+    name: perf signal (optional)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-toolchain
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: conan-perf-${{ hashFiles('conanfile.py', 'conan/profiles/fin') }}
+          restore-keys: conan-perf-
+
+      - name: Conan install
+        run: |
+          conan profile detect --force
+          conan install . \
+            --output-folder=build \
+            --build=missing \
+            -pr:a=conan/profiles/fin \
+            -c tools.cmake.cmaketoolchain:generator=Ninja \
+            -s build_type="$FIN_BUILD_TYPE"
+
+      - name: Locate the Conan toolchain
+        run: |
+          tc="$(find build -name conan_toolchain.cmake -print | head -n 1)"
+          if [ -z "$tc" ]; then
+            echo "::error::conan_toolchain.cmake was not generated under build/"
+            exit 1
+          fi
+          tc="$(pwd)/$tc"
+          echo "FIN_TOOLCHAIN=$tc" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$FIN_TOOLCHAIN" \
+            -DCMAKE_BUILD_TYPE="$FIN_BUILD_TYPE" \
+            -DFIN_WITH_LLVM=ON \
+            -DFIN_LLVM_MAJOR="$FIN_LLVM_MAJOR" \
+            -DLLVM_DIR="$LLVM_DIR"
+
+      - name: Build finc
+        run: cmake --build build --target finc --parallel
+
+      - name: Run benchmarks
+        run: |
+          python3 bench/run_bench.py --json "$RUNNER_TEMP/bench-results.json"
+          cat "$RUNNER_TEMP/bench-results.json"
+
+      - name: Upload benchmark numbers
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-perf
+          if-no-files-found: error
+          path: ${{ runner.temp }}/bench-results.json
+
   # The exit criterion is that build.sh runs as committed.  It is a separate job
   # so that a broken build.sh is a distinct red mark from a broken build.
   build-script:

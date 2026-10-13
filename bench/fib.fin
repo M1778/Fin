@@ -1,0 +1,9 @@
+@define printf(fmt: string, ...) <noret>;
+fun fib(n: int) <int> {
+  if (n < 2) { return n; }
+  return fib(n-1) + fib(n-2);
+}
+fun main() <noret> {
+  let r <int> = fib(40);
+  printf("%d\n", r);
+}

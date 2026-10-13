@@ -17,6 +17,13 @@
 //   cmake --build build-fuzz --target fin_parse_fuzz
 //   mkdir -p /tmp/opencode/fuzz-seeds && cp tests/samples/basic.fin /tmp/opencode/fuzz-seeds/
 //   ./build-fuzz/fuzz/fin_parse_fuzz -max_len=8192 -max_total_time=60 /tmp/opencode/fuzz-seeds
+//
+// Measured 2026-10-13: 8104 runs in 61s, no crashes (mixed-toolchain proof:
+// clang harness + gcc-built libfin_core). Two environment notes from that run:
+// ASAN_OPTIONS=alloc_dealloc_mismatch=0 and LSAN_OPTIONS=detect_leaks=0 were
+// needed, both LLVM/exit-time-attributed (libLLVM static init mismatches an
+// aligned new with free; fin Type objects leak once at exit -- see the leak
+// follow-up issue), neither in the preprocessor/lexer/parser under test.
 #include <cstddef>
 #include <cstdint>
 #include <string>

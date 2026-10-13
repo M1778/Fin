@@ -22,22 +22,36 @@ specification — it is empirical documentation.
 
 ### How to Reproduce
 
-Benchmarks live in `/tmp/bench/` (temporary). To set up:
+Benchmarks live in `bench/` (checked in; issue #65). One command:
+
+```bash
+python3 bench/run_bench.py [--json bench/results.json]
+# FINC defaults to build/finc; override with FINC=/path/to/finc
+```
+
+Per-language equivalents of what the driver runs (`-O2` throughout,
+`rustc -O` for Rust):
 
 ```bash
 # Fin benchmarks (source files)
-finc /tmp/bench/fib.fin -o /tmp/bench/fib_fin -O2
-finc /tmp/bench/qsort_big.fin -o /tmp/bench/qsort_fin -O2
-finc /tmp/bench/mmul_big.fin -o /tmp/bench/mmul_fin_big -O2
+finc bench/fib.fin -o /tmp/fib_fin -O2
+finc bench/qsort_big.fin -o /tmp/qsort_fin -O2
+finc bench/mmul_big.fin -o /tmp/mmul_fin_big -O2
 
 # C/C++/Rust benchmarks
-gcc -O2 -o /tmp/bench/fib_c /tmp/bench/fib.c
-g++ -O2 -o /tmp/bench/fib_cpp /tmp/bench/fib.cpp
-rustc -O -o /tmp/bench/fib_rust /tmp/bench/fib.rs
+gcc -O2 -o /tmp/fib_c bench/fib.c
+g++ -O2 -o /tmp/fib_cpp bench/fib.cpp
+rustc -O -o /tmp/fib_rust bench/fib.rs
 # (Repeat for qsort and mmul benchmarks)
 ```
 
-A reusable benchmark script was created at `/tmp/bench/run_bench.sh` (Python 3).
+The driver records the environment (compiler versions, CPU,
+memory/swap state, LLVM pin, flags) alongside every number, reports
+median-of-N with the min alongside, and honors the ~5% noise floor.
+Reference numbers live in `bench/baseline.json` (machine-local,
+informational only). CI runs the same harness on Linux as a
+non-blocking `perf` job (`continue-on-error`) and uploads fresh
+numbers as an artifact — signal, not gate.
 
 ### Method Note (2026-09-20 Re-measurement)
 
@@ -225,8 +239,8 @@ Still open, lower value:
 
 1. Test `-O3` vs `-O2` for recursive benchmarks:
    ```bash
-   finc /tmp/bench/fib.fin -o /tmp/bench/fib_O3 -O3
-   /tmp/bench/fib_O3
+   finc bench/fib.fin -o /tmp/fib_O3 -O3
+   /tmp/fib_O3
    ```
 2. If `-O3` helps significantly, consider making it the default or documenting
    the recommendation.
