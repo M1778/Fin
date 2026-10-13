@@ -1684,25 +1684,25 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
     // Enhanced support requires a TypeAlias type in the type system.
     
     if (!node.generic_params.empty()) {
-        // A generic *union* alias is a template over its alternatives:
-        // `type Offer<T, E> = T | E;` (lib/std/types.fin, ADR 0046). The
-        // parameters are declared in a scope of the alias's own -- the same
-        // declareGenericParams structs and enums get -- so the alternatives
-        // resolve with `T`/`E` meaning the parameters, and the UnionType keeps
-        // them as its generic arguments. A use with concrete arguments
-        // instantiates by substitution (Analyzer_Core.cpp, the
-        // StructType::instantiate rule), which UnionType::substitute already
-        // serves.
+        // A generic alias is a template over its target: `type ArrayType<T> =
+        // [T];` (tests/samples/arrays.fin:4) as well as `type Offer<T, E> = T |
+        // E;` (lib/std/types.fin, ADR 0046). The parameters are declared in a
+        // scope of the alias's own -- the same declareGenericParams structs and
+        // enums get -- so the target resolves with `T` meaning the parameter,
+        // and a use with concrete arguments instantiates by substitution
+        // (Analyzer_Core.cpp, the StructType::instantiate rule), which
+        // UnionType::substitute already serves.
         //
-        // Unions only. Any other generic alias (`type array<T> = [T]`) takes
-        // the early return below, which is what
-        // KnownDefect_TypeAliases.AGenericTypeAliasIsNeverDeclared pins. The
-        // line is principled rather than convenient: an erased union never
-        // materialises storage -- as a bound it is unchecked, as a value the
-        // layout pass refuses it -- so instantiating one needs no layout or
-        // lowering support, while an array or struct alias would.
-        if (!node.union_members.empty() && node.aliased_type && !node.has_implements) {
-            debugLog(fg(fmt::color::yellow), "      [Type] Generic union alias '{}' -- declaring template.\n",
+        // Stored as a UnionType however many alternatives the target has: one
+        // for a plain alias, more for a union. A one-alternative template
+        // instantiates to its substituted target outright
+        // (UnionType::instantiate), which is what makes the alias transparent
+        // exactly as a non-generic alias is -- `Alias<int>` is `[int]`, so
+        // layout and lowering never see a name they cannot answer for -- while
+        // a multi-alternative one stays a union, which the layout pass refuses
+        // as a value for its own reason (Q12).
+        if (node.aliased_type && !node.has_implements) {
+            debugLog(fg(fmt::color::yellow), "      [Type] Generic alias '{}' -- declaring template.\n",
                      node.name);
             enterScope();
             std::vector<std::shared_ptr<Type>> genArgs;
@@ -1717,14 +1717,14 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
             currentScope->defineType(node.name, aliasType);
             if (node.is_public) currentScope->privateTypes.erase(node.name);
             else currentScope->privateTypes.insert(node.name);
-            debugLog(fg(fmt::color::gray), "      [Type] Defined generic union alias '{}' -> '{}'\n",
+            debugLog(fg(fmt::color::gray), "      [Type] Defined generic alias '{}' -> '{}'\n",
                      node.name, aliasType->toString());
             return;
         }
-        debugLog(fg(fmt::color::yellow), "      [Warning] Generic type aliases are partially supported.\n");
-        // We can't fully resolve it yet without instantiation.
-        // We should define a placeholder or template.
-        // For this immediate task, we'll verify the aliased type structure.
+        // Only a generic alias with an `implements` bound still reaches here:
+        // the bound has nowhere to live yet (see the non-generic
+        // AnImplementsBoundOnANonDynamicAliasIsDropped), so the target is
+        // resolved for its diagnostics and the name stays undefined.
         
         enterScope();
         declareGenericParams(node.generic_params);

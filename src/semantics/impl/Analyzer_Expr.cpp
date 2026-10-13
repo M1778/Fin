@@ -14,6 +14,9 @@ namespace fin {
 
 namespace {
 std::unique_ptr<TypeNode> spellType(const TypePtr& t);
+bool mentionsGenericParam(const TypePtr& t);
+void unifyGeneric(const TypePtr& param, const TypePtr& arg, TypeMap& out);
+std::vector<TypePtr> orderedGenericArgs(const std::shared_ptr<StructType>& st, const TypeMap& mapping);
 }
 
 // Signature now accepts std::shared_ptr<Scope>
@@ -538,7 +541,31 @@ void SemanticAnalyzer::visit(Identifier& node) {
                 }
             }
         }
-        lastExprType = sym->type;
+        // A payloadless member of a generic enum, read as a plain name, is
+        // instantiated from the hint -- the annotation, the assignment target,
+        // the enclosing return, or the parameter it is passed to, which
+        // checkCallArguments installs before the argument is walked. Without
+        // this the member yields the enum still holding its own parameter, and
+        // `let q <Opt<int>> = Nothing` reports `got 'Opt<T>'`. A payloaded
+        // member needs no such read: it is a call, and checkGenericCall unifies
+        // its arguments. Gated on the hint naming this enum: anything else
+        // teaches nothing, and the check below reports exactly as before.
+        TypePtr readType = sym->type;
+        if (namesAnEnumerator(node.name, sym->type)) {
+            if (auto hint = hintFor(node)) {
+                if (auto st = std::dynamic_pointer_cast<StructType>(sym->type)) {
+                    if (mentionsGenericParam(st)) {
+                        TypeMap mapping;
+                        unifyGeneric(st, hint, mapping);
+                        if (!mapping.empty()) {
+                            if (auto inst = st->instantiate(orderedGenericArgs(st, mapping)))
+                                readType = inst;
+                        }
+                    }
+                }
+            }
+        }
+        lastExprType = readType;
         // Wave-4 step 17 (W7): reading a binding is a use. A definitely-moved
         // variable reports use-after-move here; maybe-moved stays readable.
         // Skipped on the check walk (§3.3), and suspended for a plain
@@ -942,11 +969,31 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
     // Operator Overloading. The call is typed by what its operator returns, and
     // the right-hand operand is checked against the operator's parameter -- the
     // subscript path (visit(ArrayAccess&)) is the model, with the same words.
+    // A generic operator is instantiated from what is written to it -- the hint
+    // on the call's result first, then the operand -- exactly as a method call
+    // is (checkGenericCall). Without this the operand is checked against the
+    // template and every use reports `got 'T'` about a name only the
+    // declaration ever wrote.
     if (auto structType = getStructType(leftType, currentScope)) {
         if (auto opType = structType->getOperatorType(static_cast<int>(node.op))) {
             if (auto* sig = opType->as<FunctionType>()) {
-                if (!sig->param_types.empty()) checkType(*node.right, rightType, sig->param_types[0]);
-                lastExprType = sig->return_type;
+                if (!sig->param_types.empty()) {
+                    const FunctionType* use = sig;
+                    std::shared_ptr<FunctionType> isig;
+                    if (mentionsGenericParam(sig->param_types[0]) ||
+                        mentionsGenericParam(sig->return_type)) {
+                        TypeMap mapping;
+                        if (auto hint = hintFor(node)) unifyGeneric(sig->return_type, hint, mapping);
+                        unifyGeneric(sig->param_types[0], rightType, mapping);
+                        isig = std::dynamic_pointer_cast<FunctionType>(
+                            sig->substitute(mapping, nullptr));
+                        if (isig && !isig->param_types.empty()) use = isig.get();
+                    }
+                    checkType(*node.right, rightType, use->param_types[0]);
+                    lastExprType = use->return_type;
+                } else {
+                    lastExprType = sig->return_type;
+                }
             } else {
                 lastExprType = opType;
             }

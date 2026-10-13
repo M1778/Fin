@@ -18,6 +18,38 @@ if(CMAKE_CXX_STANDARD LESS 20)
         "If you are using Conan, install with -pr:a=conan/profiles/fin.")
 endif()
 
+# --- Warnings (issue #84) ------------------------------------------------------
+# -Wall -Wextra are on by default: a compiler that parses untrusted source
+# should not compile silent. Warnings are warnings, never errors -- there is no
+# -Werror here, and per the issue there will not be until the inventory it
+# reports reaches zero (it does not: 339 instances at introduction, triaged in
+# the issue, mostly aggregate-init noise in files this block does not excuse).
+# MSVC gets /W4 for the same reason. Generated bison/flex outputs are excluded
+# below: warning-cleanliness of machine-written tables is the generator's
+# business, not ours.
+if(MSVC)
+    add_compile_options(/W4)
+else()
+    add_compile_options(-Wall -Wextra)
+endif()
+
+# --- Sanitizers (issue #84) ----------------------------------------------------
+# option(FIN_SANITIZE ...) is the pattern CMakeLists.txt already uses for
+# FIN_WITH_LLVM/FIN_BUILD_TESTS: one option, documented here. OFF by default
+# because instrumenting a program that links LLVM can surface upstream reports
+# (scope those separately; see the sanitizer CI job), and because MSVC has no
+# -fsanitize=address,undefined spelling. Exact configure line:
+#   cmake -B build-asan -S . -DCMAKE_BUILD_TYPE=Debug -DFIN_SANITIZE=ON [...]
+#   cmake --build build-asan -j$(nproc)
+option(FIN_SANITIZE "Build with AddressSanitizer+UndefinedBehaviorSanitizer (GCC/Clang only)." OFF)
+if(FIN_SANITIZE)
+    if(MSVC)
+        message(FATAL_ERROR "FIN_SANITIZE is GCC/Clang only; MSVC has no -fsanitize=address,undefined.")
+    endif()
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 # --- LLVM (ADR 0010: one LLVM major, proven by CI) ----------------------------
 # FIN_LLVM_MAJOR is the single major version finc is built against, on every
 # platform.  It is enforced rather than merely documented: a mismatched LLVM is
@@ -134,6 +166,15 @@ BISON_TARGET(Parser src/parser/parser.y ${CMAKE_CURRENT_BINARY_DIR}/parser.cpp
 FLEX_TARGET(Lexer src/lexer/lexer.l ${CMAKE_CURRENT_BINARY_DIR}/lexer.cpp)
 
 ADD_FLEX_BISON_DEPENDENCY(Lexer Parser)
+
+# The skeletons trip -Wunused-but-set-variable (yynerrs_) and friends. That is
+# upstream table code, so generated outputs compile -w (see the Warnings block
+# above for why everything else does not).
+if(NOT MSVC)
+    foreach(generated IN LISTS BISON_Parser_OUTPUTS FLEX_Lexer_OUTPUTS)
+        set_source_files_properties(${generated} PROPERTIES COMPILE_OPTIONS -w)
+    endforeach()
+endif()
 
 # --- Core Library (The Compiler Engine) ---
 add_library(fin_core STATIC
@@ -302,6 +343,14 @@ set_target_properties(finc PROPERTIES
 # standalone binary, run directly; ctest wiring arrives in slice 2).
 add_subdirectory(tools/fintest)
 add_subdirectory(tools/fmt)
+
+# libFuzzer harness for the lexer/parser entry point (issue #84). OFF unless
+# asked: libFuzzer is Clang-only, and a fuzz target is not something a normal
+# build, CI matrix row, or release archive should carry.
+option(FIN_FUZZ "Build the libFuzzer lexer/parser harness in fuzz/ (Clang only)." OFF)
+if(FIN_FUZZ)
+    add_subdirectory(fuzz)
+endif()
 
 # --- Install / package layout (ADR 0010) --------------------------------------
 # A release archive unpacks to exactly `bin/finc[.exe]` and `lib/std/**`, with

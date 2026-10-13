@@ -51,7 +51,15 @@ TypePtr UnionType::instantiate(const std::vector<TypePtr>& concreteArgs) {
     for (size_t i = 0; i < generic_args.size(); ++i) {
         mapping[generic_args[i]->toString()] = concreteArgs[i];
     }
-    return substitute(mapping);
+    auto sub = std::dynamic_pointer_cast<UnionType>(substitute(mapping));
+    if (!sub) return nullptr;
+    // A plain generic alias (`type ArrayType<T> = [T]`) is one alternative, and
+    // instantiating it is the alias itself: the substituted target, exactly as
+    // a non-generic alias defines its name to. Transparency is what keeps
+    // layout and lowering working -- they answer for `[int]` already -- where
+    // a one-member union would be refused as a value for Q12's reason.
+    if (sub->alternatives.size() == 1) return sub->alternatives[0];
+    return sub;
 }
 
 TypePtr UnionType::clone() const {

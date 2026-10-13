@@ -282,6 +282,92 @@ jobs:
             build/Testing/Temporary/LastTest.log
             build/CMakeCache.txt
 
+  # Sanitizer sweep (issue #84). Clearly-marked OPTIONAL: continue-on-error, so
+  # an ASan/UBSan finding -- including one attributed to upstream LLVM, which a
+  # program linking LLVM can surface -- files an issue per defect instead of
+  # blocking the matrix. Promote to blocking by deleting continue-on-error once
+  # the tree is proven clean (the first deliverable of the issue is that
+  # measurement, not the assumption). Does NOT touch the build matrix above:
+  # same toolchain action, Debug (better stacks), -DFIN_SANITIZE=ON, full ctest.
+  # No stage bootstrap here: stage binaries link through the stage driver's own
+  # `cc` line, so they would run uninstrumented and prove nothing sanitizer-
+  # specific; the fixed point stays owned by the Linux matrix rows above.
+  sanitizers:
+    name: sanitizers (ASan+UBSan, optional)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-toolchain
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: conan-sanitizers-${{ hashFiles('conanfile.py', 'conan/profiles/fin') }}
+          restore-keys: conan-sanitizers-
+
+      - name: Conan install
+        run: |
+          conan profile detect --force
+          conan install . \
+            --output-folder=build \
+            --build=missing \
+            -pr:a=conan/profiles/fin \
+            -c tools.cmake.cmaketoolchain:generator=Ninja \
+            -s build_type=Debug
+
+      - name: Locate the Conan toolchain
+        run: |
+          tc="$(find build -name conan_toolchain.cmake -print | head -n 1)"
+          if [ -z "$tc" ]; then
+            echo "::error::conan_toolchain.cmake was not generated under build/"
+            exit 1
+          fi
+          tc="$(pwd)/$tc"
+          echo "FIN_TOOLCHAIN=$tc" >> "$GITHUB_ENV"
+
+      - name: Configure (sanitizers on)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$FIN_TOOLCHAIN" \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DFIN_WITH_LLVM=ON \
+            -DFIN_LLVM_MAJOR="$FIN_LLVM_MAJOR" \
+            -DLLVM_DIR="$LLVM_DIR" \
+            -DFIN_SANITIZE=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test under ASan+UBSan
+        # LSAN (leak detection) rides along with ASan by default, and the tree
+        # is NOT leak-clean today: even `finc basic.fin -c` reports ~4329
+        # unreleased allocations at exit (shared_ptr type objects, e.g.
+        # FunctionType::substitute; one-time exit-time leaks, filed as a
+        # follow-up, not fixed here). Leaving it on would paint every stderr-
+        # asserting test red for a harness reason, so this job measures memory
+        # SAFETY (ASan+UBSan) with leaks off. Do not delete this without
+        # re-measuring: that is the day the leak follow-up closed.
+        env:
+          LSAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          ctest --test-dir build --build-config Debug \
+                --output-on-failure --no-tests=error 2>&1 \
+            | tee "$RUNNER_TEMP/ctest-asan.log"
+
+      - name: Upload sanitizer logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-sanitizers
+          if-no-files-found: ignore
+          path: |
+            build/Testing/Temporary/LastTest.log
+            build/CMakeCache.txt
+
   # The exit criterion is that build.sh runs as committed.  It is a separate job
   # so that a broken build.sh is a distinct red mark from a broken build.
   build-script:

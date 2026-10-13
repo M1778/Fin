@@ -672,11 +672,14 @@ TEST(Soundness_Generics, AnOperatorsRegisteredReturnTypeIsWhatItsCallIsTyped) {
         << "the operator's own return type, not the operand's and not the struct's\n" << err;
 
     // The generic case, which is the one that needs the signature pass to have declared
-    // T. This asserts only that *some* real type was registered and reported -- what T
-    // should have been narrowed to is a separate question, booked in
-    // KnownDefect_Generics.AnOperatorsGenericParameterIsNotInferredFromItsOperand.
-    // Silence is the failure mode being watched for here: an operator registered
-    // returning the sentinel makes this program compile clean.
+    // T.
+    // Was KnownDefect_Generics.AnOperatorsGenericParameterIsNotInferredFromItsOperand
+    // (#95): the operand was checked against the unsubstituted parameter, so the
+    // mismatch read `got 'T'` about a name only the declaration ever wrote. The
+    // operand now instantiates the operator first -- T is int -- so the call is an
+    // int and the annotation is what reports it. Silence is still the failure mode
+    // being watched for here: an operator registered returning the sentinel makes
+    // this program compile clean.
     const FincRun g = compile(
         "struct S {\n"
         "    v <int>,\n"
@@ -693,19 +696,18 @@ TEST(Soundness_Generics, AnOperatorsRegisteredReturnTypeIsWhatItsCallIsTyped) {
     EXPECT_EQ(gerr.find("<error>"), std::string::npos)
         << "the signature pass registered the sentinel: it resolved <T> without T in scope\n"
         << gerr;
+    EXPECT_NE(gerr.find("expected 'string', got 'int'"), std::string::npos)
+        << "the operand instantiates the operator, so the call is an int\n" << gerr;
 }
 
-TEST(KnownDefect_Generics, AnOperatorsGenericParameterIsNotInferredFromItsOperand) {
-    // Known defect: #95 (tracked; see issue for inversion target).
-    // `s + 1` calls `operator + : <T>(other: <T>) <T>` with an int, so T is int and the
-    // call is an int. The analyser reports the mismatch against the *unsubstituted*
-    // parameter instead, printing a type name that exists only inside the operator's own
-    // declaration: `expected 'string', got 'T'`.
-    //
-    // A function call has the same shape and the same gap -- there is no inference from
-    // arguments to generic parameters anywhere yet, which is why this is booked here
-    // rather than fixed: the fix is a unification pass shared by calls, method calls and
-    // operators, and it wants its own tests.
+TEST(Soundness_Generics, AnOperatorsGenericParameterIsInferredFromItsOperand) {
+    // Was KnownDefect_Generics.AnOperatorsGenericParameterIsNotInferredFromItsOperand
+    // (#95). `s + 1` calls `operator + : <T>(other: <T>) <T>` with an int, so T is
+    // int and the call is an int. The assertion this carried -- the diagnostic reads
+    // "expected 'string', got 'int'" -- now lives on
+    // Soundness_Generics.AnOperatorsRegisteredReturnTypeIsWhatItsCallIsTyped, which
+    // compiles exactly this program; this test keeps the passing shape, that a
+    // correctly-annotated generic-operator call compiles clean.
     const FincRun r = compile(
         "struct S {\n"
         "    v <int>,\n"
@@ -713,17 +715,10 @@ TEST(KnownDefect_Generics, AnOperatorsGenericParameterIsNotInferredFromItsOperan
         "}\n"
         "fun main() <int> {\n"
         "    let s <S> = S{v: 1};\n"
-        "    let r <string> = s + 1;\n"
+        "    let r <int> = s + 1;\n"
         "    return 0;\n"
         "}\n");
-    const std::string err = stripAnsi(r.err);
-    EXPECT_NE(err.find("got 'T'"), std::string::npos)
-        << "GOOD NEWS: an operator's generic parameter is inferred from its operand.\n"
-           "The diagnostic should now read \"expected 'string', got 'int'\" -- move that\n"
-           "assertion into Soundness_Generics.AnOperatorsRegisteredReturnTypeIsWhatItsCall-\n"
-           "IsTyped, which currently asserts only that the type is not the sentinel, and\n"
-           "delete this test.\n"
-        << err;
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
 TEST(Soundness_ErrorRecovery, ACastOfAnOperandThatDidNotTypeKeepsItsTargetType) {
@@ -1730,25 +1725,28 @@ TEST(Soundness_Prototypes, APrototypeWithAnUnassignableKeyOrValueIsStillRejected
     }
 }
 
-TEST(KnownDefect_TypeAliases, AGenericTypeAliasIsNeverDeclared) {
-    // Known defect: #95 (tracked; see issue for inversion target).
-    // Not the drop-the-entity rule -- worse. visit(TypeDefinition&) returns early for any
-    // alias with generic parameters, resolving the target for its diagnostics and never
-    // calling defineType at all, so `type ArrayType<T> = [T];` leaves `ArrayType`
-    // undefined whether or not `[T]` resolved. The debugLog calls it "partially
-    // supported"; nothing is supported. The fix is a TypeAlias in the type system that
-    // can be instantiated, which is why this is booked rather than fixed here.
-    //
-    // Corpus footprint: `arrays.fin:4` writes one and never names it, so this costs
-    // nothing today and will cost a diagnostic per use the first time it is used.
+TEST(Soundness_TypeAliases, AGenericTypeAliasIsDeclaredAndInstantiable) {
+    // Was KnownDefect_TypeAliases.AGenericTypeAliasIsNeverDeclared (#95):
+    // visit(TypeDefinition&) returned early for any alias with generic parameters,
+    // resolving the target for its diagnostics and never calling defineType, so
+    // `type ArrayType<T> = [T]` left the name undefined. A generic alias is now a
+    // template over its target -- the generic-union-alias rule generalised -- and
+    // a one-alternative template instantiates to its substituted target outright
+    // (UnionType::instantiate), which is what makes the alias transparent exactly
+    // as a non-generic alias is.
     const FincRun r = compile("type Alias<T> = [T];\n"
                               "fun f(a: Alias<int>) <int> { return 0; }\n"
                               "fun main() <int> { return 0; }\n");
-    EXPECT_NE(stripAnsi(r.err).find("Undefined type 'Alias'"), std::string::npos)
-        << "GOOD NEWS: generic type aliases are declared now. Invert this test -- the\n"
-           "program should compile clean -- and rename it to\n"
-           "Soundness_TypeAliases.AGenericTypeAliasIsDeclaredAndInstantiable.\n"
-        << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+
+    // The use is the target: an element read through the alias is an int.
+    const FincRun use = compile("type Alias<T> = [T];\n"
+                                "fun main() <noret> {\n"
+                                "  let a <Alias<int>> = [1, 2];\n"
+                                "  let s <string> = a[0];\n"
+                                "}\n");
+    EXPECT_NE(stripAnsi(use.err).find("expected 'string', got 'int'"), std::string::npos)
+        << stripAnsi(use.err);
 
     // The control: the non-generic spelling of the same alias is declared and usable,
     // which is what makes the above a gap in one branch rather than the feature missing.
@@ -9664,18 +9662,32 @@ TEST(Soundness_SelfGenerics, ABareSelfIsUnaffected) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_SelfGenerics, SelfWithConcreteArgumentsInAStructIsAFabricatedType) {
-    // Known defect: #95 (tracked; see issue for inversion target).
-    // Booked: `Self<int>` inside `Box<T>` names the instantiation `Box<int>`, and in a
-    // struct it still reaches the fabrication arm -- a struct literally named `Self`
-    // with one argument -- because `Self` is a SelfType there and only a StructType can
-    // be instantiated. Reaching the real `Box<int>` means giving SelfType a way to be
-    // instantiated, which is a bigger change than the rule above and has no corpus site
-    // asking for it. If this starts passing, invert it.
+TEST(Soundness_SelfGenerics, SelfWithConcreteArgumentsInAStructNamesTheInstantiation) {
+    // Was KnownDefect_SelfGenerics.SelfWithConcreteArgumentsInAStructIsAFabricatedType
+    // (#95): `Self<int>` inside `Box<T>` reached the fabrication arm -- a struct
+    // literally named `Self` with one argument -- because `Self` is a SelfType there
+    // and only a StructType could be instantiated. The generics path now unwraps the
+    // SelfType to the struct it stands for, so `Self<int>` is `Box<int>`.
+    //
+    // The program below still does not compile, and that is correct: `self` is the
+    // whole `Box<T>` and the method promises a `Box<int>`. What changed is the
+    // diagnostic -- `expected 'Box<int>', got 'Self'`, a real mismatch between two
+    // real types, where the fabrication used to report a type against itself.
     const FincRun r = compile(
         "struct Box<T> { pub v <T>, pub fun me() <Self<int>> { return self; } }\n");
-    EXPECT_NE(r.exitCode, 0) << "if this passes, Self<int> resolves properly -- invert this test";
-    EXPECT_NE(stripAnsi(r.err).find("Self<int>"), std::string::npos) << stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'Box<int>', got 'Self'"), std::string::npos)
+        << stripAnsi(r.err);
+
+    // And the resolution itself is observable where it is well-typed: a `Self<int>`
+    // parameter is a `Box<int>` parameter, with an int field to read.
+    const FincRun ok = compile(
+        "struct Box<T> { pub v <T>, pub fun get(o: Self<int>) <int> { return o.v; } }\n"
+        "fun main() <noret> {\n"
+        "  let b <Box<int>> = Box{v: 3};\n"
+        "  let x <int> = b.get(Box{v: 4});\n"
+        "}\n");
+    EXPECT_EQ(ok.exitCode, 0) << stripAnsi(ok.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -10217,22 +10229,15 @@ TEST(Soundness_EnumInference, AReturnDoesNotSeedASubexpression) {
     EXPECT_EQ(err.find("expected 'Opt<string>', got 'Opt<int>'"), std::string::npos) << err;
 }
 
-TEST(KnownDefect_EnumInference, APayloadlessEnumeratorIgnoresTheHint) {
-    // Known defect: #95 (tracked; see issue for inversion target).
-    // `Nothing` carries no payload, so nothing about the written value says what `T` is
-    // and the hint is the only thing that does. It is not read: a payload-less
-    // enumerator named on its own yields the enum still holding its own parameter, and
-    // `Opt<T>` is then compared against the annotation and rejected.
-    //
-    // Not about the argument site -- the annotation says it too, and the annotation has
-    // been a hint since generic inference existed. What is missing is that an enumerator
-    // reached as a plain name never goes through checkGenericCall, so nothing unifies
-    // the enum's parameters against what is expected. `Some("x")` on the next line is
-    // fine, because its payload says what `T` is without being asked.
-    //
-    // No corpus sample writes this, which is why it is booked rather than built: the
-    // corpus's payload-less enumerators are all compared (`enums.fin:26`) or returned
-    // under a declared type that is already instantiated.
+TEST(Soundness_EnumInference, APayloadlessEnumeratorReadsTheHint) {
+    // Was KnownDefect_EnumInference.APayloadlessEnumeratorIgnoresTheHint (#95):
+    // `Nothing` carries no payload, so nothing about the written value says what
+    // `T` is and the hint is the only thing that does. It was not read: a
+    // payloadless enumerator named on its own yielded the enum still holding its
+    // own parameter. A member read as a plain name is now instantiated from the
+    // hint -- the annotation on `a`, the parameter `g` is passed on `n` -- so all
+    // three lines compile clean. `Some("x")` never needed this: its payload says
+    // what `T` is without being asked.
     const FincRun r = compile(
         std::string(kOptDecl) +
         "fun g(o: Opt<string>) <int> { return 1; }\n"
@@ -10241,9 +10246,7 @@ TEST(KnownDefect_EnumInference, APayloadlessEnumeratorIgnoresTheHint) {
         "  const n <int> = g(Nothing);\n"
         "  let b <Opt<string>> = Some(\"x\");\n"
         "}\n");
-    const std::string err = stripAnsi(r.err);
-    EXPECT_EQ(errorCount(err), 2u) << err;
-    EXPECT_NE(err.find("expected 'Opt<string>', got 'Opt<T>'"), std::string::npos) << err;
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
 TEST(Soundness_EnumInference, AStaticEnumeratorCallInfersToo) {
@@ -10326,22 +10329,24 @@ TEST(Soundness_EnumInference, AnAssignmentToANonGenericTargetIsUnaffected) {
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_EnumInference, APayloadlessMemberOfAGenericEnumIsTypedAsTheTemplate) {
-    // Known defect: #95 (tracked; see issue for inversion target).
-    // `let q <Opt<int>> = Nothing;` reports `expected 'Opt<int>', got 'Opt<T>'`. A
-    // payloadless member read as a value is not a call, so there are no arguments to
-    // infer from and nothing walks it against the annotation -- the hint channel is
-    // read by the call sites only.
-    //
-    // No corpus sample writes it: the two generic enums in the corpus are enums.fin's
-    // `Result<T, E>` and stdlib/stdio.fin's `IOResult<T>`, and every member of both
-    // carries a payload. Fixing it means reading the hint in visit(Identifier&) and
-    // instantiating there, which is a fourth site for a shape nothing asks for yet.
+TEST(Soundness_EnumInference, APayloadlessMemberOfAGenericEnumIsInstantiatedFromTheHint) {
+    // Was KnownDefect_EnumInference.APayloadlessMemberOfAGenericEnumIsTypedAsTheTemplate
+    // (#95): `let q <Opt<int>> = Nothing;` reported
+    // `expected 'Opt<int>', got 'Opt<T>'`. A payloadless member read as a value is
+    // not a call, so there are no arguments to infer from -- the annotation is what
+    // says which `Opt` this is, and visit(Identifier&) now instantiates from it.
     const FincRun r = compile(
         std::string(kOptDecl) +
         "fun main() <noret> { let q <Opt<int>> = Nothing; }\n");
-    EXPECT_NE(stripAnsi(r.err).find("expected 'Opt<int>', got 'Opt<T>'"), std::string::npos)
-        << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+
+    // The gate: a hint naming something else teaches nothing, and the check below
+    // reports exactly as before rather than instantiating against it.
+    const FincRun bad = compile(
+        std::string(kOptDecl) +
+        "fun main() <noret> { let s <string> = Nothing; }\n");
+    EXPECT_NE(stripAnsi(bad.err).find("expected 'string', got 'Opt<T>'"), std::string::npos)
+        << stripAnsi(bad.err);
 }
 
 // ---------------------------------------------------------------------------

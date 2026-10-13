@@ -463,6 +463,16 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveTypeUnwrapped(TypeNode* node) {
     
     // 5. Generics
     if (!node->generics.empty() && !selfNamesEnclosingType(node, type)) {
+        // `Self<int>` inside `Box<T>` is a genuine instantiation, not the type
+        // being declared: unwrap the SelfType to the struct it stands for so
+        // the general path below instantiates it. Without this a struct
+        // literally named `Self` was fabricated, and `return self` reported
+        // `expected 'Self<int>', got 'Self'` -- a mismatch between a type and
+        // itself.
+        if (auto* self = type ? type->as<SelfType>() : nullptr) {
+            if (auto orig = std::dynamic_pointer_cast<StructType>(self->originalStruct))
+                type = orig;
+        }
         std::vector<std::shared_ptr<Type>> args;
         auto structDef = std::dynamic_pointer_cast<StructType>(type);
         bool argsResolved = true;
