@@ -618,35 +618,48 @@ TEST(SemanticAnalyzer, RefusesReturningTheAddressOfALocalArrayElement) {
         << "indexing does not leave the frame; errors: " << a.errorCount;
 }
 
-TEST(KnownDefect_Semantics, AnEscapingAddressLaunderedThroughAPointerLocalIsAccepted) {
-    // Known defect: #105 (tracked; invert into Soundness_Semantics when the
-    // rule reads the referent instead of the declared type).
+TEST(Soundness_Semantics, RefusesAnEscapingAddressLaunderedThroughAPointerLocal) {
+    // #105: a pointer local initialised from `&d` is `d`'s address however
+    // many pointer hops intervene, so both spellings refuse with the existing
+    // wording, blamed on the returned expression. Provenance-lite tracks the
+    // initializer (and copies of it, `let q = p`); a pointer parameter, a
+    // global, and a call's result have no entry and stay accepted.
     //
-    // Ownership is decided from the declared type of the root symbol, so a
-    // pointer local initialised from `&d` launders the address past the check:
-    // `return p` takes no address for the walk to see, and `&p.n` reads as a
-    // dereference out of the frame -- the right reading for a pointer
-    // *parameter* (AcceptsReturningTheAddressOfAParameterField above), the
-    // wrong one for a local. Measured, both dangle: the two calls reuse one
-    // frame slot, so the first escaped pointer reads the other call's dead
-    // local (prints `8 8` where the first is `7`).
-    //
-    // Booked rather than fixed because closing it needs the referent, not the
-    // declared type: initialiser provenance for pointer locals (enough for
-    // this shape, defeated by reassignment through a branch) or real alias
-    // analysis. ADR 0055 records it as a non-goal, and the accepted parameter
-    // case must stay accepted -- a fix that refuses it has moved the bug.
-    //
-    // Neither half asserts a value, because a dead frame's contents are not a
-    // specification. The assertion is that the check stays *silent*, which is
-    // what has to go red the day the referent is tracked.
+    // CEILING (documented): reassignment inside one branch of a conditional
+    // defeats the tracking -- the join keeps whichever entry ran last -- so
+    // that shape is still accepted. Closing it needs real alias analysis, an
+    // owner-level call, not this slice.
     auto a = analyze(
         "struct D { n <int> }\n"
         "fun viaLocal() <&D> { let d <D> = D { n: 7 }; let p <&D> = &d; return p; }\n"
         "fun viaField() <&int> { let d <D> = D { n: 8 }; let p <&D> = &d; return &p.n; }\n"
         "fun main() <noret> { }\n");
     ASSERT_TRUE(a.parsed);
-    EXPECT_FALSE(refusedWith(a, "cannot return the address of local variable 'd'"))
-        << "the referent is not tracked yet (#105); errors: " << a.errorCount;
+    EXPECT_TRUE(refusedWith(a, "cannot return the address of local variable 'd'"))
+        << "errors: " << a.errorCount;
+    EXPECT_EQ(a.errorCount, 2) << "both laundered spellings must refuse";
+}
+
+TEST(SemanticAnalyzer, AcceptsReturningAPointerLocalCopiedFromAParameter) {
+    // The #105 non-goal: a pointer with no `&local` initializer points at
+    // storage someone else owns, so forwarding it stays accepted -- refusing
+    // it would move the bug rather than close it.
+    auto a = analyze(
+        "struct D { n <int> }\n"
+        "fun fwd(p: &D) <&D> { let q <&D> = p; return q; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean()) << "errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, AcceptsReturningAPointerLocalToAGlobal) {
+    // Same storage question, the global spelling: the referent outlives the
+    // call, so laundering it through a local changes nothing.
+    auto a = analyze(
+        "struct D { n <int> }\n"
+        "let g <D> = D { n: 1 };\n"
+        "fun get() <&D> { let p <&D> = &g; return p; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
     EXPECT_TRUE(a.clean()) << "errors: " << a.errorCount;
 }

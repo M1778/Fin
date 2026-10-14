@@ -125,7 +125,17 @@ fun main() <noret> {
 
 The check reads the declared type of the variable named, not what it points at,
 so an address laundered through a pointer local is still accepted today
-(issue #105). Use caller-owned storage or an explicitly owned heap allocation
+(issue #105). Two more shapes bypass the check rather than mislead it, and both
+stay accepted (issue #109): a struct-literal field or array-literal element
+that takes a local's address (`return W { p: &d }`, `return [&d]`), and the
+three store/call shapes -- through an out-parameter (`*out = &d`), into a
+global (`g = &d`), or through a call wrapper (`return id(&a)`). Each compiles,
+and each reads back whatever the reused frame slot was given next -- measured
+as 4243 after a clobbering call. The literals cannot be refused where they are
+built: the same spelling in the same frame is legal (`Holder{p: &x}` used in
+the same body, `[&x, &y]`, a linked `next: &tail`), and the expression pass
+cannot see whether a literal flows out. Use caller-owned storage or an
+explicitly owned heap allocation
 for escaping data rather than relying on the refusal to catch every shape.
 
 ## Prototypes: builtin structural maps

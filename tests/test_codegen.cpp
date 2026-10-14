@@ -12465,6 +12465,31 @@ BACKEND_TEST(Soundness_Codegen, AnEscapingReferenceIsRefusedWhetherInterfaceOrAd
     EXPECT_EQ(fwd.out, "7\n") << fwd.why();
 }
 
+BACKEND_TEST(KnownDefect_Codegen, ALiteralCarryingALocalAddressEscapes) {
+    // Known defect: #109 (tracked; see issue for the provenance fix that
+    // inverts this test). `return W { p: &d }` and `return [&d]` carry a
+    // frame-local address out inside a value, so the return-operand rule (ADR
+    // 0055, which inspects only the immediate operand) never sees a root to ask
+    // about -- both compile, and both read the reused frame slot afterwards.
+    // A construction-time refusal was tried and reverted: the same spelling in
+    // the same frame is legal and must keep compiling (`Holder{p: &x}` used in
+    // the same body, `[&x, &y]`, a linked `next: &tail` -- all three pinned by
+    // Soundness tests in this file), and the expression pass cannot see
+    // whether a literal flows out. So both shapes stay accepted and documented
+    // in the guide until provenance lands. Neither half runs: a dead frame's
+    // contents are not a specification, so the assertion is the compile.
+    const Built viaStruct = build(std::string(kPrintf) +
+        "struct W { p <&int> }\n"
+        "fun leak() <W> { let d <int> = 7; return W { p: &d }; }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(viaStruct.compileExit, 0) << viaStruct.why();
+
+    const Built viaArray = build(std::string(kPrintf) +
+        "fun leak() <[&int]> { let d <int> = 7; return [&d]; }\n"
+        "fun main() <noret> { }\n");
+    EXPECT_EQ(viaArray.compileExit, 0) << viaArray.why();
+}
+
 // ---------------------------------------------------------------------------
 // The no-backend diagnostic names the pin.
 // ---------------------------------------------------------------------------

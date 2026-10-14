@@ -9,6 +9,7 @@
 #include "../../ast/exprs/MiscExpr.hpp"
 #include "../../ast/exprs/StructureExpr.hpp"
 #include "../../ast/exprs/UnaryOp.hpp"
+#include "../../ast/exprs/Lambda.hpp"
 #include "../../ast/stmts/ControlFlow.hpp"
 #include "../../ast/stmts/VariableDecl.hpp"
 #include "../../types/TypeImpl.hpp"
@@ -36,6 +37,152 @@ ReturnedStorage returnedStorage(const Expression* e) {
     if (const auto* idx = dynamic_cast<const ArrayAccess*>(e))
         return {returnedStorage(idx->array.get()).root, false};
     return {};
+}
+
+// #105 (PROVENANCE-LITE): what a pointer local was initialised from. `let p
+// <&D> = &d` hands `p` the frame slot of `d`, so `return p` and `return &p.n`
+// escape `d` through a name whose declared type reads as foreign storage.
+// One entry per pointer-local declaration: the referent symbol, or null where
+// the initializer names foreign or unknown storage (a parameter, a global, a
+// call, `new`) -- which keeps today's silent accept for exactly those. A null
+// entry is still an entry: it stops the lookup, so an inner `let p`
+// shadowing an outer tracked one does not inherit the outer's referent.
+//
+// One frame per open Block, pushed and popped by visit(Block&), so entries
+// die with the scope that owns the binding and sibling blocks never see each
+// other. File-static because the owning slice is this file alone; every push
+// is popped on the same fall-through path, so no frame outlives its walk.
+using PtrProvFrame = std::unordered_map<std::string, const Symbol*>;
+std::vector<PtrProvFrame> ptrProvFrames_;
+
+bool lookupPtrProvenance(const std::string& name, const Symbol*& out) {
+    for (auto it = ptrProvFrames_.rbegin(); it != ptrProvFrames_.rend(); ++it) {
+        auto f = it->find(name);
+        if (f != it->end()) {
+            out = f->second;
+            return true;
+        }
+    }
+    out = nullptr;
+    return false;
+}
+
+// Whether a referent outlives any call: a global, `$Fin`-pinned storage, or
+// the receiver. Anything failing these is this frame's, however many pointer
+// hops intervene -- and null (unknown) reads as foreign, which keeps today's
+// silent accept for the shapes this slice does not track.
+bool ptrProvForeign(const Symbol* ref, const std::shared_ptr<Scope>& global,
+                    const std::shared_ptr<Type>& structCtx) {
+    if (!ref || !global) return true;
+    if (ref == global->resolve(ref->name)) return true;
+    if (ref->slaveof == "$Fin") return true;
+    if (ref->name == "self" && structCtx) return true;
+    return false;
+}
+
+// Follows one initializer to the frame slot it names, or null for foreign or
+// unknown storage. `&e` reads the root of `e`; a bare Identifier / member /
+// index chain is a pointer copy and reads through an existing entry, so
+// `let q = p` inherits what `p` was recorded with -- null included, because
+// foreign stays foreign through a copy. Anything else (a call, `new`, a
+// literal) is storage this rule already accepts, hence null.
+const Symbol* ptrProvReferent(const Expression* init, const std::shared_ptr<Scope>& scope,
+                              const std::shared_ptr<Scope>& global,
+                              const std::shared_ptr<Type>& structCtx) {
+    if (!init || !scope) return nullptr;
+    const Identifier* root = nullptr;
+    if (const auto* u = dynamic_cast<const UnaryOp*>(init)) {
+        if (u->op != ASTTokenKind::AMPERSAND || !u->operand) return nullptr;
+        root = returnedStorage(u->operand.get()).root;
+    } else {
+        root = returnedStorage(init).root;
+    }
+    if (!root) return nullptr;
+    Symbol* rsym = scope->resolve(root->name);
+    if (!rsym) return nullptr;
+    const Symbol* known = nullptr;
+    if (lookupPtrProvenance(rsym->name, known)) return known;
+    if (ptrProvForeign(rsym, global, structCtx)) return nullptr;
+    // A pointer with no entry of its own points at storage someone else owns:
+    // a parameter is never declared and so never recorded, and recording it
+    // here would move the bug onto the accepted parameter case (#105
+    // non-goal; AcceptsReturningTheAddressOfAParameterField).
+    if (rsym->type && rsym->type->as<PointerType>()) return nullptr;
+    return rsym;
+}
+
+// Records one statement's effect on the tracking: a pointer-local
+// declaration writes its referent (or a null tombstone for foreign storage,
+// which still shadows an outer entry), and a straight-line `p = ...`
+// re-derives the innermost entry for the name. CEILING (#105): an assignment
+// inside one arm of a conditional leaves the join holding whichever entry
+// ran last, so branch-conditional reassignment defeats this tracking; that
+// needs real alias analysis, an owner-level call, not this slice.
+void notePtrProvenance(Statement* stmt, const std::shared_ptr<Scope>& scope,
+                       const std::shared_ptr<Scope>& global,
+                       const std::shared_ptr<Type>& structCtx) {
+    if (!stmt || !scope || ptrProvFrames_.empty()) return;
+    const auto* vd = dynamic_cast<const VariableDeclaration*>(stmt);
+    const Expression* init = nullptr;
+    const std::string* name = nullptr;
+    bool isDecl = false;
+    if (vd) {
+        isDecl = true;
+        name = &vd->name;
+        init = vd->initializer ? vd->initializer.get() : nullptr;
+    } else {
+        const auto* es = dynamic_cast<const ExpressionStatement*>(stmt);
+        const auto* b = (es && es->expr) ? dynamic_cast<const BinaryOp*>(es->expr.get()) : nullptr;
+        if (!b || b->op != ASTTokenKind::EQUAL || !b->left || !b->right) return;
+        const auto* id = dynamic_cast<const Identifier*>(b->left.get());
+        if (!id) return;
+        name = &id->name;
+        init = b->right.get();
+    }
+    Symbol* sym = scope->resolve(*name);
+    // Only pointer bindings are tracked; a bare `return p` for a value local
+    // is a copy, not an escape, so a non-pointer shadowing cannot reach the
+    // check either way.
+    if (!sym || !sym->type || !sym->type->as<PointerType>()) return;
+    const Symbol* ref = ptrProvReferent(init, scope, global, structCtx);
+    if (isDecl) {
+        ptrProvFrames_.back()[*name] = ref;
+        return;
+    }
+    for (auto it = ptrProvFrames_.rbegin(); it != ptrProvFrames_.rend(); ++it) {
+        auto f = it->find(*name);
+        if (f != it->end()) {
+            f->second = ref;
+            return;
+        }
+    }
+}
+
+// The frame-local slot a returned expression smuggles out through a pointer
+// local, or null. Two shapes `held` never sees: a bare `return p`, which
+// takes no address, and a returned closure, whose env copies the capture --
+// a dead address survives in the lambda, because captures copy.
+const Symbol* launderedReferent(const Expression* value, const std::shared_ptr<Scope>& scope,
+                                const std::shared_ptr<Scope>& global,
+                                const std::shared_ptr<Type>& structCtx) {
+    if (!value || !scope) return nullptr;
+    if (const auto* lam = dynamic_cast<const LambdaExpression*>(value)) {
+        for (const auto& c : lam->captures) {
+            const Symbol* ref = nullptr;
+            if (lookupPtrProvenance(c.name, ref) && ref &&
+                !ptrProvForeign(ref, global, structCtx))
+                return ref;
+        }
+        return nullptr;
+    }
+    ReturnedStorage bare = returnedStorage(value);
+    if (!bare.root) return nullptr;
+    if (!scope->resolve(bare.root->name)) return nullptr;
+    const Symbol* ref = nullptr;
+    if (lookupPtrProvenance(bare.root->name, ref) && ref &&
+        !ptrProvForeign(ref, global, structCtx))
+        return ref;
+    return nullptr;
 }
 // B4: whether the guard mentions `@defined` (or `compiler.symbols.defined`),
 // the only shape this slice folds. Anything else keeps the both-arms walk.
@@ -223,6 +370,8 @@ void SemanticAnalyzer::visit(Block& node) {
     // fallthrough point per variable; jumps out recorded their own exits on
     // the way. Skipped on the check walk (§3.3).
     if (!injectedWalk_) moved_.enterBlock();
+    // #105 provenance-lite: pointer-local entries live and die with this scope.
+    ptrProvFrames_.emplace_back();
     // Issue #46: everything after a `return` in the same block is dead (the
     // backend drops it in silence), so each statement past one warns, spanned
     // on itself. Still walked, so errors inside still report. Warning-level
@@ -241,8 +390,10 @@ void SemanticAnalyzer::visit(Block& node) {
                 warning(*stmt, "unreachable statement after 'return' never runs; remove it");
         }
         stmt->accept(*this);
+        notePtrProvenance(stmt.get(), currentScope, globalScope, currentStructContext);
         if (!afterReturn && dynamic_cast<ReturnStatement*>(stmt.get())) afterReturn = true;
     }
+    ptrProvFrames_.pop_back();
     if (!injectedWalk_) {
         auto w7report = [this](ASTNode& at, const std::string& msg) { error(at, msg); };
         moved_.exitBlock(node, w7report);
@@ -340,7 +491,24 @@ void SemanticAnalyzer::refuseEscapingReturn(ReturnStatement& node, bool ctorPoin
     }
 
     Symbol* sym = (held.root && currentScope) ? currentScope->resolve(held.root->name) : nullptr;
-    if (!sym || !globalScope) return;
+    if (!sym || !globalScope) {
+        // `return p` takes no address and a returned closure names none, so
+        // `held` is empty for both -- but either can still hand out this
+        // frame through a pointer local (#105). Untracked pointers (a
+        // parameter, a global, a call's result) stay silent here, as today.
+        const auto* lam = node.value ? dynamic_cast<const LambdaExpression*>(node.value.get())
+                                     : nullptr;
+        if (node.value && (addressForm || lam)) {
+            if (const Symbol* ref =
+                    launderedReferent(node.value.get(), currentScope, globalScope,
+                                       currentStructContext))
+                error(*node.value,
+                      fmt::format("cannot return the address of local variable '{}'", ref->name),
+                      "return caller-owned storage or an owned heap allocation (`new`) "
+                      "instead; this slot ends with the call");
+        }
+        return;
+    }
     const std::string& name = held.root->name;
 
     // A global's storage is the program's, so no call can end it.
@@ -355,10 +523,22 @@ void SemanticAnalyzer::refuseEscapingReturn(ReturnStatement& node, bool ctorPoin
     // pointer and is exempt there instead.
     if (name == "self" && currentStructContext) return;
     // Reaching *through* a pointer lands in storage someone else owns, while
-    // the pointer's own slot is this frame's either way. Read from the declared
-    // type, so an address laundered through a pointer local still escapes
-    // (#105).
-    if (!held.wholeSlot && sym->type && sym->type->as<PointerType>()) return;
+    // the pointer's own slot is this frame's either way -- unless the pointer
+    // is a local initialised from `&local`, which launders this frame's
+    // address through a foreign-looking type (#105). The recorded referent
+    // decides those; everything else keeps the declared-type reading, so the
+    // accepted pointer-parameter case stays accepted.
+    if (!held.wholeSlot && sym->type && sym->type->as<PointerType>()) {
+        const Symbol* ref = nullptr;
+        if (lookupPtrProvenance(name, ref) && ref &&
+            !ptrProvForeign(ref, globalScope, currentStructContext)) {
+            error(*node.value,
+                  fmt::format("cannot return the address of local variable '{}'", ref->name),
+                  "return caller-owned storage or an owned heap allocation (`new`) "
+                  "instead; this slot ends with the call");
+        }
+        return;
+    }
 
     // The remedy is the same for both spellings, and the compiler is sure of
     // it, so it earns the `= help:` row over the typo heuristic (the 3-arg
