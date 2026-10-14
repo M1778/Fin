@@ -5524,6 +5524,9 @@ BACKEND_TEST(Soundness_Codegen, AnUndeclaredInequalityOnAGenericInstantiationIsR
 }
 
 BACKEND_TEST(Soundness_Codegen, AStructAsAConditionIsRefused) {
+    // Was the pin that the *backend* refused `if (p)`: the frontend accepted a
+    // struct condition and codegen reported it. Since #94 the frontend refuses
+    // first, with the condition check; the backend path is now unreachable.
     const Built b = build(std::string(kPrintf) +
         "struct P { a <int> }\n"
         "fun main() <noret> {\n"
@@ -5531,7 +5534,7 @@ BACKEND_TEST(Soundness_Codegen, AStructAsAConditionIsRefused) {
         "    if (p) { printf(\"truthy\\n\"); }\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("codegen"), std::string::npos) << b.why();
+    EXPECT_NE(b.compileErr.find("expected 'bool'"), std::string::npos) << b.why();
 }
 
 // Was AGenericStructIsRefused, which asserted that `struct Box<T> { v <T> }` fails

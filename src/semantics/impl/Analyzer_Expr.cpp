@@ -14,7 +14,6 @@ namespace fin {
 
 namespace {
 std::unique_ptr<TypeNode> spellType(const TypePtr& t);
-bool mentionsGenericParam(const TypePtr& t);
 void unifyGeneric(const TypePtr& param, const TypePtr& arg, TypeMap& out);
 std::vector<TypePtr> orderedGenericArgs(const std::shared_ptr<StructType>& st, const TypeMap& mapping);
 }
@@ -1166,6 +1165,23 @@ void SemanticAnalyzer::visit(BinaryOp& node) {
 
     if (!checkType(node, rightType, leftType)) {
         lastExprType = nullptr;
+    } else if ((node.op == ASTTokenKind::PLUS || node.op == ASTTokenKind::MINUS ||
+                node.op == ASTTokenKind::MULT || node.op == ASTTokenKind::DIV ||
+                node.op == ASTTokenKind::MOD) &&
+               !isErrorType(leftType) && !isErrorType(rightType) &&
+               !mentionsGenericParam(leftType) && !mentionsGenericParam(rightType) &&
+               (!isNumericPrimitive(leftType) || !isNumericPrimitive(rightType))) {
+        // #94: the check above asks whether the operands agree with each other,
+        // never whether the operator accepts them, so `"a" - "b"` and
+        // `true / false` typed as their operands. Arithmetic takes numerics
+        // (`int` and `float` families, every width); the corpus builds strings
+        // with `format!(...)` and never with an operator, so there is no
+        // concatenation reading to preserve. Runs after checkType so a
+        // disagreement still reports as the mismatch it always was
+        // (Soundness_BinaryOperators.MismatchedOperandsAreStillRejected).
+        error(node, fmt::format("Arithmetic operator requires numeric operands, got '{}' and '{}'",
+                                leftType->toString(), rightType->toString()));
+        lastExprType = nullptr;
     } else {
         lastExprType = leftType;
     }
@@ -1245,38 +1261,34 @@ void SemanticAnalyzer::visit(UnaryOp& node) {
             lastExprType = nullptr;
         }
     }
+    else if (node.op == ASTTokenKind::NOT) {
+        // #94: `!` takes a `bool`. Before this the operand passed straight
+        // through, so `let a <int> = !1;` compiled and only `<bool>` caught it
+        // — at the binding, for the wrong reason. The operand's type is kept
+        // after the refusal (the `++` precedent): one mistake, one diagnostic.
+        // Silent on an already-failed operand, and on one still holding a
+        // generic parameter: a template body is walked once, uninstantiated,
+        // and what `T` becomes is decided at the use.
+        auto boolType = currentScope->resolveType("bool");
+        if (!isErrorType(type) && !mentionsGenericParam(type))
+            checkType(node, type, boolType);
+        lastExprType = type;
+    }
+    else if (node.op == ASTTokenKind::MINUS) {
+        // #94: unary `-` takes a numeric, like the binary arithmetic above.
+        // Silent on an already-failed operand, and on an uninstantiated
+        // generic, like every check here.
+        if (!isErrorType(type) && !mentionsGenericParam(type) && !isNumericPrimitive(type)) {
+            error(node, fmt::format("Cannot negate a value of type '{}'", type->toString()));
+        }
+        lastExprType = type;
+    }
     else {
         lastExprType = type;
     }
 }
 
 namespace {
-
-// Does this type still mention a generic parameter that has not been given a value?
-//
-// The gate on generic-argument inference, and deliberately narrow: it looks at a
-// struct's generic_args and not at its fields, so `Box<int>` is concrete even though
-// `Box<T>::v` was written `T` -- the field is already substituted by the time an
-// instantiated struct exists, and reading fields here would call a fully applied type
-// generic and re-infer it.
-bool mentionsGenericParam(const TypePtr& t) {
-    if (!t) return false;
-    if (t->as<GenericType>()) return true;
-    if (auto* p = t->as<PointerType>()) return mentionsGenericParam(p->pointee);
-    if (auto* a = t->as<ArrayType>()) return mentionsGenericParam(a->element_type);
-    if (auto* n = t->as<NullableType>()) return mentionsGenericParam(n->inner);
-    if (auto* s = t->as<StructType>()) {
-        for (const auto& g : s->generic_args) if (mentionsGenericParam(g)) return true;
-        return false;
-    }
-    if (auto* pr = t->as<PrototypeType>())
-        return mentionsGenericParam(pr->keyType) || mentionsGenericParam(pr->valueType);
-    if (auto* f = t->as<FunctionType>()) {
-        if (mentionsGenericParam(f->return_type)) return true;
-        for (const auto& q : f->param_types) if (mentionsGenericParam(q)) return true;
-    }
-    return false;
-}
 
 // Learn what a generic parameter stands for by matching a written argument against the
 // parameter it binds to, structurally. Nothing is diagnosed here -- an argument that
@@ -1518,6 +1530,36 @@ std::unique_ptr<TypeNode> spellType(const TypePtr& t) {
 }
 
 } // namespace
+
+// Does this type still mention a generic parameter that has not been given a value?
+//
+// The gate on generic-argument inference, and deliberately narrow: it looks at a
+// struct's generic_args and not at its fields, so `Box<int>` is concrete even though
+// `Box<T>::v` was written `T` -- the field is already substituted by the time an
+// instantiated struct exists, and reading fields here would call a fully applied type
+// generic and re-infer it.
+//
+// Defined here at `fin` scope (declared in SemanticAnalyzer.hpp) rather than in the
+// anonymous namespace above: Analyzer_Stmt.cpp's condition check reads the same
+// answer for #94's generic exemption.
+bool mentionsGenericParam(const TypePtr& t) {
+    if (!t) return false;
+    if (t->as<GenericType>()) return true;
+    if (auto* p = t->as<PointerType>()) return mentionsGenericParam(p->pointee);
+    if (auto* a = t->as<ArrayType>()) return mentionsGenericParam(a->element_type);
+    if (auto* n = t->as<NullableType>()) return mentionsGenericParam(n->inner);
+    if (auto* s = t->as<StructType>()) {
+        for (const auto& g : s->generic_args) if (mentionsGenericParam(g)) return true;
+        return false;
+    }
+    if (auto* pr = t->as<PrototypeType>())
+        return mentionsGenericParam(pr->keyType) || mentionsGenericParam(pr->valueType);
+    if (auto* f = t->as<FunctionType>()) {
+        if (mentionsGenericParam(f->return_type)) return true;
+        for (const auto& q : f->param_types) if (mentionsGenericParam(q)) return true;
+    }
+    return false;
+}
 
 // Arity only, so that the generic-inference path can report it before it walks the
 // arguments -- see the header.

@@ -1295,13 +1295,17 @@ TEST(Soundness_ModuleDiagnostics, EveryImportSiteKeepsItsOwnLocatedError) {
            "the module name alone.\n" << err;
 }
 
-// A file import and a package import of the same name search different places
-// -- `resolvePath` CASE B tries the importing file's own directory first and
-// CASE A does not -- so both are explained, and the two help strings differ.
-// This is deliberate rather than a leak in the dedup key: suppressing the
-// second would claim the one search that ran covered both.
+// A file import of a quoted *path* and a package import of the same name search
+// different places -- `resolvePath` CASE B tries the importing file's own
+// directory first and CASE A does not -- so both are explained, and the two help
+// strings differ. This is deliberate rather than a leak in the dedup key:
+// suppressing the second would claim the one search that ran covered both.
+// (A bare quoted name is the other case: it searches the same places a package
+// import does since #92, and that pair shares one explanation -- see the next
+// test. The `./` below is what keeps this test on the two-search side of that
+// line.)
 TEST(Soundness_ModuleDiagnostics, TheTwoSearchKindsAreExplainedSeparately) {
-    TempFin f("import \"mylib\";\nimport { a } from mylib;\nfun main() <noret> {}\n",
+    TempFin f("import \"./mylib\";\nimport { a } from mylib;\nfun main() <noret> {}\n",
               "kinds");
     auto r = runFinc({f.str(), "--diagnostics=json", "--fin-libs=/nonexistent/only"},
                      noFinLibs());
@@ -1309,7 +1313,7 @@ TEST(Soundness_ModuleDiagnostics, TheTwoSearchKindsAreExplainedSeparately) {
 
     std::vector<std::string> helps;
     for (const auto& d : jsonDiagnostics(r.err)) {
-        if (d.find("module not found: mylib") == std::string::npos) continue;
+        if (d.find("module not found") == std::string::npos) continue;
         const size_t at = d.find("\"help\":");
         ASSERT_NE(at, std::string::npos) << d;
         helps.push_back(d.substr(at));
@@ -1321,6 +1325,21 @@ TEST(Soundness_ModuleDiagnostics, TheTwoSearchKindsAreExplainedSeparately) {
         << "two messages carrying the same help are a duplicate after all; "
            "either the searches differ and the help should show it, or they do "
            "not and one message should be suppressed.\n" << r.err;
+}
+
+// Since #92 a bare quoted name (`import "mylib"`) searches the same places a
+// package import does, so the pair is one search run twice and is explained
+// once -- the rule TheTwoSearchKindsAreExplainedSeparately states. Each import
+// site still keeps its own located error (EveryImportSiteKeepsItsOwnLocatedError
+// above); only the shared "where I looked" is deduplicated.
+TEST(Soundness_ModuleDiagnostics, ABareQuotedNameAndAPackageImportShareOneExplanation) {
+    TempFin f("import \"mylib\";\nimport { a } from mylib;\nfun main() <noret> {}\n",
+              "kindpair");
+    auto r = runFinc({f.str(), "--diagnostics=json", "--fin-libs=/nonexistent/only"},
+                     noFinLibs());
+    ASSERT_EQ(r.exitCode, 1) << r.err;
+    EXPECT_EQ(countOccurrences(stripAnsi(r.err), "module not found"), 1u)
+        << "one failed search, one explanation of it.\n" << r.err;
 }
 
 // --- An imported module's diagnostics point into the imported module ---------
@@ -1454,7 +1473,8 @@ TEST(Soundness_ModuleDiagnostics, AnImportCycleIsReportedOnceAndTerminates) {
     // 1), so a stray /tmp/a.fin shadows the pinned library and this test measures a
     // syntax error in somebody else's leftover probe instead of a cycle. That is not
     // hypothetical -- it happened, which is also what
-    // KnownDefect_LibraryPaths.AFileBesideTheSourceShadowsAPinnedLibrary is about.
+    // Soundness_LibraryPaths.APinnedLibraryIsNotShadowedByASiblingFile is about
+    // (bare quoted names skip the source-directory step since #92).
     const std::string tag = root.filename().string();
     const std::string modA = "cyc_a_" + tag;
     const std::string modB = "cyc_b_" + tag;
@@ -1474,34 +1494,23 @@ TEST(Soundness_ModuleDiagnostics, AnImportCycleIsReportedOnceAndTerminates) {
         << "one cycle, one statement of it.\n" << err;
 }
 
-// A file beside the source shadows a library the build pinned.
+// A file beside the source does not shadow a library the build pinned.
 //
-// Driver.cpp goes to real trouble for hermeticity: as soon as `--fin-libs` or `FIN_LIBS`
-// names a path it drops the working directory from the search list, because "leaving it
-// in would let a file in the project shadow a module the build pinned", and it says
-// outright that `finn` "cannot fix that from its side at any price". The reasoning is
-// right and the working directory is duly gone -- but the *importing file's own
-// directory* is still consulted, and it is consulted first: ModuleLoader::resolvePath
-// CASE B step 1 checks `rootBasePath / rawImport` before it looks at a single search
-// path. So `import "collection";` next to a stray collection.fin picks up the stray, and
-// the pin is worth nothing.
+// Driver.cpp drops the working directory from the search list as soon as
+// `--fin-libs` or `FIN_LIBS` names a path, because leaving it in would let a
+// file in the project shadow a module the build pinned. ModuleLoader::
+// resolvePath closes the same hole against the importing file's own directory:
+// a bare quoted name (`import "mylib"`, no separator and no `.fin`) is a
+// library lookup and skips the source-directory step, resolving through the
+// search paths like the package spelling does. A quoted *path*
+// (`import "tests/samples/macros.fin"`, importing.fin:7) still resolves
+// against the source, and a bare name reaching for a library
+// (`import "networking"`, importing.fin:9) still reaches it through
+// FIN_LIBS/--fin-libs -- one spelling, two meanings, split on whether the
+// string looks like a path.
 //
-// Two readings, and the corpus does not settle which is right, so this is booked rather
-// than fixed. A quoted import is overloaded: `import "tests/samples/macros.fin";`
-// (importing.fin:7) is a path relative to the project and has to resolve against the
-// source, while `import "networking";` (importing.fin:9) is emphatically a *library* lookup
-// with no path at all -- "HOW DOES THE COMPILER KNOW WHERE TO IMPORT THIS LIBRARY". One
-// spelling, two meanings, and only the second one should honour a pin. A plausible rule
-// is that a name with no separator and no `.fin` is a library lookup and skips the
-// source directory, but that is a language decision and it is the owner's.
-//
-// It has already cost something: Soundness_ModuleDiagnostics.AnImportCycleIsReportedOnce-
-// AndTerminates went red because a probe file left in /tmp shadowed the library it had
-// pinned, and it took a while to see that the test was right and the leftover was not.
-//
-// The inversion is Soundness_LibraryPaths.APinnedLibraryIsNotShadowedByASiblingFile.
-TEST(KnownDefect_LibraryPaths, AFileBesideTheSourceShadowsAPinnedLibrary) {
-    // Known defect: #92 (tracked; see issue for inversion target).
+// (Was KnownDefect_LibraryPaths.AFileBesideTheSourceShadowsAPinnedLibrary, #92.)
+TEST(Soundness_LibraryPaths, APinnedLibraryIsNotShadowedByASiblingFile) {
     // The library the build pins, and a decoy of the same name beside the source. The
     // two differ in a way the diagnostic can see: only the decoy has an error in it.
     TempLib lib;  // writes <dir>/mylib.fin, empty and valid
@@ -1518,51 +1527,27 @@ TEST(KnownDefect_LibraryPaths, AFileBesideTheSourceShadowsAPinnedLibrary) {
     const std::string err = stripAnsi(r.err);
     fs::remove_all(decoy, ec);
 
-    EXPECT_EQ(r.exitCode, 1)
-        << "when this starts exiting 0 the pin is being honoured -- invert and rename\n"
-        << err;
-    EXPECT_NE(err.find("nope_from_the_decoy"), std::string::npos)
-        << "the decoy beside the source was loaded instead of the pinned library.\n"
-           "If this stops matching, resolvePath stopped preferring the source directory\n"
-           "and the pin now wins, which is the fix this test is waiting for.\n"
+    EXPECT_EQ(r.exitCode, 0)
+        << "the pinned mylib is empty and valid, so a failure here means the "
+           "decoy beside the source was loaded instead of the pinned library\n"
         << err;
 }
 
 // --- Pinning a library against a same-named file next to the source ---
 //
 // `finn` passes --fin-libs to pin the environment a build compiles against, and
-// Driver.cpp:83-93 goes to real trouble for that promise: it drops the working
-// directory from the search list as soon as any library path is named, because
-// "leaving it in would let a file in the project shadow a module the build
-// pinned". That reasoning is sound and the code does what it says.
+// Driver.cpp drops the working directory from the search list as soon as any
+// library path is named, because "leaving it in would let a file in the
+// project shadow a module the build pinned". Package imports (CASE A) consult
+// only searchPaths and never rootBasePath; quoted imports of a bare library
+// name now do the same (resolvePath skips CASE B step 1 for a name with no
+// separator and no `.fin`), so the two spellings of the same import agree: with
+// one pinned `mylib` and one same-named sibling, both `from mylib` and
+// `from "mylib"` get the pinned one. A quoted *path* still resolves against
+// the importing file's directory first. That agreement is the property the
+// tests below hold.
 //
-// It is also not sufficient. ModuleLoader::resolvePath CASE B step 1 resolves a
-// quoted import against `rootBasePath` -- the *importing file's* directory --
-// before it ever consults the search paths, and it does so unconditionally. In a
-// real project every source file has the project's other files as siblings, so
-// the hole the driver closed against the working directory stays open against the
-// directory the source itself lives in. Dropping "." was necessary, not enough.
-//
-// Package imports (CASE A) consult only searchPaths and never rootBasePath, so
-// the two spellings of the same import disagree: with one pinned `mylib` and one
-// same-named sibling, `from mylib` gets the pinned one and `from "mylib"` gets
-// the sibling. That contrast is the evidence the quoted form is the odd one out
-// rather than the whole design being cwd-flavoured, and it is why the package
-// case below is Soundness while the quoted case is a KnownDefect.
-//
-// The shadowing is silent: the build succeeds against the wrong module. A warning
-// would be the obvious answer and the contract forbids it -- ADR 0009 has exit 0
-// imply zero diagnostics, and a shadowed import compiles fine -- which is the
-// same wall the bogus-search-path finding hit.
-//
-// Whether the fix is "a bare quoted name is a library lookup and skips step 1,
-// while a quoted *path* keeps it" is a language decision, not a loader detail:
-// the corpus documents both meanings for the one syntax. importing.fin calls
-// `import "tests/samples/macros.fin"` "a normal file import" and says of
-// `import "networking"` that it has no path so the compiler must find it through
-// FIN_LIBS/--fin-libs. A rule keyed on whether the string looks like a path
-// reads straight off those two lines and closes the hole exactly. It is left for
-// the owner, because it changes how every import in every project resolves.
+// (Was the KnownDefect block tracked by #92; both tests inverted.)
 
 namespace {
 
@@ -1649,26 +1634,22 @@ TEST(Soundness_PinnedLibraries, AQuotedImportReachesAPinnedLibraryWhenNothingSha
         << stripAnsi(r.err);
 }
 
-// Asserts the defect. resolvePath CASE B step 1 tries the importing file's own
-// directory before any search path, so the float sibling wins over the int
-// library the build pinned, silently.
+// The invariant `finn` depends on, for the quoted spelling: what --fin-libs
+// names is what gets compiled against, whatever files happen to sit next to
+// the source. The two spellings agreeing is the property; the package half is
+// APackageImportIsNotShadowedByASiblingFile above.
 //
-// When the owner rules on the library-lookup-versus-file-path question and the
-// quoted form stops consulting rootBasePath for a bare name, this test fails --
-// which is the good news. Invert it to EXPECT_EQ(r.exitCode, 0) with the message
-// from APackageImportIsNotShadowedByASiblingFile and rename it into
-// Soundness_PinnedLibraries.AQuotedImportIsNotShadowedByASiblingFile. Do not
-// relax it, and do not delete it: the two spellings agreeing is the property.
-TEST(KnownDefect_PinnedLibraries, AQuotedImportIsShadowedByASiblingFile) {
-    // Known defect: #92 (tracked; see issue for inversion target).
+// (Was KnownDefect_PinnedLibraries.AQuotedImportIsShadowedByASiblingFile, #92:
+// resolvePath CASE B step 1 tried the importing file's own directory before
+// any search path, so the float sibling won over the int library the build
+// pinned, silently. A bare quoted name now skips that step.)
+TEST(Soundness_PinnedLibraries, AQuotedImportIsNotShadowedByASiblingFile) {
     TempPinnedProject p(kAppQuotedImport, kPinnedReturnsInt, kSiblingReturnsFloat);
     auto r = runFinc({p.app(), "--fin-libs=" + p.libs()}, noFinLibs());
-    const std::string err = stripAnsi(r.err);
-    EXPECT_EQ(r.exitCode, 1)
-        << "TODAY'S BEHAVIOUR, not the desired one: a same-named sibling file "
-           "beats the pinned library for a quoted import\n" << err;
-    EXPECT_NE(err.find("Type mismatch"), std::string::npos)
-        << "the float sibling won over the int library\n" << err;
+    EXPECT_EQ(r.exitCode, 0)
+        << "the pinned mylib returns int and the sibling returns float, so a "
+           "type mismatch here means the sibling won and the pin was defeated\n"
+        << stripAnsi(r.err);
 }
 
 namespace {
@@ -2824,7 +2805,7 @@ struct TempReadableModule {
         fs::create_directories(root, ec);
         std::ofstream(root / "m.fin", std::ios::binary) << moduleBody;
         std::ofstream(root / "main.fin", std::ios::binary)
-            << "import { exported } from \"m\";\n"
+            << "import { exported } from \"./m\";\n"
                "fun main() <noret> { let x <int> = exported(); }\n";
     }
     ~TempReadableModule() {
@@ -2932,13 +2913,17 @@ TEST(Soundness_ModuleIdentity, OneModuleImportedUnderTwoSpellingsIsStillOneModul
     // Asserted against the compiler's own behaviour on the single-import case rather than
     // against a fixed count: importing a module a second time under another spelling must
     // not change what the compiler says about that module at all.
-    TempAliasedModule once({"m"});
+    //
+    // The pair is `"m.fin"` versus `"./m"`: a bare `"m"` no longer names the sibling at
+    // all -- since #92 it is a library lookup and skips the source directory -- so the
+    // two-spellings question only arises between path spellings.
+    TempAliasedModule once({"m.fin"});
     const auto baseline = runFinc({once.main(), "--diagnostics=json"}, noFinLibs());
     const size_t expected = countDiagnosticsNotAbout(baseline.err, "main.fin");
     ASSERT_GT(expected, 0u) << "the module has an error in it, so it must be diagnosed at "
                                "least once, or this test compares nothing\n" << baseline.err;
 
-    TempAliasedModule twice({"m", "./m"});
+    TempAliasedModule twice({"m.fin", "./m"});
     const auto r = runFinc({twice.main(), "--diagnostics=json"}, noFinLibs());
     EXPECT_EQ(countDiagnosticsNotAbout(r.err, "main.fin"), expected)
         << "naming one module two ways doubled its diagnostics: the cache is keyed on the "
@@ -2950,12 +2935,12 @@ TEST(Soundness_ModuleIdentity, AModuleReachedThroughASymlinkIsNotASecondModule) 
     // versus `m` and leaves this case untouched, so one plausible fix for that defect
     // would leave this one green. A symlink is a second name for one file, and parsing
     // the file twice defines its symbols twice regardless of which name was used.
-    TempAliasedModule once({"real"}, "real");
+    TempAliasedModule once({"./real"}, "real");
     const auto baseline = runFinc({once.main(), "--diagnostics=json"}, noFinLibs());
     const size_t expected = countDiagnosticsNotAbout(baseline.err, "main.fin");
     ASSERT_GT(expected, 0u) << baseline.err;
 
-    TempAliasedModule twice({"real", "alias"}, "real");
+    TempAliasedModule twice({"./real", "./alias"}, "real");
     if (!twice.linkAs("alias.fin", "real.fin"))
         GTEST_SKIP() << "cannot create a symlink here";
 

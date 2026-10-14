@@ -146,7 +146,8 @@ private:
     // The caches below are keyed on this and never on the path text: one file reached
     // by two names is one module, and parsing it twice reports its diagnostics twice.
     std::string identityOf(const std::string& path) const;
-    std::string describeSearchedPaths(bool isPackage) const;
+    std::string describeSearchedPaths(bool isPackage,
+                                      const std::string& rawImport = "") const;
     void report(const std::string& msg);
     void report(const std::string& msg, const std::string& help);
 };

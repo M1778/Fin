@@ -24,6 +24,21 @@ namespace fin {
 
 extern std::unique_ptr<Program> root;
 
+// A bare quoted name (`import "mylib"`) is a library lookup: no separator,
+// no `.fin` suffix. A quoted *path* (`import "tests/samples/macros.fin"`,
+// `./x`, `sub/y`) keeps resolving against the importing file. `.` and `..`
+// are paths, not names, whatever they lack (#92).
+static bool isBareLibraryName(const std::string& rawImport) {
+    if (rawImport == "." || rawImport == "..") return false;
+    if (rawImport.find('/') != std::string::npos) return false;
+    if (rawImport.find('\\') != std::string::npos) return false;
+    constexpr char kExt[] = ".fin";
+    if (rawImport.size() >= 4 &&
+        rawImport.compare(rawImport.size() - 4, 4, kExt) == 0)
+        return false;
+    return true;
+}
+
 ModuleLoader::~ModuleLoader() = default;
 
 ModuleLoader::ModuleLoader(const std::string& base) : rootBasePath(base), globalScope(std::make_shared<Scope>()) {
@@ -50,11 +65,15 @@ void ModuleLoader::addSearchPath(const std::string& path) {
 // This is help text on a failure rather than a warning at the point the bad path
 // is accepted, because ADR 0009 has exit `0` imply zero diagnostics: warning
 // about a bogus entry on a compile that then succeeded would break that.
-std::string ModuleLoader::describeSearchedPaths(bool isPackage) const {
+std::string ModuleLoader::describeSearchedPaths(bool isPackage,
+                                                 const std::string& rawImport) const {
     std::vector<std::string> places;
     // A package import consults the search paths only (resolvePath CASE A); a
-    // file import tries the importing file's own directory first (CASE B).
-    if (!isPackage && !rootBasePath.empty()) places.push_back(rootBasePath);
+    // file import tries the importing file's own directory first (CASE B),
+    // unless it is a bare library name, which skips that step like a package
+    // import does (#92).
+    if (!isPackage && !isBareLibraryName(rawImport) && !rootBasePath.empty())
+        places.push_back(rootBasePath);
     places.insert(places.end(), requestedPaths.begin(), requestedPaths.end());
 
     if (places.empty()) {
@@ -115,11 +134,16 @@ std::string ModuleLoader::resolvePath(const std::string& rawImport, bool isPacka
     }
 
     // CASE B: File Import (import "foo" or import "foo.fin")
-    
-    // 1. Check relative to current file (rootBasePath)
-    std::string res = check(fs::path(rootBasePath) / rawImport);
-    if (!res.empty()) return res;
-    
+
+    // 1. Check relative to current file (rootBasePath) -- unless the import is
+    // a bare library name, which is a search-path lookup and skips this step,
+    // so a stray sibling cannot shadow a pinned library (#92).
+    if (!isBareLibraryName(rawImport)) {
+        const std::string rel = check(fs::path(rootBasePath) / rawImport);
+        if (!rel.empty()) return rel;
+    }
+
+    std::string res;
     // 2. Check absolute path
     fs::path absP(rawImport);
     if (absP.is_absolute()) {
@@ -210,11 +234,17 @@ std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, b
     // 1. Resolve
     std::string fullPath = resolvePath(importPath, isPackage);
     if (fullPath.empty()) {
-        // Once per import, not once per pass that asks (ModuleLoader.hpp:23).
-        const std::string key = (isPackage ? "p:" : "f:") + importPath;
+        // Once per failed *search*, not once per pass that asks
+        // (ModuleLoader.hpp:23) and not once per spelling that runs it: a bare
+        // quoted name searches the same places a package import does (#92), so
+        // `import "mylib"` beside `import { a } from mylib` is one search run
+        // twice, and saying so twice adds nothing. A quoted *path* searches its
+        // importer's directory too, which is a different search and is still
+        // explained separately (TheTwoSearchKindsAreExplainedSeparately).
+        const std::string help = describeSearchedPaths(isPackage, importPath);
+        const std::string key = importPath + "\n" + help;
         if (failedModules.insert(key).second) {
-            report(fmt::format("module not found: {}", importPath),
-                   describeSearchedPaths(isPackage));
+            report(fmt::format("module not found: {}", importPath), help);
         }
         return nullptr;
     }

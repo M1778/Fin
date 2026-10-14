@@ -45,6 +45,13 @@ struct AnalysisContext {
     std::shared_ptr<Type> currentFuncReturnType = nullptr;
 };
 
+// Whether a type still mentions an unbound generic parameter (#94's exemption:
+// a template body is walked once, uninstantiated, so operand and condition
+// checks cannot be decided there). Defined in Analyzer_Expr.cpp beside the
+// inference gate it was written for; condition checking in Analyzer_Stmt.cpp
+// reads the same answer.
+bool mentionsGenericParam(const TypePtr& t);
+
 class SemanticAnalyzer : public Visitor {
 public:
     bool hasError = false;

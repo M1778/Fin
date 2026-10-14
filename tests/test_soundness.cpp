@@ -4254,10 +4254,10 @@ TEST(Soundness_FieldOrder, InstantiatingAGenericStructKeepsTheOrder) {
 }
 
 // ---------------------------------------------------------------------------
-// Conditions are not type-checked.
+// Conditions are type-checked against `bool` (#94, fixed).
 //
-// `if (1)`, `if ("s")`, `while (1)` and a `for` header's `1` all compile clean.
-// Not in the plan's list, and not findable by counting samples: no sample fails
+// `if (1)`, `if ("s")`, `while (1)` and a `for` header's `1` used to compile
+// clean. Not in the plan's list, and not findable by counting samples: no sample fails
 // because of it, because accepting too much never fails.
 //
 // What makes this a defect rather than a design choice is that the analyzer
@@ -4286,14 +4286,14 @@ TEST(Soundness_FieldOrder, InstantiatingAGenericStructKeepsTheOrder) {
 // written to demonstrate return-path analysis, and the file says nothing about
 // conditions either way.
 //
-// So this is pinned rather than fixed, because the fix is one uncommented line
-// that changes what the language accepts, and `undefined_behavior.fin` — a
-// normative sample — stops compiling the moment it lands. Under ADR 0008 a
-// normative sample changes only by a deliberate language decision, so enabling
-// the check and rewriting that sample's `if (0)` to `if (false)` is one ruling,
-// not two edits. If the ruling goes the other way, delete these tests and
-// delete the commented-out line, so that the next reader does not find the same
-// contradiction and reopen it.
+// So this was pinned, then fixed by checking every condition against `bool`
+// in visit(IfStatement&), visit(WhileLoop&) and visit(ForLoop&). Enabling the
+// check makes `undefined_behavior.fin` — a normative sample — emit two extra
+// diagnostics, which its `//@ error` expectation tolerates (at-least semantics,
+// pinned by ExpectationRunner.AnUnrelatedExtraErrorIsTolerated). Rewriting that
+// sample's `if (0)` to `if (false)` is still one deliberate language decision
+// under ADR 0008, now recorded beside the first inverted test rather than made
+// here.
 // ---------------------------------------------------------------------------
 
 // The controls. These are what make the tests below evidence of an
@@ -4313,60 +4313,73 @@ TEST(Soundness_Conditions, BlameStillRejectsAnInteger) {
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Conditions, AnIfAcceptsAnInteger) {
-    // Known defect: #94 (tracked; see issue for inversion target).
+TEST(Soundness_Conditions, AnIfRejectsAnInteger) {
+    // Was KnownDefect_Conditions.AnIfAcceptsAnInteger (#94): `if (1)` compiled.
+    // The condition is now checked against `bool`, like `let <bool>` and the
+    // asserting `blame`. `undefined_behavior.fin` still writes `if (0)` twice;
+    // its `//@ error` expectation is at-least, so the suite tolerates the two
+    // extra diagnostics (ExpectationRunner.AnUnrelatedExtraErrorIsTolerated
+    // pins the semantics). Rewriting that sample to `if (false)` is the
+    // owner's ruling to make, not this fix's.
     auto r = compile("fun main() <void> { if (1) { } }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: conditions are checked now. Invert these and rule on "
-           "undefined_behavior.fin's `if (0)` — see this block's comment.\n"
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool'"), std::string::npos)
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Conditions, AnIfAcceptsAString) {
-    // Known defect: #94 (tracked; see issue for inversion target).
+TEST(Soundness_Conditions, AnIfRejectsAString) {
+    // Was KnownDefect_Conditions.AnIfAcceptsAString (#94): `if ("s")` compiled.
     // A separate test from the integer because "C allows int" is at least an
-    // argument, and there is none at all for a string. If a ruling ever does
-    // admit truthiness, it has to say what this line means.
+    // argument, and there is none at all for a string.
     auto r = compile("fun main() <void> { if (\"s\") { } }\n");
-    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool'"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Conditions, AnIfAcceptsANonBoolVariable) {
-    // Known defect: #94 (tracked; see issue for inversion target).
+TEST(Soundness_Conditions, AnIfRejectsANonBoolVariable) {
+    // Was KnownDefect_Conditions.AnIfAcceptsANonBoolVariable (#94).
     // Not a literal, so this cannot be dismissed as constant folding.
     auto r = compile("fun main() <void> { let n <int> = 3; if (n) { } }\n");
-    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool'"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Conditions, AWhileAcceptsAnInteger) {
-    // Known defect: #94 (tracked; see issue for inversion target).
-    // Separate from `if` because the fix is separate: WhileLoop has no
-    // commented-out check to uncomment, so a fix that only edits line 34
-    // leaves this one passing.
+TEST(Soundness_Conditions, AWhileRejectsAnInteger) {
+    // Was KnownDefect_Conditions.AWhileAcceptsAnInteger (#94).
+    // Separate from `if` because the fix is separate: the check lives in
+    // visit(WhileLoop&), not beside the `if` one.
     auto r = compile("fun main() <void> { while (1) { } }\n");
-    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool'"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Conditions, AForHeaderAcceptsAnInteger) {
-    // Known defect: #94 (tracked; see issue for inversion target).
+TEST(Soundness_Conditions, AForHeaderRejectsAnInteger) {
+    // Was KnownDefect_Conditions.AForHeaderAcceptsAnInteger (#94).
     auto r = compile("fun main() <void> { for (let i <int> = 0; 1; i = i + 1) { } }\n");
-    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool'"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
 // ---------------------------------------------------------------------------
-// A binary operator checks that its operands agree with each other, never that
-// the operator accepts them.
+// A binary operator checks that its operands agree with each other, and an
+// arithmetic one checks that it accepts them (#94, fixed).
 //
-// Analyzer_Expr.cpp:176 ends visit(BinaryOp&) with
+// visit(BinaryOp&) used to end with
 //
 //     if (!checkType(node, rightType, leftType)) { lastExprType = nullptr; }
 //     else { lastExprType = leftType; }
 //
-// which asks one question — are the two sides the same type — and answers the
-// other one by assumption. So `1 + "s"` is rejected, correctly but for the wrong
+// which asked one question — are the two sides the same type — and answered the
+// other one by assumption. So `1 + "s"` was rejected, correctly but for the wrong
 // reason (the operands disagree, not that `+` is undefined on strings), and
-// `"a" - "b"`, `"a" % "b"`, `true + false` and `true / false` are all accepted,
-// each yielding the operand type.
+// `"a" - "b"`, `"a" % "b"`, `true + false` and `true / false` were all accepted,
+// each yielding the operand type. The fall-through now refuses `+ - * / %` on
+// non-numeric operands after the agreement check, so a disagreement still
+// reports as the mismatch it always was.
 //
 // The same function already does this right twice. At :158 `&&` and `||` check
 // both operands against `bool` and yield `bool`; at :148 an operand-specific
@@ -4414,48 +4427,51 @@ TEST(Soundness_BinaryOperators, LogicalAndStillRequiresBooleanOperands) {
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_BinaryOperators, SubtractionAcceptsTwoStrings) {
-    // Known defect: #94 (tracked; see issue for inversion target).
-    // Asserting the *result type*, not merely that it compiles: this passes only
-    // if `"a" - "b"` was typed `string`, which is the pass-through at :176 rather
-    // than some unrelated leniency.
+TEST(Soundness_BinaryOperators, SubtractionRejectsTwoStrings) {
+    // Was KnownDefect_BinaryOperators.SubtractionAcceptsTwoStrings (#94):
+    // `"a" - "b"` typed `string` via the operand-agreement fall-through.
+    // Arithmetic now requires numeric operands; the corpus builds strings with
+    // `format!(...)`, so no concatenation reading is lost.
     auto r = compile("fun main() <void> { let a <string> = \"a\" - \"b\"; }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a binary operator now checks that it accepts its operands. "
-           "Invert this and the two below to EXPECT_NE, move them to "
-           "Soundness_BinaryOperators, and strike the entry from docs/plan.md.\n"
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("requires numeric operands"), std::string::npos)
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_BinaryOperators, ModuloAcceptsTwoStrings) {
-    // Known defect: #94 (tracked; see issue for inversion target).
+TEST(Soundness_BinaryOperators, ModuloRejectsTwoStrings) {
+    // Was KnownDefect_BinaryOperators.ModuloAcceptsTwoStrings (#94).
     // Separate from subtraction because `%` is the case with no reading at all:
-    // a fix that whitelists `+` and `-` for strings on the way to concatenation
-    // would leave this one accepted, and it should not.
+    // a fix that whitelisted `+` and `-` for strings on the way to concatenation
+    // would leave this one accepted, and it is not.
     auto r = compile("fun main() <void> { let a <string> = \"a\" % \"b\"; }\n");
-    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("requires numeric operands"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_BinaryOperators, ArithmeticAcceptsTwoBooleans) {
-    // Known defect: #94 (tracked; see issue for inversion target).
-    // A different operand kind, so a numeric whitelist that admits `bool` by way
+TEST(Soundness_BinaryOperators, ArithmeticRejectsTwoBooleans) {
+    // Was KnownDefect_BinaryOperators.ArithmeticAcceptsTwoBooleans (#94).
+    // A different operand kind, so a numeric whitelist that admitted `bool` by way
     // of integer promotion would leave this green while the string cases go red.
     auto r = compile("fun main() <void> { let a <bool> = true / false; }\n");
-    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("requires numeric operands"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
 // ---------------------------------------------------------------------------
-// A unary operator other than `&` and `*` returns its operand's type without
-// checking anything.
+// Every unary operator other than `&` and `*` used to return its operand's type
+// without checking anything (#94, fixed).
 //
-// visit(UnaryOp&) handles two operators and then gives up. Analyzer_Expr.cpp:207:
+// visit(UnaryOp&) handled two operators and then gave up:
 //
 //     else { lastExprType = type; }
 //
 // `&` builds a PointerType, `*` unwraps one and errors on a non-pointer, and
-// every other operator — `!`, unary `-`, `~`, `++`, `--` — falls into that
-// clause. So `!` on an integer yields `int` and unary `-` on a string yields
-// `string`.
+// every other operator — `!`, unary `-`, `~`, `++`, `--` — fell into that
+// clause. So `!` on an integer yielded `int` and unary `-` on a string yielded
+// `string`. `!` now requires `bool` and unary `-` a numeric; `~` still passes
+// through, unpinned — ruling owed if anything writes it.
 //
 // This defect hides behind the binding it appears in, which is why it took a
 // deliberate probe to see. `let a <bool> = !1;` *is* rejected, so `!` looks
@@ -4480,24 +4496,25 @@ TEST(Soundness_UnaryOperators, DereferencingANonPointerIsStillRejected) {
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_UnaryOperators, NotPassesAnIntegerStraightThrough) {
-    // Known defect: #94 (tracked; see issue for inversion target).
-    // `<int>`, not `<bool>`: this compiling is the proof that `!1` is typed
-    // `int`. With `<bool>` the file already rejects it, for the wrong reason.
+TEST(Soundness_UnaryOperators, NotRejectsAnInteger) {
+    // Was KnownDefect_UnaryOperators.NotPassesAnIntegerStraightThrough (#94):
+    // `!1` typed `int`. `!` now requires a boolean operand; `<int>`, not
+    // `<bool>`, is what proves it, since the binding used to catch the
+    // `<bool>` spelling for the wrong reason.
     auto r = compile("fun main() <void> { let a <int> = !1; }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: `!` now requires a boolean operand. Invert this and the one "
-           "below, move them to Soundness_UnaryOperators, and strike the entry "
-           "from docs/plan.md.\n"
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("expected 'bool'"), std::string::npos)
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_UnaryOperators, NegationPassesAStringStraightThrough) {
-    // Known defect: #94 (tracked; see issue for inversion target).
+TEST(Soundness_UnaryOperators, NegationRejectsAString) {
+    // Was KnownDefect_UnaryOperators.NegationPassesAStringStraightThrough (#94).
     // Separate operator, separate case in the fix: `!` wants `bool` and `-`
     // wants a number, so a repair that only learns about `!` leaves this green.
     auto r = compile("fun main() <void> { let a <string> = -\"s\"; }\n");
-    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_NE(r.exitCode, 0);
+    EXPECT_NE(stripAnsi(r.err).find("Cannot negate"), std::string::npos)
+        << stripAnsi(r.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -7425,7 +7442,11 @@ TEST(Soundness_Nullability, FunQuestionMayFallOffTheEnd) {
     // is missing a return statement on some paths" on the very line the sample
     // says is legal. The sample passed anyway because `//@ error` means "at least
     // this diagnostic" (test_expectations.cpp), so the extra one was invisible.
-    auto r = compile("fun? f() <int> { if (0) { return 1; } }\n"
+    //
+    // `if (false)` and not the sample's `if (0)`: since #94 a condition must be
+    // boolean, and this test is about the implicit `return null`, not about the
+    // condition. Whether the sample's `if (0)` stays is the owner's ruling.
+    auto r = compile("fun? f() <int> { if (false) { return 1; } }\n"
                      "fun main() <int> { return 0; }\n");
     EXPECT_EQ(r.exitCode, 0) << "a `fun?` has an implicit `return null`:\n" << r.err;
 }
@@ -15996,13 +16017,17 @@ TEST(Soundness_BareMethodCalls, AFreeCallInsideADifferentlyNamedMethodIsUnaffect
 // if/while/for/ternary condition warns naming the assignment and suggesting
 // `==`; an intentional assignment stays silent behind extra parentheses or an
 // explicit comparison.
+//
+// The assigned value is a `bool` in every program below: since #94 a condition
+// must be boolean, so an `int` assignment would fail to build for a reason that
+// has nothing to do with the warning these tests pin.
 // ---------------------------------------------------------------------------
 
 TEST(Soundness_AssignInCondition, IfWithAssignmentWarnsButBuilds) {
     const FincRun r = compile(
         "fun main() <int> {\n"
-        "  let x <int> = 1;\n"
-        "  if (x = 2) {\n"
+        "  let b <bool> = false;\n"
+        "  if (b = true) {\n"
         "    return 1;\n"
         "  }\n"
         "  return 0;\n"
@@ -16019,8 +16044,8 @@ TEST(Soundness_AssignInCondition, IfWithAssignmentWarnsButBuilds) {
 TEST(Soundness_AssignInCondition, WhileWithAssignmentWarnsButBuilds) {
     const FincRun r = compile(
         "fun main() <int> {\n"
-        "  let x <int> = 1;\n"
-        "  while (x = 2) {\n"
+        "  let b <bool> = false;\n"
+        "  while (b = true) {\n"
         "    return 1;\n"
         "  }\n"
         "  return 0;\n"
@@ -16035,8 +16060,8 @@ TEST(Soundness_AssignInCondition, WhileWithAssignmentWarnsButBuilds) {
 TEST(Soundness_AssignInCondition, ForConditionWithAssignmentWarnsButBuilds) {
     const FincRun r = compile(
         "fun main() <int> {\n"
-        "  let x <int> = 1;\n"
-        "  for (i : int = 0; x = 2; i++) {\n"
+        "  let b <bool> = false;\n"
+        "  for (i : int = 0; b = true; i++) {\n"
         "    return 1;\n"
         "  }\n"
         "  return 0;\n"
@@ -16085,8 +16110,8 @@ TEST(Soundness_AssignInCondition, ExtraParensStaySilent) {
     // The intentional form: parentheses say the assignment was meant.
     const FincRun r = compile(
         "fun main() <int> {\n"
-        "  let x <int> = 1;\n"
-        "  if ((x = 2)) {\n"
+        "  let b <bool> = false;\n"
+        "  if ((b = true)) {\n"
         "    return 1;\n"
         "  }\n"
         "  return 0;\n"

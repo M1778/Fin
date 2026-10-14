@@ -558,6 +558,15 @@ void SemanticAnalyzer::visit(ExpressionStatement& node) {
 void SemanticAnalyzer::visit(IfStatement& node) {
     node.condition->accept(*this);
     if (node.condition) warnOnAssignmentInCondition(*node.condition);
+    // #94: a condition is a `bool`. `let <bool>` and the asserting `blame`
+    // already refused anything else; the condition is checked the same way.
+    // Skipped while the condition still mentions a generic parameter: a
+    // template body is walked once, uninstantiated, and what `T` becomes is
+    // decided at the use (the mentionsGenericParam contract).
+    if (node.condition && !mentionsGenericParam(lastExprType)) {
+        auto boolType = currentScope->resolveType("bool");
+        checkType(*node.condition, lastExprType, boolType);
+    }
     // A `getkeyid(v) == keyidof(M)` guard narrows `v`'s payload slots to M's
     // in the taken arm. Matched after the condition's own walk, which is what
     // type-checks the two calls; the use site re-validates the member against
@@ -681,6 +690,12 @@ void SemanticAnalyzer::visit(WhileLoop& node) {
 
     node.condition->accept(*this);
     if (node.condition) warnOnAssignmentInCondition(*node.condition);
+    // #94: a loop condition is a `bool`, like an `if` condition (generic
+    // exemption as there).
+    if (node.condition && !mentionsGenericParam(lastExprType)) {
+        auto boolType = currentScope->resolveType("bool");
+        checkType(*node.condition, lastExprType, boolType);
+    }
     // Wave-4 step 17 (W7): the body may run zero or more times, so its end
     // joins its start. A move in the body is Maybe past the loop.
     if (injectedWalk_) {
@@ -725,6 +740,12 @@ void SemanticAnalyzer::visit(ForLoop& node) {
     if(node.condition) {
         node.condition->accept(*this);
         warnOnAssignmentInCondition(*node.condition);
+        // #94: a `for` header condition is a `bool`, like an `if` condition
+        // (generic exemption as there).
+        if (!mentionsGenericParam(lastExprType)) {
+            auto boolType = currentScope->resolveType("bool");
+            checkType(*node.condition, lastExprType, boolType);
+        }
     }
     events::MovedAnalysis::Snapshot pre;
     if (track) pre = moved_.snapshot();
