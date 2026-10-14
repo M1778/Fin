@@ -8,17 +8,17 @@ enable_testing()
 
 # Idempotency + canonical-style gate over the corpus the tool owns: fails
 # until `finfmt` has been run over lib/std and stays failing on any drift.
-file(GLOB FINFMT_LIBSTD_FILES "${CMAKE_SOURCE_DIR}/lib/std/*.fin")
+file(GLOB FINFMT_LIBSTD_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/lib/std/*.fin")
 add_test(NAME "finfmt:check-libstd"
     COMMAND $<TARGET_FILE:finfmt> --check ${FINFMT_LIBSTD_FILES})
 
 # Issue #77: the same gate over the self-host compiler sources and the sample
 # corpus. Separate named tests so a failure names which corpus drifted.
-file(GLOB FINFMT_SELFHOST_FILES "${CMAKE_SOURCE_DIR}/finc/*.fin")
+file(GLOB FINFMT_SELFHOST_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/finc/*.fin")
 add_test(NAME "finfmt:check-selfhost"
     COMMAND $<TARGET_FILE:finfmt> --check ${FINFMT_SELFHOST_FILES})
 
-file(GLOB FINFMT_SAMPLE_FILES
+file(GLOB FINFMT_SAMPLE_FILES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/tests/samples/*.fin"
     "${CMAKE_SOURCE_DIR}/tests/samples/stdlib/*.fin")
 add_test(NAME "finfmt:check-samples"
