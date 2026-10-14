@@ -564,7 +564,10 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // finc/ self-host mirror already carried this; the samples were missing.
     // 56 -> 58: debug.fin (issue #37, DWARF test pin) and zeros_uninitialized.fin
     // (ADR 0052, zero-init policy pin) join the corpus.
-    EXPECT_EQ(t.samples, 58)
+    // 58 -> 59: pointer_escape.fin pins the returned-reference lifetime rule
+    // (ADR 0055, issue #99) -- both refused spellings, the storage that stays
+    // legal, and the struct-result waiver that does not also waive this check.
+    EXPECT_EQ(t.samples, 59)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";

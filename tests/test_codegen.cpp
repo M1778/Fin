@@ -12402,26 +12402,25 @@ BACKEND_TEST(Soundness_Codegen, AGenericInterfaceAsAValueTypeLowers) {
               std::string::npos) << bNoAddr.why();
 }
 
-BACKEND_TEST(KnownDefect_Codegen, AnEscapingInterfaceReferenceIsAcceptedLikeAnyEscapingAddress) {
-    // Known defect: #99 (tracked; see issue for inversion target).
-    // A reference whose implementor died is a dangling `data` word, and this backend
-    // accepts it: `make` converts a local and returns the pair, and the caller reads
-    // through it. Measured, it prints garbage -- the disassembly is `lea -0x8(%rsp)`,
-    // so the word points into the frame `make` just left.
+BACKEND_TEST(Soundness_Codegen, AnEscapingReferenceIsRefusedWhetherInterfaceOrAddress) {
+    // Was KnownDefect_Codegen.AnEscapingInterfaceReferenceIsAcceptedLikeAnyEscapingAddress
+    // (#99): `make` converted a local and returned the pair, and the caller read
+    // through a `data` word pointing into the frame `make` just left (measured
+    // garbage; the disassembly was `lea -0x8(%rsp)`). The front end now refuses
+    // both spellings in visit(ReturnStatement&): a returned `&local` and a local
+    // converted to an interface on return both hand out the frame they leave.
+    // One rule for both, deliberately: the defect was never interface-specific
+    // (the `&D` half compiled just as happily), so the refusal lives where the
+    // two spellings meet rather than in either type's own check. ADR 0055 is
+    // the ruling; `tests/samples/pointer_escape.fin` is the specification, and
+    // `tests/test_semantics.cpp` carries the front-end cases -- including the
+    // storage that stays legal, which this backend test does not cover.
     //
-    // Booked rather than fixed, and booked *here* rather than as an interface defect,
-    // because it is not one. The second half of this test is the same program with a
-    // plain `&D` in place of the interface, and it is accepted just as happily: there
-    // is still no general escape analysis anywhere in the pipeline. Wave-5 slice 4
-    // gave `#[slaveof]` a real rule (referent validation plus deferred struct
-    // destruction), but only for declarations that ask for it -- an untied
-    // reference inherits the general property; it does not add one.
-    //
-    // Neither half asserts the value, because a dead frame's contents are not a
-    // specification -- the assertion is that the compile is *accepted*, which is what
-    // has to go red the day escape analysis arrives. The two halves must move together:
-    // if the interface half ever refuses while the pointer half still compiles, the
-    // refusal was written in the wrong place.
+    // Neither half runs, because a dead frame's contents are not a
+    // specification -- the assertion is that the compile is *refused*.
+    // The forwarding control below is the boundary: an interface-typed
+    // parameter is already a pair, so returning it copies the pair without
+    // taking any address and still compiles.
     const std::string tail =
         "fun main() <noret> {\n"
         "    let s <Speaker> = make();\n"
@@ -12434,7 +12433,9 @@ BACKEND_TEST(KnownDefect_Codegen, AnEscapingInterfaceReferenceIsAcceptedLikeAnyE
         "}\n"
         "D implements <Speaker> { }\n"
         "fun make() <Speaker> { let d <D> = D { n: 7 }; return d; }\n" + tail);
-    EXPECT_EQ(iface.compileExit, 0) << iface.why();
+    EXPECT_NE(iface.compileExit, 0) << iface.why();
+    EXPECT_NE(iface.compileErr.find("cannot return local variable 'd' as an interface"),
+              std::string::npos) << iface.why();
 
     const Built ptr = build(std::string(kPrintf) +
         "struct D { n <int> }\n"
@@ -12443,7 +12444,25 @@ BACKEND_TEST(KnownDefect_Codegen, AnEscapingInterfaceReferenceIsAcceptedLikeAnyE
         "    let p <&D> = make();\n"
         "    printf(\"%d\\n\", p.n);\n"
         "}\n");
-    EXPECT_EQ(ptr.compileExit, 0) << ptr.why();
+    EXPECT_NE(ptr.compileExit, 0) << ptr.why();
+    EXPECT_NE(ptr.compileErr.find("cannot return the address of local variable 'd'"),
+              std::string::npos) << ptr.why();
+
+    const Built fwd = build(std::string(kPrintf) +
+        "interface Speaker { pub fun speak() <int>; }\n"
+        "struct D { n <int>\n"
+        "    fun speak() <int> { return self.n; }\n"
+        "}\n"
+        "D implements <Speaker> { }\n"
+        "fun fwd(s: Speaker) <Speaker> { return s; }\n"
+        "fun main() <noret> {\n"
+        "    let d <D> = D { n: 7 };\n"
+        "    let t <Speaker> = fwd(d);\n"
+        "    printf(\"%d\\n\", t.speak());\n"
+        "}\n");
+    EXPECT_EQ(fwd.compileExit, 0) << fwd.why();
+    ASSERT_TRUE(fwd.ran) << fwd.why();
+    EXPECT_EQ(fwd.out, "7\n") << fwd.why();
 }
 
 // ---------------------------------------------------------------------------

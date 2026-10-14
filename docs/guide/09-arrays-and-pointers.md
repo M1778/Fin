@@ -91,8 +91,42 @@ fun main() <noret> {
 }
 ```
 
-No borrow checker prevents returning an address into expired local storage.
-Use caller-owned storage or an explicitly owned heap allocation for escaping data.
+A returned reference must name storage that outlives the call, so handing back
+the address of a local is refused (ADR 0055):
+
+```fin error
+struct Point { x <int> }
+
+fun escapes() <&Point> {
+    let local <Point> = Point { x: 1 };
+    return &local;
+}
+
+fun main() <noret> { }
+```
+
+Reaching through a pointer is fine, because the storage belongs to whoever
+passed it in, and so are a global and the receiver of a method — `self` is by
+reference, so `&self.x` names the caller's object:
+
+```fin
+struct Point { x <int>
+    fun ref() <&int> { return &self.x; }
+}
+
+fun fromParameter(p: &Point) <&int> { return &p.x; }
+
+fun main() <noret> {
+    let point <Point> = Point { x: 1 };
+    blame *point.ref() == 1;
+    blame *fromParameter(&point) == 1;
+}
+```
+
+The check reads the declared type of the variable named, not what it points at,
+so an address laundered through a pointer local is still accepted today
+(issue #105). Use caller-owned storage or an explicitly owned heap allocation
+for escaping data rather than relying on the refusal to catch every shape.
 
 ## Prototypes: builtin structural maps
 

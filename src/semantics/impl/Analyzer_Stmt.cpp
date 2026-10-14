@@ -3,6 +3,7 @@
 #include "../EventPayloads.hpp"
 #include "../../ast/decls/Program.hpp"
 #include "../../ast/exprs/BinaryOp.hpp"
+#include "../../ast/exprs/ArrayExpr.hpp"
 #include "../../ast/exprs/FunctionCall.hpp"
 #include "../../ast/exprs/Identifier.hpp"
 #include "../../ast/exprs/MiscExpr.hpp"
@@ -17,6 +18,25 @@
 namespace fin {
 
 namespace {
+// What a returned expression addresses: the variable whose storage it names,
+// and whether it names that variable's own slot rather than storage reached
+// from it. `d` in `return &d` and `return d` is the slot itself; `d` in
+// `&d.n` and `a` in `&a[0]` are storage inside one. A call, `new` or a
+// literal names no variable, so there is no lifetime to ask about.
+struct ReturnedStorage {
+    const Identifier* root = nullptr;
+    bool wholeSlot = false;
+};
+
+ReturnedStorage returnedStorage(const Expression* e) {
+    if (!e) return {};
+    if (const auto* id = dynamic_cast<const Identifier*>(e)) return {id, true};
+    if (const auto* mem = dynamic_cast<const MemberAccess*>(e))
+        return {returnedStorage(mem->object.get()).root, false};
+    if (const auto* idx = dynamic_cast<const ArrayAccess*>(e))
+        return {returnedStorage(idx->array.get()).root, false};
+    return {};
+}
 // B4: whether the guard mentions `@defined` (or `compiler.symbols.defined`),
 // the only shape this slice folds. Anything else keeps the both-arms walk.
 bool mentionsDefined(const Expression* e) {
@@ -261,9 +281,82 @@ void SemanticAnalyzer::visit(ReturnStatement& node) {
             // other return expressions still undergo the ordinary exact check.
             auto expectedStruct = std::dynamic_pointer_cast<StructType>(context.currentFuncReturnType);
             auto returnedPtr = lastExprType ? std::dynamic_pointer_cast<PointerType>(lastExprType) : nullptr;
-            if (!(expectedStruct && returnedPtr && returnedPtr->pointee &&
-                  typesEqual(returnedPtr->pointee, expectedStruct))) {
-                checkType(*node.value, lastExprType, context.currentFuncReturnType);
+            const bool ctorPointerResult =
+                expectedStruct && returnedPtr && returnedPtr->pointee &&
+                typesEqual(returnedPtr->pointee, expectedStruct);
+            bool typeOk = true;
+            if (!ctorPointerResult) {
+                typeOk = checkType(*node.value, lastExprType, context.currentFuncReturnType);
+            }
+            // A returned reference must not point into the frame it leaves
+            // (#99, ADR 0055). `&d` hands out the slot and converting a local
+            // to an interface hands out the slot's address as the pair's data
+            // word; both dangle the moment the call ends. One rule for both
+            // spellings -- the defect was never interface-specific, so the
+            // check lives where the two meet rather than in either type's own
+            // check. What decides is whose frame owns the storage, not which
+            // spelling asked for it, so the receiver, a pointer's referent, a
+            // global and `#[slaveof($Fin)]`-pinned storage all stay legal:
+            // each of them outlives the call that returns it.
+            if (typeOk) {
+                const bool ptrExpected =
+                    context.currentFuncReturnType->as<PointerType>() != nullptr;
+                const auto* expectedIface =
+                    context.currentFuncReturnType->as<StructType>();
+                const bool ifaceExpected =
+                    expectedIface && expectedIface->is_interface;
+                // The constructor exemption above waives the *type* check for
+                // a returned pointer, never this one: `&local` handed back
+                // where the value type is declared is the same dangle the
+                // `<&D>` spelling refuses, reached through the waiver.
+                const bool addressForm = ptrExpected || ctorPointerResult;
+                ReturnedStorage held;
+                if (addressForm) {
+                    if (const auto* u =
+                            dynamic_cast<const UnaryOp*>(node.value.get()))
+                        if (u->op == ASTTokenKind::AMPERSAND)
+                            held = returnedStorage(u->operand.get());
+                } else if (ifaceExpected) {
+                    // `return s` where s is already a pair copies the pair; the
+                    // address (if any) was taken where the pair was formed.
+                    const auto* actualIface =
+                        lastExprType ? lastExprType->as<StructType>() : nullptr;
+                    if (!actualIface || !actualIface->is_interface)
+                        held = returnedStorage(node.value.get());
+                }
+                Symbol* sym = (held.root && currentScope)
+                                  ? currentScope->resolve(held.root->name)
+                                  : nullptr;
+                if (sym && globalScope) {
+                    const std::string& name = held.root->name;
+                    // A global's storage is the program's, so no call ends it.
+                    const bool isGlobal = sym == globalScope->resolve(name);
+                    // `$Fin` pins storage to program exit (Scope.hpp:19-27).
+                    const bool pinned = sym->slaveof == "$Fin";
+                    // A method's receiver is the caller's object, not this
+                    // frame: `self` is by reference, so a mutation through it
+                    // is visible to the caller. The implicit injection types
+                    // it `Self` or the struct itself (Analyzer_Decl.cpp:476,
+                    // :865), neither a pointer, so the dereference test below
+                    // cannot see it; an explicit `self: &Self` parameter is a
+                    // pointer and is exempt there instead.
+                    const bool receiver =
+                        name == "self" && currentStructContext != nullptr;
+                    // Reaching *through* a pointer lands in storage someone
+                    // else owns, while the pointer's own slot is this frame's
+                    // either way. Read from the declared type, so an address
+                    // laundered through a pointer local still escapes (#105).
+                    const bool throughPointer = !held.wholeSlot && sym->type &&
+                                                sym->type->as<PointerType>();
+                    if (!isGlobal && !pinned && !receiver && !throughPointer) {
+                        error(*node.value,
+                              addressForm
+                                  ? fmt::format("cannot return the address of "
+                                                "local variable '{}'", name)
+                                  : fmt::format("cannot return local variable "
+                                                "'{}' as an interface", name));
+                    }
+                }
             }
         }
     } else {

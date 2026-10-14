@@ -27,6 +27,19 @@ namespace {
 // safe, it is the answer: the recursive occurrence *is* the type being built.
 //
 // Soundness_MachineContract.ASelfReferentialInstantiationIsNotFatal is the record.
+//
+// The same sharing is a shared_ptr island LSan reports at exit (issue #101):
+// a struct owns its constructors'/enumerators'/methods' signatures and those
+// signatures name the struct (`substitute` builds `fn(params) -> newStruct`
+// into `newStruct`), so no owner release frees them -- the loader, scopes, and
+// ASTs all die as locals and the island stays. That is why #101's report tops
+// out in `FunctionType::substitute` (src/types/FunctionType.cpp:51): the
+// signatures are what the cycle strands. One compile leaks it once, bounded
+// and deterministic rather than growth -- #101 measured 373648 bytes in 4329
+// allocations compiling tests/samples/basic.fin, with the exit code still 0.
+// Reclaiming it needs weak back-references or an arena, an ownership redesign
+// rather than a fix, which is why the sanitizer job sets
+// LSAN_OPTIONS=detect_leaks=0 until it closes. Issue #101 is the record.
 std::unordered_map<std::string, TypePtr>& substitutionsInProgress() {
     static thread_local std::unordered_map<std::string, TypePtr> inProgress;
     return inProgress;

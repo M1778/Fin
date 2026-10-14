@@ -1,0 +1,41 @@
+//@ normative
+//@ error 36:60 "cannot return the address of local variable 'd'"
+//@ error 37:69 "cannot return local variable 'd' as an interface"
+//@ error 38:65 "cannot return the address of local variable 'a'"
+//@ error 39:66 "cannot return the address of local variable 'd'"
+
+// A returned reference must not point into the frame that owns it, whichever
+// spelling asks for it: an address handed straight back, or a local converted
+// to an interface pair whose data word is that slot's address. One rule for
+// both, because the question is whose frame owns the storage and not which
+// type was written. ADR 0055; the defect this closed was #99.
+
+interface Speaker { pub fun speak() <int>; }
+
+struct D {
+    n <int>
+    fun speak() <int> { return self.n; }
+    // `self` is the caller's object, by reference, so both of these hand back
+    // storage the call does not end.
+    fun ref() <&int> { return &self.n; }
+    fun me() <Speaker> { return self; }
+}
+
+D implements <Speaker> { }
+
+let g <D> = D { n: 1 };
+
+// Legal: every one of these names storage that outlives the call.
+fun fromGlobal() <&D> { return &g; }
+fun fromParameter(p: &D) <&int> { return &p.n; }
+fun forwards(s: Speaker) <Speaker> { return s; }
+
+// Refused: every one of these names storage this frame owns. The last reaches
+// the rule through the constructor convention, which waives the type check for
+// a returned pointer where the value type is declared but not this check.
+fun escapesAddress() <&D> { let d <D> = D { n: 7 }; return &d; }
+fun escapesAsInterface() <Speaker> { let d <D> = D { n: 7 }; return d; }
+fun escapesElement() <&int> { let a <[int]> = [1, 2, 3]; return &a[0]; }
+fun escapesAsStructResult() <D> { let d <D> = D { n: 7 }; return &d; }
+
+fun main() <noret> { }

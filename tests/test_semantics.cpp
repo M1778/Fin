@@ -489,3 +489,164 @@ TEST(SemanticAnalyzer, ImplementsThroughCompilerApiEliminatesArm) {
     ASSERT_TRUE(a.parsed);
     EXPECT_TRUE(a.clean()) << "the API spelling must fold like @implements; errors: " << a.errorCount;
 }
+
+// ---------------------------------------------------------------------------
+// Returning a reference out of the frame that owns it (#99, ADR 0055).
+//
+// The rule's two halves are spelled differently and refuse for one reason: a
+// returned `&local` hands out the slot, and a local converted to an interface
+// hands out the slot's address as the pair's data word. What decides is whose
+// frame the storage belongs to, not which spelling asked -- so the receiver,
+// a parameter, a global and `#[slaveof($Fin)]` storage all stay legal, because
+// each of them outlives the call that returns it.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Whether some error diagnostic contains `needle`. The messages are matched by
+// substring, as the duplicate-field tests above do: the wording is the rule's
+// user-visible contract, the surrounding frame is the engine's.
+bool refusedWith(const Analysis& a, const std::string& needle) {
+    for (const auto& d : a.diagnostics) {
+        if (d.severity != fin::DiagnosticSeverity::Error) continue;
+        if (d.message.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
+const char* const kSpeaker =
+    "interface Speaker { pub fun speak() <int>; }\n";
+
+} // namespace
+
+TEST(SemanticAnalyzer, AcceptsReturningTheAddressOfASelfField) {
+    // `self` is by reference: a method assigning `self.n` is visible in the
+    // caller, so `&self.n` addresses the caller's object and outlives the
+    // call. Refusing it would reject caller-owned storage.
+    auto a = analyze(
+        "struct D { n <int>\n"
+        "    fun ref() <&int> { return &self.n; }\n"
+        "}\n"
+        "fun main() <noret> { let d <D> = D { n: 7 }; }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean())
+        << "`&self.n` is caller-owned storage, not this frame's; errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, AcceptsReturningSelfAsAnInterface) {
+    // Same storage question, the interface spelling. The pair's data word
+    // points at the caller's object, which the call does not end.
+    auto a = analyze(std::string(kSpeaker) +
+        "struct D { n <int>\n"
+        "    fun speak() <int> { return self.n; }\n"
+        "    fun me() <Speaker> { return self; }\n"
+        "}\n"
+        "D implements <Speaker> { }\n"
+        "fun main() <noret> { let d <D> = D { n: 7 }; }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean())
+        << "`self` as an interface borrows the caller's object; errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, AcceptsReturningTheAddressOfAParameterField) {
+    // A pointer parameter dereferences into storage the caller already owns.
+    auto a = analyze(
+        "struct D { n <int> }\n"
+        "fun get(p: &D) <&int> { return &p.n; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean()) << "errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, AcceptsReturningTheAddressOfAGlobal) {
+    // A global's storage is the program's, so no call can end it.
+    auto a = analyze(
+        "struct D { n <int> }\n"
+        "let g <D> = D { n: 1 };\n"
+        "fun get() <&D> { return &g; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean()) << "errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, RefusesReturningTheAddressOfALocal) {
+    auto a = analyze(
+        "struct D { n <int> }\n"
+        "fun make() <&D> { let d <D> = D { n: 7 }; return &d; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a, "cannot return the address of local variable 'd'"))
+        << "errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, RefusesReturningALocalAsAnInterface) {
+    auto a = analyze(std::string(kSpeaker) +
+        "struct D { n <int>\n"
+        "    fun speak() <int> { return self.n; }\n"
+        "}\n"
+        "D implements <Speaker> { }\n"
+        "fun make() <Speaker> { let d <D> = D { n: 7 }; return d; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a, "cannot return local variable 'd' as an interface"))
+        << "errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, RefusesReturningTheAddressOfALocalAsAStructResult) {
+    // The constructor convention accepts a returned pointer where the declared
+    // result is the value type, because `new S{}` is the constructor's storage
+    // operation. `&local` is not: it is the same dangle the `<&D>` spelling
+    // refuses, reached through the exemption that waives the type check.
+    auto a = analyze(
+        "struct D { n <int> }\n"
+        "fun make() <D> { let d <D> = D { n: 7 }; return &d; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a, "cannot return the address of local variable 'd'"))
+        << "the struct-result exemption must not also waive the lifetime rule; errors: "
+        << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, RefusesReturningTheAddressOfALocalArrayElement) {
+    // An element's storage is the array's, so indexing reaches the same frame
+    // a bare `&a` would.
+    auto a = analyze(
+        "fun make() <&int> { let a <[int]> = [1, 2, 3]; return &a[0]; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a, "cannot return the address of local variable 'a'"))
+        << "indexing does not leave the frame; errors: " << a.errorCount;
+}
+
+TEST(KnownDefect_Semantics, AnEscapingAddressLaunderedThroughAPointerLocalIsAccepted) {
+    // Known defect: #105 (tracked; invert into Soundness_Semantics when the
+    // rule reads the referent instead of the declared type).
+    //
+    // Ownership is decided from the declared type of the root symbol, so a
+    // pointer local initialised from `&d` launders the address past the check:
+    // `return p` takes no address for the walk to see, and `&p.n` reads as a
+    // dereference out of the frame -- the right reading for a pointer
+    // *parameter* (AcceptsReturningTheAddressOfAParameterField above), the
+    // wrong one for a local. Measured, both dangle: the two calls reuse one
+    // frame slot, so the first escaped pointer reads the other call's dead
+    // local (prints `8 8` where the first is `7`).
+    //
+    // Booked rather than fixed because closing it needs the referent, not the
+    // declared type: initialiser provenance for pointer locals (enough for
+    // this shape, defeated by reassignment through a branch) or real alias
+    // analysis. ADR 0055 records it as a non-goal, and the accepted parameter
+    // case must stay accepted -- a fix that refuses it has moved the bug.
+    //
+    // Neither half asserts a value, because a dead frame's contents are not a
+    // specification. The assertion is that the check stays *silent*, which is
+    // what has to go red the day the referent is tracked.
+    auto a = analyze(
+        "struct D { n <int> }\n"
+        "fun viaLocal() <&D> { let d <D> = D { n: 7 }; let p <&D> = &d; return p; }\n"
+        "fun viaField() <&int> { let d <D> = D { n: 8 }; let p <&D> = &d; return &p.n; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_FALSE(refusedWith(a, "cannot return the address of local variable 'd'"))
+        << "the referent is not tracked yet (#105); errors: " << a.errorCount;
+    EXPECT_TRUE(a.clean()) << "errors: " << a.errorCount;
+}
