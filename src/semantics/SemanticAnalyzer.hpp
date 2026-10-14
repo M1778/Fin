@@ -497,6 +497,17 @@ private:
     // does an assignment nested under any other operator (e.g. `(x = 2) == 2`).
     void warnOnAssignmentInCondition(Expression& cond);
 
+    // ADR 0055: refuses a `return` that hands out storage the returning frame
+    // owns -- `&local` returned as an address, or a local converted to an
+    // interface, whose pair carries that slot's address as its data word. One
+    // rule for both, because the question is whose frame owns the storage and
+    // not which type was written. `ctorPointerResult` says the caller took the
+    // constructor waiver (a returned pointer where the value type is
+    // declared), which waives the type check but never this one. Called only
+    // once the type check has passed: a type error is the better diagnostic,
+    // and this question assumes the returned shape is the declared one.
+    void refuseEscapingReturn(ReturnStatement& node, bool ctorPointerResult);
+
     // Issue #46: warns on never-read `let`/`const` locals bound to pure
     // values. One frame per open scope, pushed and popped with it, so
     // shadowing resolves the way Scope::resolve does (nearest frame holding

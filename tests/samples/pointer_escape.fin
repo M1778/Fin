@@ -14,7 +14,7 @@ interface Speaker { pub fun speak() <int>; }
 
 struct D {
     n <int>
-    fun speak() <int> { return self.n; }
+      fun speak() <int> { return self.n; }
     // `self` is the caller's object, by reference, so both of these hand back
     // storage the call does not end.
     fun ref() <&int> { return &self.n; }

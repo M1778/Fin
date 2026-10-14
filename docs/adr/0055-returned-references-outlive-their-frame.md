@@ -51,7 +51,9 @@ of these holds:
 Two messages, by the spelling that asked: `cannot return the address of local
 variable '<name>'` for a returned address, and `cannot return local variable
 '<name>' as an interface` for a conversion. Blame falls on the returned
-expression.
+expression. Both carry the same `= help:` row — return caller-owned storage or
+an owned heap allocation — because the remedy does not depend on the spelling
+and the compiler is sure of it, which is what that row is for.
 
 The constructor convention — a returned pointer accepted where the declared
 result is the value type, because `new S{}` is the constructor's storage
@@ -89,7 +91,8 @@ the special case of a general rule rather than the whole of it.
 - ADR 0003 (memory management is a library), ADR 0019 and ADR 0027 (an
   interface reference is `{data, vtable}`), ADR 0008 (samples are the
   specification).
-- `visit(ReturnStatement&)`, `src/semantics/impl/Analyzer_Stmt.cpp`.
+- `visit(ReturnStatement&)` and `refuseEscapingReturn`,
+  `src/semantics/impl/Analyzer_Stmt.cpp`.
 - `tests/samples/pointer_escape.fin` — both refused spellings, the storage
   that stays legal, and the struct-result waiver.
 - `tests/test_semantics.cpp`:
