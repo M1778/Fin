@@ -104,6 +104,12 @@ void MacroExpander::visit(MacroDeclaration& node) {
         currentScope->defineMacro(node.name, &node);
     }
 
+    // The file this declaration was parsed from, so an expansion cloned from
+    // its body remembers whose coordinates its locations use. Read off the
+    // engine because that is what named the file: a module is visited under
+    // its own engine, the root under the root's.
+    node.definingFile = diag.getFilename();
+
     // Refused here rather than at expansion, which is what "with no call site present"
     // in ADR 0023 step 4's verification clause means: a library whose macro is never
     // called is still a library with a broken macro in it, and the diagnostic belongs on

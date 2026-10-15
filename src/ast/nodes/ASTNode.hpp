@@ -46,6 +46,12 @@ enum class ASTTokenKind {
 class ASTNode {
 public:
     fin::location loc;
+    // The file whose source this node was written in, when that is not the
+    // file being compiled: set only on clones of an imported macro's quote
+    // body, whose locations are in the defining module's coordinates while the
+    // engine rendering them holds the caller's source. Empty everywhere else,
+    // which is every node a programmer wrote directly.
+    std::string originFile;
     virtual ~ASTNode() = default;
     virtual void accept(Visitor& v) = 0;
     void setLoc(const fin::location& l) { loc = l; }

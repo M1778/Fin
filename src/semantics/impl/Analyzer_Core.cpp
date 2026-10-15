@@ -709,20 +709,39 @@ void SemanticAnalyzer::error(ASTNode& node, const std::string& msg) {
     // is the one outcome worse than a duplicate. See SemanticAnalyzer::QuietPass for
     // why silence is sound at the two sites that use it.
     if (quietDepth) return;
-    if (activeAttr_.active)
-        diag.reportError(node.loc, attributedMessage(msg), engineAttribution());
-    else
-        diag.reportError(node.loc, msg);
+    // A node cloned out of an imported macro's body carries the defining
+    // file: its locations are in that file's coordinates, so it renders there
+    // rather than against the caller's source.
+    if (node.originFile.empty()) {
+        if (activeAttr_.active)
+            diag.reportError(node.loc, attributedMessage(msg), engineAttribution());
+        else
+            diag.reportError(node.loc, msg);
+    } else {
+        if (activeAttr_.active)
+            diag.reportErrorFromFile(node.loc, attributedMessage(msg), engineAttribution(),
+                                     node.originFile);
+        else
+            diag.reportErrorFromFile(node.loc, msg, node.originFile);
+    }
     hasError = true;
 }
 
 void SemanticAnalyzer::error(ASTNode& node, const std::string& msg,
                              const std::string& help) {
     if (quietDepth) return;
-    if (activeAttr_.active)
-        diag.reportError(node.loc, attributedMessage(msg), help, engineAttribution());
-    else
-        diag.reportError(node.loc, msg, help);
+    if (node.originFile.empty()) {
+        if (activeAttr_.active)
+            diag.reportError(node.loc, attributedMessage(msg), help, engineAttribution());
+        else
+            diag.reportError(node.loc, msg, help);
+    } else {
+        if (activeAttr_.active)
+            diag.reportErrorFromFile(node.loc, attributedMessage(msg), help, engineAttribution(),
+                                     node.originFile);
+        else
+            diag.reportErrorFromFile(node.loc, msg, help, node.originFile);
+    }
     hasError = true;
 }
 
@@ -1343,6 +1362,7 @@ void SemanticAnalyzer::setExternalGlobalScope(const std::shared_ptr<Scope>& scop
 }
 
 void SemanticAnalyzer::visit(Program& node) {
+    publishDeclaredNamespaces(node);
     refuseMisplacedGlobals(node);
     auto prevHoisted = std::move(hoistedTypes_);
     // Wave-4 step 15, Collect then Arm (docs/compiler-api.md §3.4). Collection

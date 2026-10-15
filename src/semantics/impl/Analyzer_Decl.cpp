@@ -1272,6 +1272,14 @@ void SemanticAnalyzer::visit(EnumDeclaration& node) {
         currentScope->define({name, enumType->getEnumeratorValueType(name), false, true});
 }
 
+void SemanticAnalyzer::publishDeclaredNamespaces(const Program& node) {
+    // Order-independent by construction: the Program carries every namespace
+    // the file opens, so a qualifier is checkable before any statement is
+    // walked, whichever order the file declares things in.
+    for (const auto& name : node.declared_namespaces)
+        globalScope->declaredNamespaces.insert(name);
+}
+
 void SemanticAnalyzer::visit(ImportModule& node) {
     validateAttributes(node.attributes);
     if (!loader) return;
@@ -1281,6 +1289,28 @@ void SemanticAnalyzer::visit(ImportModule& node) {
     if (!moduleScope) {
         error(node, "Failed to load module '" + node.source + "'");
         return;
+    }
+
+    // Strict namespaces (#90): a `::` tail names namespaces inside the module,
+    // and naming one the module never declared is an error, not a no-op. Every
+    // segment is checked -- `m::a::b::c` fails on `a` -- because no legal
+    // selector in the corpus nests (every one is a single `::std`), so there
+    // is no deeper path a rejection could wrongly refuse. A quoted file import
+    // carries no tail and skips this outright.
+    if (!node.namespace_path.empty()) {
+        size_t start = 0;
+        while (start <= node.namespace_path.size()) {
+            const size_t sep = node.namespace_path.find("::", start);
+            const std::string seg = (sep == std::string::npos)
+                ? node.namespace_path.substr(start)
+                : node.namespace_path.substr(start, sep - start);
+            if (!seg.empty() && !moduleScope->isNamespaceDeclared(seg)) {
+                error(node, "Module '" + node.source + "' has no namespace '" + seg + "'");
+                return;
+            }
+            if (sep == std::string::npos) break;
+            start = sep + 2;
+        }
     }
 
     // Case 0: `import * from m;` -- every symbol the module has, not a symbol
@@ -1571,12 +1601,12 @@ bool SemanticAnalyzer::publishIfGlobal(
 //                      (`Ok(10)`, enums.fin:44) and a payloadless one's is a value.
 //   `myns::myfunc`     a *namespace* qualifier, either an import alias bound to a
 //                      NamespaceType (whose scope can be searched) or a namespace
-//                      block in this file (whose name was discarded when its contents
-//                      were spliced -- parser.y, namespace_block). For the second the
-//                      last segment is all there is to go on, which is why the
-//                      qualifier goes unchecked: KnownDefect_ExternAlias.\
-//                      ANamespaceQualifierOnAnExternPathIsNotChecked books it, and the
-//                      fix is a namespace with a scope rather than a check here.
+//                      block in this file (whose contents were spliced --
+//                      parser.y, namespace_block -- but whose name the analyzer
+//                      published into the scope at Program entry). The qualifier
+//                      must name a declared namespace: a wrong one resolves
+//                      nothing and the caller reports the path as unknown
+//                      (Soundness_ExternAlias.ANamespaceQualifierOnAnExternPathIsChecked).
 std::shared_ptr<Type> SemanticAnalyzer::resolveExternPathAsSymbol(const std::string& path) {
     std::vector<std::string> segs;
     for (size_t start = 0; start <= path.size();) {
@@ -1614,8 +1644,14 @@ std::shared_ptr<Type> SemanticAnalyzer::resolveExternPathAsSymbol(const std::str
         }
     }
 
-    // The spliced case. See the KnownDefect above.
-    if (auto* sym = currentScope->resolve(segs.back())) return sym->type;
+    // The spliced case: the qualifier names a namespace block in this file,
+    // whose contents are in scope but whose name survives only in the scope's
+    // declared-namespaces record. A qualifier that names nothing declared --
+    // no namespace, no enum above, no import alias -- resolves nothing, so the
+    // caller falls through to the type reading and reports the unknown path.
+    if (currentScope->isNamespaceDeclared(segs[0])) {
+        if (auto* sym = currentScope->resolve(segs.back())) return sym->type;
+    }
     return nullptr;
 }
 

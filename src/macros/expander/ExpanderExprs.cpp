@@ -51,6 +51,24 @@ private:
     Scope* scope;
 };
 
+// Writes the defining file onto every node of a macro's expansion, so a
+// diagnostic about the expansion renders against the module's lines rather
+// than the caller's. Only unstamped nodes are written, for the nested-macro
+// reason above; run before substitution, for the caller-argument reason above.
+class OriginFileStamp : public StructuralWalk {
+public:
+    explicit OriginFileStamp(std::string file) : file(std::move(file)) {}
+
+protected:
+    bool enter(ASTNode& node) override {
+        if (node.originFile.empty()) node.originFile = file;
+        return true;
+    }
+
+private:
+    std::string file;
+};
+
 } // namespace
 
 // --- Lookup Helper ---
@@ -189,6 +207,15 @@ void MacroExpander::visit(MacroInvocation& node) {
     if (def->declaringScope) {
         DeclaringScopeStamp stamp(def->declaringScope);
         stamp.walk(*resultExpr);
+        // The file with it, so a diagnostic about the expansion is rendered
+        // against the lines its locations belong to rather than the caller's.
+        // Skipped with the scope stamp above when the macro is file-local, and
+        // skipped when the declaration never recorded its file (a hand-built
+        // declaration in a unit test, which has no file to name).
+        if (!def->definingFile.empty()) {
+            OriginFileStamp origin(def->definingFile);
+            origin.walk(*resultExpr);
+        }
     }
 
     SubstitutionVisitor subVisitor(argsMap);

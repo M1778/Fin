@@ -1,6 +1,7 @@
 #include "DiagnosticEngine.hpp"
 #include "../utils/Levenshtein.hpp"
 #include <sstream>
+#include <fstream>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -140,6 +141,15 @@ bool startsWith(const std::string& s, const char* prefix) {
 
 DiagnosticEngine* g_lexerDiagnostics = nullptr;
 
+// One line out of an explicit line table, rather than this engine's own: the
+// cross-file render below walks another file's lines with the same code.
+std::string lineIn(const std::vector<std::string>& srcLines, int lineNum) {
+    if (lineNum > 0 && lineNum <= (int)srcLines.size()) {
+        return srcLines[(size_t)lineNum - 1];
+    }
+    return "";
+}
+
 } // namespace
 
 std::string DiagnosticEngine::codeForMessage(const std::string& message) {
@@ -226,14 +236,35 @@ void DiagnosticEngine::setSource(std::string src, std::string fname) {
 }
 
 void DiagnosticEngine::splitLines() {
-    std::stringstream ss(sourceCode);
+    lines = splitSourceLines(sourceCode);
+}
+
+std::vector<std::string> DiagnosticEngine::splitSourceLines(const std::string& text) {
+    std::vector<std::string> out;
+    std::stringstream ss(text);
     std::string line;
     while (std::getline(ss, line)) {
         // Tolerate a stray CR so a column never counts one.
         if (!line.empty() && line.back() == '\r') line.pop_back();
         sanitiseForDisplay(line);
-        lines.push_back(line);
+        out.push_back(line);
     }
+    return out;
+}
+
+// Which file and lines a located diagnostic renders against. Empty, self, or
+// unreadable means this engine's own -- the old behaviour, kept as the
+// fallback rather than a second failure on top of the first.
+DiagnosticEngine::RenderSource DiagnosticEngine::renderSourceFor(const std::string& originFile) {
+    if (originFile.empty() || originFile == filename) return {filename, &lines};
+    auto it = overlays.find(originFile);
+    if (it != overlays.end()) return {originFile, &it->second};
+    std::ifstream t(originFile, std::ios::binary);
+    if (!t.is_open()) return {filename, &lines};
+    std::stringstream buffer;
+    buffer << t.rdbuf();
+    if (t.bad()) return {filename, &lines};
+    return {originFile, &overlays.emplace(originFile, splitSourceLines(buffer.str())).first->second};
 }
 
 // A rendered snippet is the source line itself, so every byte of the source is a byte the
@@ -260,10 +291,7 @@ void DiagnosticEngine::sanitiseForDisplay(std::string& line) {
 }
 
 std::string DiagnosticEngine::getLine(int lineNum) {
-    if (lineNum > 0 && lineNum <= (int)lines.size()) {
-        return lines[lineNum - 1];
-    }
-    return "";
+    return lineIn(lines, lineNum);
 }
 
 std::string DiagnosticEngine::lineText(int lineNum) const {
@@ -273,8 +301,9 @@ std::string DiagnosticEngine::lineText(int lineNum) const {
     return "";
 }
 
-std::string DiagnosticEngine::extractTokenText(const fin::location& loc) {
-    std::string line = getLine(loc.begin.line);
+std::string DiagnosticEngine::extractTokenText(const fin::location& loc,
+                                               const std::vector<std::string>& srcLines) {
+    std::string line = lineIn(srcLines, loc.begin.line);
     if (line.empty()) return "";
     int start = loc.begin.column - 1;
     int end = loc.end.column - 1;
@@ -312,12 +341,17 @@ std::string DiagnosticEngine::extractTokenText(const fin::location& loc) {
 // `size()` for a location that begins exactly at end-of-line, so every location that
 // does fit is untouched.
 //
-// What this does NOT fix is the mis-render itself -- the line, and the file named in the
-// `-->`, still come from the root when the location came from a module. That needs a
-// location that carries its file, and is booked as
-// `KnownDefect_Diagnostics.ADiagnosticFromAnImportedMacroBodyIsRenderedAgainstTheCaller`.
-std::string DiagnosticEngine::getPreviousWord(const fin::location& loc) {
-    std::string line = getLine(loc.begin.line);
+// What this does NOT do is pick the file: the line above still comes from
+// whichever line table the caller hands in. A diagnostic about an expansion
+// of an imported macro carries the module's coordinates, so the analyzer
+// routes those through `reportErrorFromFile` with the macro's defining file
+// (stamped at expansion), and the table is the module's own lines --
+// `Soundness_Diagnostics.ADiagnosticFromAnImportedMacroBodyNamesTheModule`.
+// Anything else still renders against this engine's file, and the guard above
+// is what keeps such a cross-file column from indexing out of bounds.
+std::string DiagnosticEngine::getPreviousWord(const fin::location& loc,
+                                               const std::vector<std::string>& srcLines) {
+    std::string line = lineIn(srcLines, loc.begin.line);
     if (line.empty()) return "";
     if (loc.begin.column - 1 > (int)line.size()) return "";
 
@@ -335,8 +369,9 @@ std::string DiagnosticEngine::getPreviousWord(const fin::location& loc) {
 // (`reportError`), so this is the copy the abort came through; `getPreviousWord` has
 // none today and is fixed rather than deleted because the bug in it is identical and
 // whoever calls it next would inherit it.
-fin::location DiagnosticEngine::getPreviousWordLoc(const fin::location& loc) {
-    std::string line = getLine(loc.begin.line);
+fin::location DiagnosticEngine::getPreviousWordLoc(const fin::location& loc,
+                                                     const std::vector<std::string>& srcLines) {
+    std::string line = lineIn(srcLines, loc.begin.line);
     if (line.empty()) return loc;
     if (loc.begin.column - 1 > (int)line.size()) return loc;
 
@@ -405,32 +440,58 @@ void DiagnosticEngine::reportError(const fin::location& loc, const std::string& 
 
 void DiagnosticEngine::reportError(const fin::location& loc, const std::string& msg,
                                    const DiagnosticAttribution& attribution) {
+    emitLocatedError(loc, msg, "", attribution, true, "");
+}
+
+void DiagnosticEngine::reportErrorFromFile(const fin::location& loc, const std::string& msg,
+                                           const std::string& originFile) {
+    emitLocatedError(loc, msg, "", DiagnosticAttribution{}, true, originFile);
+}
+
+void DiagnosticEngine::reportErrorFromFile(const fin::location& loc, const std::string& msg,
+                                           const DiagnosticAttribution& attribution,
+                                           const std::string& originFile) {
+    emitLocatedError(loc, msg, "", attribution, true, originFile);
+}
+
+void DiagnosticEngine::emitLocatedError(const fin::location& loc, const std::string& msg,
+                                        const std::string& help,
+                                        const DiagnosticAttribution& attribution,
+                                        bool runTypoHeuristic,
+                                        const std::string& originFile) {
+    const RenderSource rs = renderSourceFor(originFile);
     Diagnostic d;
     d.severity = DiagnosticSeverity::Error;
     d.message = msg;
-    d.file = filename;
+    d.file = rs.file;
     d.line = loc.begin.line;
     d.column = loc.begin.column;
     d.endLine = loc.end.line;
     d.endColumn = loc.end.column;
     d.attribution = attribution;
 
-    std::string badToken = extractTokenText(loc);
-    std::string suggestion = checkTypo(badToken);
-    if (suggestion == badToken) suggestion = "";
-    if (suggestion.empty()) {
-        fin::location prevLoc = getPreviousWordLoc(loc);
-        if (prevLoc.begin.column != loc.begin.column) {
-            std::string prevWord = extractTokenText(prevLoc);
-            std::string prevSuggestion = checkTypo(prevWord);
-            if (prevSuggestion == prevWord) prevSuggestion = "";
-            if (!prevSuggestion.empty()) {
-                d.help = fmt::format("the word '{}' looks suspicious. Did you mean '{}'?",
-                                     prevWord, prevSuggestion);
+    if (runTypoHeuristic) {
+        std::string badToken = extractTokenText(loc, *rs.lines);
+        std::string suggestion = checkTypo(badToken);
+        if (suggestion == badToken) suggestion = "";
+        if (suggestion.empty()) {
+            fin::location prevLoc = getPreviousWordLoc(loc, *rs.lines);
+            if (prevLoc.begin.column != loc.begin.column) {
+                std::string prevWord = extractTokenText(prevLoc, *rs.lines);
+                std::string prevSuggestion = checkTypo(prevWord);
+                if (prevSuggestion == prevWord) prevSuggestion = "";
+                if (!prevSuggestion.empty()) {
+                    d.help = fmt::format("the word '{}' looks suspicious. Did you mean '{}'?",
+                                         prevWord, prevSuggestion);
+                }
             }
+        } else {
+            d.help = fmt::format("did you mean '{}'?", suggestion);
         }
     } else {
-        d.help = fmt::format("did you mean '{}'?", suggestion);
+        // No `checkTypo` pass. The caller supplied the explanation, so the heuristic has
+        // nothing to add and one row to lose it in.
+        d.help = help;
     }
 
     errorCount++;
@@ -439,36 +500,26 @@ void DiagnosticEngine::reportError(const fin::location& loc, const std::string& 
 
 void DiagnosticEngine::reportError(const fin::location& loc, const std::string& msg,
                                    const std::string& help) {
-    Diagnostic d;
-    d.severity = DiagnosticSeverity::Error;
-    d.message = msg;
-    d.file = filename;
-    d.line = loc.begin.line;
-    d.column = loc.begin.column;
-    d.endLine = loc.end.line;
-    d.endColumn = loc.end.column;
-    // No `checkTypo` pass. The caller supplied the explanation, so the heuristic has
-    // nothing to add and one row to lose it in.
-    d.help = help;
-    errorCount++;
-    emit(d);
+    emitLocatedError(loc, msg, help, DiagnosticAttribution{}, false, "");
+}
+
+void DiagnosticEngine::reportErrorFromFile(const fin::location& loc, const std::string& msg,
+                                           const std::string& help,
+                                           const std::string& originFile) {
+    emitLocatedError(loc, msg, help, DiagnosticAttribution{}, false, originFile);
 }
 
 void DiagnosticEngine::reportError(const fin::location& loc, const std::string& msg,
                                    const std::string& help,
                                    const DiagnosticAttribution& attribution) {
-    Diagnostic d;
-    d.severity = DiagnosticSeverity::Error;
-    d.message = msg;
-    d.file = filename;
-    d.line = loc.begin.line;
-    d.column = loc.begin.column;
-    d.endLine = loc.end.line;
-    d.endColumn = loc.end.column;
-    d.help = help;
-    d.attribution = attribution;
-    errorCount++;
-    emit(d);
+    emitLocatedError(loc, msg, help, attribution, false, "");
+}
+
+void DiagnosticEngine::reportErrorFromFile(const fin::location& loc, const std::string& msg,
+                                           const std::string& help,
+                                           const DiagnosticAttribution& attribution,
+                                           const std::string& originFile) {
+    emitLocatedError(loc, msg, help, attribution, false, originFile);
 }
 
 void DiagnosticEngine::reportError(const std::string& msg) {
@@ -539,9 +590,14 @@ void DiagnosticEngine::emitHuman(const Diagnostic& d) {
     put(color, fmt::text_style(fmt::emphasis::bold), d.message + "\n");
 
     if (d.line > 0) {
+        // The lines come from the file the diagnostic names, which is this
+        // engine's own everywhere but on a cross-file render -- and there the
+        // record's file is the lookup key that finds the same table the error
+        // path chose.
+        const RenderSource rs = renderSourceFor(d.file);
         put(color, fg(fmt::color::cornflower_blue),
-            fmt::format("   --> {}:{}:{}\n", d.file, d.line, d.column));
-        printContext(d.line, d.column, d.endColumn);
+            fmt::format("   --> {}:{}:{}\n", rs.file, d.line, d.column));
+        printContext(d.line, d.column, d.endColumn, *rs.lines);
     } else if (!d.file.empty()) {
         put(color, fg(fmt::color::cornflower_blue), fmt::format("   --> {}\n", d.file));
     }
@@ -592,8 +648,9 @@ void DiagnosticEngine::success(const std::string& text) {
     put(color, fg(fmt::color::green) | fmt::emphasis::bold, text + "\n");
 }
 
-void DiagnosticEngine::printContext(int lineNum, int beginCol, int endCol) {
-    std::string lineContent = getLine(lineNum);
+void DiagnosticEngine::printContext(int lineNum, int beginCol, int endCol,
+                                     const std::vector<std::string>& srcLines) {
+    std::string lineContent = lineIn(srcLines, lineNum);
     std::string lineNumStr = std::to_string(lineNum);
     std::string padding(lineNumStr.length(), ' ');
 

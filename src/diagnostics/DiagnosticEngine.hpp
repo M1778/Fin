@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <iostream>
 #include "location.hh"
@@ -65,6 +66,26 @@ public:
     // heuristic, and the attribution still reaches the JSON path.
     void reportError(const fin::location& loc, const std::string& msg,
                      const std::string& help, const DiagnosticAttribution& attribution);
+    // A diagnostic about code from another file (today: an imported macro's
+    // expansion, whose locations are in the defining module's coordinates).
+    // Rendered against that file's own lines rather than this engine's, so the
+    // `-->` names the file the location belongs to and the snippet is its line.
+    // Falls back to this engine's file when `originFile` cannot be read. The
+    // (msg) form runs the same typo heuristic as reportError(loc, msg); the
+    // (msg, help) forms suppress it the same way reportError(loc, msg, help)
+    // does.
+    void reportErrorFromFile(const fin::location& loc, const std::string& msg,
+                             const std::string& originFile);
+    void reportErrorFromFile(const fin::location& loc, const std::string& msg,
+                             const DiagnosticAttribution& attribution,
+                             const std::string& originFile);
+    void reportErrorFromFile(const fin::location& loc, const std::string& msg,
+                             const std::string& help,
+                             const std::string& originFile);
+    void reportErrorFromFile(const fin::location& loc, const std::string& msg,
+                             const std::string& help,
+                             const DiagnosticAttribution& attribution,
+                             const std::string& originFile);
     // A diagnostic with no source location: a file that could not be read, a
     // module that could not be found, or a mistake in the command line itself.
     // `file` is emitted as null and `line` as 0 for these, which is what the
@@ -100,6 +121,11 @@ public:
 
     void setSource(std::string src, std::string fname);
 
+    // The file this engine renders against, as given at construction or by
+    // setSource. The macro expander reads it while visiting a declaration, so
+    // the declaration remembers which file's coordinates its body uses.
+    const std::string& getFilename() const { return filename; }
+
     // The code registry (issue #47). Maps a diagnostic message to its stable
     // code, or "" when the message matches no row yet. New diagnostics gain
     // codes by appending a row here; existing rows are frozen, so a code once
@@ -131,6 +157,9 @@ private:
     int errorCount = 0;
     int warningCount = 0;
     std::vector<std::string> lines;
+    // Sources read for cross-file diagnostics, by file, so one broken
+    // expansion producing many diagnostics reads its module once.
+    std::unordered_map<std::string, std::vector<std::string>> overlays;
     std::vector<std::string> keywords;
     std::vector<std::string> types;
     std::vector<Diagnostic> records;
@@ -139,15 +168,30 @@ private:
     bool color = false;
 
     void splitLines();
+    static std::vector<std::string> splitSourceLines(const std::string& text);
 
     // Makes one source line safe to write to a terminal, in place and without changing
     // its length. See the definition for why the length matters.
     static void sanitiseForDisplay(std::string& line);
     std::string getLine(int lineNum);
 
-    std::string extractTokenText(const fin::location& loc);
-    std::string getPreviousWord(const fin::location& loc);
-    fin::location getPreviousWordLoc(const fin::location& loc);
+    // The lines a cross-file diagnostic renders against: this engine's own
+    // when `originFile` is empty, names this engine's file, or cannot be read
+    // (the old mis-render, kept as the fallback rather than a second failure),
+    // otherwise the lines read from `originFile`. Read once per file, because
+    // one broken expansion can produce many diagnostics against one module.
+    struct RenderSource {
+        std::string file;
+        const std::vector<std::string>* lines;
+    };
+    RenderSource renderSourceFor(const std::string& originFile);
+
+    std::string extractTokenText(const fin::location& loc,
+                                 const std::vector<std::string>& srcLines);
+    std::string getPreviousWord(const fin::location& loc,
+                                const std::vector<std::string>& srcLines);
+    fin::location getPreviousWordLoc(const fin::location& loc,
+                                     const std::vector<std::string>& srcLines);
 
     std::string checkTypo(const std::string& word);
 
@@ -155,7 +199,15 @@ private:
     void emitHuman(const Diagnostic& d);
     void emitJson(const Diagnostic& d);
 
-    void printContext(int line, int beginCol, int endCol);
+    // The shared body behind every located error: the typo heuristic runs only
+    // when the caller supplied no sure explanation, exactly as before.
+    void emitLocatedError(const fin::location& loc, const std::string& msg,
+                          const std::string& help,
+                          const DiagnosticAttribution& attribution,
+                          bool runTypoHeuristic, const std::string& originFile);
+
+    void printContext(int line, int beginCol, int endCol,
+                      const std::vector<std::string>& srcLines);
     void printHighlightedLine(const std::string& line);
 };
 

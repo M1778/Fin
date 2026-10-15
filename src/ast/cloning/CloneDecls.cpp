@@ -4,6 +4,7 @@ namespace fin {
 
 void CloneVisitor::visit(Program& node) {
     auto res = std::make_unique<Program>(cloneVector(node.statements));
+    res->declared_namespaces = node.declared_namespaces;
     res->setLoc(node.loc);
     result = std::move(res);
 }

@@ -167,6 +167,12 @@
 
 %parse-param { fin::DiagnosticEngine& diag }
 
+// A parse never interrupts another parse (ModuleLoader.cpp step 5), but many
+// run per process -- one per imported module -- and each must start with an
+// empty namespace record, or a failed parse leaks its names into the next
+// file's Program (see noteNamespaceName in Attribute.hpp).
+%initial-action { fin::takeNamespaceNames(); }
+
 /* ========================================================================== */
 /*                                   TOKENS                                   */
 /* ========================================================================== */
@@ -385,6 +391,7 @@ program:
     statements { 
         $$ = std::make_unique<fin::Program>(std::move($1)); 
         $$->setLoc(@$);
+        $$->declared_namespaces = fin::takeNamespaceNames();
         fin::root = std::move($$);
         // Issue #49: recovery above lets the parse accept with errors recorded.
         // The driver and the module loader both treat a non-zero parse result
@@ -467,9 +474,15 @@ attribute_block:
        (accept dispatch), src/ast/cloning/** and src/semantics/**, none of which
        this wave owns.
  
-   So: parsing is complete here, name resolution is not.  `ImportModule::
-   namespace_path` already carries the `::` tail from the import side; the two
-   halves meet when namespaces get a node and a scope.
+   So: parsing is complete here, and the names travel one step further than
+   they used to.  Every block reports its name (`noteNamespaceName`), the
+   `program` production collects them onto the Program node, and the analyzer
+   publishes them into the file's scope -- which is where the import side
+   reads them: `ImportModule::namespace_path` carries the `::` tail, and
+   `visit(ImportModule&)` rejects a tail the module never declared (#90,
+   ruled strict).  The contents are still spliced, so a namespace is still
+   not a scope in the `Block` sense; a `NamespaceDeclaration` node with a
+   scope of its own remains the end state this wave does not build.
 
    ONE THING IS READ OFF THE NAME BEFORE IT GOES.  `#[global]` is usable only
    inside `namespace std` (ADR 0021), and this production is the last place in
@@ -485,6 +498,7 @@ attribute_block:
    nothing downstream can tell the two apart. */
 namespace_block:
     KW_NAMESPACE IDENTIFIER LBRACE block_stmts RBRACE {
+        fin::noteNamespaceName($2);
         if ($2 == "std") fin::markStdScopedGlobals($4);
         $$ = std::move($4);
     }

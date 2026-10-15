@@ -1923,28 +1923,23 @@ TEST(Soundness_Imports, ImportStarBindsEveryMacroTheModuleDeclares) {
 // memory, and so that whichever way it goes, something fails when the behaviour
 // changes.
 
-// `import { X } from m::ns` names a namespace. The parser keeps it --
-// `module_path` in parser.y:776 splits `m::ns` into the module and the namespace
-// tail, and `ImportModule::namespace_path` holds it -- and
-// `visit(ImportModule&)` never reads the field. So the namespace is not merely
-// unchecked, it is discarded: `from m::nonexistent` and `from m::a::b::c` both
-// compile clean, and so would a namespace no module has ever declared.
-//
-// Not fixable as it stands. Enforcing it means knowing which namespace each
-// symbol was declared in, and `namespace std { ... }` currently has no effect on
-// anything -- dropping the block from a module changes no import. That is the
-// ruling: what does a namespace do to a module's symbol table, and is naming the
-// wrong one an error or a no-op? Twelve stdlib samples open with `namespace std`
-// and eleven corpus imports name `::std`, so the answer is load-bearing for the
-// standard library and should be settled before it is written, not after.
-TEST(KnownDefect_Imports, AnImportIgnoresTheNamespaceItNames) {
-    // Known defect: #90 (tracked; see issue for inversion target).
+// `import { X } from m::ns` names a namespace, and naming one the module never
+// declared is an error (#90, ruled strict: a wrong namespace at import time is
+// rejected, not ignored). The parser keeps the tail -- `module_path` in
+// parser.y:967 splits `m::ns` into the module and the namespace tail, and
+// `ImportModule::namespace_path` holds it -- and `visit(ImportModule&)` reads
+// it against the namespaces the module's own program declared (a `Program`
+// carries them; a namespace block is still spliced, so only the name travels).
+TEST(Soundness_Imports, AnImportRejectsAnUnknownNamespace) {
+    // Was KnownDefect_Imports.AnImportIgnoresTheNamespaceItNames (#90): the
+    // field was never read, so `from m::nonexistent` and `from m::a::b::c`
+    // both compiled clean, and so would a namespace no module ever declared.
     for (const char* ns : {"m::nonexistent", "m::a::b::c"}) {
         const auto r = runStar("import { m_fn } from " + std::string(ns) + ";\n"
                                "fun main() <noret> { let x <int> = m_fn(); }\n");
-        EXPECT_EQ(r.exitCode, 0)
-            << "`from " << ns << "` was rejected -- if that is the fix landing, invert "
-               "this test rather than relaxing it\n" << stripAnsi(r.err);
+        const std::string err = stripAnsi(r.err);
+        EXPECT_NE(r.exitCode, 0) << "`from " << ns << "` compiled clean\n" << err;
+        EXPECT_NE(err.find("has no namespace"), std::string::npos) << err;
     }
 }
 
@@ -2226,43 +2221,32 @@ TEST(Soundness_Diagnostics, TheTypoHintStillWorksWhenTheLocationIsInRange) {
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_Diagnostics, ADiagnosticFromAnImportedMacroBodyIsRenderedAgainstTheCaller) {
-    // Known defect: #91 (tracked; see issue for inversion target).
-    // What the guard does not fix, asserted so that fixing it cannot pass unnoticed.
-    // The diagnostic is right about the program and wrong about where to look: the
-    // `-->` names the caller, the line number is the caller's, and the snippet under
-    // the caret is the caller's source with the caret placed at a column that belongs
-    // to the module. The user is sent to a line that has nothing wrong with it.
+TEST(Soundness_Diagnostics, ADiagnosticFromAnImportedMacroBodyNamesTheModule) {
+    // #91's wrong-file half, fixed: the diagnostic about an expansion of an
+    // imported macro renders against the defining file, not the caller. The
+    // guard above stopped the abort; this is the render itself -- the `--->`
+    // names `mac.fin`, the line number is the module's, and the snippet under
+    // the caret is the macro's own line with the caret at the offending word.
     //
-    // Blocked on a change with a much wider blast radius than the crash was. A
-    // `fin::location` has a `filename` field -- `position::filename`, a
-    // `std::string*` -- and Fin never sets it: `reset_lexer_location()` passes
-    // `nullptr`. Setting it means owning those strings for as long as any location
-    // outlives the parse that made it (an expansion's locations outlive it by a whole
-    // pass), and it means the render path choosing an engine by the location's file
-    // rather than using the one it was called on. Neither is a change to make while
-    // chasing an abort.
-    //
-    // Until then the honest reading of this output is "an undeclared name reached the
-    // program through an expansion, somewhere". The message names the right word, and
-    // that word does not appear in the file being pointed at, which is at least a
-    // detectable inconsistency.
+    // The geometry premise is checked first, as in the verdict test: without a
+    // module column past the end of the caller's first line, the old render
+    // could pass by the columns happening to line up.
+    const int col = columnOfNeedle(kMacroNamingNothing, "Undeclared");
+    ASSERT_GT(col, firstLineLength(kImportsThatMacro))
+        << "this test needs a module column past the end of the caller's first line";
+    ASSERT_EQ(col, 42);
+
     TempMacroProject p(kMacroNamingNothing, kImportsThatMacro);
     const auto r = runFinc({p.app(), "--fin-libs=" + p.libs(), "--color=never"}, noFinLibs());
     ASSERT_EQ(r.exitCode, 1) << stripAnsi(r.err);
     const std::string err = stripAnsi(r.err);
 
-    EXPECT_NE(err.find("app.fin:1:"), std::string::npos)
-        << "GOOD NEWS: the diagnostic no longer claims to be on the caller's line 1. If a\n"
-           "location now carries its file, invert this test into Soundness_Diagnostics\n"
-           ".ADiagnosticFromAnImportedMacroBodyNamesTheModule asserting `mac.fin:1:42`,\n"
-           "and check the snippet is the macro's own line -- the two halves of this render\n"
-           "are separately wrong and a fix could land one without the other.\n"
-        << err;
-    EXPECT_NE(err.find("import { names_nothing } from mac;"), std::string::npos)
-        << "GOOD NEWS: the snippet is no longer the caller's line. See above.\n" << err;
-    EXPECT_EQ(err.find("mac.fin"), std::string::npos)
-        << "GOOD NEWS: the module is named somewhere in the render. See above.\n" << err;
+    EXPECT_NE(err.find("mac.fin:1:42"), std::string::npos)
+        << "the diagnostic must name the defining file and its line\n" << err;
+    EXPECT_NE(err.find("return quote { Undeclared::f($v); };"), std::string::npos)
+        << "the snippet must be the macro's own line, not the caller's\n" << err;
+    EXPECT_EQ(err.find("app.fin:1:"), std::string::npos)
+        << "the caller has nothing wrong with it and must not be named\n" << err;
 }
 
 // --- A macro body resolves in the module that declared it (ADR 0023 step 4) ---

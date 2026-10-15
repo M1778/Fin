@@ -98,6 +98,19 @@ public:
     std::unordered_set<std::string> privateSymbols;
     std::unordered_set<std::string> privateTypes;
 
+    // Namespaces this file declares (`Program::declared_namespaces`,
+    // published by the analyzer at Program entry). A namespace block splices
+    // its contents and keeps no scope, so this record is what the #90 strict
+    // rule checks: an import's `::` tail against the module scope's record,
+    // an extern qualifier against the importing scope's own.
+    std::unordered_set<std::string> declaredNamespaces;
+
+    bool isNamespaceDeclared(const std::string& name) const {
+        if (declaredNamespaces.count(name)) return true;
+        if (parent) return parent->isNamespaceDeclared(name);
+        return false;
+    }
+
     Scope(Scope* p = nullptr) : parent(p) {}
 
     void define(Symbol sym) { symbols[sym.name] = sym; }

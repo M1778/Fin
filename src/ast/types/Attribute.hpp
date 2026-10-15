@@ -46,4 +46,21 @@ public:
 // place that knows every node's children (ADR 0004).
 void markStdScopedGlobals(const std::vector<std::unique_ptr<Statement>>& body);
 
+// The names every `namespace_block` declared in the parse now running, in
+// source order. The blocks splice their contents and discard their names
+// (parser.y), so the analyzer would otherwise never know which namespaces a
+// file declares -- and both halves of the #90 strict rule need exactly that:
+// an import's `::` tail is checked against the *module's* names, an extern's
+// qualifier against the *importing file's*.
+//
+// Collected rather than stamped: `markStdScopedGlobals` above can walk a
+// block's statements because it only needs what is inside one block, but the
+// names live one per block across the whole file, so they accumulate here and
+// the `program` production moves them onto the Program node in one go.
+// Cleared at every parse start (`%initial-action` in parser.y): parses are
+// sequential but many run per process (one per imported module), and a failed
+// parse must not leak its names into the next file's Program.
+void noteNamespaceName(const std::string& name);
+std::vector<std::string> takeNamespaceNames();
+
 } // namespace fin

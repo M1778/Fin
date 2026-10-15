@@ -135,6 +135,12 @@ public:
     // `namespace std` (ADR 0021). See its definition for why it walks attributes
     // rather than declaration shapes.
     void refuseMisplacedGlobals(Program& node);
+    // Publishes every `namespace X { ... }` block the file opened into the
+    // file's scope (Program::declared_namespaces). The blocks splice, so the
+    // names would otherwise be gone by analysis time; the #90 strict rule
+    // reads this record -- imports against the module's, an extern qualifier
+    // against the importing file's own. See its definition.
+    void publishDeclaredNamespaces(const Program& node);
     // Publishes a declaration the parser stamped `#[global]` into the scope the
     // ModuleLoader owns, so it resolves in files that import nothing (ADR 0021).
     // A no-op when no loader-owned scope was injected. See its definition.
@@ -575,7 +581,7 @@ private:
     // A `::`-separated path from an `extern X as Y;` or a `pub implements Y = X;`,
     // resolved as a symbol rather than as a type. Null when the path names no symbol,
     // which is the caller's cue to read it as a type instead. Analyzer_Decl.cpp carries
-    // the three path shapes and why the namespace qualifier goes unchecked.
+    // the three path shapes and how the namespace qualifier is checked.
     std::shared_ptr<Type> resolveExternPathAsSymbol(const std::string& path);
 
     // The body of the above, without the nullable wrap. Split out rather than

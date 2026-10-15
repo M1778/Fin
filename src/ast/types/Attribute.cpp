@@ -35,4 +35,21 @@ void markStdScopedGlobals(const std::vector<std::unique_ptr<Statement>>& body) {
     marker.walkAll(body);
 }
 
+namespace {
+std::vector<std::string>& namespaceNameSink() {
+    static std::vector<std::string> names;
+    return names;
+}
+} // namespace
+
+void noteNamespaceName(const std::string& name) {
+    namespaceNameSink().push_back(name);
+}
+
+std::vector<std::string> takeNamespaceNames() {
+    std::vector<std::string> out;
+    out.swap(namespaceNameSink());
+    return out;
+}
+
 } // namespace fin

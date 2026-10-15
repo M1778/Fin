@@ -63,6 +63,12 @@ public:
     // `MacroDeclaration*`), which is a cycle rather than safety.
     Scope* declaringScope = nullptr;
 
+    // The file this macro was declared in, as the engine that parsed it named
+    // it. Recorded by the expander while visiting the declaration -- which runs
+    // once per module under that module's own engine -- so an expansion cloned
+    // from the body can be rendered against the lines its locations belong to.
+    std::string definingFile;
+
     MacroDeclaration(std::string n, std::vector<MacroParam> p, std::unique_ptr<Block> b);
     void accept(Visitor& v) override;
 };

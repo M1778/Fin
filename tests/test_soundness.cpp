@@ -9283,21 +9283,28 @@ TEST(Soundness_ExternAlias, ASymbolResolutionBindsASymbol) {
     EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_ExternAlias, ANamespaceQualifierOnAnExternPathIsNotChecked) {
-    // Known defect: #90 (tracked; see issue for inversion target).
-    // `extern myns::myfunc as myfunc;` (extern_as.fin:19) resolves, and it resolves by
-    // ignoring `myns`: a namespace block's contents are spliced into the enclosing
-    // statement list and its name is discarded (parser.y, namespace_block), so there is
-    // no `myns` to look `myfunc` up in and the last segment is all there is to go on.
+TEST(Soundness_ExternAlias, ANamespaceQualifierOnAnExternPathIsChecked) {
+    // Was KnownDefect_ExternAlias.ANamespaceQualifierOnAnExternPathIsNotChecked
+    // (#90): `extern myns::myfunc as myfunc;` (extern_as.fin:19) resolved by
+    // ignoring `myns` -- a namespace block's contents are spliced into the
+    // enclosing statement list and its name discarded (parser.y,
+    // namespace_block), so the last segment was all there was to go on, and a
+    // wrong qualifier like `nosuchns` bound without a word.
     //
-    // Which means a wrong qualifier is accepted. `extern nosuchns::myfunc as f;` binds
-    // f to myfunc, and nothing says the namespace does not exist. This is not a rule --
-    // it is the splice showing through, and the fix is a namespace with a scope, not a
-    // check bolted onto the extern path. Invert this test when namespaces get one.
-    const FincRun r = compile("namespace ns { pub fun myfunc() <void> {} }\n"
+    // Ruled strict: the qualifier must name something real -- a namespace the
+    // file declares, an enum in scope, or an import alias bound to a module.
+    // `nosuchns` is none of those, so the alias reports it; `ns` below is a
+    // declared namespace, so that alias still binds.
+    const FincRun bad = compile("namespace ns { pub fun myfunc() <void> {} }\n"
                               "extern nosuchns::myfunc as f;\n"
                               "fun main() <noret> { f(); }\n");
-    EXPECT_EQ(r.exitCode, 0) << "a qualifier that names nothing is accepted\n" << stripAnsi(r.err);
+    EXPECT_EQ(bad.exitCode, 1) << "a qualifier that names nothing must be reported\n"
+                               << stripAnsi(bad.err);
+    EXPECT_NE(stripAnsi(bad.err).find("nosuchns"), std::string::npos) << stripAnsi(bad.err);
+    const FincRun good = compile("namespace ns { pub fun myfunc() <void> {} }\n"
+                               "extern ns::myfunc as f;\n"
+                               "fun main() <noret> { f(); }\n");
+    EXPECT_EQ(good.exitCode, 0) << stripAnsi(good.err);
 }
 
 // `Result<T, U> implements <IResult> { ... }` -- stdlib/typing.fin:27 and

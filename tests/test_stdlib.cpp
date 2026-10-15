@@ -275,27 +275,28 @@ TEST(Soundness_BundledStdlib, TheWholeModuleImportFormsResolve) {
     }
 }
 
-// The `::` tail is parsed and dropped (parser.y's note on `namespace_block`), so
-// `error::std` and `error::nosuchnamespace` load the same file and neither complains.
-// That is the state of namespaces today, and it is asserted rather than left implicit
-// because the bundled library is written *with* `namespace std { ... }` blocks -- the
-// spelling the corpus's own drafts use -- and it would be easy to conclude from a
-// green suite that the selector was doing work.
-TEST(KnownDefect_BundledStdlib, TheNamespaceSelectorInAnImportIsNotChecked) {
-    // Known defect: #90 (tracked; see issue for inversion target).
-    const std::string err = stripAnsi(compileBundled(
+// The `::` tail names a namespace inside the module, and naming one the module
+// never declared is an error (#90, ruled strict). The bundled library is
+// written *with* `namespace std { ... }` blocks -- the spelling the corpus's
+// own drafts use -- so `error::std` resolves and `error::nosuchnamespace`
+// reports the unknown name.
+TEST(Soundness_BundledStdlib, TheNamespaceSelectorInAnImportIsChecked) {
+    // Was KnownDefect_BundledStdlib.TheNamespaceSelectorInAnImportIsNotChecked
+    // (#90): parser.y's note on `namespace_block` recorded that the tail was
+    // parsed and dropped, so `error::std` and `error::nosuchnamespace` loaded
+    // the same file and neither complained.
+    const std::string bad = stripAnsi(compileBundled(
         "import { Error } from error::nosuchnamespace;\n"
         "fun main() <int> { return 0; }\n").err);
-    EXPECT_EQ(errorCount(err), 0u)
-        << "GOOD NEWS: the namespace selector in an import is resolved. Invert this\n"
-           "test -- `error::nosuchnamespace` must report an unknown namespace, and\n"
-           "`error::std` must still compile clean -- and rename it\n"
-           "Soundness_BundledStdlib.TheNamespaceSelectorInAnImportIsChecked.\n"
-           "Doing that needs a NamespaceDeclaration node with a scope; today\n"
-           "namespace_block splices its contents and discards the name, and\n"
-           "ImportModule::namespace_path carries the tail to no reader\n"
-           "(`grep -rn namespace_path src/` finds only the declaration).\n"
-        << err;
+    EXPECT_NE(errorCount(bad), 0u)
+        << "an unknown namespace must be reported\n" << bad;
+    EXPECT_NE(bad.find("has no namespace"), std::string::npos) << bad;
+    const std::string good = stripAnsi(compileBundled(
+        "import { Error } from error::std;\n"
+        "fun main() <int> { return 0; }\n").err);
+    EXPECT_EQ(errorCount(good), 0u)
+        << "`error::std` names the namespace lib/std/error.fin declares\n" << good;
+
 }
 
 // ---------------------------------------------------------------------------
