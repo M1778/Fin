@@ -1,0 +1,42 @@
+//@ normative
+//@ ok
+@define printf(fmt: string, ...) <noret>;
+
+enum R { Ok(int), Err(int) }
+enum E { A, B, C }
+
+fun main() <noret> {
+    // ADR 0050 canonical shape: member patterns bind payloads.
+    let a <R> = Ok(10);
+    let b <R> = Err(3);
+    let x <int> = match (a) { Ok(v) => v, Err(e) => 0 };
+    let y <int> = match (b) { Ok(v) => v, Err(e) => e };
+    blame x == 10;
+    blame y == 3;
+
+    // `_` closes any match; bare members bind nothing.
+    let e <E> = B;
+    let n <int> = match (e) { A => 1, _ => 9 };
+    blame n == 9;
+
+    // Nullable: `null` matches absence, a bare binder the present payload.
+    let p? <int> = 10;
+    let q? <int> = null;
+    let u <int> = match (p) { null => -1, v => v };
+    let w <int> = match (q) { v => v, null => -1 };
+    blame u == 10;
+    blame w == -1;
+
+    // Constants compare with `==` (strings by content); `_` closes.
+    let c <int> = 1;
+    let k <int> = match (c) { 1 => 10, 2 => 20, _ => 0 };
+    blame k == 10;
+    let s <string> = "hi";
+    let t <int> = match (s) { "hi" => 1, "bye" => 2, _ => 0 };
+    blame t == 1;
+    let f <bool> = true;
+    let g <int> = match (f) { true => 1, _ => 0 };
+    blame g == 1;
+
+    printf("match ok\n");
+}

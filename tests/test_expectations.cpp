@@ -567,7 +567,9 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // 58 -> 59: pointer_escape.fin pins the returned-reference lifetime rule
     // (ADR 0055, issue #99) -- both refused spellings, the storage that stays
     // legal, and the struct-result waiver that does not also waive this check.
-    EXPECT_EQ(t.samples, 59)
+    // 59 -> 60: match.fin pins ADR 0050 (issue #70) -- the canonical Ok/Err
+    // member dispatch plus wildcard, nullable, and constant arms, all `ok`.
+    EXPECT_EQ(t.samples, 60)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";

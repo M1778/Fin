@@ -256,7 +256,9 @@
    whatever the constant `IFaceOptions::First` holds. Declared rather than left
    to shift-by-default so the choice is recorded and the conflict count stays 0. */
 %precedence STATIC_VALUE_PREC
-%right ARROW
+%right ARROW RARROW /* RARROW beside ARROW: both end an fn_type return, so both sit
+   below QUESTION and `fn(...) -> T?` shifts (nullable return) by declaration,
+   the same reading bison chose by default. Was 2 shift/reduce conflicts (#102). */
 %right EQUAL PLUSEQUAL MINUSEQUAL MULTEQUAL DIVEQUAL MODEQUAL AMPERSANDEQUAL PIPEEQUAL SHIFTLEFTEQUAL SHIFTRIGHTEQUAL
 %right KW_NEW KW_CAST KW_SIZEOF
 %right QUESTION COLON
@@ -2036,10 +2038,9 @@ type:
        suffix lands the flag on the pointee instead -- `&(int?)` refuses
        `&x` where `p? <&int>` accepts it.) The composite reductions all carry
        a real precedence above QUESTION, so bison reduces first and the outer
-       reading wins silently there; the two remaining conflicts are the
-       `fn(...) -> T?` return positions, where no precedence applies and the
-       default shift reads a nullable return, the `fun?` analogy. Both warnings
-       stay as the record. A width annotation keeps its braces closed
+       reading wins silently there; the two `fn(...) -> T?` return positions
+       shift by declaration (RARROW sits with ARROW below QUESTION), which reads
+       a nullable return, the `fun?` analogy. Zero conflicts (#102). A width annotation keeps its braces closed
        (`<int{64}?>` stays refused, held by
        Soundness_IntegerWidths.AWidthMustBeWrittenInsideTheType). */
     | type QUESTION {
@@ -2921,8 +2922,12 @@ match_binder_list:
     | no_struct_expression PIPEEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::PIPEEQUAL, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression SHIFTLEFTEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTLEFTEQUAL, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression SHIFTRIGHTEQUAL no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTRIGHTEQUAL, std::move($3)); $$->setLoc(@$); }
-    | no_struct_expression PIPE PIPE no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($4)); $$->setLoc(@$); }
-    | no_struct_expression AMPERSAND AMPERSAND no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($4)); $$->setLoc(@$); }
+    /* `&&`, `||` and `<<` as the single tokens the lexer returns (AND, OR,
+       SHIFTLEFT), like `expression` spells them. The two-token spellings these
+       replace (`AMPERSAND AMPERSAND` et al) never matched lexer output and made
+       `a & &b` ambiguous with `a && b`: 16 reduce/reduce conflicts (#102). */
+    | no_struct_expression OR no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::OR, std::move($3)); $$->setLoc(@$); }
+    | no_struct_expression AND no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::AND, std::move($3)); $$->setLoc(@$); }
     /* Bitwise mirror of the `expression` additions above (issue #67). */
     | no_struct_expression PIPE no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::PIPE, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression CARET no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::CARET, std::move($3)); $$->setLoc(@$); }
@@ -2938,7 +2943,7 @@ match_binder_list:
     | no_struct_expression MULT no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MULT, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression DIV no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::DIV, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression MOD no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::MOD, std::move($3)); $$->setLoc(@$); }
-    | no_struct_expression LT LT no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTLEFT, std::move($4)); $$->setLoc(@$); }
+    | no_struct_expression SHIFTLEFT no_struct_expression { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTLEFT, std::move($3)); $$->setLoc(@$); }
     | no_struct_expression GT GT no_struct_expression %prec SHIFTRIGHT { $$ = std::make_unique<fin::BinaryOp>(std::move($1), fin::ASTTokenKind::SHIFTRIGHT, std::move($4)); $$->setLoc(@$); }
     
     /* Unary Ops */
