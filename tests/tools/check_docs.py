@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Fin fences in the application docs using an explicitly chosen compiler."""
+"""Check Fin fences in the application docs and ADR citations under docs/adr/."""
 
 import argparse
 import os
@@ -12,6 +12,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 FENCE = re.compile(r"^```fin(?:[ \t]+([^\n]*))?\n(.*?)^```[ \t]*(?:\n|$)", re.M | re.S)
 OUTPUT = re.compile(r"\s*```output\n(.*?)^```", re.M | re.S)
+ADRS = re.compile(r"ADR[ \-#]?(\d{4})")
+ADR_DIRS = ("src", "tests", "docs", "lib", "finc", "conan", ".github")
+ADR_EXTS = {".md", ".cpp", ".hpp", ".l", ".y", ".fin", ".sh", ".yml", ".py", ".cmake"}
+RESERVED = {24}  # 0024 reserved for the wave-4 $type ruling, per docs/adr/0025-a-dynamic-array-is-a-pointer-and-a-length.md
 
 
 def main():
@@ -20,6 +24,7 @@ def main():
     args = parser.parse_args()
     compiler = args.finc.resolve()
     env = {**os.environ, "FIN_LIBS": str(ROOT / "lib/std")}
+    adr_sweep = check_adrs()
     docs = [ROOT / "README.md", ROOT / "docs/agent-guide.md"]
     docs += sorted((ROOT / "docs/guide").glob("*.md"))
     checked = fragments = 0
@@ -80,7 +85,42 @@ def main():
             print(f"PASS {source.relative_to(ROOT)}", flush=True)
     if not checked:
         raise SystemExit("No documentation examples found")
-    print(f"{checked} examples passed; {fragments} explicitly marked fragments skipped")
+    print(f"{checked} examples passed; {fragments} explicitly marked fragments skipped{adr_sweep}")
+
+
+def check_adrs():
+    adrs = {}
+    for path in sorted((ROOT / "docs/adr").glob("*.md")):
+        match = re.match(r"(\d{4})-", path.name)
+        if not match:
+            raise SystemExit(f"FAIL docs/adr/{path.name}: ADR filenames are numbered <NNNN>-*.md")
+        number = int(match[1])
+        if number in adrs:
+            raise SystemExit(f"FAIL docs/adr/{path.name}: ADR {number:04d} is already "
+                             f"{adrs[number].relative_to(ROOT)}")
+        adrs[number] = path
+    title = re.compile(r"docs/adr\S* — (\d+) binding numbered rulings")
+    declared = title.search((ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
+    if not declared:
+        raise SystemExit("FAIL CLAUDE.md: no 'docs/adr/ — <N> binding numbered rulings' sentence to verify")
+    if int(declared[1]) != len(adrs):
+        raise SystemExit(f"FAIL CLAUDE.md: {declared[1]} numbered rulings stated, docs/adr/ holds {len(adrs)}")
+    files = [path for path in sorted(ROOT.iterdir()) if path.is_file()
+             and (path.suffix in ADR_EXTS or path.name == "CMakeLists.txt")]
+    for name in ADR_DIRS:
+        files += [path for path in sorted((ROOT / name).rglob("*")) if path.is_file()
+                  and (path.suffix in ADR_EXTS or path.name == "CMakeLists.txt")]
+    for path in files:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for line_number, line in enumerate(text.splitlines(), 1):
+            for match in ADRS.finditer(line):
+                number = int(match[1])
+                if number in adrs or number in RESERVED:
+                    continue
+                raise SystemExit(f"FAIL {path.relative_to(ROOT)}:{line_number}: ADR {number:04d} cited, "
+                                 f"no docs/adr/{number:04d}-*.md (only 0024 is reserved, "
+                                 "per docs/adr/0025-a-dynamic-array-is-a-pointer-and-a-length.md)")
+    return f"; ADR sweep: {len(adrs)} numbered rulings, 0 dangling"
 
 
 if __name__ == "__main__":
