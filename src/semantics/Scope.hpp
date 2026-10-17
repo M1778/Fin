@@ -79,6 +79,45 @@ struct Symbol {
     //
     // Defaulted: a symbol defines unless an `@define` says it prototypes.
     bool is_prototype = false;
+
+    static Symbol immutable(std::string n, std::shared_ptr<Type> t) {
+        Symbol s;
+        s.name = std::move(n);
+        s.type = std::move(t);
+        s.is_mutable = false;
+        s.is_initialized = true;
+        return s;
+    }
+
+    static Symbol mutableBinding(std::string n, std::shared_ptr<Type> t) {
+        Symbol s;
+        s.name = std::move(n);
+        s.type = std::move(t);
+        s.is_mutable = true;
+        s.is_initialized = true;
+        return s;
+    }
+
+    static Symbol function(std::string n, std::shared_ptr<Type> t) {
+        Symbol s;
+        s.name = std::move(n);
+        s.type = std::move(t);
+        s.is_mutable = false;
+        s.is_initialized = true;
+        s.is_function = true;
+        return s;
+    }
+
+    static Symbol prototype(std::string n, std::shared_ptr<Type> t) {
+        Symbol s;
+        s.name = std::move(n);
+        s.type = std::move(t);
+        s.is_mutable = false;
+        s.is_initialized = true;
+        s.is_function = true;
+        s.is_prototype = true;
+        return s;
+    }
 };
 
 class Scope {

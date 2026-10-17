@@ -181,7 +181,7 @@ void MacroExpander::visit(ImportModule& node) {
     // Define a symbol with NamespaceType that holds the scope
     auto nsType = std::make_shared<NamespaceType>(alias, moduleScope);
     
-    Symbol sym{alias, nsType, false, true};
+    Symbol sym = Symbol::immutable(alias, nsType);
     currentScope->define(sym);
 }
 

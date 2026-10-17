@@ -788,7 +788,7 @@ void SemanticAnalyzer::visit(ForeachLoop& node) {
     }
     // Define loop variable
     auto type = resolveTypeFromAST(node.var_type.get());
-    if(type) currentScope->define({node.var_name, type, false, true});
+    if(type) currentScope->define(Symbol::immutable(node.var_name, type));
     if (track && type) moved_.declare(node.var_name, type->toString());
 
     // And the index binding of the two-binding form. The parser has stored it on the
@@ -813,7 +813,7 @@ void SemanticAnalyzer::visit(ForeachLoop& node) {
     std::shared_ptr<Type> indexWritten;
     if (!node.index_name.empty()) {
         indexWritten = resolveTypeFromAST(node.index_type.get());
-        if (indexWritten) currentScope->define({node.index_name, indexWritten, false, true});
+        if (indexWritten) currentScope->define(Symbol::immutable(node.index_name, indexWritten));
         if (track && indexWritten) moved_.declare(node.index_name, indexWritten->toString());
     }
 
@@ -929,7 +929,7 @@ void SemanticAnalyzer::visit(TryCatch& node) {
     enterScope();
     // Define catch var
     auto type = resolveTypeFromAST(node.catch_type.get());
-    if(type) currentScope->define({node.catch_var, type, false, true});
+    if(type) currentScope->define(Symbol::immutable(node.catch_var, type));
     // Wave-4 step 17 (W7): the catch variable lives in a scope with no Block
     // node of its own, so it is tracked in the enclosing frame and its exit
     // is recorded when that frame ends -- an approximation the exceptional
