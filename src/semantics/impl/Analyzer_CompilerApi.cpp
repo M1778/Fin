@@ -375,7 +375,7 @@ void SemanticAnalyzer::visit(Attribute& node) {
             error(node, "Attribute 'slaveof' needs a variable: #[slaveof(<variable>)] or #[slaveof($Fin)]");
             return;
         }
-        if (node.value_str[0] == '$' && node.value_str != "$Fin") {
+        if (node.value_str[0] == '$' && node.value_str != kFinLifetimeRoot) {
             error(node, "Unknown lifetime '" + node.value_str +
                         "' in #[slaveof(...)]: only $Fin pins to program exit");
             return;

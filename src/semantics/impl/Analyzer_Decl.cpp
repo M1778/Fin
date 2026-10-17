@@ -188,7 +188,10 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
                           node.name + "'");
                 continue;
             }
-            if (a->value_str == "$Fin") { slaveofTie = "$Fin"; continue; }
+            if (a->value_str == kFinLifetimeRoot) {
+                slaveofTie = kFinLifetimeRoot;
+                continue;
+            }
             if (a->is_flag || a->value_str.empty() || a->value_str[0] == '$' ||
                 a->value_str.find('.') != std::string::npos)
                 continue;  // malformed: visit(Attribute&) already reported it

@@ -10,6 +10,9 @@ namespace fin { class MacroDeclaration; }
 
 namespace fin {
 
+// The `#[slaveof(...)]` referent that pins storage to program exit.
+inline constexpr const char* kFinLifetimeRoot = "$Fin";
+
 struct Symbol {
     std::string name;
     std::shared_ptr<Type> type;
@@ -17,7 +20,7 @@ struct Symbol {
     bool is_initialized;
 
     // Wave-5 slice 4: `#[slaveof(...)]` on the declaration that defined this
-    // binding. Empty when untied, "$Fin" when pinned to program exit, else
+    // binding. Empty when untied, kFinLifetimeRoot ("$Fin") when pinned to program exit, else
     // the referent variable whose scope exit ends this storage. Recorded at
     // declaration (after the referent resolved in scope) so a use can tell a
     // live tie from a dangling one; the scope owns the entry, so the tie
