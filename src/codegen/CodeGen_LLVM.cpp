@@ -12,6 +12,7 @@
 // truth lives, which is the failure ADR 0008 rejects by name.
 #include "../semantics/BuiltinMacros.hpp"
 #include "../semantics/ComptimeInterp.hpp"
+#include "../semantics/Scope.hpp"
 #include "../types/Layout.hpp"
 #include "../utils/IntegerConstant.hpp"
 
@@ -8271,7 +8272,7 @@ private:
             return false;
         }
         const std::string& referent = tieAttr->value_str;
-        if (referent == "$Fin") {
+        if (referent == kFinLifetimeRoot) {
             tie = Local::SlaveofTie::Pinned;
             return true;
         }

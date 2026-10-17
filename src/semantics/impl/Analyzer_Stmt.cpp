@@ -75,7 +75,7 @@ bool ptrProvForeign(const Symbol* ref, const std::shared_ptr<Scope>& global,
                     const std::shared_ptr<Type>& structCtx) {
     if (!ref || !global) return true;
     if (ref == global->resolve(ref->name)) return true;
-    if (ref->slaveof == "$Fin") return true;
+    if (ref->slaveof == kFinLifetimeRoot) return true;
     if (ref->name == "self" && structCtx) return true;
     return false;
 }
@@ -514,7 +514,7 @@ void SemanticAnalyzer::refuseEscapingReturn(ReturnStatement& node, bool ctorPoin
     // A global's storage is the program's, so no call can end it.
     if (sym == globalScope->resolve(name)) return;
     // `$Fin` pins storage to program exit (Scope.hpp:19-27).
-    if (sym->slaveof == "$Fin") return;
+    if (sym->slaveof == kFinLifetimeRoot) return;
     // A method's receiver is the caller's object, not this frame: `self` is by
     // reference, so a mutation through it is visible to the caller. The
     // implicit injection types it `Self` or the struct itself
