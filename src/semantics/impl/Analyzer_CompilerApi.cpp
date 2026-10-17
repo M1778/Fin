@@ -149,7 +149,7 @@ void SemanticAnalyzer::applyUseAttributes(
     if (grantsCompiler) {
         // Not mutable and not assignable-to: `compiler` is the API, not a variable
         // holding it.
-        currentScope->define({"compiler", std::make_shared<CompilerApiType>(), false, true});
+        currentScope->define(Symbol::immutable("compiler", std::make_shared<CompilerApiType>()));
     }
 }
 

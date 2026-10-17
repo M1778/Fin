@@ -1234,7 +1234,7 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
 
             for (const auto& name : enumeratorNames) {
                 if (!currentScope->symbols.count(name)) {
-                    currentScope->define({name, enumType->getEnumeratorValueType(name), false, true});
+                    currentScope->define(Symbol::immutable(name, enumType->getEnumeratorValueType(name)));
                 }
             }
         } else if (auto* ib = dynamic_cast<ImplementsBlock*>(stmt.get())) {
@@ -1272,8 +1272,9 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
             if (var->type && !currentScope->symbols.count(var->name)) {
                 auto type = resolveTypeFromAST(var->type.get());
                 if (type && !isErrorType(type) && type->toString() != "auto") {
-                    Symbol hoisted{var->name, type, var->is_mutable,
-                                   var->initializer != nullptr};
+                    Symbol hoisted = var->is_mutable
+                                         ? Symbol::mutableBinding(var->name, type)
+                                         : Symbol::immutable(var->name, type);
                     hoisted.is_hoisted = true;
                     currentScope->define(hoisted);
                     debugLog(fg(fmt::color::gray), "      [Hoist] Registered global '{}' at file scope\n", var->name);
@@ -1344,9 +1345,8 @@ void SemanticAnalyzer::hoistTopLevelSignatures(Program& node) {
         // that was already there.
         if (currentScope->symbols.count(name)) continue;
 
-        Symbol hoisted{name, std::make_shared<FunctionType>(paramTypes, retType, false,
-                                                             paramDefaults),
-                         false, true};
+        Symbol hoisted = Symbol::function(
+            name, std::make_shared<FunctionType>(paramTypes, retType, false, paramDefaults));
         hoisted.is_hoisted = true;
         currentScope->define(hoisted);
         if (generics) recordFunctionGenerics(name, *generics);

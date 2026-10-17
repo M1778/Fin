@@ -294,11 +294,12 @@ private:
     //
     // Nine call sites, one per shape of thing that has parameters -- function,
     // method, operator, constructor, lambda -- and they were nine copies of
-    // `define({param->name, t, false, true})`. One of them disagreeing is the bug
+    // `Symbol::mutableBinding(param.name, t)`. One of them disagreeing is the bug
     // this replaces.
     void defineParameter(const Parameter& param, const std::shared_ptr<Type>& type) {
         const bool isConst = param.type && param.type->is_const;
-        currentScope->define({param.name, type, !isConst, true});
+        currentScope->define(isConst ? Symbol::immutable(param.name, type)
+                                     : Symbol::mutableBinding(param.name, type));
     }
 
     // ---- The compiler API (docs/compiler-api.md, ADR 0012) --------------------
