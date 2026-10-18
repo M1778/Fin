@@ -16,6 +16,7 @@
 #include "semantics/SemanticAnalyzer.hpp"
 #include "types/FunctionType.hpp"
 #include "types/StructType.hpp"
+#include "utils/Process.hpp"
 
 // The soundness defects listed at the top of docs/plan.md, each pinned by a test
 // that runs the real compiler. They are gathered in one file because they share a
@@ -79,6 +80,42 @@ FincRun compileWith(const std::vector<std::string>& flags, const std::string& co
     argv.insert(argv.end(), flags.begin(), flags.end());
     return runFinc(argv);
 }
+
+#ifdef FIN_TESTS_HAVE_BACKEND
+// Compiles with `-o` and runs the binary. For the tests that must observe what the
+// program *printed* rather than what the compiler said -- a diagnostic cannot read
+// an array's storage, and a copy that reads as garbage is not visible to one.
+// Backend-gated: a build without LLVM refuses `-o` by contract; there is nothing
+// to run there, and the test compilation is still checked below the gate.
+struct CompiledRun {
+    int compileExit = -1;
+    std::string compileErr;
+    int runExit = -1;
+    std::string out;
+};
+CompiledRun compileAndRun(const std::string& code) {
+    CompiledRun r;
+    fs::path src = uniqueTempPath("fin_sound", ".fin");
+    fs::path exe = uniqueTempPath("fin_sound");
+    fs::path outPath = uniqueTempPath("fin_sound_out");
+    {
+        std::ofstream f(src, std::ios::binary);
+        f.write(code.data(), (std::streamsize)code.size());
+    }
+    const FincRun c = runFinc({src.string(), "-o", exe.string()});
+    r.compileExit = c.exitCode;
+    r.compileErr = stripAnsi(c.err);
+    if (r.compileExit == 0 && fs::exists(exe)) {
+        r.runExit = fin::runProcess({exe.string()}, outPath.string(), outPath.string());
+        r.out = readProcessOutput(outPath.string());
+    }
+    std::error_code ec;
+    fs::remove(src, ec);
+    fs::remove(exe, ec);
+    fs::remove(outPath, ec);
+    return r;
+}
+#endif
 
 // The diagnostic message lines, and nothing else.
 //
@@ -1169,35 +1206,41 @@ TEST(Soundness_ContainerVariance, AStructDoesNotConvertToAnInterfaceThroughACont
     EXPECT_EQ(errorCount(stripAnsi(byvalue.err)), 0u) << stripAnsi(byvalue.err);
 }
 
-TEST(KnownDefect_ContainerVariance, ADynamicElementTypeStillAcceptsAConcreteOne) {
-    // Known defect: #96 (tracked; see issue for inversion target).
-    // The one hole `isAssignableThrough` keeps open, and it is open on the corpus's
-    // authority rather than by oversight. `[int] -> [any]` is a representation change
-    // by the same argument as everything the predicate refuses -- docs/plan.md fixes
-    // `any` as `{i8*, i64}`, sixteen bytes, and an `int` is four -- and
-    // stdlib/types.fin:102 declares `resolve_arr_type(const &arr: [any])`, which is
-    // useless without it.
-    //
-    // It is also mutable-container covariance, which is unsound in the ordinary way
-    // even where the representations agree: a write through the `[any]` view can put a
-    // `string` where the `[int]` name promises an integer.
-    //
-    // Not a wrong program today, which is why it is booked rather than refused: codegen
-    // has no `[any]` at all. Measured -- `fun take(a: [any])` reached with an `[int]`
-    // reports `codegen: a parameter of type '[any]' is not lowered yet`, so the
-    // conversion has nowhere to be wrong yet.
-    //
-    // Closing it needs the corpus to change, so it is an owner ruling: either
-    // `resolve_arr_type` gains a cast or a generic parameter, or `[any]` becomes a
-    // conversion the backend performs element by element rather than a rename. Whoever
-    // closes it inverts this test into Soundness_ContainerVariance beside the four
-    // above.
+TEST(Soundness_ContainerVariance, ADynamicElementTypeIsACopyNotAView) {
+    // Was KnownDefect_ContainerVariance.
+    // ADynamicElementTypeStillAcceptsAConcreteOne. Owner ruling, issue #96 (R4):
+    // `[int] -> [any]` stays accepted, and it is a *copy* -- one boxed blob per
+    // element, built through the same conversion a cast-to-any lowers with -- so a
+    // write through the `[any]` view no longer reaches the `[int]` name's storage.
+    // Both halves are `{ptr, len}` and the identity shortcut used to alias them:
+    // after `a[0] = "s"` the uncoerced `v[0]` printed garbage (probe ran
+    // `-308273148`, and again `-539500540`).
     const FincRun r = compile(
         "fun take(a: [any]) <int> { return 0; }\n"
         "fun main() <noret> { let v <[int]> = [1, 2]; take(v); }\n");
     EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u)
-        << "when this fails, `[int]` no longer converts to `[any]`: invert this test\n"
+        << "stdlib/types.fin:102 needs `[int]` -> `[any]`, now as a copy\n"
         << stripAnsi(r.err);
+
+    // The copy the ruling asks for, observed at run time. `v` keeps its integers:
+    // the string written through the `[any]` view lands in the box array only.
+#ifdef FIN_TESTS_HAVE_BACKEND
+    const CompiledRun run = compileAndRun(
+        "@define printf(fmt: string, ...) <noret>;\n"
+        "fun main() <int> {\n"
+        "    let v <[int]> = [1, 2];\n"
+        "    let a <[any]> = v;\n"
+        "    a[0] = \"s\";\n"
+        "    printf(\"%d\\n\", v[0]);\n"
+        "    return 0;\n"
+        "}\n");
+    EXPECT_EQ(run.compileExit, 0)
+        << "the conversion the ruling keeps must compile\n" << run.compileErr;
+    EXPECT_EQ(run.runExit, 0) << run.compileErr;
+    EXPECT_EQ(run.out, "1\n")
+        << "`v[0]` must still be 1 after `a[0] = \"s\"`: the conversion is a copy\n"
+        << run.out;
+#endif
 
     // The pointee and prototype spellings of the same hole, so that closing one and
     // leaving the others is visible.
@@ -1381,20 +1424,12 @@ TEST(Soundness_DynamicTypes, ABoundIsRenderedInTheDiagnosticThatQuotesTheType) {
         << "the bound the program wrote is part of the type's name\n" << err;
 }
 
-TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnADynamicTypeIsNotEnforced) {
-    // Known defect: #96 (tracked; see issue for inversion target).
-    // `type EnumType = any implements <Enum>;` (stdlib/enums.fin:6) reads as "any
-    // type that implements Enum". Only the first half is enforced: the bound is
-    // resolved and recorded on the DynamicType, and nothing consults it, so a struct
-    // that implements nothing is accepted where the bound was written.
-    //
-    // Booked rather than fixed because enforcing it needs the answer to a question
-    // the corpus does not settle -- stdlib/types.fin:78 writes `type nullptr = any
-    // implements <&void>;`, where the bound is a *pointer type* and not an interface
-    // at all, and stdlib/typing.fin:10 writes `string | any implements <Error>` inside
-    // a union. A check that only understands interfaces would reject both of those
-    // spellings, which the corpus writes as ordinary library code. See docs/plan.md,
-    // "Rulings owed": does a primitive satisfy an interface bound.
+TEST(Soundness_DynamicTypes, AnImplementsBoundIsEnforced) {
+    // Was KnownDefect_DynamicTypes.AnImplementsBoundOnADynamicTypeIsNotEnforced.
+    // Owner ruling, issue #96 (R1): `type Bound = any implements <I>;` accepts a
+    // value only when the value is an implementor of I, or I is memberless. The
+    // predicate is `satisfiesBound` (src/types/Type.cpp), shared with the generic
+    // bounds and with the alias spelling.
     const char* prog =
         "interface I { pub fun m() <int>; }\n"
         "struct Good { pub v <int> }\n"
@@ -1402,48 +1437,77 @@ TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnADynamicTypeIsNotEnforced) {
         "struct Bad { pub v <int> }\n"
         "type Bound = any implements <I>;\n";
 
-    // The satisfying case must stay clean whichever way the ruling goes.
+    // The satisfying case stays clean.
     const FincRun good = compile(std::string(prog) +
         "fun main() <int> { let a <Bound> = new Good{v: 1}; return 0; }\n");
     EXPECT_EQ(errorCount(stripAnsi(good.err)), 0u)
         << "Good implements I\n" << stripAnsi(good.err);
 
-    // These two are the defect. When either starts failing, the bound is enforced:
-    // split this test, keep the `Good` case as Soundness_DynamicTypes, and assert
-    // the ruled diagnostic on whichever of the two the ruling covers.
+    // A struct that implements nothing is refused where the bound was written.
     const FincRun bad = compile(std::string(prog) +
         "fun main() <int> { let a <Bound> = new Bad{v: 1}; return 0; }\n");
-    EXPECT_EQ(errorCount(stripAnsi(bad.err)), 0u)
-        << "Bad implements nothing and is accepted today\n" << stripAnsi(bad.err);
+    const std::string badErr = stripAnsi(bad.err);
+    EXPECT_EQ(bad.exitCode, 1) << "Bad implements nothing\n" << badErr;
+    EXPECT_NE(badErr.find("expected 'any implements <I>'"), std::string::npos) << badErr;
 
     const FincRun prim = compile(std::string(prog) +
         "fun main() <int> { let a <Bound> = 5; return 0; }\n");
-    EXPECT_EQ(errorCount(stripAnsi(prim.err)), 0u)
-        << "an int where `implements <I>` was written -- this is the case the ruling "
-           "is about, since `implements <&void>` in stdlib/types.fin:78 means the "
-           "answer cannot simply be no\n" << stripAnsi(prim.err);
+    const std::string primErr = stripAnsi(prim.err);
+    EXPECT_EQ(prim.exitCode, 1) << "an int satisfies no member-full interface\n" << primErr;
+    EXPECT_NE(primErr.find("expected 'any implements <I>'"), std::string::npos) << primErr;
+
+    // The two spellings the corpus writes that the ruling keeps vacuous, so the
+    // acceptance the library code is written against survives the ruling:
+    //
+    // stdlib/types.fin:78 -- the bound is a pointer type, not an interface at all;
+    // the corpus record is checked (R1 keeps non-interface bounds unchecked), and
+    // `type nullptr = any implements <&void>;` still defines.
+    const FincRun pointerBound = compile(
+        "type nullptr = any implements <&void>;\n"
+        "fun main() <noret> {}\n");
+    const std::string ptrErr = stripAnsi(pointerBound.err);
+    EXPECT_EQ(ptrErr.find("neither erased nor dynamic"), std::string::npos) << ptrErr;
+    // A dynamic-target alias defines even with a non-interface bound: R2's refusal
+    // here would take `nullptr` out of the library. Counted rather than uncounted
+    // so an accidental diagnostic cannot hide:
+    EXPECT_EQ(errorCount(ptrErr), 0u) << ptrErr;
+
+    // stdlib/enums.fin -- the memberless interface: `getkeyid(value: EnumType)`
+    // works, and `type EnumType = any implements <Enum>;` resolves for the same
+    // vacuous reason. A member-full interface like `Any<Printable>`-style bounds
+    // is the case the two refusals above now name; a memberless one has nothing
+    // to demand.
+    const FincRun member = compile(
+        "interface Memberless {}\n"
+        "type Bound2 = any implements <Memberless>;\n"
+        "fun take(x: int) <noret> {}\n"
+        "fun main() <noret> { let b <Bound2> = 5; take(1); }\n");
+    const std::string memberErr = stripAnsi(member.err);
+    EXPECT_EQ(errorCount(memberErr), 0u)
+        << "a memberless interface demands nothing, so it is satisfied vacuously\n"
+        << memberErr;
 }
 
-TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnANonDynamicAliasIsDropped) {
-    // Known defect: #96 (tracked; see issue for inversion target).
-    // The bound is attached only when the alias target is dynamic (`any`, `object`,
-    // or `Struct`), because that is the only shape the corpus writes it on --
-    // including literal_struct.fin:15, `type PlayerStructLike = Struct implements
-    // <_PlayerStructLike>;`, which keeps its bound (Soundness_DynamicTypes.
-    // AStructTargetKeepsItsImplementsBound).
-    //
-    // On any other target the bound is resolved and then discarded. Resolving it is
-    // deliberate and is what the second half of this test pins: an unenforced bound
-    // that also fails to reject a misspelling is not a partial implementation, it is
-    // a blind spot, and that was the state before this unit.
+TEST(Soundness_DynamicTypes, AnImplementsBoundNeedsADynamicTarget) {
+    // Was KnownDefect_DynamicTypes.AnImplementsBoundOnANonDynamicAliasIsDropped.
+    // Owner ruling, issue #96 (R2): a bound on a non-dynamic target is refused
+    // outright rather than resolved-and-dropped. `type F = int implements <I>` has
+    // nowhere to keep the bound, and an alias that silently became a plain `int` was
+    // what made the old state a defect rather than a spelling. The alias still
+    // defines as its target: the name was written, so the name exists, and the
+    // program loses one diagnostic to the clause, not its whole type.
     const FincRun r = compile(
         "interface I { pub fun m() <int>; }\n"
         "type F = int implements <I>;\n"
         "fun main() <int> { let x <F> = 5; return 0; }\n");
-    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u)
-        << "`F` is a plain `int` today; the bound went nowhere\n" << stripAnsi(r.err);
+    const std::string err = stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 1) << err;
+    EXPECT_NE(err.find("An 'implements' bound needs a dynamic target"), std::string::npos) << err;
+    EXPECT_NE(err.find("'int' is neither erased nor dynamic"), std::string::npos) << err;
 
-    // The alias is still the alias -- dropping the bound must not have dropped the
+    // The two keeps, so the refusal changes exactly one thing:
+    //
+    // The alias is still the alias -- refusing the clause must not have refused the
     // target with it.
     const FincRun mismatch = compile(
         "interface I { pub fun m() <int>; }\n"
@@ -1452,13 +1516,24 @@ TEST(KnownDefect_DynamicTypes, AnImplementsBoundOnANonDynamicAliasIsDropped) {
     EXPECT_NE(stripAnsi(mismatch.err).find("expected 'int', got 'string'"), std::string::npos)
         << "F resolves to int\n" << stripAnsi(mismatch.err);
 
-    // A typo in a dropped bound is still reported. This half is Soundness in spirit
-    // and lives here so that a fix to the paragraph above cannot quietly take it out.
+    // A typo in the bound is still reported. Resolving before refusing is deliberate:
+    // an unenforced bound that also fails to reject a misspelling is not a partial
+    // implementation, it is a blind spot, and that was the state this paragraph
+    // replaces.
     const FincRun typo = compile(
         "type F = int implements <NoSuchIface>;\n"
         "fun main() <int> { let x <F> = 5; return 0; }\n");
     EXPECT_NE(stripAnsi(typo.err).find("Undefined type 'NoSuchIface'"), std::string::npos)
-        << "a bound is resolved even where it is not kept\n" << stripAnsi(typo.err);
+        << "a bound is resolved even where it is refused\n" << stripAnsi(typo.err);
+
+    // And the dynamic spellings the corpus writes stay accepted, since the refusal is
+    // about the *target*: `Struct` keeps its bound (the test below), and a dynamic
+    // target with a memberless bound defines.
+    const FincRun dyn = compile(
+        "interface Memberless {}\n"
+        "type Bound = any implements <Memberless>;\n"
+        "fun main() <noret> { let b <Bound> = 5; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(dyn.err)), 0u) << stripAnsi(dyn.err);
 }
 
 TEST(Soundness_DynamicTypes, AStructTargetKeepsItsImplementsBound) {
@@ -1578,63 +1653,57 @@ TEST(Soundness_DynamicTypes, AnyInsideAGenericSurvivesInstantiation) {
         << "instantiation keeps both the name and the bound\n" << stripAnsi(bound.err);
 }
 
-TEST(KnownDefect_DynamicTypes, GenericArgumentsOnADynamicTypeAreNotConstraints) {
-    // Known defect: #96 (tracked; see issue for inversion target).
-    // Having kept `any<int>` dynamic, the open question is whether the `<int>` means
-    // anything. Today it does not: `any<int>` accepts a string.
-    //
-    // The corpus does not settle it, and the one spelling it actually writes points
-    // away from narrowing: stdlib/types.fin:74 is `type Any<...> = any implements
-    // <...>;`, whose argument is the literal variadic `...`, and whose comment says
-    // "ANY type is allowed to be passed but it has to be casted or handled by the user
-    // itself". A narrowing reading would make `Any<...>` mean "any type that is `...`",
-    // which is not a type. So the arguments are carried and ignored, and the ruling on
-    // whether a written `any<int>` should narrow is owed (docs/plan.md).
+TEST(Soundness_DynamicTypes, GenericArgumentsOnADynamicTypeAreCarriedIgnored) {
+    // Was KnownDefect_DynamicTypes.GenericArgumentsOnADynamicTypeAreNotConstraints.
+    // Pinned in the positive form because that IS the ruling: `any<int>`'s argument
+    // is carried and ignored, and the corpus is the reason -- stdlib/types.fin:74 is
+    // `type Any<...> = any implements <...>;`, whose argument is the literal variadic
+    // `...` and whose comment says "ANY type is allowed to be passed but it has to be
+    // casted or handled by the user itself". A narrowing reading would make `Any<...>`
+    // mean "any type that is `...`", which is not a type. A ruling to narrow stays
+    // open (docs/plan.md); it may only narrow without taking `Any<...>` out.
     const FincRun r = compile("fun main() <noret> { let x <any<int>> = \"s\"; }\n");
     EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u)
-        << "when this fails, `any<T>` narrows: make it Soundness and assert the "
-           "mismatch, and check stdlib/types.fin:74's `Any<...>` still resolves\n"
+        << "when this fails, `any<T>` narrows: check stdlib/types.fin:74's `Any<...>` "
+           "still resolves before trusting the narrowing\n"
         << stripAnsi(r.err);
+
+    // The bound spelling the library writes defines clean; the part carried over is
+    // the alias itself, because using a generic alias as a parameter type is refused
+    // (nothing else in the corpus or tests instantiates one).
+    const FincRun anyLike = compile("type Any<...> = any implements <...>;\n"
+                                    "fun main() <noret> {}\n");
+    EXPECT_EQ(errorCount(stripAnsi(anyLike.err)), 0u)
+        << "stdlib/types.fin:74's alias shape is ordinary library code\n"
+        << stripAnsi(anyLike.err);
 }
 
-TEST(KnownDefect_DynamicTypes, ObjectAndAnyAreMutuallyAssignable) {
-    // Known defect: #96 (tracked; see issue for inversion target).
-    // Both directions compile, and one of them probably should not.
-    //
-    // The corpus draws a distinction between the two names. stdlib/types.fin:97 says
-    // of `any`: "any type that is visible in compile time (can be identified in
-    // compile time)". prototype_test.fin:40 says of `object`: "object type is an
-    // expensive type but can fit any datatype in it at the cost of memory and speed".
-    // Read together those are erasure and boxing: an `any` is a type the compiler
-    // knows and has stopped checking, an `object` is a value carrying its type at
-    // runtime. Every static type fits either. But an `object` fits an `any` only if
-    // its content was compile-time known, which is exactly what the box exists to
-    // stop promising -- so `object -> any` looks like it should be rejected while
-    // `any -> object` stays.
-    //
-    // Booked rather than implemented because no corpus program exercises the
-    // direction, and a directional rule between the two would change what
-    // `<{object, object}>` accepts across prototype_test.fin. The ruling is owed
-    // (docs/plan.md, "Rulings owed").
-    //
-    // This test also records where DynamicType::equals's name comparison stands. That
-    // comparison is what keeps `any` and `object` two types rather than one, and
-    // today nothing can observe it: the "every type fits a dynamic target" rule in
-    // Type::isAssignableTo answers before equality in both directions, and the one
-    // remaining channel -- the cast -- rejects both names alike
-    // (Soundness_Casts.ACastToOrFromADynamicTypeIsAllowed). A mutant that drops the
-    // name comparison kills no test, which is a statement about the consumer not
-    // existing yet and not about the comparison being wrong. Deleting it would make
-    // `any` and `object` one type, a stronger claim than the corpus supports.
-    for (const char* code : {"fun main() <noret> { let a <any> = 1; let b <object> = a; }\n",
-                             "fun main() <noret> { let a <object> = 1; let b <any> = a; }\n"}) {
-        const FincRun r = compile(code);
-        EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u)
-            << "GOOD NEWS IF THIS FAILED on the second program: the boxing/erasure "
-               "distinction has been ruled on. Split this test, keep `any -> object` "
-               "as Soundness, and assert the mismatch for the other direction.\n"
-            << code << stripAnsi(r.err);
-    }
+TEST(Soundness_DynamicTypes, ObjectAndAnyKeepTheirDistinction) {
+    // Was KnownDefect_DynamicTypes.ObjectAndAnyAreMutuallyAssignable. Owner ruling,
+    // issue #96 (R5, one-way): `any -> object` stays -- the box's known-content
+    // spelling. `object -> any` is refused: an `object` carries its type at runtime,
+    // so an erased slot cannot say what to erase, and that is what the corpus's two
+    // descriptions draw (stdlib/types.fin:97 -- "any type that is visible in compile
+    // time" -- against prototype_test.fin:40 -- "expensive type ... at the cost of
+    // memory and speed"). The explicit `cast` spelling stays open and is where the
+    // help text points.
+    const FincRun widen = compile(
+        "fun main() <noret> { let a <any> = 1; let b <object> = a; }\n");
+    EXPECT_EQ(errorCount(stripAnsi(widen.err)), 0u)
+        << "`any -> object` is the erasure direction the corpus writes\n" << stripAnsi(widen.err);
+
+    const FincRun narrow = compile(
+        "fun main() <noret> { let a <object> = 1; let b <any> = a; }\n");
+    const std::string err = stripAnsi(narrow.err);
+    EXPECT_EQ(narrow.exitCode, 1) << err;
+    EXPECT_NE(err.find("expected 'any', got 'object'"), std::string::npos) << err;
+    EXPECT_NE(err.find("an 'object' carries its type at runtime"), std::string::npos)
+        << "the help must say why, and where the cast lives\n" << err;
+    EXPECT_NE(err.find("cast<any>"), std::string::npos) << err;
+
+    // The distinction DynamicType::equals's name comparison serves is real again:
+    // `any` and `object` answer conversions differently, so the previous "nothing can
+    // observe it" note is gone. The comparison is load-bearing through isAssignableTo.
 }
 
 TEST(Soundness_Prototypes, AHeterogeneousPrototypeLiteralInfersObject) {
@@ -5025,36 +5094,50 @@ TEST(Soundness_GenericBounds, ABogusInlineImplementsBoundIsRejected) {
         << stripAnsi(r.err);
 }
 
-TEST(KnownDefect_GenericBounds, AnArgumentViolatingAFunctionBoundIsAccepted) {
-    // Known defect: #96 (tracked; see issue for inversion target).
-    // `int` does not implement `I`, and `f` says it requires it. The bound is
-    // resolved and stored now (see the Soundness tests above), so what is missing
-    // here is the call site: nothing on the path through visit(FunctionCall&) looks
-    // at the callee's generic parameters at all, so there is no place the bound
-    // would be consulted even though it is finally there to consult.
+TEST(Soundness_GenericBounds, AnArgumentViolatingAFunctionBoundIsRefused) {
+    // Was KnownDefect_GenericBounds.AnArgumentViolatingAFunctionBoundIsAccepted.
+    // The bound is resolved and stored on the GenericType, and the call site consults
+    // it (checkGenericCall, R1 site (a) of issue #96): `int` does not implement `I`,
+    // and `f` says it requires it, so the call is refused.
     auto r = compile("interface I { fun m() <int>; }\n"
                      "fun f<T: I>(x: T) <noret> {}\n"
                      "fun main() <void> { f(1); }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: an argument is checked against its generic bound.\n"
-        << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Type 'int' does not implement interface 'I'"),
+              std::string::npos) << stripAnsi(r.err);
+
+    // The vacuous side of the same consult, so enforcement cannot take the library's
+    // bounds with it. A memberless interface demands nothing, so any argument fits
+    // (the corpus calls EnumType and Castable-shaped bounds this way), and a
+    // non-interface bound (`T: int`) keeps its vacuous reading.
+    const FincRun memberless = compile(
+        "interface Memberless {}\n"
+        "fun f<T: Memberless>(x: T) <noret> {}\n"
+        "fun main() <void> { f(1); f(\"s\"); }\n");
+    EXPECT_EQ(memberless.exitCode, 0) << stripAnsi(memberless.err);
+    const FincRun plainBound = compile(
+        "fun f<T: int>(x: T) <noret> {}\n"
+        "fun main() <void> { f(1); }\n");
+    EXPECT_EQ(plainBound.exitCode, 0) << stripAnsi(plainBound.err);
 }
 
-TEST(KnownDefect_GenericBounds, AStructInstantiationViolatingItsBoundIsAccepted) {
-    // Known defect: #96 (tracked; see issue for inversion target).
-    // Still accepted, but no longer for the reason it was written for. The bound is
-    // stored now and checkConstraint does run on it; it returns true because the
-    // argument `int` is a PrimitiveType and checkConstraint only reports on a
-    // StructType argument. So the fix is a ruling followed by three lines, not
-    // plumbing: does a primitive satisfy an interface bound? `Castable` and `Any`
-    // are bounds in the standard library that every primitive must satisfy
-    // (ADR 0018), so the answer is not simply "no".
+TEST(Soundness_GenericBounds, AStructInstantiationViolatingItsBoundIsRefused) {
+    // Was KnownDefect_GenericBounds.AStructInstantiationViolatingItsBoundIsAccepted.
+    // `S<int>` instantiates over `T: I`, and `int` does not implement `I`,
+    // so the instantiation is refused (checkConstraint, R1 site (b), issue #96).
     auto r = compile("interface I { fun m() <int>; }\n"
                      "struct S<T: I> { x <T>, }\n"
                      "fun main() <void> { let s <S<int>>; }\n");
-    EXPECT_EQ(r.exitCode, 0)
-        << "FIXED: a generic argument is checked against the parameter's bound.\n"
-        << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 1) << stripAnsi(r.err);
+    EXPECT_NE(stripAnsi(r.err).find("Type 'int' does not implement interface 'I'"),
+              std::string::npos) << stripAnsi(r.err);
+
+    // Same vacuous side, at the instantiation: a memberless bound fits everything.
+    const FincRun memberless = compile(
+        "interface Memberless {}\n"
+        "struct S<T: Memberless> { x <T>, }\n"
+        "fun main() <void> { let s <S<int>>; }\n");
+    EXPECT_EQ(memberless.exitCode, 0) << stripAnsi(memberless.err);
 }
 
 // ---------------------------------------------------------------------------
@@ -9563,20 +9646,19 @@ TEST(Soundness_ErrorRecovery, AnImplementsBlockConstructorParameterIsReportedOnc
     EXPECT_EQ(n, 1u) << e;
 }
 
-TEST(KnownDefect_ImplementsConstructors, ABlocksConstructorIsNotAnOverloadOfTheTargetsOwn) {
-    // Known defect: #95 (tracked; see issue for inversion target).
-    // Booked, not fixed: constructor lookup reads constructors[0] and nothing else,
-    // which is the same limit the struct body has had all along -- two constructors
-    // written on one struct are not resolved between either. The block's is second in
-    // the vector because the struct declaration is analysed first, so it is the one
-    // that cannot be called. Fixing this is overload resolution, not registration.
+TEST(ImplementsConstructors, ABlockConstructorIsAnOverloadOfTheTargetsOwn) {
+    // The binding cannot recover from a wrong body, and the ruling is that the
+    // block's constructor is the target's second construction: a `Nullary` call
+    // resolves to it and compiles, not to the first-registered one-argument shape.
+    // Lowering of the resolved call is the backend half tracked by the same issue.
+    // (Was KnownDefect_ImplementsConstructors.ABlocksConstructorIsNotAnOverloadOfTheTargetsOwn, #95.)
     const FincRun r = compile(
         "struct Thing { pub d <int>, Thing(d: int) { self.d = d; } }\n"
         "interface INoArgs { Self(); }\n"
         "Thing implements <INoArgs> { Thing() { self.d = 0; } }\n"
         "fun f() <void> { let t <Thing> = Thing(); }\n");
-    EXPECT_NE(r.exitCode, 0) << "if this passes, constructor overloads resolve -- invert this test";
-    EXPECT_EQ(errorCount(stripAnsi(r.err)), 1u) << stripAnsi(r.err);
+    EXPECT_EQ(r.exitCode, 0) << stripAnsi(r.err);
+    EXPECT_EQ(errorCount(stripAnsi(r.err)), 0u) << stripAnsi(r.err);
 }
 
 // ---------------------------------------------------------------------------

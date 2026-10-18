@@ -10,6 +10,7 @@
 #include "../../ast/exprs/StructureExpr.hpp"
 #include "../../ast/exprs/UnaryOp.hpp"
 #include "../../ast/exprs/Lambda.hpp"
+#include "../../ast/decls/FunctionDecl.hpp"
 #include "../../ast/stmts/ControlFlow.hpp"
 #include "../../ast/stmts/VariableDecl.hpp"
 #include "../../types/TypeImpl.hpp"
@@ -184,6 +185,234 @@ const Symbol* launderedReferent(const Expression* value, const std::shared_ptr<S
         return ref;
     return nullptr;
 }
+
+// #109 (ADR 0056): the four routes a frame-local address takes out without
+// presenting a `return` operand for the ADR 0055 reading. They share one
+// storage test with the operand rule: the slot named is this frame's unless
+// it is a global's, `#[slaveof($Fin)]`-pinned storage, the receiver's, or
+// reached through a pointer whose provenance is foreign (#105). The helper
+// answers with the local whose slot a diagnostic must name; null when the
+// shape is legal or names no variable.
+const Symbol* escapingFrameSlot(const Identifier* root, bool wholeSlot,
+                                const std::shared_ptr<Scope>& scope,
+                                const std::shared_ptr<Scope>& global,
+                                const std::shared_ptr<Type>& structCtx) {
+    if (!root || !scope || !global) return nullptr;
+    Symbol* sym = scope->resolve(root->name);
+    if (!sym) return nullptr;
+    // A global's storage is the program's, so no call or frame can end it.
+    if (sym == global->resolve(root->name)) return nullptr;
+    // `$Fin` pins storage to program exit.
+    if (sym->slaveof == "$Fin") return nullptr;
+    // The receiver is the caller's object, by reference.
+    if (root->name == "self" && structCtx) return nullptr;
+    // Reaching *through* a pointer lands in storage someone else owns; a
+    // tracked pointer local can still launder this frame's address (#105):
+    // the recorded referent decides, and untracked pointers keep today's
+    // accept for exactly the parameters, globals and call results.
+    if (!wholeSlot && sym->type && sym->type->as<PointerType>()) {
+        const Symbol* ref = nullptr;
+        if (lookupPtrProvenance(sym->name, ref) && ref &&
+            !ptrProvForeign(ref, global, structCtx))
+            return ref;
+        return nullptr;
+    }
+    return sym;
+}
+
+// Slot a pointer local launders out of this frame when its value is copied
+// into a returned literal's field or element (`return W{p: q}` copies `q`,
+// whose provenance #105 tracks). The bare identifier's reading, reused
+// wherever the copy happens.
+const Symbol* copiedPointerLocalSlot(const Identifier* id, const std::shared_ptr<Scope>& scope,
+                                     const std::shared_ptr<Scope>& global,
+                                     const std::shared_ptr<Type>& structCtx) {
+    if (!id || !scope || !global) return nullptr;
+    if (!scope->resolve(id->name)) return nullptr;
+    const Symbol* ref = nullptr;
+    if (lookupPtrProvenance(id->name, ref) && ref && !ptrProvForeign(ref, global, structCtx))
+        return ref;
+    return nullptr;
+}
+
+// Walks one node of a returned literal, gathering fields and elements that
+// hand out this frame's storage. Only returned literals are walked, never
+// built ones: a same-frame `Holder{p: &x}` is where the storage lives as long
+// as the value does, and that construction is pinned legal.
+struct EscapingField {
+    Expression* at = nullptr;
+    const Symbol* slot = nullptr;
+};
+void collectEscapingLiteralField(Expression& e, std::vector<EscapingField>& out,
+                                 const std::shared_ptr<Scope>& scope,
+                                 const std::shared_ptr<Scope>& global,
+                                 const std::shared_ptr<Type>& structCtx) {
+    if (const auto* sl = dynamic_cast<const StructInstantiation*>(&e)) {
+        for (const auto& f : sl->fields)
+            if (f.second) collectEscapingLiteralField(*f.second, out, scope, global, structCtx);
+        return;
+    }
+    if (const auto* arr = dynamic_cast<const ArrayLiteral*>(&e)) {
+        for (const auto& el : arr->elements)
+            if (el) collectEscapingLiteralField(*el, out, scope, global, structCtx);
+        return;
+    }
+    // A field or element: addressed, whose slot is taken, or a pointer local
+    // copied in by value (the laundering reading once more).
+    if (const auto* u = dynamic_cast<const UnaryOp*>(&e)) {
+        if (u->op != ASTTokenKind::AMPERSAND || !u->operand) return;
+        ReturnedStorage held = returnedStorage(u->operand.get());
+        if (const Symbol* slot =
+                escapingFrameSlot(held.root, held.wholeSlot, scope, global, structCtx))
+            out.push_back({&e, slot});
+        return;
+    }
+    if (const auto* id = dynamic_cast<const Identifier*>(&e))
+        if (const Symbol* slot = copiedPointerLocalSlot(id, scope, global, structCtx))
+            out.push_back({&e, slot});
+}
+std::vector<EscapingField> findEscapingLiteralFields(Expression* value,
+                                                     const std::shared_ptr<Scope>& scope,
+                                                     const std::shared_ptr<Scope>& global,
+                                                     const std::shared_ptr<Type>& structCtx) {
+    std::vector<EscapingField> out;
+    if (value) collectEscapingLiteralField(*value, out, scope, global, structCtx);
+    return out;
+}
+
+// #109 (ADR 0056), forwarding-call summaries. `return id(&a)` names no root,
+// so the site asks what the callee's returns can carry: per reference-return-
+// ing function, the parameter positions its returned reference may be built
+// from. Facts: a bare `return p;` where `p` is a pointer parameter (the
+// returned value *is* the argument's pointer), or an interface parameter (the
+// pair copied out with the parameter's data word), and by composition a call
+// whose callee's facts map through this call's parameter arguments. Computed
+// before any body is walked and re-derived to a fixed point over the call
+// graph, so forwarding order and forwarding cycles across the file both
+// converge; walk-time refusal reads only the final map.
+struct RefProvFact {
+    size_t param = 0;
+    bool iface = false;
+    bool operator==(const RefProvFact& o) const { return param == o.param && iface == o.iface; }
+};
+std::unordered_map<std::string, std::vector<RefProvFact>> refProvSummaries_;
+bool refProvHasFact(const std::vector<RefProvFact>& facts, size_t param, bool iface) {
+    for (const auto& f : facts)
+        if (f == RefProvFact{param, iface}) return true;
+    return false;
+}
+
+// Whether a parameter type can carry a reference out in the fact's spelling:
+// a pointer for the pointer-value reading, an interface for the pair reading.
+bool refProvParamKind(const Type& t, bool wantIface) {
+    if (t.as<PointerType>()) return !wantIface;
+    if (const auto* st = t.as<StructType>()) return wantIface && st->is_interface;
+    return false;
+}
+
+// Gathers every ReturnStatement under `stmt` without entering a nested
+// declaration, and reports `shadowed` for any binding that covers one of
+// `paramNames` -- the grammar lets a local cover a parameter, after which the
+// function's return wiring is ambiguous and its summary is skipped rather
+// than guessed.
+void collectEscapingReturns(const Statement& s, const std::unordered_set<std::string>& paramNames,
+                            std::vector<const ReturnStatement*>& out, bool& shadowed) {
+    if (const auto* ret = dynamic_cast<const ReturnStatement*>(&s)) {
+        out.push_back(ret);
+        return;
+    }
+    // Leaving a nested `fun`/struct/lambda body here is the point: the
+    // summary is free functions', not a nested declaration's.
+    if (const auto* blk = dynamic_cast<const Block*>(&s)) {
+        for (const auto& st : blk->statements)
+            if (st) collectEscapingReturns(*st, paramNames, out, shadowed);
+        return;
+    }
+    if (const auto* ifs = dynamic_cast<const IfStatement*>(&s)) {
+        if (ifs->then_block) collectEscapingReturns(*ifs->then_block, paramNames, out, shadowed);
+        if (ifs->else_stmt) collectEscapingReturns(*ifs->else_stmt, paramNames, out, shadowed);
+        return;
+    }
+    if (const auto* wh = dynamic_cast<const WhileLoop*>(&s)) {
+        if (wh->body) collectEscapingReturns(*wh->body, paramNames, out, shadowed);
+        return;
+    }
+    if (const auto* fr = dynamic_cast<const ForLoop*>(&s)) {
+        if (fr->init) collectEscapingReturns(*fr->init, paramNames, out, shadowed);
+        if (fr->body) collectEscapingReturns(*fr->body, paramNames, out, shadowed);
+        return;
+    }
+    if (const auto* fe = dynamic_cast<const ForeachLoop*>(&s)) {
+        if (paramNames.count(fe->var_name)) shadowed = true;
+        if (!fe->index_name.empty() && paramNames.count(fe->index_name)) shadowed = true;
+        if (fe->body) collectEscapingReturns(*fe->body, paramNames, out, shadowed);
+        return;
+    }
+    if (const auto* tc = dynamic_cast<const TryCatch*>(&s)) {
+        if (paramNames.count(tc->catch_var)) shadowed = true;
+        if (tc->try_block) collectEscapingReturns(*tc->try_block, paramNames, out, shadowed);
+        if (tc->catch_block) collectEscapingReturns(*tc->catch_block, paramNames, out, shadowed);
+        return;
+    }
+    if (const auto* vd = dynamic_cast<const VariableDeclaration*>(&s)) {
+        if (paramNames.count(vd->name)) shadowed = true;
+        return;
+    }
+    // Any other statement shape carries neither a return nor a binding this
+    // test can read; expression statements are checked when walked for real.
+}
+// The forwarding-call route's argument test: which arguments of a call the
+// summary says the returned reference may carry through, and whether each one
+// hands this frame's storage out. A pointer fact holds the argument to the
+// operand rule (`id(&a)` behaves like `return &a` at the call for storage
+// purposes), an interface fact like `return d` -- with the already-a-pair
+// exemption ADR 0055 states: the address was taken where the pair was formed,
+// so a forwarded interface parameter names no new slot.
+struct EscapingCallArg {
+    Expression* at = nullptr;
+    const Symbol* slot = nullptr;
+    bool viaInterface = false;
+};
+std::vector<EscapingCallArg> findEscapingCallArgs(const FunctionCall& call,
+                                                  const std::shared_ptr<Scope>& scope,
+                                                  const std::shared_ptr<Scope>& global,
+                                                  const std::shared_ptr<Type>& structCtx) {
+    std::vector<EscapingCallArg> out;
+    if (call.is_special || !call.resolved_method_owner.empty() ||
+        !call.generic_args.empty() || !call.resolved_args.empty())
+        return out;
+    auto byName = refProvSummaries_.find(call.name);
+    if (byName == refProvSummaries_.end()) return out;
+    for (const auto& fact : byName->second) {
+        if (fact.param >= call.args.size() || !call.args[fact.param]) continue;
+        Expression& arg = *call.args[fact.param];
+        if (fact.iface) {
+            ReturnedStorage held = returnedStorage(&arg);
+            if (!held.root) continue;
+            // Already a pair: the address was taken where the pair was formed,
+            // so copying it out names no new slot (the forwarded-pair pin).
+            if (const Symbol* sym = scope->resolve(held.root->name)) {
+                const auto* st = sym->type ? sym->type->as<StructType>() : nullptr;
+                if (st && st->is_interface) continue;
+            }
+            if (const Symbol* slot = escapingFrameSlot(held.root, true, scope, global, structCtx))
+                out.push_back({&arg, slot, true});
+            continue;
+        }
+        if (const auto* u = dynamic_cast<const UnaryOp*>(&arg);
+            u && u->op == ASTTokenKind::AMPERSAND && u->operand) {
+            ReturnedStorage held = returnedStorage(u->operand.get());
+            if (const Symbol* slot = escapingFrameSlot(held.root, held.wholeSlot, scope, global, structCtx))
+                out.push_back({&arg, slot, false});
+            continue;
+        }
+        if (const auto* id = dynamic_cast<const Identifier*>(&arg))
+            if (const Symbol* slot = copiedPointerLocalSlot(id, scope, global, structCtx))
+                out.push_back({&arg, slot, false});
+    }
+    return out;
+}
+
 // B4: whether the guard mentions `@defined` (or `compiler.symbols.defined`),
 // the only shape this slice folds. Anything else keeps the both-arms walk.
 bool mentionsDefined(const Expression* e) {
@@ -457,6 +686,173 @@ void SemanticAnalyzer::visit(ReturnStatement& node) {
     }
 }
 
+// #109 (ADR 0056), the forwarding-call summaries. Runs in visit(Program&)
+// right after the signature hoist: every top-level reference-returning
+// declaration re-derives the parameter positions its returns can carry until
+// nothing changes over the call graph. Order of definition and forwarding
+// cycles across the file converge to the same map this way, so walk-time
+// refusal reads its callee's answer even when the callee is declared after
+// its caller. A declaration whose signature did not hoist, a generic recipe,
+// and a body whose parameters are shadowed are skipped -- each an
+// under-refusal, never an over-refusal.
+void SemanticAnalyzer::buildReferenceProvenance(Program& node) {
+    refProvSummaries_.clear();
+
+    struct Candidate {
+        const FunctionDeclaration* decl = nullptr;
+        const FunctionType* type = nullptr;
+    };
+    std::vector<Candidate> candidates;  // file order
+    std::unordered_map<std::string, size_t> byName;
+    for (const auto& stmt : node.statements) {
+        const auto* fn = dynamic_cast<const FunctionDeclaration*>(stmt.get());
+        if (!fn || !fn->body || !fn->generic_params.empty()) continue;
+        // The hoisted signature (hoistTopLevelSignatures pass 4) already
+        // resolved the parameter and return types this pass reads.
+        const Symbol* sym = currentScope->resolve(fn->name);
+        const auto* ftype = sym && sym->type ? sym->type->as<FunctionType>() : nullptr;
+        if (!ftype || !ftype->return_type) continue;
+        const bool isReference =
+            ftype->return_type->as<PointerType>() != nullptr ||
+            (ftype->return_type->as<StructType>() != nullptr &&
+             ftype->return_type->as<StructType>()->is_interface);
+        if (!isReference) continue;
+        if (byName.count(fn->name)) continue;
+        byName[fn->name] = candidates.size();
+        candidates.push_back({fn, ftype});
+    }
+
+    const auto derive = [&](const Candidate& c) {
+        std::unordered_set<std::string> paramNames;
+        std::unordered_map<std::string, size_t> index;
+        for (size_t i = 0; i < c.decl->params.size(); ++i) {
+            paramNames.insert(c.decl->params[i]->name);
+            index[c.decl->params[i]->name] = i;
+        }
+        std::vector<const ReturnStatement*> returns;
+        bool shadowed = false;
+        collectEscapingReturns(*c.decl->body, paramNames, returns, shadowed);
+        std::vector<RefProvFact> facts;
+        if (shadowed) return facts;
+        for (const ReturnStatement* ret : returns) {
+            if (!ret->value) continue;
+            if (const auto* id = dynamic_cast<const Identifier*>(ret->value.get())) {
+                // `return p;` carries the argument's pointer (or the copied
+                // pair) out whole: one fact, in the parameter's spelling.
+                auto it = index.find(id->name);
+                if (it == index.end()) continue;
+                for (const bool want : {false, true}) {
+                    if (c.type->param_types[it->second] &&
+                        refProvParamKind(*c.type->param_types[it->second], want))
+                        facts.push_back({it->second, want});
+                }
+                continue;
+            }
+            if (const auto* call = dynamic_cast<const FunctionCall*>(ret->value.get())) {
+                // Composition: a forwarded call contributes the facts of its
+                // callee, each mapped through the argument that carried it
+                // -- and only an argument that is itself a bare parameter
+                // keeps the fact, since anything else would already have
+                // had to answer for its own frame here.
+                if (call->is_special || !call->resolved_method_owner.empty() ||
+                    !call->generic_args.empty() || !call->resolved_args.empty())
+                    continue;
+                auto inner = refProvSummaries_.find(call->name);
+                if (inner == refProvSummaries_.end()) continue;
+                for (const auto& fact : inner->second) {
+                    if (fact.param >= call->args.size() || !call->args[fact.param]) continue;
+                    const auto* arg =
+                        dynamic_cast<const Identifier*>(call->args[fact.param].get());
+                    if (!arg) continue;
+                    auto it = index.find(arg->name);
+                    if (it == index.end()) continue;
+                    if (c.type->param_types[it->second] &&
+                        refProvParamKind(*c.type->param_types[it->second], fact.iface))
+                        facts.push_back({it->second, fact.iface});
+                }
+            }
+        }
+        std::vector<RefProvFact> unique;
+        for (const auto& f : facts)
+            if (!refProvHasFact(unique, f.param, f.iface)) unique.push_back(f);
+        return unique;
+    };
+
+    bool changed = true;
+    const size_t cap = candidates.size() * 2 + 4;
+    for (size_t iter = 0; changed && iter < cap; ++iter) {
+        changed = false;
+        for (const auto& c : candidates) {
+            auto next = derive(c);
+            auto& standing = refProvSummaries_[c.decl->name];
+            if (standing != next) {
+                standing = std::move(next);
+                changed = true;
+            }
+        }
+    }
+}
+
+// #109 (ADR 0056), the store route. `*out = &d` and `g = &d` install a
+// frame-local address in storage that outlives the frame; the return rule
+// never sees them, because they are not returns. The right-hand side must be
+// handing out this frame's storage (an `&local`, or a pointer local whose
+// provenance derives from one) and the left-hand side must outlive it (a
+// dereferenced pointer's target, or a global) -- a store built into locals,
+// both slots dying together, stays legal. Blamed on the right-hand side,
+// which is what carries the address out.
+void SemanticAnalyzer::refuseEscapingStore(Statement& base) {
+    auto& node = static_cast<ExpressionStatement&>(base);
+    if (injectedWalk_) return;
+    const auto* bin = dynamic_cast<const BinaryOp*>(node.expr.get());
+    if (!bin || bin->op != ASTTokenKind::EQUAL || !bin->left || !bin->right) return;
+
+    const Symbol* slot = nullptr;
+    if (const auto* u = dynamic_cast<const UnaryOp*>(bin->right.get());
+        u && u->op == ASTTokenKind::AMPERSAND && u->operand) {
+        ReturnedStorage held = returnedStorage(u->operand.get());
+        slot = escapingFrameSlot(held.root, held.wholeSlot, currentScope, globalScope,
+                                 currentStructContext);
+    } else if (const auto* id = dynamic_cast<const Identifier*>(bin->right.get())) {
+        slot = copiedPointerLocalSlot(id, currentScope, globalScope, currentStructContext);
+    } else {
+        return;
+    }
+    if (!slot || !globalScope || !currentScope) return;
+
+    bool receives = false;
+    if (const auto* u = dynamic_cast<const UnaryOp*>(bin->left.get());
+        u && u->op == ASTTokenKind::MULT && u->operand) {
+        // Through a dereference: the target lives wherever the pointer does.
+        // A pointer local proven to point at this frame's storage cannot
+        // carry the address out (both slots die together); a parameter's
+        // target, a heap allocation, or anything untracked can. Non-
+        // identifier targets (`**slot`, `*self.q`) stay open: this slice
+        // answers the out-parameter's own shape.
+        if (const auto* target = dynamic_cast<const Identifier*>(u->operand.get())) {
+            if (const Symbol* targetSym = currentScope->resolve(target->name);
+                targetSym && targetSym->slaveof == "$Fin")
+                return;  // the $Fin-pinned slot reads nothing the call can end
+            const Symbol* proven = nullptr;
+            if (lookupPtrProvenance(target->name, proven) && proven)
+                receives = false;
+            else
+                receives = true;
+        }
+    } else if (const auto* lhs = dynamic_cast<const Identifier*>(bin->left.get())) {
+        const Symbol* sym = currentScope->resolve(lhs->name);
+        receives = sym && sym == globalScope->resolve(lhs->name);
+    }
+    if (!receives) return;
+
+    error(*bin->right,
+          fmt::format("cannot store the address of local variable '{}' into storage that "
+                      "outlives the call",
+                      slot->name),
+          "store caller-owned storage or an owned heap allocation (`new`) instead; "
+          "this slot ends with the call");
+}
+
 // A returned reference must not point into the frame it leaves (#99, ADR
 // 0055). `&d` hands out the slot, and converting a local to an interface hands
 // out that slot's address as the pair's data word; both dangle the moment the
@@ -476,6 +872,50 @@ void SemanticAnalyzer::refuseEscapingReturn(ReturnStatement& node, bool ctorPoin
     // never this one: `&local` handed back where the value type is declared is
     // the same dangle the `<&D>` spelling refuses, reached through the waiver.
     const bool addressForm = ptrExpected || ctorPointerResult;
+
+    // #109 (ADR 0056), the literal route: a returned literal never reaches the
+    // operand reading below (a literal answers no root), so its fields and
+    // elements are held to the same storage test here. Only a returned literal
+    // is walked, so the same spellings built into same-frame locals stay
+    // legal exactly as the pins hold them. Blamed on each field or element
+    // that carries the address, with ADR 0055's wording: the storage is the
+    // same storage, and the remedy does not depend on how it reached the
+    // return.
+    if (const auto fields =
+            findEscapingLiteralFields(node.value.get(), currentScope, globalScope,
+                                      currentStructContext);
+        !fields.empty()) {
+        for (const auto& f : fields)
+            error(*f.at,
+                  fmt::format("cannot return the address of local variable '{}'", f.slot->name),
+                  "return caller-owned storage or an owned heap allocation (`new`) "
+                  "instead; this slot ends with the call");
+        return;
+    }
+
+    // The forwarding-call route: the callee's summary says which argument
+    // positions its return can carry through, and this site holds that
+    // argument to the same test the operand would get. A bare call is the
+    // only shape the summaries answer; `@special`, a method call, and any
+    // generic instantiation stay accepted exactly as before.
+    if (const auto* call = dynamic_cast<const FunctionCall*>(node.value.get());
+        call && !call->is_special && call->resolved_method_owner.empty() &&
+        call->generic_args.empty() && call->resolved_args.empty()) {
+        bool reported = false;
+        for (const auto& f :
+             findEscapingCallArgs(*call, currentScope, globalScope, currentStructContext)) {
+            reported = true;
+            error(*f.at,
+                  f.viaInterface
+                      ? fmt::format("cannot return local variable '{}' as an interface",
+                                    f.slot->name)
+                      : fmt::format("cannot return the address of local variable '{}'",
+                                    f.slot->name),
+                  "return caller-owned storage or an owned heap allocation (`new`) "
+                  "instead; this slot ends with the call");
+        }
+        if (reported) return;
+    }
 
     ReturnedStorage held;
     if (addressForm) {
@@ -553,6 +993,7 @@ void SemanticAnalyzer::refuseEscapingReturn(ReturnStatement& node, bool ctorPoin
 
 void SemanticAnalyzer::visit(ExpressionStatement& node) {
     node.expr->accept(*this);
+    refuseEscapingStore(node);  // #109 (ADR 0056): the store routes the return rule never sees
 }
 
 void SemanticAnalyzer::visit(IfStatement& node) {

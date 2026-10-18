@@ -521,6 +521,22 @@ private:
     // and this question assumes the returned shape is the declared one.
     void refuseEscapingReturn(ReturnStatement& node, bool ctorPointerResult);
 
+    // #109 (ADR 0056): flow checks for the routes that bypass the return-operand
+    // rule. The store half refuses `*out = &local` and `g = &local` -- storage
+    // that receives a frame-local address but outlives the frame. Called once
+    // per expression statement, after the expression's own walk and type
+    // checks, so a well-formed store is what answers.
+    void refuseEscapingStore(Statement& node);
+
+    // The summary half: before any body is walked, each top-level
+    // reference-returning function computes which parameter positions its
+    // returned reference can carry through (`return p;` forwarding a pointer or
+    // interface parameter, composed through calls), re-derived to a fixed point
+    // so forwarding order and forwarding cycles in the file both converge.
+    // refuseEscapingReturn reads the map when the returned value is a call.
+    void buildReferenceProvenance(Program& node);
+
+    // Issue #46: warns on never-read `let`/`const` locals bound to pure
     // Issue #46: warns on never-read `let`/`const` locals bound to pure
     // values. One frame per open scope, pushed and popped with it, so
     // shadowing resolves the way Scope::resolve does (nearest frame holding
@@ -682,6 +698,24 @@ private:
     void checkCallArguments(ASTNode& node, const char* kind, const std::string& name,
                             const FunctionType& sig,
                             std::vector<std::unique_ptr<Expression>>& args);
+
+    // Constructor-call binding across a struct's whole overload set.
+    //
+    // `constructorFor` answers one question (the first listed construction, whether the
+    // struct's or an inherited one); this answers the call's: which of the registered
+    // constructions -- the struct's own and, when it declares none, its first
+    // contributing parent's, up to rebinds and defaults -- fits the written argument
+    // count and shapes the way checkCallArguments would admit it. Never invents a
+    // signature: the single-construction case returns the same FunctionType
+    // constructorFor returns, so a call the old rule admitted keeps exactly the
+    // diagnostics it always had; a call the new rule refuses is already diagnosed, and
+    // the null answer means "reported".
+    //
+    // The pick is recorded on the call as `resolved_ctor_param_count`, which is what
+    // the backend's dispatcher holds the frontend to. Definition in Analyzer_Decl.cpp,
+    // next to the declarations it reads.
+    std::shared_ptr<FunctionType> resolveConstructorOverload(
+        const std::shared_ptr<StructType>& st, FunctionCall& node);
 
     // The arity half of checkCallArguments on its own.
     //
@@ -897,7 +931,7 @@ private:
     //
     // Static because visit(BinaryOp&) asks the same question about an operand.
     static bool constantFitsType(const ASTNode& node, const Type& target);
-    bool checkConstraint(TypeNode* typeNode, std::shared_ptr<Type> actualType, std::shared_ptr<Type> constraint);
+    bool checkConstraint(ASTNode* typeNode, std::shared_ptr<Type> actualType, std::shared_ptr<Type> constraint);
 
     // Declares `<T>` / `<T: C>` into the current scope and resolves each
     // constraint. Every declaration form that can be generic calls this, which is

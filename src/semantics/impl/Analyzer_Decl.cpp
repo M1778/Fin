@@ -1817,11 +1817,23 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
         for (auto& bnd : node.implements_list) bounds.push_back(resolveTypeOrError(bnd.get()));
 
         // Attached only to a dynamic target, which is the only shape the corpus writes
-        // a bound on. On anything else the bound has nowhere to live yet and the alias
-        // is still worth defining -- see
-        // KnownDefect_DynamicTypes.AnImplementsBoundOnANonDynamicAliasIsDropped.
-        if (auto* dyn = type ? type->as<DynamicType>() : nullptr)
+        // a bound on. Owner ruling, issue #96 (R2): a bound on any other target is
+        // refused outright rather than resolved-and-dropped -- `ty F = int implements
+        // <I>` has nowhere to keep the bound, and the old state (a plain `int` alias
+        // whose `implements` clause was read and then thrown away) is what made
+        // KnownDefect_DynamicTypes.AnImplementsBoundOnANonDynamicAliasIsDropped a
+        // defect instead of a spelling. The alias still defines as its target: the
+        // name was written, so the name exists, and the program loses one diagnostic
+        // to the clause, not its whole type.
+        if (auto* dyn = type ? type->as<DynamicType>() : nullptr) {
             type = std::make_shared<DynamicType>(dyn->name, std::move(bounds));
+        } else if (type) {
+            error(node,
+                  fmt::format("An 'implements' bound needs a dynamic target: '{}' is neither erased nor dynamic",
+                              type->toString()),
+                  "declare the struct or enum `: <I>` at its own declaration, or spell the "
+                  "bound as `any implements <I>` where the erased value belongs");
+        }
     }
 
     // The twenty-first site of the same rule, and the one that cost the corpus most:
@@ -2397,6 +2409,199 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
     exitScope();
     
     debugLog(fg(fmt::color::green), "      [OK] Implements block for '{}' analyzed successfully\n", node.target_type);
+}
+
+// ---------------------------------------------------------------------------
+// Constructor-call binding across one struct's whole overload set.
+//
+// `StructType::constructorFor` (and the call site that reads it) has always answered
+// ONE question: the first listed construction, and no more. That was enough while a
+// struct had at most one, and #95's two arrivals are what made it not enough: a
+// struct-body construction plus one arriving through an `implements` block are both
+// registered against the same StructType, and a call written like the second one was
+// diagnosed against the first (`Function 'Thing' expects 1 arguments, got 0` about
+// `Thing()` over a block-construction that takes none). So the selector is arity-shaped
+// here, answering for the call rather than for the type.
+//
+// THE SINGLE-CONSTRUCTION CONTRACT. Where every other behavior is new, this one is
+// pinned: when the list has exactly one entry the answer is that entry, whatever the
+// call says. The diagnostics a call may then draw -- its arity, its arguments' types --
+// stay exactly where they are drawn (checkCallArguments at the call site, checkCallArity
+// inside it), which keeps today's messages for the single-construction programs the
+// corpus is made of. A resolver that re-reported name and arity itself would have
+// duplicated those messages, or rewritten them; neither is the contract.
+//
+// THE REST OF THE RULE. A list of more than one filters by the window the written
+// count must sit in -- the same optional-parameter rule checkCallArity applies
+// (a nullable parameter is optional there, with a defaulted one an absent argument,
+// and the minimum is one past the last required position) -- then scores what is
+// left against the arguments' own types. The scoring is deliberately narrow: an
+// argument whose type IS the parameter's type is a point, anything else is not, so
+// the two layers -- this one and CodeGen_LLVM's dispatcher, which scores against its
+// mapped types with exactly the rule -- answer the same call the same way or tie.
+// A tie is the ambiguity that the backend refuses its side of: these two
+// constructions have no written call that says which it meant, whichever layer is
+// asked later. Nothing here guesses first-wins, and nothing here re-substitutes what
+// the registration already produced.
+//
+// INHERITANCE KEEPS ITS MEANING. The walk is constructorFor's: a struct with its own
+// constructions never reaches a parent, and a parent's entry is rebuilt to construct
+// this struct -- its parameters and defaults verbatim, its return type rebound --
+// before it joins the set. The walk takes the first contributing parent's set whole,
+// because each parent's set is itself the list one propagation would have answered
+// with.
+std::shared_ptr<FunctionType> SemanticAnalyzer::resolveConstructorOverload(
+        const std::shared_ptr<StructType>& st, FunctionCall& node) {
+    auto reported = [&]() -> std::shared_ptr<FunctionType> {
+        lastExprType = nullptr;
+        return nullptr;
+    };
+
+    // The overload set, in the order a construction was registered.
+    std::vector<std::shared_ptr<FunctionType>> overloads;
+    bool ownDeclared = false;
+    for (const auto& c : st->constructors)
+        if (auto* sig = c ? c->as<FunctionType>() : nullptr) {
+            ownDeclared = true;
+            overloads.push_back(std::static_pointer_cast<FunctionType>(c));
+        }
+    if (!ownDeclared) {
+        // The same recursive walk StructType::constructorFor performs: each
+        // ancestor branch in turn, the first branch that supplies a construction
+        // wins, and what it supplies is rebound to construct `st` (only the
+        // outermost binding survives, so a grandparent's string ctor is found by
+        // its parent's parent -- Soundness_ConstructorInheritance).
+        std::function<bool(const std::shared_ptr<StructType>&)> adoptAncestry =
+            [&](const std::shared_ptr<StructType>& node) -> bool {
+            bool declared = false;
+            for (const auto& c : node->constructors) {
+                if (auto* sig = c ? c->as<FunctionType>() : nullptr) {
+                    declared = true;
+                    overloads.push_back(std::make_shared<FunctionType>(
+                        sig->param_types, st, sig->is_vararg, sig->param_defaults));
+                }
+            }
+            if (declared) return true;
+            for (const auto& parentType : node->parents) {
+                const auto parent = std::dynamic_pointer_cast<StructType>(parentType);
+                if (!parent || parent->is_interface) continue;
+                if (adoptAncestry(parent)) return true;
+            }
+            return false;
+        };
+        (void)adoptAncestry(st);
+    }
+
+    // A struct with no construction anywhere constructs with no arguments and nothing
+    // else -- exactly the shape the bare call site used to synthesize, so `P()` is
+    // still admitted and `P(1)` still refused there (Soundness_ConstructorInheritance).
+    if (overloads.empty()) {
+        if (node.args.empty()) {
+            // The synthesized shape is recorded for the backend to hold the binding to.
+            node.resolved_ctor_param_count = 0;
+            return std::make_shared<FunctionType>(std::vector<std::shared_ptr<Type>>{}, st);
+        }
+        error(node, fmt::format("Function '{}' expects 0 arguments, got {}",
+                                node.name, node.args.size()));
+        return reported();
+    }
+
+    // Exactly one construction: the old answer, unchanged, whatever the call says.
+    if (overloads.size() == 1) {
+        node.resolved_ctor_param_count = overloads[0]->param_types.size();
+        return overloads[0];
+    }
+
+    // More than one: the written count picks first, on the rules the call itself is
+    // checked by. A window here means the same thing checkCallArity means by it.
+    size_t argc = node.args.size();
+    std::vector<std::shared_ptr<FunctionType>> fits;
+    for (auto& sig : overloads) {
+        size_t required = 0;
+        for (size_t i = 0; i < sig->param_types.size(); ++i) {
+            const bool optional = sig->param_types[i]->as<NullableType>() ||
+                                  sig->hasDefault(i);
+            if (!optional) required = i + 1;
+        }
+        const bool fitsArity = argc >= required &&
+                               (sig->is_vararg || argc <= sig->param_types.size());
+        if (fitsArity) fits.push_back(sig);
+    }
+    if (fits.empty()) {
+        size_t minRequired = SIZE_MAX, maxExpected = 0;
+        for (auto& sig : overloads) {
+            size_t required = 0;
+            for (size_t i = 0; i < sig->param_types.size(); ++i) {
+                const bool optional = sig->param_types[i]->as<NullableType>() ||
+                                      sig->hasDefault(i);
+                if (!optional) required = i + 1;
+            }
+            minRequired = std::min(minRequired, required);
+            maxExpected = std::max(maxExpected, sig->param_types.size());
+        }
+        if (minRequired == maxExpected)
+            error(node, fmt::format("Function '{}' expects {} arguments, got {}",
+                                    node.name, maxExpected, argc));
+        else
+            error(node, fmt::format("Function '{}' expects between {} and {} arguments, got {}",
+                                    node.name, minRequired, maxExpected, argc));
+        return reported();
+    }
+    if (fits.size() == 1) {
+        node.resolved_ctor_param_count = fits[0]->param_types.size();
+        return fits[0];
+    }
+
+    // A tie by count is settled by the argument shapes, scored narrowly: an argument
+    // whose type IS the parameter's type. The arguments are read on a discovery walk,
+    // the shape visit(MethodCall&) preludes its receiver with -- quiet and injected,
+    // so the walk is side-effect-neutral and the real check at the call site reports.
+    std::vector<std::shared_ptr<Type>> argTypes;
+    {
+        auto savedHintFor = typeHintFor;
+        auto savedHint = typeHint;
+        auto savedLast = lastExprType;
+        const bool savedInjected = injectedWalk_;
+        typeHintFor = nullptr;
+        typeHint = nullptr;
+        injectedWalk_ = true;
+        {
+            QuietPass quiet(*this);
+            for (auto& a : node.args) {
+                a->accept(*this);
+                argTypes.push_back(lastExprType);
+            }
+        }
+        typeHintFor = savedHintFor;
+        typeHint = savedHint;
+        lastExprType = savedLast;
+        injectedWalk_ = savedInjected;
+    }
+    auto scoreOf = [&](const FunctionType& sig) {
+        size_t score = 0;
+        for (size_t i = 0; i < argTypes.size() && i < sig.param_types.size(); ++i) {
+            if (argTypes[i] && !isErrorType(argTypes[i]) &&
+                sig.param_types[i] && typesEqual(argTypes[i], sig.param_types[i]))
+                ++score;
+        }
+        return score;
+    };
+    std::shared_ptr<FunctionType> chosen = fits[0];
+    size_t best = scoreOf(*chosen);
+    for (size_t i = 1; i < fits.size(); ++i) {
+        size_t score = scoreOf(*fits[i]);
+        if (score > best) {
+            best = score;
+            chosen = fits[i];
+        } else if (score == best) {
+            error(node, fmt::format("two constructors of struct '{}' take {} argument(s) "
+                                    "these arguments fit; make their parameter shapes "
+                                    "disjoint", st->name, argc));
+            return reported();
+        }
+    }
+    node.resolved_ctor_param_count = chosen->param_types.size();
+    return chosen;
 }
 
 }

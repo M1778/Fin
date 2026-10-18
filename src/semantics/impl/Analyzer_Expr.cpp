@@ -9,6 +9,7 @@
 #include <fmt/color.h>
 #include <algorithm>
 #include <set>
+#include <unordered_set>
 
 namespace fin {
 
@@ -1761,6 +1762,68 @@ std::shared_ptr<Type> SemanticAnalyzer::checkGenericCall(ASTNode& node, const ch
     if (owner && mentionsGenericParam(owner)) {
         instantiatedOwner = owner->instantiate(orderedGenericArgs(owner, mapping));
     }
+
+    // The callee's declared generic bounds, consulted at the call (owner ruling
+    // issue #96, R1 site (a)). The bound has been resolved and carried on the
+    // GenericType since declareGenericParams started assigning the field; the call
+    // was the one place it was never read, which is what made
+    // `fun f<T: I>(x: T)` accept `f(1)`.
+    //
+    // Walked rather than paired: a parameter is not always the parameter itself --
+    // `Take<T>` mentions T a box below its own type -- and the *same* declared
+    // GenericType is what every mention of the name resolves to, so one walk over the
+    // signature collects each bounded parameter once, at the first parameter that
+    // mentions it. A name the call has not given a type to yet, or one still standing
+    // for another generic, is left unmolested: the check fires when the substitution
+    // becomes literal, at the instantiation that bound it, and re-asking here would
+    // consult a type nobody supplied.
+    struct BoundedMention {
+        const GenericType* param;
+        int argIndex;  // the parameter that first mentions it, or -1 from the return type
+    };
+    std::vector<BoundedMention> bounded;
+    std::unordered_set<std::string> seen;
+    auto walkBound = [&](const TypePtr& t, int argIndex, auto& self) -> void {
+        if (!t) return;
+        if (auto* gen = t->as<GenericType>()) {
+            if (gen->constraint && seen.insert(gen->name).second)
+                bounded.push_back({gen, argIndex});
+            return;
+        }
+        if (auto* st = t->as<StructType>())
+            for (const auto& a : st->generic_args) self(a, argIndex, self);
+        if (auto* p = t->as<PointerType>()) self(p->pointee, argIndex, self);
+        if (auto* a = t->as<ArrayType>()) self(a->element_type, argIndex, self);
+        if (auto* n = t->as<NullableType>()) self(n->inner, argIndex, self);
+        if (auto* s = t->as<SelfType>()) self(s->originalStruct, argIndex, self);
+        if (auto* d = t->as<DynamicType>())
+            for (const auto& b : d->bounds) self(b, argIndex, self);
+        if (auto* u = t->as<UnionType>())
+            for (const auto& alt : u->alternatives) self(alt, argIndex, self);
+        if (auto* f = t->as<FunctionType>()) {
+            for (const auto& p : f->param_types) self(p, argIndex, self);
+            self(f->return_type, argIndex, self);
+        }
+        if (auto* pr = t->as<PrototypeType>()) {
+            self(pr->keyType, argIndex, self);
+            self(pr->valueType, argIndex, self);
+        }
+    };
+    for (size_t i = 0; i < sig.param_types.size(); ++i)
+        walkBound(sig.param_types[i], static_cast<int>(i), walkBound);
+    if (sig.return_type) walkBound(sig.return_type, -1, walkBound);
+
+    for (const auto& mention : bounded) {
+        auto found = mapping.find(mention.param->name);
+        if (found == mapping.end()) continue;                 // inferred or left standing
+        const std::shared_ptr<Type>& actual = found->second;
+        if (!actual || actual->as<GenericType>()) continue;   // still generic: deferred
+        // The diagnostic anchors on the offending argument when one exists.
+        ASTNode* loc = (mention.argIndex >= 0 && size_t(mention.argIndex) < args.size())
+            ? args[mention.argIndex].get() : &node;
+        checkConstraint(loc, actual, mention.param->constraint);
+    }
+
     // Reported before the substitution below, so that the one early return it has -- a
     // signature that did not come back a FunctionType -- still hands the instantiation
     // over. What the caller does with it is a separate question from whether the
@@ -2070,11 +2133,14 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
             return;
         }
         auto st = std::dynamic_pointer_cast<StructType>(currentStructContext);
-        auto ctor = st ? StructType::constructorFor(st) : nullptr;
-        if (ctor) {
-            funcType = std::dynamic_pointer_cast<FunctionType>(ctor);
-        } else {
-            error(node, "Struct '" + st->name + "' has no constructors");
+        if (!st) {
+            error(node, "'Self' used outside of struct");
+            lastExprType = nullptr;
+            return;
+        }
+        funcType = resolveConstructorOverload(st, node);
+        if (!funcType) {
+            // resolveConstructorOverload reported the refusal it found
             lastExprType = nullptr;
             return;
         }
@@ -2090,16 +2156,11 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
                 // (Soundness_ConstructorInheritance). `struct CollectionError :
                 // <Error> {}` gets `Error(msg: string)` this way, which four samples
                 // call and none declare.
-                if (auto ctor = StructType::constructorFor(st)) {
-                    funcType = std::dynamic_pointer_cast<FunctionType>(ctor);
-                } else {
-                     // Nothing in the ancestry declares one, so the type is
-                     // constructible with no arguments and with nothing else --
-                     // Soundness_ConstructorInheritance
-                     // .AStructWithNoConstructorAnywhereStillTakesNoArguments is what
-                     // keeps `P(1)` an arity error rather than an unchecked call.
-                     std::vector<std::shared_ptr<Type>> dummyParams;
-                     funcType = std::make_shared<FunctionType>(dummyParams, st);
+                funcType = resolveConstructorOverload(st, node);
+                if (!funcType) {
+                    // resolveConstructorOverload reported the refusal it found
+                    lastExprType = nullptr;
+                    return;
                 }
             }
         } 

@@ -5204,11 +5204,19 @@ BACKEND_TEST(Soundness_Codegen, AMethodInABlockOfANameTheStructDeclaresIsRefused
               std::string::npos) << b.why();
 }
 
-BACKEND_TEST(Soundness_Codegen, AConstructorInABlockBesideTheStructsOwnIsRefused) {
+BACKEND_TEST(Codegen_Overloads, AConstructorInABlockBesideTheStructsOwnIsRefused) {
     // One constructor symbol per struct, matching the analyzer's `constructors[0]`
     // rule -- so two of them are two definitions of `S.constructor` however they are
     // spread over the file, and which one `S()` meant is overload resolution nobody
-    // has written.
+    // has written. Registered: the block's construction is the struct's second, and
+    // two nullary constructions of one struct cannot be told apart by any call --
+    // the second registration is refused before a call could reach either body.
+    // (Was Soundness_Codegen.AConstructorInABlockBesideTheStructsOwnIsRefused, #95:
+    //  same refusal, one pair from two arrival sites.)
+    //
+    // The probe carries no construction call: a call whose arity fits two same-shape
+    // ctors is already the semantic resolver's tie (the analytic refusal names the
+    // pair against the call), so this pin exercises the registration belt itself.
     const Built b = build(std::string(kPrintf) +
         "interface I { pub fun f() <int>; }\n"
         "struct S {\n"
@@ -5220,12 +5228,13 @@ BACKEND_TEST(Soundness_Codegen, AConstructorInABlockBesideTheStructsOwnIsRefused
         "    pub fun f() <int> { return self.a; }\n"
         "}\n"
         "fun main() <noret> {\n"
-        "    let s <S> = S();\n"
-        "    printf(\"%d\\n\", s.f());\n"
+        "    printf(\"hi\\n\");\n"
         "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("constructor overloads on struct 'S'"),
+    EXPECT_NE(b.compileErr.find("two constructors on struct 'S' have the same signature"),
               std::string::npos) << b.why();
+    EXPECT_EQ(b.compileErr.find("constructor overloads on struct"), std::string::npos)
+        << "the old by-name refusal is retired\n" << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AnImplementsBlockOnAnEnumIsRefused) {
@@ -9438,14 +9447,15 @@ BACKEND_TEST(Soundness_Codegen, AnImportedGenericStructInstantiates) {
     fs::remove_all(dir, ec);
 }
 
-BACKEND_TEST(KnownDefect_Codegen, ConstructorOverloadsAreRefusedRatherThanResolved) {
-    // Known defect: #95 (tracked; see issue for inversion target).
-    // The booked defect (docs/HANDOFF.md §7): the analyzer resolves `constructors[0]`
-    // and no more. One symbol per struct is what this file declares to match it, so a
-    // second `constructor` is refused *by name* at its declaration rather than silently
-    // losing to the first -- a call that reached the wrong body would be a program that
-    // quietly computes something else. The day overload resolution lands, this test is
-    // the one that says so.
+BACKEND_TEST(Codegen_Overloads, ConstructorOverloadsInAStructBodyAreEachRegistered) {
+    // Every construction a body writes is registered, and the call is lowered
+    // against both. The bound defect kept one symbol per struct and refused a
+    // second construction at its
+    // declaration before a call could reach a wrong body; the ruling is that both
+    // constructions are registered and a written call is resolved between them.
+    // `Two(1)` names the one-argument construction; `Two(1, 2)` needs the call site
+    // to resolve it, which is the call-site half tracked by the same issue.
+    // (Was KnownDefect_Codegen.ConstructorOverloadsAreRefusedRatherThanResolved, #95.)
     const Built b = build(std::string(kPrintf) +
         "struct Two {\n"
         "    a <int>,\n"
@@ -9456,9 +9466,34 @@ BACKEND_TEST(KnownDefect_Codegen, ConstructorOverloadsAreRefusedRatherThanResolv
         "    let t <Two> = Two(1);\n"
         "    printf(\"%d\\n\", t.a);\n"
         "}\n");
+    ASSERT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "1\n") << b.why();
+}
+
+BACKEND_TEST(Codegen_Overloads, TwoConstructorsOfTheSameShapeAreRefusedAtARegistration) {
+    // The refusal the resolution keeps: two constructions whose parameter shapes
+    // are identical cannot be told apart by any call, so the second registration is
+    // refused rather than silently winning or losing to the first. The old refusal
+    // blamed every overload at once; this one names the pair against the call.
+    // (Was part of KnownDefect_Codegen.ConstructorOverloadsAreRefusedRatherThanResolved, #95.)
+    //
+    // As above, no construction call in the probe: the semantic resolver takes the
+    // call-shaped tie first; this is the registration belt itself.
+    const Built b = build(std::string(kPrintf) +
+        "struct Two {\n"
+        "    a <int>,\n"
+        "    constructor(n: int) { self.a = n; }\n"
+        "    constructor(m: int) { self.a = m + 1; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"hi\\n\");\n"
+        "}\n");
     EXPECT_NE(b.compileExit, 0) << b.why();
-    EXPECT_NE(b.compileErr.find("constructor overloads on struct 'Two'"),
+    EXPECT_NE(b.compileErr.find("two constructors on struct 'Two' have the same signature"),
               std::string::npos) << b.why();
+    EXPECT_EQ(b.compileErr.find("constructor overloads on struct"), std::string::npos)
+        << "the old by-name refusal is retired\n" << b.why();
 }
 
 BACKEND_TEST(Soundness_Codegen, AStructWithNoFunctionsOfItsOwnStillLowers) {
@@ -12468,29 +12503,38 @@ BACKEND_TEST(Soundness_Codegen, AnEscapingReferenceIsRefusedWhetherInterfaceOrAd
     EXPECT_EQ(fwd.out, "7\n") << fwd.why();
 }
 
-BACKEND_TEST(KnownDefect_Codegen, ALiteralCarryingALocalAddressEscapes) {
-    // Known defect: #109 (tracked; see issue for the provenance fix that
-    // inverts this test). `return W { p: &d }` and `return [&d]` carry a
-    // frame-local address out inside a value, so the return-operand rule (ADR
-    // 0055, which inspects only the immediate operand) never sees a root to ask
-    // about -- both compile, and both read the reused frame slot afterwards.
-    // A construction-time refusal was tried and reverted: the same spelling in
-    // the same frame is legal and must keep compiling (`Holder{p: &x}` used in
-    // the same body, `[&x, &y]`, a linked `next: &tail` -- all three pinned by
-    // Soundness tests in this file), and the expression pass cannot see
-    // whether a literal flows out. So both shapes stay accepted and documented
-    // in the guide until provenance lands. Neither half runs: a dead frame's
-    // contents are not a specification, so the assertion is the compile.
+BACKEND_TEST(Soundness_Codegen, ALiteralCarryingALocalAddressIsRefusedAtItsReturnSite) {
+    // Was KnownDefect_Codegen.ALiteralCarryingALocalAddressEscapes (#109):
+    // `return W { p: &d }` and `return [&d]` carried a frame-local address out
+    // inside a value, and the return-operand rule (ADR 0055, which inspects
+    // only the immediate operand) never saw a root to ask about -- both
+    // compiled, and both read the reused frame slot afterwards. ADR 0056
+    // holds a returned literal's fields and elements to the same storage
+    // test, each blamed on the field or element that carries the address, so
+    // both halves are refused at the return site. A construction-time refusal
+    // stays refused on purpose: the same spelling in the same frame is legal
+    // and must keep compiling (`Holder{p: &x}`, `[&x, &y]`, a linked
+    // `next: &tail` -- all three pinned by Soundness tests in this file), and
+    // the expression pass cannot see whether a literal flows out.
+    // tests/test_semantics.cpp carries the front-end cases, including the
+    // storage that stays legal.
+    //
+    // Neither half runs, because a dead frame's contents are not a
+    // specification -- the assertion is that the compile is *refused*.
     const Built viaStruct = build(std::string(kPrintf) +
         "struct W { p <&int> }\n"
         "fun leak() <W> { let d <int> = 7; return W { p: &d }; }\n"
         "fun main() <noret> { }\n");
-    EXPECT_EQ(viaStruct.compileExit, 0) << viaStruct.why();
+    EXPECT_NE(viaStruct.compileExit, 0) << viaStruct.why();
+    EXPECT_NE(viaStruct.compileErr.find("cannot return the address of local variable 'd'"),
+              std::string::npos) << viaStruct.why();
 
     const Built viaArray = build(std::string(kPrintf) +
         "fun leak() <[&int]> { let d <int> = 7; return [&d]; }\n"
         "fun main() <noret> { }\n");
-    EXPECT_EQ(viaArray.compileExit, 0) << viaArray.why();
+    EXPECT_NE(viaArray.compileExit, 0) << viaArray.why();
+    EXPECT_NE(viaArray.compileErr.find("cannot return the address of local variable 'd'"),
+              std::string::npos) << viaArray.why();
 }
 
 // ---------------------------------------------------------------------------

@@ -663,3 +663,215 @@ TEST(SemanticAnalyzer, AcceptsReturningAPointerLocalToAGlobal) {
     ASSERT_TRUE(a.parsed);
     EXPECT_TRUE(a.clean()) << "errors: " << a.errorCount;
 }
+
+// ---------------------------------------------------------------------------
+// Issues #109/ADR 0056: the routes that carry a frame-local address out
+// without presenting a `return` operand the 0055 reading could ask. Each
+// refusal keeps the wording and blames the expression that carries the
+// address; each control keeps the same-frame spelling legal.
+// ---------------------------------------------------------------------------
+
+TEST(Soundness_Semantics, RefusesAReturnedStructLiteralFieldCarryingALocalAddress) {
+    // The literal answers no root to `returnedStorage`, so the operand rule
+    // never reached `W { p: &d }`; the field is the same slot `&d` hands out.
+    auto a = analyze(
+        "struct W { p <&int> }\n"
+        "fun leak() <W> { let d <int> = 7; return W { p: &d }; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a, "cannot return the address of local variable 'd'"))
+        << "errors: " << a.errorCount;
+}
+
+TEST(Soundness_Semantics, RefusesAReturnedArrayLiteralElementCarryingALocalAddress) {
+    // Same reading, one element deep.
+    auto a = analyze(
+        "fun leak() <[&int]> { let d <int> = 7; return [&d]; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a, "cannot return the address of local variable 'd'"))
+        << "errors: " << a.errorCount;
+}
+
+TEST(Soundness_Semantics, RefusesAReturnedLiteralFieldLaunderedThroughAPointerLocal) {
+    // #105's readability, at the field: `W { p: q }` copies `q`, whose
+    // provenance says `d`.
+    auto a = analyze(
+        "struct W { p <&int> }\n"
+        "fun leak() <W> { let d <int> = 7; let q <&int> = &d; return W { p: q }; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a, "cannot return the address of local variable 'd'"))
+        << "errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, AcceptsSameFrameLiteralFieldsCarryingLocalAddresses) {
+    // The pinned counter-cases: the same spellings built into same-frame
+    // locals are how pointer fields and pointer arrays get their values, and
+    // the pins (Soundness_Codegen.APointerFieldInAStructRoundTrips,
+    // .AnArrayOfPointersIsIndexedAndDereferenced,
+    // .ATypeParameterUnderAPointerIsSubstituted) hold them. The walk runs
+    // only on returned literals.
+    auto a = analyze(
+        "struct Holder { p <&int> }\n"
+        "fun main() <noret> {\n"
+        "    let x <int> = 1;\n"
+        "    let y <int> = 2;\n"
+        "    let h <Holder> = Holder { p: &x };\n"
+        "    let ps <[&int, 2]> = [&x, &y];\n"
+        "    *h.p = 42;\n"
+        "    *ps[1] = 20;\n"
+        "}\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean()) << "errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, RefusesAnOutParameterStoreOfALocalAddress) {
+    // `*out` is the caller's slot: what is written there outlives this frame,
+    // and `&d` does not. Not a return, so the operand rule never ran; the
+    // store route answers at the statement.
+    auto a = analyze(
+        "fun leak(out: &&int) <noret> { let d <int> = 7; *out = &d; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a,
+        "cannot store the address of local variable 'd' into storage that outlives the call"))
+        << "errors: " << a.errorCount;
+    EXPECT_EQ(a.errorCount, 1) << "one store, one refusal";
+}
+
+TEST(SemanticAnalyzer, RefusesAGlobalStoreOfALocalAddress) {
+    auto a = analyze(
+        "let g <&int>;\n"
+        "fun leak() <noret> { let d <int> = 7; g = &d; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a,
+        "cannot store the address of local variable 'd' into storage that outlives the call"))
+        << "errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, AcceptsStoringAFrameAddressInFrameStorage) {
+    // The deref-store exemption: a pointer local proven to point at this
+    // frame's own storage dies with it, so `*p = &e` both-sides-frame is
+    // legal. Same for a global's own address into a global.
+    auto a = analyze(
+        "let g <&&int>;\n"
+        "let g2 <&int>;\n"
+        "fun shortlived() <noret> {\n"
+        "    let e <int> = 7;\n"
+        "    let d <int> = 8;\n"
+        "    let p <&int> = &d;\n"
+        "    *p = &e;\n"
+        "    g = &g2;\n"
+        "}\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean()) << "errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, AcceptsStoringAParameterOrGlobalAddressOut) {
+    // The exemptions mirrored: through a pointer (the parameter's referent),
+    // into the receiver-shaped and $Fin-pinned targets. A parameter's slot
+    // address is still this frame's -- the pointer hop carries its *referent*,
+    // caller-owned -- while `&global` is program storage.
+    auto a = analyze(
+        "struct D { n <int>\n"
+        "    fun stow(p: &int) <noret> { self.n = 0; }\n"
+        "}\n"
+        "let g <&int>;\n"
+        "let keep <int> = 3;\n"
+        "fun stowParam(d: &D, out: &&D) <noret> { *out = d; }\n"
+        "fun stowGlobal() <noret> { g = &keep; }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean()) << "errors: " << a.errorCount;
+}
+
+TEST(Soundness_Semantics, RefusesAFrameAddressThroughAForwardingCall) {
+    // The call wrapper: `id` forwards its pointer parameter, so `id(&a)` is
+    // `return &a` in everything but syntax. The summary pass says which
+    // parameter the return carries; the site holds the argument to the
+    // operand rule, blamed on the argument that carries the address.
+    auto a = analyze(
+        "fun id(p: &int) <&int> { return p; }\n"
+        "fun leak() <&int> { let a <int> = 7; return id(&a); }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a, "cannot return the address of local variable 'a'"))
+        << "errors: " << a.errorCount;
+}
+
+TEST(Soundness_Semantics, RefusesAForwardingCallChain) {
+    // Two hops: wrap forwards id's forwarding. The fixed point over the call
+    // graph must compose the facts before any body is walked.
+    auto a = analyze(
+        "fun id(p: &int) <&int> { return p; }\n"
+        "fun wrap(q: &int) <&int> { return id(q); }\n"
+        "fun leak() <&int> { let a <int> = 7; return wrap(&a); }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a, "cannot return the address of local variable 'a'"))
+        << "errors: " << a.errorCount;
+}
+
+TEST(Soundness_Semantics, RefusesAForwardedInterfacePairFedALocal) {
+    // The interface spelling of the same route: `fwd` forwards its pair
+    // parameter, and `fwd(d)` forms that pair at this site, out of this
+    // frame's `d`.
+    auto a = analyze(std::string(kSpeaker) +
+        "struct D { n <int>\n"
+        "    fun speak() <int> { return self.n; }\n"
+        "}\n"
+        "D implements <Speaker> { }\n"
+        "fun fwd(s: Speaker) <Speaker> { return s; }\n"
+        "fun leak() <Speaker> { let d <D> = D { n: 7 }; return fwd(d); }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a, "cannot return local variable 'd' as an interface"))
+        << "errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, AcceptsForwardingCallWithCallerOwnedArguments) {
+    // The ADR 0055 non-goals through the same route: a pointer parameter's
+    // value, a global, a `new`, and the pinned forwarded-pair spelling all
+    // stay legal at the call site.
+    auto a = analyze(std::string(kSpeaker) +
+        "struct D { n <int>\n"
+        "    fun speak() <int> { return self.n; }\n"
+        "}\n"
+        "D implements <Speaker> { }\n"
+        "fun fwd(s: Speaker) <Speaker> { return s; }\n"
+        "fun id(p: &D) <&D> { return p; }\n"
+        "let g <D> = D { n: 1 };\n"
+        "fun fromParam(p: &D) <&D> { return id(p); }\n"
+        "fun fromGlobal() <&D> { return id(&g); }\n"
+        "fun fromHeap() <&D> { return id(new D { n: 3 }); }\n"
+        "fun fromPair() <Speaker> { return fwd(g); }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(a.clean()) << "errors: " << a.errorCount;
+}
+
+TEST(SemanticAnalyzer, AcceptsForwardingCallAcrossDefinitionOrderAndCycles) {
+    // The fixed point's reason: `late` is declared below the call that
+    // reaches it, and the `weird` -> `loop` edge points below itself with the
+    // seed (`return q`) inside the cycle. Convergence precedes any body, so
+    // none of this depends on where the declarations sat: the composed facts
+    // refuse exactly the local-address arguments, and the same shapes fed a
+    // global stay legal.
+    auto a = analyze(
+        "fun user(p: &int) <&int> { return late(p); }\n"
+        "fun weird(q: &int) <&int> { return loop(q); }\n"
+        "fun loop(q: &int) <&int> { return q; }\n"
+        "fun late(z: &int) <&int> { return z; }\n"
+        "let g <int> = 1;\n"
+        "fun leak() <&int> { let a <int> = 7; return weird(&a); }\n"
+        "fun ok() <&int> { return user(&g); }\n"
+        "fun main() <noret> { }\n");
+    ASSERT_TRUE(a.parsed);
+    EXPECT_TRUE(refusedWith(a, "cannot return the address of local variable 'a'"))
+        << "errors: " << a.errorCount;
+    EXPECT_EQ(a.errorCount, 1) << "errors: " << a.errorCount;
+}
+

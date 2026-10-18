@@ -125,17 +125,26 @@ fun main() <noret> {
 
 The check reads the declared type of the variable named, not what it points at,
 so an address laundered through a pointer local is still accepted today
-(issue #105). Two more shapes bypass the check rather than mislead it, and both
-stay accepted (issue #109): a struct-literal field or array-literal element
-that takes a local's address (`return W { p: &d }`, `return [&d]`), and the
-three store/call shapes -- through an out-parameter (`*out = &d`), into a
-global (`g = &d`), or through a call wrapper (`return id(&a)`). Each compiles,
-and each reads back whatever the reused frame slot was given next -- measured
-as 4243 after a clobbering call. The literals cannot be refused where they are
-built: the same spelling in the same frame is legal (`Holder{p: &x}` used in
-the same body, `[&x, &y]`, a linked `next: &tail`), and the expression pass
-cannot see whether a literal flows out. Use caller-owned storage or an
-explicitly owned heap allocation
+(issue #105). The other bypasses issue #109 tracked are closed now (ADR 0056):
+a returned literal's fields and elements (`return W { p: &d }`, `return [&d]`),
+a store into storage that outlives the frame (`*out = &d` into an out-
+parameter, `g = &d` into a global), and a call wrapper that forwards its
+parameter (`return id(&a)`) are all refused at the site, each blamed on the
+field, element, right-hand side, or argument that carries the address, through
+the same wording as the direct rule. Same-frame spellings stay legal: the
+refusal reads a returned literal's fields, not the literal as built
+(`Holder{p: &x}` in the same body, `[&x, &y]`, a linked `next: &tail`), a
+store into a pointer local proven to point at this frame dies with it, and
+forwarding a parameter through a call
+(`fun id(p: &int) <&int> { return p; }`) stays legal at every depth, with the
+facts converged across definition order and call cycles before any body is
+walked. What still needs eyes: a whole struct local returned by value whose
+pointer field a store filled, forwarding resolved through a method rather than
+a top-level `fun`, calls into another module, a parameter reassigned under a
+branch and returned after it, storage reached through a dereference of
+something other than a bare name (`**slot`, `*self.q`), stores into a field or
+element (`o.p = &d`), and the laundered reads of issue #105. Use caller-owned
+storage or an explicitly owned heap allocation
 for escaping data rather than relying on the refusal to catch every shape.
 
 ## Prototypes: builtin structural maps

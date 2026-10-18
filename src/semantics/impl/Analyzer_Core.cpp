@@ -688,17 +688,30 @@ void SemanticAnalyzer::declareGenericParams(
     }
 }
 
-bool SemanticAnalyzer::checkConstraint(TypeNode* typeNode, std::shared_ptr<Type> actualType, std::shared_ptr<Type> constraint) {
+bool SemanticAnalyzer::checkConstraint(ASTNode* typeNode, std::shared_ptr<Type> actualType, std::shared_ptr<Type> constraint) {
     if (!constraint) return true;
 
-    if (auto* iface = dynamic_cast<StructType*>(constraint.get())) {
-        if (auto* st = dynamic_cast<StructType*>(actualType.get())) {
-            if (!st->implements(iface)) {
-                error(*typeNode, fmt::format("Type '{}' does not implement interface '{}'", 
-                    actualType->toString(), iface->toString()));
-                return false;
-            }
+    // Owner ruling, issue #96 (R1, structural conformance): a bound
+    // `X implements <I>` is satisfied iff X's type is an implementor of I or the
+    // interface is memberless. The predicate is shared with the conversion check
+    // (Type::isAssignableTo), so an `S<int>` instantiation and an assignment into
+    // `Bound` agree, instead of three sites each with its own half of the rule.
+    //
+    // What this replaces: the struct-vs-interface question this function could already
+    // answer, and only for a StructType argument -- a primitive argument returned true
+    // unread (KnownDefect_GenericBounds.AStructInstantiationViolatingItsBoundIsAccepted).
+    // The ruling's answer to the fuel behind that test is: no, a primitive does not
+    // satisfy a member-full interface, and the memberless mocks (`Castable`) do.
+    if (!fin::satisfiesBound(actualType.get(), constraint.get())) {
+        auto* iface = constraint->as<StructType>();
+        if (iface && iface->is_interface) {
+            error(*typeNode, fmt::format("Type '{}' does not implement interface '{}'",
+                actualType->toString(), constraint->toString()));
+        } else {
+            error(*typeNode, fmt::format("Type '{}' does not implement '{}'",
+                actualType->toString(), constraint->toString()));
         }
+        return false;
     }
     return true;
 }
@@ -923,6 +936,20 @@ bool SemanticAnalyzer::checkType(ASTNode& node, std::shared_ptr<Type> actual, st
                 if (it->second->isAssignableTo(*expected)) return true;
                 error(node, fmt::format("Type mismatch: expected '{}', got '{}'",
                                         expected->toString(), it->second->toString()));
+                return false;
+            }
+        }
+        // Issue #96 (R5, one-way): `object -> any` is the one refused direction, and
+        // the help names `cast` because that is where the corpus puts an untyped
+        // read-back: a box is the expensive spelling of "this may be anything later"
+        // (prototype_test.fin:40) and erasure cannot answer for what it holds, so the
+        // program that wants an `any` out of an `object` states the cast that reads
+        // it back.
+        if (auto* a = actual->as<DynamicType>(); a && a->name == "object") {
+            if (auto* e = expected->as<DynamicType>(); e && e->name == "any") {
+                error(node, "Type mismatch: expected 'any', got 'object'",
+                      "an 'object' carries its type at runtime, so an erased slot cannot "
+                      "read it back; write `cast<any>(x)` at the conversion");
                 return false;
             }
         }
@@ -1387,6 +1414,11 @@ void SemanticAnalyzer::visit(Program& node) {
     // once no matter how many events it subscribes.
     w10_refused_ = events::checkW10HandlerPayloads(node, event_registry_, report);
     hoistTopLevelSignatures(node);
+    // #109 (ADR 0056): the provenance summaries must exist before any body is
+    // walked, so the hoisted signatures this resolved are exactly what the
+    // summary pass reads. Facts re-derive to a fixed point here, one pass and
+    // no later recomputation, so walk-time refusal never races a missing entry.
+    buildReferenceProvenance(node);
     // The program being walked, for the inline struct_layout_finalised fire.
     w5_program_ = &node;
     for (auto& stmt : node.statements) {

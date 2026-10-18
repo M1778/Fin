@@ -59,6 +59,18 @@ public:
     // else -- where the callee is the file's own, concrete, or local -- so
     // those calls lower exactly as before.
     std::optional<size_t> resolved_generic_owner;
+    // Which construction a bare constructor call bound to, counted in *written*
+    // parameters (a call's argc). Set by the analyzer's overload-resolving constructor
+    // lookup (SemanticAnalyzer::resolveConstructorOverload), read by
+    // CodeGen_LLVM::emitCtorCall as the frontend's pick when more than one declared
+    // construction has room for the written count. Empty where a single construction
+    // exists (the call bound the only one there is), and empty everywhere else --
+    // where the callee is not a constructor at all.
+    //
+    // Beside the call rather than written into it's name, for the same reasons
+    // resolved_method_owner is: the binding is a resolution the *other* pass must
+    // agree with, and the written tree is what a diagnostic points at.
+    std::optional<size_t> resolved_ctor_param_count;
     FunctionCall(std::string n, std::vector<std::unique_ptr<Expression>> a);
     void accept(Visitor& v) override;
 };

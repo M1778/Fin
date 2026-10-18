@@ -118,14 +118,38 @@ bool Type::isAssignableTo(const Type& other) const {
     // `[int]` fits `[any]` through this line. A copy in checkType would answer for
     // `any` and not for `[any]`, and stdlib/types.fin:102 takes `const &arr: [any]`.
     //
-    // `null` is excluded, and the corpus is explicit about why. nullifier.fin:36
+    // NullType is excluded, and the corpus is explicit about why. nullifier.fin:36
     // writes `let _ <any> = mibombo?;` and comments "this should be an error since
     // type any cannot be null". `null` is not a value of some type that is being
     // erased; it is the absence of one, and NullType::isAssignableTo falls through to
     // here -- so a rule stated as "a dynamic target accepts anything" accepts null
     // too, silently. A program that means it writes `any?`, which is a NullableType
-    // and is answered before this.
-    if (other.as<DynamicType>() && !this->as<NullType>()) return true;
+    // and is answered before this. (Ruling the other side of that line is case 2 of
+    // issue #96 and is still open: nothing here closes it.)
+    if (auto* otherDyn = other.as<DynamicType>()) {
+        if (this->as<NullType>()) {
+            // Refused as before; the fall-through reaches the bottom.
+        } else if (auto* thisDyn = this->as<DynamicType>()) {
+            // Issue #96 (R5, one-way): `any -> object` is the box's known-content
+            // spelling and stays; `object -> any` is refused -- an `object` carries
+            // its type at runtime and an erased slot cannot say what to erase, which
+            // is the distinction corpus evidence draws (stdlib/types.fin:97 -- "any
+            // type that is visible in compile time" -- against prototype_test.fin:40
+            // -- "an expensive type ... at the cost of memory and speed"). The other
+            // direction through an explicit `cast` stays open; the help text points
+            // there from checkType.
+            if (thisDyn->name == "object" && otherDyn->name == "any") return false;
+            return true;
+        } else if (satisfiesBound(this, otherDyn)) {
+            // The bound consulted (R1, #96): an alias spelling a bound
+            // (`type Bound = any implements <I>`, or `getkeyid(value: EnumType)`)
+            // accepts a value only when the value is an implementor of the bound's
+            // interface, or the interface is memberless. Without this the bound was
+            // recorded on the DynamicType and never read by anyone.
+            return true;
+        }
+        // Either null into a dynamic type, or a bound no value satisfies: refused.
+    }
 
     // No rule for the error sentinel here, deliberately. checkType short-circuits on
     // isErrorType before it ever calls this (Analyzer_Core.cpp:361), and checkType is
@@ -221,6 +245,69 @@ bool Type::isAssignableTo(const Type& other) const {
     }
 
     return false;
+}
+
+// An interface's member set: the only thing an implements bound is able to demand
+// when it reads as vacuous. Kept beside isAssignableTo rather than on StructType so
+// that the question "is this bound checkable" and the question "does it hold" live in
+// one file; `implements()` itself is not moved, and the declaration-site check keeps
+// its own call.
+static bool memberSetEmpty(const StructType& s) {
+    return s.fields.empty() && s.methods.empty() && s.operators.empty() &&
+           s.constructors.empty() && s.enumerators.empty() && !s.has_destructor;
+}
+
+bool satisfiesBound(const Type* value, const Type* bound) {
+    // A bound that failed to resolve is already reported where it was written; a
+    // missing value is the sentinel the analyser carries instead of a type. Neither
+    // adds a second diagnostic.
+    if (!bound || !value) return true;
+
+    // A generic value is a type nobody has substituted yet, and the substitution is
+    // checked at the moment it becomes literal. Refusing the spelling the generic body
+    // writes would refuse the body itself.
+    if (value->as<GenericType>()) return true;
+
+    // A dynamic bound: `type Bound = any implements <I>` or `T: any implements <I>`.
+    // Elision records nothing, and every non-elision bound must hold in turn.
+    if (auto* dyn = bound->as<DynamicType>()) {
+        if (dyn->name == "...") return true;
+        // `Struct` is its own interface-like bound kind, ruled in
+        // Soundness_DynamicTypes.AStructTargetKeepsItsImplementsBound: member lookup
+        // goes through it to the struct, and the corpus writes it where the value must
+        // be a struct (`make_default<T: any implements Struct>`, literal_struct.fin).
+        if (dyn->name == "Struct" && !value->as<StructType>()) return false;
+        for (const auto& b : dyn->bounds)
+            if (!satisfiesBound(value, b.get())) return false;
+        return true;
+    }
+
+    // The interface case, and the only one that can refuse. "X's type is an
+    // implementor of I": the same predicate the declaration-site check runs, which is
+    // what makes an accepted instantiation and an accepted `: <I>` one rule.
+    if (auto* iface = bound->as<StructType>()) {
+        if (!iface->is_interface) {
+            // Not an interface: a class (`<Error>`) or one of the builtin mocks
+            // (`Castable`, the erasure marker). A member set that is empty satisfies
+            // vacuously (R1's own words); a member set that is not is an
+            // inheritance-shaped reliance the analyzer does not answer for --
+            // `pub struct HashMapError : <Error> {}` is shipped library code whose
+            // conformance against `Error`'s fields is not what Structural compares.
+            return memberSetEmpty(*iface);
+        }
+        if (memberSetEmpty(*iface)) return true;  // the `Enum` case; vacuous per R1
+        auto* v = value->as<StructType>();
+        return !!v && v->implements(iface);
+    }
+
+    // Everything else on the bound side has no member set to compare and is
+    // unchecked today by corpus rule: a class bound above, a union constraint
+    // (`E: Offer<string, Error>`, whose own lib comment pins it unchecked), a
+    // primitive classifier bound (`T: Number`), and a pointer bound
+    // (`any implements <&void>`, stdlib/types.fin:78). None of them is what the
+    // ruling answered, and tightening one would be its own ruling.
+
+    return true;
 }
 
 }

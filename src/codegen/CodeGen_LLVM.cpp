@@ -428,6 +428,13 @@ struct StructInfo {
     // template's entry and outlive the statement that instantiated it.
     const StructExtras* extras = nullptr;
 
+    // Every body-bearing constructor's function-table key, in declaration order (the
+    // struct's own before an implements block's). The first is the legacy
+    // `S.constructor`; a later one is `S.constructor#N`. Read by the constructor-call
+    // dispatcher, which resolves a written call among them by the arity each signature
+    // accepts and by the shapes of the arguments, exactly as the analyzer does.
+    std::vector<std::string> ctorKeys;
+
     // What the mapper is handed while one of this struct's method bodies is emitted:
     // this struct's own substitution, plus `Self`, plus the template's bare name.
     //
@@ -4144,19 +4151,50 @@ private:
             for (FunctionDeclaration* m : info.extras->methods)
                 if (!declareStructMethod(info, *m, receiver)) return false;
 
-        // At most one constructor, whichever declaration carries it: lowerableStruct
-        // refuses a second one across the struct and its blocks together, so reaching
-        // here with one in each is impossible and the first found is the only one.
-        for (auto& c : info.decl->constructors) {
-            if (!c->body) continue;
-            if (!declareStructConstructor(info, *c, receiver)) return false;
-            break; // constructorFor currently selects constructors[0]
-        }
-        if (info.extras && !functions_.count(methodKey(info.finName, "constructor"))) {
-            for (ConstructorDeclaration* c : info.extras->constructors) {
+        // Every body-bearing construction is a declared function of its own. The first
+        // keeps `Point.constructor`, the one-symbol key every call and `nm` listing
+        // already resolves; a second construction takes `Point.constructor#1`, so two
+        // bodies can never share one symbol -- a call resolves among them by arity
+        // exactly as the analyzer binds itself. A second declaration that cannot be
+        // told apart from the first by any written call is the refusal, inherited
+        // from the single-symbol rule: the two constructors below are never both
+        // published. The rule the analyzer, has one for it (the per-arity-and-shape
+        // resolution at the call site), so its side of the contract is already there.
+        std::vector<std::pair<ConstructorDeclaration*, const FnInfo*>> declaredCtors;
+        {
+            std::vector<ConstructorDeclaration*> ctorDecls;
+            ctorDecls.reserve(info.decl->constructors.size() +
+                              (info.extras ? info.extras->constructors.size() : 0));
+            for (auto& c : info.decl->constructors) ctorDecls.push_back(c.get());
+            if (info.extras)
+                for (ConstructorDeclaration* c : info.extras->constructors) ctorDecls.push_back(c);
+            for (ConstructorDeclaration* c : ctorDecls) {
+                // A bodyless declaration is a requirement (`Self();` in an interface), not
+                // code: nothing is emitted and no key is published, exactly as before.
                 if (!c->body) continue;
-                if (!declareStructConstructor(info, *c, receiver)) return false;
-                break;
+                const std::string key = methodKey(info.finName, "constructor") +
+                                        (info.ctorKeys.empty() ? std::string()
+                                                               : fmt::format("#{}", info.ctorKeys.size()));
+                if (!declareStructConstructor(info, *c, receiver, key)) return false;
+                auto declared = functions_.find(key);
+                if (declared == functions_.end()) return false;
+                declaredCtors.push_back({c, &declared->second});
+            }
+        }
+        // The one shape overload resolution cannot answer: two constructions whose
+        // mapped parameters are the same type list. No call can distinguish them --
+        // the analyzer's rule would tie too -- so the second is refused by name rather
+        // than published and silently lost to whatever a call resolved to. Blaming the
+        // second keeps the old convention.
+        for (size_t i = 0; i < declaredCtors.size(); ++i) {
+            for (size_t j = i + 1; j < declaredCtors.size(); ++j) {
+                if (sameConstructorShape(*declaredCtors[i].second, *declaredCtors[j].second)) {
+                    unsupported(*declaredCtors[j].first,
+                                fmt::format("two constructors on struct '{}' have the same "
+                                            "signature; no call between them can be resolved",
+                                            info.finName));
+                    return false;
+                }
             }
         }
 
@@ -4268,8 +4306,11 @@ private:
     // One constructor's prototype and its queued body. declareStructMethod's
     // counterpart, and split out for the same reason.
     bool declareStructConstructor(StructInfo& info, ConstructorDeclaration& c,
-                                  const CgType& receiver) {
-        const std::string key = methodKey(info.finName, "constructor");
+                                  const CgType& receiver, const std::string& key) {
+        // The key is the caller's: the first construction keeps `Point.constructor`, a
+        // later one takes `Point.constructor#N`, which is what makes each overload its
+        // own symbol instead of a silent loss to whichever was declared first. Recorded
+        // in StructInfo in declaration order, which is the order a call resolves in.
         // The object is the receiver and the result is nothing: the caller owns the
         // storage, passes its address as parameter 0, and reads the value back out
         // of its own slot afterwards. That is the same convention `set_x` already
@@ -4288,6 +4329,7 @@ private:
         if (declared == functions_.end()) return false;
         declared->second.fn->setLinkage(llvm::Function::LinkOnceODRLinkage);
         declared->second.isConstructor = true;
+        info.ctorKeys.push_back(key);
         pendingBodies_.push_back(PendingBody{&c, &c.params, c.body.get(), key,
                                              &info.methodBindings, info.finName});
         return true;
@@ -4377,29 +4419,14 @@ private:
         }
         if (!lowerableMethods(s)) return false;
         if (!lowerableOperators(s)) return false;
-        // Constructors use one symbol per struct, matching the analyzer's current
-        // constructorFor rule: overload resolution is deliberately not invented here.
-        // The first declaration wins, and every other overload is refused by name.
-        //
-        // The count spans the `implements` blocks: `Collection<T> implements
-        // <NoLengthCollection> { Collection() {...} }` (stdlib/collection.fin:103)
-        // writes a constructor of a struct that may already declare one, and two of them
-        // are two definitions of `Collection.constructor` however they are spread over
-        // the file. The analyzer registers both against the same StructType
-        // (addConstructor) and selects `constructors[0]`, so the ambiguity is real on
-        // both sides rather than an artefact of this table.
-        const StructExtras* extras = extrasFor(s.name);
-        const size_t ctors = s.constructors.size() +
-                             (extras ? extras->constructors.size() : 0);
-        if (ctors > 1) {
-            ASTNode& second = s.constructors.size() > 1
-                                  ? static_cast<ASTNode&>(*s.constructors[1])
-                                  : static_cast<ASTNode&>(*extras->constructors[
-                                        s.constructors.empty() ? 1 : 0]);
-            unsupported(second, fmt::format("constructor overloads on struct '{}'",
-                                            s.name));
-            return false;
-        }
+        // Constructor overloads are declared, not refused: each body-bearing
+        // construction gets its own symbol (declareStructMethods keys them
+        // `S.constructor` and `S.constructor#N`), and the call sites resolve among
+        // them by the same arity-and-shape rule the analyzer binds itself with. The
+        // one shape still refused is where the two layers would agree to be at a
+        // loss together -- two constructions with the same parameter types -- and
+        // that refusal sits at the declaration now (declareStructMethods), where the
+        // pair can be named.
         for (auto& m : s.members) {
             for (auto& attr : m->attributes) {
                 // `debug` is observational only; it does not affect field layout.
@@ -5922,6 +5949,46 @@ private:
         return a.llvmType == b.llvmType;
     }
 
+    // The one comparison between two declared constructors. The FnInfos are what a
+    // call would be lowered against, so equality here is exactly what overload
+    // resolution cannot see past: same set of written parameters and same types,
+    // position for position (the two receivers -- the caller's object -- are always
+    // parameter 0 of both). Vararg is part of the answer: `f(...)` and `f()` mean
+    // different call shapes.
+    static bool sameConstructorShape(const FnInfo& a, const FnInfo& b) {
+        if (a.isVarArg != b.isVarArg) return false;
+        if (a.paramTypes.size() != b.paramTypes.size()) return false;
+        for (size_t i = 1; i < a.paramTypes.size(); ++i)
+            if (!sameType(a.paramTypes[i], b.paramTypes[i])) return false;
+        return true;
+    }
+
+    // How a written call fits a construction's signature: the count of written
+    // arguments inside what the signature demands, with the same rules a call made
+    // directly against `info` gets. A position past what was written is filled with
+    // null only when its parameter is nullable (the trailing-short-call fill
+    // emitCallArgs also performs), and anything longer than the list refuses unless
+    // the construction is vararg. This mirrors that path rather than inventing a
+    // second one -- a fit here must mean the same thing emitCallArgs would decide.
+    static bool ctorWindowFits(const FnInfo& info, size_t written) {
+        if (written + 1 > info.paramTypes.size() && !info.isVarArg) return false;
+        for (size_t p = 1 + written; p < info.paramTypes.size(); ++p)
+            if (!info.paramTypes[p].isNullable) return false;
+        return true;
+    }
+
+    // How well a construction's parameters sit behind arguments the call has already
+    // emitted: one point per position whose parameter type IS the value's type, with
+    // the call's own written positions only (a trailing nullable slot is filled, not
+    // scored). The best-fit constructor.
+    static size_t ctorShapeScore(const FnInfo& info,
+                                 const std::vector<CgVal>& vals) {
+        size_t score = 0;
+        for (size_t i = 0; i < vals.size() && 1 + i < info.paramTypes.size(); ++i)
+            if (sameType(vals[i].type, info.paramTypes[1 + i])) ++score;
+        return score;
+    }
+
     // How a CgType reads in a diagnostic, for the refusals that have no TypeNode to
     // spell. Only the shapes that reach one: a conversion involving a function type is
     // the single caller, and everything else on either side of it is named by kind
@@ -6305,6 +6372,81 @@ private:
                                               describe(from.type), describe(to)));
                 return nullptr;
             }
+        }
+        // Issue #96 (R4): an implicit `[T] -> [any]` is a copy, one boxed blob per
+        // element, built through the same conversion a cast-to-any lowers with. Both
+        // halves are `{ptr, len}` and the element kinds differ only in what they mean
+        // -- one word of `T` against a `{i8*, i64}` existential -- so the identity
+        // shortcut below would alias the two arrays: a store through the `[any]` view
+        // would write sixteen bytes into four (probe: after `a[0] = "s"` the
+        // uncoerced `v[0]` printed garbage). Never reachable without `from` being a
+        // *dynamic* array of some concrete element: the analyzer's only door (`let a
+        // <[any]> = v`, R4 keeping the conversion accepted) and nothing in the corpus
+        // writes it.
+        if (from.type.isArray() && to.isArray() && from.type.isDynamicArray &&
+            to.isDynamicArray && from.type.element && to.element &&
+            to.element->isAny && !from.type.element->isAny &&
+            !sameType(*from.type.element, *to.element)) {
+            if (!currentFn_) {
+                unsupported(node, "a '[T]' to '[any]' copy outside a function (ADR 0034)");
+                return nullptr;
+            }
+            auto* i64 = llvm::Type::getInt64Ty(ctx_);
+            auto* i32 = llvm::Type::getInt32Ty(ctx_);
+            const CgType& fromElem = *from.type.element;
+            llvm::Value* len =
+                builder_.CreateExtractValue(from.value, {1u}, "any.copy.len");
+            llvm::Value* srcData =
+                builder_.CreateExtractValue(from.value, {0u}, "any.copy.src");
+            llvm::Value* wide = builder_.CreateIntCast(len, i64, false);
+
+            const uint64_t stride = module_.getDataLayout().getTypeAllocSize(to.element->llvmType);
+            llvm::Value* bytes = builder_.CreateMul(wide, builder_.getInt64(stride), "any.copy.bytes");
+            llvm::FunctionCallee alloc = runtimeFn(
+                node, "malloc",
+                llvm::FunctionType::get(llvm::PointerType::getUnqual(ctx_), {i64}, false),
+                "a '[T]' to '[any]' copy");
+            if (!alloc) return nullptr;
+            llvm::Value* dest = builder_.CreateCall(alloc, {bytes}, "any.copy.dest");
+            builder_.CreateMemSet(dest, builder_.getInt8(0), bytes, llvm::MaybeAlign(1));
+            dest = builder_.CreateBitCast(dest, llvm::PointerType::get(to.element->llvmType, 0),
+                                          "any.copy.elems");
+
+            // The guard branches away from the entry block, exactly the shape the
+            // `any` unbox above leaves: everything that follows this conversion
+            // continues in `doneBB`, which is where the value is returned from.
+            auto* condBB = llvm::BasicBlock::Create(ctx_, "any.copy.cond", currentFn_->fn);
+            auto* bodyBB = llvm::BasicBlock::Create(ctx_, "any.copy.body", currentFn_->fn);
+            auto* doneBB = llvm::BasicBlock::Create(ctx_, "any.copy.done", currentFn_->fn);
+            auto* index = entryAlloca(i64, "any.copy.i");
+            builder_.CreateStore(builder_.getInt64(0), index);
+            builder_.CreateBr(condBB);
+            {
+                builder_.SetInsertPoint(condBB);
+                llvm::Value* at = builder_.CreateLoad(i64, index, "i");
+                builder_.CreateCondBr(builder_.CreateICmpULT(at, wide, "any.copy.more"),
+                                      bodyBB, doneBB);
+                builder_.SetInsertPoint(bodyBB);
+                llvm::Value* elemPtr = builder_.CreateInBoundsGEP(
+                    fromElem.llvmType, srcData, at, "elem");
+                llvm::Value* payload =
+                    builder_.CreateLoad(fromElem.llvmType, elemPtr, "elem.val");
+                llvm::Value* blob = convert(node, CgVal{payload, fromElem}, *to.element);
+                if (!blob) {
+                    builder_.SetInsertPoint(doneBB);
+                    return nullptr;
+                }
+                llvm::Value* slot = builder_.CreateInBoundsGEP(
+                    to.element->llvmType, dest, at, "slot");
+                builder_.CreateStore(blob, slot);
+                builder_.CreateStore(builder_.CreateAdd(at, builder_.getInt64(1)), index);
+                builder_.CreateBr(condBB);
+                builder_.SetInsertPoint(doneBB);
+            }
+            llvm::Value* pair = llvm::UndefValue::get(to.llvmType);
+            pair = builder_.CreateInsertValue(pair, dest, {0u});
+            pair = builder_.CreateInsertValue(pair, len, {1u});
+            return pair;
         }
         // Before the identity shortcut below, and that is the whole point of putting it
         // here. Every function value is one `{code, env}` struct, so
@@ -11834,20 +11976,24 @@ private:
     // rather than the written one, and nothing else about a constructor call differs.
     // A second copy would be a second calling convention for one spelling.
     void emitNamedCall(FunctionCall& node, const std::string& name) {
-        std::string emittedName = name;
         auto asStruct = structs_.find(name);
         const bool isCtorCall = asStruct != structs_.end();
-        if (isCtorCall) emittedName = methodKey(name, "constructor");
+        // A constructor call resolves among the struct's declared overloads, which is
+        // its own path: the name said the struct, the arguments say which construction.
+        if (isCtorCall) {
+            emitCtorCall(node, name, asStruct->second);
+            return;
+        }
         // The tag intrinsics, before any found-lookup: `getkeyid` and `keyidof`
         // are declared bodiless in lib/std's enum modules, and a bodiless
         // declaration still reaches functions_ as a declaration -- which is what
         // made `keyidof(Ok)` lower as a call and then refuse its own argument (a
         // conversion from the tag constant to whatever `$enum_member` mapped to).
-        if (!isCtorCall && tryEnumTagIntrinsic(node, name)) return;
-        if (!isCtorCall && tryMetaIntrinsic(node, name)) return;
-        if (!isCtorCall && tryHashWordIntrinsic(node, name)) return;
-        auto found = functions_.find(emittedName);
-        if (!isCtorCall && currentOwner_) {
+        if (tryEnumTagIntrinsic(node, name)) return;
+        if (tryMetaIntrinsic(node, name)) return;
+        if (tryHashWordIntrinsic(node, name)) return;
+        auto found = functions_.find(name);
+        if (currentOwner_) {
             // A body its defining module owns calls the module's own
             // declaration, not the first one in load order: strings' `replace`
             // calls strings' `join` even when path's `join` loaded first --
@@ -11856,19 +12002,19 @@ private:
             // only on a miss. When the owner declares no such name (or only a
             // generic) this falls through, keeping the earlier hit.
             if (ensureOwnerCallable(name, currentOwner_))
-                found = functions_.find(moduleKeyOf(currentOwner_, emittedName));
+                found = functions_.find(moduleKeyOf(currentOwner_, name));
         }
-        if (found == functions_.end() && !isCtorCall) {
+        if (found == functions_.end()) {
             // A function or `@define` the module declares: `c_socket` from
             // lib/std/networking.fin, or a plain `fun` a stdlib module defines.
             // Lazily declared and queued, so the object contains the callee and
             // the call links. After the intrinsics above, which have no body to
             // declare, and after the template probes in visit(FunctionCall&),
             // which run before this is reached.
-            if (ensureModuleCallable(name)) found = functions_.find(emittedName);
+            if (ensureModuleCallable(name)) found = functions_.find(name);
         }
         if (found == functions_.end()) {
-            // A struct with no declared constructor, or a name that is neither. Not a
+            // A name that is neither a known function nor a struct. Not a
             // zeroed default-construct: a constructor is the only thing that runs field
             // defaults here (declareStructConstructor queues the body that does), so
             // synthesising one would hand back an object whose `= null` fields were
@@ -11878,37 +12024,175 @@ private:
             return;
         }
         const FnInfo& info = found->second;
+        if (info.isConstructor) {
+            // The symbol is a constructor and the name is not the struct's, which
+            // is not a spelling that exists: `Struct.constructor` is not writable.
+            unsupported(node, fmt::format("a call to the constructor '{}'", name));
+            return;
+        }
 
         std::vector<llvm::Value*> args;
-        llvm::Value* ctorStorage = nullptr;
-        if (info.isConstructor) {
-            if (!isCtorCall || !asStruct->second.complete) {
-                // The symbol is a constructor and the name is not the struct's, which
-                // is not a spelling that exists: `Struct.constructor` is not writable.
-                unsupported(node, fmt::format("a call to the constructor '{}'", name));
-                return;
-            }
-            // The caller owns the object. It is allocated here, its address is passed
-            // as parameter 0, and the call's value is what the constructor left in it.
-            ctorStorage = entryAlloca(asStruct->second.llvmType, name);
-            // Zeroed first, so a field no constructor assigns reads as zero rather
-            // than as whatever the frame held -- the answer a local with no
-            // initialiser gets here too.
-            builder_.CreateStore(llvm::Constant::getNullValue(asStruct->second.llvmType),
-                                 ctorStorage);
-            args.push_back(ctorStorage);
-        }
         if (!emitCallArgs(node, info, name, argList(node.args), args)) return;
         emitCall(info, args);
-        if (ctorStorage) {
-            auto object = types_.structByName(asStruct->second.finName);
-            if (!object) {
-                unsupported(node, fmt::format("a call to the constructor of '{}'", name));
+    }
+
+    // A constructor call on a struct, resolved among the struct's declared
+    // constructions. There is one symbol per body-bearing declaration (the first keeps
+    // `Point.constructor`, a later one takes `Point.constructor#N`), and the written
+    // argument count and shapes pick among them exactly as the analyzer binds itself:
+    // a construction fits a call when the count is inside what its signature demands
+    // and every unfilled trailing position is nullable; exactly one fit is the call; a
+    // tie is scored on the emitted argument values, and a tie that does not separate
+    // the fits is the unresolved ambiguity -- the same conclusion both passes reach,
+    // never the first loser lowered quietly.
+    void emitCtorCall(FunctionCall& node, const std::string& structName,
+                      StructInfo& s) {
+        std::vector<const FnInfo*> fits;
+        for (const std::string& key : s.ctorKeys) {
+            auto it = functions_.find(key);
+            if (it != functions_.end() && ctorWindowFits(it->second, node.args.size()))
+                fits.push_back(&it->second);
+        }
+        // Semantics already picked one construction for this call and recorded its
+        // declared arity on the node. Trust the count when it names a unique fit --
+        // larger than the arity tie the shapes below settle, and the one thing the
+        // two layers must agree on. If the count names none, the registration state
+        // here and what semantics saw have diverged; re-resolve on shapes instead
+        // of picking off a number.
+        if (node.resolved_ctor_param_count && fits.size() > 1) {
+            std::vector<const FnInfo*> byCount;
+            for (const FnInfo* f : fits)
+                if (f->paramTypes.size() - 1 == *node.resolved_ctor_param_count)
+                    byCount.push_back(f);
+            if (byCount.size() == 1) fits.swap(byCount);
+        }
+        if (fits.empty()) {
+            if (s.ctorKeys.empty()) {
+                // The struct has no constructor anywhere, or one no body makes live:
+                // a call to it is exactly what it always was. Not a zeroed
+                // default-construct -- `P{}` is the spelling that means the defaults.
+                unsupported(node, fmt::format("a call to '{}'", structName));
                 return;
             }
-            value_ = CgVal{builder_.CreateLoad(object->llvmType, ctorStorage, "constructed"),
-                           *object};
+            unsupported(node, fmt::format("no constructor of struct '{}' takes {} "
+                                          "argument(s)",
+                                          structName, node.args.size()));
+            return;
         }
+
+        if (fits.size() > 1) {
+            // More than one construction has room for this many arguments. The
+            // written arguments are emitted once -- each offered the first fit's
+            // parameter type, which is what the call would have offered before a
+            // second construction existed -- and then the fits are scored: one point
+            // per position whose parameter type is the argument's own type. A unique
+            // best is the call; a tie is an ambiguity, reported and never lowered as
+            // the first of the tied pair.
+            if (!s.complete) {
+                unsupported(node, fmt::format("a call to the constructor '{}'",
+                                              structName));
+                return;
+            }
+            const FnInfo& hintFit = *fits[0];
+            std::vector<CgVal> vals;
+            vals.reserve(node.args.size());
+            for (size_t i = 0; i < node.args.size(); ++i) {
+                const size_t p = 1 + i;
+                vals.push_back(p < hintFit.paramTypes.size()
+                                   ? emitAs(*node.args[i], hintFit.paramTypes[p])
+                                   : emit(*node.args[i]));
+                if (failed_) return;
+                if (!vals.back().ok()) { unsupported(node, "this argument"); return; }
+            }
+            const FnInfo* chosen = fits[0];
+            size_t best = ctorShapeScore(*chosen, vals);
+            for (size_t i = 1; i < fits.size(); ++i) {
+                size_t score = ctorShapeScore(*fits[i], vals);
+                if (score > best) { best = score; chosen = fits[i]; }
+                else if (score == best) {
+                    // NOT a first-wins case: two constructions whose parameter shapes
+                    // both fit these arguments. declareStructMethods refuses the
+                    // identical-shape pair at declaration, so reaching a tie here
+                    // means the shapes differ and the written call does not say
+                    // which it meant.
+                    unsupported(node, fmt::format("{} constructors of struct '{}' fit "
+                                                  "these arguments; the call cannot pick "
+                                                  "between them",
+                                                  fits.size(), structName));
+                    return;
+                }
+            }
+            emitConstructedCall(node, structName, s, *chosen, vals);
+            return;
+        }
+
+        // Exactly one fit: the call exactly as it always lowered. This is the whole
+        // of every single-constructor struct's path, unchanged.
+        if (!s.complete) {
+            unsupported(node, fmt::format("a call to the constructor '{}'", structName));
+            return;
+        }
+        const FnInfo& info = *fits[0];
+        std::vector<llvm::Value*> args;
+        llvm::Value* ctorStorage = entryAlloca(s.llvmType, structName);
+        // Zeroed first, so a field no constructor assigns reads as zero rather
+        // than as whatever the frame held -- the answer a local with no
+        // initialiser gets here too.
+        builder_.CreateStore(llvm::Constant::getNullValue(s.llvmType), ctorStorage);
+        args.push_back(ctorStorage);
+        if (!emitCallArgs(node, info, structName, argList(node.args), args)) return;
+        emitCall(info, args);
+        finishCtorCall(node, structName, s, ctorStorage);
+    }
+
+    // Shared by both dispatch paths: the chosen construction's already-emitted
+    // arguments converted onto its parameter types (the same convert a direct call
+    // makes), then the call and the value read back from the caller's storage.
+    bool convertCtorArgs(FunctionCall& node, const FnInfo& info, std::vector<CgVal>& vals,
+                         std::vector<llvm::Value*>& args) {
+        for (size_t i = 0; i < vals.size(); ++i) {
+            const size_t p = 1 + i;
+            if (p < info.paramTypes.size()) {
+                llvm::Value* converted = convert(node, vals[i], info.paramTypes[p]);
+                if (!converted) return false;
+                args.push_back(converted);
+            } else {
+                // A vararg position has no declared type. The fit filter already
+                // established this construction accepts the count.
+                llvm::Value* promoted = promoteVararg(node, vals[i]);
+                if (!promoted) return false;
+                args.push_back(promoted);
+            }
+        }
+        // Trailing nullable parameters the call did not write are null, as on a
+        // direct call. Anything still missing after that is a fit-filter miss the
+        // dispatcher refused before getting here.
+        while (args.size() < info.paramTypes.size())
+            args.push_back(llvm::Constant::getNullValue(
+                info.paramTypes[args.size()].llvmType));
+        return true;
+    }
+
+    void emitConstructedCall(FunctionCall& node, const std::string& structName,
+                             StructInfo& s, const FnInfo& info, std::vector<CgVal>& vals) {
+        std::vector<llvm::Value*> args;
+        llvm::Value* ctorStorage = entryAlloca(s.llvmType, structName);
+        builder_.CreateStore(llvm::Constant::getNullValue(s.llvmType), ctorStorage);
+        args.push_back(ctorStorage);
+        if (!convertCtorArgs(node, info, vals, args)) return;
+        emitCall(info, args);
+        finishCtorCall(node, structName, s, ctorStorage);
+    }
+
+    void finishCtorCall(FunctionCall& node, const std::string& structName,
+                        StructInfo& s, llvm::Value* ctorStorage) {
+        auto object = types_.structByName(s.finName);
+        if (!object) {
+            unsupported(node, fmt::format("a call to the constructor of '{}'", structName));
+            return;
+        }
+        value_ = CgVal{builder_.CreateLoad(object->llvmType, ctorStorage, "constructed"),
+                       *object};
     }
 
     void emitEnumConstructor(ASTNode& loc, const EnumInfo& enumInfo,
