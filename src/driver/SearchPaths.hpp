@@ -141,21 +141,12 @@ inline std::vector<std::string> bundledLibraryPathsFor(const std::string& exePat
         std::filesystem::path(exePath).parent_path().parent_path() / "lib" / "std";
     std::error_code ec;
     if (!std::filesystem::is_directory(candidate, ec)) return {};
-    // Canonical, not lexically normal: the preloader's skip rule (Driver.cpp's
-    // rootIsLibrary) compares this spelling against a *canonical* root path, and
-    // the two only agree for a disk layout that spells the directory the same
-    // way twice. A symlinked build layout -- a private build tree whose `../lib`
-    // points at the checkout's lib -- names the same directory by two spellings,
-    // missed the skip, preloaded stdio into a stdlib module the root already is,
-    // and manufactured the very cycle this path exists to prevent:
-    // Soundness_BundledStdlib.EveryModuleChecksCleanStandalone went red for the
-    // environment, not for a change. Canonical answers the question the rule
-    // means, and falls back to the lexical spelling only when the filesystem
-    // cannot be interrogated (the old behaviour).
-    std::error_code ecCan;
-    const std::filesystem::path resolved = std::filesystem::canonical(candidate, ecCan);
-    if (ecCan) return {candidate.lexically_normal().string()};
-    return {resolved.string()};
+    // Lexical, not canonical: the comparison against a canonical root happens
+    // where it belongs -- Driver.cpp's rootIsLibrary canonicalizes the library
+    // dir on both sides of its under-check. Canonicalizing HERE made the
+    // BundledLibraries spelling pins fail on layouts whose tmp paths resolve
+    // through symlinks (macOS `/var`→`/private/var`, Windows junctions).
+    return {candidate.lexically_normal().string()};
 }
 
 // The bundled standard library of the binary now running.

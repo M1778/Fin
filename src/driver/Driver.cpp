@@ -187,8 +187,21 @@ int Driver::compile() {
             std::filesystem::canonical(options.inputFile, ec).string();
         if (!ec) {
             for (const auto& libDir : bundledLibraryPaths()) {
+                // Canonical on BOTH sides of the under-check: the root file was
+                // canonicalized above, so a symlinked layout -- a private build
+                // tree whose `../lib` points at the checkout's lib -- names the
+                // two sides by different spellings, and a lexical dir comparison
+                // misses it, preloading stdio into a stdlib module the root
+                // already is and manufacturing a cycle the file's own imports
+                // never create. Canonical cannot be interrogated for a path that
+                // does not exist, so the lexical spelling (the old behaviour)
+                // stays the fallback.
+                std::error_code ecDir;
+                const std::filesystem::path dirResolved =
+                    std::filesystem::canonical(libDir, ecDir);
                 const std::string dir =
-                    std::filesystem::path(libDir).lexically_normal().string();
+                    (ecDir ? std::filesystem::path(libDir) : dirResolved)
+                        .lexically_normal().string();
                 // Separator-aware, not a `'/'` string match: on Windows both
                 // spellings are native, so the old check never saw a library
                 // root there and preloaded the stdio prelude into every
