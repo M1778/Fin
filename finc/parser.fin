@@ -3953,6 +3953,16 @@ pub struct Parser {
       }
 
       fun parse_define(self: &Self, attr_val: string) <&AstNode> {
+        // C++ blame opens at the first token: `#[...]` attributes top-level
+        // `@define`s, then the `@define` keyword. The ambient-redeclaration
+        // diagnostic (issue #100 L3) reads this line for the ambient side,
+        // and the module text carries it like any other declaration today.
+        let bl_line <int> = 0;
+        let bl_col <int> = 0;
+        if (self.top_attr_line > 0) {
+            bl_line = self.top_attr_line;
+            bl_col = self.top_attr_col;
+        }
         let id_tok <Token> = self.stream.peek();
         if (!self.expect(tok_ident(), "expected function name after '@define'")) {
             return null;
@@ -4017,6 +4027,13 @@ pub struct Parser {
 
         self.expect(tok_semicolon(), "expected ';' after define declaration");
 
+        // The C++ node range for an extern ends at the `;` the reader sees
+        // (the same closing column a bodied declaration takes its closing
+        // brace from); `blame_*` stay 0 for the block-level `@define`, whose
+        // readers fall back to line/col as before.
+        let sem_tok <Token> = self.stream.previous();
+        let close_col <int> = sem_tok.col + 1;
+
         let fn_node <&AstNode> = new AstNode{};
         fn_node.kind = ast_fun_decl();
         fn_node.name = fn_name;
@@ -4026,6 +4043,9 @@ pub struct Parser {
         fn_node.attr_text = attr_val;
         fn_node.line = id_tok.line;
         fn_node.col = id_tok.col;
+        fn_node.blame_line = bl_line;
+        fn_node.blame_col = bl_col;
+        fn_node.close_col = close_col;
         return fn_node;
       }
 

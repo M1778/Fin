@@ -6,6 +6,7 @@ import { AstNode, free_ast, ast_fun_decl } from ast::std;
 import { format_stmt } from printer::std;
 import { read_to_string, write_string, remove_file, free_file_content, file_exists, file_size } from fs::std;
 import { run_command, exec_command, ProcessResult, free_process_result } from process::std;
+import { diag_error, format_snippet, free_diag_str } from diag::std;
 import { getenv } from env::std;
 import { Buffer, new_buffer, free_buffer, free_string } from buffer::std;
 
@@ -2736,7 +2737,7 @@ priv fun resolve_module_spec(spec: string, importer: string) <string> {
 }
 
 pub fun print_version() <int> {
-    printf("finc 0.4.0 (contract 2)\n");
+    printf("finc 0.4.0 (contract 3)\n");
     return 0;
 }
 
@@ -2841,7 +2842,485 @@ priv fun drv_has_main(root: &AstNode) <bool> {
     return false;
 }
 
+// Ambient `#[global]` publishes, the self-hosted half of issue #100 L3. The
+// C++ loader retains one prototype per ambiently published extern
+// (ModuleLoader::retainAmbientPrototype) and the analyzer's
+// SemanticAnalyzer::checkDuplicateDeclaration refuses a file-level
+// declaration whose `#[llvm_name]` names a different symbol than the
+// retained one. This port derives the same facts from the merged modules
+// and the preload instead of a loader object, and refuses with the same
+// text. The table rides parallel arrays beside the module merge in
+// compile_source_file, first-wins per name; entries are owned copies, so a
+// fact outlives the parsed module it was read from.
+priv fun drv_amb_index_of(names: [string], count: int, name: string) <int> {
+    let i <int> = 0;
+    while (i < count) {
+        if (drv_str_eq(names[i], name)) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+priv fun drv_amb_own(s: string) <string> {
+    let chars <[char]> = to_chars(s);
+    let own <string> = from_chars(chars, 0, cast<int>(drv_strlen(s)));
+    delete chars;
+    return own;
+}
+
+// The `@define` attribute spellings are `;`-joined `name(...)`/`name=value`
+// segments (checker.fin api_attr_*): the name runs to the first `(` or `=`,
+// the argument sits inside `(...)` or after `=` with quotes stripped. The
+// same readings here, a deliberate second copy of a few lines each --
+// ModuleLoader::symbolOf keeps its twin of codegen's symbol reading the same
+// way, so the two ends of the rule cannot drift apart silently.
+priv fun drv_amb_attr_count(text: string, cap: int) <int> {
+    if (text == null || drv_strlen(text) == cast<ulong>(0)) { return 0; }
+    let n <int> = 1;
+    let len <int> = cast<int>(drv_strlen(text));
+    let i <int> = 0;
+    while (i < len) {
+        let cs <string> = substr(text, i, 1);
+        let is_cut <bool> = drv_str_eq(cs, ";");
+        free_string(cs);
+        if (is_cut) { n = n + 1; }
+        i = i + 1;
+    }
+    if (n > cap) { n = cap; }
+    return n;
+}
+
+priv fun drv_amb_attr_seg(text: string, want: int) <string> {
+    if (text == null) { return ""; }
+    let len <int> = cast<int>(drv_strlen(text));
+    let cur <int> = 0;
+    let start <int> = 0;
+    let i <int> = 0;
+    while (i <= len) {
+        let cut_here <bool> = i == len;
+        if (!cut_here) {
+            let cs <string> = substr(text, i, 1);
+            cut_here = drv_str_eq(cs, ";");
+            free_string(cs);
+        }
+        if (cut_here) {
+            if (cur == want) { return substr(text, start, i - start); }
+            cur = cur + 1;
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+// Owned: every caller frees the name like every other helper result.
+priv fun drv_amb_attr_name_of(seg: string) <string> {
+    if (seg == null) { return ""; }
+    let len <int> = cast<int>(drv_strlen(seg));
+    let i <int> = 0;
+    while (i < len) {
+        let cs <string> = substr(seg, i, 1);
+        let stop <bool> = drv_str_eq(cs, "(") || drv_str_eq(cs, "=");
+        free_string(cs);
+        if (stop) { return substr(seg, 0, i); }
+        i = i + 1;
+    }
+    return drv_amb_own(seg);
+}
+
+priv fun drv_amb_attr_has_arg(seg: string) <bool> {
+    if (seg == null) { return false; }
+    let len <int> = cast<int>(drv_strlen(seg));
+    let i <int> = 0;
+    while (i < len) {
+        let cs <string> = substr(seg, i, 1);
+        let stop <bool> = drv_str_eq(cs, "(") || drv_str_eq(cs, "=");
+        free_string(cs);
+        if (stop) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+priv fun drv_amb_attr_arg_of(seg: string) <string> {
+    if (seg == null) { return ""; }
+    let len <int> = cast<int>(drv_strlen(seg));
+    let i <int> = 0;
+    while (i < len) {
+        let cs <string> = substr(seg, i, 1);
+        let par <bool> = drv_str_eq(cs, "(");
+        free_string(cs);
+        if (par) {
+            let j <int> = i + 1;
+            let depth <int> = 1;
+            while (j < len && depth > 0) {
+                let cj <string> = substr(seg, j, 1);
+                let op <bool> = drv_str_eq(cj, "(");
+                let cl <bool> = drv_str_eq(cj, ")");
+                free_string(cj);
+                if (op) { depth = depth + 1; }
+                else if (cl) { depth = depth - 1; }
+                j = j + 1;
+            }
+            return substr(seg, i + 1, j - i - 1);
+        }
+        let cs2 <string> = substr(seg, i, 1);
+        let eq <bool> = drv_str_eq(cs2, "=");
+        free_string(cs2);
+        if (eq) {
+            let v <string> = substr(seg, i + 1, len - i - 1);
+            let vlen <int> = cast<int>(drv_strlen(v));
+            if (vlen >= 2 && starts_with(v, "\"") && ends_with(v, "\"")) {
+                let un <string> = substr(v, 1, vlen - 2);
+                free_string(v);
+                return un;
+            }
+            return v;
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+// Retained ambient prototypes from one loaded module: what each of its
+// `#[global]` externs publishes. Only `@define` reaches ambient level in C++
+// (publishIfGlobal hangs off the DefineDeclaration visit), so only bodiless
+// declarations scan. The C++ additionally requires the attribute to sit
+// inside `namespace std` (ADR 0021 placement, the parser's std_scoped
+// stamp), which the merged decl list does not carry:
+// shortcut: the stage implements no placement refusal either, and the one
+// in-corpus publish (stdio's printf) is inside `namespace std`; upgrade when
+// a publish outside `std` shows up.
+priv fun drv_ambient_scan(
+  mod_root: &AstNode,
+  mod_path: string,
+  names: [string],
+  symbols: [string],
+  files: [string],
+  lines: [int],
+  count: int
+) <int> {
+    if (mod_root == null || count >= 32) { return count; }
+    let decl <&AstNode> = mod_root.left;
+    while (decl != null && count < 32) {
+        if (decl.kind == ast_fun_decl() && decl.left == null &&
+          decl.attr_text != null && drv_strlen(decl.attr_text) > cast<ulong>(0)) {
+            let segs <int> = drv_amb_attr_count(decl.attr_text, 16);
+            // `published` is the real gate: the `#[global]` flag on the
+            // declaration is what makes it a publish (C++ publishIfGlobal).
+            // The symbol is recorded whatever it holds, empty included --
+            // symbolOf reads the valued `#[llvm_name]` verbatim, and a bare
+            // one falls back to the Fin name.
+            let published <bool> = false;
+            let symbol <string> = decl.name;
+            let symbol_owned <bool> = false;
+            let s <int> = 0;
+            while (s < segs) {
+                let seg <string> = drv_amb_attr_seg(decl.attr_text, s);
+                let an <string> = drv_amb_attr_name_of(seg);
+                if (drv_str_eq(an, "global")) {
+                    if (!drv_amb_attr_has_arg(seg)) { published = true; }
+                } else if (drv_str_eq(an, "llvm_name")) {
+                    if (drv_amb_attr_has_arg(seg)) {
+                        if (symbol_owned) { free_string(symbol); }
+                        symbol = drv_amb_attr_arg_of(seg);
+                        symbol_owned = true;
+                    }
+                }
+                free_string(an);
+                free_string(seg);
+                s = s + 1;
+            }
+            if (published && drv_amb_index_of(names, count, decl.name) < 0) {
+                names[count] = drv_amb_own(decl.name);
+                symbols[count] = drv_amb_own(symbol);
+                files[count] = drv_amb_own(mod_path);
+                let aline <int> = decl.blame_line;
+                if (aline <= 0) { aline = decl.line; }
+                lines[count] = aline;
+                count = count + 1;
+            }
+            if (symbol_owned) { free_string(symbol); }
+          }
+        decl = decl.right;
+    }
+    return count;
+}
+
+// The preload's module pipeline: the same stages the import merge runs
+// (preprocess, macro expand, scan, parse), ending in the ambient scan
+// instead of a merge -- the C++ preload's module lives in the loader's
+// astStorage, never in the root program, and the same hold here keeps the
+// checker's walk unchanged. Any failure is silent: the C++ preload reports
+// nothing when the module is not resolvable or not loadable.
+priv fun drv_ambient_from_file(
+  path: string,
+  modidx: int,
+  names: [string],
+  symbols: [string],
+  files: [string],
+  lines: [int],
+  count: int
+) <int> {
+    let src? <string> = read_to_string(path);
+    if (src == null) { return count; }
+    let proc? <string> = drv_preprocess(src?, path);
+    free_file_content(src);
+    if (proc == null) { return count; }
+    let exp? <string> = drv_macro_expand(proc?, path, modidx);
+    free_file_content(proc);
+    if (exp == null) { return count; }
+    let sc <Scanner> = new_scanner(exp?);
+    let cap <int> = 65536;
+    let toks <[Token]> = new [Token, cap]{};
+    let tc <int> = 0;
+    let tk <Token> = sc.scan_token();
+    let done <bool> = false;
+    while (!done) {
+        if (tk.kind == tok_eof()) { done = true; }
+        if (tc >= cap) {
+            let ncap <int> = cap * 2;
+            let grown <[Token]> = new [Token, ncap]{};
+            let gi <int> = 0;
+            while (gi < tc) { grown[gi] = toks[gi]; gi = gi + 1; }
+            delete toks;
+            toks = grown;
+            cap = ncap;
+        }
+        if (!done) {
+            toks[tc] = tk;
+            tc = tc + 1;
+            if (!done) {
+                tk = sc.scan_token();
+            }
+        }
+    }
+    free_scanner(sc);
+    let p <Parser> = new_parser(toks, tc, path, exp?);
+    let mod_root <&AstNode> = p.parse_program();
+    let out <int> = drv_ambient_scan(mod_root, path, names, symbols, files, lines, count);
+    free_parser(p);
+    delete toks;
+    free_ast(mod_root);
+    free_file_content(exp);
+    return out;
+}
+
+// One snippet line out of the diagnostic source text, the checker's
+// source_line_text over the pretext the driver already holds (the snippet
+// renderer must never re-read disk -- checker.fin report_error).
+priv fun drv_amb_snip_line(text: string, line_no: int) <string> {
+    if (text == null || line_no < 1) { return ""; }
+    let total <int> = cast<int>(drv_strlen(text));
+    let bytes <[char]> = to_chars(text);
+    let cur <int> = 1;
+    let start <int> = 0;
+    let found_start <int> = -1;
+    let found_len <int> = 0;
+    let i <int> = 0;
+    while (i <= total) {
+        if (i == total || bytes[i] == cast<char>(10)) {
+            if (cur == line_no) {
+                found_start = start;
+                found_len = i - start;
+                if (found_len > 0 && bytes[start + found_len - 1] == cast<char>(13)) {
+                    found_len = found_len - 1;
+                }
+                break;
+            }
+            cur = cur + 1;
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    let out <string> = "";
+    if (found_start >= 0 && found_len > 0) {
+        let lb <Buffer> = new_buffer(found_len + 1);
+        let k <int> = 0;
+        while (k < found_len) {
+            lb.write_char(bytes[found_start + k]);
+            k = k + 1;
+        }
+        out = lb.to_string();
+        free_buffer(lb);
+    }
+    delete bytes;
+    return out;
+}
+
+// The one bundled module the preload implants: C++ pins `stdio` by name
+// (`loadGlobalModuleIfPresent("stdio", ...)`, Driver.cpp). Resolution order
+// mirrors the bundled search path: absolute first (`<exe dir>/../lib/std`,
+// exactly what bundledLibraryPathsFor names), then the CWD-relative spelling
+// the stage has always fallen back to. "" when neither exists, which skips
+// the preload silently like the C++ resolve miss.
+priv fun drv_preload_stdio_path() <string> {
+    let exedir <string> = drv_exe_dir();
+    if (drv_strlen(exedir) > 0) {
+        let parent <string> = drv_dirname(exedir);
+        free_string(exedir);
+        if (drv_strlen(parent) > 0) {
+            let up_cand <string> = drv_std_join(parent, "stdio");
+            free_string(parent);
+            if (file_exists(up_cand)) { return up_cand; }
+            free_string(up_cand);
+        } else {
+            free_string(parent);
+        }
+    } else {
+        free_string(exedir);
+    }
+    let cwd_cand <string> = drv_std_join("", "stdio");
+    if (file_exists(cwd_cand)) { return cwd_cand; }
+    free_string(cwd_cand);
+    return "";
+}
+
+// C++ rootIsLibrary (Driver.cpp): a root inside the bundled `lib` never gets
+// the preload -- which is why lib/std/stdio.fin's own `#[global]` publish
+// and the corpus's bare `@define printf` sites keep compiling with nothing
+// published underneath them. String prefix against the exe-relative bundled
+// dir plus the CWD-relative spelling of the same directory.
+// shortcut: purely lexical, no canonical() -- a root written through a
+// symlink or `..` into lib/std would not be skipped; the corpus invocations
+// (repo root or the absolute sample paths ctest passes) never spell one.
+priv fun drv_root_is_library(filename: string) <bool> {
+    let exedir <string> = drv_exe_dir();
+    if (drv_strlen(exedir) > 0) {
+        let parent <string> = drv_dirname(exedir);
+        free_string(exedir);
+        if (drv_strlen(parent) > 0) {
+            let bd <string> = concat(parent, "/lib/std");
+            free_string(parent);
+            let bl <int> = cast<int>(drv_strlen(bd));
+            let flen <int> = cast<int>(drv_strlen(filename));
+            if (bl > 0 && flen >= bl && starts_with(filename, bd)) {
+                // A prefix may stop mid-component (`x/lib/stdFoo` is not
+                // `x/lib/std`'s file): the next byte must be `/` or the end.
+                let next_ok <bool> = flen == bl || drv_str_eq(substr(filename, bl, 1), "/");
+                free_string(bd);
+                if (next_ok) { return true; }
+            } else {
+                free_string(bd);
+            }
+        } else {
+            free_string(parent);
+        }
+    } else {
+        free_string(exedir);
+    }
+    let flen2 <int> = cast<int>(drv_strlen(filename));
+    let rl <int> = 7; // "lib/std"
+    if (flen2 >= rl && starts_with(filename, "lib/std")) {
+        if (flen2 == rl || drv_str_eq(substr(filename, rl, 1), "/")) { return true; }
+    }
+    return false;
+}
+
+// The refusal itself, over the root file's own declarations (the C++ ambient
+// branch fires at file level only). A root declaration of a published
+// ambient name is exempt when it carries `#[overwrite]` (flag, empty value,
+// or the name itself), a `#[global]` flag (the publish contract), or names
+// the ambient declaration's own symbol (a valued `#[llvm_name]` equal to the
+// retained one; a bare declaration defaults to its Fin name, which is why
+// the corpus's bare `@define printf` sites are one fact, not a refusal).
+// Everything else takes the name back from both spellings and is refused
+// with the C++ text, blamed at the declaration's node range.
+priv fun drv_ambient_precheck(
+  root: &AstNode,
+  root_decl_count: int,
+  names: [string],
+  symbols: [string],
+  files: [string],
+  lines: [int],
+  amb_count: int,
+  filename: string,
+  pretext: string
+) <bool> {
+    if (root == null || amb_count == 0) { return false; }
+    let decl <&AstNode> = root.left;
+    let i <int> = 0;
+    while (decl != null && i < root_decl_count) {
+        if (decl.attr_text != null && drv_strlen(decl.attr_text) > cast<ulong>(0)) {
+            let ix <int> = drv_amb_index_of(names, amb_count, decl.name);
+            if (ix >= 0 && !drv_str_eq(decl.name, "_")) {
+                let consented <bool> = false;
+                let new_symbol <string> = decl.name;
+                let new_owned <bool> = false;
+                let segs <int> = drv_amb_attr_count(decl.attr_text, 16);
+                let s <int> = 0;
+                while (s < segs) {
+                    let seg <string> = drv_amb_attr_seg(decl.attr_text, s);
+                    let an <string> = drv_amb_attr_name_of(seg);
+                    if (drv_str_eq(an, "overwrite")) {
+                        if (!drv_amb_attr_has_arg(seg)) {
+                            consented = true;
+                        } else {
+                            let ov <string> = drv_amb_attr_arg_of(seg);
+                            if (drv_strlen(ov) == cast<ulong>(0) || drv_str_eq(ov, decl.name)) {
+                                consented = true;
+                            }
+                            free_string(ov);
+                        }
+                    } else if (drv_str_eq(an, "global")) {
+                        if (!drv_amb_attr_has_arg(seg)) { consented = true; }
+                    } else if (drv_str_eq(an, "llvm_name")) {
+                        if (drv_amb_attr_has_arg(seg)) {
+                            if (new_owned) { free_string(new_symbol); }
+                            new_symbol = drv_amb_attr_arg_of(seg);
+                            new_owned = true;
+                        }
+                    }
+                    free_string(an);
+                    free_string(seg);
+                    if (consented) { break; }
+                    s = s + 1;
+                }
+                let refuse <bool> = !consented && !drv_str_eq(new_symbol, symbols[ix]);
+                if (refuse) {
+                    let b <Buffer> = new_buffer(512);
+                    b.write_string("'");
+                    b.write_string(decl.name);
+                    b.write_string("' is already declared ambiently (#[global], symbol '");
+                    b.write_string(symbols[ix]);
+                    b.write_string("', at ");
+                    b.write_string(files[ix]);
+                    b.write_char(':');
+                    b.write_int(lines[ix]);
+                    b.write_string("); declaring it here again takes the name back from both spellings, and the plain call fails the link on a symbol nothing defines. Name the same symbol with '#[llvm_name=\"");
+                    b.write_string(new_symbol);
+                    b.write_string("\"]', or mark it '#[overwrite(");
+                    b.write_string(decl.name);
+                    b.write_string(")]' to replace the ambient definition in this file");
+                    let msg <string> = b.to_string();
+                    free_buffer(b);
+                    let eline <int> = decl.blame_line;
+                    let ecol <int> = decl.blame_col;
+                    if (eline <= 0) {
+                        eline = decl.line;
+                        ecol = decl.col;
+                    }
+                    let espan <int> = 1;
+                    if (decl.close_col > ecol) { espan = decl.close_col - ecol; }
+                    let sline <string> = drv_amb_snip_line(pretext, eline);
+                    let snip <string> = format_snippet(filename, eline, ecol, diag_error(), msg, sline, espan);
+                    err_dprintf(2, "%s", snip);
+                    free_diag_str(snip);
+                    free_string(sline);
+                    free_string(msg);
+                }
+                if (new_owned) { free_string(new_symbol); }
+                if (refuse) { return true; }
+            }
+        }
+        decl = decl.right;
+        i = i + 1;
+    }
+    return false;
+}
+
 pub fun compile_source_file(
+
   filename: string,
   out_path: string,
   is_compile_only: bool,
@@ -2963,6 +3442,36 @@ pub fun compile_source_file(
     loaded_count = 1;
     let had_module_error <bool> = false;
 
+    // Ambient facts, issue #100 L3's self-hosted half: the C++ preload
+    // (`loadGlobalModuleIfPresent("stdio", ...)` at Driver.cpp) implants the
+    // bundled library's one `#[global]` name into every root that is not
+    // itself a library file, and every merged module's own `#[global]`
+    // extern publishes the same way. Library roots skip the preload
+    // (drv_root_is-library), so nothing publishes underneath lib/std's own
+    // files and the corpus's bare `@define printf` sites keep compiling.
+    let amb_names <[string]> = new [string, 32]{};
+    let amb_symbols <[string]> = new [string, 32]{};
+    let amb_files <[string]> = new [string, 32]{};
+    let amb_lines <[int]> = new [int, 32]{};
+    let amb_count <int> = 0;
+    let ambient_refused <bool> = false;
+    if (!drv_root_is_library(filename)) {
+        let preload_path <string> = drv_preload_stdio_path();
+        if (drv_strlen(preload_path) > 0) {
+            amb_count = drv_ambient_from_file(preload_path, 1, amb_names, amb_symbols, amb_files, amb_lines, amb_count);
+        }
+        free_string(preload_path);
+    }
+    // Root-decl count: merged modules append at the tail of the chain, so
+    // the first root_decl_count entries are always this file's own
+    // declarations -- the file-level scope the C++ ambient branch reads.
+    let root_decl_count <int> = 0;
+    let rc <&AstNode> = root.left;
+    while (rc != null) {
+        root_decl_count = root_decl_count + 1;
+        rc = rc.right;
+    }
+
     let cur_decl <&AstNode> = root.left;
     while (cur_decl != null) {
         if (cur_decl.kind == 6) {
@@ -3030,6 +3539,12 @@ pub fun compile_source_file(
                                 let mod_p <Parser> = new_parser(mod_toks, mod_tc, mod_path, mod_src?);
                                 let mod_root <&AstNode> = mod_p.parse_program();
 
+                                // This module's `#[global]` externs publish
+                                // ambiently (the merge loop scans what it
+                                // loaded, exactly where the C++ loader's
+                                // analyze of the module retained them).
+                                amb_count = drv_ambient_scan(mod_root, mod_path, amb_names, amb_symbols, amb_files, amb_lines, amb_count);
+
                                 let r_end <&AstNode> = root.left;
                                 while (r_end != null && r_end.right != null) {
                                     r_end = r_end.right;
@@ -3072,6 +3587,22 @@ pub fun compile_source_file(
         return 1;
     }
 
+    // The ambient-redeclaration refusal (issue #100 L3). It runs before the
+    // checker so the refusal sits at its declaration's position -- for
+    // stdio.fin, whose redeclaration at :11 precedes every other diagnostic
+    // the file earns, exactly the C++ analyzer's visit order. The stage
+    // checker sits exactly on its 64-field lowering ceiling, so the fact
+    // table lives here and the driver owns the emission; the checker still
+    // runs below and its own diagnostics follow, which is the same order the
+    // C++ produces.
+    if (!no_check) {
+        ambient_refused = drv_ambient_precheck(root, root_decl_count, amb_names, amb_symbols, amb_files, amb_lines, amb_count, filename, pretext);
+    }
+    delete amb_names;
+    delete amb_symbols;
+    delete amb_files;
+    delete amb_lines;
+
     // Option: --dump-ast
     if (dump_ast) {
         let decl <&AstNode> = root.left;
@@ -3103,7 +3634,7 @@ pub fun compile_source_file(
         // the preprocessor output). Borrowed: freed with `pretext` below.
         chk.set_snippet_text(pretext);
         let check_ok <bool> = chk.check_program(root);
-        if (!check_ok) {
+        if (!check_ok || ambient_refused) {
             // No summary line: the C++ Driver prints none in human mode,
             // so the check sweep agrees bytes on the diagnostics alone.
             delete tokens;
