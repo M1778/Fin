@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "StructType.hpp"
 #include "TypeImpl.hpp"
 // `operators` is keyed by a plain `int` so that this layer need not know what an

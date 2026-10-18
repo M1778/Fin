@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // NodeKind -- the AST's kind discriminator (ADR 0004).

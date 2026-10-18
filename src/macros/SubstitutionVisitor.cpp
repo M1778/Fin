@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "SubstitutionVisitor.hpp"
 #include "../ast/CloneVisitor.hpp"
 #include <iostream>

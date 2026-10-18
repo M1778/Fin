@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "DiagnosticEngine.hpp"
 #include "../utils/Levenshtein.hpp"
 #include <sstream>

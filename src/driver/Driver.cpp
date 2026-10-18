@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "utils/Process.hpp"
 #include "Driver.hpp"
 #include "lexer/lexer.hpp"

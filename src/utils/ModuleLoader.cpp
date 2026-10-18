@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "ModuleLoader.hpp"
 #include "lexer/lexer.hpp"
 #include "parser.hpp"

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // StructuralWalk -- traversal with a default (ADR 0004).

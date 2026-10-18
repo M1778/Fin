@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Wave-4 step 17, W7: `variable_scope_exit` plus the moved analysis.
 // See MovedAnalysis.hpp for the contract.
 #include "MovedAnalysis.hpp"

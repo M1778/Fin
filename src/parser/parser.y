@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 %skeleton "lalr1.cc"
 %require "3.2"
 %defines

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "NodeKind.hpp"
 
 #include "ASTNode.hpp" // the umbrella: every concrete node type, complete

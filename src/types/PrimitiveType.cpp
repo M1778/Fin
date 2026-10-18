@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "PrimitiveType.hpp"
 #include "TypeImpl.hpp" // For typesEqual and others if needed
 #include "Layout.hpp"

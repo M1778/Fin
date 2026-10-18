@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Wave-4 step 20, W10: `loop_back_edge` plus its firing.
 // See LoopBackEdge.hpp for the contract.
 #include "LoopBackEdge.hpp"

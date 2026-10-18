@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "TypeNode.hpp"
 #include "../Visitor.hpp"
 // For the out-of-line FunctionTypeNode destructor: its `generic_params` holds
