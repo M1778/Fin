@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 // The semver is derived, never written down here. `FINC_VERSION` is defined by
@@ -28,6 +29,12 @@ namespace fin {
 // These are `kFincVersion`, not `FINC_VERSION`: the macro owns that spelling and
 // a same-named constant would be rewritten by the preprocessor.
 inline constexpr const char* kFincVersion = FINC_VERSION;
-inline constexpr int kFincContractVersion = 2;
+// Contract history:
+//   1 -> 2: `-o <path>` honours executables (self-hosting bootstrap).
+//   2 -> 3: `-o` (without `-c`) refused together with `--diagnostics=json`,
+//           exit 2 (issue #73): an executable build runs an external C driver
+//           whose own output reaches the JSON stream raw, so the argv pattern
+//           a contract-2 caller could issue no longer means "link it".
+inline constexpr int kFincContractVersion = 3;
 
 }

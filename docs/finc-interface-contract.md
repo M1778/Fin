@@ -1,7 +1,7 @@
-# The `finc` interface, contract 2
+# The `finc` interface, contract 3
 
 This is the command-line interface used by `finn` and other tools. It describes
-the current compiler, `0.4.0 (contract 2)`. ADR 0009 records the contract's design;
+the current compiler, `0.4.0 (contract 3)`. ADR 0009 records the contract's design;
 `tests/test_cli.cpp` and `tests/test_codegen.cpp` check its behavior.
 
 `finc file.fin` checks source. Add `-o app` to build an executable or `-c` to emit
@@ -11,7 +11,7 @@ an object. Code generation requires a build with the LLVM backend enabled.
 
 ```
 $ finc --version
-finc 0.4.0 (contract 2)
+finc 0.4.0 (contract 3)
 ```
 
 Format: `finc <semver> (contract <int>)`, one line, on **stdout**, exit `0`. The two numbers move
@@ -50,9 +50,13 @@ to a user, that is stderr. This holds on every exit path, including `2` and `3`.
 Fin writes JSONL on stderr: one object per line, each with a `kind`. This also
 applies to command-line errors and when `--color=always` is passed.
 
-Current linking limitation: an external C driver can write its own output to the
-inherited streams. Its messages are not converted into Fin JSON diagnostics.
-Use `-c` and a separate link step when a tool needs strict stream control.
+`-o` without `-c` is refused together with this flag, by name, with exit `2`: an
+executable build links through an external C driver whose own output reaches the
+inherited streams, and those bytes would be the one thing a `--diagnostics=json`
+consumer cannot parse. Build the object with `-c` (`-o` may name it) and run the
+C link yourself, or drop this flag for executable builds. The refusal is a
+command-line error: it is one `diagnostic` object rendered like any other,
+followed by the summary with `exitCode` 2, whatever the input file contains.
 
 One diagnostic:
 
@@ -140,6 +144,8 @@ success means the executable was linked at the requested path. With `-c`, succes
 means the object was written; the default name is `<input stem>.o` in the working
 directory. Supplying `-o` alongside `-c` overrides that object path. An executable
 needs `main`; a library object does not. Unsupported lowering produces a diagnostic.
+`-o` without `-c` cannot be combined with `--diagnostics=json` (exit `2`; see the
+section above) — `-c` accepts the flag because it links nothing.
 
 `--target <triple>` names the target triple; omitting it builds for the host triple. A triple
 other than the host's is refused by name (exit `1`) for `-o` and `-c` builds, and no artifact
@@ -236,6 +242,19 @@ Anything here changing incompatibly bumps `kFincContractVersion` in `src/driver/
 JSON key, adding a flag, or adding a severity value does not. If `finn` needs something that is not here,
 that is a request to this repository, not a local workaround — a hand-maintained assumption on the `finn`
 side is how `download.rs:62-65` came to match on OS alone and hand arm64 users an x86_64 build.
+
+### Why contract 3
+
+Contract 3 refuses `-o` (without `-c`) together with `--diagnostics=json`, exit `2` (issue
+#73). Contract 2 documented that combination as allowed with a caveat: the external C driver
+wrote its own link-failure text into the JSON stream, the one stream the contract simultaneously
+promised is one JSON object per line. So the narrowing *fixes* a promise this document makes —
+that a consumer can parse every byte of stderr — but it also changes what a previously accepted
+invocation returns: some such builds linked, and all of them now exit `2`. That is the argument
+the search-path narrowing (contract 1) could still dodge because nothing had shipped against it,
+so the integer moves. A contract-2 `finn` treats a `2` as a version-skew signal, and the refusal
+is JSONL-shaped with the command-line diagnostic naming `-o` and `--diagnostics=json`, so a
+consumer that ignores the integer still gets a parseable explanation.
 
 ### Why the search-path change did not bump the contract
 

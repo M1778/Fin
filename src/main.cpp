@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include <exception>
 #include <string>
 #include <vector>
@@ -223,6 +224,26 @@ int main(int argc, char** argv) {
         }
 
         if (!sawInput) return fail("no input file specified");
+
+        // Issue #73: linking an executable hands the object to an external C
+        // driver whose own output goes straight to the inherited streams, so a
+        // `-o` build under `--diagnostics=json` once dropped raw `ld` text into
+        // the stream the contract promised is one JSON object per line. Refuse
+        // the combination up front, by name — the standard the `--target`
+        // refusal (issue #39) set — rather than capture the driver's output.
+        // And only executable builds: `-c` never runs a link step, so it can
+        // accept `--diagnostics=json` and stay parseable. Parsed after the loop
+        // so argv order does not matter.
+        if (opts.outputPathGiven && !opts.compileOnly &&
+            opts.diagFormat == fin::DiagnosticFormat::Json) {
+            return reportAndExit(
+                format, color, fin::ExitCode::Usage,
+                "'-o' with --diagnostics=json cannot be combined: linking an "
+                "executable runs an external C driver whose own output bypasses "
+                "the JSON stream",
+                "add '-c' to stop at the object file and link it yourself with "
+                "the C driver, or drop --diagnostics=json for '-o' builds");
+        }
 
         fin::Driver driver(opts);
         return driver.compile();

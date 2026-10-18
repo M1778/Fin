@@ -641,6 +641,101 @@ TEST(JsonDiagnostics, ATypeMismatchCarriesItsStableCode) {
         << "the code is additive: the message text is unchanged:\n" << d;
 }
 
+// --- `-o` + --diagnostics=json (issue #73) ------------------------------------
+//
+// Linking an executable hands the object to an external C driver whose own
+// output streams straight past finc into stderr -- the mixing used to put raw
+// `ld` text into the one stream the contract promises is JSON object per line.
+// So the combination is refused up front, by name, the same standard as the
+// --target refusal, and the refusal is itself a command-line error (exit 2).
+// `-c` never runs a link step, so a compile-only build is not refused.
+
+TEST(MachineContract, BuildingAnExecutableWithJsonDiagnosticsIsRefusedByName) {
+    TempFin f("fun main() <noret> {}\n");
+    const std::string exe = uniqueTempPath("fin_o_json_refused");
+    auto r = runFinc({f.str(), "-o", exe, "--diagnostics=json"});
+    std::error_code ec;
+    fs::remove(exe, ec);
+
+    EXPECT_EQ(r.exitCode, 2) << r.err;
+    EXPECT_EQ(r.out, "") << "stdout is reserved on the refusal path";
+    const std::string err = stripAnsi(r.err);
+    EXPECT_NE(err.find("'-o'"), std::string::npos)
+        << "the refusal must name -o:\n" << err;
+    EXPECT_NE(err.find("--diagnostics=json"), std::string::npos)
+        << "the refusal must name --diagnostics=json:\n" << err;
+    EXPECT_NE(err.find("'-c'"), std::string::npos)
+        << "the refusal must point at the compile-then-link workaround:\n" << err;
+    EXPECT_FALSE(fs::exists(exe)) << "a refused build writes no artifact";
+}
+
+TEST(MachineContract, TheExecutableJsonRefusalIsPureJsonlWithATerminalSummary) {
+    TempFin f("fun main() <noret> {}\n");
+    const std::string exe = uniqueTempPath("fin_o_json_shape");
+    auto r = runFinc({f.str(), "-o", exe, "--diagnostics=json"});
+    std::error_code ec;
+    fs::remove(exe, ec);
+
+    auto lines = jsonLines(r.err);
+    ASSERT_GE(lines.size(), 2u) << r.err;
+    for (const auto& l : lines) {
+        EXPECT_EQ(l.front(), '{') << l;
+        EXPECT_EQ(l.back(), '}') << l;
+    }
+    EXPECT_NE(lines.front().find("\"kind\":\"diagnostic\""), std::string::npos)
+        << lines.front();
+    EXPECT_NE(lines.back().find("\"kind\":\"summary\""), std::string::npos)
+        << lines.back();
+    EXPECT_NE(lines.back().find("\"exitCode\":2"), std::string::npos) << lines.back();
+    EXPECT_NE(lines.back().find("\"status\":\"failed\""), std::string::npos)
+        << lines.back();
+}
+
+TEST(MachineContract, TheExecutableJsonRefusalDoesNotDependOnFlagOrder) {
+    // `--diagnostics=` may be written after the mistake it renders, so the
+    // refusal cannot depend on argv order either.
+    TempFin f("fun main() <noret> {}\n");
+    const std::string exe = uniqueTempPath("fin_o_json_order");
+    auto r = runFinc({"--diagnostics=json", f.str(), "-o", exe});
+    std::error_code ec;
+    fs::remove(exe, ec);
+
+    EXPECT_EQ(r.exitCode, 2) << r.err;
+    EXPECT_NE(r.err.find("'-o'"), std::string::npos) << r.err;
+}
+
+TEST(JsonDiagnostics, ACompileOnlyJsonBuildIsNotRefused) {
+    // The rejection is scoped to executable builds exactly, not to the `-o`
+    // flag in general: `-c -o` names an object and nothing is linked, so there
+    // is no C driver to leak. (Valid but backend-less configs still exit 1 with
+    // their own refusal here; only *this* refusal is asserted absent.)
+    TempFin f("fun main() <noret> {}\n");
+    const std::string obj = uniqueTempPath("fin_c_json", ".o");
+    auto r = runFinc({f.str(), "-c", "-o", obj, "--diagnostics=json"},
+                     {{"FIN_LIBS", kUnset}});
+    std::error_code ec;
+    fs::remove(obj, ec);
+
+    EXPECT_EQ(stripAnsi(r.err).find("cannot be combined"), std::string::npos)
+        << "a compile-only build has no link step to refuse:\n" << r.err;
+}
+
+#ifdef FIN_TESTS_HAVE_BACKEND
+TEST(JsonDiagnostics, ACompileOnlyJsonBuildStillSucceeds) {
+    TempFin f("fun main() <noret> {}\n");
+    const std::string obj = uniqueTempPath("fin_c_json_ok", ".o");
+    auto r = runFinc({f.str(), "-c", "-o", obj, "--diagnostics=json"},
+                     {{"FIN_LIBS", kUnset}});
+    std::error_code ec;
+    fs::remove(obj, ec);
+
+    ASSERT_EQ(jsonLines(r.err).size(), 1u) << r.err;
+    EXPECT_NE(r.err.find("\"kind\":\"summary\""), std::string::npos) << r.err;
+    EXPECT_NE(r.err.find("\"exitCode\":0"), std::string::npos) << r.err;
+    EXPECT_NE(r.err.find("\"status\":\"ok\""), std::string::npos) << r.err;
+}
+#endif
+
 // --- Library search paths ---------------------------------------------------
 //
 // `import "mylib";` gives the compiler no path, so the only way it can resolve
