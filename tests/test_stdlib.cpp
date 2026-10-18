@@ -1060,7 +1060,7 @@ TEST(Soundness_BundledStdlib, EveryModuleChecksCleanThroughAnImport) {
     // to be clean by the route a program actually uses.
     for (const char* module : {"error", "collection", "hashmap", "types", "typing",
                                "enums", "operators", "stdptr", "stdio", "strings",
-                               "math", "networking"}) {
+                               "math", "networking", "outcome"}) {
         const std::string err =
             bundledErr(std::string("import ") + module + ";\nfun main() <noret> {}\n");
         EXPECT_EQ(errorCount(err), 0u)
@@ -1253,6 +1253,128 @@ TEST(Soundness_BundledStdlib, AnEnumMethodTakesItsReceiverAsItsFirstParameter) {
            "and typing.fin's signatures need re-reading.\n"
         << err;
 }
+
+// ---------------------------------------------------------------------------
+// Outcome, the struct that makes recoverable errors runnable (issue #52).
+//
+// `typing::std` declares `Result<T,E>` with the method names a caller wants and
+// payload enums are refused in codegen (ADR 0037), so until now a recoverable
+// error was a `blame`-abort or a hand-rolled status code. `outcome::std` is the
+// struct version: `Outcome<T>` with `Ok<T>`/`Err<T>` free constructors and
+// `is_ok`/`is_err`/`unwrap_or`/`expect` on the struct -- the API exactly as the
+// issue writes it, nothing more.
+//
+// These pair a positive case with a negative one like every surface test above,
+// and the runnable half guards itself like every build-and-run here.
+
+TEST(Soundness_Outcome, TheStructSurfaceResolves) {
+    // issue #52's API at every call shape: both constructors, all four methods,
+    // and the fields the issue publishes. The `let r <auto>` spelling of the
+    // constructor's result and the `let bad <Outcome<int>>` spelling of both
+    // are deliberate: a caller who writes the type out and one who doesn't
+    // must both resolve.
+    const std::string err = bundledErr(program(
+        "import { Outcome, Ok, Err } from outcome::std;\n",
+        "  let r <auto> = Ok::<int>(80);\n"
+        "  blame r.is_ok();\n"
+        "  let bad <Outcome<int>> = Err::<int>(\"bad port\");\n"
+        "  blame bad.is_err();\n"
+        "  blame bad.ok == false;\n"
+        "  let fallback <int> = bad.unwrap_or(-1);\n"
+        "  let msg <string> = bad.message;\n"
+        "  bad.expect(\"surface probe\");\n"));
+    EXPECT_EQ(errorCount(err), 0u)
+        << "Outcome's surface stopped resolving. The struct literal inside the\n"
+           "constructors is the module's own, so a failure here is the import\n"
+           "route or a declaration, not the literal:\n"
+        << err;
+}
+
+TEST(Soundness_Outcome, AConstructorArgumentIsChecked) {
+    // The negative half: `Ok::<int>` handed a string must still be an argument
+    // error, not a silent accept. Without it, a constructor that lost its
+    // parameter types to a catch-all would pass the test above.
+    const std::string err = bundledErr(program(
+        "import { Ok } from outcome::std;\n",
+        "  let r <auto> = Ok::<int>(\"x\");\n"));
+    EXPECT_NE(err.find("expected 'int', got 'string'"), std::string::npos)
+        << "the generic constructor call must keep being checked:\n"
+        << err;
+}
+
+#ifdef FIN_TESTS_HAVE_BACKEND
+
+TEST(Soundness_Outcome, TheIssueExampleRunsAndSaysSo) {
+    // The issue's normative program, verbatim but for the module spelling that
+    // ships (`outcome::std`). Every line is a `blame` on a measured value: an
+    // Ok carries 80 through `unwrap_or` and an Err falls back to `-1`, so a
+    // constructor that swapped its fields, or an `unwrap_or` that read the
+    // field it should not, compiles exactly as cleanly and fails exactly here.
+    EXPECT_EQ(buildBundledAndRun(
+                  "import { Outcome, Ok, Err } from outcome::std;\n"
+                  "fun parse_port(text: string) <Outcome<int>> {\n"
+                  "    if (text == \"80\") { return Ok::<int>(80); }\n"
+                  "    return Err::<int>(\"bad port\");\n"
+                  "}\n"
+                  "fun main() <noret> {\n"
+                  "    let r <Outcome<int>> = parse_port(\"80\");\n"
+                  "    blame r.is_ok();\n"
+                  "    blame r.unwrap_or(-1) == 80;\n"
+                  "    let bad <Outcome<int>> = parse_port(\"xx\");\n"
+                  "    blame bad.is_err();\n"
+                  "    blame bad.unwrap_or(-1) == -1;\n"
+                  "}\n"),
+              "");
+}
+
+TEST(Soundness_Outcome, ExpectOnAnErrAbortsAndUnreachableCodeStaysUnreached) {
+    // `expect(msg)` is `blame self.ok, msg`: the abort happens where the Err
+    // was, the message reaches stderr, and the `unreachable` print after it
+    // must not be there. The program-exited form of `buildBundledAndRun`'s
+    // return names both halves, so this is made to fail on the abort itself.
+    const std::string out = buildBundledAndRun(
+        "import { Outcome, Err } from outcome::std;\n"
+        "fun main() <noret> {\n"
+        "    let bad <Outcome<int>> = Err::<int>(\"input only reached expect\");\n"
+        "    bad.expect(\"port must be numeric\");\n"
+        "    printf(\"unreachable\\n\");\n"
+        "}\n");
+    EXPECT_NE(out.find("program exited non-zero"), std::string::npos)
+        << "an Err's `expect` must abort, not return:\n" << out;
+    EXPECT_NE(out.find("assertion failed: port must be numeric"), std::string::npos)
+        << "the caller's message is the whole point of the abort:\n" << out;
+    EXPECT_EQ(out.find("unreachable"), std::string::npos)
+        << "whatever follows an aborted `expect` must not run:\n" << out;
+}
+
+TEST(Soundness_Outcome, ThePropagationPatternRelaysAnErrInExecutableForm) {
+    // The one pattern the module states, as an executable: a caller relays an
+    // Err through `if (!r.ok) { return Err::<int>(r.message); }` and carries a
+    // value on with `r.value` (lib/std/outcome.fin's doc comment). Both runs
+    // are blamed, so a relay that swapped `ok`'s sense or dropped the value
+    // fails here rather than in a caller.
+    EXPECT_EQ(buildBundledAndRun(
+                  "import { Outcome, Ok, Err } from outcome::std;\n"
+                  "fun parse_port(text: string) <Outcome<int>> {\n"
+                  "    if (text == \"80\") { return Ok::<int>(80); }\n"
+                  "    return Err::<int>(\"bad port\");\n"
+                  "}\n"
+                  "fun relay(text: string) <Outcome<int>> {\n"
+                  "    let r <Outcome<int>> = parse_port(text);\n"
+                  "    if (!r.ok) { return Err::<int>(r.message); }\n"
+                  "    return Ok::<int>(r.value);\n"
+                  "}\n"
+                  "fun main() <noret> {\n"
+                  "    let good <Outcome<int>> = relay(\"80\");\n"
+                  "    let bad <Outcome<int>> = relay(\"xx\");\n"
+                  "    blame good.unwrap_or(-1) == 80;\n"
+                  "    blame bad.is_err();\n"
+                  "    blame bad.unwrap_or(-1) == -1;\n"
+                  "}\n"),
+              "");
+}
+
+#endif  // FIN_TESTS_HAVE_BACKEND
 
 TEST(Soundness_BundledStdlib, TheIOResultAndFileSurfacesResolve) {
     const std::string err = bundledErr(program(

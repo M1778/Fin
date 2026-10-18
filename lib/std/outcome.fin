@@ -1,0 +1,100 @@
+// Outcome: the recoverable-error value that lowers today.
+//
+// tests/samples/stdlib/outcome.fin is the specification and this module is the
+// shipped form of it: one struct, two constructors, four methods, all concrete.
+// `Outcome<T>` is a plain generic struct and nothing here depends on a payload
+// enum -- `typing::std` declares `Result<T,E>` with the method names a caller
+// wants, and that type is refused in codegen (`a generic enum 'Result' is not
+// lowered yet`, ADR 0037), so recoverable errors have had no runnable idiom: a
+// caller either `blame`-aborts or hands out status codes. This is the struct
+// version that lowers NOW. When payload enums land, `Outcome` becomes an alias
+// of the real enum and the spellings here keep compiling; that compat note is
+// recorded in issue #52 and nowhere this side of the compiler.
+//
+// THE CONSTRUCTORS ARE FREE FUNCTIONS, and that is a decision about syntax and
+// not taste: `Ok(T)`/`Err(U)` as enum members is exactly the `State::Ready`
+// member spelling (`getkeyid`/`keyidof`, lib/std/enums.fin), so the two names
+// cannot be members of anything. As free functions they are declared
+// `pub fun Ok<T>(v: T) <Outcome<T>>` and called `Ok::<int>(80)` -- the turbofish
+// is on the call, the way math.fin's `min` is. Both build and run through an
+// import.
+//
+// HOW THE VALUES ARE MADE. A bare struct literal:
+//
+//     Outcome{ok: true, value: v, message: ""}
+//
+// `new Outcome{...}` is REFUSED in codegen (`'new' of type 'Outcome' is not
+// lowered yet`), so there is no heap form anywhere -- and `Err`'s literal leaves
+// the `value` field out entirely: an Err carries no value, and none of the
+// method bodies below read one (`unwrap_or` answers on `ok` alone).
+//
+// PROPAGATION, the one pattern this module states. The nullable denullify `e?`
+// answers a `T?` holder, not an Outcome, so the route is the explicit one:
+//
+//     fun relay(text: string) <Outcome<int>> {
+//         let r <Outcome<int>> = parse_port(text);
+//         if (!r.ok) { return Err::<int>(r.message); }
+//         return Ok::<int>(r.value);
+//     }
+//
+// measured writing exactly that: both functions build, and the relayed failure
+// keeps `is_err()` true with `unwrap_or(-1) == -1` at the far end.
+//
+// OWNERSHIP OF `message`. `Err(msg)` stores the string the erring side supplied:
+// this module copies nothing and frees nothing, so the `malloc` that allocated
+// the string stays its owner and the one who releases it -- the rule
+// lib/std/strings.fin states for every string it returns, pointed the other
+// way. Nothing here reads a freed message; a caller who passes a fresh
+// allocation keeps owning it, and one who relies on a literal does not free.
+//
+// THE METHODS, and the one call-shape fact worth reading them for. A method's
+// first parameter is its receiver (`self: &Self`, the every-library-struct
+// rule), so `r.is_ok()` and `r.is_err()` take no argument, `r.unwrap_or(d)`
+// takes one, and `r.expect(msg)` takes one. `expect` is built on the assertion
+// form of `blame`: on an Err it prints the message where it failed and aborts
+// -- no unwinding, no catch, never coming back. On an Ok it is a branch
+// not taken.
+//
+// GAPS hit while writing this file:
+//
+//   * `==` on two `message`s, or a `message` and a literal, is POINTER equality
+//     with literals pooled (strings.fin records the same fact from its side).
+//     A byte comparison of a message is strings.fin's `equals`, not `==`.
+//   * A payloaded member of `Outcome` is just a struct field, so nothing here
+//     meets the erased-slot hazard typing.fin documents for `enum_.0` -- but
+//     what `unwrap_or` returns on an Err is `default` by an `if`, and a caller
+//     who reads `r.value` on an Err reads a field the constructor never set.
+//     That read is the caller's own `pub`-field question, not guarded here.
+namespace std {
+
+#[export]
+pub struct Outcome<T> {
+    pub ok <bool>,
+      pub value <T>,
+      pub message <string>,
+
+      pub fun is_ok(self: &Self) <bool> {
+        return self.ok;
+      }
+    pub fun is_err(self: &Self) <bool> {
+        return !self.ok;
+    }
+    pub fun unwrap_or(self: &Self, default: T) <T> {
+        return self.ok : self.value ? default;
+    }
+    pub fun expect(self: &Self, msg: string) <noret> {
+        blame self.ok, msg;
+    }
+}
+
+#[export]
+pub fun Ok<T>(v: T) <Outcome<T>> {
+    return Outcome{ok: true, value: v, message: ""};
+}
+
+#[export]
+pub fun Err<T>(msg: string) <Outcome<T>> {
+    return Outcome{ok: false, message: msg};
+}
+
+}

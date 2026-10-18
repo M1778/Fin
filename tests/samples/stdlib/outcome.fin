@@ -1,0 +1,54 @@
+//@ normative
+//@ ok
+// The outcome module: a recoverable-error value shaped as a struct, so it lowers
+// with today's backend. Payload enums (typing::std's Result) are declared but
+// refused in codegen, which is why this is a struct (issue #52) and why the
+// constructors are free functions rather than enum members: the `Ok(T)` spelling
+// would collide with the `State::Ready` member syntax.
+//
+// PROPAGATION is the explicit route, and it is the one this module states:
+// `if (!r.ok) { return Err::<U>(r.message); }`. The nullable `e?` denullify is
+// about a `T?` holder, not an Outcome, and is not this value's pattern.
+//
+// OWNERSHIP of `message`: the string a caller handed to `Err(msg)` is not copied
+// and not freed here; whichever `malloc` allocated it stays its owner (the same
+// rule strings.fin states for its results).
+
+namespace std {
+
+#[export]
+pub struct Outcome<T> {
+    pub ok <bool>,
+      pub value <T>,
+      pub message <string>,
+
+      // The receiver is `self`, spelled `&Self` as every other library struct's
+      // methods do, so `r.is_ok()` takes no argument and `r.unwrap_or(0)` takes
+      // one. `expect(msg)` is built on `blame`: on an Err it prints the message
+      // where it failed and aborts -- no unwinding, no catch, same as every other
+      // `blame bool, "message"`.
+      pub fun is_ok(self: &Self) <bool> {
+        return self.ok;
+      }
+    pub fun is_err(self: &Self) <bool> {
+        return !self.ok;
+    }
+    pub fun unwrap_or(self: &Self, default: T) <T> {
+        return self.ok : self.value ? default;
+    }
+    pub fun expect(self: &Self, msg: string) <noret> {
+        blame self.ok, msg;
+    }
+}
+
+#[export]
+pub fun Ok<T>(v: T) <Outcome<T>> {
+    return Outcome{ok: true, value: v, message: ""};
+}
+
+#[export]
+pub fun Err<T>(msg: string) <Outcome<T>> {
+    return Outcome{ok: false, message: msg};
+}
+
+}

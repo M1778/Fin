@@ -569,7 +569,12 @@ TEST(Census, EverySampleIsAnnotatedAndClassified) {
     // legal, and the struct-result waiver that does not also waive this check.
     // 59 -> 60: match.fin pins ADR 0050 (issue #70) -- the canonical Ok/Err
     // member dispatch plus wildcard, nullable, and constant arms, all `ok`.
-    EXPECT_EQ(t.samples, 60)
+    // 60 -> 61: tests/samples/stdlib/outcome.fin arrives for issue #52
+    // (stdlib/outcome -- a runnable Result today): the struct, the Ok/Err free
+    // constructors and the four methods, checked `ok` as a module draft while
+    // lib/std/outcome.fin ships the same API. Ratified slice, not accident;
+    // the payload-enum alias it becomes later is a separate decision.
+    EXPECT_EQ(t.samples, 61)
         << "the corpus is 51 samples. Sample code changes only by a ratified "
            "language decision (ADR 0008), so a different count is either such a "
            "decision — update this — or a file globbed in by accident";
@@ -618,7 +623,11 @@ TEST(Census, ThePassingSampleCountNeverFalls) {
     // 31 -> 43 on 2026-10-03, same mechanism: eleven promotions landed without
     // raising the floor, and the Offer task's promotion of `enums.fin` made it
     // twelve. Measured from the working tree with the task's changes built.
-    constexpr int kFloor = 43;
+    // 43 -> 50 on 2026-10-18, same mechanism again: the count moved past the
+    // floor without it being raised, and this file's `outcome.fin` sample
+    // (issue #52, `//@ normative` `//@ ok`) is one of the seven. Re-measured
+    // from the working tree with the module built and its run pins green.
+    constexpr int kFloor = 50;
 
     const auto t = census();
     EXPECT_GE(t.ok, kFloor)

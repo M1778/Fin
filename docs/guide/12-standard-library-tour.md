@@ -22,6 +22,7 @@ executable. The examples below mark those boundaries.
 | [hashmap](../../lib/std/hashmap.fin) | `HashMap<K,V>`, `HashMapError`, `map!` | Erased/custom-hasher paths and method emission have limits; `from_prototype` stores entries via `__set`, so `map!{...}` builds a populated map |
 | [types](../../lib/std/types.fin) | Numeric aliases, `Number`, `Any`, `number2str` | Alias/bound declarations do not imply working dynamic values or conversion helpers |
 | [typing](../../lib/std/typing.fin) | `Result<T,E>`, `IResult` | Generic payload enums do not build |
+| [outcome](../../lib/std/outcome.fin) | `Outcome<T>`, free-function constructors `Ok<T>`/`Err<T>`, `is_ok`/`is_err`/`unwrap_or`/`expect` | The struct form builds and runs today (`Ok::<int>(80)`, `Err::<int>(msg)`, field reads and methods probed live); bare struct literals only, `new Outcome{...}` refuses; `expect` aborts on an Err and never returns; `message` is caller-owned |
 | [enums](../../lib/std/enums.fin) | `Enum`, `EnumType`, `getkeyid`, `keyidof` | Reflection declarations are not general runtime payload dispatch |
 | [operators](../../lib/std/operators.fin) | `Add`, `Equal`, `Index`, `IndexAssign`, other operator interfaces | Some declared operators have no expression grammar or use erased results |
 | [error](../../lib/std/error.fin) | `Error`, message/code accessors | Error values do not enable catchable exceptions |
