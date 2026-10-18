@@ -12,6 +12,7 @@
 // two apart. A second copy of the names in this file would be a second place the
 // truth lives, which is the failure ADR 0008 rejects by name.
 #include "../semantics/BuiltinMacros.hpp"
+#include "../semantics/Scope.hpp"
 #include "../semantics/ComptimeInterp.hpp"
 #include "../types/Layout.hpp"
 #include "../utils/IntegerConstant.hpp"
