@@ -105,6 +105,18 @@ public:
     // delegates here in its first statement.
     std::unique_ptr<Expression> resolved_call;
 
+    // The loader's astStorage index of the module the qualifier resolved through,
+    // together with that module's source file, when the qualifier named a module and
+    // the call was NOT rewritten -- lowerModuleCall's gate returns early on a member
+    // whose declaration is not the one the root program will carry (is_ambient), and
+    // codegen's refusal reads these: the refusal of an imported Fin function blames the
+    // definition (issue #100, L2), and only the analyzer that resolved the qualifier
+    // knows which astStorage entry it belongs to and which file the body was written
+    // in (a loc answers its line and no more; the backend receives the programs and not
+    // the loader they came from). Null/empty on every other method call.
+    std::optional<size_t> member_module;
+    std::string member_module_file;
+
     MethodCall(std::unique_ptr<Expression> obj, std::string name, 
                std::vector<std::unique_ptr<Expression>> a,
                std::vector<std::unique_ptr<TypeNode>> g = {});

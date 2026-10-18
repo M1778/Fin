@@ -3,6 +3,7 @@
 #include "../../ast/exprs/MiscExpr.hpp"
 #include "../../types/TypeImpl.hpp"
 #include "../../utils/IntegerConstant.hpp"
+#include "../../utils/ModuleLoader.hpp"
 #include "../../types/Layout.hpp"
 #include "../BuiltinMacros.hpp"
 #include <fmt/core.h>
@@ -2320,6 +2321,25 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
     lastExprType = funcType->return_type;
 }
 
+// The help the two "Namespace 'X' has no exported member 'Y'" refusals carry when Y
+// names a type of the module itself (issue #100, L1). The owner ruling kept the
+// refusal: a module's types are not addressable through a dot -- the dotted type
+// spelling (`let e <stdio.IOError>`) is a parser refusal and the dot cannot construct
+// one either -- so the honest help is the spelling that does work, which is
+// constructing where a by-name binding lands. Said here rather than at both call
+// sites so the working route is written once, exactly the text the regression in
+// Soundness_Modules pins.
+static std::string moduleDotTypeHelp(const NamespaceType& ns, const std::string& member) {
+    if (!ns.scope->resolveType(member)) return {};
+    return fmt::format(
+        " -- '{}' is a type of module '{}': a module's types are not addressable through a "
+        "dot (the dotted annotation does not parse, `e <{}.{}>` is refused, and the dot "
+        "cannot construct one). Bind it plainly and construct where the binding lands: "
+        "`import {{ {} }} from {};` then `{}{{...}}` for a struct, or `{}::<K, V>()` for a "
+        "generic struct",
+        member, ns.name, ns.name, member, member, ns.name, member, member);
+}
+
 // The rewrite half of a module-qualified call (HANDOFF section 6, item 5).
 //
 // `stdio.printf("Big")` (complex.fin:14) is checked above as a call to the module member
@@ -2369,7 +2389,18 @@ void SemanticAnalyzer::visit(FunctionCall& node) {
 // is what holds the front end to it.
 void SemanticAnalyzer::lowerModuleCall(MethodCall& node, const NamespaceType& ns,
                                        const Symbol& member) {
-    if (!member.is_ambient) return;
+    if (!member.is_ambient) {
+        // Recorded for the refusal the backend raises on this spelling (issue #100, L2):
+        // it blames a definition only when it names the astStorage entry the member
+        // genuinely resolved through -- never a name match across modules, which two
+        // modules publishing a `join` would turn into a lie about where a body lives.
+        if (loader) {
+            node.member_module = loader->indexOfModule(ns.scope);
+            node.member_module_file =
+                node.member_module ? loader->fileOfModule(*node.member_module) : std::string();
+        }
+        return;
+    }
 
     // Moved, not copied. Two owners of one argument expression would be walked twice by
     // anything structural, and the arguments have already been checked in place.
@@ -2481,7 +2512,10 @@ void SemanticAnalyzer::visit(MethodCall& node) {
     if (auto* ns = dynamic_cast<const NamespaceType*>(objType.get())) {
         Symbol* sym = ns->scope->resolve(node.method_name);
         if (!sym) {
-            error(node, fmt::format("Namespace '{}' has no exported member '{}'", ns->name, node.method_name));
+            std::string what = fmt::format("Namespace '{}' has no exported member '{}'",
+                                           ns->name, node.method_name);
+            what += moduleDotTypeHelp(*ns, node.method_name);
+            error(node, what);
             lastExprType = nullptr;
             return;
         }
@@ -3268,7 +3302,10 @@ void SemanticAnalyzer::visit(MemberAccess& node) {
             lastExprType = sym->type;
             return;
         }
-        error(node, fmt::format("Namespace '{}' has no exported member '{}'", ns->name, node.member));
+        std::string what = fmt::format("Namespace '{}' has no exported member '{}'",
+                                       ns->name, node.member);
+        what += moduleDotTypeHelp(*ns, node.member);
+        error(node, what);
         lastExprType = nullptr;
         return;
     }

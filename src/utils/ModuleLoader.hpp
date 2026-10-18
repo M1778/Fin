@@ -91,6 +91,28 @@ public:
     bool retainAmbientPrototype(const DefineDeclaration& decl);
     void appendAmbientPrototypes(Program& root) const;
 
+    // The retained ambient prototype for a name, and the facts the analyzer's
+    // ambient-redeclaration check (issue #100, L3) needs about it: who declared it,
+    // the file it was declared in, and the symbol it binds (computed here, where the
+    // retained declaration was read, because the symbol reading has no other caller
+    // outside this loader). The file travels with the prototype because a loc carries
+    // only a line -- a node's `filename` is the lexer's per-parse pointer, safe to
+    // read at render time from a node in THIS file and not from a copy that came out
+    // of a module's. `decl` is borrowed like `modulePrograms()` above; null on
+    // nothing, first-wins as retention goes.
+    struct Retained {
+        const DefineDeclaration* decl = nullptr;
+        std::string symbol;
+        std::string file;
+    };
+    Retained retainedPrototype(const std::string& name) const;
+
+    // The file each entry of modulePrograms() was read from, by the same index (issue
+    // #100, L2): the refusal of an imported Fin function called through a qualifier
+    // blames the definition, and the importing file's loc has no file of its own for a
+    // node that was never written there. Empty on nothing.
+    std::string fileOfModule(size_t index) const;
+
 private:
     DiagnosticEngine* diags = nullptr;
     std::string rootBasePath; // Directory of the current file
@@ -132,6 +154,19 @@ private:
     // module's AST. First declaration of a name wins, which is the rule
     // `Scope::resolve` and `declareFunction` already follow.
     std::vector<std::unique_ptr<DefineDeclaration>> ambientPrototypes;
+
+    // The file each retained prototype was declared in, aligned with the vector above
+    // (see `retainedPrototype`): the shared ambient scope outlives the parse that
+    // published into it, and a loc cannot answer which file a node came from.
+    std::vector<std::string> ambientFiles;
+
+    // The file the parse being analysed came from: set by `beginRootFile` for the file
+    // named on the command line and by a load for the module it resolved, restored on
+    // the way out so a nested import cannot age the parent's entries.
+    std::string analyzingFile;
+
+    // The source file of every astStorage entry, keyed by index (see `fileOfModule`).
+    std::unordered_map<size_t, std::string> astFiles;
 
     // The symbol an `@define` names -- its valued `#[llvm_name]`, or its Fin name.
     static std::string symbolOf(const DefineDeclaration& decl);

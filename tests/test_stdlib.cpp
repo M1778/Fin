@@ -351,26 +351,30 @@ TEST(Soundness_Modules, AnUnknownModuleMemberIsReportedWhetherReadOrCalled) {
     }
 }
 
-TEST(KnownDefect_Modules, AModuleStructIsNotConstructibleThroughADot) {
-    // Known defect: #100 (tracked; see issue for inversion target).
-    // `stdio.IOError("x")` resolves the name -- lib/std/stdio.fin exports the struct --
-    // and then finds no FunctionType behind it, because a struct's constructors live on
-    // its StructType and the namespace branch only looks in the value table.
-    //
-    // Left alone because the dot is not the only half that is missing: `let e <stdio.IOError>;`
-    // is a *syntax* error (`unexpected DOT, expecting GT`), so a module's types cannot be
-    // named in a type position at all, and making them constructible while they stay
-    // unwritable would be a strange place to stop. The corpus writes neither -- complex.fin
-    // needs only the function call -- so both wait on whoever rules on namespace
-    // semantics. Inverts into Soundness_Modules.AModuleStructIsConstructibleThroughADot
-    // together with the type-position grammar.
-    const std::string err = stripAnsi(compileBundled(
-        "import stdio;\n"
-        "fun main() <int> { stdio.IOError(); return 0; }\n").err);
-    EXPECT_NE(errorCount(err), 0u)
-        << "FIXED: a module's struct is now constructible through a dot. Check that "
-           "`let e <stdio.IOError>;` parses too, then invert this.\n"
-        << err;
+TEST(Soundness_Modules, AModuleTypeNamedThroughADotRefusesAndNamesTheBynameRoute) {
+    // Was KnownDefect_Modules.AModuleStructIsNotConstructibleThroughADot, #100. The
+    // owner ruling kept the refusal and charged it with naming the route that works.
+    // A module's types are not addressable through a dot: the dotted type spelling is
+    // a parser refusal (`let e <stdio.IOError>` reports `unexpected DOT`), the dot's
+    // call path finds no value under the name, and making construction work here
+    // would strand the plain call behind a by-name import (`a call to 'IOError' is
+    // not lowered yet`). What does work is binding the name plainly and constructing
+    // where the binding lands, and both the call and the read must say so
+    // (AnUnknownModuleMemberIsReportedWhetherReadOrCalled holds the two spellings
+    // together).
+    for (const char* code : {"import stdio;\n"
+                             "fun main() <int> { stdio.IOError(); return 0; }\n",
+                             "import stdio;\n"
+                             "fun main() <int> { let e <auto> = stdio.IOError; return 0; }\n"}) {
+        const std::string err = stripAnsi(compileBundled(code).err);
+        EXPECT_NE(err.find("Namespace 'stdio' has no exported member 'IOError'"),
+                  std::string::npos) << code << err;
+        EXPECT_NE(err.find("import { IOError } from stdio;"), std::string::npos)
+            << "the refusal must name the route that works\n" << code << err;
+        EXPECT_NE(err.find("`IOError{"), std::string::npos)
+            << "the construction form must be the brace literal, not a plain call:\n"
+            << code << err;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -601,22 +605,27 @@ TEST(Soundness_Modules, AnImportedGenericStructInstantiatesOnDemand) {
     EXPECT_EQ(err.find("explicit generic arguments"), std::string::npos) << err;
 }
 
-TEST(KnownDefect_Modules, AnImportedFinFunctionIsNotLoweredThroughADot) {
-    // Known defect: #100 (tracked; see issue for inversion target).
-    // The other half of the same gap, and the larger one: a Fin function with a body in a
-    // loaded module is not lowered under any spelling. Its definition stays in the
-    // loader's `astStorage`, where the backend never looks, so the root object has no copy
-    // of it -- this waits on separate compilation, not on the qualifier, and rewriting it
-    // would only move the refusal onto a different name.
+TEST(Soundness_Modules, AnImportedFinFunctionDotRefusalBlamesTheModuleDefinition) {
+    // Was KnownDefect_Modules.AnImportedFinFunctionIsNotLoweredThroughADot, #100. The
+    // owner ruling kept the refusal -- the definition is a module body and its AST
+    // stays in the loader's astStorage, where the backend never looks, so rewriting
+    // the qualifier would only move the refusal onto a different name -- and
+    // sharpened it into a blame: the refusal says the definition is in the module's
+    // own file at its own line, that a module body does not reach a file which calls
+    // it through a qualifier until separate compilation, and that the spellings not
+    // held back by that are the by-name plain call and a local wrapper.
     const std::string err = buildErr(
         "import stdio;\n"
         "fun main() <noret> { stdio.println(\"x\"); }\n");
     EXPECT_NE(err.find("the receiver of a call to the method 'println' on a value with no "
                        "address"), std::string::npos)
-        << "GOOD NEWS: an imported Fin function lowers. That is separate compilation\n"
-           "rather than a namespace fix -- check the module's object is actually linked\n"
-           "in before inverting this.\n"
         << err;
+    EXPECT_NE(err.find("stdio.fin"), std::string::npos)
+        << "the refusal must blame the file the definition lives in\n" << err;
+    EXPECT_NE(err.find("defined at"), std::string::npos) << err;
+    EXPECT_NE(err.find("separate compilation"), std::string::npos) << err;
+    EXPECT_NE(err.find("import { println }"), std::string::npos)
+        << "the by-name route must be named as what lowers\n" << err;
 }
 
 #ifdef FIN_TESTS_HAVE_BACKEND
@@ -629,6 +638,20 @@ TEST(Soundness_Modules, TheModulesPrintfLowersAndRunsThroughAQualifier) {
                   "import stdio::std as stdio;\n"
                   "fun main() <noret> { stdio.printf(\"%d\\n\", 41 + 1); }\n"),
               "42\n");
+}
+
+TEST(Soundness_Modules, AnImportedStructBynameConstructsAndRuns) {
+    // The route the dotted refusal points at, pinned as a run so the help text cannot
+    // drift into promising what no longer works: after `import { IOError } from stdio;`
+    // the type is where the file itself is bound, and constructing it there is an
+    // ordinary struct literal.
+    EXPECT_EQ(buildBundledAndRun(
+                  "import { IOError } from stdio;\n"
+                  "fun main() <noret> {\n"
+                  "    let e <IOError> = IOError{};\n"
+                  "    printf(\"ok\\n\");\n"
+                  "}\n"),
+              "ok\n");
 }
 
 TEST(Soundness_Modules, AQualifiedCallLowersWhereverAnExpressionGoes) {
@@ -718,44 +741,44 @@ TEST(Soundness_Modules, AModuleBodyKeepsItsOwnFunctionWhenTheRootCallsTheOtherOn
               "a/b ba\n");
 }
 
-TEST(KnownDefect_Modules, RenamingAnAmbientNameInTheRootFileBreaksBothSpellingsAlike) {
-    // Known defect: #100 (tracked; see issue for inversion target).
-    // The residual hazard, booked rather than repaired, and bookable because the two
-    // spellings now agree. A file that redeclares an ambient name wins in
-    // `declareFunction` -- first declaration wins, and the splice is appended -- so the
-    // plain call goes to *its* symbol, and after the rewrite the qualified call goes there
-    // too. Here that symbol is `twin`, which no C library defines, and both fail at the
-    // link.
-    //
-    // Not repaired here because it is not a namespace fault: the plain call in this file
-    // was already broken before any rewrite existed, and the second assertion is what
-    // says so. Making the qualified spelling link while the plain one does not, in one
-    // file, would be worse than both failing. It is `#[overwrite]`'s question -- which of
-    // two declarations of a name wins, and under whose symbol -- and it is due whoever
-    // rules on that. `printf` never shows it because the corpus samples that redeclare it
-    // write no `#[llvm_name]`, so their symbol and the bundle's are the same string.
+TEST(Soundness_Modules, APlainRedeclarationOfAnAmbientNameRefusesWithoutOverwrite) {
+    // Was KnownDefect_Modules.RenamingAnAmbientNameInTheRootFileBreaksBothSpellingsAlike,
+    // #100. A plain redeclaration of a name a module publishes ambient was taken in
+    // silence, and the file's own declaration won: first-wins in declareFunction kept
+    // its symbol, the rewrite spent the qualifier on the plain name, and the symbol
+    // nothing defined failed at the link -- both spellings broken, no word at compile.
+    // The owner ruling made it the duplicate a redeclaration in one file has been
+    // since the duplicates fix: refused without `#[overwrite]`, and the opt-in
+    // replaces the ambient definition in this file -- whereupon both spellings call
+    // the file's own declaration, which is the "under whose symbol" the comment on
+    // the old defect filed to the ruling.
     TempModuleDir d;
     d.write("amod.fin", kTwinAsAbs);
     const std::string plain = buildErrWithModule(
         "import amod as a;\n"
         "@define twin(v: int) <int>;\n"
         "fun main() <noret> { printf(\"%d\\n\", twin(0 - 7)); }\n", d.path());
-    EXPECT_NE(plain.find("link failed"), std::string::npos)
-        << "the plain call is the baseline this defect is measured against, and it is\n"
-           "expected to fail the link: the file's own `twin` wins and names a symbol\n"
-           "nothing defines.\n"
-        << plain;
+    EXPECT_EQ(plain.find("link failed"), std::string::npos)
+        << "the refusal must arrive at compile, not at the link:\n" << plain;
+    EXPECT_NE(plain.find("'twin'"), std::string::npos) << plain;
+    EXPECT_NE(plain.find("amod.fin"), std::string::npos)
+        << "the ambient declaration the file collides with must be named:\n" << plain;
+    EXPECT_NE(plain.find("#[overwrite(twin)]"), std::string::npos) << plain;
 
-    const std::string qualified = buildErrWithModule(
-        "import amod as a;\n"
-        "@define twin(v: int) <int>;\n"
-        "fun main() <noret> { printf(\"%d\\n\", a.twin(0 - 7)); }\n", d.path());
-    EXPECT_NE(qualified.find("link failed"), std::string::npos)
-        << "GOOD NEWS, maybe: the qualified spelling no longer fails the way the plain\n"
-           "one does. Check which symbol it reached. If it reached the module's, then two\n"
-           "spellings of one call in one file now disagree, which is a worse state than\n"
-           "this defect -- read the note above before inverting anything.\n"
-        << qualified;
+    // The opt-in, run rather than merely compiled. The file's own declaration replaces
+    // the ambient one in this program, and first-wins in the backend keeps it -- so for
+    // the file's bare prototype (nothing behind it) to link, it must name the symbol the
+    // ambient definition already publishes, which is the second route the refusal
+    // spells: twin(-7) through both spellings is C's `abs`, answering 7 because no
+    // stub with a foreign symbol is standing where the calls land.
+    EXPECT_EQ(buildWithModuleAndRun(
+                  "import amod as a;\n"
+                  "#[overwrite(twin)]\n"
+                  "#[llvm_name=\"abs\"]\n"
+                  "@define twin(v: int) <int>;\n"
+                  "fun main() <noret> { printf(\"%d %d\\n\", twin(0 - 7), a.twin(0 - 7)); }\n",
+                  d.path()),
+              "7 7\n");
 }
 
 #endif  // FIN_TESTS_HAVE_BACKEND

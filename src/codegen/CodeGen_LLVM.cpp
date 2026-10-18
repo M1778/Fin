@@ -5760,6 +5760,13 @@ private:
             if (attr->name == "llvm_name" && !attr->is_flag) continue;
             if (attr->name == kGlobalAttribute && attr->is_flag) continue;
             if (attr->name == "export" && attr->is_flag) continue;
+            // Issue #100, L3: the duplicate `#[overwrite]` guards was arbitrated in the
+            // front end before this tree existed -- that is why the declaration is here
+            // -- and it asks nothing of the object file. The declaration it marks is the
+            // root program's own and first-wins in `declareFunction` keeps it, which is
+            // the arbitration "ignore the current definition" asks for; the symbol it
+            // binds is `#[llvm_name]`'s answer, read at the same table as any `@define`.
+            if (attr->name == "overwrite") continue;
             unsupported(node, fmt::format("the attribute '{}' on a '@define'", attr->name));
             return false;
         }
@@ -14658,8 +14665,34 @@ private:
             return;
         }
         if (!receiver) {
-            unsupported(node, fmt::format("the receiver of a call to the method '{}' on "
-                                          "a value with no address", node.method_name));
+            std::string what = fmt::format("the receiver of a call to the method '{}' on "
+                                           "a value with no address", node.method_name);
+            // Issue #100, L2: a module-qualified call whose member the front end could
+            // not rewrite -- the member's declaration is not the one the root program
+            // carries -- lands here with the qualifier's module recorded during
+            // resolution (lowerModuleCall's early return). The refusal blames that
+            // module's definition and only here: `member_module` is the astStorage
+            // entry the member resolved through, never a name matched across modules,
+            // so two modules publishing a stretched `join` neither of them blames for
+            // the other's body.
+            if (node.member_module && *node.member_module < modules_.size()) {
+                for (const auto& stmt : modules_[*node.member_module]->statements) {
+                    const auto* fn = dynamic_cast<const FunctionDeclaration*>(stmt.get());
+                    if (!fn || fn->name != node.method_name || fn->body == nullptr) continue;
+                    what = fmt::format(
+                        "the receiver of a call to the method '{}' on a value with no "
+                        "address -- '{}' is a function with a body defined at {}:{}, and a "
+                        "module body does not reach a file that calls it through a "
+                        "qualifier: the module's own object is the one that lowers it, "
+                        "which is separate compilation. Bind it by name from the module "
+                        "the qualifier named (`import {{ {} }}`) and call it plainly, or "
+                        "write the body this file needs",
+                        node.method_name, node.method_name,
+                        node.member_module_file, fn->loc.begin.line, node.method_name);
+                    break;
+                }
+            }
+            unsupported(node, what);
             return;
         }
         if (!receiver->type.structInfo) {

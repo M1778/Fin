@@ -220,6 +220,7 @@ void ModuleLoader::beginRootFile(const std::string& path) {
     // Keyed the same way every other entry is, so the root is recognised however an
     // import spells it -- "main", "./main", or a symlink to it.
     loadingStack.insert(identityOf(path));
+    analyzingFile = path;
 }
 
 void ModuleLoader::loadGlobalModuleIfPresent(const std::string& importPath, bool isPackage,
@@ -273,6 +274,13 @@ std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, b
     }
     
     loadingStack.insert(key);
+
+    // The file this load will analyse, so a `#[global]` declaration retained out of it
+    // (`retainAmbientPrototype`, issue #100) records where it was written. Restored on
+    // every way out: a nested import's analysis must not age the parent's entries, and
+    // the parent's analysis continues after the child finishes.
+    const std::string outerAnalyzingFile = analyzingFile;
+    analyzingFile = fullPath;
 
     // 4. Read & Preprocess
     std::optional<std::string> contents = readFile(fullPath);
@@ -337,6 +345,7 @@ std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, b
         failedPaths.insert(key);
         loadingStack.erase(key);
         fin::root = std::move(oldRoot);
+        analyzingFile = outerAnalyzingFile;
         return nullptr;
     }
 
@@ -359,6 +368,7 @@ std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, b
         report(fmt::format("semantic errors in module: {}", fullPath));
         failedPaths.insert(key);
         loadingStack.erase(key);
+        analyzingFile = outerAnalyzingFile;
         return nullptr;
     }
 
@@ -370,8 +380,10 @@ std::shared_ptr<Scope> ModuleLoader::loadModule(const std::string& importPath, b
 
     astStorage.push_back(std::move(moduleAST));
     scopeModuleIndex_[moduleScope.get()] = astStorage.size() - 1;
+    astFiles[astStorage.size() - 1] = fullPath;
     moduleCache[key] = moduleScope;
     loadingStack.erase(key);
+    analyzingFile = outerAnalyzingFile;
     
     return moduleScope;
 }
@@ -401,6 +413,9 @@ bool ModuleLoader::retainAmbientPrototype(const DefineDeclaration& decl) {
 
     CloneVisitor cloner;
     ambientPrototypes.push_back(cloner.clone(&decl));
+    // Aligned with the push above: where the declaration was written, read back by
+    // `retainedPrototype` for the ambient-redeclaration diagnostic (issue #100, L3).
+    ambientFiles.push_back(analyzingFile);
     return true;
 }
 
@@ -414,6 +429,25 @@ std::string ModuleLoader::symbolOf(const DefineDeclaration& decl) {
     for (const auto& attr : decl.attributes)
         if (attr && attr->name == "llvm_name" && !attr->is_flag) return attr->value_str;
     return decl.name;
+}
+
+// The retained set is walked by name and answered with the first entry, because first
+// retention wins: a second `#[global]` declaration of the name is refused or recorded
+// as one fact, and either way the splice carries exactly this one
+// (ModuleLoader::retainAmbientPrototype's comment). `ambientFiles` runs one entry per
+// retained prototype, pushed beside it, so the file and the declaration must agree on
+// the index -- aligned exactly like `astFiles` is with `astStorage`.
+ModuleLoader::Retained ModuleLoader::retainedPrototype(const std::string& name) const {
+    for (size_t i = 0; i < ambientPrototypes.size(); ++i)
+        if (ambientPrototypes[i]->name == name)
+            return {ambientPrototypes[i].get(), symbolOf(*ambientPrototypes[i]),
+                    ambientFiles[i]};
+    return {nullptr, {}, {}};
+}
+
+std::string ModuleLoader::fileOfModule(size_t index) const {
+    auto it = astFiles.find(index);
+    return it == astFiles.end() ? std::string() : it->second;
 }
 
 // Splices a prototype for every ambiently-published extern into the root program.

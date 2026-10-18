@@ -37,6 +37,66 @@ bool SemanticAnalyzer::checkDuplicateDeclaration(
     if (!scope) return false;
     // `_` is the blank: a discard, not a binding, so it never collides with itself.
     if (name == "_") return false;
+
+    // An ambient name is read back from the shared scope the loader owns (it sits under
+    // this file's global scope), which is why a redeclaration of one in this file never
+    // met a duplicate refusal: the ambient binding is not in `scope->symbols`, and it
+    // arrives after the front end too (ModuleLoader::appendAmbientPrototypes). It is
+    // exactly the collision the KnownDefect in #100 measured: the file's declaration
+    // won first-wins in the backend, the rewrite spent the qualifier on the plain
+    // name, and both spellings failed the link on a symbol nothing defines.
+    //
+    // Refused here, at file level only, under the same rule a second declaration in one
+    // file has followed since the duplicates fix. Two carve-outs, both settled: a
+    // `#[global]`-stamped declaration is publishIfGlobal's contract (a differing type is
+    // refused there; a same-symbol publishing is one fact), and a declaration naming the
+    // ambient declaration's own symbol is one fact by the same reading -- the corpus's
+    // fourteen bare `@define printf` lines and complex.fin's differing-signature printf
+    // all bind the symbol `printf` the module already names, and today they only work
+    // because first-wins agrees with them. `#[overwrite]` is the ask-me-first: it means
+    // this file's declaration replaces the ambient one for this file ("ignore the
+    // current definition", as stdio.fin's comment puts it).
+    if (loader && scope == globalScope.get() && globalScope->parent) {
+        if (globalScope->parent->resolve(name)) {
+            bool consented = false;
+            std::string newSymbol = name;
+            for (const auto& a : attrs) {
+                if (!a) continue;
+                if (a->name == "overwrite" &&
+                    (a->is_flag || a->value_str.empty() || a->value_str == name)) {
+                    consented = true;
+                    break;
+                }
+                if (a->name == kGlobalAttribute && a->is_flag) {
+                    consented = true;
+                    break;
+                }
+                if (a->name == "llvm_name" && !a->is_flag) newSymbol = a->value_str;
+            }
+            const ModuleLoader::Retained ambient = consented
+                ? ModuleLoader::Retained{}
+                : loader->retainedPrototype(name);
+            if (ambient.decl && newSymbol != ambient.symbol) {
+                std::string where;
+                if (!ambient.file.empty())
+                    where = fmt::format("(#[global], symbol '{}', at {}:{})",
+                                        ambient.symbol, ambient.file,
+                                        ambient.decl->loc.begin.line);
+                else
+                    where = fmt::format("(#[global], symbol '{}', at line {} of the module)",
+                                        ambient.symbol, ambient.decl->loc.begin.line);
+                error(node, fmt::format(
+                          "'{}' is already declared ambiently {}; declaring it here again "
+                          "takes the name back from both spellings, and the plain call "
+                          "fails the link on a symbol nothing defines. Name the same "
+                          "symbol with '#[llvm_name=\"{}\"]', or mark it '#[overwrite({})]' "
+                          "to replace the ambient definition in this file",
+                          name, where, newSymbol, name));
+                return true;
+            }
+        }
+    }
+
     auto it = scope->symbols.find(name);
     if (it == scope->symbols.end()) return false;
     const Symbol& existing = it->second;

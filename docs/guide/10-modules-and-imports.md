@@ -40,14 +40,22 @@ extern (for example `stdio.io_fflush`) is refused in the front end instead of
 lowered. To use such an extern, re-declare it in the file that calls it or
 mark it `#[global]` in its module.
 
+A module's *types* are refused through a dot as well (`stdio.IOError()` reports
+`Namespace ... has no exported member ...` and names the route that works):
+import the type by name and construct it where the binding lands --
+`IOError{...}` for a struct, `HashMap::<string, int>()` for a generic template.
+
 ## What crosses the backend boundary
 
 Imported generic structs can instantiate in the root program. Whether an ordinary
 imported Fin function body reaches the backend depends on the call: many library
 calls (`println_str`, `len`, `split_str`, `replace`, `print_bool`, `copy_file`)
-build and run, while other paths are still refused. Resolving the function's
-signature does not by itself make a call executable, so build the program to
-confirm. This example builds and runs:
+build and run, while other paths are still refused. A module-qualified call of an
+imported Fin function (`stdio.println("x")`) is one of the refusals, and it names
+the definition: its file and line in the module, plus the two spellings that
+lower (the by-name plain call, or a local `@define` wrapper). Resolving the
+function's signature does not by itself make a call executable, so build the
+program to confirm. This example builds and runs:
 
 ```fin
 import { println_str } from stdio::std;
@@ -134,6 +142,9 @@ compiler can build for the actual use site.
 `#[global]` permits an ambient declaration only inside `namespace std`. The live
 publication path covers foreign declarations such as `printf`; it is not a way
 for an application to install arbitrary global functions. `format!` is separately
-implemented as a compiler builtin and needs no import.
+implemented as a compiler builtin and needs no import. A plain second declaration
+of an ambient name is refused (it would take the name back from both the bare and
+the qualified spellings of a call): name the same symbol with `#[llvm_name]`, or
+mark `#[overwrite(name)]` to replace the ambient definition in this file.
 
 Next: [macros and preprocessing](11-macros-and-preprocessor.md).
