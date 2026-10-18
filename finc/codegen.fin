@@ -1545,8 +1545,8 @@ fun cg_ensure_enum_instance(ctx: &FnContext, spelling: string) <&EnumInfo> {
         let pay_sz <int> = ni.max_payload_size;
         if (pay_sz == 0) { pay_sz = 8; }
         let e_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        e_args.t0 = llvm_i32_type();
-        e_args.t1 = llvm_array_type(llvm_i8_type(), pay_sz);
+        e_args.t[0] = llvm_i32_type();
+        e_args.t[1] = llvm_array_type(llvm_i8_type(), pay_sz);
         ni.llvm_type = llvm_struct_type(e_args, 2, 0);
         delete e_args;
     } else {
@@ -2429,7 +2429,7 @@ fun emit_destructor_for_obj(ctx: &FnContext, st_name: string, rec_ptr: &LLVMValu
         let d_sym <&FnSymbol> = fn_ctx_find_fn(ctx, st.destructor_name);
         if (d_sym != null) {
             let d_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            d_args.v0 = rec_ptr;
+            d_args.v[0] = rec_ptr;
             llvm_build_call2(ctx.builder, d_sym.fn_ty, d_sym.fn_val, d_args, 1, "");
             delete d_args;
             ran_body = true;
@@ -2450,7 +2450,7 @@ fun emit_destructor_for_obj(ctx: &FnContext, st_name: string, rec_ptr: &LLVMValu
             if (d_fn != null) {
                 let d_ty <&LLVMType> = llvm_global_get_value_type(d_fn);
                 let d_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                d_args.v0 = rec_ptr;
+                d_args.v[0] = rec_ptr;
                 llvm_build_call2(ctx.builder, d_ty, d_fn, d_args, 1, "");
                 delete d_args;
                 ran_body = true;
@@ -2668,8 +2668,8 @@ fun map_type(ctx: &FnContext, fin_type: string) <&LLVMType> {
             }
             let inner_llvm <&LLVMType> = map_type(ctx, inner_t);
             let n_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-            n_args.t0 = inner_llvm;
-            n_args.t1 = ctx.i1_ty;
+            n_args.t[0] = inner_llvm;
+            n_args.t[1] = ctx.i1_ty;
             let n_ty <&LLVMType> = llvm_struct_type(n_args, 2, 0);
             delete n_args;
             return n_ty;
@@ -2851,420 +2851,56 @@ fun cg_is_heap_struct_value(ctx: &FnContext, v: &LocalVar) <bool> {
 }
 
 // Indexed access to the LLVM carrier structs (`LLVMTypeArgs` /
-// `LLVMValueArgs`, finc/llvm.fin). Fin selects fields statically, so each
-// op keeps one 64-arm chain here; the twelve sites below call these
-// instead of repeating it. Pure relocation: the same field stores and
-// loads execute for the same indices, and every call site keeps its
-// own range guard and overflow refusal. The carriers stay homogeneous
-// `&LLVMType` / `&LLVMValue` fields (the FFI contract the C++ backend
-// reads field-by-field); a heterogeneous field would need a new
-// accessor here, never a reinterpretation.
+// `LLVMValueArgs`, finc/llvm.fin). Each carrier is one fixed `[T, 64]`
+// array member holding the same contiguous pointer slots the LLVM
+// functions read (C ABI unchanged, `new` zero-fills every slot null), so
+// each op is a plain runtime-indexed element store/load: no field-by-field
+// chain, and the twelve sites below keep single calls with unchanged shapes.
+// Out-of-range indices keep the old arm semantics: a set past slot 63 (or
+// a negative index) is a silent no-op and a load returns null, so the
+// callers' own range guards and overflow refusals stay the loud paths.
 fun cg_targs_set(a: &LLVMTypeArgs, i: int, v: &LLVMType) <noret> {
-    if (i == 0) { a.t0 = v; }
-    else if (i == 1) { a.t1 = v; }
-    else if (i == 2) { a.t2 = v; }
-    else if (i == 3) { a.t3 = v; }
-    else if (i == 4) { a.t4 = v; }
-    else if (i == 5) { a.t5 = v; }
-    else if (i == 6) { a.t6 = v; }
-    else if (i == 7) { a.t7 = v; }
-    else if (i == 8) { a.t8 = v; }
-    else if (i == 9) { a.t9 = v; }
-    else if (i == 10) { a.t10 = v; }
-    else if (i == 11) { a.t11 = v; }
-    else if (i == 12) { a.t12 = v; }
-    else if (i == 13) { a.t13 = v; }
-    else if (i == 14) { a.t14 = v; }
-    else if (i == 15) { a.t15 = v; }
-    else if (i == 16) { a.t16 = v; }
-    else if (i == 17) { a.t17 = v; }
-    else if (i == 18) { a.t18 = v; }
-    else if (i == 19) { a.t19 = v; }
-    else if (i == 20) { a.t20 = v; }
-    else if (i == 21) { a.t21 = v; }
-    else if (i == 22) { a.t22 = v; }
-    else if (i == 23) { a.t23 = v; }
-    else if (i == 24) { a.t24 = v; }
-    else if (i == 25) { a.t25 = v; }
-    else if (i == 26) { a.t26 = v; }
-    else if (i == 27) { a.t27 = v; }
-    else if (i == 28) { a.t28 = v; }
-    else if (i == 29) { a.t29 = v; }
-    else if (i == 30) { a.t30 = v; }
-    else if (i == 31) { a.t31 = v; }
-    else if (i == 32) { a.t32 = v; }
-    else if (i == 33) { a.t33 = v; }
-    else if (i == 34) { a.t34 = v; }
-    else if (i == 35) { a.t35 = v; }
-    else if (i == 36) { a.t36 = v; }
-    else if (i == 37) { a.t37 = v; }
-    else if (i == 38) { a.t38 = v; }
-    else if (i == 39) { a.t39 = v; }
-    else if (i == 40) { a.t40 = v; }
-    else if (i == 41) { a.t41 = v; }
-    else if (i == 42) { a.t42 = v; }
-    else if (i == 43) { a.t43 = v; }
-    else if (i == 44) { a.t44 = v; }
-    else if (i == 45) { a.t45 = v; }
-    else if (i == 46) { a.t46 = v; }
-    else if (i == 47) { a.t47 = v; }
-    else if (i == 48) { a.t48 = v; }
-    else if (i == 49) { a.t49 = v; }
-    else if (i == 50) { a.t50 = v; }
-    else if (i == 51) { a.t51 = v; }
-    else if (i == 52) { a.t52 = v; }
-    else if (i == 53) { a.t53 = v; }
-    else if (i == 54) { a.t54 = v; }
-    else if (i == 55) { a.t55 = v; }
-    else if (i == 56) { a.t56 = v; }
-    else if (i == 57) { a.t57 = v; }
-    else if (i == 58) { a.t58 = v; }
-    else if (i == 59) { a.t59 = v; }
-    else if (i == 60) { a.t60 = v; }
-    else if (i == 61) { a.t61 = v; }
-    else if (i == 62) { a.t62 = v; }
-    else if (i == 63) { a.t63 = v; }
+    if (i >= 0 && i < 64) { a.t[i] = v; }
 }
 
 fun cg_targs_at(a: &LLVMTypeArgs, i: int) <&LLVMType> {
-    if (i == 0) { return a.t0; }
-    else if (i == 1) { return a.t1; }
-    else if (i == 2) { return a.t2; }
-    else if (i == 3) { return a.t3; }
-    else if (i == 4) { return a.t4; }
-    else if (i == 5) { return a.t5; }
-    else if (i == 6) { return a.t6; }
-    else if (i == 7) { return a.t7; }
-    else if (i == 8) { return a.t8; }
-    else if (i == 9) { return a.t9; }
-    else if (i == 10) { return a.t10; }
-    else if (i == 11) { return a.t11; }
-    else if (i == 12) { return a.t12; }
-    else if (i == 13) { return a.t13; }
-    else if (i == 14) { return a.t14; }
-    else if (i == 15) { return a.t15; }
-    else if (i == 16) { return a.t16; }
-    else if (i == 17) { return a.t17; }
-    else if (i == 18) { return a.t18; }
-    else if (i == 19) { return a.t19; }
-    else if (i == 20) { return a.t20; }
-    else if (i == 21) { return a.t21; }
-    else if (i == 22) { return a.t22; }
-    else if (i == 23) { return a.t23; }
-    else if (i == 24) { return a.t24; }
-    else if (i == 25) { return a.t25; }
-    else if (i == 26) { return a.t26; }
-    else if (i == 27) { return a.t27; }
-    else if (i == 28) { return a.t28; }
-    else if (i == 29) { return a.t29; }
-    else if (i == 30) { return a.t30; }
-    else if (i == 31) { return a.t31; }
-    else if (i == 32) { return a.t32; }
-    else if (i == 33) { return a.t33; }
-    else if (i == 34) { return a.t34; }
-    else if (i == 35) { return a.t35; }
-    else if (i == 36) { return a.t36; }
-    else if (i == 37) { return a.t37; }
-    else if (i == 38) { return a.t38; }
-    else if (i == 39) { return a.t39; }
-    else if (i == 40) { return a.t40; }
-    else if (i == 41) { return a.t41; }
-    else if (i == 42) { return a.t42; }
-    else if (i == 43) { return a.t43; }
-    else if (i == 44) { return a.t44; }
-    else if (i == 45) { return a.t45; }
-    else if (i == 46) { return a.t46; }
-    else if (i == 47) { return a.t47; }
-    else if (i == 48) { return a.t48; }
-    else if (i == 49) { return a.t49; }
-    else if (i == 50) { return a.t50; }
-    else if (i == 51) { return a.t51; }
-    else if (i == 52) { return a.t52; }
-    else if (i == 53) { return a.t53; }
-    else if (i == 54) { return a.t54; }
-    else if (i == 55) { return a.t55; }
-    else if (i == 56) { return a.t56; }
-    else if (i == 57) { return a.t57; }
-    else if (i == 58) { return a.t58; }
-    else if (i == 59) { return a.t59; }
-    else if (i == 60) { return a.t60; }
-    else if (i == 61) { return a.t61; }
-    else if (i == 62) { return a.t62; }
-    else if (i == 63) { return a.t63; }
-    else { return null; }
+    if (i >= 0 && i < 64) {
+        let r <&LLVMType> = a.t[i];
+        return r;
+    }
+    return null;
 }
 
 fun cg_targs_count(a: &LLVMTypeArgs) <int> {
     let n <int> = 0;
-    if (a.t0 != null) { n = n + 1; }
-    if (a.t1 != null) { n = n + 1; }
-    if (a.t2 != null) { n = n + 1; }
-    if (a.t3 != null) { n = n + 1; }
-    if (a.t4 != null) { n = n + 1; }
-    if (a.t5 != null) { n = n + 1; }
-    if (a.t6 != null) { n = n + 1; }
-    if (a.t7 != null) { n = n + 1; }
-    if (a.t8 != null) { n = n + 1; }
-    if (a.t9 != null) { n = n + 1; }
-    if (a.t10 != null) { n = n + 1; }
-    if (a.t11 != null) { n = n + 1; }
-    if (a.t12 != null) { n = n + 1; }
-    if (a.t13 != null) { n = n + 1; }
-    if (a.t14 != null) { n = n + 1; }
-    if (a.t15 != null) { n = n + 1; }
-    if (a.t16 != null) { n = n + 1; }
-    if (a.t17 != null) { n = n + 1; }
-    if (a.t18 != null) { n = n + 1; }
-    if (a.t19 != null) { n = n + 1; }
-    if (a.t20 != null) { n = n + 1; }
-    if (a.t21 != null) { n = n + 1; }
-    if (a.t22 != null) { n = n + 1; }
-    if (a.t23 != null) { n = n + 1; }
-    if (a.t24 != null) { n = n + 1; }
-    if (a.t25 != null) { n = n + 1; }
-    if (a.t26 != null) { n = n + 1; }
-    if (a.t27 != null) { n = n + 1; }
-    if (a.t28 != null) { n = n + 1; }
-    if (a.t29 != null) { n = n + 1; }
-    if (a.t30 != null) { n = n + 1; }
-    if (a.t31 != null) { n = n + 1; }
-    if (a.t32 != null) { n = n + 1; }
-    if (a.t33 != null) { n = n + 1; }
-    if (a.t34 != null) { n = n + 1; }
-    if (a.t35 != null) { n = n + 1; }
-    if (a.t36 != null) { n = n + 1; }
-    if (a.t37 != null) { n = n + 1; }
-    if (a.t38 != null) { n = n + 1; }
-    if (a.t39 != null) { n = n + 1; }
-    if (a.t40 != null) { n = n + 1; }
-    if (a.t41 != null) { n = n + 1; }
-    if (a.t42 != null) { n = n + 1; }
-    if (a.t43 != null) { n = n + 1; }
-    if (a.t44 != null) { n = n + 1; }
-    if (a.t45 != null) { n = n + 1; }
-    if (a.t46 != null) { n = n + 1; }
-    if (a.t47 != null) { n = n + 1; }
-    if (a.t48 != null) { n = n + 1; }
-    if (a.t49 != null) { n = n + 1; }
-    if (a.t50 != null) { n = n + 1; }
-    if (a.t51 != null) { n = n + 1; }
-    if (a.t52 != null) { n = n + 1; }
-    if (a.t53 != null) { n = n + 1; }
-    if (a.t54 != null) { n = n + 1; }
-    if (a.t55 != null) { n = n + 1; }
-    if (a.t56 != null) { n = n + 1; }
-    if (a.t57 != null) { n = n + 1; }
-    if (a.t58 != null) { n = n + 1; }
-    if (a.t59 != null) { n = n + 1; }
-    if (a.t60 != null) { n = n + 1; }
-    if (a.t61 != null) { n = n + 1; }
-    if (a.t62 != null) { n = n + 1; }
-    if (a.t63 != null) { n = n + 1; }
+    let k <int> = 0;
+    while (k < 64) {
+        if (a.t[k] != null) { n = n + 1; }
+        k = k + 1;
+    }
     return n;
 }
 
 fun cg_targs_span(a: &LLVMTypeArgs) <int> {
     let n <int> = 0;
-    if (a.t0 != null) { n = 1; }
-    if (a.t1 != null) { n = 2; }
-    if (a.t2 != null) { n = 3; }
-    if (a.t3 != null) { n = 4; }
-    if (a.t4 != null) { n = 5; }
-    if (a.t5 != null) { n = 6; }
-    if (a.t6 != null) { n = 7; }
-    if (a.t7 != null) { n = 8; }
-    if (a.t8 != null) { n = 9; }
-    if (a.t9 != null) { n = 10; }
-    if (a.t10 != null) { n = 11; }
-    if (a.t11 != null) { n = 12; }
-    if (a.t12 != null) { n = 13; }
-    if (a.t13 != null) { n = 14; }
-    if (a.t14 != null) { n = 15; }
-    if (a.t15 != null) { n = 16; }
-    if (a.t16 != null) { n = 17; }
-    if (a.t17 != null) { n = 18; }
-    if (a.t18 != null) { n = 19; }
-    if (a.t19 != null) { n = 20; }
-    if (a.t20 != null) { n = 21; }
-    if (a.t21 != null) { n = 22; }
-    if (a.t22 != null) { n = 23; }
-    if (a.t23 != null) { n = 24; }
-    if (a.t24 != null) { n = 25; }
-    if (a.t25 != null) { n = 26; }
-    if (a.t26 != null) { n = 27; }
-    if (a.t27 != null) { n = 28; }
-    if (a.t28 != null) { n = 29; }
-    if (a.t29 != null) { n = 30; }
-    if (a.t30 != null) { n = 31; }
-    if (a.t31 != null) { n = 32; }
-    if (a.t32 != null) { n = 33; }
-    if (a.t33 != null) { n = 34; }
-    if (a.t34 != null) { n = 35; }
-    if (a.t35 != null) { n = 36; }
-    if (a.t36 != null) { n = 37; }
-    if (a.t37 != null) { n = 38; }
-    if (a.t38 != null) { n = 39; }
-    if (a.t39 != null) { n = 40; }
-    if (a.t40 != null) { n = 41; }
-    if (a.t41 != null) { n = 42; }
-    if (a.t42 != null) { n = 43; }
-    if (a.t43 != null) { n = 44; }
-    if (a.t44 != null) { n = 45; }
-    if (a.t45 != null) { n = 46; }
-    if (a.t46 != null) { n = 47; }
-    if (a.t47 != null) { n = 48; }
-    if (a.t48 != null) { n = 49; }
-    if (a.t49 != null) { n = 50; }
-    if (a.t50 != null) { n = 51; }
-    if (a.t51 != null) { n = 52; }
-    if (a.t52 != null) { n = 53; }
-    if (a.t53 != null) { n = 54; }
-    if (a.t54 != null) { n = 55; }
-    if (a.t55 != null) { n = 56; }
-    if (a.t56 != null) { n = 57; }
-    if (a.t57 != null) { n = 58; }
-    if (a.t58 != null) { n = 59; }
-    if (a.t59 != null) { n = 60; }
-    if (a.t60 != null) { n = 61; }
-    if (a.t61 != null) { n = 62; }
-    if (a.t62 != null) { n = 63; }
-    if (a.t63 != null) { n = 64; }
+    let k <int> = 0;
+    while (k < 64) {
+        if (a.t[k] != null) { n = k + 1; }
+        k = k + 1;
+    }
     return n;
 }
 
 fun cg_vargs_set(a: &LLVMValueArgs, i: int, v: &LLVMValue) <noret> {
-    if (i == 0) { a.v0 = v; }
-    else if (i == 1) { a.v1 = v; }
-    else if (i == 2) { a.v2 = v; }
-    else if (i == 3) { a.v3 = v; }
-    else if (i == 4) { a.v4 = v; }
-    else if (i == 5) { a.v5 = v; }
-    else if (i == 6) { a.v6 = v; }
-    else if (i == 7) { a.v7 = v; }
-    else if (i == 8) { a.v8 = v; }
-    else if (i == 9) { a.v9 = v; }
-    else if (i == 10) { a.v10 = v; }
-    else if (i == 11) { a.v11 = v; }
-    else if (i == 12) { a.v12 = v; }
-    else if (i == 13) { a.v13 = v; }
-    else if (i == 14) { a.v14 = v; }
-    else if (i == 15) { a.v15 = v; }
-    else if (i == 16) { a.v16 = v; }
-    else if (i == 17) { a.v17 = v; }
-    else if (i == 18) { a.v18 = v; }
-    else if (i == 19) { a.v19 = v; }
-    else if (i == 20) { a.v20 = v; }
-    else if (i == 21) { a.v21 = v; }
-    else if (i == 22) { a.v22 = v; }
-    else if (i == 23) { a.v23 = v; }
-    else if (i == 24) { a.v24 = v; }
-    else if (i == 25) { a.v25 = v; }
-    else if (i == 26) { a.v26 = v; }
-    else if (i == 27) { a.v27 = v; }
-    else if (i == 28) { a.v28 = v; }
-    else if (i == 29) { a.v29 = v; }
-    else if (i == 30) { a.v30 = v; }
-    else if (i == 31) { a.v31 = v; }
-    else if (i == 32) { a.v32 = v; }
-    else if (i == 33) { a.v33 = v; }
-    else if (i == 34) { a.v34 = v; }
-    else if (i == 35) { a.v35 = v; }
-    else if (i == 36) { a.v36 = v; }
-    else if (i == 37) { a.v37 = v; }
-    else if (i == 38) { a.v38 = v; }
-    else if (i == 39) { a.v39 = v; }
-    else if (i == 40) { a.v40 = v; }
-    else if (i == 41) { a.v41 = v; }
-    else if (i == 42) { a.v42 = v; }
-    else if (i == 43) { a.v43 = v; }
-    else if (i == 44) { a.v44 = v; }
-    else if (i == 45) { a.v45 = v; }
-    else if (i == 46) { a.v46 = v; }
-    else if (i == 47) { a.v47 = v; }
-    else if (i == 48) { a.v48 = v; }
-    else if (i == 49) { a.v49 = v; }
-    else if (i == 50) { a.v50 = v; }
-    else if (i == 51) { a.v51 = v; }
-    else if (i == 52) { a.v52 = v; }
-    else if (i == 53) { a.v53 = v; }
-    else if (i == 54) { a.v54 = v; }
-    else if (i == 55) { a.v55 = v; }
-    else if (i == 56) { a.v56 = v; }
-    else if (i == 57) { a.v57 = v; }
-    else if (i == 58) { a.v58 = v; }
-    else if (i == 59) { a.v59 = v; }
-    else if (i == 60) { a.v60 = v; }
-    else if (i == 61) { a.v61 = v; }
-    else if (i == 62) { a.v62 = v; }
-    else if (i == 63) { a.v63 = v; }
+    if (i >= 0 && i < 64) { a.v[i] = v; }
 }
 
 fun cg_vargs_at(a: &LLVMValueArgs, i: int) <&LLVMValue> {
-    if (i == 0) { return a.v0; }
-    else if (i == 1) { return a.v1; }
-    else if (i == 2) { return a.v2; }
-    else if (i == 3) { return a.v3; }
-    else if (i == 4) { return a.v4; }
-    else if (i == 5) { return a.v5; }
-    else if (i == 6) { return a.v6; }
-    else if (i == 7) { return a.v7; }
-    else if (i == 8) { return a.v8; }
-    else if (i == 9) { return a.v9; }
-    else if (i == 10) { return a.v10; }
-    else if (i == 11) { return a.v11; }
-    else if (i == 12) { return a.v12; }
-    else if (i == 13) { return a.v13; }
-    else if (i == 14) { return a.v14; }
-    else if (i == 15) { return a.v15; }
-    else if (i == 16) { return a.v16; }
-    else if (i == 17) { return a.v17; }
-    else if (i == 18) { return a.v18; }
-    else if (i == 19) { return a.v19; }
-    else if (i == 20) { return a.v20; }
-    else if (i == 21) { return a.v21; }
-    else if (i == 22) { return a.v22; }
-    else if (i == 23) { return a.v23; }
-    else if (i == 24) { return a.v24; }
-    else if (i == 25) { return a.v25; }
-    else if (i == 26) { return a.v26; }
-    else if (i == 27) { return a.v27; }
-    else if (i == 28) { return a.v28; }
-    else if (i == 29) { return a.v29; }
-    else if (i == 30) { return a.v30; }
-    else if (i == 31) { return a.v31; }
-    else if (i == 32) { return a.v32; }
-    else if (i == 33) { return a.v33; }
-    else if (i == 34) { return a.v34; }
-    else if (i == 35) { return a.v35; }
-    else if (i == 36) { return a.v36; }
-    else if (i == 37) { return a.v37; }
-    else if (i == 38) { return a.v38; }
-    else if (i == 39) { return a.v39; }
-    else if (i == 40) { return a.v40; }
-    else if (i == 41) { return a.v41; }
-    else if (i == 42) { return a.v42; }
-    else if (i == 43) { return a.v43; }
-    else if (i == 44) { return a.v44; }
-    else if (i == 45) { return a.v45; }
-    else if (i == 46) { return a.v46; }
-    else if (i == 47) { return a.v47; }
-    else if (i == 48) { return a.v48; }
-    else if (i == 49) { return a.v49; }
-    else if (i == 50) { return a.v50; }
-    else if (i == 51) { return a.v51; }
-    else if (i == 52) { return a.v52; }
-    else if (i == 53) { return a.v53; }
-    else if (i == 54) { return a.v54; }
-    else if (i == 55) { return a.v55; }
-    else if (i == 56) { return a.v56; }
-    else if (i == 57) { return a.v57; }
-    else if (i == 58) { return a.v58; }
-    else if (i == 59) { return a.v59; }
-    else if (i == 60) { return a.v60; }
-    else if (i == 61) { return a.v61; }
-    else if (i == 62) { return a.v62; }
-    else if (i == 63) { return a.v63; }
-    else { return null; }
+    if (i >= 0 && i < 64) {
+        let r <&LLVMValue> = a.v[i];
+        return r;
+    }
+    return null;
 }
 
 // Build an LLVM function type from a `fn(P1, P2) -> R` annotation, mapping
@@ -3620,8 +3256,8 @@ fun get_or_declare_calloc(ctx: &FnContext) <&LLVMValue> {
     let calloc_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "calloc");
     if (calloc_fn == null) {
         let c_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        c_params.t0 = ctx.i64_ty;
-        c_params.t1 = ctx.i64_ty;
+        c_params.t[0] = ctx.i64_ty;
+        c_params.t[1] = ctx.i64_ty;
         let c_ty <&LLVMType> = llvm_function_type(ctx.ptr_ty, c_params, 2, 0);
         delete c_params;
         calloc_fn = llvm_add_function(ctx.module, "calloc", c_ty);
@@ -3636,9 +3272,9 @@ fun get_or_declare_memcpy(ctx: &FnContext) <&LLVMValue> {
     let memcpy_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "memcpy");
     if (memcpy_fn == null) {
         let m_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        m_params.t0 = ctx.ptr_ty;
-        m_params.t1 = ctx.ptr_ty;
-        m_params.t2 = ctx.i64_ty;
+        m_params.t[0] = ctx.ptr_ty;
+        m_params.t[1] = ctx.ptr_ty;
+        m_params.t[2] = ctx.i64_ty;
         let m_ty <&LLVMType> = llvm_function_type(ctx.ptr_ty, m_params, 3, 0);
         delete m_params;
         memcpy_fn = llvm_add_function(ctx.module, "memcpy", m_ty);
@@ -3654,7 +3290,7 @@ fun get_or_declare_strlen(ctx: &FnContext) <&LLVMValue> {
     let strlen_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "strlen");
     if (strlen_fn == null) {
         let s_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        s_params.t0 = ctx.ptr_ty;
+        s_params.t[0] = ctx.ptr_ty;
         let s_ty <&LLVMType> = llvm_function_type(ctx.i64_ty, s_params, 1, 0);
         delete s_params;
         strlen_fn = llvm_add_function(ctx.module, "strlen", s_ty);
@@ -3669,9 +3305,9 @@ fun get_or_declare_memcmp(ctx: &FnContext) <&LLVMValue> {
     let memcmp_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "memcmp");
     if (memcmp_fn == null) {
         let m_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        m_params.t0 = ctx.ptr_ty;
-        m_params.t1 = ctx.ptr_ty;
-        m_params.t2 = ctx.i64_ty;
+        m_params.t[0] = ctx.ptr_ty;
+        m_params.t[1] = ctx.ptr_ty;
+        m_params.t[2] = ctx.i64_ty;
         let m_ty <&LLVMType> = llvm_function_type(ctx.i32_ty, m_params, 3, 0);
         delete m_params;
         memcmp_fn = llvm_add_function(ctx.module, "memcmp", m_ty);
@@ -3938,8 +3574,8 @@ fun box_interface_value(ctx: &FnContext, fat_val: &LLVMValue, fat_ty: &LLVMType)
     let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
     let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
     let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-    c_args.v0 = llvm_const_int(ctx.i64_ty, 2, 0);
-    c_args.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+    c_args.v[0] = llvm_const_int(ctx.i64_ty, 2, 0);
+    c_args.v[1] = llvm_const_int(ctx.i64_ty, 8, 0);
     let box <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "iface_box");
     delete c_args;
     if (box_ty != null) {
@@ -3960,8 +3596,8 @@ fun struct_to_interface(ctx: &FnContext, st_val: &LLVMValue, st_name: string, if
     let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
     let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
     let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-    c_args.v0 = llvm_const_int(ctx.i64_ty, m_count, 0);
-    c_args.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+    c_args.v[0] = llvm_const_int(ctx.i64_ty, m_count, 0);
+    c_args.v[1] = llvm_const_int(ctx.i64_ty, 8, 0);
     let vt_ptr <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "vtable");
     delete c_args;
 
@@ -4092,7 +3728,7 @@ fun get_or_declare_malloc(ctx: &FnContext) <&LLVMValue> {
     let malloc_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "malloc");
     if (malloc_fn == null) {
         let m_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        m_params.t0 = ctx.i64_ty;
+        m_params.t[0] = ctx.i64_ty;
         let m_ty <&LLVMType> = llvm_function_type(ctx.ptr_ty, m_params, 1, 0);
         delete m_params;
         malloc_fn = llvm_add_function(ctx.module, "malloc", m_ty);
@@ -4104,7 +3740,7 @@ fun get_or_declare_free(ctx: &FnContext) <&LLVMValue> {
     let free_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "free");
     if (free_fn == null) {
         let f_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        f_params.t0 = ctx.ptr_ty;
+        f_params.t[0] = ctx.ptr_ty;
         let f_ty <&LLVMType> = llvm_function_type(ctx.void_ty, f_params, 1, 0);
         delete f_params;
         free_fn = llvm_add_function(ctx.module, "free", f_ty);
@@ -4116,7 +3752,7 @@ fun get_or_declare_printf(ctx: &FnContext) <&LLVMValue> {
     let p_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "printf");
     if (p_fn == null) {
         let p_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        p_params.t0 = ctx.ptr_ty;
+        p_params.t[0] = ctx.ptr_ty;
         let p_ty <&LLVMType> = llvm_function_type(ctx.i32_ty, p_params, 1, 1);
         delete p_params;
         p_fn = llvm_add_function(ctx.module, "printf", p_ty);
@@ -4128,8 +3764,8 @@ fun get_or_declare_dprintf(ctx: &FnContext) <&LLVMValue> {
     let d_fn <&LLVMValue> = llvm_get_named_function(ctx.module, "dprintf");
     if (d_fn == null) {
         let d_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        d_params.t0 = ctx.i32_ty;
-        d_params.t1 = ctx.ptr_ty;
+        d_params.t[0] = ctx.i32_ty;
+        d_params.t[1] = ctx.ptr_ty;
         let d_ty <&LLVMType> = llvm_function_type(ctx.i32_ty, d_params, 2, 1);
         delete d_params;
         d_fn = llvm_add_function(ctx.module, "dprintf", d_ty);
@@ -4174,20 +3810,20 @@ fun cg_emit_blame_text(ctx: &FnContext, line: int, msg_val: &LLVMValue) <noret> 
     if (msg_val != null) {
         let fmt <&LLVMValue> = llvm_build_global_string_ptr(ctx.builder, "%s:%d: assertion failed: %s\n", "blame_fmt");
         let args <&LLVMValueArgs> = new LLVMValueArgs{};
-        args.v0 = fd_v;
-        args.v1 = fmt;
-        args.v2 = file_s;
-        args.v3 = line_v;
-        args.v4 = msg_val;
+        args.v[0] = fd_v;
+        args.v[1] = fmt;
+        args.v[2] = file_s;
+        args.v[3] = line_v;
+        args.v[4] = msg_val;
         llvm_build_call2(ctx.builder, d_ty, d_fn, args, 5, "");
         delete args;
     } else {
         let fmt <&LLVMValue> = llvm_build_global_string_ptr(ctx.builder, "%s:%d: assertion failed\n", "blame_fmt");
         let args <&LLVMValueArgs> = new LLVMValueArgs{};
-        args.v0 = fd_v;
-        args.v1 = fmt;
-        args.v2 = file_s;
-        args.v3 = line_v;
+        args.v[0] = fd_v;
+        args.v[1] = fmt;
+        args.v[2] = file_s;
+        args.v[3] = line_v;
         llvm_build_call2(ctx.builder, d_ty, d_fn, args, 4, "");
         delete args;
     }
@@ -4207,11 +3843,11 @@ fun cg_emit_absent_blame_val(ctx: &FnContext, line: int, msg_val: &LLVMValue) <n
     let fd_v <&LLVMValue> = llvm_const_int(ctx.i32_ty, 2, 0);
     let fmt <&LLVMValue> = llvm_build_global_string_ptr(ctx.builder, "%s:%d: Fin blames %s\n", "absent_fmt");
     let args <&LLVMValueArgs> = new LLVMValueArgs{};
-    args.v0 = fd_v;
-    args.v1 = fmt;
-    args.v2 = file_s;
-    args.v3 = line_v;
-    args.v4 = msg_val;
+    args.v[0] = fd_v;
+    args.v[1] = fmt;
+    args.v[2] = file_s;
+    args.v[3] = line_v;
+    args.v[4] = msg_val;
     llvm_build_call2(ctx.builder, d_ty, d_fn, args, 5, "");
     delete args;
 }
@@ -5092,19 +4728,19 @@ fun cg_lower_string_eq(ctx: &FnContext, lhs: &LLVMValue, rhs: &LLVMValue, want_n
     let strlen_fn <&LLVMValue> = get_or_declare_strlen(ctx);
     let strlen_ty <&LLVMType> = llvm_global_get_value_type(strlen_fn);
     let llen_args <&LLVMValueArgs> = new LLVMValueArgs{};
-    llen_args.v0 = lhs;
+    llen_args.v[0] = lhs;
     let llen <&LLVMValue> = llvm_build_call2(ctx.builder, strlen_ty, strlen_fn, llen_args, 1, "str.llen");
     delete llen_args;
     let rlen_args <&LLVMValueArgs> = new LLVMValueArgs{};
-    rlen_args.v0 = rhs;
+    rlen_args.v[0] = rhs;
     let rlen <&LLVMValue> = llvm_build_call2(ctx.builder, strlen_ty, strlen_fn, rlen_args, 1, "str.rlen");
     delete rlen_args;
     let memcmp_fn <&LLVMValue> = get_or_declare_memcmp(ctx);
     let memcmp_ty <&LLVMType> = llvm_global_get_value_type(memcmp_fn);
     let cmp_args <&LLVMValueArgs> = new LLVMValueArgs{};
-    cmp_args.v0 = lhs;
-    cmp_args.v1 = rhs;
-    cmp_args.v2 = llen;
+    cmp_args.v[0] = lhs;
+    cmp_args.v[1] = rhs;
+    cmp_args.v[2] = llen;
     let cmp <&LLVMValue> = llvm_build_call2(ctx.builder, memcmp_ty, memcmp_fn, cmp_args, 3, "str.cmp");
     delete cmp_args;
     let zero32 <&LLVMValue> = llvm_const_int(ctx.i32_ty, 0, 0);
@@ -5123,8 +4759,8 @@ fun cg_lower_string_eq(ctx: &FnContext, lhs: &LLVMValue, rhs: &LLVMValue, want_n
     llvm_position_builder(ctx.builder, end_bb);
     let phi <&LLVMValue> = llvm_build_phi(ctx.builder, ctx.i1_ty, "str.eq");
     let phi_vals <&LLVMValueArgs> = new LLVMValueArgs{};
-    phi_vals.v0 = ptr_res;
-    phi_vals.v1 = content_res;
+    phi_vals.v[0] = ptr_res;
+    phi_vals.v[1] = content_res;
     let phi_blks <&LLVMBlockArgs> = new LLVMBlockArgs{};
     phi_blks.b0 = null_exit;
     phi_blks.b1 = content_exit;
@@ -5289,7 +4925,7 @@ fun cg_hash_word_string(ctx: &FnContext, data: &LLVMValue) <&LLVMValue> {
     let strlen_fn <&LLVMValue> = get_or_declare_strlen(ctx);
     let strlen_ty <&LLVMType> = llvm_global_get_value_type(strlen_fn);
     let len_args <&LLVMValueArgs> = new LLVMValueArgs{};
-    len_args.v0 = data;
+    len_args.v[0] = data;
     let len <&LLVMValue> = llvm_build_call2(ctx.builder, strlen_ty, strlen_fn, len_args, 1, "hash.len");
     delete len_args;
     let h_slot <&LLVMValue> = llvm_build_alloca(ctx.builder, ctx.i32_ty, "hash.h");
@@ -5422,8 +5058,8 @@ pub fun declare_function(
             ret_ty = ret_iface.fat_ptr_ty;
         } else {
             let f_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-            f_args.t0 = ptr_t;
-            f_args.t1 = ptr_t;
+            f_args.t[0] = ptr_t;
+            f_args.t[1] = ptr_t;
             ret_ty = llvm_struct_type(f_args, 2, 0);
             delete f_args;
         }
@@ -5468,8 +5104,8 @@ pub fun declare_function(
       (ret_ty == i32_t || ret_ty == i64_t || ret_ty == i1_t || ret_ty == i8_t ||
       ret_ty == llvm_float_type() || ret_ty == llvm_double_type())) {
         let r_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        r_args.t0 = ret_ty;
-        r_args.t1 = i1_t;
+        r_args.t[0] = ret_ty;
+        r_args.t[1] = i1_t;
         ret_ty = llvm_struct_type(r_args, 2, 0);
         delete r_args;
       }
@@ -5479,8 +5115,8 @@ pub fun declare_function(
     let is_var_arg <int> = 0;
     let p_cur <&AstNode> = fn_node.extra;
     if (is_main_args_decl) {
-        param_types.t0 = i32_t;
-        param_types.t1 = ptr_t;
+        param_types.t[0] = i32_t;
+        param_types.t[1] = ptr_t;
         p_count = 2;
     } else {
         while (p_cur != null && p_count < 64) {
@@ -5515,8 +5151,8 @@ pub fun declare_function(
                     pt = param_iface.fat_ptr_ty;
                 } else {
                     let f_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-                    f_args.t0 = ptr_t;
-                    f_args.t1 = ptr_t;
+                    f_args.t[0] = ptr_t;
+                    f_args.t[1] = ptr_t;
                     pt = llvm_struct_type(f_args, 2, 0);
                     delete f_args;
                 }
@@ -5561,8 +5197,8 @@ pub fun declare_function(
               (pt == i32_t || pt == i64_t || pt == i1_t || pt == i8_t ||
               pt == llvm_float_type() || pt == llvm_double_type())) {
                 let p_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-                p_args.t0 = pt;
-                p_args.t1 = i1_t;
+                p_args.t[0] = pt;
+                p_args.t[1] = i1_t;
                 pt = llvm_struct_type(p_args, 2, 0);
                 delete p_args;
               }
@@ -8575,7 +8211,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                                     let strlen_fn <&LLVMValue> = get_or_declare_strlen(ctx);
                                     let s_fn_ty <&LLVMType> = llvm_global_get_value_type(strlen_fn);
                                     let s_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                                    s_args.v0 = base_val;
+                                    s_args.v[0] = base_val;
                                     let s_res64 <&LLVMValue> = llvm_build_call2(ctx.builder, s_fn_ty, strlen_fn, s_args, 1, "strlen");
                                     delete s_args;
                                     return llvm_build_trunc(ctx.builder, s_res64, ctx.i32_ty, "strlen32");
@@ -8608,7 +8244,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                             let strlen_fn <&LLVMValue> = get_or_declare_strlen(ctx);
                             let s_fn_ty <&LLVMType> = llvm_global_get_value_type(strlen_fn);
                             let s_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                            s_args.v0 = base_val_s;
+                            s_args.v[0] = base_val_s;
                             let s_res64 <&LLVMValue> = llvm_build_call2(ctx.builder, s_fn_ty, strlen_fn, s_args, 1, "strlen");
                             delete s_args;
                             return llvm_build_trunc(ctx.builder, s_res64, ctx.i32_ty, "strlen32");
@@ -8718,6 +8354,19 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 let box <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, gep, "iface_box");
                 return llvm_build_load2(ctx.builder, f_iface.fat_ptr_ty, box, n.name);
             }
+            // A fixed-array member (`[T, N]` with a literal extent) lays its
+            // N elements end to end at the field slot, so a reader that
+            // indexes the member needs the slot ADDRESS (the element base),
+            // not a load of slot 0's content. No preexisting member in the
+            // tree carries such an extent; the generic wide-slot shape keeps
+            // the loaded-pointer path below exactly as before.
+            let m_ann <string> = cg_member_field_ann(ctx, n.left, n.name);
+            if (cg_strlen(m_ann) > cast<ulong>(0) && get_fixed_array_extent(m_ann) >= 0) {
+                let m_elem <&LLVMType> = get_index_elem_type(ctx, n.left);
+                if (m_elem != null && !cg_member_array_wide(ctx, n.left, m_elem)) {
+                    return gep;
+                }
+            }
             return llvm_build_load2(ctx.builder, fld_ty, gep, n.name);
         }
         return null;
@@ -8764,8 +8413,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             llvm_position_builder(ctx.builder, end_bb);
             let phi <&LLVMValue> = llvm_build_phi(ctx.builder, common_ty, "tern");
             let vals <&LLVMValueArgs> = new LLVMValueArgs{};
-            vals.v0 = av;
-            vals.v1 = bv;
+            vals.v[0] = av;
+            vals.v[1] = bv;
             let blks <&LLVMBlockArgs> = new LLVMBlockArgs{};
             blks.b0 = then_exit;
             blks.b1 = else_exit;
@@ -8794,8 +8443,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let false_v <&LLVMValue> = llvm_const_int(ctx.i1_ty, 0, 0);
 
             let vals <&LLVMValueArgs> = new LLVMValueArgs{};
-            vals.v0 = false_v;
-            vals.v1 = r;
+            vals.v[0] = false_v;
+            vals.v[1] = r;
             let blks <&LLVMBlockArgs> = new LLVMBlockArgs{};
             blks.b0 = entry_bb;
             blks.b1 = rhs_exit;
@@ -8824,8 +8473,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let true_v <&LLVMValue> = llvm_const_int(ctx.i1_ty, 1, 0);
 
             let vals <&LLVMValueArgs> = new LLVMValueArgs{};
-            vals.v0 = true_v;
-            vals.v1 = r;
+            vals.v[0] = true_v;
+            vals.v[1] = r;
             let blks <&LLVMBlockArgs> = new LLVMBlockArgs{};
             blks.b0 = entry_bb;
             blks.b1 = rhs_exit;
@@ -9024,8 +8673,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                         let m_fn <&LLVMValue> = get_or_declare_calloc(ctx);
                         let m_fn_ty <&LLVMType> = llvm_global_get_value_type(m_fn);
                         let m_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                        m_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
-                        m_args.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+                        m_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
+                        m_args.v[1] = llvm_const_int(ctx.i64_ty, 8, 0);
                         let fresh_cell <&LLVMValue> = llvm_build_call2(ctx.builder, m_fn_ty, m_fn, m_args, 2, "fresh_p");
                         delete m_args;
                         if (n.left.left.kind == ast_ident()) {
@@ -9040,8 +8689,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                         llvm_position_builder(ctx.builder, cont_bb);
                         let phi_ptr <&LLVMValue> = llvm_build_phi(ctx.builder, ctx.ptr_ty, "real_dest");
                         let p_vals <&LLVMValueArgs> = new LLVMValueArgs{};
-                        p_vals.v0 = ptr_val;
-                        p_vals.v1 = fresh_cell;
+                        p_vals.v[0] = ptr_val;
+                        p_vals.v[1] = fresh_cell;
                         let p_blks <&LLVMBlockArgs> = new LLVMBlockArgs{};
                         p_blks.b0 = cur_bb;
                         p_blks.b1 = alloc_exit_bb;
@@ -9765,8 +9414,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
             let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
             let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            c_args.v0 = slots;
-            c_args.v1 = eight;
+            c_args.v[0] = slots;
+            c_args.v[1] = eight;
             let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "arr_alloc");
             delete c_args;
             let ind_h <&LLVMIndices> = new LLVMIndices{};
@@ -9784,8 +9433,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
             let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
             let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            c_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
-            c_args.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+            c_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
+            c_args.v[1] = llvm_const_int(ctx.i64_ty, 8, 0);
             let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "scalar_alloc");
             delete c_args;
             if (n.left != null) {
@@ -9812,7 +9461,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                 let e_malloc <&LLVMValue> = get_or_declare_malloc(ctx);
                 let e_ty <&LLVMType> = llvm_global_get_value_type(e_malloc);
                 let e_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                e_args.v0 = llvm_const_int(ctx.i64_ty, 16, 0);
+                e_args.v[0] = llvm_const_int(ctx.i64_ty, 16, 0);
                 let empty_raw <&LLVMValue> = llvm_build_call2(ctx.builder, e_ty, e_malloc, e_args, 1, "arr_lit");
                 delete e_args;
                 let ind_eh <&LLVMIndices> = new LLVMIndices{};
@@ -9863,7 +9512,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             // [-1], so a field or parameter holding this literal reads its
             // length there. Element indices are unchanged (relative to the
             // returned element pointer).
-            m_args.v0 = llvm_const_int(ctx.i64_ty, n_elems * stride + 8, 0);
+            m_args.v[0] = llvm_const_int(ctx.i64_ty, n_elems * stride + 8, 0);
             let lit_raw <&LLVMValue> = llvm_build_call2(ctx.builder, m_fn_ty, malloc_fn, m_args, 1, "arr_lit");
             delete m_args;
             let ind_lh <&LLVMIndices> = new LLVMIndices{};
@@ -9903,12 +9552,12 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
             let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
             let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            c_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
+            c_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
             // Heap structs share one fixed buffer: it must fit the largest
             // struct (LLVMTypeArgs/LLVMValueArgs, 64 words = 512 bytes).
             // 1024 covers 128 word fields; a bigger struct needs this raised
             // everywhere it appears (struct_alloc, st_buf, ctor_obj alike).
-            c_args.v1 = llvm_const_int(ctx.i64_ty, 1024, 0);
+            c_args.v[1] = llvm_const_int(ctx.i64_ty, 1024, 0);
             let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "struct_alloc");
             delete c_args;
             return raw;
@@ -9917,10 +9566,10 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
             let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
             let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            c_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
+            c_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
             // Same fixed heap-struct buffer as struct_alloc: 1024 fits the
             // largest struct (64 words); raise together, never apart.
-            c_args.v1 = llvm_const_int(ctx.i64_ty, 1024, 0);
+            c_args.v[1] = llvm_const_int(ctx.i64_ty, 1024, 0);
             let st_ptr <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "st_buf");
             delete c_args;
 
@@ -10297,7 +9946,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let malloc_fn <&LLVMValue> = get_or_declare_malloc(ctx);
             let m_fn_ty <&LLVMType> = llvm_global_get_value_type(malloc_fn);
             let m_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            m_args.v0 = size_i64;
+            m_args.v[0] = size_i64;
             let raw <&LLVMValue> = llvm_build_call2(ctx.builder, m_fn_ty, malloc_fn, m_args, 1, "raw_alloc");
             delete m_args;
             return raw;
@@ -10426,9 +10075,9 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                     ind_db.i0 = llvm_const_int_of_string(ctx.i64_ty, "-1", 10);
                     let base_ptr <&LLVMValue> = llvm_build_gep2(ctx.builder, ctx.i64_ty, p_val, ind_db, 1, "arr_base");
                     delete ind_db;
-                    f_args.v0 = base_ptr;
+                    f_args.v[0] = base_ptr;
                 } else {
-                    f_args.v0 = p_val;
+                    f_args.v[0] = p_val;
                 }
                 let free_res <&LLVMValue> = llvm_build_call2(ctx.builder, f_fn_ty, free_fn, f_args, 1, "");
                 delete f_args;
@@ -10647,7 +10296,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                         delete ind;
                         let fn_ptr <&LLVMValue> = llvm_build_load2(ctx.builder, ctx.ptr_ty, fn_slot, "m_ptr");
                         let if_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                        if_args.v0 = data_ptr;
+                        if_args.v[0] = data_ptr;
                         let if_arg_count <int> = 1;
                         let cur_wrap <&AstNode> = n.left.right;
                         let if_bad <bool> = false;
@@ -10676,7 +10325,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
                         }
                         let ret_t <&LLVMType> = map_type(ctx, m_info.ret_type);
                         let if_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-                        if_params.t0 = ctx.ptr_ty;
+                        if_params.t[0] = ctx.ptr_ty;
                         let if_ti <int> = 1;
                         while (if_ti < if_arg_count) {
                             let if_v <&LLVMValue> = cg_vargs_at(if_args, if_ti);
@@ -11064,7 +10713,7 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             }
             let pcount <int> = cg_targs_count(param_tys);
             if (acount + 1 == pcount) {
-                args.v0 = llvm_const_null(ctx.ptr_ty);
+                args.v[0] = llvm_const_null(ctx.ptr_ty);
                 arg_count = 1;
             }
         }
@@ -11073,14 +10722,14 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
             let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
             let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
             let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            c_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
+            c_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
             // Same fixed heap-struct buffer as struct_alloc: 1024 fits the
             // largest struct (64 words); raise together, never apart.
-            c_args.v1 = llvm_const_int(ctx.i64_ty, 1024, 0);
+            c_args.v[1] = llvm_const_int(ctx.i64_ty, 1024, 0);
             ctor_st_ptr = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "ctor_obj");
             delete c_args;
 
-            args.v0 = ctor_st_ptr;
+            args.v[0] = ctor_st_ptr;
             arg_count = 1;
         }
 
@@ -11348,14 +10997,14 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
 
         let c_args_k <&LLVMValueArgs> = new LLVMValueArgs{};
-        c_args_k.v0 = llvm_const_int(ctx.i64_ty, alloc_count, 0);
-        c_args_k.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+        c_args_k.v[0] = llvm_const_int(ctx.i64_ty, alloc_count, 0);
+        c_args_k.v[1] = llvm_const_int(ctx.i64_ty, 8, 0);
         let keys_buf <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args_k, 2, "k_buf");
         delete c_args_k;
 
         let c_args_v <&LLVMValueArgs> = new LLVMValueArgs{};
-        c_args_v.v0 = llvm_const_int(ctx.i64_ty, alloc_count, 0);
-        c_args_v.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+        c_args_v.v[0] = llvm_const_int(ctx.i64_ty, alloc_count, 0);
+        c_args_v.v[1] = llvm_const_int(ctx.i64_ty, 8, 0);
         let vals_buf <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args_v, 2, "v_buf");
         delete c_args_v;
 
@@ -11389,8 +11038,8 @@ pub fun lower_expr(ctx: &FnContext, n: &AstNode) <&LLVMValue> {
         }
 
         let c_args_h <&LLVMValueArgs> = new LLVMValueArgs{};
-        c_args_h.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
-        c_args_h.v1 = llvm_const_int(ctx.i64_ty, 32, 0);
+        c_args_h.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
+        c_args_h.v[1] = llvm_const_int(ctx.i64_ty, 32, 0);
         let proto_hdr <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args_h, 2, "proto_hdr");
         delete c_args_h;
 
@@ -11654,8 +11303,8 @@ fun cg_zero_uninit_buffer(ctx: &FnContext, ty_ann: string, ty: &LLVMType, alloca
         let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
         let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
         let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-        c_args.v0 = llvm_const_int(ctx.i64_ty, slots, 0);
-        c_args.v1 = llvm_const_int(ctx.i64_ty, 8, 0);
+        c_args.v[0] = llvm_const_int(ctx.i64_ty, slots, 0);
+        c_args.v[1] = llvm_const_int(ctx.i64_ty, 8, 0);
         let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "arr_zero");
         delete c_args;
         let ind_h <&LLVMIndices> = new LLVMIndices{};
@@ -11680,8 +11329,8 @@ fun cg_zero_uninit_buffer(ctx: &FnContext, ty_ann: string, ty: &LLVMType, alloca
         let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
         let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
         let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-        c_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
-        c_args.v1 = llvm_const_int(ctx.i64_ty, 32, 0);
+        c_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
+        c_args.v[1] = llvm_const_int(ctx.i64_ty, 32, 0);
         let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "proto_zero");
         delete c_args;
         llvm_build_store(ctx.builder, raw, alloca);
@@ -11711,8 +11360,8 @@ fun cg_zero_uninit_buffer(ctx: &FnContext, ty_ann: string, ty: &LLVMType, alloca
             let calloc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
             let c_fn_ty <&LLVMType> = llvm_global_get_value_type(calloc_fn);
             let c_args <&LLVMValueArgs> = new LLVMValueArgs{};
-            c_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
-            c_args.v1 = llvm_const_int(ctx.i64_ty, 1024, 0);
+            c_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
+            c_args.v[1] = llvm_const_int(ctx.i64_ty, 1024, 0);
             let raw <&LLVMValue> = llvm_build_call2(ctx.builder, c_fn_ty, calloc_fn, c_args, 2, "struct_zero");
             delete c_args;
             llvm_build_store(ctx.builder, raw, alloca);
@@ -13431,8 +13080,8 @@ pub fun lower_fun_decl(
     }
 
     let fat_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-    fat_args.t0 = ptr_t;
-    fat_args.t1 = ptr_t;
+    fat_args.t[0] = ptr_t;
+    fat_args.t[1] = ptr_t;
     ctx.fat_ptr_ty = llvm_struct_type(fat_args, 2, 0);
     delete fat_args;
 
@@ -13495,16 +13144,16 @@ pub fun lower_fun_decl(
                 let bc_fn <&LLVMValue> = get_or_declare_calloc(ctx);
                 let bc_ty <&LLVMType> = llvm_global_get_value_type(bc_fn);
                 let bc_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                bc_args.v0 = llvm_const_int(ctx.i64_ty, 1, 0);
-                bc_args.v1 = llvm_const_int(ctx.i64_ty, 1024, 0);
+                bc_args.v[0] = llvm_const_int(ctx.i64_ty, 1, 0);
+                bc_args.v[1] = llvm_const_int(ctx.i64_ty, 1024, 0);
                 let fresh <&LLVMValue> = llvm_build_call2(builder, bc_ty, bc_fn, bc_args, 2, "byval_copy");
                 delete bc_args;
                 let mc_fn <&LLVMValue> = get_or_declare_memcpy(ctx);
                 let mc_ty <&LLVMType> = llvm_global_get_value_type(mc_fn);
                 let mc_args <&LLVMValueArgs> = new LLVMValueArgs{};
-                mc_args.v0 = fresh;
-                mc_args.v1 = p_val;
-                mc_args.v2 = llvm_const_int(ctx.i64_ty, 1024, 0);
+                mc_args.v[0] = fresh;
+                mc_args.v[1] = p_val;
+                mc_args.v[2] = llvm_const_int(ctx.i64_ty, 1024, 0);
                 llvm_build_call2(builder, mc_ty, mc_fn, mc_args, 3, "");
                 delete mc_args;
                 llvm_build_store(builder, fresh, alloca);
@@ -14139,8 +13788,8 @@ fun lower_dtor_claim(
     ctx.src_file = src_file;
     ctx.ret_iface = null;
     let fat_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-    fat_args.t0 = ptr_t;
-    fat_args.t1 = ptr_t;
+    fat_args.t[0] = ptr_t;
+    fat_args.t[1] = ptr_t;
     ctx.fat_ptr_ty = llvm_struct_type(fat_args, 2, 0);
     delete fat_args;
     // Wave-5 slice 4: the deferred-destruction list (see lower_fun_decl).
@@ -14229,8 +13878,8 @@ fun lower_dealloc_claim(
     ctx.src_file = src_file;
     ctx.ret_iface = null;
     let fat_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-    fat_args.t0 = ptr_t;
-    fat_args.t1 = ptr_t;
+    fat_args.t[0] = ptr_t;
+    fat_args.t[1] = ptr_t;
     ctx.fat_ptr_ty = llvm_struct_type(fat_args, 2, 0);
     delete fat_args;
     // Wave-5 slice 4: the deferred-destruction list (see lower_fun_decl).
@@ -14282,7 +13931,7 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int, 
     let pre_pf <&LLVMValue> = llvm_get_named_function(module, "printf");
     if (pre_pf == null) {
         let pre_params <&LLVMTypeArgs> = new LLVMTypeArgs{};
-        pre_params.t0 = llvm_pointer_type(llvm_i8_type(), 0);
+        pre_params.t[0] = llvm_pointer_type(llvm_i8_type(), 0);
         let pre_ty <&LLVMType> = llvm_function_type(llvm_i32_type(), pre_params, 1, 1);
         delete pre_params;
         pre_pf = llvm_add_function(module, "printf", pre_ty);
@@ -14454,8 +14103,8 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int, 
                     let pay_sz <int> = e_info.max_payload_size;
                     if (pay_sz == 0) { pay_sz = 8; }
                     let e_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-                    e_args.t0 = llvm_i32_type();
-                    e_args.t1 = llvm_array_type(llvm_i8_type(), pay_sz);
+                    e_args.t[0] = llvm_i32_type();
+                    e_args.t[1] = llvm_array_type(llvm_i8_type(), pay_sz);
                     e_info.llvm_type = llvm_struct_type(e_args, 2, 0);
                     delete e_args;
                 } else {
@@ -14531,8 +14180,8 @@ pub fun generate_llvm_code(root: &AstNode, output_path: string, opt_level: int, 
                 let fcx <&LLVMContext> = llvm_get_global_context();
                 let named_fat <&LLVMType> = llvm_struct_create_named(fcx, fat_name);
                 let if_args <&LLVMTypeArgs> = new LLVMTypeArgs{};
-                if_args.t0 = llvm_pointer_type(llvm_i8_type(), 0);
-                if_args.t1 = llvm_pointer_type(llvm_i8_type(), 0);
+                if_args.t[0] = llvm_pointer_type(llvm_i8_type(), 0);
+                if_args.t[1] = llvm_pointer_type(llvm_i8_type(), 0);
                 llvm_struct_set_body(named_fat, if_args, 2, 0);
                 delete if_args;
                 if_info.fat_ptr_ty = named_fat;
