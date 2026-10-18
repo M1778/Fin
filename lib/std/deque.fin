@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Double-ended queue (Deque), FIFO Queue, and LIFO Stack.
 //
 // Matches C++'s `<deque>`, `<queue>`, and `<stack>`, and Python's `collections.deque`.

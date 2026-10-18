@@ -73,6 +73,15 @@ jobs:
           key: conan-${{ matrix.name }}-${{ hashFiles('conanfile.py', 'conan/profiles/fin') }}
           restore-keys: conan-${{ matrix.name }}-
 
+      - name: License headers (issue #85)
+        run: |
+          missing=$(git ls-files 'src/*.cpp' 'src/**/*.cpp' 'src/*.hpp' 'src/**/*.hpp' 'src/lexer/lexer.l' 'src/parser/parser.y' 'finc/*.fin' 'lib/std/*.fin' 'tools/*/main.cpp' | xargs grep -L SPDX-License-Identifier || true)
+          if [ -n "$missing" ]; then
+            echo "::error::files without SPDX-License-Identifier:"
+            printf '%s\n' "$missing"
+            exit 1
+          fi
+
       - name: Conan install
         run: |
           # conan/profiles/fin does `include(default)`, so a detected default

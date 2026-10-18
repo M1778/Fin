@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Emitter: target code generation emitting valid, portable ANSI C/C99 source code.
 //
 // Translates AST and IR constructs into clean C code that can be compiled

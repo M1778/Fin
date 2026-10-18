@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Algorithms: sorting, searching, partition, and sequence manipulation.
 //
 // Matches C++'s `<algorithm>` and Python's `bisect`/`sorted` modules, providing

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // `Result` and the interface it implements.
 //
 // tests/samples/stdlib/typing.fin is the specification, and as of this rewrite the shape

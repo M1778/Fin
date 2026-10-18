@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // finc/main.fin: Main CLI entry point for the Fin self-hosting compiler.
 
 import {

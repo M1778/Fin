@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // finc/checker.fin: Semantic analyzer and type checker for Fin self-hosting compiler.
 
 import {

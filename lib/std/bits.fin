@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Bit manipulation operations matching C++20 `<bit>` and Python bitwise capabilities.
 //
 // Provides bitwise operations, bit testing and modification, counting operations

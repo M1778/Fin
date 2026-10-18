@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // fintest — minimal end-to-end runner for `*_test.fin` files.
 //
 // Usage: fintest [--timeout Ns] [roots...]  (default root: ./fintest/)

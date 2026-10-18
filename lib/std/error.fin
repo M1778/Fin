@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // The standard error class.
 //
 // tests/samples/stdlib/error.fin is the full specification of this module and this is

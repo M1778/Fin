@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Token definitions, source location tracking, and lexical classification.
 //
 // Matches Go's `go/token` and Python's `token` modules, specialized for Fin's

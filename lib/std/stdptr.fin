@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //@ bundled
 // The reference-counted pointer, and the weak handle beside it.
 //

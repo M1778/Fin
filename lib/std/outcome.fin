@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Outcome: the recoverable-error value that lowers today.
 //
 // tests/samples/stdlib/outcome.fin is the specification and this module is the

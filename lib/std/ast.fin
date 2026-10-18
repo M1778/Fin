@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Abstract Syntax Tree (AST) node representations and tree builder functions.
 //
 // Matches Go's `go/ast` and standard compiler AST node models.

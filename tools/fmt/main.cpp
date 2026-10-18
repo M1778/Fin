@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // finfmt — canonical whitespace formatter for Fin sources (issue #38).
 //
 // Usage: finfmt [--check] <file.fin>...

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // TypeSys: semantic type representation, type checking, and assignability for Fin compilers.
 //
 // Models primitive scalar types, pointer types, dynamic and static array types,

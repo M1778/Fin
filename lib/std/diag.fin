@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Compiler diagnostics, severity levels, error tracking, and formatted source reporting.
 //
 // Matches modern compiler diagnostic reporting (Clang, Rust, Fin).

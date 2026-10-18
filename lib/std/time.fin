@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Time: system clock and execution delays.
 //
 // Reaches standard C library runtime facilities for epoch timestamping

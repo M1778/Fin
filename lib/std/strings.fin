@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Strings: length, comparison, search, slicing, splitting, joining, trimming, and the
 // two conversions between a `string` and a `[char]`.
 //

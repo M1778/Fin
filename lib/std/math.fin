@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Math: comparisons and clamping over the `Number` constraint set, integer arithmetic
 // the language does not have operators for, and C's libm by its own names.
 //

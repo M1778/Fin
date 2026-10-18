@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // LLVM-C API bindings for the Fin Self-Hosting Compiler
 // Implements ADR 0002 and ADR 0043 (pure LLVM lowering)
 

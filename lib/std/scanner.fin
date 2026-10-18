@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Lexical scanner and tokenizer for Fin source code.
 //
 // Matches Go's `go/scanner` and Python's `tokenize`.

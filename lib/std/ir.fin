@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // IR: 3-address code intermediate representation for Fin compiler backend.
 //
 // Bridges the abstract syntax tree and target code generation (C / LLVM IR / assembly),

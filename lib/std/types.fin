@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Type names, numeric aliases, the constraint sets, and the conversions between a number
 // and a `string`.
 //

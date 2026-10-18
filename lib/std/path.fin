@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Path: filesystem path manipulation functions.
 //
 // Provides platform path joining, basename/dirname extraction, extension query,

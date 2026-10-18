@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Scope: lexical scoping, symbol tables, and identifier resolution for compiler frontends.
 //
 // Models nested scopes (global -> module -> function -> block) with lexical shadowing,

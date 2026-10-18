@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // finc/parser.fin: Recursive descent and Pratt expression parser for Fin self-hosting compiler.
 
 import {

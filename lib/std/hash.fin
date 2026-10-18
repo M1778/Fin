@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Hash algorithms: CRC32, FNV-1a, DJB2, and SDBM.
 //
 // Provides non-cryptographic checksums and hash algorithms for data integrity,

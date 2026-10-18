@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Networking: TCP over IPv4, through the C library's socket calls.
 //
 // The file this replaces was empty on purpose, and the empty file's argument is

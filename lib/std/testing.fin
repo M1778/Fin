@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Test assertions and testing utilities.
 //
 // Matches Python's `unittest` / `pytest` assertion helpers, using Fin's native

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // finc/driver.fin: Compiler driver pipeline and command-line execution.
 
 import { Token, tok_eof, token_name } from token::std;

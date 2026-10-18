@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Process: process spawning, command execution, and subprocess output capture.
 //
 // Essential for compiler self-hosting: allows compiling emitted C or assembly files,
