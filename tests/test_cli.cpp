@@ -3578,3 +3578,30 @@ TEST(DwarfDebugInfo, DashGIsAdvertisedInHelp) {
         << "--debug-symbols must appear in --help output";
 }
 #endif  // FIN_TESTS_HAVE_BACKEND
+
+// A leak the plain build cannot see: LeakSanitizer only exists in the sanitizer
+// build, so this test is compiled only there (FIN_TESTS_SANITIZE, set by
+// tests/CMakeLists.txt when FIN_SANITIZE is on) and the test count stays stable
+// everywhere else. The exit code is the primary signal -- ASan halts on detected
+// leaks with its own code -- and the report text backs it up, so a suppressed
+// leak cannot masquerade as a pass.
+#if defined(FIN_TESTS_SANITIZE)
+TEST(FincLeaks, StdioPreludeCompileIsLeakSanitizerClean) {
+    // The struct/signature cycles form wherever a struct's method, constructor or
+    // enumerator table is instantiated into (StructType::substitute / FunctionType
+    // ::substitute), so these are the corpus samples that bled indirect
+    // FunctionType reports while the sweep was offline; variables.fin and
+    // basic.fin happen to be leak-free even unswept and witness nothing.
+    for (const char* sample : {"enums.fin", "deeptest2.fin", "match.fin"}) {
+        const std::string src = (fs::path(samplesDir()) / sample).string();
+        // The bundled library is found relative to the finc executable; a build
+        // tree outside the repo gets none, so pin the search explicitly rather
+        // than let the module-not-found error masquerade as a leak signal.
+        const std::string libs = (fs::path(testsDir()).parent_path() / "lib" / "std").string();
+        const FincRun r = runFinc({src, "-c", "--fin-libs=" + libs});
+        EXPECT_EQ(r.exitCode, 0) << "for " << sample << ":\n" << stripAnsi(r.err);
+        EXPECT_EQ(stripAnsi(r.err).find("LeakSanitizer"), std::string::npos)
+            << "finc leaked while compiling " << sample << ":\n" << stripAnsi(r.err);
+    }
+}
+#endif

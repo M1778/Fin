@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <iostream>
 
+#include "TypeSweep.hpp"
+
 namespace fin {
 
 class Type;
@@ -13,9 +15,13 @@ using TypeMap = std::unordered_map<std::string, TypePtr>;
 
 class Type {
 public:
-    virtual ~Type() = default;
+    // Issue #101 (see TypeSweep.hpp): every node joins the exit-time graph sweep on
+    // construction and leaves it in its destructor, so the registry outlives no
+    // node and holds no node alive.
+    Type() { typeGraphRegister(this); }
+    virtual ~Type() { typeGraphUnregister(this); }
     virtual std::string toString() const = 0;
-    
+
     // Equality (Strict)
     virtual bool equals(const Type& other) const = 0;
 
@@ -32,6 +38,12 @@ public:
 
     // Cloning
     virtual TypePtr clone() const = 0;
+
+    // Issue #101 (see TypeSweep.hpp): the process-exit sweep asks each surviving
+    // node to drop the type-valued edges it owns. Edge-free nodes inherit this
+    // empty default; a class that owns edges must override it or its shares of
+    // the leak come back.
+    virtual void releaseTypeEdges() {}
 
     template <typename T>
     const T* as() const { return dynamic_cast<const T*>(this); }

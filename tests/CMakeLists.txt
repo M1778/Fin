@@ -33,6 +33,12 @@ target_link_libraries(fin_tests PRIVATE
 
 target_include_directories(fin_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Issue #101's leak test needs a binary that can observe a leak, and only the
+# sanitizer build has one. Compiled out elsewhere so the count stays stable.
+if(FIN_SANITIZE)
+    target_compile_definitions(fin_tests PRIVATE FIN_TESTS_SANITIZE=1)
+endif()
+
 # The harness reads the corpus and the finc binary through absolute paths baked
 # in at configure time. The old suite discovered samples with a relative path
 # during static initialisation, so a wrong working directory registered zero

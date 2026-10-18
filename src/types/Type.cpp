@@ -3,6 +3,22 @@
 
 namespace fin {
 
+// The registry is a leaked `new` on purpose (a destructor cannot run at exit
+// safely: nodes may reference each other), so the sweep owns the teardown.
+// See TypeSweep.hpp for the mechanism and the reason it is exit-time.
+void typeGraphSweep() {
+    std::vector<const Type*> pending(typeGraphNodes().begin(), typeGraphNodes().end());
+    for (const Type* node : pending) {
+        auto found = typeGraphNodes().find(node);
+        if (found == typeGraphNodes().end()) continue;
+        typeGraphNodes().erase(found);
+        // Dropping the edges may free this very node by cascade; its destructor
+        // unregistered it above, so nothing is read through `node` afterwards.
+        const_cast<Type*>(node)->releaseTypeEdges();
+    }
+    typeGraphNodes().clear();
+}
+
 // --- Helper ---
 bool typesEqual(const TypePtr& a, const TypePtr& b) {
     if (!a && !b) return true;

@@ -342,16 +342,13 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Test under ASan+UBSan
-        # LSAN (leak detection) rides along with ASan by default, and the tree
-        # is NOT leak-clean today: even `finc basic.fin -c` reports ~4329
-        # unreleased allocations at exit (shared_ptr type objects, e.g.
-        # FunctionType::substitute; one-time exit-time leaks, filed as a
-        # follow-up, not fixed here). Leaving it on would paint every stderr-
-        # asserting test red for a harness reason, so this job measures memory
-        # SAFETY (ASan+UBSan) with leaks off. Do not delete this without
-        # re-measuring: that is the day the leak follow-up closed.
-        env:
-          LSAN_OPTIONS: detect_leaks=0
+        # LSAN (leak detection) rides along with ASan by default. The tree behind
+        # issue #101 was not leak-clean (~4329 allocations at exit per compile,
+        # the shared_ptr struct/signature cycle); the exit-time type-graph sweep
+        # reclaims that island, so leak detection is back ON and
+        # FincLeaks.StdioPreludeCompileIsLeakSanitizerClean asserts it from
+        # inside the suite. If a new leak appears, fix it -- do not silently
+        # re-arm detect_leaks=0 on top of a leak that outlives its issue.
         run: |
           set -o pipefail
           ctest --test-dir build --build-config Debug \

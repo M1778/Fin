@@ -84,6 +84,24 @@ public:
     // keeping it out of `fields` is what stops `value.A` from resolving.
     std::unordered_map<std::string, TypePtr> enumerators;
 
+    // Issue #101 (see TypeSweep.hpp): every type-valued edge this node owns, in
+    // one place. A struct is the other half of the struct/signature cycle -- its
+    // tables point at the FunctionTypes, which point back -- and the name-only
+    // maps (`field_index`, `method_visibility`) carry no edges, so they do not
+    // take part in the sweep. As on FunctionType the edges move into stack
+    // locals first, because dropping them in place can free this node itself
+    // mid-call and destroy the containers the sweep is still walking.
+    void releaseTypeEdges() override {
+        std::vector<TypePtr> localArgs = std::move(generic_args);
+        std::vector<TypePtr> localParents = std::move(parents);
+        std::vector<FieldInfo> localFields = std::move(fields);
+        std::unordered_map<std::string, size_t> localIndex = std::move(field_index);
+        std::unordered_map<std::string, TypePtr> localMethods = std::move(methods);
+        std::unordered_map<int, TypePtr> localOps = std::move(operators);
+        std::vector<TypePtr> localCtors = std::move(constructors);
+        std::unordered_map<std::string, TypePtr> localEnums = std::move(enumerators);
+    }
+
     StructType(std::string n, std::vector<TypePtr> args = {}) 
         : name(std::move(n)), generic_args(std::move(args)) {}
 

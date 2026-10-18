@@ -44,6 +44,24 @@ public:
     bool equals(const Type& other) const override;
     TypePtr substitute(const TypeMap& mapping, TypePtr selfReplacement = nullptr) override;
     TypePtr clone() const override;
+
+    // Issue #101 (see TypeSweep.hpp): the two edges this node owns. A signature is
+    // the half of every struct/enum cycle this file was silent about: the struct's
+    // method, constructor and enumerator tables point here, and these edges point
+    // back at the struct. `param_defaults` is positionally parallel flags, not an
+    // edge, and stays.
+    //
+    // The edges move into stack locals before anything is dropped: a signature
+    // naming its struct twice (`f(self: S) -> S`) holds two of the struct's
+    // references, so dropping the edges in place can free this node itself
+    // mid-function, and a destructor destroying the containers the sweep is
+    // still walking is use-after-free by construction. The locals carry the
+    // graph on this stack frame while the members sit empty for their own
+    // destructor.
+    void releaseTypeEdges() override {
+        std::vector<TypePtr> params = std::move(param_types);
+        TypePtr ret = std::move(return_type);
+    }
 };
 
 }
