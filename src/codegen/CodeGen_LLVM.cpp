@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "CodeGen.hpp"
 
 #include "../ast/ASTNode.hpp"   // the master AST include
@@ -8420,7 +8421,7 @@ private:
             return false;
         }
         const std::string& referent = tieAttr->value_str;
-        if (referent == "$Fin") {
+        if (referent == fin::kFinLifetimeRoot) {
             tie = Local::SlaveofTie::Pinned;
             return true;
         }
@@ -13968,6 +13969,36 @@ private:
         return true;
     }
 
+    // Whether destroying a value of `info` emits cleanup output at all: the
+    // declared destructor body, or the `destructor` claimant's generation, or
+    // the composed field/base pass reaching anything of the kind. The exact
+    // facts emitDestructorCall lowers (same `functions_` lookups, same field
+    // and effective-base walks), so the field-delete refusal at
+    // visit(DeleteStatement&) names a cleanup the owner really runs, and can
+    // only drift if that emission itself changes. A value cycle cannot reach
+    // here circularly: the layout recursion this mirrors is finite by
+    // construction (emitDestructorCall's termination note).
+    bool destructionWouldRun(const StructInfo& info) {
+        if (functions_.count(methodKey(info.finName, "destructor"))) return true;
+        if (hasDestructorClaimant_ &&
+            functions_.count(destructorClaimantKey())) return true;
+        for (size_t i = info.fields.size(); i-- > 0;) {
+            const StructField& field = info.fields[i];
+            if (field.inherited) continue;  // owned by the base pass below
+            if (field.type.isStruct() && field.type.structInfo &&
+                destructionWouldRun(*field.type.structInfo))
+                return true;
+        }
+        if (info.decl) {
+            for (const TypeNode* baseType : effectiveBases(*info.decl)) {
+                auto base = structs_.find(baseType->name);
+                if (base == structs_.end() || !base->second.complete) continue;
+                if (destructionWouldRun(base->second)) return true;
+            }
+        }
+        return false;
+    }
+
     void visit(DeleteStatement& node) override {
         if (!currentFn_) { unsupported(node, "'delete' outside a function"); return; }
         if (!node.expr) { unsupported(node, "'delete' with no operand"); return; }
@@ -13989,8 +14020,38 @@ private:
         // ("Calls destructor if defined, then frees memory") -- the declared
         // body, then fields and bases through emitDestructorCall, so cleanup
         // composes. A type with nothing to clean frees exactly as before.
+        //
+        // Unless the address is a *field* of an object whose cleanup composes:
+        // ADR 0016 amendment (2026-10-18). `delete` destroys the pointee and
+        // frees an address no allocation root owns, and the owner -- a value
+        // local's scope exit (ADR 0030), a later root `delete`, or the owner's
+        // own destructor running into its composed field pass -- destroys the
+        // same field again. That measured as a clean compile that aborts in
+        // libc ("free(): double free detected in tcache 2") on every route, so
+        // the construct refuses instead of emitting the double-run. Members
+        // whose type composes nothing (deeptest2.fin's `delete &name` on a
+        // `<string>` field) keep lowering, and destructionWouldRun is the
+        // same facts emitDestructorCall emits, so a refusal names a cleanup
+        // the owner really runs. What is not closed here: a member address
+        // laundered through a value first (`let p <&Inner> = &w.inn; delete p`)
+        // deletes an identifier, which is not this shape today.
         if (v.type.isPointer() && v.type.pointee && v.type.pointee->isStruct() &&
             v.type.pointee->structInfo) {
+            const Expression* inner = node.expr.get();
+            if (auto* unary = dynamic_cast<const UnaryOp*>(inner)) {
+                if (!unary->is_postfix && unary->op == ASTTokenKind::AMPERSAND)
+                    inner = unary->operand.get();
+            }
+            if (auto* memberCode = dynamic_cast<const MemberAccess*>(inner);
+                memberCode && !memberCode->is_static &&
+                destructionWouldRun(*v.type.pointee->structInfo)) {
+                unsupported(node, fmt::format(
+                    "the 'delete' of field '{}' (type '{}'), whose destructor the "
+                    "owner's cleanup composes and runs again (ADR 0016, ADR 0030)",
+                    memberCode->member,
+                    v.type.pointee->structInfo->finName));
+                return;
+            }
             if (!emitDestructorCall(node, *v.type.pointee->structInfo, address))
                 return;
         }

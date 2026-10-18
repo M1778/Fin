@@ -8688,6 +8688,91 @@ BACKEND_TEST(Soundness_Codegen, ADeleteCleansTheBaseAfterTheBody) {
 }
 
 // ---------------------------------------------------------------------------
+// `delete` of a field subobject whose type has a destructor vs the composed
+// cleanup that runs that same destructor again.
+//
+// ADR 0016 amendment (2026-10-18): `delete` destroys its pointee first
+// (deeptest3.fin:44), and every owner of that field -- a value local's scope
+// exit (ADR 0030), a later root `delete`, or the owner's own destructor body
+// running before the composed field pass -- destroys it again. Measured today,
+// before the pin: every route compiled clean and aborted in libc
+// ("free(): double free detected in tcache 2"), because the delete's
+// deallocation frees the field's address, which no allocation root owns. The
+// pin is Option A of the issue: the construct now refuses instead of emitting
+// the double-run. A field whose type composes *nothing* (e.g. a `<string>`
+// field, deeptest2.fin's `delete &name`) keeps lowering -- the refusal is
+// keyed on the composed destructor, not on field-deletes at large.
+// ---------------------------------------------------------------------------
+
+BACKEND_TEST(Soundness_Codegen, ADeleteOfADestructorFieldRefusesTheDoubleRun) {
+    // The scope-exit route (the issue's shape) and the root-delete route are
+    // two owners of the same field; each aborts at run time without the pin.
+    for (const char* tail : {"        return;\n", "        delete w;\n"}) {
+        const Built b = build(std::string(kPrintf) +
+            "struct Inner {\n"
+            "    v <int>,\n"
+            "    ~Inner() { printf(\"inner %d\\n\", self.v); }\n"
+            "}\n"
+            "struct Wrap {\n"
+            "    inn <Inner>,\n"
+            "}\n"
+            "fun main() <noret> {\n"
+            "    let w <&Wrap> = new Wrap{ inn: Inner{ v: 9 } };\n"
+            "    delete &w.inn;\n" +
+            tail +
+            "}\n");
+        EXPECT_NE(b.compileExit, 0) << b.why() << "\nvariant:\n" << tail;
+        EXPECT_NE(b.compileErr.find("'inn'"), std::string::npos) << b.why();
+        EXPECT_NE(b.compileErr.find("whose destructor the owner's cleanup composes and runs again"),
+                  std::string::npos)
+            << b.why();
+    }
+}
+
+BACKEND_TEST(Soundness_Codegen, ADeleteInsideADestructorBodyRefusesTheCompose) {
+    // `~Wrap()` deleting its own field: the composed field pass right after
+    // the body destroys `inn` again, inside one destructor call.
+    const Built b = build(std::string(kPrintf) +
+        "struct Inner {\n"
+        "    v <int>,\n"
+        "    ~Inner() { printf(\"inner %d\\n\", self.v); }\n"
+        "}\n"
+        "struct Wrap {\n"
+        "    inn <Inner>,\n"
+        "    ~Wrap() { delete &self.inn; }\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    let w <&Wrap> = new Wrap{ inn: Inner{ v: 2 } };\n"
+        "    delete w;\n"
+        "}\n");
+    EXPECT_NE(b.compileExit, 0) << b.why();
+    EXPECT_NE(b.compileErr.find("'inn'"), std::string::npos) << b.why();
+}
+
+BACKEND_TEST(Soundness_Codegen, ADeleteOfADestructorlessFieldStillLowers) {
+    // The narrow predicate: a field whose type composes nothing stays a legal
+    // delete (deeptest2.fin's `~Person()` writes `delete &name` on a
+    // `<string>` field). The shape compiles; the test never destroys a
+    // Person at run time, because the deallocation target question is
+    // separate (see the ADR amendment) and not this pin.
+    const Built b = build(std::string(kPrintf) +
+        "struct Person {\n"
+        "    name <string>,\n"
+        "    ~Person() { delete &name; }\n"
+        "}\n"
+        "fun never_called() <void> {\n"
+        "    let p <&Person> = new Person{ name: \"Ada\" };\n"
+        "    delete &p.name;\n"
+        "}\n"
+        "fun main() <noret> {\n"
+        "    printf(\"never destroys\\n\");\n"
+        "}\n");
+    EXPECT_EQ(b.compileExit, 0) << b.why();
+    ASSERT_TRUE(b.ran) << b.why();
+    EXPECT_EQ(b.out, "never destroys\n") << b.why();
+}
+
+// ---------------------------------------------------------------------------
 // Scope-exit destruction: locals with destructors clean up when control
 // leaves their scope (ADR 0030) -- at `return`, at block end, and on `break`
 // and `continue` -- in reverse declaration order. There are no moves in the
