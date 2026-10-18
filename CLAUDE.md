@@ -32,7 +32,8 @@ preprocessor → lexer → parser → AST → macro expander (@special)
 - `tests/samples/*.fin` — the language specification (ADR 0008); each sample
   needs a `//@` header (`ok` / `error <line>:<col> "<msg>"` /
   `unimplemented "<reason>"`); missing expectation = harness fault
-- `docs/adr/` — 42 binding numbered rulings; behavior changes trace to an ADR
+- `docs/adr/` — 55 binding numbered rulings; behavior changes trace to an ADR (the
+  count and every `ADR NNNN` citation are checked by tests/tools/check_docs.py)
 
 ## Verify commands
 ```sh
