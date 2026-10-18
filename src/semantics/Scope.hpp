@@ -1,5 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
@@ -9,6 +11,14 @@
 namespace fin { class MacroDeclaration; }
 
 namespace fin {
+
+// The `#[slaveof]` referent meaning "pinned to program exit", spelled in one
+// place and used where it means that. A typo in any single use would compile
+// and simply never match: storage the programmer pinned would stop being
+// recognised as pinned (ADR 0055's read) and the attribute validator would
+// start refusing it. The spelling itself is language surface
+// (tests/samples/variables.fin:35) and does not change.
+inline constexpr std::string_view kFinLifetimeRoot{"$Fin"};
 
 struct Symbol {
     std::string name;
@@ -23,8 +33,9 @@ struct Symbol {
     // live tie from a dangling one; the scope owns the entry, so the tie
     // dies with the binding and shadowing resolves by construction.
     //
-    // Defaulted, so the aggregate initialisations of Symbol elsewhere mean
-    // what they meant: a symbol is untied unless something says otherwise.
+    // Defaulted, so the one aggregate initialisation of Symbol (in `bound`,
+    // below) means what it meant: a symbol is untied unless something says
+    // otherwise.
     std::string slaveof;
 
     // Whether this binding is a compile-time callable rather than frame data.
@@ -37,8 +48,9 @@ struct Symbol {
     // exist -- while an `fn`-typed parameter or closure variable stays
     // capturable: it holds a runtime closure pair.
     //
-    // Defaulted, so the aggregate initialisations of Symbol elsewhere mean
-    // what they meant: a symbol is data unless something says otherwise.
+    // Defaulted, so the one aggregate initialisation of Symbol (in `bound`,
+    // below) means what it meant: a symbol is data unless something says
+    // otherwise.
     bool is_function = false;
     bool is_template = false;
 
@@ -53,8 +65,9 @@ struct Symbol {
     // (SemanticAnalyzer::visit(MethodCall&)'s namespace branch), because only for that
     // one is the name in the root program bound to the symbol the module named.
     //
-    // Defaulted, so the twenty-two aggregate initialisations of Symbol elsewhere mean
-    // what they meant: a symbol is not ambient unless something says it is.
+    // Defaulted, so the one aggregate initialisation of Symbol (in `bound`,
+    // below) means what it meant: a symbol is not ambient unless something
+    // says it is.
     bool is_ambient = false;
 
     // Whether this binding was pre-registered by the file-scope hoist
@@ -65,8 +78,9 @@ struct Symbol {
     // with a fresh Symbol, so the flag consumes itself: a second textual
     // declaration finds it cleared and is refused.
     //
-    // Defaulted, so the aggregate initialisations of Symbol elsewhere mean
-    // what they meant: a symbol is walked unless the hoist says otherwise.
+    // Defaulted, so the one aggregate initialisation of Symbol (in `bound`,
+    // below) means what it meant: a symbol is walked unless the hoist says
+    // otherwise.
     bool is_hoisted = false;
 
     // Whether this binding is a prototype (`@define`) rather than a definition.
@@ -79,6 +93,19 @@ struct Symbol {
     //
     // Defaulted: a symbol defines unless an `@define` says it prototypes.
     bool is_prototype = false;
+
+    // The one way a binding is registered. Every Scope::define call states the
+    // four fields a variable has -- name, type, mutability, and whether an
+    // initialiser ran -- and every defaulted field stays defaulted here, in
+    // this one list. Stated once on purpose: a field added to Symbol surfaces
+    // at this one construction instead of defaulting silently at every call
+    // site, and the warning for a field with no default member initialiser
+    // points here and nowhere else.
+    static Symbol bound(std::string name, std::shared_ptr<Type> type,
+                        bool is_mutable, bool is_initialized = true) {
+        return Symbol{.name = std::move(name), .type = type, .is_mutable = is_mutable,
+                      .is_initialized = is_initialized, .slaveof = {}};
+    }
 };
 
 class Scope {

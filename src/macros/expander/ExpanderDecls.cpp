@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "../MacroExpander.hpp"
 #include "../../types/TypeImpl.hpp" 
 #include "../../utils/ModuleLoader.hpp"
@@ -181,8 +182,7 @@ void MacroExpander::visit(ImportModule& node) {
     // Define a symbol with NamespaceType that holds the scope
     auto nsType = std::make_shared<NamespaceType>(alias, moduleScope);
     
-    Symbol sym{alias, nsType, false, true};
-    currentScope->define(sym);
+    currentScope->define(Symbol::bound(alias, nsType, false));
 }
 
 void MacroExpander::visit(Program& node) { for (auto& stmt : node.statements) stmt->accept(*this); }

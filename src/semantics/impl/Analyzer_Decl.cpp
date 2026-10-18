@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "../SemanticAnalyzer.hpp"
 #include "../ComptimeInterp.hpp"
 #include "../EventPayloads.hpp"
@@ -248,7 +249,7 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
                           node.name + "'");
                 continue;
             }
-            if (a->value_str == "$Fin") { slaveofTie = "$Fin"; continue; }
+            if (a->value_str == kFinLifetimeRoot) { slaveofTie = kFinLifetimeRoot; continue; }
             if (a->is_flag || a->value_str.empty() || a->value_str[0] == '$' ||
                 a->value_str.find('.') != std::string::npos)
                 continue;  // malformed: visit(Attribute&) already reported it
@@ -262,7 +263,8 @@ void SemanticAnalyzer::visit(VariableDeclaration& node) {
         }
     }
 
-    Symbol sym{node.name, type, node.is_mutable, node.initializer != nullptr};
+    Symbol sym = Symbol::bound(node.name, type, node.is_mutable,
+                               node.initializer != nullptr);
     if (!slaveofTie.empty()) sym.slaveof = slaveofTie;
     // A generic lambda is a recipe, not a value: it has no slot until a call
     // instantiates it, so a lambda body naming it is instantiating, not
@@ -533,7 +535,7 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
     if (currentStructContext && !node.is_static && !hasSelf) {
         auto selfType = currentScope->resolveType("Self");
         if (selfType) {
-            currentScope->define({"self", selfType, true, true});
+            currentScope->define(Symbol::bound("self", selfType, true));
             debugLog(fg(fmt::color::gray), "      [Magic] Injected implicit 'self' into '{}'\n", node.name);
         }
     }
@@ -586,7 +588,7 @@ void SemanticAnalyzer::visit(FunctionDeclaration& node) {
         // calling it needs no frame slot, so a lambda body naming one is
         // calling across the boundary, not capturing. The flag is what keeps
         // capture analysis from snapshotting a slot that does not exist.
-        Symbol funSym{node.name, funcType, false, true};
+        Symbol funSym = Symbol::bound(node.name, funcType, false);
         funSym.is_function = true;
         checkDuplicateDeclaration(currentScope->parent, node, node.name, node.attributes, funcType, true, false);
         currentScope->parent->define(funSym);
@@ -922,7 +924,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
         }
         visitParameterDefaults(ctor->params);
         // Inject Self
-        currentScope->define({"self", structType, true, true});
+        currentScope->define(Symbol::bound("self", structType, true));
         
         // A constructor has the struct itself as its declared result.  Keep that
         // expectation active while walking the body so `return` cannot smuggle an
@@ -938,7 +940,7 @@ void SemanticAnalyzer::visit(StructDeclaration& node) {
     if (node.destructor) {
         structType->has_destructor = true;
         enterScope();
-        currentScope->define({"self", structType, true, true});
+        currentScope->define(Symbol::bound("self", structType, true));
         if (node.destructor->body) node.destructor->body->accept(*this);
         exitScope();
     }
@@ -1015,7 +1017,7 @@ void SemanticAnalyzer::visit(OperatorDeclaration& node) {
     visitParameterDefaults(node.params);
     
     // 3. Inject Self
-    currentScope->define({"self", structType, true, true});
+    currentScope->define(Symbol::bound("self", structType, true));
 
     // 4. Return Type
     std::shared_ptr<Type> retType = nullptr;
@@ -1329,7 +1331,7 @@ void SemanticAnalyzer::visit(EnumDeclaration& node) {
     // bound to its constructor, so `Ok(10)` (enums.fin:44) is a call and `let e <E> =
     // Ok;` is the error it should be. StructType.hpp carries the rule.
     for (const auto& name : enumeratorNames)
-        currentScope->define({name, enumType->getEnumeratorValueType(name), false, true});
+        currentScope->define(Symbol::bound(name, enumType->getEnumeratorValueType(name), false));
 }
 
 void SemanticAnalyzer::publishDeclaredNamespaces(const Program& node) {
@@ -1517,7 +1519,7 @@ void SemanticAnalyzer::visit(ImportModule& node) {
     
     // Define the namespace as a variable in the current scope
     // This allows 'alias.member' to work via MemberAccess
-    currentScope->define({alias, nsType, false, true});
+    currentScope->define(Symbol::bound(alias, nsType, false));
     
     node.consumed = true;
     debugLog(fg(fmt::color::blue), "      [Import] Module '{}' bound to namespace '{}'\n", node.source, alias);
@@ -1545,7 +1547,7 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
     // An `@define` is a symbol like a `fun` (a C function reached by name),
     // so the same capture exclusion applies: a lambda calling `printf` reads
     // no frame slot.
-    Symbol defineSym{node.name, funcType, false, true};
+    Symbol defineSym = Symbol::bound(node.name, funcType, false);
     defineSym.is_function = true;
     defineSym.is_prototype = true;
     checkDuplicateDeclaration(currentScope.get(), node, node.name, node.attributes, funcType,
@@ -1553,7 +1555,7 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
     currentScope->define(defineSym);
     if (globalScope && currentScope != globalScope) {
         checkDuplicateDeclaration(globalScope.get(), node, node.name, node.attributes, funcType, false, true);
-        globalScope->define({node.name, funcType, false, true});
+        globalScope->define(Symbol::bound(node.name, funcType, false));
     }
     if (publishIfGlobal(node, node.attributes, node.name, funcType) && loader) {
         // The backend half. Publishing the name makes a call to it type-check in a file
@@ -1574,7 +1576,7 @@ void SemanticAnalyzer::visit(DefineDeclaration& node) {
             // writer, and reaching into `symbols` here would be the second one.
             // Written field by field: a positional literal would silently bind
             // `is_ambient` to whichever flag the struct grows next.
-            Symbol retained{node.name, funcType, false, true};
+            Symbol retained = Symbol::bound(node.name, funcType, false);
             retained.is_function = true;
             retained.is_prototype = true;
             retained.is_ambient = true;
@@ -1643,7 +1645,7 @@ bool SemanticAnalyzer::publishIfGlobal(
             return false;
         }
     }
-    ambient->define({name, type, false, true});
+    ambient->define(Symbol::bound(name, type, false));
     return true;
 }
 
@@ -1749,7 +1751,7 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
     if ((node.is_extern_alias || node.is_symbol_resolution) && node.aliased_type) {
         const std::string& path = node.aliased_type->name;
         if (auto symType = resolveExternPathAsSymbol(path)) {
-            currentScope->define({node.name, symType, false, true});
+            currentScope->define(Symbol::bound(node.name, symType, false));
             if (node.is_public) currentScope->privateSymbols.erase(node.name);
             else currentScope->privateSymbols.insert(node.name);
             debugLog(fg(fmt::color::gray), "      [Extern] Symbol '{}' -> '{}'\n",
@@ -1769,7 +1771,7 @@ void SemanticAnalyzer::visit(TypeDefinition& node) {
         // And as a symbol too, holding the sentinel, when the path resolved to nothing
         // at all: `x` in `extern nosuchthing as x;` may be used in either position and
         // the sentinel is quiet in both.
-        if (isErrorType(asType)) currentScope->define({node.name, asType, false, true});
+        if (isErrorType(asType)) currentScope->define(Symbol::bound(node.name, asType, false));
         debugLog(fg(fmt::color::gray), "      [Extern] Type '{}' -> '{}'\n",
                  node.name, asType->toString());
         return;
@@ -1967,7 +1969,7 @@ void SemanticAnalyzer::visit(SpecialDeclaration& node) {
         auto funcType = std::make_shared<FunctionType>(
             paramTypes, retType ? retType : errorType(), false, paramDefaults);
         checkDuplicateDeclaration(currentScope->parent, node, node.name, node.attributes, funcType, true, false);
-        currentScope->parent->define({node.name, funcType, false, true});
+        currentScope->parent->define(Symbol::bound(node.name, funcType, false));
         // Import visibility (see visit(FunctionDeclaration&)): `@special(priv)`
         // stays in its module.
         if (node.is_public) currentScope->parent->privateSymbols.erase(node.name);
@@ -2160,7 +2162,7 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
             defineParameter(*param, resolveTypeOrError(param->type.get()));
         }
         visitParameterDefaults(ctor->params);
-        currentScope->define({"self", structType, true, true});
+        currentScope->define(Symbol::bound("self", structType, true));
         if (ctor->body) ctor->body->accept(*this);
         exitScope();
     }
@@ -2169,7 +2171,7 @@ void SemanticAnalyzer::visit(ClassDeclaration& node) {
     if (node.destructor) {
         structType->has_destructor = true;
         enterScope();
-        currentScope->define({"self", structType, true, true});
+        currentScope->define(Symbol::bound("self", structType, true));
         if (node.destructor->body) node.destructor->body->accept(*this);
         exitScope();
     }
@@ -2447,7 +2449,7 @@ void SemanticAnalyzer::visit(ImplementsBlock& node) {
             defineParameter(*param, resolveTypeOrError(param->type.get()));
         }
         visitParameterDefaults(ctor->params);
-        currentScope->define({"self", structType, true, true});
+        currentScope->define(Symbol::bound("self", structType, true));
         ctor->accept(*this);
         exitScope();
     }

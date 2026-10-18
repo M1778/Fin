@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "../SemanticAnalyzer.hpp"
 #include "../EventPayloads.hpp"
 #include "../../ast/exprs/MiscExpr.hpp"
@@ -3938,7 +3939,7 @@ void SemanticAnalyzer::checkNullableMatch(MatchExpr& node, const TypePtr& inner)
             // binder (ADR 0050); over an enum the same spelling is a member,
             // which is why this meaning lives only on this path.
             hasBinder = true;
-            currentScope->define({arm.member, inner, false, true});
+            currentScope->define(Symbol::bound(arm.member, inner, false));
         }
         if (arm.body) arm.body->accept(*this);
         auto bodyType = lastExprType;
@@ -4146,7 +4147,7 @@ void SemanticAnalyzer::visit(MatchExpr& node) {
                             armOk = false;
                             break;
                         }
-                        currentScope->define({b, sig->param_types[i], false, true});
+                        currentScope->define(Symbol::bound(b, sig->param_types[i], false));
                     }
                 }
             }

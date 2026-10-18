@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "../SemanticAnalyzer.hpp"
 #include "../ComptimeInterp.hpp"
 #include "../EventPayloads.hpp"
@@ -76,7 +77,7 @@ bool ptrProvForeign(const Symbol* ref, const std::shared_ptr<Scope>& global,
                     const std::shared_ptr<Type>& structCtx) {
     if (!ref || !global) return true;
     if (ref == global->resolve(ref->name)) return true;
-    if (ref->slaveof == "$Fin") return true;
+    if (ref->slaveof == kFinLifetimeRoot) return true;
     if (ref->name == "self" && structCtx) return true;
     return false;
 }
@@ -203,7 +204,7 @@ const Symbol* escapingFrameSlot(const Identifier* root, bool wholeSlot,
     // A global's storage is the program's, so no call or frame can end it.
     if (sym == global->resolve(root->name)) return nullptr;
     // `$Fin` pins storage to program exit.
-    if (sym->slaveof == "$Fin") return nullptr;
+    if (sym->slaveof == kFinLifetimeRoot) return nullptr;
     // The receiver is the caller's object, by reference.
     if (root->name == "self" && structCtx) return nullptr;
     // Reaching *through* a pointer lands in storage someone else owns; a
@@ -831,7 +832,7 @@ void SemanticAnalyzer::refuseEscapingStore(Statement& base) {
         // answers the out-parameter's own shape.
         if (const auto* target = dynamic_cast<const Identifier*>(u->operand.get())) {
             if (const Symbol* targetSym = currentScope->resolve(target->name);
-                targetSym && targetSym->slaveof == "$Fin")
+                targetSym && targetSym->slaveof == kFinLifetimeRoot)
                 return;  // the $Fin-pinned slot reads nothing the call can end
             const Symbol* proven = nullptr;
             if (lookupPtrProvenance(target->name, proven) && proven)
@@ -953,8 +954,8 @@ void SemanticAnalyzer::refuseEscapingReturn(ReturnStatement& node, bool ctorPoin
 
     // A global's storage is the program's, so no call can end it.
     if (sym == globalScope->resolve(name)) return;
-    // `$Fin` pins storage to program exit (Scope.hpp:19-27).
-    if (sym->slaveof == "$Fin") return;
+    // `$Fin` pins storage to program exit (`kFinLifetimeRoot`, Scope.hpp).
+    if (sym->slaveof == kFinLifetimeRoot) return;
     // A method's receiver is the caller's object, not this frame: `self` is by
     // reference, so a mutation through it is visible to the caller. The
     // implicit injection types it `Self` or the struct itself
@@ -1229,7 +1230,7 @@ void SemanticAnalyzer::visit(ForeachLoop& node) {
     }
     // Define loop variable
     auto type = resolveTypeFromAST(node.var_type.get());
-    if(type) currentScope->define({node.var_name, type, false, true});
+    if(type) currentScope->define(Symbol::bound(node.var_name, type, false));
     if (track && type) moved_.declare(node.var_name, type->toString());
 
     // And the index binding of the two-binding form. The parser has stored it on the
@@ -1254,7 +1255,7 @@ void SemanticAnalyzer::visit(ForeachLoop& node) {
     std::shared_ptr<Type> indexWritten;
     if (!node.index_name.empty()) {
         indexWritten = resolveTypeFromAST(node.index_type.get());
-        if (indexWritten) currentScope->define({node.index_name, indexWritten, false, true});
+        if (indexWritten) currentScope->define(Symbol::bound(node.index_name, indexWritten, false));
         if (track && indexWritten) moved_.declare(node.index_name, indexWritten->toString());
     }
 
@@ -1370,7 +1371,7 @@ void SemanticAnalyzer::visit(TryCatch& node) {
     enterScope();
     // Define catch var
     auto type = resolveTypeFromAST(node.catch_type.get());
-    if(type) currentScope->define({node.catch_var, type, false, true});
+    if(type) currentScope->define(Symbol::bound(node.catch_var, type, false));
     // Wave-4 step 17 (W7): the catch variable lives in a scope with no Block
     // node of its own, so it is tracked in the enclosing frame and its exit
     // is recorded when that frame ends -- an approximation the exceptional

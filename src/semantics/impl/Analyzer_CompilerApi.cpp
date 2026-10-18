@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "../SemanticAnalyzer.hpp"
 #include "../ComptimeInterp.hpp"
 #include "../../ast/StructuralWalk.hpp"
@@ -149,7 +150,7 @@ void SemanticAnalyzer::applyUseAttributes(
     if (grantsCompiler) {
         // Not mutable and not assignable-to: `compiler` is the API, not a variable
         // holding it.
-        currentScope->define({"compiler", std::make_shared<CompilerApiType>(), false, true});
+        currentScope->define(Symbol::bound("compiler", std::make_shared<CompilerApiType>(), false));
     }
 }
 
@@ -375,7 +376,7 @@ void SemanticAnalyzer::visit(Attribute& node) {
             error(node, "Attribute 'slaveof' needs a variable: #[slaveof(<variable>)] or #[slaveof($Fin)]");
             return;
         }
-        if (node.value_str[0] == '$' && node.value_str != "$Fin") {
+        if (node.value_str[0] == '$' && node.value_str != kFinLifetimeRoot) {
             error(node, "Unknown lifetime '" + node.value_str +
                         "' in #[slaveof(...)]: only $Fin pins to program exit");
             return;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
 #include "../ast/Visitor.hpp"
@@ -298,7 +299,7 @@ private:
     // this replaces.
     void defineParameter(const Parameter& param, const std::shared_ptr<Type>& type) {
         const bool isConst = param.type && param.type->is_const;
-        currentScope->define({param.name, type, !isConst, true});
+        currentScope->define(Symbol::bound(param.name, type, !isConst));
     }
 
     // ---- The compiler API (docs/compiler-api.md, ADR 0012) --------------------

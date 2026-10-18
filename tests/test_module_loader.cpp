@@ -342,3 +342,34 @@ TEST(ModuleLoader, ANamedImportOfAMacroIsConsumedAndLeavesTheTree) {
            " three maps and this check read two of them";
     EXPECT_EQ(r.importsAfter, 0);
 }
+
+// Issue #107: the field list of a registered binding is stated once, in
+// Symbol::bound, instead of 29 positional brace initialisations. This pins the
+// contract the analyzer relies on: the four named facts land, and every field
+// with a default member initialiser stays at its default, so a default drift
+// in Scope.hpp fails here as well as at the construction site itself.
+TEST(Symbol, BoundStatesTheFourFactsAndLeavesDefaultsAlone) {
+    fin::Symbol mutableInit = fin::Symbol::bound("x", nullptr, true);
+    EXPECT_EQ(mutableInit.name, "x");
+    EXPECT_EQ(mutableInit.type, nullptr);
+    EXPECT_TRUE(mutableInit.is_mutable);
+    EXPECT_TRUE(mutableInit.is_initialized);
+    EXPECT_TRUE(mutableInit.slaveof.empty());
+    EXPECT_FALSE(mutableInit.is_function);
+    EXPECT_FALSE(mutableInit.is_template);
+    EXPECT_FALSE(mutableInit.is_ambient);
+    EXPECT_FALSE(mutableInit.is_hoisted);
+    EXPECT_FALSE(mutableInit.is_prototype);
+
+    fin::Symbol immutableUninitialized = fin::Symbol::bound("y", nullptr, false, false);
+    EXPECT_FALSE(immutableUninitialized.is_mutable);
+    EXPECT_FALSE(immutableUninitialized.is_initialized);
+}
+
+// Issue #108: the `#[slaveof]` sentinel is language surface
+// (tests/samples/variables.fin:35), read at six sites and lowered at a
+// seventh, so the spelling is one constant and this test is the pin that
+// keeps it honest even if no attribute path runs.
+TEST(Symbol, TheLifetimeRootSpellingIsPinned) {
+    EXPECT_EQ(std::string(fin::kFinLifetimeRoot), "$Fin");
+}
